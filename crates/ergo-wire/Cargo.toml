@@ -1,0 +1,16 @@
+[package]
+name = "ergo-wire"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ergo-settings = { path = "../ergo-settings" }
+ergo-types = { path = "../ergo-types" }
+blake2 = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+ergo-types = { path = "../ergo-types", features = ["test-utils"] }
+tokio = { workspace = true }

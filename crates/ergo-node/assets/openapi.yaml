@@ -1,0 +1,3111 @@
+openapi: "3.0.2"
+
+info:
+  title: Ergo Node API
+  version: "5.0.0"
+  description: API for the Ergo full-node implementation in Rust.
+  contact:
+    name: Ergo Platform
+    url: https://ergoplatform.org
+  license:
+    name: CC0 1.0 Universal
+    url: https://creativecommons.org/publicdomain/zero/1.0/
+
+servers:
+  - url: /
+
+tags:
+  - name: info
+    description: Node information
+  - name: blocks
+    description: Block retrieval and chain queries
+  - name: nipopow
+    description: NiPoPoW proof generation
+  - name: peers
+    description: Peer management
+  - name: transactions
+    description: Transaction submission and mempool queries
+  - name: utils
+    description: Utility endpoints (address, seed, hash)
+  - name: script
+    description: ErgoScript compilation and conversion
+  - name: emission
+    description: Emission schedule
+  - name: node
+    description: Node control
+  - name: blockchain
+    description: Indexed blockchain queries
+  - name: utxo
+    description: UTXO state queries
+  - name: mining
+    description: Mining candidate and solution
+  - name: wallet
+    description: Wallet operations (feature-gated)
+  - name: scan
+    description: External scan management (feature-gated)
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: api_key
+
+  schemas:
+    ApiError:
+      type: object
+      required: [error, reason, detail]
+      properties:
+        error:
+          type: integer
+        reason:
+          type: string
+        detail:
+          type: string
+
+    NodeInfo:
+      type: object
+      properties:
+        currentTime:
+          type: integer
+          format: int64
+        appVersion:
+          type: string
+        fullHeight:
+          type: integer
+          nullable: true
+        headersHeight:
+          type: integer
+          nullable: true
+        maxPeerHeight:
+          type: integer
+        bestFullHeaderId:
+          type: string
+          nullable: true
+        previousFullHeaderId:
+          type: string
+          nullable: true
+        bestHeaderId:
+          type: string
+        stateRoot:
+          type: string
+        stateType:
+          type: string
+        stateVersion:
+          type: string
+        isMining:
+          type: boolean
+        peersCount:
+          type: integer
+        unconfirmedCount:
+          type: integer
+        difficulty:
+          type: string
+        headersScore:
+          type: string
+        fullBlocksScore:
+          type: string
+        launchTime:
+          type: integer
+          format: int64
+        genesisBlockId:
+          type: string
+        syncState:
+          type: string
+        network:
+          type: string
+        parameters:
+          type: object
+        eip27Supported:
+          type: boolean
+        eip37Supported:
+          type: boolean
+        isExplorer:
+          type: boolean
+        restApiUrl:
+          type: string
+        lastSeenMessageTime:
+          type: integer
+          format: int64
+
+    Header:
+      type: object
+      description: Block header
+      properties:
+        id:
+          type: string
+        parentId:
+          type: string
+        version:
+          type: integer
+        height:
+          type: integer
+        nBits:
+          type: integer
+          format: int64
+        difficulty:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+        stateRoot:
+          type: string
+        adProofsRoot:
+          type: string
+        transactionsRoot:
+          type: string
+        extensionHash:
+          type: string
+        powSolutions:
+          $ref: "#/components/schemas/PowSolutions"
+        votes:
+          type: string
+        size:
+          type: integer
+
+    PowSolutions:
+      type: object
+      properties:
+        pk:
+          type: string
+        w:
+          type: string
+        n:
+          type: string
+        d:
+          type: string
+
+    Block:
+      type: object
+      properties:
+        header:
+          $ref: "#/components/schemas/Header"
+        blockTransactions:
+          type: object
+          properties:
+            headerId:
+              type: string
+            transactions:
+              type: array
+              items:
+                $ref: "#/components/schemas/Transaction"
+        adProofs:
+          type: object
+          nullable: true
+          properties:
+            headerId:
+              type: string
+            proofBytes:
+              type: string
+        extension:
+          type: object
+          properties:
+            headerId:
+              type: string
+            fields:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+        size:
+          type: integer
+
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+        inputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Input"
+        dataInputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataInput"
+        outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErgoBox"
+        size:
+          type: integer
+
+    Input:
+      type: object
+      properties:
+        boxId:
+          type: string
+        spendingProof:
+          type: object
+          properties:
+            proofBytes:
+              type: string
+            extension:
+              type: object
+
+    DataInput:
+      type: object
+      properties:
+        boxId:
+          type: string
+
+    ErgoBox:
+      type: object
+      properties:
+        boxId:
+          type: string
+        value:
+          type: integer
+          format: int64
+        ergoTree:
+          type: string
+        creationHeight:
+          type: integer
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Asset"
+        additionalRegisters:
+          type: object
+        transactionId:
+          type: string
+        index:
+          type: integer
+
+    Asset:
+      type: object
+      properties:
+        tokenId:
+          type: string
+        amount:
+          type: integer
+          format: int64
+
+    Peer:
+      type: object
+      properties:
+        address:
+          type: string
+        name:
+          type: string
+        lastHandshake:
+          type: integer
+          format: int64
+        lastMessage:
+          type: integer
+          format: int64
+        connectionType:
+          type: string
+
+    MerkleProof:
+      type: object
+      properties:
+        leaf:
+          type: string
+        levels:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+
+    EmissionInfo:
+      type: object
+      properties:
+        minerReward:
+          type: integer
+          format: int64
+        totalCoinsIssued:
+          type: integer
+          format: int64
+        totalRemainCoins:
+          type: integer
+          format: int64
+
+    WorkMessage:
+      type: object
+      properties:
+        msg:
+          type: string
+        b:
+          type: string
+        h:
+          type: integer
+        pk:
+          type: string
+
+    MiningSolution:
+      type: object
+      required: [n]
+      properties:
+        pk:
+          type: string
+        w:
+          type: string
+        n:
+          type: string
+        d:
+          type: string
+
+    WalletStatus:
+      type: object
+      properties:
+        isInitialized:
+          type: boolean
+        isUnlocked:
+          type: boolean
+        changeAddress:
+          type: string
+          nullable: true
+        walletHeight:
+          type: integer
+
+    BalanceInfo:
+      type: object
+      properties:
+        nanoErgs:
+          type: integer
+          format: int64
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/Asset"
+
+    PaymentRequest:
+      type: object
+      properties:
+        address:
+          type: string
+        value:
+          type: integer
+          format: int64
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Asset"
+        registers:
+          type: object
+
+    ScanRequest:
+      type: object
+      properties:
+        scanName:
+          type: string
+        walletInteraction:
+          type: string
+        trackingRule:
+          type: object
+
+    PopowHeader:
+      type: object
+      properties:
+        header:
+          $ref: "#/components/schemas/Header"
+        interlinks:
+          type: array
+          items:
+            type: string
+
+    NipopowProof:
+      type: object
+      properties:
+        m:
+          type: integer
+        k:
+          type: integer
+        prefix:
+          type: array
+          items:
+            $ref: "#/components/schemas/PopowHeader"
+        suffixHead:
+          $ref: "#/components/schemas/PopowHeader"
+        suffixTail:
+          type: array
+          items:
+            $ref: "#/components/schemas/PopowHeader"
+
+    IndexedHeight:
+      type: object
+      properties:
+        indexedHeight:
+          type: integer
+        fullHeight:
+          type: integer
+
+    IndexedToken:
+      type: object
+      properties:
+        id:
+          type: string
+        boxId:
+          type: string
+        emissionAmount:
+          type: integer
+          format: int64
+        name:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        decimals:
+          type: integer
+          nullable: true
+
+  parameters:
+    offsetParam:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        default: 0
+    limitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 50
+    sortDirectionParam:
+      name: sortDirection
+      in: query
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: desc
+    includeUnconfirmedParam:
+      name: includeUnconfirmed
+      in: query
+      schema:
+        type: boolean
+        default: false
+
+paths:
+  # ── Info ──────────────────────────────────────────────────────────────
+  /info:
+    get:
+      summary: Get node information
+      tags: [info]
+      responses:
+        "200":
+          description: Node status and configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeInfo"
+
+  # ── Blocks ────────────────────────────────────────────────────────────
+  /blocks:
+    get:
+      summary: Get paginated block IDs
+      tags: [blocks]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Array of header IDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /blocks/lastHeaders/{n}:
+    get:
+      summary: Get last n block headers
+      tags: [blocks]
+      parameters:
+        - name: n
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Array of headers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Header"
+
+  /blocks/chainSlice:
+    get:
+      summary: Get headers in height range
+      tags: [blocks]
+      parameters:
+        - name: fromHeight
+          in: query
+          schema:
+            type: integer
+        - name: toHeight
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Array of headers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Header"
+
+  /blocks/headerIds:
+    post:
+      summary: Get blocks by array of header IDs
+      tags: [blocks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        "200":
+          description: Blocks matching the IDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Block"
+
+  /blocks/modifier/{modifier_id}:
+    get:
+      summary: Get raw modifier bytes by ID
+      tags: [blocks]
+      parameters:
+        - name: modifier_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Modifier data
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Modifier not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blocks/at/{height}:
+    get:
+      summary: Get header IDs at height
+      tags: [blocks]
+      parameters:
+        - name: height
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Array of header IDs at this height
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /blocks/{header_id}/header:
+    get:
+      summary: Get block header by ID
+      tags: [blocks]
+      parameters:
+        - name: header_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Block header
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Header"
+        "404":
+          description: Header not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blocks/{header_id}/transactions:
+    get:
+      summary: Get block transactions by header ID
+      tags: [blocks]
+      parameters:
+        - name: header_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Block transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  headerId:
+                    type: string
+                  transactions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Transaction"
+        "404":
+          description: Block not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blocks/{header_id}/proofFor/{tx_id}:
+    get:
+      summary: Get Merkle proof for transaction in block
+      tags: [blocks]
+      parameters:
+        - name: header_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: tx_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Merkle proof
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MerkleProof"
+        "404":
+          description: Block or transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blocks/{header_id}:
+    get:
+      summary: Get full block by header ID
+      tags: [blocks]
+      parameters:
+        - name: header_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full block
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Block"
+        "404":
+          description: Block not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── NiPoPoW ──────────────────────────────────────────────────────────
+  /nipopow/popowHeaderById/{id}:
+    get:
+      summary: Get NiPoPoW header with interlinks by ID
+      tags: [nipopow]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Popow header
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PopowHeader"
+        "404":
+          description: Header not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /nipopow/popowHeaderByHeight/{h}:
+    get:
+      summary: Get NiPoPoW header by height
+      tags: [nipopow]
+      parameters:
+        - name: h
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Popow header
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PopowHeader"
+        "404":
+          description: Header not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /nipopow/proof/{m}/{k}/{id}:
+    get:
+      summary: Get NiPoPoW proof for specific header
+      tags: [nipopow]
+      parameters:
+        - name: m
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: k
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: NiPoPoW proof
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NipopowProof"
+
+  /nipopow/proof/{m}/{k}:
+    get:
+      summary: Get NiPoPoW proof for best header
+      tags: [nipopow]
+      parameters:
+        - name: m
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: k
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: NiPoPoW proof
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NipopowProof"
+
+  # ── Peers ─────────────────────────────────────────────────────────────
+  /peers/connected:
+    get:
+      summary: Get connected peers
+      tags: [peers]
+      responses:
+        "200":
+          description: Connected peer list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Peer"
+
+  /peers/all:
+    get:
+      summary: Get all known peers
+      tags: [peers]
+      responses:
+        "200":
+          description: All known peers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Peer"
+
+  /peers/blacklisted:
+    get:
+      summary: Get blacklisted peers
+      tags: [peers]
+      responses:
+        "200":
+          description: Blacklisted peer addresses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /peers/connect:
+    post:
+      summary: Connect to a peer
+      tags: [peers]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+              description: Peer address (host:port)
+      responses:
+        "200":
+          description: Connection initiated
+        "403":
+          description: API key required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /peers/status:
+    get:
+      summary: Get peer manager status
+      tags: [peers]
+      responses:
+        "200":
+          description: Peer status summary
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /peers/syncInfo:
+    get:
+      summary: Get sync tracker information
+      tags: [peers]
+      responses:
+        "200":
+          description: Per-peer sync status
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /peers/trackInfo:
+    get:
+      summary: Get delivery tracker information
+      tags: [peers]
+      responses:
+        "200":
+          description: Delivery tracker snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+
+  # ── Transactions ──────────────────────────────────────────────────────
+  /transactions:
+    post:
+      summary: Submit a transaction
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Transaction"
+      responses:
+        "200":
+          description: Transaction ID
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Invalid transaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/check:
+    post:
+      summary: Validate transaction without submitting
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Transaction"
+      responses:
+        "200":
+          description: Transaction ID if valid
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Invalid transaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/bytes:
+    post:
+      summary: Submit transaction from raw bytes (hex)
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Transaction ID
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Invalid bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/checkBytes:
+    post:
+      summary: Validate transaction bytes without submitting
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Transaction ID if valid
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Invalid bytes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/poolHistogram:
+    get:
+      summary: Get mempool fee histogram
+      tags: [transactions]
+      responses:
+        "200":
+          description: Histogram buckets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /transactions/getFee:
+    get:
+      summary: Get recommended fee for wait time
+      tags: [transactions]
+      parameters:
+        - name: waitTime
+          in: query
+          schema:
+            type: integer
+        - name: txSize
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Recommended fee in nanoErg
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int64
+
+  /transactions/waitTime:
+    get:
+      summary: Get expected wait time for fee
+      tags: [transactions]
+      parameters:
+        - name: fee
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: txSize
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Expected wait time in ms
+          content:
+            application/json:
+              schema:
+                type: integer
+                format: int64
+
+  /transactions/unconfirmed:
+    get:
+      summary: Get unconfirmed transactions (paginated)
+      tags: [transactions]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Unconfirmed transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transaction"
+
+  /transactions/unconfirmed/{tx_id}:
+    get:
+      summary: Get unconfirmed transaction by ID
+      tags: [transactions]
+      parameters:
+        - name: tx_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Unconfirmed transaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "404":
+          description: Not in mempool
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/unconfirmed/transactionIds:
+    get:
+      summary: Get all unconfirmed transaction IDs
+      tags: [transactions]
+      responses:
+        "200":
+          description: Array of transaction IDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /transactions/unconfirmed/byTransactionIds:
+    post:
+      summary: Get unconfirmed transactions by IDs
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        "200":
+          description: Matching unconfirmed transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transaction"
+
+  /transactions/unconfirmed/inputs/byBoxId/{id}:
+    get:
+      summary: Get unconfirmed input spending a box
+      tags: [transactions]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Spending input info
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/unconfirmed/outputs/byBoxId/{id}:
+    get:
+      summary: Get unconfirmed output by box ID
+      tags: [transactions]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Unconfirmed output box
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErgoBox"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/unconfirmed/outputs/byTokenId/{id}:
+    get:
+      summary: Get unconfirmed outputs containing token
+      tags: [transactions]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Matching output boxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /transactions/unconfirmed/byErgoTree:
+    post:
+      summary: Get unconfirmed transactions by ErgoTree
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+              description: ErgoTree hex string
+      responses:
+        "200":
+          description: Matching unconfirmed transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transaction"
+
+  /transactions/unconfirmed/outputs/byErgoTree:
+    post:
+      summary: Get unconfirmed outputs by ErgoTree
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Matching outputs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /transactions/unconfirmed/outputs/byRegisters:
+    post:
+      summary: Get unconfirmed outputs matching registers
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Register key-value filter
+      responses:
+        "200":
+          description: Matching outputs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /transactions/unconfirmed/size:
+    get:
+      summary: Get mempool size
+      tags: [transactions]
+      responses:
+        "200":
+          description: Number of unconfirmed transactions
+          content:
+            application/json:
+              schema:
+                type: integer
+
+  # ── Utils ─────────────────────────────────────────────────────────────
+  /utils/address/{addr}:
+    get:
+      summary: Validate Ergo address
+      tags: [utils]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Address validity result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+                  isValid:
+                    type: boolean
+                  error:
+                    type: string
+                    nullable: true
+
+  /utils/address:
+    post:
+      summary: Validate Ergo address (POST)
+      tags: [utils]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Address validity result
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /utils/rawToAddress/{pubkey_hex}:
+    get:
+      summary: Convert raw pubkey hex to P2PK address
+      tags: [utils]
+      parameters:
+        - name: pubkey_hex
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Ergo address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+
+  /utils/addressToRaw/{addr}:
+    get:
+      summary: Extract raw bytes from address
+      tags: [utils]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Raw hex
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  raw:
+                    type: string
+
+  /utils/ergoTreeToAddress/{ergo_tree_hex}:
+    get:
+      summary: Convert ErgoTree hex to address
+      tags: [utils]
+      parameters:
+        - name: ergo_tree_hex
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Ergo address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+
+  /utils/ergoTreeToAddress:
+    post:
+      summary: Convert ErgoTree hex to address (POST)
+      tags: [utils]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Ergo address
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /utils/seed:
+    get:
+      summary: Generate random seed (32 bytes hex)
+      tags: [utils]
+      responses:
+        "200":
+          description: Random seed hex string
+          content:
+            application/json:
+              schema:
+                type: string
+
+  /utils/seed/{length}:
+    get:
+      summary: Generate random seed of specified length
+      tags: [utils]
+      parameters:
+        - name: length
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Random seed hex string
+          content:
+            application/json:
+              schema:
+                type: string
+
+  /utils/hash/blake2b:
+    post:
+      summary: Compute Blake2b-256 hash
+      tags: [utils]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+              description: Hex-encoded bytes to hash
+      responses:
+        "200":
+          description: Hash hex string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hash:
+                    type: string
+
+  # ── Script ────────────────────────────────────────────────────────────
+  /script/addressToTree/{addr}:
+    get:
+      summary: Get ErgoTree from address
+      tags: [script]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ErgoTree hex
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tree:
+                    type: string
+
+  /script/addressToBytes/{addr}:
+    get:
+      summary: Get serialized address bytes
+      tags: [script]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Address bytes hex
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bytes:
+                    type: string
+
+  /script/p2sAddress:
+    post:
+      summary: Compile ErgoScript to P2S address
+      tags: [script]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source:
+                  type: string
+      responses:
+        "200":
+          description: P2S address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+        "400":
+          description: Compilation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /script/p2shAddress:
+    post:
+      summary: Compile ErgoScript to P2SH address
+      tags: [script]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source:
+                  type: string
+      responses:
+        "200":
+          description: P2SH address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+        "400":
+          description: Compilation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Emission ──────────────────────────────────────────────────────────
+  /emission/scripts:
+    get:
+      summary: Get emission-related script addresses
+      tags: [emission]
+      responses:
+        "200":
+          description: Emission script addresses
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /emission/at/{height}:
+    get:
+      summary: Get emission info at height
+      tags: [emission]
+      parameters:
+        - name: height
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Emission info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmissionInfo"
+
+  # ── Node ──────────────────────────────────────────────────────────────
+  /node/shutdown:
+    post:
+      summary: Shutdown the node
+      tags: [node]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Shutdown initiated
+        "403":
+          description: API key required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Blockchain (indexed) ──────────────────────────────────────────────
+  /blockchain/indexedHeight:
+    get:
+      summary: Get current indexed height
+      tags: [blockchain]
+      responses:
+        "200":
+          description: Indexed and full heights
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexedHeight"
+
+  /blockchain/transaction/byId/{id}:
+    get:
+      summary: Get indexed transaction by ID
+      tags: [blockchain]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Indexed transaction
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blockchain/transaction/byIndex/{n}:
+    get:
+      summary: Get indexed transaction by global index
+      tags: [blockchain]
+      parameters:
+        - name: n
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Indexed transaction
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blockchain/transaction/byAddress/{addr}:
+    get:
+      summary: Get transactions by address
+      tags: [blockchain]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Transactions for address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  total:
+                    type: integer
+
+  /blockchain/transaction/byAddress:
+    post:
+      summary: Get transactions by address (POST)
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Transactions for address
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /blockchain/transaction/range:
+    get:
+      summary: Get transactions in index range
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Transactions in range
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/unspent/byTokenId/{id}:
+    get:
+      summary: Get unspent boxes by token ID
+      tags: [blockchain]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Unspent boxes containing token
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/unspent/byAddress/{addr}:
+    get:
+      summary: Get unspent boxes by address
+      tags: [blockchain]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+        - $ref: "#/components/parameters/sortDirectionParam"
+        - $ref: "#/components/parameters/includeUnconfirmedParam"
+      responses:
+        "200":
+          description: Unspent boxes for address
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/unspent/byAddress:
+    post:
+      summary: Get unspent boxes by address (POST)
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+        - $ref: "#/components/parameters/sortDirectionParam"
+        - $ref: "#/components/parameters/includeUnconfirmedParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Unspent boxes for address
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/unspent/byTemplateHash/{hash}:
+    get:
+      summary: Get unspent boxes by ErgoTree template hash
+      tags: [blockchain]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Unspent boxes matching template
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/unspent/byErgoTree:
+    post:
+      summary: Get unspent boxes by ErgoTree (POST)
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+        - $ref: "#/components/parameters/includeUnconfirmedParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Unspent boxes matching ErgoTree
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/byTokenId/{id}:
+    get:
+      summary: Get all boxes (spent and unspent) by token ID
+      tags: [blockchain]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Boxes containing token
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/byAddress/{addr}:
+    get:
+      summary: Get all boxes by address
+      tags: [blockchain]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Boxes for address
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/byAddress:
+    post:
+      summary: Get all boxes by address (POST)
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Boxes for address
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/byTemplateHash/{hash}:
+    get:
+      summary: Get all boxes by ErgoTree template hash
+      tags: [blockchain]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Boxes matching template
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/byErgoTree:
+    post:
+      summary: Get all boxes by ErgoTree (POST)
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Boxes matching ErgoTree
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/range:
+    get:
+      summary: Get boxes in global index range
+      tags: [blockchain]
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Boxes in range
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /blockchain/box/byIndex/{n}:
+    get:
+      summary: Get box by global index
+      tags: [blockchain]
+      parameters:
+        - name: n
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Indexed box
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blockchain/box/byId/{id}:
+    get:
+      summary: Get indexed box by ID
+      tags: [blockchain]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Indexed box
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blockchain/token/byId/{id}:
+    get:
+      summary: Get token info by ID
+      tags: [blockchain]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Token information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexedToken"
+        "404":
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blockchain/tokens:
+    post:
+      summary: Get multiple tokens by IDs
+      tags: [blockchain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        "200":
+          description: Token information array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IndexedToken"
+
+  /blockchain/balance:
+    post:
+      summary: Get address balance (POST)
+      tags: [blockchain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: string
+              description: Ergo address
+      responses:
+        "200":
+          description: Balance info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceInfo"
+
+  /blockchain/balanceForAddress/{addr}:
+    get:
+      summary: Get address balance
+      tags: [blockchain]
+      parameters:
+        - name: addr
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Balance info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceInfo"
+
+  /blockchain/block/byHeaderId/{id}:
+    get:
+      summary: Get indexed block by header ID
+      tags: [blockchain]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Indexed block data
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Block not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /blockchain/block/byHeaderIds:
+    post:
+      summary: Get indexed blocks by header IDs
+      tags: [blockchain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        "200":
+          description: Indexed block data array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  # ── UTXO ──────────────────────────────────────────────────────────────
+  /utxo/byId/{boxId}:
+    get:
+      summary: Get UTXO box by ID
+      tags: [utxo]
+      parameters:
+        - name: boxId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: UTXO box
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErgoBox"
+        "404":
+          description: Box not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Not available in digest mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /utxo/byIdBinary/{boxId}:
+    get:
+      summary: Get UTXO box bytes by ID
+      tags: [utxo]
+      parameters:
+        - name: boxId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Box bytes hex
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  boxId:
+                    type: string
+                  bytes:
+                    type: string
+        "404":
+          description: Box not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Not available in digest mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /utxo/withPool/byId/{boxId}:
+    get:
+      summary: Get UTXO box by ID (includes mempool)
+      tags: [utxo]
+      parameters:
+        - name: boxId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: UTXO box (confirmed or mempool)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErgoBox"
+        "404":
+          description: Box not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Not available in digest mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /utxo/withPool/byIds:
+    post:
+      summary: Get multiple UTXO boxes by IDs (includes mempool)
+      tags: [utxo]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        "200":
+          description: Array of boxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+        "503":
+          description: Not available in digest mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /utxo/withPool/byIdBinary/{boxId}:
+    get:
+      summary: Get UTXO box bytes by ID (includes mempool)
+      tags: [utxo]
+      parameters:
+        - name: boxId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Box bytes hex
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Box not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Not available in digest mode
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /utxo/genesis:
+    get:
+      summary: Get genesis UTXO boxes
+      tags: [utxo]
+      responses:
+        "200":
+          description: Genesis boxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  # ── Mining ────────────────────────────────────────────────────────────
+  /mining/candidate:
+    get:
+      summary: Get current mining candidate
+      tags: [mining]
+      responses:
+        "200":
+          description: Work message for mining
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkMessage"
+
+  /mining/candidateWithTxs:
+    post:
+      summary: Get mining candidate with mandatory transactions
+      tags: [mining]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/Transaction"
+      responses:
+        "200":
+          description: Work message with specified transactions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkMessage"
+
+  /mining/solution:
+    post:
+      summary: Submit mining solution
+      tags: [mining]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MiningSolution"
+      responses:
+        "200":
+          description: Solution accepted
+        "400":
+          description: Invalid solution
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /mining/rewardAddress:
+    get:
+      summary: Get miner reward address
+      tags: [mining]
+      responses:
+        "200":
+          description: Reward address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rewardAddress:
+                    type: string
+
+  /mining/rewardPublicKey:
+    get:
+      summary: Get miner reward public key
+      tags: [mining]
+      responses:
+        "200":
+          description: Reward public key hex
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rewardPubKey:
+                    type: string
+
+  # ── Wallet (feature-gated) ───────────────────────────────────────────
+  /wallet/status:
+    get:
+      summary: Get wallet status
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Wallet status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatus"
+
+  /wallet/init:
+    post:
+      summary: Initialize new wallet with mnemonic
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pass]
+              properties:
+                pass:
+                  type: string
+                mnemonicPass:
+                  type: string
+      responses:
+        "200":
+          description: Mnemonic phrase
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mnemonic:
+                    type: string
+        "400":
+          description: Already initialized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /wallet/restore:
+    post:
+      summary: Restore wallet from mnemonic
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pass, mnemonic]
+              properties:
+                pass:
+                  type: string
+                mnemonic:
+                  type: string
+                mnemonicPass:
+                  type: string
+      responses:
+        "200":
+          description: Wallet restored
+        "400":
+          description: Already initialized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /wallet/unlock:
+    post:
+      summary: Unlock wallet
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pass]
+              properties:
+                pass:
+                  type: string
+      responses:
+        "200":
+          description: Wallet unlocked
+        "400":
+          description: Wrong password or not initialized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /wallet/lock:
+    get:
+      summary: Lock wallet
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Wallet locked
+
+  /wallet/addresses:
+    get:
+      summary: Get wallet addresses
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Wallet addresses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /wallet/deriveKey:
+    post:
+      summary: Derive new key at path
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                derivationPath:
+                  type: string
+      responses:
+        "200":
+          description: Derived address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  address:
+                    type: string
+
+  /wallet/deriveNextKey:
+    get:
+      summary: Derive next sequential key
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Next derived address
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  derivationPath:
+                    type: string
+                  address:
+                    type: string
+
+  /wallet/balances/withUnconfirmed:
+    get:
+      summary: Get wallet balances including unconfirmed
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Balance with unconfirmed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceInfo"
+
+  /wallet/balances:
+    get:
+      summary: Get confirmed wallet balances
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Confirmed balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceInfo"
+
+  /wallet/updateChangeAddress:
+    post:
+      summary: Update wallet change address
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                address:
+                  type: string
+      responses:
+        "200":
+          description: Change address updated
+
+  /wallet/boxes/unspent:
+    get:
+      summary: Get wallet unspent boxes
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: minConfirmations
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: minInclusionHeight
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Unspent boxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /wallet/boxes/collect:
+    post:
+      summary: Collect boxes for target amount
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetBalance:
+                  type: integer
+                  format: int64
+                targetAssets:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Asset"
+      responses:
+        "200":
+          description: Selected boxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /wallet/boxes:
+    get:
+      summary: Get all wallet boxes (spent and unspent)
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Wallet boxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /wallet/transactions:
+    get:
+      summary: Get wallet transaction history
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/offsetParam"
+        - $ref: "#/components/parameters/limitParam"
+      responses:
+        "200":
+          description: Wallet transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /wallet/payment/send:
+    post:
+      summary: Send simple payment
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/PaymentRequest"
+      responses:
+        "200":
+          description: Transaction ID
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Insufficient funds or error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /wallet/transaction/generate:
+    post:
+      summary: Generate and sign transaction
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Transaction generation request
+      responses:
+        "200":
+          description: Signed transaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+
+  /wallet/transaction/generateUnsigned:
+    post:
+      summary: Generate unsigned transaction
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Unsigned transaction
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /wallet/transaction/sign:
+    post:
+      summary: Sign an unsigned transaction
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Unsigned transaction to sign
+      responses:
+        "200":
+          description: Signed transaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+
+  /wallet/transaction/send:
+    post:
+      summary: Sign and broadcast transaction
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Transaction ID
+          content:
+            application/json:
+              schema:
+                type: string
+
+  /wallet/transactionById/{txId}:
+    get:
+      summary: Get wallet transaction by ID
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Wallet transaction
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /wallet/check:
+    post:
+      summary: Check mnemonic phrase
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mnemonic:
+                  type: string
+                mnemonicPass:
+                  type: string
+      responses:
+        "200":
+          description: Check result (matched or not)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matched:
+                    type: boolean
+
+  /wallet/rescan:
+    post:
+      summary: Rescan blockchain for wallet boxes
+      tags: [wallet]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fromHeight:
+                  type: integer
+                  default: 0
+      responses:
+        "200":
+          description: Rescan initiated
+
+  # ── Scan (feature-gated) ─────────────────────────────────────────────
+  /scan/register:
+    post:
+      summary: Register external scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanRequest"
+      responses:
+        "200":
+          description: Scan ID
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scanId:
+                    type: integer
+
+  /scan/deregister:
+    post:
+      summary: Deregister external scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scanId:
+                  type: integer
+      responses:
+        "200":
+          description: Scan removed
+
+  /scan/listAll:
+    get:
+      summary: List all registered scans
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: All scans
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /scan/unspentBoxes/{scanId}:
+    get:
+      summary: Get unspent boxes for scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: scanId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: minConfirmations
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: minInclusionHeight
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Unspent boxes for scan
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /scan/spentBoxes/{scanId}:
+    get:
+      summary: Get spent boxes for scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: scanId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Spent boxes for scan
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ErgoBox"
+
+  /scan/stopTracking:
+    post:
+      summary: Stop tracking a box in scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scanId:
+                  type: integer
+                boxId:
+                  type: string
+      responses:
+        "200":
+          description: Tracking stopped
+
+  /scan/addBox:
+    post:
+      summary: Manually add box to scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scanId:
+                  type: integer
+                box:
+                  $ref: "#/components/schemas/ErgoBox"
+      responses:
+        "200":
+          description: Box added
+
+  /scan/p2sRule:
+    post:
+      summary: Create P2S tracking rule for scan
+      tags: [scan]
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scanId:
+                  type: integer
+                p2sAddress:
+                  type: string
+      responses:
+        "200":
+          description: Rule added

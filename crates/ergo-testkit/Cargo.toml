@@ -1,0 +1,28 @@
+[package]
+name = "ergo-testkit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ergo-settings = { path = "../ergo-settings" }
+ergo-wire = { path = "../ergo-wire" }
+ergo-types = { path = "../ergo-types" }
+ergo-consensus = { path = "../ergo-consensus" }
+ergo-network = { path = "../ergo-network" }
+blake2 = { workspace = true }
+hex = { workspace = true }
+num-bigint = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+ergo-types = { path = "../ergo-types", features = ["test-utils"] }
+ergo-avldb = { path = "../ergo-avldb" }
+ergo-state = { path = "../ergo-state" }
+ergo-storage = { path = "../ergo-storage" }
+ergo-indexer = { path = "../ergo-indexer" }
+ergo-wallet = { path = "../ergo-wallet" }
+tempfile = "3"
+bytes = "1"
+serde_json = { workspace = true }
+toml = { workspace = true }

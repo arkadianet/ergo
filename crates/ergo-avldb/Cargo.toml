@@ -1,0 +1,10 @@
+[package]
+name = "ergo-avldb"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ergo_avltree_rust = { workspace = true }
+thiserror = { workspace = true }
+

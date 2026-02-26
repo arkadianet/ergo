@@ -1,0 +1,19 @@
+[package]
+name = "ergo-state"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+ergo-types = { path = "../ergo-types" }
+ergo-wire = { path = "../ergo-wire" }
+ergo-storage = { path = "../ergo-storage" }
+ergo-avldb = { path = "../ergo-avldb" }
+ergo-consensus = { path = "../ergo-consensus" }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+ergo-types = { path = "../ergo-types", features = ["test-utils"] }
+tempfile = "3"

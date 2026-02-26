@@ -1,0 +1,54 @@
+[ergo]
+directory = ".ergo"
+network_type = "mainnet"
+
+[ergo.node]
+state_type = "digest"
+verify_transactions = true
+blocks_to_keep = -1
+mining = false
+max_transaction_cost = 1000000
+max_transaction_size = 98304
+extra_index = false
+checkpoint_height = 0
+
+[ergo.chain]
+protocol_version = 4
+address_prefix = 0
+block_interval_secs = 120
+epoch_length = 1024
+use_last_epochs = 8
+initial_difficulty_hex = "011765000000"
+genesis_state_digest_hex = "a5df145d41ab15a01e0cd3ffbab046f0d029e5412293072ad0f5827428589b9302"
+genesis_id = "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"
+version2_activation_height = 417792
+version2_activation_difficulty_hex = "6f98d5000000"
+
+[ergo.chain.pow]
+pow_type = "autolykos"
+k = 32
+n = 26
+
+[ergo.chain.monetary]
+fixed_rate_period = 525600
+fixed_rate = 75000000000
+founders_initial_reward = 7500000000
+epoch_length = 64800
+one_epoch_reduction = 3000000000
+miner_reward_delay = 720
+
+[network]
+node_name = "ergo-rust"
+app_version = "6.0.1"
+agent_name = "ergoref"
+bind_address = "0.0.0.0:9030"
+magic_bytes = [1, 0, 2, 4]
+known_peers = [
+    "213.239.193.208:9030",
+    "159.65.11.55:9030",
+    "165.227.26.175:9030",
+    "159.89.116.15:9030",
+]
+
+[api]
+bind_address = "127.0.0.1:9053"

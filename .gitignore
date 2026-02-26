@@ -1,0 +1,22 @@
+/target
+.worktrees/
+docs/plans/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Ergo data directories
+.ergo/
+.ergo-testnet/
+
+# Environment
+.env
+.env.*

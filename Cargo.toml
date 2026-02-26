@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ergo-settings",
+    "crates/ergo-wire",
+    "crates/ergo-types",
+    "crates/ergo-consensus",
+    "crates/ergo-network",
+    "crates/ergo-testkit",
+    "crates/ergo-storage",
+    "crates/ergo-avldb",
+    "crates/ergo-state",
+    "crates/ergo-node",
+    "crates/ergo-indexer",
+    "crates/ergo-wallet",
+]
+
+[workspace.package]
+edition = "2021"
+license = "CC0-1.0"
+repository = "https://github.com/arkadianet/ergo"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+blake2 = "0.10"
+bytes = "1"
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+hex = "0.4"
+num-integer = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rocksdb = "0.24"
+tempfile = "3"
+ergo_avltree_rust = "0.1"
+axum = "0.8"
+lru = "0.12"
+
+[patch.crates-io]
+ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
+sigma-ser = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
+ergotree-ir = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
+ergo-chain-types = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
