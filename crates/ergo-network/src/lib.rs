@@ -1,3 +1,4 @@
+pub mod block_processor;
 pub mod connection_pool;
 pub mod delivery_tracker;
 pub mod emission;
