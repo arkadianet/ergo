@@ -21,6 +21,7 @@ num-bigint = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 blake2 = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 ergo-types = { path = "../ergo-types", features = ["test-utils"] }

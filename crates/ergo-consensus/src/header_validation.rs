@@ -345,6 +345,23 @@ pub fn validate_child_header(
     Ok(())
 }
 
+/// Run all non-genesis header validations **except** proof-of-work.
+///
+/// Use this when PoW has already been validated in a parallel batch
+/// (e.g., via rayon) and only parent-dependent checks remain.
+pub fn validate_child_header_skip_pow(
+    header: &Header,
+    parent: &Header,
+    now_ms: u64,
+    required_n_bits: Option<u32>,
+) -> Result<(), HeaderValidationError> {
+    validate_height(header, parent)?;
+    validate_timestamp(header, parent)?;
+    validate_future_timestamp(header, now_ms)?;
+    validate_required_difficulty(header, required_n_bits)?;
+    Ok(())
+}
+
 /// Run all genesis header validations.
 ///
 /// Checks (in order):
@@ -366,6 +383,23 @@ pub fn validate_genesis_header(
     validate_required_difficulty(header, initial_n_bits)?;
     validate_future_timestamp(header, now_ms)?;
     validate_pow(header)?;
+    Ok(())
+}
+
+/// Run all genesis header validations **except** proof-of-work.
+///
+/// Use this when PoW has already been validated in a parallel batch.
+pub fn validate_genesis_header_skip_pow(
+    header: &Header,
+    now_ms: u64,
+    genesis_id: Option<&str>,
+    initial_n_bits: Option<u32>,
+) -> Result<(), HeaderValidationError> {
+    validate_genesis_parent(header)?;
+    validate_genesis_height(header)?;
+    validate_genesis_id(header, genesis_id)?;
+    validate_required_difficulty(header, initial_n_bits)?;
+    validate_future_timestamp(header, now_ms)?;
     Ok(())
 }
 
@@ -861,5 +895,67 @@ mod tests {
         // initial_n_bits doesn't match → rejected
         let err = validate_required_difficulty(&h, Some(0x1a0fffff)).unwrap_err();
         assert!(matches!(err, HeaderValidationError::DifficultyMismatch { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Skip-PoW composite validator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn skip_pow_child_valid() {
+        let parent = Header {
+            height: 99,
+            timestamp: 1_000_000,
+            ..Header::default_for_test()
+        };
+        let child = Header {
+            height: 100,
+            timestamp: 2_000_000,
+            ..Header::default_for_test()
+        };
+        let now_ms = child.timestamp + 60_000;
+        assert!(validate_child_header_skip_pow(&child, &parent, now_ms, None).is_ok());
+    }
+
+    #[test]
+    fn skip_pow_child_rejects_bad_height() {
+        let parent = Header {
+            height: 99,
+            timestamp: 1_000_000,
+            ..Header::default_for_test()
+        };
+        let child = Header {
+            height: 105, // wrong — should be 100
+            timestamp: 2_000_000,
+            ..Header::default_for_test()
+        };
+        let now_ms = child.timestamp + 60_000;
+        let err = validate_child_header_skip_pow(&child, &parent, now_ms, None).unwrap_err();
+        assert!(matches!(err, HeaderValidationError::HeightMismatch { expected: 100, got: 105 }));
+    }
+
+    #[test]
+    fn skip_pow_genesis_valid() {
+        let genesis = Header {
+            height: 1,
+            parent_id: ModifierId::GENESIS_PARENT,
+            timestamp: 1_000_000,
+            ..Header::default_for_test()
+        };
+        let now_ms = genesis.timestamp + 60_000;
+        assert!(validate_genesis_header_skip_pow(&genesis, now_ms, None, None).is_ok());
+    }
+
+    #[test]
+    fn skip_pow_genesis_rejects_bad_height() {
+        let genesis = Header {
+            height: 2, // wrong — must be 1
+            parent_id: ModifierId::GENESIS_PARENT,
+            timestamp: 1_000_000,
+            ..Header::default_for_test()
+        };
+        let now_ms = genesis.timestamp + 60_000;
+        let err = validate_genesis_header_skip_pow(&genesis, now_ms, None, None).unwrap_err();
+        assert!(matches!(err, HeaderValidationError::GenesisHeightInvalid(2)));
     }
 }
