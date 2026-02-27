@@ -1228,6 +1228,17 @@ impl NodeViewHolder {
         &self.current_state_root
     }
 
+    /// Get the ID of the last block whose state was applied.
+    ///
+    /// Returns `None` if no state has been applied yet (all-zero ID).
+    pub fn state_version_id(&self) -> Option<[u8; 32]> {
+        if self.current_state_version == ModifierId([0u8; 32]) {
+            None
+        } else {
+            Some(self.current_state_version.0)
+        }
+    }
+
     /// Get current best full block ID from storage.
     pub fn best_full_block_id(&self) -> Result<Option<ModifierId>, NodeViewError> {
         Ok(self.history.best_full_block_id()?)

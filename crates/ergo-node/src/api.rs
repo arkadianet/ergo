@@ -58,6 +58,7 @@ pub struct NodeInfoResponse {
     pub rest_api_url: Option<String>,
     pub current_time: u64,
     pub parameters: serde_json::Value,
+    pub last_mempool_update_time: u64,
 }
 
 /// JSON response for proof-of-work solution fields.
@@ -2114,22 +2115,13 @@ async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfoResponse> {
         _ => "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
     };
 
-    let parameters = serde_json::json!({
-        "maxBlockSize": 524288,
-        "maxBlockCost": 1000000,
-        "tokenAccessCost": 100,
-        "inputCost": 2000,
-        "dataInputCost": 100,
-        "outputCost": 100,
-        "blockVersion": 3,
-        "storageFeeFactor": 1250000,
-        "minValuePerByte": 360
-    });
-
     // Heights of 0 mean no headers/blocks yet — report as null
     let headers_height = if shared.headers_height > 0 { Some(shared.headers_height) } else { None };
     let full_height = if shared.full_height > 0 { Some(shared.full_height) } else { None };
     let max_peer_height = if shared.max_peer_height > 0 { Some(shared.max_peer_height) } else { None };
+
+    // Mining is enabled when a candidate generator has been initialized.
+    let is_mining = shared.is_mining || state.candidate_generator.is_some();
 
     Json(NodeInfoResponse {
         name: state.node_name.clone(),
@@ -2140,9 +2132,9 @@ async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfoResponse> {
         max_peer_height,
         best_header_id: shared.best_header_id.map(hex::encode),
         best_full_header_id: shared.best_full_block_id.map(hex::encode),
-        previous_full_header_id: None, // TODO: populate from parent of best full block header
+        previous_full_header_id: shared.previous_full_header_id.map(hex::encode),
         state_root: hex::encode(&shared.state_root),
-        state_version: None, // TODO: populate from persisted state version
+        state_version: shared.state_version.map(hex::encode),
         state_type: state.state_type.clone(),
         peers_count: shared.peer_count,
         sync_state: shared.sync_state.clone(),
@@ -2153,13 +2145,14 @@ async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfoResponse> {
         launch_time: shared.start_time * 1000,
         last_seen_message_time: shared.last_message_time.unwrap_or(0),
         genesis_block_id: genesis_id.to_string(),
-        is_mining: false,
+        is_mining,
         is_explorer: state.extra_db.is_some(),
         eip27_supported: true,
         eip37_supported: true,
         rest_api_url: None,
         current_time: now_ms,
-        parameters,
+        parameters: shared.parameters.clone(),
+        last_mempool_update_time: shared.last_mempool_update_time,
     })
 }
 
@@ -5449,6 +5442,7 @@ mod tests {
             rest_api_url: None,
             current_time: 1700001500000,
             parameters: serde_json::json!({"maxBlockSize": 524288}),
+            last_mempool_update_time: 0,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["name"], "ergo-rust");
@@ -5497,6 +5491,7 @@ mod tests {
             rest_api_url: None,
             current_time: 1700001500000,
             parameters: serde_json::json!({}),
+            last_mempool_update_time: 0,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json.get("headersHeight").is_some(), "expected headersHeight");

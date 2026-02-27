@@ -69,6 +69,16 @@ pub struct SharedState {
     pub difficulty: u64,
     pub headers_score: String,
     pub full_blocks_score: String,
+    /// Live on-chain parameters from the voting system.
+    pub parameters: serde_json::Value,
+    /// Parent of the best full block header.
+    pub previous_full_header_id: Option<[u8; 32]>,
+    /// ID of the last block whose state was applied.
+    pub state_version: Option<[u8; 32]>,
+    /// Whether mining is enabled (candidate generator is active).
+    pub is_mining: bool,
+    /// Unix-epoch milliseconds of the last mempool mutation.
+    pub last_mempool_update_time: u64,
 }
 
 impl SharedState {
@@ -95,6 +105,11 @@ impl SharedState {
             difficulty: 0,
             headers_score: "0".into(),
             full_blocks_score: "0".into(),
+            parameters: serde_json::json!({}),
+            previous_full_header_id: None,
+            state_version: None,
+            is_mining: false,
+            last_mempool_update_time: 0,
         }
     }
 }
@@ -215,6 +230,12 @@ pub async fn run(
     // Whether the node is synced enough to accept and verify transactions.
     // Only true in UTXO mode when headers and full blocks are at the same height.
     let mut is_synced_for_txs = false;
+
+    // Propagate mining status into shared state once at startup.
+    {
+        let mut s = shared.write().await;
+        s.is_mining = candidate_gen.is_some();
+    }
 
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
@@ -402,6 +423,14 @@ pub async fn run(
                     // Broadcast applied blocks to peers and create snapshots.
                     if !result.applied_blocks.is_empty() {
                         let applied_blocks = result.applied_blocks;
+
+                        // Record mempool mutation timestamp (block application evicts txs).
+                        if let Ok(mut s) = shared.try_write() {
+                            s.last_mempool_update_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                        }
 
                         // Reset tx cost counters so peers can submit new txs.
                         tx_cost_tracker.reset();
@@ -682,6 +711,13 @@ pub async fn run(
                 };
                 pool.broadcast(MessageCode::Inv as u8, &inv.serialize()).await;
                 let _ = submission.response.send(Ok(()));
+                // Record mempool mutation timestamp.
+                if let Ok(mut s) = shared.try_write() {
+                    s.last_mempool_update_time = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                }
             }
 
             _ = status_tick.tick() => {
@@ -710,6 +746,13 @@ pub async fn run(
                 };
                 if !evicted.is_empty() {
                     tracing::info!(evicted = evicted.len(), "mempool audit: evicted stale transactions");
+                    // Record mempool mutation timestamp.
+                    if let Ok(mut s) = shared.try_write() {
+                        s.last_mempool_update_time = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+                    }
                 }
                 // Step 2: Re-validate against UTXO state.
                 if !node_view.is_digest_mode() {
@@ -1437,16 +1480,19 @@ async fn update_shared_state(
         .and_then(|id| node_view.history.load_header(id).ok().flatten())
         .map_or(0, |h| h.height as u64);
 
-    let full_height = best_full_block_id
+    // Load the best full block header once so we can extract both height and
+    // parent_id without redundant lookups.
+    let best_full_header = best_full_block_id
         .as_ref()
-        .and_then(|id| node_view.history.load_header(id).ok().flatten())
-        .map_or(0, |h| h.height as u64);
+        .and_then(|id| node_view.history.load_header(id).ok().flatten());
+
+    let full_height = best_full_header.as_ref().map_or(0, |h| h.height as u64);
 
     // Difficulty from best full block header's nBits
-    let difficulty = best_full_block_id
-        .as_ref()
-        .and_then(|id| node_view.history.load_header(id).ok().flatten())
-        .map_or(0, |h| h.n_bits);
+    let difficulty = best_full_header.as_ref().map_or(0, |h| h.n_bits);
+
+    // Parent of the best full block header.
+    let previous_full_header_id = best_full_header.as_ref().map(|h| h.parent_id.0);
 
     // Headers score: cumulative score of best header
     let headers_score = best_header_id
@@ -1465,6 +1511,23 @@ async fn update_shared_state(
             node_view.history.get_index(&key).ok().flatten()
         })
         .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
+
+    // Build parameters JSON from live on-chain voting parameters.
+    let params = node_view.current_parameters();
+    let parameters = serde_json::json!({
+        "storageFeeFactor": params.storage_fee_factor(),
+        "minValuePerByte": params.min_value_per_byte(),
+        "maxBlockSize": params.max_block_size(),
+        "maxBlockCost": params.max_block_cost(),
+        "tokenAccessCost": params.get(ergo_consensus::parameters::TOKEN_ACCESS_COST_ID).unwrap_or(100),
+        "inputCost": params.get(ergo_consensus::parameters::INPUT_COST_ID).unwrap_or(2000),
+        "dataInputCost": params.get(ergo_consensus::parameters::DATA_INPUT_COST_ID).unwrap_or(100),
+        "outputCost": params.get(ergo_consensus::parameters::OUTPUT_COST_ID).unwrap_or(100),
+        "blockVersion": params.block_version(),
+    });
+
+    // State version: the ID of the last block whose state was applied.
+    let state_version = node_view.state_version_id();
 
     let mut state = shared.write().await;
     state.headers_height = headers_height;
@@ -1502,6 +1565,9 @@ async fn update_shared_state(
     state.difficulty = difficulty;
     state.headers_score = headers_score;
     state.full_blocks_score = full_blocks_score;
+    state.parameters = parameters;
+    state.previous_full_header_id = previous_full_header_id;
+    state.state_version = state_version;
 }
 
 /// Convert big-endian score bytes to a decimal string.
