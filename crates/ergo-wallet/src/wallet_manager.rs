@@ -554,6 +554,55 @@ impl WalletManager {
         }
     }
 
+    /// Get the hex-encoded secret key for the given wallet address.
+    ///
+    /// Finds the derivation index corresponding to the address among stored
+    /// addresses, derives the EIP-3 secret key at that index, and returns the
+    /// raw secret bytes as a hex string.
+    ///
+    /// Requires **Unlocked** state.
+    pub fn get_private_key(&self, address: &str) -> Result<String, WalletError> {
+        let keys = self.keys()?;
+        let addresses = self.storage.get_addresses();
+        let idx = addresses
+            .iter()
+            .find(|(_, addr)| addr == address)
+            .map(|(i, _)| *i)
+            .ok_or_else(|| WalletError::Address("address not found in wallet".into()))?;
+        let sks = keys
+            .secret_keys(&[idx])
+            .map_err(|e| WalletError::Keys(e.to_string()))?;
+        let sk = sks.first().ok_or_else(|| {
+            WalletError::Keys("failed to derive secret key".into())
+        })?;
+        Ok(hex::encode(sk.to_bytes()))
+    }
+
+    /// Get wallet transactions associated with a given scan ID.
+    ///
+    /// Walks all boxes tracked by the scan, collects their creating `tx_id`s,
+    /// deduplicates, and returns the corresponding `WalletTransaction` records.
+    pub fn get_txs_by_scan_id(
+        &self,
+        scan_id: u16,
+    ) -> Result<Vec<WalletTransaction>, WalletError> {
+        self.require_unlocked()?;
+        let box_ids = self.registry.boxes_for_scan(scan_id);
+        let mut seen_tx_ids = HashSet::new();
+        let mut txs = Vec::new();
+        for box_id in &box_ids {
+            if let Some(tb) = self.registry.get_box(box_id) {
+                if seen_tx_ids.insert(tb.tx_id) {
+                    if let Some(wtx) = self.registry.get_transaction_by_id(&tb.tx_id) {
+                        txs.push(wtx);
+                    }
+                }
+            }
+        }
+        txs.sort_by_key(|t| t.inclusion_height);
+        Ok(txs)
+    }
+
     /// Get the change address.
     pub fn change_address(&self) -> Result<String, WalletError> {
         self.require_unlocked()?;
