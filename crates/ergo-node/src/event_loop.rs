@@ -1093,7 +1093,13 @@ async fn handle_sync_tick(
         .map(|p| (p.id, true))
         .collect();
 
-    let actions = sync_mgr.on_tick(&node_view.history, tracker, &peers);
+    let our_height: u32 = node_view.history.best_header_id().ok().flatten()
+        .and_then(|id| node_view.history.load_header(&id).ok().flatten())
+        .map_or(0, |h| h.height);
+    let max_peer = sync_tracker.max_peer_height();
+    let is_caught_up = max_peer > 0 && our_height >= max_peer;
+
+    let actions = sync_mgr.on_tick(&node_view.history, tracker, &peers, is_caught_up);
     execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
 
     let timed_out = tracker.collect_timed_out();
