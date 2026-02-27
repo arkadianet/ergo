@@ -9,11 +9,14 @@ use std::time::Instant;
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use ergo_consensus::autolykos::validate_pow;
 use ergo_storage::history_db::HistoryDb;
 use ergo_types::modifier_id::ModifierId;
 use ergo_wire::codec::RawMessage;
+use ergo_wire::header_ser::parse_header as wire_parse_header;
 use ergo_wire::inv::{InvData, ModifiersData};
 use ergo_wire::sync_info::ErgoSyncInfo;
+use rayon::prelude::*;
 
 use crate::connection_pool::PeerId;
 use crate::delivery_tracker::{DeliveryTracker, ModifierStatus};
@@ -116,6 +119,12 @@ fn blake2b256(data: &[u8]) -> [u8; 32] {
 
 /// Header type ID.
 const HEADER_TYPE_ID: u8 = 101;
+
+/// Result of parallel header validation: either a successfully parsed and
+/// PoW-verified header (with its index into the `requested` vec), or a
+/// rejected modifier ID with a human-readable reason.
+type HeaderValidationResult =
+    Result<(usize, ModifierId, ergo_types::header::Header), (ModifierId, String)>;
 
 // ---------------------------------------------------------------------------
 // HandleResult
@@ -549,59 +558,116 @@ fn handle_modifiers(
     let mut blocks_to_download = Vec::new();
     let mut penalties = Vec::new();
 
-    for (id, data) in &mods.modifiers {
-        // Only process modifiers we requested (spam detection).
-        let mod_status = tracker.status(type_id, id);
-        if mod_status != ModifierStatus::Requested {
-            tracing::debug!(
-                modifier_id = hex::encode(id.0),
-                ?mod_status,
-                "ignoring unrequested modifier"
-            );
-            penalties.push((PenaltyType::SpamMessage, peer_id));
-            continue;
-        }
+    if type_id == HEADER_TYPE_ID {
+        // ----- Header path: parallel PoW validation via rayon -----
 
-        // Verify declared modifier ID matches hash of data.
-        // For headers (type 101), the ID is blake2b256(serialized_header).
-        // For block sections (102, 104, 108), the ID uses a different formula:
-        //   blake2b256(type_byte ++ header_id ++ content_digest)
-        // where content_digest requires full parsing (Merkle tree for txs/extension,
-        // hash of proof bytes for ADProofs). Block section integrity is verified
-        // during block validation via header commitments, so we only check headers.
-        if type_id == HEADER_TYPE_ID {
-            let actual_id = ModifierId(blake2b256(data));
-            if actual_id != *id {
-                tracing::warn!(
-                    declared = hex::encode(id.0),
-                    actual = hex::encode(actual_id.0),
-                    "modifier ID mismatch — declared ID does not match hash of data"
-                );
-                penalties.push((PenaltyType::InvalidBlock, peer_id));
-                tracker.set_invalid(id);
-                continue;
-            }
-        }
-
-        match node_view.process_modifier(type_id, id, data) {
-            Ok(info) => {
-                tracker.set_received(type_id, id);
-                sync_mgr.on_section_received(type_id, id, tracker);
-
-                if type_id == HEADER_TYPE_ID {
-                    new_headers.push(*id);
+        // Phase 1 — Sequential filter: keep only requested headers.
+        let requested: Vec<(usize, &ModifierId, &Vec<u8>)> = mods
+            .modifiers
+            .iter()
+            .enumerate()
+            .filter(|(_idx, (id, _data))| {
+                let mod_status = tracker.status(type_id, id);
+                if mod_status != ModifierStatus::Requested {
+                    tracing::debug!(
+                        modifier_id = hex::encode(id.0),
+                        ?mod_status,
+                        "ignoring unrequested header"
+                    );
+                    penalties.push((PenaltyType::SpamMessage, peer_id));
+                    false
+                } else {
+                    true
                 }
+            })
+            .map(|(idx, (id, data))| (idx, id, data))
+            .collect();
 
-                // Collect header IDs that need their body sections downloaded.
-                for (_section_type, header_id) in &info.to_download {
-                    if !blocks_to_download.contains(header_id) {
-                        blocks_to_download.push(*header_id);
+        // Phase 2 — Parallel: verify ID, parse, and validate PoW.
+        let validated: Vec<HeaderValidationResult> =
+            requested
+                .par_iter()
+                .map(|&(idx, id, data)| {
+                    let actual_id = ModifierId(blake2b256(data));
+                    if actual_id != *id {
+                        return Err((*id, format!(
+                            "ID mismatch: declared {} actual {}",
+                            hex::encode(id.0),
+                            hex::encode(actual_id.0),
+                        )));
+                    }
+                    let header = wire_parse_header(data).map_err(|e| {
+                        (*id, format!("parse failed: {e}"))
+                    })?;
+                    validate_pow(&header).map_err(|e| {
+                        (*id, format!("PoW invalid: {e}"))
+                    })?;
+                    Ok((idx, *id, header))
+                })
+                .collect();
+
+        // Phase 3 — Sequential: apply pre-validated headers.
+        for result in validated {
+            match result {
+                Ok((idx, id, header)) => {
+                    tracker.set_received(type_id, &id);
+                    sync_mgr.on_section_received(type_id, &id, tracker);
+
+                    match node_view.process_prevalidated_header(&id, &header) {
+                        Ok(info) => {
+                            new_headers.push(id);
+                            for (_section_type, header_id) in &info.to_download {
+                                if !blocks_to_download.contains(header_id) {
+                                    blocks_to_download.push(*header_id);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(modifier_id = ?id, error = %e, "caching header for retry");
+                            cache.put(id, HEADER_TYPE_ID, requested[idx].2.clone());
+                        }
                     }
                 }
+                Err((id, reason)) => {
+                    tracing::warn!(
+                        modifier_id = hex::encode(id.0),
+                        reason = %reason,
+                        "header rejected during parallel validation"
+                    );
+                    penalties.push((PenaltyType::InvalidBlock, peer_id));
+                    tracker.set_invalid(&id);
+                }
             }
-            Err(e) => {
-                tracing::debug!(modifier_id = ?id, error = %e, "caching modifier for retry");
-                cache.put(*id, type_id, data.clone());
+        }
+    } else {
+        // ----- Non-header path: sequential processing (unchanged) -----
+        for (id, data) in &mods.modifiers {
+            let mod_status = tracker.status(type_id, id);
+            if mod_status != ModifierStatus::Requested {
+                tracing::debug!(
+                    modifier_id = hex::encode(id.0),
+                    ?mod_status,
+                    "ignoring unrequested modifier"
+                );
+                penalties.push((PenaltyType::SpamMessage, peer_id));
+                continue;
+            }
+
+            match node_view.process_modifier(type_id, id, data) {
+                Ok(info) => {
+                    tracker.set_received(type_id, id);
+                    sync_mgr.on_section_received(type_id, id, tracker);
+
+                    for (_section_type, header_id) in &info.to_download {
+                        if !blocks_to_download.contains(header_id) {
+                            blocks_to_download.push(*header_id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(modifier_id = ?id, error = %e, "caching modifier for retry");
+                    cache.put(*id, type_id, data.clone());
+                }
             }
         }
     }
@@ -2151,5 +2217,156 @@ mod tests {
         t.record_cost(1, 1000);    // peer 1 now at 5000
         assert!(!t.can_accept(1)); // 5000 >= 5000
         assert!(t.can_accept(2));  // still OK
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel header PoW validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parallel_pow_rejects_bad_header() {
+        let (mut node_view, _dir) = open_test_node_view();
+        let mut sync_mgr = SyncManager::new(10, 64);
+        let mut tracker = DeliveryTracker::new(30, 3);
+
+        // Create a header with zeroed PoW — parse will succeed but
+        // validate_pow will fail.
+        let header = ergo_types::header::Header::default_for_test();
+        let data = ergo_wire::header_ser::serialize_header(&header);
+        let id = ModifierId(blake2b256(&data));
+
+        tracker.set_requested(HEADER_TYPE_ID, id, 1);
+
+        let mods = ModifiersData {
+            type_id: HEADER_TYPE_ID as i8,
+            modifiers: vec![(id, data)],
+        };
+        let msg = RawMessage {
+            code: 33,
+            body: mods.serialize(),
+        };
+
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+        );
+
+        // PoW failure should produce an InvalidBlock penalty.
+        assert!(!result.penalties.is_empty());
+        assert!(matches!(result.penalties[0].0, PenaltyType::InvalidBlock));
+
+        // Header should NOT be stored.
+        assert!(!node_view.history.contains_modifier(HEADER_TYPE_ID, &id).unwrap());
+
+        // Tracker should show Invalid status.
+        assert_eq!(
+            tracker.status(HEADER_TYPE_ID, &id),
+            crate::delivery_tracker::ModifierStatus::Invalid
+        );
+    }
+
+    /// Build the real mainnet header at height 500,001 (Autolykos v2).
+    /// This header has valid PoW and serialization.
+    fn mainnet_header_500001() -> ergo_types::header::Header {
+        use ergo_types::header::AutolykosSolution;
+        use ergo_types::modifier_id::{ADDigest, Digest32};
+
+        fn hex_to_array<const N: usize>(s: &str) -> [u8; N] {
+            let bytes = hex::decode(s).unwrap();
+            let mut arr = [0u8; N];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+
+        ergo_types::header::Header {
+            version: 2,
+            parent_id: ModifierId(hex_to_array(
+                "0261b8bbe791aa26379c679e22359d21a92bda09abd369b938946d0128eed660",
+            )),
+            ad_proofs_root: Digest32(hex_to_array(
+                "c8e78371ef52ae0662e97026a982af6aecce782e85d568f2dfd59efee606267c",
+            )),
+            transactions_root: Digest32(hex_to_array(
+                "aebd3c318e1b0de0e1bcf1f9201bd0e99b5cb1418e8f877baefe332bd3548160",
+            )),
+            state_root: ADDigest(hex_to_array(
+                "93c0a548ec4ee8a3596e02455adab35dae331e7c7defcadfc95a46788a9cb97715",
+            )),
+            timestamp: 1_622_316_376_238,
+            extension_root: Digest32(hex_to_array(
+                "5b1b7be58974721b508c7f7796f5fc7fca9b241449961e564429902554be6fc8",
+            )),
+            n_bits: 117_919_008,
+            height: 500_001,
+            votes: [0, 0, 0],
+            unparsed_bytes: Vec::new(),
+            pow_solution: AutolykosSolution {
+                miner_pk: hex_to_array(
+                    "02b3a06d6eaa8671431ba1db4dd427a77f75a5c2acbd71bfb725d38adc2b55f669",
+                ),
+                w: [0u8; 33],
+                nonce: hex_to_array("906d3e6e46ac9ede"),
+                d: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn parallel_pow_caches_orphan_header() {
+        let (mut node_view, _dir) = open_test_node_view();
+        let mut sync_mgr = SyncManager::new(10, 64);
+        let mut tracker = DeliveryTracker::new(30, 3);
+        let mut cache = ModifiersCache::with_default_capacities();
+
+        // Use a real mainnet header — passes parse and PoW but its
+        // parent is not in our empty test DB, so it will be orphaned.
+        let header = mainnet_header_500001();
+        let data = ergo_wire::header_ser::serialize_header(&header);
+        let id = ModifierId(blake2b256(&data));
+
+        tracker.set_requested(HEADER_TYPE_ID, id, 1);
+
+        let mods = ModifiersData {
+            type_id: HEADER_TYPE_ID as i8,
+            modifiers: vec![(id, data.clone())],
+        };
+        let msg = RawMessage {
+            code: 33,
+            body: mods.serialize(),
+        };
+
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut cache,
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+        );
+
+        // No penalties — the header is valid, just orphaned.
+        assert!(result.penalties.is_empty());
+
+        // The orphan header should be cached for retry.
+        assert!(
+            !cache.is_empty(),
+            "orphan header should be placed in the modifiers cache"
+        );
     }
 }
