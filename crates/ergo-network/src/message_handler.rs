@@ -298,7 +298,7 @@ fn handle_sync_info(
     let their_height = match &parsed {
         ErgoSyncInfo::V2(v2) => v2
             .last_headers
-            .last()
+            .first()
             .map(|h| h.height)
             .unwrap_or(0),
         ErgoSyncInfo::V1(_) => 0,
@@ -306,7 +306,7 @@ fn handle_sync_info(
 
     // Extract peer's best header ID from SyncInfo V2
     let their_best_id = match &parsed {
-        ErgoSyncInfo::V2(v2) => v2.last_headers.last().map(|h| {
+        ErgoSyncInfo::V2(v2) => v2.last_headers.first().map(|h| {
             // Compute header ID = blake2b256(serialized header with PoW)
             let serialized = ergo_wire::header_ser::serialize_header(h);
             ModifierId(blake2b256(&serialized))
@@ -349,10 +349,10 @@ fn handle_sync_info(
             }];
 
             // Check for continuation header: if the peer's most recent
-            // header (last in our oldest-first ordering) has parent_id
+            // header (first in our newest-first ordering) has parent_id
             // equal to our best header ID, we can apply it directly.
             if let ErgoSyncInfo::V2(ref v2) = parsed {
-                if let Some(continuation) = v2.last_headers.last() {
+                if let Some(continuation) = v2.last_headers.first() {
                     if let Some(ref best_id) = our_best_id {
                         if continuation.parent_id == *best_id {
                             let header_bytes =
@@ -1905,8 +1905,8 @@ mod tests {
         continuation.parent_id = genesis_id;
         continuation.timestamp = 1_700_000_000_000;
 
-        // Build SyncInfoV2 with the continuation header (oldest-first ordering,
-        // so the continuation header is last = most recent).
+        // Build SyncInfoV2 with the continuation header (newest-first ordering,
+        // so the continuation header is first = most recent).
         let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 {
             last_headers: vec![continuation.clone()],
         };

@@ -34,7 +34,8 @@ impl HistoryDb {
     /// Find the most recent common header between our chain and the peer's
     /// advertised headers.
     ///
-    /// Iterates `peer_headers` from **newest to oldest** (reverse order).
+    /// Iterates `peer_headers` from **newest to oldest** (forward order,
+    /// since headers are stored newest-first in SyncInfo V2).
     /// For each header, serializes it and computes its blake2b256 ID, then
     /// checks whether we have that header in our DB (type 101 = Header).
     ///
@@ -44,7 +45,7 @@ impl HistoryDb {
         &self,
         peer_headers: &[Header],
     ) -> Result<Option<(ModifierId, u32)>, StorageError> {
-        for header in peer_headers.iter().rev() {
+        for header in peer_headers.iter() {
             let bytes = serialize_header(header);
             let id = compute_header_id(&bytes);
             if self.contains_modifier(101, &id)? {
@@ -173,9 +174,9 @@ mod tests {
         let id2 = header_id(&h2);
         db.store_header(&id2, &h2).unwrap();
 
-        // Pass both; since we iterate .rev() (newest first), h2 at 200
-        // should be found before h1 at 100.
-        let result = db.common_point(&[h1.clone(), h2.clone()]).unwrap();
+        // Pass both newest-first (matching SyncInfo V2 convention); h2 at 200
+        // should be found first since we iterate forward.
+        let result = db.common_point(&[h2.clone(), h1.clone()]).unwrap();
         assert_eq!(result, Some((id2, 200)));
     }
 

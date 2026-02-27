@@ -55,7 +55,8 @@ pub enum PersistentSyncError {
 /// Build an `ErgoSyncInfo` V2 message from the persistent database state.
 ///
 /// If the database contains headers, includes the last N (up to 10) headers,
-/// oldest first. If the database is empty, returns an empty V2 SyncInfo.
+/// newest first (tip is `last_headers[0]`), matching the Scala reference node
+/// convention. If the database is empty, returns an empty V2 SyncInfo.
 pub fn build_sync_info_persistent(db: &HistoryDb) -> Result<ErgoSyncInfo, PersistentSyncError> {
     let best_id = match db.best_header_id()? {
         None => {
@@ -79,7 +80,7 @@ pub fn build_sync_info_persistent(db: &HistoryDb) -> Result<ErgoSyncInfo, Persis
     };
 
     let mut headers = Vec::new();
-    for h in start..=best_height {
+    for h in (start..=best_height).rev() {
         let ids = db.header_ids_at_height(h)?;
         if let Some(id) = ids.first() {
             if let Some(header) = db.load_header(id)? {
@@ -216,9 +217,9 @@ mod tests {
         match sync {
             ErgoSyncInfo::V2(v2) => {
                 assert_eq!(v2.last_headers.len(), 10);
-                // Should contain heights 6..=15 (last 10).
-                assert_eq!(v2.last_headers[0].height, 6);
-                assert_eq!(v2.last_headers[9].height, 15);
+                // Should contain heights 6..=15 (last 10), newest first.
+                assert_eq!(v2.last_headers[0].height, 15);
+                assert_eq!(v2.last_headers[9].height, 6);
             }
             _ => panic!("expected V2"),
         }
@@ -245,8 +246,9 @@ mod tests {
             match sync {
                 ErgoSyncInfo::V2(v2) => {
                     assert_eq!(v2.last_headers.len(), 5);
-                    assert_eq!(v2.last_headers[0].height, 1);
-                    assert_eq!(v2.last_headers[4].height, 5);
+                    // Newest first after reopen.
+                    assert_eq!(v2.last_headers[0].height, 5);
+                    assert_eq!(v2.last_headers[4].height, 1);
                 }
                 _ => panic!("expected V2"),
             }
