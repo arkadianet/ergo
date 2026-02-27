@@ -1,14 +1,18 @@
-//! Autolykos v2 Proof-of-Work verification.
+//! Autolykos v1/v2 Proof-of-Work verification.
 //!
 //! Ports `AutolykosPowScheme.scala` from the Ergo reference implementation.
-//! For v2, this is purely hash-based with no elliptic curve operations.
+//! V1 (heights 0-417,791) uses EC-based verification: w^f == g^d * pk.
+//! V2 (heights 417,792+) is purely hash-based with no elliptic curve operations.
 
 use std::sync::LazyLock;
 
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
+use ergo_chain_types::{ec_point, EcPoint};
+use k256::{elliptic_curve::ops::Reduce, Scalar, U256};
 use num_bigint::BigUint;
 use num_traits::Zero;
+use sigma_ser::ScorexSerializable;
 use thiserror::Error;
 
 use ergo_types::header::Header;
@@ -62,6 +66,13 @@ pub static M: LazyLock<Vec<u8>> = LazyLock::new(|| {
     m
 });
 
+/// Valid range for hashModQ rejection sampling.
+/// This is (2^256 / q) * q -- the largest number <= 2^256 divisible by q.
+static VALID_RANGE: LazyLock<BigUint> = LazyLock::new(|| {
+    let two_256 = BigUint::from(1u8) << 256;
+    (&two_256 / &*Q) * &*Q
+});
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -75,10 +86,6 @@ pub enum AutolykosError {
         hit: String,
         target: String,
     },
-
-    /// Only v2 headers are supported by this verification path.
-    #[error("unsupported Autolykos version: {0}")]
-    UnsupportedVersion(u8),
 }
 
 // ---------------------------------------------------------------------------
@@ -87,22 +94,23 @@ pub enum AutolykosError {
 
 /// Validate the proof-of-work for a block header.
 ///
-/// Computes the PoW hit and checks that `hit < q / decode_compact_bits(nBits)`.
+/// For v1 headers (version < 2), verifies the EC equation w^f == g^d * pk.
+/// For v2+ headers, computes the PoW hit and checks that `hit < q / decode_compact_bits(nBits)`.
 pub fn validate_pow(header: &Header) -> Result<(), AutolykosError> {
     if header.version < 2 {
-        return Err(AutolykosError::UnsupportedVersion(header.version));
-    }
-
-    let hit = hit_for_version2(header);
-    let target = get_b(header.n_bits);
-
-    if hit < target {
-        Ok(())
+        validate_pow_v1(header)
     } else {
-        Err(AutolykosError::InvalidPow {
-            hit: hit.to_string(),
-            target: target.to_string(),
-        })
+        let hit = hit_for_version2(header);
+        let target = get_b(header.n_bits);
+
+        if hit < target {
+            Ok(())
+        } else {
+            Err(AutolykosError::InvalidPow {
+                hit: hit.to_string(),
+                target: target.to_string(),
+            })
+        }
     }
 }
 
@@ -189,6 +197,152 @@ pub fn gen_indexes(seed: &[u8], n: u32) -> Vec<u32> {
                 .unwrap_or(0)
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// V1 PoW verification
+// ---------------------------------------------------------------------------
+
+/// Validate Autolykos v1 PoW: verify EC equation w^f == g^d * pk.
+fn validate_pow_v1(header: &Header) -> Result<(), AutolykosError> {
+    let sol = &header.pow_solution;
+
+    // Parse d from raw bytes to BigUint
+    let d = BigUint::from_bytes_be(&sol.d);
+
+    // Compute target = Q / difficulty
+    let target = get_b(header.n_bits);
+
+    // Check d < target
+    if d >= target {
+        return Err(AutolykosError::InvalidPow {
+            hit: d.to_string(),
+            target: target.to_string(),
+        });
+    }
+
+    // Parse EC points from compressed bytes
+    let pk = parse_ec_point(&sol.miner_pk)?;
+    let w = parse_ec_point(&sol.w)?;
+
+    // Check neither is identity (infinity)
+    if ec_point::is_identity(&pk) || ec_point::is_identity(&w) {
+        return Err(AutolykosError::InvalidPow {
+            hit: "identity point".to_string(),
+            target: String::new(),
+        });
+    }
+
+    // msg = H(header_without_pow)
+    let header_bytes = serialize_header_without_pow(header);
+    let msg = blake2b256(&header_bytes);
+
+    // seed = msg || nonce
+    let mut seed = Vec::with_capacity(32 + 8);
+    seed.extend_from_slice(&msg);
+    seed.extend_from_slice(&sol.nonce);
+
+    // Generate 32 indices (v1 always uses N_BASE)
+    let indices = gen_indexes_v1(&seed, N_BASE);
+
+    // Calculate f = sum of hashModQ elements mod q
+    let f = calculate_f_v1(&indices, &msg, &sol.miner_pk, &sol.w);
+
+    // Convert to scalars for EC operations
+    let f_scalar = biguint_to_scalar(&f);
+    let d_scalar = biguint_to_scalar(&d);
+
+    // Verify: w^f == g^d * pk
+    let left = ec_point::exponentiate(&w, &f_scalar);
+    let g = ec_point::generator();
+    let g_d = ec_point::exponentiate(&g, &d_scalar);
+    // EcPoint Mul trait is point addition in multiplicative group notation
+    let right = g_d * &pk;
+
+    if left == right {
+        Ok(())
+    } else {
+        Err(AutolykosError::InvalidPow {
+            hit: "EC equation w^f != g^d * pk".to_string(),
+            target: String::new(),
+        })
+    }
+}
+
+/// Generate K (32) indices for v1: hash seed first, then sliding window.
+fn gen_indexes_v1(seed: &[u8], n: u32) -> Vec<u32> {
+    let hash = blake2b256(seed);
+    let mut extended = [0u8; 35];
+    extended[..32].copy_from_slice(&hash);
+    extended[32..35].copy_from_slice(&hash[..3]);
+
+    let n_big = BigUint::from(n);
+    (0..K)
+        .map(|i| {
+            let val = BigUint::from_bytes_be(&extended[i..i + 4]);
+            let idx = val % &n_big;
+            idx.to_u32_digits().first().copied().unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Calculate f for v1: sum of hashModQ(idx || M || pk || msg || w) mod q.
+fn calculate_f_v1(
+    indices: &[u32],
+    msg: &[u8; 32],
+    pk_bytes: &[u8; 33],
+    w_bytes: &[u8; 33],
+) -> BigUint {
+    let mut sum = BigUint::ZERO;
+    for &idx in indices {
+        let idx_bytes = idx.to_be_bytes();
+        let mut input = Vec::with_capacity(4 + M.len() + 33 + 32 + 33);
+        input.extend_from_slice(&idx_bytes);
+        input.extend_from_slice(&M);
+        input.extend_from_slice(pk_bytes);
+        input.extend_from_slice(msg);
+        input.extend_from_slice(w_bytes);
+        sum += hash_mod_q(&input);
+    }
+    sum % &*Q
+}
+
+/// Compute Blake2b256 hash and reduce mod q (group order).
+/// Uses rejection sampling to ensure uniform distribution.
+fn hash_mod_q(input: &[u8]) -> BigUint {
+    let mut current_input = input.to_vec();
+    loop {
+        let mut hasher = Blake2b256::new();
+        hasher.update(&current_input);
+        let hash: [u8; 32] = hasher.finalize().into();
+        let bi = BigUint::from_bytes_be(&hash);
+        if bi < *VALID_RANGE {
+            return bi % &*Q;
+        }
+        current_input = hash.to_vec();
+    }
+}
+
+/// Convert BigUint to k256 Scalar, reducing mod group order.
+fn biguint_to_scalar(value: &BigUint) -> Scalar {
+    let mut arr = [0u8; 32];
+    let bytes = value.to_bytes_be();
+    if bytes.len() > 32 {
+        let reduced = value % &*Q;
+        let b = reduced.to_bytes_be();
+        arr[32 - b.len()..].copy_from_slice(&b);
+    } else {
+        arr[32 - bytes.len()..].copy_from_slice(&bytes);
+    }
+    Scalar::reduce(U256::from_be_slice(&arr))
+}
+
+/// Parse a compressed SEC1 EC point (33 bytes) into an EcPoint.
+fn parse_ec_point(bytes: &[u8; 33]) -> Result<EcPoint, AutolykosError> {
+    EcPoint::scorex_parse_bytes(bytes).map_err(|e| AutolykosError::InvalidPow {
+        hit: format!("EC point parse error: {}", e),
+        target: String::new(),
+    })
 }
 
 // ---------------------------------------------------------------------------
