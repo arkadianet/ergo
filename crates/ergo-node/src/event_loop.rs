@@ -23,6 +23,22 @@ use ergo_wire::message::MessageCode;
 
 use crate::mining::{CandidateGenerator, MiningSolution};
 
+/// A block submission from the API: individual modifier sections to be processed
+/// through the existing modifier pipeline (same as receiving from peers).
+///
+/// Each entry is `(type_id, modifier_id, serialized_bytes)`.
+pub struct BlockSubmission {
+    pub modifiers: Vec<(u8, ergo_types::modifier_id::ModifierId, Vec<u8>)>,
+}
+
+/// A request from the API to generate a batch AVL+ proof for a set of box IDs.
+///
+/// The response is sent back via the `response_tx` oneshot channel.
+pub struct UtxoProofRequest {
+    pub box_ids: Vec<[u8; 32]>,
+    pub response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
+}
+
 /// Type alias for the optional wallet handle, gated on the `wallet` feature.
 #[cfg(feature = "wallet")]
 pub type WalletArc = Option<Arc<tokio::sync::RwLock<ergo_wallet::wallet_manager::WalletManager>>>;
@@ -126,6 +142,8 @@ pub async fn run(
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
     indexer_tx: Option<tokio::sync::mpsc::Sender<ergo_indexer::task::IndexerEvent>>,
     mining_solution_rx: &mut tokio::sync::mpsc::Receiver<MiningSolution>,
+    block_submit_rx: &mut tokio::sync::mpsc::Receiver<BlockSubmission>,
+    utxo_proof_rx: &mut tokio::sync::mpsc::Receiver<UtxoProofRequest>,
     candidate_gen: Option<Arc<std::sync::RwLock<CandidateGenerator>>>,
     snapshots_db: Option<Arc<crate::snapshots::SnapshotsDb>>,
     wallet: WalletArc,
@@ -718,6 +736,70 @@ pub async fn run(
                         .unwrap()
                         .as_millis() as u64;
                 }
+            }
+
+            // Block submission from the API (POST /blocks).
+            // Process each modifier through the existing pipeline, same as
+            // receiving from a peer but without penalty tracking.
+            Some(block_sub) = block_submit_rx.recv() => {
+                for (type_id, modifier_id, data) in block_sub.modifiers {
+                    match node_view.process_modifier(type_id, &modifier_id, &data) {
+                        Ok(info) => {
+                            // Enqueue block body section downloads if needed.
+                            let mut blocks_to_download = Vec::new();
+                            for (_section_type, hdr_id) in &info.to_download {
+                                if !blocks_to_download.contains(hdr_id) {
+                                    blocks_to_download.push(*hdr_id);
+                                }
+                            }
+                            if !blocks_to_download.is_empty() {
+                                sync_mgr.enqueue_block_downloads(blocks_to_download);
+                            }
+                            tracing::info!(
+                                type_id,
+                                modifier_id = hex::encode(modifier_id.0),
+                                "API block modifier processed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                type_id,
+                                modifier_id = hex::encode(modifier_id.0),
+                                error = %e,
+                                "API block modifier rejected"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // UTXO batch proof request from the API (POST /utxo/getBoxesBinaryProof).
+            // Performs lookups on the AVL tree and generates a batch proof.
+            Some(req) = utxo_proof_rx.recv() => {
+                let result = if node_view.is_digest_mode() {
+                    Err("UTXO proofs not available in digest mode".to_string())
+                } else if let Some(utxo) = node_view.utxo_state() {
+                    // Build lookup-only StateChanges for the requested box IDs.
+                    let lookups: Vec<ergo_types::transaction::BoxId> = req
+                        .box_ids
+                        .iter()
+                        .map(|id| ergo_types::transaction::BoxId(*id))
+                        .collect();
+
+                    let changes = ergo_state::state_changes::StateChanges {
+                        to_lookup: lookups,
+                        to_remove: Vec::new(),
+                        to_insert: Vec::new(),
+                    };
+
+                    match utxo.proofs_for_transactions(&changes) {
+                        Ok((proof, _digest)) => Ok(proof),
+                        Err(e) => Err(format!("proof generation failed: {e}")),
+                    }
+                } else {
+                    Err("UTXO state not available".to_string())
+                };
+                let _ = req.response_tx.send(result);
             }
 
             _ = status_tick.tick() => {

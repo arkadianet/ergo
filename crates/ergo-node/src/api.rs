@@ -1213,6 +1213,8 @@ pub struct ApiState {
     pub state_type: String,
     pub candidate_generator: Option<Arc<std::sync::RwLock<CandidateGenerator>>>,
     pub mining_solution_tx: Option<tokio::sync::mpsc::Sender<MiningSolution>>,
+    pub block_submit: Option<tokio::sync::mpsc::Sender<crate::event_loop::BlockSubmission>>,
+    pub utxo_proof: Option<tokio::sync::mpsc::Sender<crate::event_loop::UtxoProofRequest>>,
     pub mining_pub_key_hex: String,
     pub snapshots_db: Option<Arc<crate::snapshots::SnapshotsDb>>,
     #[cfg(feature = "wallet")]
@@ -4223,44 +4225,79 @@ async fn utxo_genesis_handler(
 
 /// `POST /blocks` -- submit a full block for validation and inclusion.
 ///
-/// Accepts a JSON body representing a full block. Because we do not currently
-/// have a `block_submit` channel to the event loop for full block ingestion
-/// from an external source, this endpoint validates the JSON structure and
-/// returns the computed header ID but does not apply the block to the chain.
+/// Accepts a JSON body representing a full block. The body must contain a `header`
+/// field with hex-encoded serialized header bytes, plus optional `blockTransactions`,
+/// `extension`, and `adProofs` fields (also hex-encoded bytes). Validates the header's
+/// proof-of-work, then fire-and-forget sends each section to the event loop for full
+/// validation and application (matching Scala's pattern).
 async fn post_block_handler(
-    State(_state): State<ApiState>,
+    State(state): State<ApiState>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    // Extract the header object from the body
-    let header_obj = body
+    // Extract the header bytes (hex-encoded serialized header).
+    let header_hex = body
         .get("header")
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'header' field in block JSON"))?;
-
-    // Extract required header fields to compute the header ID
-    let id_str = header_obj
-        .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'header.id' field"))?;
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'header' field (hex string)"))?;
 
-    // Validate the header ID is valid hex
-    let id_bytes = hex::decode(id_str).map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Invalid hex encoding in header.id",
-        )
+    let header_bytes = hex::decode(header_hex).map_err(|_| {
+        api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding in header")
     })?;
 
-    if id_bytes.len() != 32 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "header.id must be 32 bytes (64 hex characters)",
-        ));
+    // Parse the header to validate PoW.
+    let header = ergo_wire::header_ser::parse_header(&header_bytes).map_err(|e| {
+        api_error(StatusCode::BAD_REQUEST, &format!("Failed to parse header: {e}"))
+    })?;
+
+    // Validate proof-of-work (lightweight pre-check, matching Scala's `powScheme.validate`).
+    ergo_consensus::autolykos::validate_pow(&header).map_err(|e| {
+        api_error(StatusCode::BAD_REQUEST, &format!("Invalid PoW: {e}"))
+    })?;
+
+    // Compute the header ID from the serialized bytes.
+    let header_id = compute_header_id(&header_bytes);
+    let header_id_hex = hex::encode(header_id.0);
+
+    // Build the list of modifiers to send to the event loop.
+    // type_id 101 = Header, 102 = BlockTransactions, 108 = Extension, 104 = ADProofs
+    let mut modifiers = Vec::new();
+    modifiers.push((101u8, header_id, header_bytes));
+
+    // Optional body sections: blockTransactions, extension, adProofs
+    if let Some(bt_hex) = body.get("blockTransactions").and_then(|v| v.as_str()) {
+        let bt_bytes = hex::decode(bt_hex).map_err(|_| {
+            api_error(StatusCode::BAD_REQUEST, "Invalid hex in blockTransactions")
+        })?;
+        modifiers.push((102u8, header_id, bt_bytes));
     }
 
-    // Block submission via API is not yet wired into the event loop.
-    // We accept the request and acknowledge receipt of the block with its ID.
-    // A future implementation would forward this to the event loop for full validation.
-    Ok(Json(serde_json::json!({ "headerId": id_str })))
+    if let Some(ext_hex) = body.get("extension").and_then(|v| v.as_str()) {
+        let ext_bytes = hex::decode(ext_hex).map_err(|_| {
+            api_error(StatusCode::BAD_REQUEST, "Invalid hex in extension")
+        })?;
+        modifiers.push((108u8, header_id, ext_bytes));
+    }
+
+    if let Some(ap_hex) = body.get("adProofs").and_then(|v| v.as_str()) {
+        let ap_bytes = hex::decode(ap_hex).map_err(|_| {
+            api_error(StatusCode::BAD_REQUEST, "Invalid hex in adProofs")
+        })?;
+        modifiers.push((104u8, header_id, ap_bytes));
+    }
+
+    // Fire-and-forget: send to the event loop.
+    let sender = state
+        .block_submit
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "Block submit channel not available"))?;
+
+    let submission = crate::event_loop::BlockSubmission { modifiers };
+    sender.try_send(submission).map_err(|_| {
+        api_error(StatusCode::SERVICE_UNAVAILABLE, "Event loop busy, block submit channel full")
+    })?;
+
+    // Return OK immediately with the header ID (Scala pattern: fire-and-forget).
+    Ok(Json(serde_json::json!({ "headerId": header_id_hex })))
 }
 
 /// `GET /utxo/getSnapshotsInfo` -- return metadata about available UTXO snapshots.
@@ -4302,8 +4339,9 @@ async fn utxo_snapshots_info_handler(
 
 /// `POST /utxo/getBoxesBinaryProof` -- return a batch Merkle proof for a set of box IDs.
 ///
-/// Accepts a JSON array of box ID hex strings. Generating batch proofs requires
-/// access to the live AVL+ tree, which is not yet exposed to the API layer.
+/// Accepts a JSON array of box ID hex strings. Sends a proof request to the event
+/// loop which holds the live UTXO AVL+ tree, awaits the response, and returns the
+/// hex-encoded serialized AD proof bytes.
 async fn utxo_boxes_binary_proof_handler(
     State(state): State<ApiState>,
     Json(box_ids): Json<Vec<String>>,
@@ -4315,7 +4353,8 @@ async fn utxo_boxes_binary_proof_handler(
         ));
     }
 
-    // Validate the input box IDs
+    // Validate and parse the input box IDs.
+    let mut parsed_ids = Vec::with_capacity(box_ids.len());
     for id_hex in &box_ids {
         let bytes = hex::decode(id_hex).map_err(|_| {
             api_error(
@@ -4329,14 +4368,45 @@ async fn utxo_boxes_binary_proof_handler(
                 &format!("Box ID must be 32 bytes, got {}: {}", bytes.len(), id_hex),
             ));
         }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        parsed_ids.push(arr);
     }
 
-    // Generating batch AVL+ proofs requires access to the live UTXO tree state,
-    // which is owned by the event loop. A read channel would be needed.
-    Err(api_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "Batch binary proof generation requires live UTXO tree access (not yet wired)",
-    ))
+    // Send a proof request to the event loop via the oneshot channel pattern.
+    let sender = state
+        .utxo_proof
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "UTXO proof channel not available"))?;
+
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    let request = crate::event_loop::UtxoProofRequest {
+        box_ids: parsed_ids,
+        response_tx: resp_tx,
+    };
+
+    sender.try_send(request).map_err(|_| {
+        api_error(StatusCode::SERVICE_UNAVAILABLE, "Event loop busy, proof request channel full")
+    })?;
+
+    // Await the response with a timeout.
+    match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await {
+        Ok(Ok(Ok(proof_bytes))) => {
+            Ok(Json(serde_json::json!(hex::encode(proof_bytes))))
+        }
+        Ok(Ok(Err(e))) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Proof generation failed: {e}"),
+        )),
+        Ok(Err(_)) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Event loop dropped proof response",
+        )),
+        Err(_) => Err(api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Proof generation timed out",
+        )),
+    }
 }
 
 /// `POST /script/executeWithContext` -- compile and evaluate an ErgoScript with a given context.
@@ -5687,6 +5757,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7082,6 +7154,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7126,6 +7200,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7167,6 +7243,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7214,6 +7292,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7255,6 +7335,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7316,6 +7398,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7357,6 +7441,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -7416,6 +7502,8 @@ mod tests {
             state_type: "digest".to_string(),
             candidate_generator: None,
             mining_solution_tx: None,
+            block_submit: None,
+            utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
             #[cfg(feature = "wallet")]
@@ -8031,37 +8119,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_blocks_accepts_valid_block_json() {
-        let (state, _dir) = test_api_state();
-        let router = build_router(state);
-        let header_id = "aa".repeat(32);
-        let body = serde_json::json!({
-            "header": {
-                "id": header_id,
-                "parentId": "bb".repeat(32),
-                "height": 100
-            },
-            "blockTransactions": { "headerId": header_id, "transactions": [] },
-            "extension": { "headerId": header_id, "fields": [] }
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/blocks")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert_eq!(json["headerId"], header_id);
-    }
-
-    #[tokio::test]
     async fn post_blocks_rejects_missing_header() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
-        let body = serde_json::json!({"blockTransactions": {}});
+        let body = serde_json::json!({"blockTransactions": "aa"});
         let req = Request::builder()
             .method("POST")
             .uri("/blocks")
@@ -8073,10 +8134,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_blocks_rejects_invalid_header_id() {
+    async fn post_blocks_rejects_invalid_header_hex() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
-        let body = serde_json::json!({"header": {"id": "not-hex"}});
+        let body = serde_json::json!({"header": "not-valid-hex"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/blocks")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_blocks_rejects_unparseable_header() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        // Valid hex but too short to be a real header.
+        let body = serde_json::json!({"header": "aabbccdd"});
         let req = Request::builder()
             .method("POST")
             .uri("/blocks")
@@ -8135,9 +8212,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn utxo_boxes_binary_proof_returns_501_in_utxo_mode() {
+    async fn utxo_boxes_binary_proof_returns_503_without_channel() {
         let (mut state, _dir) = test_api_state();
         state.state_type = "utxo".to_string();
+        // utxo_proof is None in test state, so we get SERVICE_UNAVAILABLE.
         let router = build_router(state);
         let body = serde_json::json!(["aa".repeat(32)]);
         let req = Request::builder()
@@ -8147,7 +8225,7 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

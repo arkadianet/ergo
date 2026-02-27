@@ -201,6 +201,10 @@ async fn main() {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (mining_solution_tx, mut mining_solution_rx) =
         tokio::sync::mpsc::channel::<mining::MiningSolution>(16);
+    let (block_submit_tx, mut block_submit_rx) =
+        tokio::sync::mpsc::channel::<event_loop::BlockSubmission>(16);
+    let (utxo_proof_tx, mut utxo_proof_rx) =
+        tokio::sync::mpsc::channel::<event_loop::UtxoProofRequest>(16);
 
     // Open SnapshotsDb if configured.
     let snapshots_db_opt = if settings.ergo.node.storing_utxo_snapshots > 0
@@ -288,6 +292,8 @@ async fn main() {
         state_type: settings.ergo.node.state_type.clone(),
         candidate_generator: candidate_gen_arc.clone(),
         mining_solution_tx: Some(mining_solution_tx),
+        block_submit: Some(block_submit_tx),
+        utxo_proof: Some(utxo_proof_tx),
         mining_pub_key_hex: settings.ergo.node.mining_pub_key_hex.clone(),
         snapshots_db: snapshots_db_arc.clone(),
         #[cfg(feature = "wallet")]
@@ -422,6 +428,8 @@ async fn main() {
         &mut shutdown_rx,
         indexer_tx,
         &mut mining_solution_rx,
+        &mut block_submit_rx,
+        &mut utxo_proof_rx,
         candidate_gen_arc,
         snapshots_db_arc,
         wallet_arc,
