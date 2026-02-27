@@ -271,7 +271,7 @@ fn build_emission_tx(
     let utxo = utxo_state?;
 
     // Compute expected emission at this height.
-    let reward = ergo_network::emission::emission_at_height(next_height);
+    let reward = ergo_network::emission::miner_reward_at_height(next_height);
     if reward == 0 {
         return None; // Past emission schedule.
     }
@@ -1627,8 +1627,22 @@ mod tests {
 
     #[test]
     fn emission_amount_positive_at_early_height() {
-        let reward = ergo_network::emission::emission_at_height(100);
-        assert!(reward > 0, "emission should be positive at height 100");
+        let reward = ergo_network::emission::miner_reward_at_height(100);
+        assert!(reward > 0, "miner reward should be positive at height 100");
+    }
+
+    #[test]
+    fn miner_reward_less_than_total_during_founders_period() {
+        // During the founders period, the miner reward should be less than total emission
+        // because 7.5 ERG goes to founders.
+        let total = ergo_network::emission::emission_at_height(100);
+        let miner = ergo_network::emission::miner_reward_at_height(100);
+        assert!(miner < total, "miner reward should be less than total emission during founders period");
+        assert_eq!(
+            total - miner,
+            ergo_network::emission::FOUNDERS_INITIAL_REWARD,
+            "difference should be the founders reward"
+        );
     }
 
     #[test]
