@@ -14,6 +14,8 @@ num-integer = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 ergo-lib = { version = "0.28", default-features = false, features = ["std"] }
+ergo-chain-types = "0.15"
+k256 = { version = "0.13", features = ["ecdsa"] }
 sigma-ser = "0.19"
 
 [dev-dependencies]
