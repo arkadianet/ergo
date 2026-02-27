@@ -41,7 +41,7 @@ miner_reward_delay = 720
 node_name = "ergo-rust"
 app_version = "6.0.1"
 agent_name = "ergoref"
-bind_address = "0.0.0.0:9030"
+bind_address = "0.0.0.0:9032"
 magic_bytes = [1, 0, 2, 4]
 known_peers = [
     "213.239.193.208:9030",
@@ -55,7 +55,8 @@ known_peers = [
     "173.212.220.9:9030",
     "176.9.65.58:9130",
     "213.152.106.56:9030",
+    "127.0.0.1:9030",
 ]
 
 [api]
-bind_address = "127.0.0.1:9053"
+bind_address = "127.0.0.1:9055"
