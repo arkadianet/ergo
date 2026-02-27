@@ -393,7 +393,14 @@ pub fn collect_txs(
         std::collections::HashMap::new();
 
     // Safe gap: reserve headroom for the fee tx and rounding.
-    let safe_gap: u64 = if max_block_cost >= 5_000_000 { 500_000 } else { 0 };
+    // Matches Scala's CandidateGenerator three-tier safeGap.
+    let safe_gap: u64 = if max_block_cost >= 5_000_000 {
+        500_000
+    } else if max_block_cost >= 1_000_000 {
+        150_000
+    } else {
+        0
+    };
     let cost_limit = max_block_cost.saturating_sub(safe_gap);
 
     // 1. Emission tx first (if available).
@@ -544,6 +551,32 @@ pub fn collect_txs(
 
     // 3. Append fee collection tx (collects fees from all selected txs).
     if let Some(fee_tx) = build_fee_collection_tx(&selected, next_height, miner_pk, reward_delay) {
+        // Sigma-validate fee tx if UTXO context is available.
+        if let (Some(utxo), Some(ctx)) = (utxo_state, sigma_ctx) {
+            let mut fee_input_boxes = Vec::new();
+            let mut fee_valid = true;
+            for input in &fee_tx.inputs {
+                if let Some(overlay_box) = utxo_overlay.get(&input.box_id.0) {
+                    fee_input_boxes.push(overlay_box.clone());
+                } else if let Ok(Some(b)) = utxo.get_ergo_box(&input.box_id) {
+                    fee_input_boxes.push(b);
+                } else {
+                    fee_valid = false;
+                    break;
+                }
+            }
+            if fee_valid {
+                if let Err(e) = ergo_consensus::sigma_verify::verify_transaction(
+                    &fee_tx,
+                    &fee_input_boxes,
+                    &[],
+                    ctx,
+                    0, // no checkpoint — always verify for mining candidates
+                ) {
+                    tracing::warn!(error = %e, "fee collection tx sigma verification failed");
+                }
+            }
+        }
         selected.push(fee_tx);
     }
 
@@ -689,6 +722,8 @@ pub enum CandidateError {
     NoMiningKey,
     #[error("state error: {0}")]
     StateError(String),
+    #[error("no transactions available for block candidate")]
+    NoTransactions,
 }
 
 /// Generates block candidates for mining.
@@ -903,6 +938,12 @@ impl CandidateGenerator {
             sigma_ctx.as_ref(),
             reward_delay,
         );
+
+        // Guard: if no transactions were selected, skip candidate generation.
+        if transactions.is_empty() {
+            tracing::warn!(height, "no transactions for block candidate, skipping");
+            return Err(CandidateError::NoTransactions);
+        }
 
         // 7. Compute real state root via speculative state application (UTXO mode)
         //    or fall back to parent state root (digest mode).
@@ -1905,6 +1946,33 @@ mod tests {
         assert!(eliminated.is_empty());
         // Both txs + fee tx.
         assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn test_collect_txs_cost_limit_with_middle_tier_safe_gap() {
+        let pk = [0x02; 33];
+        let params = Parameters::genesis();
+        let tx1 = make_tx_with_fee_seeded(100_000, 0xD1);
+
+        // Each tx costs 12200.
+        // With max_block_cost = 1_000_000 (>= 1M, < 5M), middle-tier safe_gap = 150_000,
+        // so cost_limit = 850_000 — tx fits easily.
+        let (selected, eliminated) = collect_txs(
+            vec![tx1.clone()],
+            None,
+            10_000_000,
+            1_000_000,
+            &params,
+            100,
+            &pk,
+            None,
+            None,
+            720,
+        );
+
+        assert!(eliminated.is_empty());
+        // tx + fee tx.
+        assert_eq!(selected.len(), 2);
     }
 
     #[test]
