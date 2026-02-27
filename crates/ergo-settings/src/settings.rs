@@ -48,8 +48,11 @@ pub struct NodeSettings {
     pub keep_versions: u32,
     #[serde(default = "default_mempool_capacity")]
     pub mempool_capacity: u32,
-    #[serde(default = "default_cleanup_mins", alias = "mempool_cleanup_duration_secs")]
-    pub mempool_cleanup_duration_mins: u64,
+    #[serde(
+        default = "default_cleanup_secs",
+        alias = "mempool_cleanup_duration_mins"
+    )]
+    pub mempool_cleanup_duration_secs: u64,
     #[serde(default = "default_sorting")]
     pub mempool_sorting: String,
     #[serde(default = "default_rebroadcast")]
@@ -80,7 +83,7 @@ pub struct NodeSettings {
 
 fn default_keep_versions() -> u32 { 200 }
 fn default_mempool_capacity() -> u32 { 1000 }
-fn default_cleanup_mins() -> u64 { 30 }
+fn default_cleanup_secs() -> u64 { 30 }
 fn default_sorting() -> String { "random".into() }
 fn default_rebroadcast() -> u32 { 3 }
 fn default_min_fee() -> u64 { 1_000_000 }
@@ -261,7 +264,7 @@ max_transaction_cost = 1000000
 max_transaction_size = 98304
 keep_versions = 200
 mempool_capacity = 1000
-mempool_cleanup_duration_mins = 30
+mempool_cleanup_duration_secs = 30
 mempool_sorting = "random"
 rebroadcast_count = 3
 minimal_fee_amount = 1000000

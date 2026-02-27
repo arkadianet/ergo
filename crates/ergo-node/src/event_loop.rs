@@ -695,7 +695,7 @@ pub async fn run(
 
             _ = mempool_audit_tick.tick() => {
                 // Step 1: Evict stale transactions.
-                let max_age = Duration::from_secs(settings.ergo.node.mempool_cleanup_duration_mins * 60);
+                let max_age = Duration::from_secs(settings.ergo.node.mempool_cleanup_duration_secs);
                 let evicted = {
                     let mut mp = node_view.mempool.write().unwrap();
                     mp.evict_stale(max_age)

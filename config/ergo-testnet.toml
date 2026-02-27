@@ -7,20 +7,20 @@ state_type = "digest"
 verify_transactions = true
 blocks_to_keep = -1
 mining = false
-max_transaction_cost = 1000000
+max_transaction_cost = 800000
 max_transaction_size = 98304
 extra_index = false
-checkpoint_height = 0
+checkpoint_height = 91320
 
 [ergo.chain]
 protocol_version = 4
 address_prefix = 16
-block_interval_secs = 120
-epoch_length = 1024
+block_interval_secs = 45
+epoch_length = 128
 use_last_epochs = 8
 initial_difficulty_hex = "01"
 genesis_state_digest_hex = "cb63aa99a3060f341781d8662b58bf18b9ad258db4fe88d09f8f71cb668cad4502"
-version2_activation_height = 417792
+version2_activation_height = 128
 version2_activation_difficulty_hex = "20"
 
 [ergo.chain.pow]
@@ -40,11 +40,12 @@ miner_reward_delay = 720
 node_name = "ergo-rust-testnet"
 app_version = "6.0.1"
 agent_name = "ergoref"
-bind_address = "0.0.0.0:9020"
-magic_bytes = [2, 0, 0, 1]
+bind_address = "0.0.0.0:9022"
+magic_bytes = [2, 0, 2, 3]
 known_peers = [
-    "213.239.193.208:9020",
-    "94.130.108.35:9020",
+    "213.239.193.208:9022",
+    "168.138.185.215:9022",
+    "192.234.196.165:9022",
 ]
 
 [api]
