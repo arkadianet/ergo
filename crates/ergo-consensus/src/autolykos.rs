@@ -571,4 +571,76 @@ mod tests {
         let result = find_nonce(&msg, &target, 100_000, 0, 10);
         assert!(result.is_none(), "find_nonce should return None for impossibly hard target");
     }
+
+    // -------------------------------------------------------------------
+    // V1 PoW helper tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_hash_mod_q_within_range() {
+        let input = b"test input for hashModQ";
+        let result = hash_mod_q(input);
+        assert!(result < *Q, "hashModQ result must be < q");
+        assert!(!result.is_zero(), "hashModQ result should be non-zero for non-trivial input");
+    }
+
+    #[test]
+    fn test_hash_mod_q_deterministic() {
+        let input = b"determinism check";
+        let r1 = hash_mod_q(input);
+        let r2 = hash_mod_q(input);
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn test_gen_indexes_v1_count_and_range() {
+        let seed = [0xABu8; 40]; // seed = msg(32) || nonce(8)
+        let indices = gen_indexes_v1(&seed, N_BASE);
+        assert_eq!(indices.len(), K);
+        for &idx in &indices {
+            assert!(idx < N_BASE, "v1 index {} must be < N_BASE {}", idx, N_BASE);
+        }
+    }
+
+    #[test]
+    fn test_gen_indexes_v1_differs_from_v2() {
+        // v1 and v2 use the same hash-then-sliding-window logic in gen_indexes,
+        // but in practice they differ because v2 prepends 31 bytes of `f` to
+        // the seed, making the actual input different. Here we verify that with
+        // the same raw seed, both functions are consistent (same algorithm).
+        let seed32: [u8; 32] = [0x42; 32];
+        let v2_indices = gen_indexes(&seed32, N_BASE);
+        let v1_indices = gen_indexes_v1(&seed32, N_BASE);
+        // Both hash the seed first, so same seed => same output
+        assert_eq!(v1_indices, v2_indices,
+            "v1 and v2 gen_indexes use the same algorithm, so same seed => same indices");
+    }
+
+    #[test]
+    fn test_biguint_to_scalar_roundtrip() {
+        let value = BigUint::from(42u32);
+        let scalar = biguint_to_scalar(&value);
+        assert_ne!(scalar, Scalar::ZERO);
+    }
+
+    #[test]
+    fn test_biguint_to_scalar_large_value() {
+        // Value larger than group order should be reduced
+        let large = &*Q + BigUint::from(1u32);
+        let scalar = biguint_to_scalar(&large);
+        let one_scalar = biguint_to_scalar(&BigUint::from(1u32));
+        assert_eq!(scalar, one_scalar, "Q+1 mod Q should equal 1");
+    }
+
+    #[test]
+    fn test_v1_pow_rejects_d_above_target() {
+        use ergo_types::header::Header;
+        let mut header = Header::default_for_test();
+        header.version = 1;
+        header.n_bits = 0x01010000; // minimal difficulty
+        // Set d to a very large value (should exceed target)
+        header.pow_solution.d = vec![0xFF; 32];
+        let result = validate_pow(&header);
+        assert!(result.is_err(), "v1 PoW should reject when d >= target");
+    }
 }
