@@ -133,6 +133,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       transition: width 0.5s ease;
       min-width: 0;
     }
+    .progress-bar-blocks {
+      background: linear-gradient(90deg, #1565c0, #42a5f5);
+    }
     .hash {
       font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
       font-size: 0.85em;
@@ -244,52 +247,52 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       document.getElementById('nodeInfoContent').innerHTML = html;
     }
 
+    function makeProgressRow(label, current, target, barClass) {
+      var pct = 0;
+      if (target > 0) { pct = Math.min(100, (current / target) * 100); }
+      var html = '<div style="margin-bottom:1rem;">';
+      html += '<div style="display:flex;justify-content:space-between;font-size:0.88em;margin-bottom:0.3rem;">';
+      html += '<span style="font-weight:600;color:#1a1a2e;">' + esc(label) + '</span>';
+      html += '<span style="color:#666;">' + fmt(current) + ' / ' + fmt(target) + ' (' + pct.toFixed(1) + '%)</span>';
+      html += '</div>';
+      html += '<div class="progress-container">';
+      html += '<div class="progress-bar' + (barClass ? ' ' + barClass : '') + '" style="width:' + pct.toFixed(1) + '%"></div>';
+      html += '</div></div>';
+      return html;
+    }
+
     function updateSync(info) {
+      var headers = info.headersHeight || 0;
       var full = info.fullHeight || 0;
       var max = info.maxPeerHeight || 0;
-      var pct = 0;
-      if (max > 0) { pct = Math.min(100, (full / max) * 100); }
 
-      var synced = max > 0 && full >= max - 1;
-      var statusBadge = synced
-        ? '<span class="badge badge-synced">Synced</span>'
-        : '<span class="badge badge-syncing">Syncing...</span>';
+      var headersDone = max > 0 && headers >= max - 1;
+      var blocksDone = headers > 0 && full >= headers - 1;
+      var synced = headersDone && blocksDone;
 
       var el = document.getElementById('syncContent');
-      el.innerHTML = '';
+      var html = '';
 
-      var section = document.createElement('div');
-      section.className = 'sync-section';
+      // Overall status badge
+      var statusBadge;
+      if (synced) {
+        statusBadge = '<span class="badge badge-synced">Synced</span>';
+      } else if (!headersDone) {
+        statusBadge = '<span class="badge badge-syncing">Syncing Headers...</span>';
+      } else {
+        statusBadge = '<span class="badge badge-syncing">Downloading Blocks...</span>';
+      }
+      html += '<div style="text-align:center;margin-bottom:1rem;">' + statusBadge + '</div>';
 
-      var pctDiv = document.createElement('div');
-      pctDiv.className = 'sync-pct';
-      pctDiv.textContent = pct.toFixed(1) + '%';
-      section.appendChild(pctDiv);
+      // Headers progress: current vs max peer height
+      html += makeProgressRow('Headers', headers, max, '');
 
-      var progContainer = document.createElement('div');
-      progContainer.className = 'progress-container';
-      var progBar = document.createElement('div');
-      progBar.className = 'progress-bar';
-      progBar.style.width = pct.toFixed(1) + '%';
-      progContainer.appendChild(progBar);
-      section.appendChild(progContainer);
+      // Full blocks progress: current vs headers height
+      html += makeProgressRow('Full Blocks', full, headers, 'progress-bar-blocks');
 
-      var labelDiv = document.createElement('div');
-      labelDiv.className = 'sync-label';
-      labelDiv.innerHTML = statusBadge;
-      section.appendChild(labelDiv);
+      html += '<div class="last-update">Last updated: ' + new Date().toLocaleTimeString() + '</div>';
 
-      var blocksDiv = document.createElement('div');
-      blocksDiv.style.cssText = 'margin-top:0.5rem;font-size:0.88em;color:#666;';
-      blocksDiv.textContent = fmt(full) + ' / ' + fmt(max) + ' blocks';
-      section.appendChild(blocksDiv);
-
-      var updateDiv = document.createElement('div');
-      updateDiv.className = 'last-update';
-      updateDiv.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
-      section.appendChild(updateDiv);
-
-      el.appendChild(section);
+      el.innerHTML = html;
     }
 
     function updatePeers(peers) {

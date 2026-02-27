@@ -3,13 +3,13 @@ directory = ".ergo"
 network_type = "mainnet"
 
 [ergo.node]
-state_type = "digest"
+state_type = "utxo"
 verify_transactions = true
 blocks_to_keep = -1
 mining = false
 max_transaction_cost = 1000000
 max_transaction_size = 98304
-extra_index = false
+extra_index = true
 checkpoint_height = 0
 
 [ergo.chain]
@@ -41,14 +41,16 @@ miner_reward_delay = 720
 node_name = "ergo-rust"
 app_version = "6.0.1"
 agent_name = "ergoref"
-bind_address = "0.0.0.0:9030"
+bind_address = "0.0.0.0:9032"
 magic_bytes = [1, 0, 2, 4]
 known_peers = [
     "213.239.193.208:9030",
     "159.65.11.55:9030",
     "165.227.26.175:9030",
     "159.89.116.15:9030",
+    "127.0.0.1:9030",
+    "10.10.20.2:9030",
 ]
 
 [api]
-bind_address = "127.0.0.1:9053"
+bind_address = "127.0.0.1:9055"

@@ -1037,7 +1037,9 @@ fn node_view_rejects_header_with_bad_height() {
     let parent_bytes = ergo_wire::header_ser::serialize_header(&parent);
     let parent_id = ModifierId(blake2b256(&parent_bytes));
 
-    nv.process_modifier(101, &parent_id, &parent_bytes)
+    // Store parent directly (bypassing process_modifier which now rejects
+    // orphan headers without a parent in the DB).
+    nv.history.store_header_with_score(&parent_id, &parent)
         .expect("storing parent header should succeed");
 
     // Build a child header with WRONG height (200 instead of 101).

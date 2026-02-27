@@ -477,17 +477,25 @@ fn handle_modifiers(
             continue;
         }
 
-        // Verify declared modifier ID matches blake2b256(data).
-        let actual_id = ModifierId(blake2b256(data));
-        if actual_id != *id {
-            tracing::warn!(
-                declared = hex::encode(id.0),
-                actual = hex::encode(actual_id.0),
-                "modifier ID mismatch — declared ID does not match hash of data"
-            );
-            penalties.push((PenaltyType::InvalidBlock, peer_id));
-            tracker.set_invalid(id);
-            continue;
+        // Verify declared modifier ID matches hash of data.
+        // For headers (type 101), the ID is blake2b256(serialized_header).
+        // For block sections (102, 104, 108), the ID uses a different formula:
+        //   blake2b256(type_byte ++ header_id ++ content_digest)
+        // where content_digest requires full parsing (Merkle tree for txs/extension,
+        // hash of proof bytes for ADProofs). Block section integrity is verified
+        // during block validation via header commitments, so we only check headers.
+        if type_id == HEADER_TYPE_ID {
+            let actual_id = ModifierId(blake2b256(data));
+            if actual_id != *id {
+                tracing::warn!(
+                    declared = hex::encode(id.0),
+                    actual = hex::encode(actual_id.0),
+                    "modifier ID mismatch — declared ID does not match hash of data"
+                );
+                penalties.push((PenaltyType::InvalidBlock, peer_id));
+                tracker.set_invalid(id);
+                continue;
+            }
         }
 
         match node_view.process_modifier(type_id, id, data) {
@@ -516,6 +524,19 @@ fn handle_modifiers(
     apply_from_cache(cache, node_view, sync_mgr, tracker, &mut new_headers, &mut blocks_to_download);
 
     if !new_headers.is_empty() {
+        let best_height = node_view
+            .history
+            .best_header_id()
+            .ok()
+            .flatten()
+            .and_then(|id| node_view.history.load_header(&id).ok().flatten())
+            .map(|h| h.height)
+            .unwrap_or(0);
+        tracing::info!(
+            new = new_headers.len(),
+            headers_height = best_height,
+            "received headers"
+        );
         sync_mgr.on_headers_received(&new_headers, &node_view.history);
     }
     if !blocks_to_download.is_empty() {
@@ -523,6 +544,14 @@ fn handle_modifiers(
     }
 
     let applied_blocks = node_view.take_applied_blocks();
+    if !applied_blocks.is_empty() {
+        let best_full = node_view.history.best_full_block_height().unwrap_or(0);
+        tracing::info!(
+            new = applied_blocks.len(),
+            full_height = best_full,
+            "applied blocks"
+        );
+    }
 
     // Sync-after-headers fast path: when we receive headers from a peer,
     // immediately send them our updated SyncInfoV2. This creates a tight
@@ -1486,21 +1515,22 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn handle_modifiers_rejects_mismatched_id() {
+    fn handle_modifiers_rejects_mismatched_header_id() {
         let (mut node_view, _dir) = open_test_node_view();
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
         // Use a fake ID that does NOT match blake2b256 of the data.
+        // ID verification is only performed for headers (type 101).
         let fake_id = make_id(99);
         let data = vec![0u8; 20];
         // Sanity: the real hash of `data` differs from make_id(99).
         assert_ne!(ModifierId(blake2b256(&data)), fake_id);
 
-        tracker.set_requested(108, fake_id, 1);
+        tracker.set_requested(HEADER_TYPE_ID, fake_id, 1);
 
         let mods = ModifiersData {
-            type_id: 108,
+            type_id: HEADER_TYPE_ID as i8,
             modifiers: vec![(fake_id, data)],
         };
         let msg = RawMessage {
@@ -1527,11 +1557,11 @@ mod tests {
         assert!(matches!(result.penalties[0].0, PenaltyType::InvalidBlock));
 
         // Modifier should NOT be stored in the history DB.
-        assert!(!node_view.history.contains_modifier(108, &fake_id).unwrap());
+        assert!(!node_view.history.contains_modifier(HEADER_TYPE_ID, &fake_id).unwrap());
 
         // Tracker should show Invalid status.
         assert_eq!(
-            tracker.status(108, &fake_id),
+            tracker.status(HEADER_TYPE_ID, &fake_id),
             crate::delivery_tracker::ModifierStatus::Invalid
         );
     }

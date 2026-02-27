@@ -174,7 +174,7 @@ pub async fn run(
     let sync_interval = Duration::from_secs(settings.network.sync_interval_secs);
     let mut sync_tick = tokio::time::interval(sync_interval);
     let mut discovery_tick = tokio::time::interval(Duration::from_secs(60));
-    let mut status_tick = tokio::time::interval(Duration::from_secs(30));
+    let mut status_tick = tokio::time::interval(Duration::from_secs(10));
     let mut check_modifiers_tick = tokio::time::interval(Duration::from_secs(10));
     let mut mempool_audit_tick = tokio::time::interval(Duration::from_secs(60));
     let mut dead_conn_tick = tokio::time::interval(Duration::from_secs(60));
@@ -211,6 +211,8 @@ pub async fn run(
     // Whether the node is synced enough to accept and verify transactions.
     // Only true in UTXO mode when headers and full blocks are at the same height.
     let mut is_synced_for_txs = false;
+
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
@@ -906,7 +908,7 @@ pub async fn run(
                 }
             }
 
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut ctrl_c => {
                 tracing::info!("shutting down...");
                 break;
             }

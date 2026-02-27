@@ -138,7 +138,7 @@ pub fn process_modifiers_persistent(
             validate_child_header(&header, &parent, now_ms, None)?;
         }
 
-        db.store_header(id, &header)?;
+        db.store_header_with_score(id, &header)?;
         added += 1;
     }
 

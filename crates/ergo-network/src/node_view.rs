@@ -443,30 +443,53 @@ impl NodeViewHolder {
         modifier_id: &ModifierId,
         data: &[u8],
     ) -> Result<ProgressInfo, NodeViewError> {
-        // For headers, validate against parent before storing.
+        // For headers, parse, validate against parent, and store with indexes.
         if type_id == HEADER_TYPE_ID {
-            if let Ok(header) = wire_parse_header(data) {
-                if let Ok(Some(parent)) = self.history.load_header(&header.parent_id) {
-                    let now_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    // Compute required difficulty for this header (rule 208).
-                    let required_n_bits =
-                        self.compute_required_difficulty(&header, &parent);
-                    if let Err(e) =
-                        validate_child_header(&header, &parent, now_ms, required_n_bits)
-                    {
-                        return Err(NodeViewError::Validation(format!(
-                            "header {} validation failed: {e}",
+            let header = wire_parse_header(data)
+                .map_err(|e| NodeViewError::Validation(format!("header parse failed: {e}")))?;
+
+            // Validate every header — matching Scala which validates PoW,
+            // difficulty, and timestamps at all heights with no checkpoint skip.
+            if header.is_genesis() {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if let Err(e) = ergo_consensus::header_validation::validate_genesis_header(
+                    &header, now_ms, None, None,
+                ) {
+                    return Err(NodeViewError::Validation(format!(
+                        "genesis header validation failed: {e}"
+                    )));
+                }
+            } else {
+                let parent = self
+                    .history
+                    .load_header(&header.parent_id)?
+                    .ok_or_else(|| {
+                        NodeViewError::Validation(format!(
+                            "parent header not found for header at height {}",
                             header.height
-                        )));
-                    }
+                        ))
+                    })?;
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let required_n_bits =
+                    self.compute_required_difficulty(&header, &parent);
+                if let Err(e) =
+                    validate_child_header(&header, &parent, now_ms, required_n_bits)
+                {
+                    return Err(NodeViewError::Validation(format!(
+                        "header {} validation failed: {e}",
+                        header.height
+                    )));
                 }
             }
 
-            // Store and process.
-            self.history.put_modifier(type_id, modifier_id, data)?;
+            // Store header with full indexing (height, best_header, chain scoring).
+            self.history.store_header_with_score(modifier_id, &header)?;
             let info = self.history.process_header(modifier_id)?;
             return Ok(info);
         }
@@ -1468,16 +1491,20 @@ mod tests {
         assert_eq!(nv.best_full_block_id().unwrap(), None);
     }
 
-    // 5. Process header returns to_download for sections.
+    // 5. Storing a header and calling process_header returns to_download for sections.
     #[test]
     fn process_header_returns_to_download() {
         let (db, _dir) = open_test_db();
-        let mut nv = make_node_view(db);
+        let nv = make_node_view(db);
 
-        let id = make_id(0xBB);
-        // Store some raw bytes as a "header" (type_id=101).
-        // process_modifier will store and then call process_header.
-        let info = nv.process_modifier(101, &id, b"raw-header-bytes").unwrap();
+        // Store a header directly (bypassing process_modifier which validates
+        // PoW — test headers don't have valid PoW). This test verifies that
+        // process_header produces the correct download list, not validation.
+        let header = make_header(1, 0x00);
+        let header_bytes = ergo_wire::header_ser::serialize_header(&header);
+        let id = ModifierId(test_blake2b256(&header_bytes));
+        nv.history.store_header_with_score(&id, &header).unwrap();
+        let info = nv.history.process_header(&id).unwrap();
 
         // Should request 3 section downloads: BlockTransactions (102),
         // ADProofs (104), Extension (108).
@@ -2182,11 +2209,12 @@ mod tests {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view(db);
 
-        // Store parent at height 100.
+        // Store parent at height 100 directly (bypassing process_modifier
+        // which would reject it as an orphan).
         let parent = make_header(100, 0x01);
         let parent_bytes = ergo_wire::header_ser::serialize_header(&parent);
         let parent_id = compute_header_id(&parent_bytes);
-        nv.process_modifier(101, &parent_id, &parent_bytes).unwrap();
+        nv.history.store_header_with_score(&parent_id, &parent).unwrap();
 
         // Build child with WRONG height (200 instead of 101).
         let mut bad_child = make_header(200, 0x02);
@@ -2204,21 +2232,24 @@ mod tests {
         );
     }
 
-    // 20. process_modifier accepts an orphan header (unknown parent) without validation.
+    // 20. process_modifier rejects orphan header (unknown parent).
     #[test]
-    fn process_modifier_orphan_header_stored_without_validation() {
+    fn process_modifier_rejects_orphan_header() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view(db);
 
-        // Store a header with an unknown parent -- should succeed because
-        // validation is skipped when the parent is not found.
+        // Store a header with an unknown parent — should fail because
+        // orphan headers (missing parent) must not be stored.
         let orphan = make_header(500, 0xFF);
         let orphan_bytes = ergo_wire::header_ser::serialize_header(&orphan);
         let orphan_id = compute_header_id(&orphan_bytes);
 
         let result = nv.process_modifier(101, &orphan_id, &orphan_bytes);
-        assert!(result.is_ok());
-        assert!(nv.history.contains_modifier(101, &orphan_id).unwrap());
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), NodeViewError::Validation(ref msg) if msg.contains("parent header not found")),
+        );
+        assert!(!nv.history.contains_modifier(101, &orphan_id).unwrap());
     }
 
     // -----------------------------------------------------------------------
