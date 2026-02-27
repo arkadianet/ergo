@@ -87,8 +87,8 @@ impl PeerSpec {
         for feat in &self.features {
             buf.push(feat.feature_id());
             let feat_bytes = feat.serialize_bytes();
-            // Feature data length as single byte (putUByte in Scorex)
-            buf.push(feat_bytes.len() as u8);
+            // Feature data length as VLQ UShort (Scala: w.putUShort(fBytes.length))
+            vlq::put_ushort(&mut buf, feat_bytes.len() as u16);
             buf.extend_from_slice(&feat_bytes);
         }
         buf
@@ -163,9 +163,11 @@ impl PeerSpec {
             }
             let feat_id = data[pos];
             pos += 1;
-            // Feature data length is 1 byte (putUByte in Scorex)
-            let feat_len = data[pos] as usize;
-            pos += 1;
+            // Feature data length is VLQ UShort (Scala: r.getUShort())
+            let mut feat_reader = &data[pos..];
+            let feat_len = vlq::get_ushort(&mut feat_reader)? as usize;
+            let vlq_bytes = data[pos..].len() - feat_reader.len();
+            pos += vlq_bytes;
             if data.len() < pos + feat_len {
                 return Err(CodecError::UnexpectedEof);
             }

@@ -45,7 +45,7 @@ impl ModeFeature {
         buf.push(self.state_type as u8);
         buf.push(u8::from(self.verifying_transactions));
         vlq::put_option(&mut buf, &self.nipopow_bootstrapped, |b, v| {
-            vlq::put_uint(b, *v as u32);
+            vlq::put_int(b, *v);
         });
         vlq::put_int(&mut buf, self.blocks_to_keep);
         buf
@@ -60,8 +60,7 @@ impl ModeFeature {
         let verifying_transactions = data[1] > 0;
         let mut reader = &data[2..];
         let nipopow_bootstrapped = vlq::get_option(&mut reader, |r| {
-            let v = vlq::get_uint(r)?;
-            Ok(v as i32)
+            vlq::get_int(r)
         })?;
         let blocks_to_keep = vlq::get_int(&mut reader)?;
         Ok(Self {
