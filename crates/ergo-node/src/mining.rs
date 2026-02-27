@@ -1,5 +1,6 @@
 //! Mining support: block candidate generation, solution validation, and internal CPU miner.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,7 @@ use num_bigint::BigUint;
 use ergo_consensus::autolykos::{get_b, msg_by_header};
 use ergo_consensus::merkle::merkle_root;
 use ergo_consensus::parameters::Parameters;
-use ergo_consensus::sigma_verify::compute_initial_tx_cost;
+use ergo_consensus::sigma_verify::{compute_initial_tx_cost, SigmaStateContext};
 use ergo_network::mempool::ErgoMemPool;
 use ergo_network::nipopow::{pack_interlinks, unpack_interlinks, update_interlinks};
 use ergo_state::state_changes::compute_state_changes;
@@ -19,7 +20,9 @@ use ergo_storage::history_db::HistoryDb;
 use ergo_types::extension::Extension;
 use ergo_types::header::{AutolykosSolution, Header};
 use ergo_types::modifier_id::{ADDigest, Digest32, ModifierId};
-use ergo_types::transaction::{compute_box_id, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
+use ergo_types::transaction::{
+    compute_box_id, BoxId, ErgoBox, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
+};
 use ergo_wire::transaction_ser::{compute_tx_id, serialize_transaction};
 use serde::{Deserialize, Serialize};
 
@@ -38,26 +41,136 @@ const MINERS_FEE_ERGO_TREE: &[u8] = &[
     0x73, 0x02, 0x73, 0x03, 0x83, 0x01, 0x08, 0xcd, 0xee, 0xac, 0x93, 0xb1, 0xa5, 0x73, 0x04,
 ];
 
-/// Mining reward lock delay (blocks before miner can spend reward).
-/// Matches Scala's `ChainSettings.MiningRewardDelay`.
-/// Used by `miner_reward_prop` once height-locked scripts are implemented.
-#[allow(dead_code)]
-const MINING_REWARD_DELAY: u32 = 720;
+/// Maximum number of distinct token entries in a single fee-collection output.
+///
+/// Matches Scala's `sdk.wallet.Constants.MaxAssetsPerBox` which is used in
+/// `CandidateGenerator.collectFees` when building the miner fee-collection box.
+const MAX_ASSETS_PER_BOX: usize = 100;
+
+/// Default mining reward lock delay when not specified via settings.
+const DEFAULT_MINING_REWARD_DELAY: u32 = 720;
 
 // ---------------------------------------------------------------------------
 // Miner reward, fee collection, emission, and transaction collection
 // ---------------------------------------------------------------------------
 
-/// Build a standard P2PK ErgoTree for the miner's public key.
+/// Build a height-locked miner reward ErgoTree matching Scala's
+/// `ErgoTreePredef.rewardOutputScript(delta, pk)`.
 ///
-/// The Scala reference node uses `ErgoTreePredef.rewardOutputScript(delta, pk)`
-/// which produces a height-locked script: `{ HEIGHT >= SELF.creationHeight + delta && PK(pk) }`.
-/// For simplicity (and because mainnet miners commonly use raw P2PK addresses),
-/// this builds the standard P2PK ErgoTree: `[0x00, 0x08, 0xcd, ...33-byte pk]`.
+/// The script is: `SigmaAnd(GE(HEIGHT, Plus(creationHeight(SELF), delta)).toSigmaProp, PK(pk))`
+/// serialized with constant segregation (header byte 0x10).
 ///
-/// A future improvement could use ergo-lib to construct the full height-locked
-/// variant for strict Scala compatibility.
-fn miner_reward_prop(miner_pk: &[u8; 33]) -> Vec<u8> {
+/// We construct the tree using the sigma-rust IR (ergotree-ir) rather than the
+/// ergoscript text compiler, because the ergo-lib 0.28 compiler only supports a
+/// trivial arithmetic subset of ErgoScript.
+///
+/// Falls back to a plain P2PK ErgoTree `[0x00, 0x08, 0xcd, ...pk]` if IR construction
+/// fails (should never happen with valid inputs).
+fn miner_reward_prop(miner_pk: &[u8; 33], reward_delay: u32) -> Vec<u8> {
+    use ergo_lib::ergo_chain_types::EcPoint;
+    use ergo_lib::ergotree_ir::ergo_tree::{ErgoTree, ErgoTreeHeader};
+    use ergo_lib::ergotree_ir::mir::bin_op::{ArithOp, BinOp, BinOpKind, RelationOp};
+    use ergo_lib::ergotree_ir::mir::bool_to_sigma::BoolToSigmaProp;
+    use ergo_lib::ergotree_ir::mir::constant::Constant;
+    use ergo_lib::ergotree_ir::mir::expr::Expr;
+    use ergo_lib::ergotree_ir::mir::extract_creation_info::ExtractCreationInfo;
+    use ergo_lib::ergotree_ir::mir::global_vars::GlobalVars;
+    use ergo_lib::ergotree_ir::mir::select_field::SelectField;
+    use ergo_lib::ergotree_ir::mir::sigma_and::SigmaAnd;
+    use ergo_lib::ergotree_ir::mir::unary_op::OneArgOpTryBuild;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+    use ergo_lib::ergotree_ir::sigma_protocol::sigma_boolean::ProveDlog;
+
+    // Parse compressed public key into EcPoint via hex string.
+    let pk_hex = hex::encode(miner_pk);
+    let ec_point = match EcPoint::from_base16_str(pk_hex) {
+        Some(p) => p,
+        None => {
+            tracing::warn!("failed to parse miner PK as EcPoint");
+            return plain_p2pk(miner_pk);
+        }
+    };
+
+    // boxCreationHeight(SELF) = SelectField(ExtractCreationInfo(SELF), 1)
+    let self_box: Expr = GlobalVars::SelfBox.into();
+    let creation_info = ExtractCreationInfo::try_build(self_box);
+    let creation_info = match creation_info {
+        Ok(ci) => ci,
+        Err(e) => {
+            tracing::warn!("failed to build ExtractCreationInfo: {e}");
+            return plain_p2pk(miner_pk);
+        }
+    };
+    let creation_height = match SelectField::new(
+        Expr::ExtractCreationInfo(creation_info),
+        1u8.try_into().expect("field index 1 is valid"),
+    ) {
+        Ok(sf) => Expr::from(sf),
+        Err(e) => {
+            tracing::warn!("failed to build SelectField: {e}");
+            return plain_p2pk(miner_pk);
+        }
+    };
+
+    // Plus(creationHeight, IntConstant(delta))
+    let delta: Expr = (reward_delay as i32).into();
+    let plus_expr: Expr = BinOp {
+        kind: BinOpKind::Arith(ArithOp::Plus),
+        left: Box::new(creation_height),
+        right: Box::new(delta),
+    }
+    .into();
+
+    // GE(Height, Plus(...))
+    let height: Expr = GlobalVars::Height.into();
+    let ge_expr: Expr = BinOp {
+        kind: BinOpKind::Relation(RelationOp::Ge),
+        left: Box::new(height),
+        right: Box::new(plus_expr),
+    }
+    .into();
+
+    // BoolToSigmaProp(GE(...))
+    let ge_sigma: Expr = Expr::BoolToSigmaProp(BoolToSigmaProp {
+        input: Box::new(ge_expr),
+    });
+
+    // SigmaPropConstant(ProveDlog(pk))
+    let prove_dlog = ProveDlog::new(ec_point);
+    let pk_const: Constant = prove_dlog.into();
+    let pk_expr: Expr = Expr::Const(pk_const);
+
+    // SigmaAnd([ge_sigma, pk_expr])
+    let sigma_and = match SigmaAnd::new(vec![ge_sigma, pk_expr]) {
+        Ok(sa) => sa,
+        Err(e) => {
+            tracing::warn!("failed to build SigmaAnd: {e}");
+            return plain_p2pk(miner_pk);
+        }
+    };
+    let root: Expr = Expr::SigmaAnd(sigma_and);
+
+    // ErgoTree with constant segregation (header = 0x10, version 0).
+    let header = ErgoTreeHeader::v0(true);
+    let ergo_tree = match ErgoTree::new(header, &root) {
+        Ok(tree) => tree,
+        Err(e) => {
+            tracing::warn!("failed to build ErgoTree: {e}");
+            return plain_p2pk(miner_pk);
+        }
+    };
+
+    match ergo_tree.sigma_serialize_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("failed to serialize height-locked ErgoTree: {e}");
+            plain_p2pk(miner_pk)
+        }
+    }
+}
+
+/// Plain P2PK ErgoTree: `[0x00, 0x08, 0xcd, ...33-byte-pk]`.
+fn plain_p2pk(miner_pk: &[u8; 33]) -> Vec<u8> {
     let mut tree = Vec::with_capacity(36);
     tree.extend_from_slice(&[0x00, 0x08, 0xcd]);
     tree.extend_from_slice(miner_pk);
@@ -68,17 +181,22 @@ fn miner_reward_prop(miner_pk: &[u8; 33]) -> Vec<u8> {
 ///
 /// Scans the given transactions for outputs whose ErgoTree matches
 /// `MINERS_FEE_ERGO_TREE`, collects them as inputs, and creates a single
-/// output paying the miner.
+/// output paying the miner. Tokens from fee boxes are aggregated (unique
+/// token IDs with summed amounts) up to [`MAX_ASSETS_PER_BOX`], matching
+/// Scala's `CandidateGenerator.collectFees`.
 ///
 /// Returns `None` if there are no fee outputs to collect.
 fn build_fee_collection_tx(
     block_txs: &[ErgoTransaction],
     next_height: u32,
     miner_pk: &[u8; 33],
+    reward_delay: u32,
 ) -> Option<ErgoTransaction> {
     // 1. Scan for fee outputs across all transactions.
     let mut fee_inputs: Vec<Input> = Vec::new();
     let mut total_fee: u64 = 0;
+    // Collect all tokens from fee boxes, preserving insertion order.
+    let mut token_map: BTreeMap<[u8; 32], u64> = BTreeMap::new();
 
     for tx in block_txs {
         for (idx, output) in tx.output_candidates.iter().enumerate() {
@@ -90,6 +208,11 @@ fn build_fee_collection_tx(
                     extension_bytes: Vec::new(),
                 });
                 total_fee = total_fee.saturating_add(output.value);
+                // Aggregate tokens from this fee box.
+                for (token_id, amount) in &output.tokens {
+                    let entry = token_map.entry(token_id.0).or_insert(0);
+                    *entry = entry.saturating_add(*amount);
+                }
             }
         }
     }
@@ -99,16 +222,23 @@ fn build_fee_collection_tx(
         return None;
     }
 
-    // 3. Build miner reward output.
+    // 3. Collect tokens up to MAX_ASSETS_PER_BOX.
+    let fee_tokens: Vec<(BoxId, u64)> = token_map
+        .into_iter()
+        .take(MAX_ASSETS_PER_BOX)
+        .map(|(id, amount)| (BoxId(id), amount))
+        .collect();
+
+    // 4. Build miner reward output.
     let miner_output = ErgoBoxCandidate {
         value: total_fee,
-        ergo_tree_bytes: miner_reward_prop(miner_pk),
+        ergo_tree_bytes: miner_reward_prop(miner_pk, reward_delay),
         creation_height: next_height,
-        tokens: Vec::new(),
+        tokens: fee_tokens,
         additional_registers: Vec::new(),
     };
 
-    // 4. Build the transaction and compute its ID.
+    // 5. Build the transaction and compute its ID.
     let mut fee_tx = ErgoTransaction {
         inputs: fee_inputs,
         data_inputs: Vec::new(),
@@ -136,6 +266,7 @@ fn build_emission_tx(
     next_height: u32,
     miner_pk: &[u8; 33],
     utxo_state: Option<&UtxoState>,
+    reward_delay: u32,
 ) -> Option<ErgoTransaction> {
     let utxo = utxo_state?;
 
@@ -191,7 +322,7 @@ fn build_emission_tx(
     // Build output 2: miner reward box.
     let miner_output = ErgoBoxCandidate {
         value: reward,
-        ergo_tree_bytes: miner_reward_prop(miner_pk),
+        ergo_tree_bytes: miner_reward_prop(miner_pk, reward_delay),
         creation_height: next_height,
         tokens: Vec::new(),
         additional_registers: Vec::new(),
@@ -214,6 +345,11 @@ fn build_emission_tx(
 /// by the mempool), applying a greedy knapsack: each transaction is included if
 /// it fits within both `max_block_size` and `max_block_cost`.
 ///
+/// When `sigma_ctx` and `utxo_state` are both provided, full sigma script
+/// validation is performed on each candidate transaction (matching Scala's
+/// `CandidateGenerator.collectTxs` which calls `validateWithCost`). Transactions
+/// that fail sigma verification are silently skipped.
+///
 /// Ordering guarantees:
 /// - The emission transaction (if any) is always first.
 /// - Mempool transactions follow in priority order.
@@ -230,6 +366,8 @@ pub fn collect_txs(
     next_height: u32,
     miner_pk: &[u8; 33],
     utxo_state: Option<&UtxoState>,
+    sigma_ctx: Option<&SigmaStateContext>,
+    reward_delay: u32,
 ) -> (Vec<ErgoTransaction>, Vec<[u8; 32]>) {
     let mut selected: Vec<ErgoTransaction> = Vec::new();
     let mut eliminated: Vec<[u8; 32]> = Vec::new();
@@ -273,6 +411,7 @@ pub fn collect_txs(
 
         // UTXO validation: check inputs exist and no intra-block double-spend.
         let mut tx_valid = true;
+        let mut input_boxes: Vec<ErgoBox> = Vec::new();
         for input in &tx.inputs {
             // Check intra-block double-spend.
             if consumed_box_ids.contains(&input.box_id.0) {
@@ -281,15 +420,73 @@ pub fn collect_txs(
             }
             // Check input exists in UTXO state (if available).
             if let Some(utxo) = utxo_state {
-                if utxo.get_box(&input.box_id).is_none() {
-                    tx_valid = false;
-                    break;
+                match utxo.get_ergo_box(&input.box_id) {
+                    Ok(Some(b)) => input_boxes.push(b),
+                    _ => {
+                        tx_valid = false;
+                        break;
+                    }
                 }
             }
         }
         if !tx_valid {
             eliminated.push(tx.tx_id.0);
             continue;
+        }
+
+        // Sigma script validation (when UTXO state + sigma context available).
+        if let (Some(utxo), Some(ctx)) = (utxo_state, sigma_ctx) {
+            // Resolve data input boxes.
+            let mut data_boxes = Vec::new();
+            let mut data_ok = true;
+            for di in &tx.data_inputs {
+                match utxo.get_ergo_box(&di.box_id) {
+                    Ok(Some(b)) => data_boxes.push(b),
+                    _ => {
+                        data_ok = false;
+                        break;
+                    }
+                }
+            }
+
+            if !data_ok {
+                tracing::debug!(
+                    tx_id = %hex::encode(tx.tx_id.0),
+                    "collect_txs: data input box missing, skipping tx"
+                );
+                eliminated.push(tx.tx_id.0);
+                continue;
+            }
+
+            match ergo_consensus::sigma_verify::verify_transaction(
+                &tx,
+                &input_boxes,
+                &data_boxes,
+                ctx,
+                0, // no checkpoint — always verify for mining candidates
+            ) {
+                Ok(sigma_cost) => {
+                    // Check that accumulated cost + sigma cost stays within limits.
+                    if total_cost + tx_cost + sigma_cost > cost_limit {
+                        tracing::debug!(
+                            tx_id = %hex::encode(tx.tx_id.0),
+                            sigma_cost,
+                            "collect_txs: tx sigma cost would exceed block cost limit"
+                        );
+                        eliminated.push(tx.tx_id.0);
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        tx_id = %hex::encode(tx.tx_id.0),
+                        error = %e,
+                        "collect_txs: sigma verification failed, skipping tx"
+                    );
+                    eliminated.push(tx.tx_id.0);
+                    continue;
+                }
+            }
         }
 
         // Track consumed inputs.
@@ -303,7 +500,7 @@ pub fn collect_txs(
     }
 
     // 3. Append fee collection tx (collects fees from all selected txs).
-    if let Some(fee_tx) = build_fee_collection_tx(&selected, next_height, miner_pk) {
+    if let Some(fee_tx) = build_fee_collection_tx(&selected, next_height, miner_pk, reward_delay) {
         selected.push(fee_tx);
     }
 
@@ -339,11 +536,28 @@ pub struct WorkMessage {
     /// blake2b256(header_without_pow) -- the message to hash (hex-encoded).
     pub msg: String,
     /// Target value: q / difficulty. Miner must find nonce such that hit < b.
-    pub b: u64,
+    ///
+    /// Serialized as a JSON number (not a quoted string), matching Scala's
+    /// `BigInt` JSON encoding via `JsonNumber.fromDecimalStringUnsafe`.
+    #[serde(serialize_with = "serialize_biguint_as_number")]
+    pub b: BigUint,
     /// Block height (used in v2 PoW computation).
     pub h: u32,
     /// Miner compressed public key (hex-encoded 33 bytes).
     pub pk: String,
+}
+
+/// Serialize a [`BigUint`] as a raw JSON number (no quotes).
+///
+/// Matches Scala's `bigIntEncoder` which uses `JsonNumber.fromDecimalStringUnsafe`.
+/// Requires the `arbitrary_precision` feature on serde_json (enabled in ergo-node).
+fn serialize_biguint_as_number<S: serde::Serializer>(
+    value: &BigUint,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let decimal = value.to_string();
+    let num = serde_json::Number::from_string_unchecked(decimal);
+    num.serialize(serializer)
 }
 
 /// Solution submitted by an external miner.
@@ -538,15 +752,22 @@ impl CandidateGenerator {
     /// 6. Compute extension root via Merkle tree.
     /// 7. Build header template (with empty PoW solution).
     /// 8. Compute PoW message and target.
-    /// 9. Rotate current → previous, store new candidate.
+    /// 9. Rotate current -> previous, store new candidate.
     /// 10. Return a [`WorkMessage`].
+    ///
+    /// `reward_delay` controls how many blocks the miner must wait before
+    /// spending the reward output (typically 720). Pass `None` to use the
+    /// default (`DEFAULT_MINING_REWARD_DELAY`).
     pub fn generate_candidate(
         &mut self,
         history: &HistoryDb,
         mempool: &RwLock<ErgoMemPool>,
         parameters: &Parameters,
         utxo_state: Option<&UtxoState>,
+        reward_delay: Option<u32>,
     ) -> Result<WorkMessage, CandidateError> {
+        let reward_delay = reward_delay.unwrap_or(DEFAULT_MINING_REWARD_DELAY);
+
         if self.miner_pk == [0u8; 33] {
             return Err(CandidateError::NoMiningKey);
         }
@@ -587,8 +808,40 @@ impl CandidateGenerator {
             fields: extension_fields.clone(),
         };
 
-        // 5. Collect transactions with emission, fee collection, and size limits
-        let emission_tx = build_emission_tx(height, &self.miner_pk, utxo_state);
+        // 5. Build sigma state context for transaction validation (UTXO mode).
+        let sigma_ctx = if utxo_state.is_some() {
+            // Collect last 10 headers for the sigma context.
+            let mut last_headers = Vec::new();
+            let mut walk_id = parent_id;
+            for _ in 0..10 {
+                match history.load_header(&walk_id) {
+                    Ok(Some(h)) => {
+                        let pid = h.parent_id;
+                        last_headers.push(h);
+                        walk_id = pid;
+                    }
+                    _ => break,
+                }
+            }
+
+            Some(SigmaStateContext {
+                last_headers,
+                current_height: height,
+                current_timestamp: timestamp,
+                current_n_bits: n_bits,
+                current_votes: self.votes,
+                current_miner_pk: self.miner_pk,
+                state_digest: parent_header.state_root.0,
+                parameters: parameters.clone(),
+                current_version: parent_header.version,
+                current_parent_id: parent_id.0,
+            })
+        } else {
+            None
+        };
+
+        // 6. Collect transactions with emission, fee collection, and size limits
+        let emission_tx = build_emission_tx(height, &self.miner_pk, utxo_state, reward_delay);
         let max_block_size = parameters.max_block_size() as u64;
         let mempool_txs = {
             let pool = mempool.read().unwrap_or_else(|e| e.into_inner());
@@ -604,9 +857,11 @@ impl CandidateGenerator {
             height,
             &self.miner_pk,
             utxo_state,
+            sigma_ctx.as_ref(),
+            reward_delay,
         );
 
-        // 6. Compute real state root via speculative state application (UTXO mode)
+        // 7. Compute real state root via speculative state application (UTXO mode)
         //    or fall back to parent state root (digest mode).
         let (state_root, ad_proof_bytes) = if let Some(utxo) = utxo_state {
             let state_changes = compute_state_changes(&transactions);
@@ -628,7 +883,7 @@ impl CandidateGenerator {
             (parent_header.state_root.0, Vec::new())
         };
 
-        // 7. Compute transactions root via Merkle tree
+        // 8. Compute transactions root via Merkle tree
         let tx_serialized: Vec<Vec<u8>> = transactions
             .iter()
             .map(serialize_transaction)
@@ -636,7 +891,7 @@ impl CandidateGenerator {
         let tx_slices: Vec<&[u8]> = tx_serialized.iter().map(|v| v.as_slice()).collect();
         let transactions_root = merkle_root(&tx_slices).unwrap_or([0u8; 32]);
 
-        // 8. Compute extension root via Merkle tree
+        // 9. Compute extension root via Merkle tree
         let ext_leaves: Vec<Vec<u8>> = extension_fields
             .iter()
             .map(|(key, value)| {
@@ -649,14 +904,14 @@ impl CandidateGenerator {
         let ext_slices: Vec<&[u8]> = ext_leaves.iter().map(|v| v.as_slice()).collect();
         let extension_root = merkle_root(&ext_slices).unwrap_or([0u8; 32]);
 
-        // 9. AD proofs root from the actual proof bytes
+        // 10. AD proofs root from the actual proof bytes
         let ad_proofs_root = if !ad_proof_bytes.is_empty() {
             crate::snapshots::blake2b256(&ad_proof_bytes)
         } else {
             [0u8; 32]
         };
 
-        // 10. Build header template with empty PoW solution
+        // 11. Build header template with empty PoW solution
         let header_template = Header {
             version: parent_header.version,
             parent_id,
@@ -681,14 +936,11 @@ impl CandidateGenerator {
             },
         };
 
-        // 11. Compute PoW message and target
+        // 12. Compute PoW message and target
         let msg = msg_by_header(&header_template);
         let b_big = get_b(n_bits);
 
-        // Convert BigUint to u64 for WorkMessage — truncate if it exceeds u64::MAX
-        let b_u64 = biguint_to_u64_saturating(&b_big);
-
-        // 12. Build candidate block
+        // 13. Build candidate block
         let candidate = CandidateBlock {
             parent: Some(parent_header.clone()),
             version: header_template.version,
@@ -701,15 +953,15 @@ impl CandidateGenerator {
             votes: self.votes,
         };
 
-        // 13. Build work message
+        // 14. Build work message (b is now full BigUint — no truncation)
         let work = WorkMessage {
             msg: hex::encode(msg),
-            b: b_u64,
+            b: b_big,
             h: height,
             pk: hex::encode(self.miner_pk),
         };
 
-        // 14. Rotate: current → previous, store new
+        // 15. Rotate: current → previous, store new
         self.previous_candidate = self.current_candidate.take();
         self.current_candidate = Some((candidate, header_template));
 
@@ -749,6 +1001,7 @@ fn build_extension_fields(
 }
 
 /// Convert a [`BigUint`] to `u64`, saturating at `u64::MAX` if the value is too large.
+#[cfg(test)]
 fn biguint_to_u64_saturating(val: &BigUint) -> u64 {
     let bytes = val.to_bytes_be();
     if bytes.len() > 8 {
@@ -926,7 +1179,7 @@ mod tests {
     fn test_work_message_serialization() {
         let work = WorkMessage {
             msg: "aa".repeat(32),
-            b: 12_345_678_901_234_567_890,
+            b: BigUint::from(12_345_678_901_234_567_890u128),
             h: 850_000,
             pk: "bb".repeat(33),
         };
@@ -935,6 +1188,27 @@ mod tests {
         assert!(json.get("b").is_some());
         assert!(json.get("h").is_some());
         assert!(json.get("pk").is_some());
+        // b should be a JSON number, not a string.
+        let b_val = json.get("b").unwrap();
+        assert!(b_val.is_number(), "b should be a JSON number");
+    }
+
+    #[test]
+    fn test_work_message_b_large_value() {
+        // Test with a value that exceeds u64::MAX but fits in u128.
+        let large_b = BigUint::from(u128::MAX);
+        let work = WorkMessage {
+            msg: "cc".repeat(32),
+            b: large_b.clone(),
+            h: 100,
+            pk: "dd".repeat(33),
+        };
+        let json_str = serde_json::to_string(&work).unwrap();
+        // Should contain the decimal representation of u128::MAX.
+        assert!(
+            json_str.contains(&u128::MAX.to_string()),
+            "large b should be present in JSON"
+        );
     }
 
     // ── CandidateGenerator unit tests ────────────────────────────────
@@ -992,7 +1266,7 @@ mod tests {
         };
         let mempool = RwLock::new(ErgoMemPool::with_min_fee(100, 0));
         let params = Parameters::genesis();
-        let result = gen.generate_candidate(&history, &mempool, &params, None);
+        let result = gen.generate_candidate(&history, &mempool, &params, None, None);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), CandidateError::NoMiningKey));
     }
@@ -1004,7 +1278,7 @@ mod tests {
         let mempool = RwLock::new(ErgoMemPool::with_min_fee(100, 0));
         let params = Parameters::genesis();
         let mut gen = CandidateGenerator::new([0x02; 33], [0, 0, 0]);
-        let result = gen.generate_candidate(&history, &mempool, &params, None);
+        let result = gen.generate_candidate(&history, &mempool, &params, None, None);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), CandidateError::NoBestBlock));
     }
@@ -1067,22 +1341,76 @@ mod tests {
     // ── miner_reward_prop tests ─────────────────────────────────────
 
     #[test]
-    fn test_miner_reward_prop_produces_valid_p2pk() {
-        let pk = [0x02; 33];
-        let tree = miner_reward_prop(&pk);
-        assert_eq!(tree.len(), 36);
-        assert_eq!(&tree[..3], &[0x00, 0x08, 0xcd]);
-        assert_eq!(&tree[3..], &pk[..]);
+    fn test_miner_reward_prop_produces_height_locked_tree() {
+        // Use the real secp256k1 generator point as a valid public key.
+        let pk: [u8; 33] = {
+            let mut buf = [0u8; 33];
+            buf[0] = 0x02;
+            // x = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+            let x = hex::decode(
+                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
+            )
+            .unwrap();
+            buf[1..].copy_from_slice(&x);
+            buf
+        };
+        let tree = miner_reward_prop(&pk, 720);
+        // Height-locked script should be longer than a plain P2PK (36 bytes).
+        assert!(
+            tree.len() > 36,
+            "height-locked tree should be longer than plain P2PK, got {} bytes",
+            tree.len()
+        );
+        // Should NOT start with plain P2PK prefix [0x00, 0x08, 0xcd].
+        assert_ne!(
+            &tree[..3],
+            &[0x00, 0x08, 0xcd],
+            "should not be a plain P2PK tree"
+        );
     }
 
     #[test]
     fn test_miner_reward_prop_different_keys_produce_different_trees() {
-        let pk1 = [0x02; 33];
-        let mut pk2 = [0x03; 33];
-        pk2[1] = 0xAA;
-        let tree1 = miner_reward_prop(&pk1);
-        let tree2 = miner_reward_prop(&pk2);
+        let pk1: [u8; 33] = {
+            let mut buf = [0u8; 33];
+            buf[0] = 0x02;
+            let x = hex::decode(
+                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
+            )
+            .unwrap();
+            buf[1..].copy_from_slice(&x);
+            buf
+        };
+        let pk2: [u8; 33] = {
+            let mut buf = [0u8; 33];
+            buf[0] = 0x03;
+            let x = hex::decode(
+                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
+            )
+            .unwrap();
+            buf[1..].copy_from_slice(&x);
+            buf
+        };
+        let tree1 = miner_reward_prop(&pk1, 720);
+        let tree2 = miner_reward_prop(&pk2, 720);
         assert_ne!(tree1, tree2);
+    }
+
+    #[test]
+    fn test_miner_reward_prop_different_delays() {
+        let pk: [u8; 33] = {
+            let mut buf = [0u8; 33];
+            buf[0] = 0x02;
+            let x = hex::decode(
+                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
+            )
+            .unwrap();
+            buf[1..].copy_from_slice(&x);
+            buf
+        };
+        let tree_720 = miner_reward_prop(&pk, 720);
+        let tree_1440 = miner_reward_prop(&pk, 1440);
+        assert_ne!(tree_720, tree_1440, "different delays should produce different trees");
     }
 
     // ── build_fee_collection_tx tests ───────────────────────────────
@@ -1146,14 +1474,14 @@ mod tests {
             tx_id: TxId([0x11; 32]),
         };
         let pk = [0x02; 33];
-        let result = build_fee_collection_tx(&[tx], 101, &pk);
+        let result = build_fee_collection_tx(&[tx], 101, &pk, 720);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_build_fee_collection_tx_none_when_empty() {
         let pk = [0x02; 33];
-        let result = build_fee_collection_tx(&[], 101, &pk);
+        let result = build_fee_collection_tx(&[], 101, &pk, 720);
         assert!(result.is_none());
     }
 
@@ -1161,14 +1489,14 @@ mod tests {
     fn test_build_fee_collection_tx_collects_single_fee() {
         let pk = [0x02; 33];
         let tx = make_tx_with_fee(1_000_000);
-        let fee_tx = build_fee_collection_tx(&[tx], 101, &pk).expect("should produce fee tx");
+        let fee_tx = build_fee_collection_tx(&[tx], 101, &pk, 720).expect("should produce fee tx");
 
         assert_eq!(fee_tx.inputs.len(), 1, "one fee input");
         assert_eq!(fee_tx.output_candidates.len(), 1, "one miner output");
         assert_eq!(fee_tx.output_candidates[0].value, 1_000_000);
         assert_eq!(
             fee_tx.output_candidates[0].ergo_tree_bytes,
-            miner_reward_prop(&pk)
+            miner_reward_prop(&pk, 720)
         );
         assert_eq!(fee_tx.output_candidates[0].creation_height, 101);
         // tx_id should be computed (not all zeros).
@@ -1181,10 +1509,111 @@ mod tests {
         let tx1 = make_tx_with_fee(500_000);
         let tx2 = make_tx_with_fee(300_000);
         let fee_tx =
-            build_fee_collection_tx(&[tx1, tx2], 200, &pk).expect("should produce fee tx");
+            build_fee_collection_tx(&[tx1, tx2], 200, &pk, 720).expect("should produce fee tx");
 
         assert_eq!(fee_tx.inputs.len(), 2, "two fee inputs");
         assert_eq!(fee_tx.output_candidates[0].value, 800_000);
+    }
+
+    // ── fee token collection tests ────────────────────────────────────
+
+    /// Build a transaction with a fee output that carries tokens.
+    fn make_tx_with_fee_and_tokens(
+        fee_value: u64,
+        box_seed: u8,
+        tokens: Vec<(BoxId, u64)>,
+    ) -> ErgoTransaction {
+        let mut tx = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: BoxId([box_seed; 32]),
+                proof_bytes: Vec::new(),
+                extension_bytes: Vec::new(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![
+                ErgoBoxCandidate {
+                    value: 1_000_000_000,
+                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                    creation_height: 100_000,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                },
+                ErgoBoxCandidate {
+                    value: fee_value,
+                    ergo_tree_bytes: MINERS_FEE_ERGO_TREE.to_vec(),
+                    creation_height: 100_000,
+                    tokens,
+                    additional_registers: Vec::new(),
+                },
+            ],
+            tx_id: TxId([0u8; 32]),
+        };
+        tx.tx_id = compute_tx_id(&tx);
+        tx
+    }
+
+    #[test]
+    fn test_build_fee_collection_tx_collects_tokens() {
+        let pk = [0x02; 33];
+        let token_id_a = BoxId([0xAA; 32]);
+        let token_id_b = BoxId([0xBB; 32]);
+
+        let tx = make_tx_with_fee_and_tokens(
+            500_000,
+            0xF1,
+            vec![(token_id_a, 100), (token_id_b, 50)],
+        );
+        let fee_tx =
+            build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
+
+        // Fee output should carry the tokens.
+        let miner_out = &fee_tx.output_candidates[0];
+        assert_eq!(miner_out.tokens.len(), 2);
+        // Tokens are ordered by BTreeMap key order (token_id bytes).
+        assert!(miner_out.tokens.iter().any(|(id, amt)| *id == token_id_a && *amt == 100));
+        assert!(miner_out.tokens.iter().any(|(id, amt)| *id == token_id_b && *amt == 50));
+    }
+
+    #[test]
+    fn test_build_fee_collection_tx_aggregates_same_tokens() {
+        let pk = [0x02; 33];
+        let token_id = BoxId([0xCC; 32]);
+
+        let tx1 = make_tx_with_fee_and_tokens(300_000, 0xF1, vec![(token_id, 100)]);
+        let tx2 = make_tx_with_fee_and_tokens(200_000, 0xF2, vec![(token_id, 50)]);
+
+        let fee_tx =
+            build_fee_collection_tx(&[tx1, tx2], 200, &pk, 720).expect("should produce fee tx");
+
+        let miner_out = &fee_tx.output_candidates[0];
+        assert_eq!(miner_out.tokens.len(), 1);
+        assert_eq!(miner_out.tokens[0].0, token_id);
+        assert_eq!(miner_out.tokens[0].1, 150, "amounts should be summed");
+    }
+
+    #[test]
+    fn test_build_fee_collection_tx_caps_at_max_assets() {
+        let pk = [0x02; 33];
+
+        // Build a fee output with more than MAX_ASSETS_PER_BOX (100) distinct tokens.
+        let mut tokens: Vec<(BoxId, u64)> = Vec::new();
+        for i in 0..150u8 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            id[1] = 0xFF; // make unique
+            tokens.push((BoxId(id), (i as u64) + 1));
+        }
+
+        let tx = make_tx_with_fee_and_tokens(1_000_000, 0xF1, tokens);
+        let fee_tx =
+            build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
+
+        let miner_out = &fee_tx.output_candidates[0];
+        assert_eq!(
+            miner_out.tokens.len(),
+            MAX_ASSETS_PER_BOX,
+            "should cap at MAX_ASSETS_PER_BOX"
+        );
     }
 
     // ── build_emission_tx tests ─────────────────────────────────────
@@ -1193,7 +1622,7 @@ mod tests {
     fn test_build_emission_tx_returns_none_without_utxo() {
         let pk = [0x02; 33];
         // Without UTXO state, should return None.
-        assert!(build_emission_tx(100, &pk, None).is_none());
+        assert!(build_emission_tx(100, &pk, None, 720).is_none());
     }
 
     #[test]
@@ -1210,8 +1639,8 @@ mod tests {
     }
 
     #[test]
-    fn mining_reward_delay_is_720() {
-        assert_eq!(MINING_REWARD_DELAY, 720);
+    fn default_mining_reward_delay_is_720() {
+        assert_eq!(DEFAULT_MINING_REWARD_DELAY, 720);
     }
 
     // ── collect_txs tests ───────────────────────────────────────────
@@ -1221,7 +1650,7 @@ mod tests {
         let pk = [0x02; 33];
         let params = Parameters::genesis();
         let (selected, eliminated) =
-            collect_txs(Vec::new(), None, 1_000_000, 1_000_000_000, &params, 100, &pk, None);
+            collect_txs(Vec::new(), None, 1_000_000, 1_000_000_000, &params, 100, &pk, None, None, 720);
         // No transactions at all, so no fee tx either.
         assert!(selected.is_empty());
         assert!(eliminated.is_empty());
@@ -1239,7 +1668,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 67_500_000_000,
-                ergo_tree_bytes: miner_reward_prop(&pk),
+                ergo_tree_bytes: miner_reward_prop(&pk, 720),
                 creation_height: 100,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -1259,6 +1688,8 @@ mod tests {
             100,
             &pk,
             None,
+            None,
+            720,
         );
 
         assert!(eliminated.is_empty());
@@ -1269,7 +1700,7 @@ mod tests {
         let last = selected.last().unwrap();
         assert_eq!(
             last.output_candidates[0].ergo_tree_bytes,
-            miner_reward_prop(&pk),
+            miner_reward_prop(&pk, 720),
             "last tx should be fee collection"
         );
     }
@@ -1286,7 +1717,7 @@ mod tests {
 
         let params = Parameters::genesis();
         let (selected, eliminated) =
-            collect_txs(vec![tx1.clone(), tx2.clone()], None, limit, 1_000_000_000, &params, 100, &pk, None);
+            collect_txs(vec![tx1.clone(), tx2.clone()], None, limit, 1_000_000_000, &params, 100, &pk, None, None, 720);
 
         // tx2 should be eliminated.
         assert_eq!(eliminated.len(), 1);
@@ -1303,14 +1734,14 @@ mod tests {
         let tx = make_tx_with_fee(500_000);
 
         let params = Parameters::genesis();
-        let (selected, _) = collect_txs(vec![tx], None, 10_000_000, 1_000_000_000, &params, 100, &pk, None);
+        let (selected, _) = collect_txs(vec![tx], None, 10_000_000, 1_000_000_000, &params, 100, &pk, None, None, 720);
 
         // Should be: mempool_tx, fee_collection_tx.
         assert_eq!(selected.len(), 2);
         let fee_tx = &selected[1];
         assert_eq!(
             fee_tx.output_candidates[0].ergo_tree_bytes,
-            miner_reward_prop(&pk)
+            miner_reward_prop(&pk, 720)
         );
         assert_eq!(fee_tx.output_candidates[0].value, 500_000);
     }
@@ -1337,6 +1768,8 @@ mod tests {
             100,
             &pk,
             None,
+            None,
+            720,
         );
 
         // tx2 should be eliminated due to cost overflow.
@@ -1367,6 +1800,8 @@ mod tests {
             100,
             &pk,
             None,
+            None,
+            720,
         );
 
         assert!(eliminated.is_empty());
@@ -1389,6 +1824,8 @@ mod tests {
             100,
             &pk,
             None,
+            None,
+            720,
         );
 
         assert_eq!(eliminated.len(), 1);
@@ -1449,6 +1886,8 @@ mod tests {
             100,
             &pk,
             None, // No utxo_state, but double-spend detection still works
+            None,
+            720,
         );
 
         // tx1 should be selected, tx2 should be eliminated (same input).

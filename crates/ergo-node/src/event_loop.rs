@@ -830,11 +830,13 @@ pub async fn run(
                         None
                     };
                     let mut gen = gen_arc.write().unwrap();
+                    let reward_delay = settings.ergo.chain.monetary.miner_reward_delay;
                     match gen.generate_candidate(
                         &node_view.history,
                         &node_view.mempool,
                         node_view.current_parameters(),
                         utxo_ref,
+                        Some(reward_delay),
                     ) {
                         Ok(work) => {
                             tracing::debug!(height = work.h, "generated new mining candidate");
