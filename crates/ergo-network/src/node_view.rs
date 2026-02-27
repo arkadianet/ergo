@@ -519,6 +519,9 @@ impl NodeViewHolder {
     /// 1. Validate and apply the block via [`validate_and_apply_block`].
     /// 2. On failure, mark the block as Invalid and return the error.
     pub fn apply_progress(&mut self, info: &ProgressInfo) -> Result<(), NodeViewError> {
+        // Collect transactions from rolled-back blocks for mempool re-addition.
+        let mut rolled_back_txs: Vec<ergo_types::transaction::ErgoTransaction> = Vec::new();
+
         // Handle chain switch: rollback state and unmark old chain.
         if let Some(branch_point) = &info.branch_point {
             if !info.to_remove.is_empty() {
@@ -528,6 +531,17 @@ impl NodeViewHolder {
                     to_apply = info.to_apply.len(),
                     "chain reorganization",
                 );
+
+                // Collect transactions from rolled-back blocks before state rollback.
+                for block_id in &info.to_remove {
+                    if let Ok(Some(bt)) = self.history.load_block_transactions(block_id) {
+                        for tx_bytes in &bt.tx_bytes {
+                            if let Ok(tx) = parse_transaction(tx_bytes) {
+                                rolled_back_txs.push(tx);
+                            }
+                        }
+                    }
+                }
 
                 // Roll back state to the branch point.
                 if self.digest_mode {
@@ -574,10 +588,25 @@ impl NodeViewHolder {
             }
         }
 
+        // Collect applied transactions to filter from rolled-back set.
+        let mut applied_tx_ids: std::collections::HashSet<ergo_types::transaction::TxId> =
+            std::collections::HashSet::new();
+
         // Apply new chain blocks.
         for block_id in &info.to_apply {
             match self.validate_and_apply_block(block_id) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // Collect tx IDs from this applied block.
+                    if !rolled_back_txs.is_empty() {
+                        if let Ok(Some(bt)) = self.history.load_block_transactions(block_id) {
+                            for tx_bytes in &bt.tx_bytes {
+                                if let Ok(tx) = parse_transaction(tx_bytes) {
+                                    applied_tx_ids.insert(tx.tx_id);
+                                }
+                            }
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(block_id = ?block_id, error = %e, "block validation failed");
                     self.history
@@ -586,6 +615,31 @@ impl NodeViewHolder {
                 }
             }
         }
+
+        // Re-add rolled-back transactions to mempool (minus those in the new chain).
+        // This matches Scala's updateMemPool behavior in ErgoNodeViewHolder.
+        if !rolled_back_txs.is_empty() {
+            let eligible: Vec<ergo_types::transaction::ErgoTransaction> = rolled_back_txs
+                .into_iter()
+                .filter(|tx| !applied_tx_ids.contains(&tx.tx_id))
+                .collect();
+
+            if !eligible.is_empty() {
+                let mut mp = self.mempool.write().unwrap();
+                let mut readded = 0u32;
+                for tx in eligible {
+                    // Use put_no_fee_check: these txs were previously valid, and
+                    // re-adding them should not be blocked by fee requirements.
+                    if mp.put_no_fee_check(tx).is_ok() {
+                        readded += 1;
+                    }
+                }
+                if readded > 0 {
+                    tracing::info!(readded, "re-added rolled-back transactions to mempool");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1367,7 +1421,7 @@ mod tests {
     /// Creates a NodeViewHolder with checkpoint_height=0 (strictest difficulty checking).
     /// Use this for tests that specifically test difficulty verification.
     fn make_node_view(db: HistoryDb) -> NodeViewHolder {
-        let mempool = Arc::new(RwLock::new(ErgoMemPool::new(1000)));
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
         let mut nv = NodeViewHolder::new(db, mempool, false, genesis_digest());
         // Test headers use version 2 (current mainnet), so set parameters to match.
         nv.voting_epoch_info
@@ -1381,7 +1435,7 @@ mod tests {
     /// verification is skipped. Use this for pipeline tests where parent headers
     /// are not stored and difficulty verification is not the focus.
     fn make_node_view_skip_difficulty(db: HistoryDb) -> NodeViewHolder {
-        let mempool = Arc::new(RwLock::new(ErgoMemPool::new(1000)));
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
         let mut nv = NodeViewHolder::new(db, mempool, false, genesis_digest());
         nv.set_checkpoint_height(u32::MAX);
         // Test headers use version 2 (current mainnet), so set parameters to match.
@@ -1477,7 +1531,7 @@ mod tests {
     #[test]
     fn state_root_returns_current_digest() {
         let (db, _dir) = open_test_db();
-        let mempool = Arc::new(RwLock::new(ErgoMemPool::new(100)));
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
         let digest = vec![0x42; 33];
         let nv = NodeViewHolder::new(db, mempool, true, digest.clone());
         assert_eq!(nv.state_root(), digest.as_slice());
@@ -2308,7 +2362,7 @@ mod tests {
     #[test]
     fn mempool_is_arc_shared() {
         let (db, _dir) = open_test_db();
-        let mempool = Arc::new(RwLock::new(ErgoMemPool::new(100)));
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
         let node_view = NodeViewHolder::new(db, mempool.clone(), true, vec![0u8; 33]);
 
         // Write from external ref.
@@ -2932,5 +2986,42 @@ mod tests {
         // Block at height 100 with matching parent nBits should pass normally.
         let block = make_full_block_for_difficulty(100, parent_id, 100_663_296);
         assert!(nv.verify_difficulty(&block).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Rolled-back tx re-addition on reorg
+    // -----------------------------------------------------------------------
+
+    // 33. put_no_fee_check is used in reorg to re-add rolled-back txs.
+    #[test]
+    fn put_no_fee_check_adds_to_mempool() {
+        let (db, _dir) = open_test_db();
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(100, 1_000_000)));
+        let node_view = NodeViewHolder::new(db, mempool.clone(), true, vec![0u8; 33]);
+
+        // This tx has 0 fee (no fee output), but put_no_fee_check should still accept it.
+        let tx = ergo_types::transaction::ErgoTransaction {
+            inputs: vec![ergo_types::transaction::Input {
+                box_id: ergo_types::transaction::BoxId([0xAA; 32]),
+                proof_bytes: vec![],
+                extension_bytes: vec![],
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
+                value: 1_000_000,
+                ergo_tree_bytes: vec![0x00],
+                creation_height: 1,
+                tokens: vec![],
+                additional_registers: vec![],
+            }],
+            tx_id: ergo_types::transaction::TxId([0x01; 32]),
+        };
+
+        let mut mp = node_view.mempool.write().unwrap();
+        // put() would fail due to fee check
+        assert!(mp.put(tx.clone()).is_err());
+        // put_no_fee_check should succeed
+        mp.put_no_fee_check(tx).unwrap();
+        assert_eq!(mp.size(), 1);
     }
 }

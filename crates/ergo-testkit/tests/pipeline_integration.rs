@@ -535,7 +535,7 @@ fn node_view_full_pipeline_empty_block() {
         .state_root()
         .expect("fresh UtxoState should have a digest");
 
-    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::new(1000)));
+    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
     // Test headers use version 2 (current mainnet), so set parameters to match.
@@ -628,7 +628,7 @@ fn node_view_rejects_tampered_merkle_root() {
         .state_root()
         .expect("fresh UtxoState should have a digest");
 
-    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::new(1000)));
+    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     // Test headers use version 2 (current mainnet), so set parameters to match.
     nv.voting_epoch_info
@@ -718,7 +718,7 @@ fn node_view_rejects_invalid_stateless_tx() {
         .state_root()
         .expect("fresh UtxoState should have a digest");
 
-    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::new(1000)));
+    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
     // Test headers use version 2 (current mainnet), so set parameters to match.
@@ -825,7 +825,7 @@ fn node_view_mempool_eviction_after_block() {
         .state_root()
         .expect("fresh UtxoState should have a digest");
 
-    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::new(1000)));
+    let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
     // Test headers use version 2 (current mainnet), so set parameters to match.
@@ -923,7 +923,7 @@ fn make_test_node_view() -> (
     let dir = tempfile::TempDir::new().unwrap();
     let history = HistoryDb::open(dir.path()).unwrap();
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(
-        ergo_network::mempool::ErgoMemPool::new(100),
+        ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
     ));
     let nv = ergo_network::node_view::NodeViewHolder::new(
         history,
@@ -989,6 +989,7 @@ fn node_view_serves_request_modifier() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     // Should produce exactly one SendModifiers action.
@@ -1107,6 +1108,7 @@ fn handle_peers_response_extracts_addresses() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     assert_eq!(
@@ -1177,6 +1179,7 @@ fn handle_get_peers_returns_connected_list() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     assert_eq!(
@@ -1248,6 +1251,7 @@ fn tx_inv_triggers_request_for_unknown() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     assert_eq!(result.actions.len(), 1);
@@ -1309,6 +1313,7 @@ fn tx_modifier_enters_mempool_and_relays() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     // Tx should be in mempool.
@@ -1377,6 +1382,7 @@ fn tx_inv_skips_known_mempool_tx() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     // Should NOT request -- tx is already in mempool.
@@ -1646,6 +1652,7 @@ fn modifiers_cache_buffers_out_of_order() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     // The extension should be stored in the DB (put_modifier stores it
@@ -1745,7 +1752,7 @@ fn state_version_persists_after_block_application() {
     // Apply a block in the first NodeViewHolder.
     {
         let db = HistoryDb::open(db_path).unwrap();
-        let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::new(100)));
+        let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
         let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
         nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
         // Test headers use version 2 (current mainnet), so set parameters to match.
@@ -1790,7 +1797,7 @@ fn state_version_persists_after_block_application() {
     // Recover in a new NodeViewHolder.
     {
         let db = HistoryDb::open(db_path).unwrap();
-        let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::new(100)));
+        let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
         let nv = NodeViewHolder::with_recovery(db, mempool, false, vec![0u8; 33]);
 
         // The state root should match the applied block's header state root.
@@ -1847,7 +1854,7 @@ fn sync_info_younger_peer_gets_continuation_ids() {
     }
 
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(
-        ergo_network::mempool::ErgoMemPool::new(100),
+        ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
     ));
     let mut nv = ergo_network::node_view::NodeViewHolder::new(
         db,
@@ -1884,6 +1891,7 @@ fn sync_info_younger_peer_gets_continuation_ids() {
         &mut std::collections::HashMap::new(),
         true,
         &mut None,
+        &mut ergo_network::message_handler::TxCostTracker::new(),
     );
 
     // Since our height is 10 and peer is at 5, peer is Younger.
@@ -1961,7 +1969,7 @@ fn mempool_evict_stale_with_low_ttl() {
     use ergo_types::transaction::*;
     use std::time::Duration;
 
-    let mut pool = ErgoMemPool::new(100);
+    let mut pool = ErgoMemPool::with_min_fee(100, 0);
     let tx = ErgoTransaction {
         inputs: vec![Input {
             box_id: BoxId([0xAA; 32]),
@@ -2063,7 +2071,7 @@ fn mempool_find_output_by_box_id() {
     use ergo_network::mempool::ErgoMemPool;
     use ergo_types::transaction::*;
 
-    let mut pool = ErgoMemPool::new(100);
+    let mut pool = ErgoMemPool::with_min_fee(100, 0);
     let tx_id = TxId([0x11; 32]);
     let tx = ErgoTransaction {
         inputs: vec![Input {
@@ -2106,7 +2114,7 @@ fn mempool_find_outputs_by_token_id() {
     use ergo_network::mempool::ErgoMemPool;
     use ergo_types::transaction::*;
 
-    let mut pool = ErgoMemPool::new(100);
+    let mut pool = ErgoMemPool::with_min_fee(100, 0);
     let token_id = BoxId([0xCC; 32]);
     let tx = ErgoTransaction {
         inputs: vec![Input {
@@ -2708,7 +2716,7 @@ fn test_mempool_tree_hash_lookup() {
         out
     }
 
-    let mut mempool = ErgoMemPool::new(100);
+    let mut mempool = ErgoMemPool::with_min_fee(100, 0);
     let ergo_tree = vec![0x00, 0x08, 0xcd, 0xAA, 0xBB, 0xCC];
     let tx = ErgoTransaction {
         inputs: vec![Input {
@@ -2931,7 +2939,7 @@ fn test_node_view_checkpoint_height() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(
-        ergo_network::mempool::ErgoMemPool::new(100),
+        ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
     ));
     let mut nvh = ergo_network::node_view::NodeViewHolder::new(
         db,

@@ -5395,7 +5395,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -6787,7 +6787,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -6830,7 +6830,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -6870,7 +6870,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -6916,7 +6916,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -6956,7 +6956,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -7016,7 +7016,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -7056,7 +7056,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),
@@ -7114,7 +7114,7 @@ mod tests {
             shared: Arc::new(RwLock::new(SharedState::new())),
             history: Arc::new(history),
             mempool: Arc::new(std::sync::RwLock::new(
-                ergo_network::mempool::ErgoMemPool::new(100),
+                ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
             )),
             node_name: "test".to_string(),
             app_version: "0.1.0".to_string(),

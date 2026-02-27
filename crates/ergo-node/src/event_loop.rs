@@ -208,6 +208,10 @@ pub async fn run(
     // prevent re-applying the same header on subsequent sync messages.
     let mut last_sync_header_applied: Option<u32> = None;
 
+    // Transaction cost rate limiter: rejects txs when the cumulative
+    // processing cost since the last block exceeds per-peer / global limits.
+    let mut tx_cost_tracker = message_handler::TxCostTracker::new();
+
     // Whether the node is synced enough to accept and verify transactions.
     // Only true in UTXO mode when headers and full blocks are at the same height.
     let mut is_synced_for_txs = false;
@@ -382,6 +386,7 @@ pub async fn run(
                         &mut last_sync_from,
                         is_synced_for_txs,
                         &mut last_sync_header_applied,
+                        &mut tx_cost_tracker,
                     );
 
                     // Handle continuation headers before network actions.
@@ -397,6 +402,9 @@ pub async fn run(
                     // Broadcast applied blocks to peers and create snapshots.
                     if !result.applied_blocks.is_empty() {
                         let applied_blocks = result.applied_blocks;
+
+                        // Reset tx cost counters so peers can submit new txs.
+                        tx_cost_tracker.reset();
 
                         // Notify the indexer of each applied block.
                         if let Some(ref idx_tx) = indexer_tx {

@@ -990,7 +990,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             HistoryDb::open(dir.path()).unwrap()
         };
-        let mempool = RwLock::new(ErgoMemPool::new(100));
+        let mempool = RwLock::new(ErgoMemPool::with_min_fee(100, 0));
         let params = Parameters::genesis();
         let result = gen.generate_candidate(&history, &mempool, &params, None);
         assert!(result.is_err());
@@ -1001,7 +1001,7 @@ mod tests {
     fn test_candidate_generator_no_best_block() {
         let dir = tempfile::tempdir().unwrap();
         let history = HistoryDb::open(dir.path()).unwrap();
-        let mempool = RwLock::new(ErgoMemPool::new(100));
+        let mempool = RwLock::new(ErgoMemPool::with_min_fee(100, 0));
         let params = Parameters::genesis();
         let mut gen = CandidateGenerator::new([0x02; 33], [0, 0, 0]);
         let result = gen.generate_candidate(&history, &mempool, &params, None);

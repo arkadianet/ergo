@@ -96,7 +96,10 @@ async fn main() {
         .unwrap_or_else(|e| panic!("cannot open API database: {e}"));
 
     let mempool = Arc::new(std::sync::RwLock::new(
-        ErgoMemPool::new(settings.ergo.node.mempool_capacity as usize),
+        ErgoMemPool::with_min_fee(
+            settings.ergo.node.mempool_capacity as usize,
+            settings.ergo.node.minimal_fee_amount,
+        ),
     ));
     let genesis_digest = settings.ergo.chain.genesis_state_digest();
     let is_utxo_mode = settings.ergo.node.state_type == "utxo";
