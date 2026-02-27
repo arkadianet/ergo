@@ -345,13 +345,19 @@ async fn main() {
             .as_millis() as u64,
         peer_spec: ergo_wire::handshake::PeerSpec {
             agent_name: settings.network.agent_name.clone(),
-            protocol_version: ergo_wire::handshake::ProtocolVersion {
+            protocol_version: ergo_wire::handshake::ProtocolVersion::from_version_str(
+                &settings.network.app_version,
+            )
+            .unwrap_or(ergo_wire::handshake::ProtocolVersion {
                 major: 5,
                 minor: 0,
-                patch: 0,
-            },
+                patch: 2,
+            }),
             node_name: settings.network.node_name.clone(),
-            declared_address: settings.network.bind_address.parse::<std::net::SocketAddr>().ok(),
+            declared_address: settings.network.declared_address.as_deref()
+                .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+                .or_else(|| settings.network.bind_address.parse::<std::net::SocketAddr>().ok()
+                    .filter(|addr| !addr.ip().is_unspecified())),
             features: vec![
                 ergo_wire::peer_feature::PeerFeature::Mode(
                     ergo_wire::peer_feature::ModeFeature {

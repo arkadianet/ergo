@@ -180,6 +180,8 @@ pub struct NetworkSettings {
     pub app_version: String,
     pub agent_name: String,
     pub bind_address: String,
+    #[serde(default)]
+    pub declared_address: Option<String>,
     pub magic_bytes: Vec<u8>,
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,

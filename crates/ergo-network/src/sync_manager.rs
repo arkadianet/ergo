@@ -153,6 +153,13 @@ impl SyncManager {
         match self.state {
             SyncState::Idle | SyncState::HeaderSync => {
                 self.state = SyncState::HeaderSync;
+                // Header-first sync: only start block download once headers
+                // are caught up to the network tip.  This prevents block
+                // section traffic from starving header synchronization.
+                if is_caught_up && !self.blocks_to_download.is_empty() {
+                    self.state = SyncState::BlockDownload;
+                    self.request_block_sections(&mut actions, tracker, available_peers);
+                }
             }
             SyncState::BlockDownload => {
                 self.request_block_sections(&mut actions, tracker, available_peers);
@@ -178,6 +185,14 @@ impl SyncManager {
     }
 
     /// Called when new headers have been stored.
+    ///
+    /// Enqueues block downloads.  During initial sync (HeaderSync/Idle) the
+    /// state is NOT changed — block download only starts once headers are
+    /// caught up (decided in `on_tick`), matching Scala's header-first
+    /// strategy and preventing block traffic from starving header sync.
+    ///
+    /// When already `Synced`, transitions to `BlockDownload` immediately so
+    /// newly-mined blocks are fetched without delay.
     pub fn on_headers_received(&mut self, new_header_ids: &[ModifierId], history: &HistoryDb) {
         let need_blocks: Vec<ModifierId> = new_header_ids
             .iter()
@@ -187,7 +202,8 @@ impl SyncManager {
 
         if !need_blocks.is_empty() {
             self.enqueue_block_downloads(need_blocks);
-            if self.state != SyncState::BlockDownload {
+            // When already synced, immediately fetch new block bodies.
+            if self.state == SyncState::Synced {
                 self.state = SyncState::BlockDownload;
             }
         }
@@ -346,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn on_headers_received_transitions_to_block_download() {
+    fn on_headers_received_enqueues_without_transitioning() {
         let dir = tempfile::tempdir().unwrap();
         let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
 
@@ -356,7 +372,8 @@ mod tests {
         let ids = vec![make_id(1), make_id(2), make_id(3)];
         mgr.on_headers_received(&ids, &history);
 
-        assert_eq!(mgr.state(), SyncState::BlockDownload);
+        // Header-first: stays in HeaderSync, blocks just enqueued.
+        assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert_eq!(mgr.blocks_remaining(), 3);
     }
 
@@ -619,6 +636,42 @@ mod tests {
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         assert_eq!(mgr.blocks_remaining(), 2);
+    }
+
+    #[test]
+    fn header_sync_transitions_to_block_download_when_caught_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut tracker = DeliveryTracker::new(30, 3);
+        let peers = vec![(1u64, true)];
+
+        let mut mgr = SyncManager::new(10, 64);
+        mgr.state = SyncState::HeaderSync;
+        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+
+        // Headers caught up → should transition to BlockDownload.
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true);
+
+        assert_eq!(mgr.state(), SyncState::BlockDownload);
+        assert!(actions.iter().any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
+    }
+
+    #[test]
+    fn header_sync_stays_when_not_caught_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut tracker = DeliveryTracker::new(30, 3);
+        let peers = vec![(1u64, true)];
+
+        let mut mgr = SyncManager::new(10, 64);
+        mgr.state = SyncState::HeaderSync;
+        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+
+        // Headers NOT caught up → should stay in HeaderSync.
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+
+        assert_eq!(mgr.state(), SyncState::HeaderSync);
+        assert_eq!(mgr.blocks_remaining(), 2); // blocks still queued
     }
 
     #[test]

@@ -13,6 +13,19 @@ impl ProtocolVersion {
     pub const EIP37_FORK: Self = Self { major: 4, minor: 0, patch: 100 };
     pub const SYNC_V2_MIN: Self = Self { major: 4, minor: 0, patch: 16 };
 
+    /// Parse a version string like "6.0.1" into a ProtocolVersion.
+    pub fn from_version_str(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        Some(Self {
+            major: parts[0].parse().ok()?,
+            minor: parts[1].parse().ok()?,
+            patch: parts[2].parse().ok()?,
+        })
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         vec![self.major, self.minor, self.patch]
     }
@@ -302,6 +315,19 @@ mod tests {
         };
         let bytes = hs.serialize();
         assert!(bytes.len() < ergo_settings::constants::MAX_HANDSHAKE_SIZE);
+    }
+
+    #[test]
+    fn protocol_version_from_str() {
+        let v = ProtocolVersion::from_version_str("6.0.1").unwrap();
+        assert_eq!(v, ProtocolVersion { major: 6, minor: 0, patch: 1 });
+
+        let v2 = ProtocolVersion::from_version_str("5.0.12").unwrap();
+        assert_eq!(v2, ProtocolVersion { major: 5, minor: 0, patch: 12 });
+
+        assert!(ProtocolVersion::from_version_str("6.0").is_none());
+        assert!(ProtocolVersion::from_version_str("abc").is_none());
+        assert!(ProtocolVersion::from_version_str("6.0.256").is_none()); // u8 overflow
     }
 
     #[test]
