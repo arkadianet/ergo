@@ -952,6 +952,237 @@ fn handle_request_modifier(
 }
 
 // ---------------------------------------------------------------------------
+// Refactored message handling for processor-thread architecture
+// ---------------------------------------------------------------------------
+
+/// Handle an incoming message from a peer, routing all codes except 33
+/// (Modifiers) which the event loop handles separately.
+///
+/// This is the "event loop" entry point: it handles SyncInfo, Inv, GetPeers,
+/// Peers, and RequestModifier using only a read-only `HistoryDb` and a shared
+/// mempool Arc. Modifier messages (code 33) are not handled here; the event
+/// loop dispatches those directly to the processor thread via channels.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_message_without_modifiers(
+    peer_id: PeerId,
+    msg: &RawMessage,
+    history: &HistoryDb,
+    mempool: &std::sync::Arc<std::sync::RwLock<crate::mempool::ErgoMemPool>>,
+    _sync_mgr: &mut SyncManager,
+    tracker: &mut DeliveryTracker,
+    connected_peers: &[std::net::SocketAddr],
+    sync_tracker: &mut SyncTracker,
+    last_sync_from: &mut HashMap<PeerId, Instant>,
+    is_synced_for_txs: bool,
+    last_sync_header_applied: &mut Option<u32>,
+    _tx_cost_tracker: &mut TxCostTracker,
+) -> HandleResult {
+    match msg.code {
+        1 => handle_get_peers(peer_id, connected_peers),
+        2 => handle_peers(&msg.body),
+        65 => {
+            const PER_PEER_SYNC_LOCK_MS: u128 = 100;
+            let now = Instant::now();
+            if let Some(last) = last_sync_from.get(&peer_id) {
+                if now.duration_since(*last).as_millis() < PER_PEER_SYNC_LOCK_MS {
+                    return HandleResult::empty();
+                }
+            }
+            last_sync_from.insert(peer_id, now);
+            handle_sync_info(
+                peer_id,
+                &msg.body,
+                history,
+                sync_tracker,
+                tracker,
+                last_sync_header_applied,
+            )
+        }
+        55 => {
+            let mp = mempool.read().unwrap();
+            handle_inv(peer_id, &msg.body, tracker, history, &mp, is_synced_for_txs)
+        }
+        22 => {
+            let mp = mempool.read().unwrap();
+            handle_request_modifier(peer_id, &msg.body, history, &mp)
+        }
+        33 => {
+            // Modifiers are handled by the event loop directly (forwarded to processor).
+            // If this function is called with code 33, return empty.
+            HandleResult::empty()
+        }
+        _ => HandleResult::empty(),
+    }
+}
+
+/// Handle transaction modifiers using a shared mempool reference instead of
+/// going through `NodeViewHolder`.
+///
+/// This is used by the refactored event loop to process tx modifiers (type_id 2)
+/// without needing `NodeViewHolder` on the event loop.
+pub fn handle_tx_modifiers_shared(
+    peer_id: PeerId,
+    modifiers: &[(ModifierId, Vec<u8>)],
+    mempool: &std::sync::Arc<std::sync::RwLock<crate::mempool::ErgoMemPool>>,
+    tracker: &mut DeliveryTracker,
+    tx_cost_tracker: &mut TxCostTracker,
+) -> HandleResult {
+    use ergo_consensus::tx_validation::validate_tx_stateless;
+    use ergo_wire::transaction_ser::parse_transaction;
+
+    let vs = ergo_consensus::validation_rules::ValidationSettings::initial();
+    let mut accepted_ids = Vec::new();
+
+    for (id, data) in modifiers {
+        tracker.set_received(2, id);
+
+        if !tx_cost_tracker.can_accept(peer_id) {
+            tracing::debug!(
+                tx_id = ?id,
+                peer_id,
+                global_cost = tx_cost_tracker.interblock_cost,
+                "tx rate-limited: cost limit exceeded"
+            );
+            continue;
+        }
+
+        let tx = match parse_transaction(data) {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::warn!(tx_id = ?id, error = %e, "failed to parse transaction");
+                tx_cost_tracker.record_cost(peer_id, FALLBACK_TX_COST);
+                continue;
+            }
+        };
+
+        if let Err(e) = validate_tx_stateless(&tx, &vs) {
+            tracing::warn!(tx_id = ?id, error = %e, "stateless tx validation failed");
+            tx_cost_tracker.record_cost(peer_id, FALLBACK_TX_COST);
+            continue;
+        }
+
+        // Sigma proof verification skipped in this path (no UTXO access on event loop).
+
+        let mut mp = mempool.write().unwrap();
+        if let Err(e) = mp.put(tx) {
+            tracing::debug!(tx_id = ?id, error = %e, "mempool rejected tx");
+            tx_cost_tracker.record_cost(peer_id, FALLBACK_TX_COST);
+            continue;
+        }
+
+        tx_cost_tracker.record_cost(peer_id, FALLBACK_TX_COST);
+        accepted_ids.push(*id);
+    }
+
+    let mut actions = Vec::new();
+    if !accepted_ids.is_empty() {
+        actions.push(SyncAction::BroadcastInvExcept {
+            type_id: 2,
+            ids: accepted_ids,
+            exclude: peer_id,
+        });
+    }
+
+    HandleResult {
+        actions,
+        new_headers: Vec::new(),
+        penalties: Vec::new(),
+        applied_blocks: Vec::new(),
+    }
+}
+
+/// Validate header modifiers in parallel using rayon and return the results.
+///
+/// Returns a tuple of:
+/// - `validated_headers`: Successfully validated headers with their modifier IDs and
+///   serialized bytes (for forwarding to the processor).
+/// - `penalties`: Penalties to apply for invalid/spam headers.
+/// - `invalid_ids`: Modifier IDs that failed validation.
+///
+/// Headers are filtered to only include those with `Requested` status in the tracker.
+/// The event loop can then forward validated headers to the processor thread.
+#[allow(clippy::type_complexity)]
+pub fn validate_headers_parallel(
+    peer_id: PeerId,
+    mods: &ModifiersData,
+    tracker: &mut DeliveryTracker,
+) -> (
+    Vec<(ModifierId, ergo_types::header::Header, Vec<u8>)>,
+    Vec<(PenaltyType, PeerId)>,
+    Vec<ModifierId>,
+) {
+    let type_id = HEADER_TYPE_ID;
+    let mut penalties = Vec::new();
+    let mut invalid_ids = Vec::new();
+
+    // Phase 1 -- Sequential filter: keep only requested headers.
+    let requested: Vec<(usize, &ModifierId, &Vec<u8>)> = mods
+        .modifiers
+        .iter()
+        .enumerate()
+        .filter(|(_idx, (id, _data))| {
+            let mod_status = tracker.status(type_id, id);
+            if mod_status != ModifierStatus::Requested {
+                tracing::debug!(
+                    modifier_id = hex::encode(id.0),
+                    ?mod_status,
+                    "ignoring unrequested header"
+                );
+                penalties.push((PenaltyType::SpamMessage, peer_id));
+                false
+            } else {
+                true
+            }
+        })
+        .map(|(idx, (id, data))| (idx, id, data))
+        .collect();
+
+    // Phase 2 -- Parallel: verify ID, parse, and validate PoW.
+    let validated: Vec<HeaderValidationResult> = requested
+        .par_iter()
+        .map(|&(_idx, id, data)| {
+            let actual_id = ModifierId(blake2b256(data));
+            if actual_id != *id {
+                return Err((
+                    *id,
+                    format!(
+                        "ID mismatch: declared {} actual {}",
+                        hex::encode(id.0),
+                        hex::encode(actual_id.0),
+                    ),
+                ));
+            }
+            let header = wire_parse_header(data).map_err(|e| (*id, format!("parse failed: {e}")))?;
+            validate_pow(&header).map_err(|e| (*id, format!("PoW invalid: {e}")))?;
+            Ok((0, *id, header)) // index not needed in this path
+        })
+        .collect();
+
+    // Phase 3 -- Collect results.
+    let mut validated_headers = Vec::new();
+    for (result, &(_idx, _id, data)) in validated.into_iter().zip(requested.iter()) {
+        match result {
+            Ok((_idx2, mid, header)) => {
+                tracker.set_received(type_id, &mid);
+                validated_headers.push((mid, header, data.clone()));
+            }
+            Err((mid, reason)) => {
+                tracing::warn!(
+                    modifier_id = hex::encode(mid.0),
+                    reason = %reason,
+                    "header rejected during parallel validation"
+                );
+                penalties.push((PenaltyType::InvalidBlock, peer_id));
+                tracker.set_invalid(&mid);
+                invalid_ids.push(mid);
+            }
+        }
+    }
+
+    (validated_headers, penalties, invalid_ids)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

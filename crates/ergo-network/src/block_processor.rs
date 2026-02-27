@@ -4,7 +4,7 @@
 //! [`ProcessorCommand`] flows event-loop -> processor.
 //! [`ProcessorEvent`] flows processor -> event-loop.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use crate::connection_pool::PeerId;
@@ -167,7 +167,7 @@ impl ProcessorState {
 /// panic a `ProcessorEvent::ValidationFailed` with "FATAL:" prefix is sent.
 pub fn run_processor_with_state<F>(
     cmd_rx: Receiver<ProcessorCommand>,
-    evt_tx: SyncSender<ProcessorEvent>,
+    evt_tx: tokio::sync::mpsc::Sender<ProcessorEvent>,
     state_factory: F,
 ) where
     F: FnOnce() -> ProcessorState + Send + 'static,
@@ -186,7 +186,7 @@ pub fn run_processor_with_state<F>(
         } else {
             "FATAL: processor thread panicked (unknown payload)".to_string()
         };
-        let _ = evt_tx_panic.try_send(ProcessorEvent::ValidationFailed {
+        let _ = evt_tx_panic.blocking_send(ProcessorEvent::ValidationFailed {
             modifier_id: ModifierId([0u8; 32]),
             peer_hint: None,
             error: msg,
@@ -197,7 +197,7 @@ pub fn run_processor_with_state<F>(
 /// Main blocking loop that receives commands and processes them in batches.
 fn processor_loop_with_state(
     cmd_rx: &Receiver<ProcessorCommand>,
-    evt_tx: &SyncSender<ProcessorEvent>,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     state: &mut ProcessorState,
 ) {
     loop {
@@ -267,7 +267,7 @@ fn processor_loop_with_state(
 
         // After each batch: emit accumulated events.
         if !new_headers.is_empty() || !blocks_to_download.is_empty() {
-            let _ = evt_tx.try_send(ProcessorEvent::HeadersApplied {
+            let _ = evt_tx.blocking_send(ProcessorEvent::HeadersApplied {
                 new_header_ids: std::mem::take(&mut new_headers),
                 to_download: std::mem::take(&mut blocks_to_download),
             });
@@ -298,7 +298,7 @@ struct BatchAccum<'a> {
 /// Process a `StoreModifier` command.
 fn process_store_modifier(
     state: &mut ProcessorState,
-    evt_tx: &SyncSender<ProcessorEvent>,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     type_id: u8,
     modifier_id: ModifierId,
     data: Vec<u8>,
@@ -320,7 +320,7 @@ fn process_store_modifier(
         Err(e) => {
             // Put in cache for later retry.
             state.cache.put(modifier_id, type_id, data);
-            let _ = evt_tx.try_send(ProcessorEvent::ModifierCached {
+            let _ = evt_tx.blocking_send(ProcessorEvent::ModifierCached {
                 type_id,
                 modifier_id,
             });
@@ -338,7 +338,7 @@ fn process_store_modifier(
 /// Process a `StorePrevalidatedHeader` command.
 fn process_prevalidated_header(
     state: &mut ProcessorState,
-    evt_tx: &SyncSender<ProcessorEvent>,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     modifier_id: ModifierId,
     header: Header,
     peer_hint: Option<PeerId>,
@@ -352,7 +352,7 @@ fn process_prevalidated_header(
             }
         }
         Err(e) => {
-            let _ = evt_tx.try_send(ProcessorEvent::ValidationFailed {
+            let _ = evt_tx.blocking_send(ProcessorEvent::ValidationFailed {
                 modifier_id,
                 peer_hint,
                 error: format!("prevalidated header failed: {e}"),
@@ -366,7 +366,7 @@ fn process_prevalidated_header(
 /// to handle cascading dependencies.
 fn apply_from_cache_processor(
     state: &mut ProcessorState,
-    evt_tx: &SyncSender<ProcessorEvent>,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     accum: &mut BatchAccum<'_>,
 ) {
     for _iteration in 0..MAX_BATCH_SIZE {
@@ -403,7 +403,7 @@ fn apply_from_cache_processor(
 
 /// Emit `BlockApplied` events for any blocks applied during the last
 /// `process_modifier` call.
-fn emit_applied_blocks(state: &mut ProcessorState, evt_tx: &SyncSender<ProcessorEvent>) {
+fn emit_applied_blocks(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>) {
     for applied_id in state.node_view.take_applied_blocks() {
         let height = state
             .node_view
@@ -413,7 +413,7 @@ fn emit_applied_blocks(state: &mut ProcessorState, evt_tx: &SyncSender<Processor
             .flatten()
             .map(|h| h.height)
             .unwrap_or(0);
-        let _ = evt_tx.try_send(ProcessorEvent::BlockApplied {
+        let _ = evt_tx.blocking_send(ProcessorEvent::BlockApplied {
             header_id: applied_id,
             height,
         });
@@ -421,7 +421,7 @@ fn emit_applied_blocks(state: &mut ProcessorState, evt_tx: &SyncSender<Processor
 }
 
 /// Read current heights from history and send a `StateUpdate` event.
-fn send_state_update(state: &mut ProcessorState, evt_tx: &SyncSender<ProcessorEvent>) {
+fn send_state_update(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>) {
     let headers_height = state
         .node_view
         .history
@@ -448,7 +448,7 @@ fn send_state_update(state: &mut ProcessorState, evt_tx: &SyncSender<ProcessorEv
     let applied_blocks = state.node_view.take_applied_blocks();
     let rollback_height = state.node_view.take_rollback_height();
 
-    let _ = evt_tx.try_send(ProcessorEvent::StateUpdate {
+    let _ = evt_tx.blocking_send(ProcessorEvent::StateUpdate {
         headers_height,
         full_height,
         best_header_id,
@@ -467,7 +467,6 @@ fn send_state_update(state: &mut ProcessorState, evt_tx: &SyncSender<ProcessorEv
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     /// Both enums must be `Send` so they can cross thread boundaries.
     #[test]
@@ -477,10 +476,10 @@ mod tests {
         assert_send::<ProcessorEvent>();
     }
 
-    /// Round-trip through `std::sync::mpsc` channels.
+    /// Round-trip through channels (std::sync::mpsc for commands, tokio::sync::mpsc for events).
     #[test]
     fn channel_round_trip() {
-        // Command channel
+        // Command channel (std::sync::mpsc)
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<ProcessorCommand>(CHANNEL_CAPACITY);
 
         let mid = ModifierId([0xAB; 32]);
@@ -514,18 +513,18 @@ mod tests {
             other => panic!("expected Shutdown, got {:?}", other),
         }
 
-        // Event channel
-        let (evt_tx, evt_rx) = mpsc::sync_channel::<ProcessorEvent>(CHANNEL_CAPACITY);
+        // Event channel (tokio::sync::mpsc)
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel::<ProcessorEvent>(CHANNEL_CAPACITY);
 
         let hid = ModifierId([0xCD; 32]);
         evt_tx
-            .send(ProcessorEvent::BlockApplied {
+            .try_send(ProcessorEvent::BlockApplied {
                 header_id: hid,
                 height: 100,
             })
             .unwrap();
 
-        match evt_rx.recv().unwrap() {
+        match evt_rx.try_recv().unwrap() {
             ProcessorEvent::BlockApplied { header_id, height } => {
                 assert_eq!(header_id, hid);
                 assert_eq!(height, 100);
@@ -538,7 +537,7 @@ mod tests {
     #[test]
     fn processor_shutdown() {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<ProcessorCommand>(CHANNEL_CAPACITY);
-        let (evt_tx, _evt_rx) = mpsc::sync_channel::<ProcessorEvent>(CHANNEL_CAPACITY);
+        let (evt_tx, _evt_rx) = tokio::sync::mpsc::channel::<ProcessorEvent>(CHANNEL_CAPACITY);
 
         let handle = std::thread::spawn(move || {
             run_processor_with_state(cmd_rx, evt_tx, || {
@@ -560,7 +559,7 @@ mod tests {
     #[test]
     fn processor_handles_modifier_sends_event() {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<ProcessorCommand>(CHANNEL_CAPACITY);
-        let (evt_tx, evt_rx) = mpsc::sync_channel::<ProcessorEvent>(CHANNEL_CAPACITY);
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel::<ProcessorEvent>(CHANNEL_CAPACITY);
 
         let handle = std::thread::spawn(move || {
             run_processor_with_state(cmd_rx, evt_tx, || {
@@ -587,7 +586,7 @@ mod tests {
         // (ModifierCached or ValidationFailed, since the test NodeViewHolder
         // has no real block data, and also StateUpdate from the batch end).
         let mut events = Vec::new();
-        while let Ok(evt) = evt_rx.recv_timeout(Duration::from_millis(100)) {
+        while let Ok(evt) = evt_rx.try_recv() {
             events.push(evt);
         }
         assert!(

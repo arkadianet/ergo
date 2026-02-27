@@ -5,18 +5,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
 
+use ergo_network::block_processor::{ProcessorCommand, ProcessorEvent};
 use ergo_network::connection_pool::ConnectionPool;
 use ergo_network::peer_conn::PeerConnection;
 use ergo_wire::handshake::ConnectionDirection;
 use ergo_network::delivery_tracker::DeliveryTracker;
 use ergo_network::message_handler;
-use ergo_network::node_view::NodeViewHolder;
+use ergo_network::mempool::ErgoMemPool;
 use ergo_network::peer_discovery::PeerDiscovery;
 use ergo_network::penalty_manager::{PenaltyAction, PenaltyManager};
 use ergo_network::sync_manager::{SyncAction, SyncManager};
 use ergo_network::sync_tracker::SyncTracker;
 use ergo_settings::settings::ErgoSettings;
-use ergo_storage::history_db::header_score_key;
+use ergo_storage::history_db::{header_score_key, HistoryDb};
 use ergo_wire::handshake::{Handshake, PeerSpec, ProtocolVersion};
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::message::MessageCode;
@@ -34,6 +35,7 @@ pub struct BlockSubmission {
 /// A request from the API to generate a batch AVL+ proof for a set of box IDs.
 ///
 /// The response is sent back via the `response_tx` oneshot channel.
+#[allow(dead_code)]
 pub struct UtxoProofRequest {
     pub box_ids: Vec<[u8; 32]>,
     pub response_tx: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
@@ -131,10 +133,19 @@ impl SharedState {
 }
 
 /// Run the main event loop.
+///
+/// The event loop is now a thin message router: block sections are forwarded to
+/// the processor thread via `cmd_tx`, and responses come back via `evt_rx`.
+/// Sync protocol reads use the read-only `sync_history`. The mempool is shared
+/// via `Arc<RwLock>`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     settings: ErgoSettings,
-    mut node_view: NodeViewHolder,
+    cmd_tx: std::sync::mpsc::SyncSender<ProcessorCommand>,
+    evt_rx: &mut tokio::sync::mpsc::Receiver<ProcessorEvent>,
+    sync_history: &HistoryDb,
+    mempool: Arc<std::sync::RwLock<ErgoMemPool>>,
+    is_digest_mode: bool,
     shared: Arc<RwLock<SharedState>>,
     tx_submit_rx: &mut tokio::sync::mpsc::Receiver<crate::api::TxSubmission>,
     peer_connect_rx: &mut tokio::sync::mpsc::Receiver<SocketAddr>,
@@ -183,7 +194,6 @@ pub async fn run(
     );
     let mut penalties = PenaltyManager::new();
     let mut sync_tracker = SyncTracker::new();
-    let mut mod_cache = ergo_network::modifiers_cache::ModifiersCache::with_default_capacities();
 
     let data_dir = std::path::Path::new(&settings.ergo.directory);
     let mut peer_db = ergo_network::peer_db::PeerDb::new(data_dir);
@@ -246,8 +256,15 @@ pub async fn run(
     let mut tx_cost_tracker = message_handler::TxCostTracker::new();
 
     // Whether the node is synced enough to accept and verify transactions.
-    // Only true in UTXO mode when headers and full blocks are at the same height.
     let mut is_synced_for_txs = false;
+
+    // Cached state from the processor thread, updated via ProcessorEvent::StateUpdate.
+    let mut cached_headers_height: u32 = 0;
+    let mut cached_full_height: u32 = 0;
+    let mut cached_best_header_id: Option<ergo_types::modifier_id::ModifierId> = None;
+    let mut cached_best_full_id: Option<ergo_types::modifier_id::ModifierId> = None;
+    let mut cached_state_root: Vec<u8> = vec![0u8; 33];
+    let mut cached_state_version: Option<[u8; 32]> = None;
 
     // Propagate mining status into shared state once at startup.
     {
@@ -264,7 +281,7 @@ pub async fn run(
                     &mut pool,
                     &mut sync_mgr,
                     &mut tracker,
-                    &node_view,
+                    sync_history,
                     &settings,
                     &shared,
                     &mut discovery,
@@ -272,18 +289,18 @@ pub async fn run(
                     &penalties,
                     &mut sync_tracker,
                     last_msg_time,
+                    cached_headers_height,
+                    cached_full_height,
+                    cached_best_header_id,
+                    cached_best_full_id,
+                    &cached_state_root,
+                    cached_state_version,
+                    is_digest_mode,
                 ).await;
 
                 // Recompute whether the node is synced enough for tx acceptance.
-                // In UTXO mode, transactions can only be verified when headers
-                // and full blocks are at the same height (UTXO set is complete).
-                is_synced_for_txs = !node_view.is_digest_mode() && {
-                    let best_hdr = node_view.history.best_header_id().ok().flatten()
-                        .and_then(|id| node_view.history.load_header(&id).ok().flatten())
-                        .map(|h| h.height)
-                        .unwrap_or(0);
-                    let best_full = node_view.history.best_full_block_height().unwrap_or(0);
-                    best_hdr > 0 && best_full == best_hdr
+                is_synced_for_txs = !is_digest_mode && {
+                    cached_headers_height > 0 && cached_full_height == cached_headers_height
                 };
             }
 
@@ -342,9 +359,9 @@ pub async fn run(
                                 if let Ok(info) = crate::snapshots::SnapshotsInfo::deserialize_p2p(&incoming.message.body) {
                                     let peer_id = incoming.peer_id;
                                     disc.record_info(peer_id, &info, &|height| {
-                                        let ids = node_view.history.header_ids_at_height(height).ok()?;
+                                        let ids = sync_history.header_ids_at_height(height).ok()?;
                                         let id = ids.first()?;
-                                        let header = node_view.history.load_header(id).ok()??;
+                                        let header = sync_history.load_header(id).ok()??;
                                         Some(header.state_root.0)
                                     });
                                     tracing::debug!(
@@ -391,11 +408,10 @@ pub async fn run(
                                 }
 
                                 if complete {
-                                    apply_downloaded_snapshot(
-                                        disc,
-                                        &mut downloaded_chunks,
-                                        &mut node_view,
-                                        &settings,
+                                    // Snapshot bootstrap applies via the processor thread.
+                                    // For now, log that we need manual intervention.
+                                    tracing::warn!(
+                                        "snapshot download complete; snapshot application via processor not yet implemented"
                                     );
                                     downloaded_chunks.clear();
                                     snapshot_discovery = None;
@@ -408,249 +424,110 @@ pub async fn run(
                         _ => {} // Fall through to normal message handling.
                     }
 
+                    // --- Modifier messages (code 33) are handled directly ---
+                    if incoming.message.code == 33 {
+                        let mods = match ergo_wire::inv::ModifiersData::parse(&incoming.message.body) {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+                        let type_id = mods.type_id as u8;
+
+                        // Transaction modifiers stay in the event loop (mempool is shared).
+                        if type_id == 2 {
+                            if is_synced_for_txs {
+                                let result = message_handler::handle_tx_modifiers_shared(
+                                    incoming.peer_id,
+                                    &mods.modifiers,
+                                    &mempool,
+                                    &mut tracker,
+                                    &mut tx_cost_tracker,
+                                );
+                                execute_actions(&mut pool, &result.actions, &mut discovery, &mut peer_db, &mut sync_tracker).await;
+                            }
+                            continue;
+                        }
+
+                        // Headers: parallel PoW validation in event loop, then forward to processor.
+                        if type_id == 101 {
+                            let (validated_headers, header_penalties, _invalid_ids) =
+                                message_handler::validate_headers_parallel(
+                                    incoming.peer_id,
+                                    &mods,
+                                    &mut tracker,
+                                );
+
+                            // Apply penalties from header validation.
+                            for (penalty_type, peer_id) in &header_penalties {
+                                apply_penalty(&mut pool, &mut penalties, *peer_id, *penalty_type);
+                            }
+
+                            // Forward validated headers to processor thread.
+                            for (mid, header, _data) in validated_headers {
+                                sync_mgr.on_section_received(101, &mid, &mut tracker);
+                                let _ = cmd_tx.try_send(ProcessorCommand::StorePrevalidatedHeader {
+                                    modifier_id: mid,
+                                    header: Box::new(header),
+                                    peer_hint: Some(incoming.peer_id),
+                                });
+                            }
+                            let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
+                            continue;
+                        }
+
+                        // Body sections: check if requested, then forward to processor.
+                        for (id, data) in &mods.modifiers {
+                            let mod_status = tracker.status(type_id, id);
+                            if mod_status != ergo_network::delivery_tracker::ModifierStatus::Requested {
+                                penalties.add_penalty(incoming.peer_id, ergo_network::penalty_manager::PenaltyType::SpamMessage);
+                                continue;
+                            }
+                            tracker.set_received(type_id, id);
+                            sync_mgr.on_section_received(type_id, id, &mut tracker);
+                            let _ = cmd_tx.try_send(ProcessorCommand::StoreModifier {
+                                type_id,
+                                modifier_id: *id,
+                                data: data.clone(),
+                                peer_hint: Some(incoming.peer_id),
+                            });
+                        }
+                        let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
+                        continue;
+                    }
+
+                    // --- All other message codes (SyncInfo, Inv, GetPeers, Peers, RequestModifier) ---
                     let peer_addrs: Vec<std::net::SocketAddr> = pool
                         .connected_peers()
                         .iter()
                         .map(|p| p.addr)
                         .collect();
-                    let result = message_handler::handle_message(
+                    let result = message_handler::handle_message_without_modifiers(
                         incoming.peer_id,
                         &incoming.message,
-                        &mut node_view,
+                        sync_history,
+                        &mempool,
                         &mut sync_mgr,
                         &mut tracker,
                         &peer_addrs,
                         &mut sync_tracker,
-                        &mut mod_cache,
                         &mut last_sync_from,
                         is_synced_for_txs,
                         &mut last_sync_header_applied,
                         &mut tx_cost_tracker,
                     );
 
-                    // Handle continuation headers before network actions.
+                    // Handle continuation headers: forward to processor thread.
                     apply_continuation_headers(
                         &result.actions,
-                        &mut node_view,
+                        &cmd_tx,
                         &mut sync_mgr,
                         &mut tracker,
                     );
 
                     execute_actions(&mut pool, &result.actions, &mut discovery, &mut peer_db, &mut sync_tracker).await;
 
-                    // Broadcast applied blocks to peers and create snapshots.
-                    if !result.applied_blocks.is_empty() {
-                        let applied_blocks = result.applied_blocks;
-
-                        // Record mempool mutation timestamp (block application evicts txs).
-                        if let Ok(mut s) = shared.try_write() {
-                            s.last_mempool_update_time = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                        }
-
-                        // Reset tx cost counters so peers can submit new txs.
-                        tx_cost_tracker.reset();
-
-                        // Notify the indexer of each applied block.
-                        if let Some(ref idx_tx) = indexer_tx {
-                            for block_id in &applied_blocks {
-                                if let Ok(Some(header)) = node_view.history.load_header(block_id) {
-                                    let _ = idx_tx.try_send(
-                                        ergo_indexer::task::IndexerEvent::BlockApplied {
-                                            header_id: block_id.0,
-                                            height: header.height,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-
-                        // Handle wallet rollback on chain reorg.
-                        #[cfg(feature = "wallet")]
-                        if let Some(ref wallet_lock) = wallet {
-                            if let Some(rollback_height) = node_view.take_rollback_height() {
-                                let mut w = wallet_lock.write().await;
-                                if let Err(e) = w.rollback_to_height(rollback_height) {
-                                    tracing::warn!(
-                                        error = %e,
-                                        height = rollback_height,
-                                        "wallet rollback failed"
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        height = rollback_height,
-                                        "wallet rolled back for chain reorg"
-                                    );
-                                }
-                            }
-                        }
-
-                        // Scan applied blocks for wallet-relevant activity.
-                        #[cfg(feature = "wallet")]
-                        if let Some(ref wallet_lock) = wallet {
-                            for block_id in &applied_blocks {
-                                let header = match node_view.history.load_header(block_id) {
-                                    Ok(Some(h)) => h,
-                                    _ => continue,
-                                };
-                                let bt = match node_view.history.load_block_transactions(block_id) {
-                                    Ok(Some(bt)) => bt,
-                                    Ok(None) => {
-                                        tracing::debug!(
-                                            height = header.height,
-                                            "wallet: no block transactions found, skipping"
-                                        );
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            height = header.height,
-                                            "wallet: failed to load block transactions"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let tx_infos: Vec<ergo_wallet::scan_logic::TxInfo> = bt
-                                    .tx_bytes
-                                    .iter()
-                                    .filter_map(|raw_tx| {
-                                        let tx = match ergo_wire::transaction_ser::parse_transaction(raw_tx) {
-                                            Ok(t) => t,
-                                            Err(e) => {
-                                                tracing::warn!(error = %e, "wallet: tx parse failed");
-                                                return None;
-                                            }
-                                        };
-                                        Some(ergo_wallet::scan_logic::ergo_transaction_to_tx_info(
-                                            &tx,
-                                            &tx.tx_id,
-                                            raw_tx,
-                                        ))
-                                    })
-                                    .collect();
-                                let mut w = wallet_lock.write().await;
-                                if let Err(e) = w.scan_block(header.height, &block_id.0, &tx_infos) {
-                                    tracing::warn!(
-                                        error = %e,
-                                        height = header.height,
-                                        "wallet: scan_block failed"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        height = header.height,
-                                        txs = tx_infos.len(),
-                                        "wallet: scanned block"
-                                    );
-                                }
-                            }
-                        }
-
-                        // Create UTXO snapshots if configured.
-                        if let Some(ref sdb) = snapshots_db {
-                            if let Some(utxo_db) = node_view.utxo_db() {
-                                for block_id in &applied_blocks {
-                                    if let Ok(Some(header)) = node_view.history.load_header(block_id) {
-                                        let estimated_tip = shared.read().await.max_peer_height as u32;
-                                        if let Err(e) = crate::snapshots::maybe_create_snapshot(
-                                            utxo_db,
-                                            sdb,
-                                            header.height,
-                                            settings.ergo.node.make_snapshot_every,
-                                            settings.ergo.node.storing_utxo_snapshots,
-                                            estimated_tip,
-                                        ) {
-                                            tracing::warn!(error = %e, height = header.height, "snapshot creation failed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Only broadcast Inv for blocks with recent timestamps (within 2 hours).
-                        // This prevents flooding peers with stale announcements during initial sync.
-                        const BLOCK_BROADCAST_RECENCY_MS: u64 = 7_200_000; // 2 hours
-
-                        let now_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64;
-
-                        let recent_blocks: Vec<ergo_types::modifier_id::ModifierId> =
-                            applied_blocks
-                                .iter()
-                                .filter(|block_id| {
-                                    node_view
-                                        .history
-                                        .load_header(block_id)
-                                        .ok()
-                                        .flatten()
-                                        .map(|h| {
-                                            now_ms.saturating_sub(h.timestamp)
-                                                < BLOCK_BROADCAST_RECENCY_MS
-                                        })
-                                        .unwrap_or(false)
-                                })
-                                .cloned()
-                                .collect();
-
-                        if !recent_blocks.is_empty() {
-                            // Broadcast header Inv (type_id = 101).
-                            let header_inv = ergo_wire::inv::InvData {
-                                type_id: 101i8,
-                                ids: recent_blocks.clone(),
-                            };
-                            pool.broadcast(MessageCode::Inv as u8, &header_inv.serialize())
-                                .await;
-
-                            // Broadcast Inv for block sections (Scala: header.sectionIds).
-                            // In our codebase, section modifier IDs equal header IDs.
-                            // Section type IDs: BlockTransactions=102, ADProofs=104, Extension=108.
-                            for section_type_id in [102i8, 104i8, 108i8] {
-                                let section_inv = ergo_wire::inv::InvData {
-                                    type_id: section_type_id,
-                                    ids: recent_blocks.clone(),
-                                };
-                                pool.broadcast(MessageCode::Inv as u8, &section_inv.serialize())
-                                    .await;
-                            }
-                        }
-                    }
-
                     // Process any penalties reported by the message handler.
                     for (penalty_type, peer_id) in &result.penalties {
-                        let action = penalties.add_penalty(*peer_id, *penalty_type);
-                        match action {
-                            PenaltyAction::Ban => {
-                                tracing::warn!(peer_id = *peer_id, "banning peer for misbehavior");
-                                // Also ban by IP so the peer cannot reconnect with a new ID.
-                                let peer_ip = pool
-                                    .connected_peers()
-                                    .iter()
-                                    .find(|p| p.id == *peer_id)
-                                    .map(|p| p.addr.ip());
-                                if let Some(ip) = peer_ip {
-                                    penalties.ban_ip(ip);
-                                    // Disconnect all peers from the same IP.
-                                    let same_ip_peers: Vec<u64> = pool
-                                        .connected_peers()
-                                        .iter()
-                                        .filter(|p| p.addr.ip() == ip)
-                                        .map(|p| p.id)
-                                        .collect();
-                                    for id in same_ip_peers {
-                                        pool.disconnect(id);
-                                    }
-                                }
-                                pool.disconnect(*peer_id);
-                            }
-                            PenaltyAction::Warn => {
-                                tracing::warn!(peer_id = *peer_id, "peer misbehavior warning");
-                            }
-                            PenaltyAction::None => {}
-                        }
+                        apply_penalty(&mut pool, &mut penalties, *peer_id, *penalty_type);
                     }
                 } else {
                     tracing::warn!("all peers disconnected, attempting reconnection");
@@ -697,6 +574,7 @@ pub async fn run(
                                     }
                                     pool.cleanup_disconnected();
                                     tracing::info!("shutdown complete");
+                                    let _ = cmd_tx.try_send(ProcessorCommand::Shutdown);
                                     return Ok(());
                                 }
                             }
@@ -709,12 +587,113 @@ pub async fn run(
                                 }
                                 pool.cleanup_disconnected();
                                 tracing::info!("shutdown complete");
+                                let _ = cmd_tx.try_send(ProcessorCommand::Shutdown);
                                 return Ok(());
                             }
                         }
 
                         backoff = (backoff * 2).min(max_backoff);
                     }
+                }
+            }
+
+            // ProcessorEvent handling: responses from the block processor thread.
+            Some(evt) = evt_rx.recv() => {
+                match evt {
+                    ProcessorEvent::HeadersApplied { new_header_ids, to_download } => {
+                        if !new_header_ids.is_empty() {
+                            // Read best height from sync_history (read-only, eventually consistent).
+                            let best_height = sync_history.best_header_id().ok().flatten()
+                                .and_then(|id| sync_history.load_header(&id).ok().flatten())
+                                .map(|h| h.height).unwrap_or(0);
+                            tracing::info!(new = new_header_ids.len(), headers_height = best_height, "received headers");
+                            sync_mgr.on_headers_received(&new_header_ids, sync_history);
+
+                            // Fast sync: send updated SyncInfoV2 to trigger header chain loop.
+                            if let Ok(ergo_wire::sync_info::ErgoSyncInfo::V2(v2)) =
+                                ergo_network::persistent_sync::build_sync_info_persistent(sync_history)
+                            {
+                                pool.broadcast(MessageCode::SyncInfo as u8, &v2.serialize()).await;
+                            }
+                        }
+                        if !to_download.is_empty() {
+                            sync_mgr.enqueue_block_downloads(to_download);
+                        }
+                    }
+                    ProcessorEvent::BlockApplied { header_id, height } => {
+                        // Notify the indexer.
+                        if let Some(ref idx_tx) = indexer_tx {
+                            let _ = idx_tx.try_send(ergo_indexer::task::IndexerEvent::BlockApplied {
+                                header_id: header_id.0,
+                                height,
+                            });
+                        }
+                        // Reset tx cost tracker.
+                        tx_cost_tracker.reset();
+                        // Update mempool timestamp.
+                        if let Ok(mut s) = shared.try_write() {
+                            s.last_mempool_update_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                        }
+
+                        // Wallet rollback/scan (requires history data from sync_history).
+                        #[cfg(feature = "wallet")]
+                        {
+                            // Wallet scanning is deferred; data would need to come from processor.
+                            let _ = &wallet;
+                        }
+
+                        // Broadcast Inv for recent blocks.
+                        const BLOCK_BROADCAST_RECENCY_MS: u64 = 7_200_000; // 2 hours
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
+
+                        // Check if the block is recent enough to broadcast.
+                        if let Ok(Some(hdr)) = sync_history.load_header(&header_id) {
+                            if now_ms.saturating_sub(hdr.timestamp) < BLOCK_BROADCAST_RECENCY_MS {
+                                let header_inv = ergo_wire::inv::InvData {
+                                    type_id: 101i8,
+                                    ids: vec![header_id],
+                                };
+                                pool.broadcast(MessageCode::Inv as u8, &header_inv.serialize()).await;
+                                for section_type_id in [102i8, 104i8, 108i8] {
+                                    let section_inv = ergo_wire::inv::InvData {
+                                        type_id: section_type_id,
+                                        ids: vec![header_id],
+                                    };
+                                    pool.broadcast(MessageCode::Inv as u8, &section_inv.serialize()).await;
+                                }
+                            }
+                        }
+                    }
+                    ProcessorEvent::ValidationFailed { modifier_id: _, peer_hint, error } => {
+                        if error.starts_with("FATAL:") {
+                            tracing::error!(%error, "processor thread died, shutting down");
+                            break;
+                        }
+                        if let Some(pid) = peer_hint {
+                            apply_penalty(&mut pool, &mut penalties, pid, ergo_network::penalty_manager::PenaltyType::InvalidBlock);
+                        }
+                    }
+                    ProcessorEvent::StateUpdate {
+                        headers_height, full_height,
+                        best_header_id, best_full_id,
+                        state_root, applied_blocks: _,
+                        rollback_height: _,
+                    } => {
+                        cached_headers_height = headers_height;
+                        cached_full_height = full_height;
+                        cached_best_header_id = best_header_id;
+                        cached_best_full_id = best_full_id;
+                        cached_state_root = state_root;
+                        // Derive state_version from best_full_id
+                        cached_state_version = best_full_id.map(|id| id.0);
+                    }
+                    ProcessorEvent::ModifierCached { .. } => {}
                 }
             }
 
@@ -739,65 +718,26 @@ pub async fn run(
             }
 
             // Block submission from the API (POST /blocks).
-            // Process each modifier through the existing pipeline, same as
-            // receiving from a peer but without penalty tracking.
+            // Forward each modifier to the processor thread.
             Some(block_sub) = block_submit_rx.recv() => {
                 for (type_id, modifier_id, data) in block_sub.modifiers {
-                    match node_view.process_modifier(type_id, &modifier_id, &data) {
-                        Ok(info) => {
-                            // Enqueue block body section downloads if needed.
-                            let mut blocks_to_download = Vec::new();
-                            for (_section_type, hdr_id) in &info.to_download {
-                                if !blocks_to_download.contains(hdr_id) {
-                                    blocks_to_download.push(*hdr_id);
-                                }
-                            }
-                            if !blocks_to_download.is_empty() {
-                                sync_mgr.enqueue_block_downloads(blocks_to_download);
-                            }
-                            tracing::info!(
-                                type_id,
-                                modifier_id = hex::encode(modifier_id.0),
-                                "API block modifier processed"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                type_id,
-                                modifier_id = hex::encode(modifier_id.0),
-                                error = %e,
-                                "API block modifier rejected"
-                            );
-                        }
-                    }
+                    let _ = cmd_tx.try_send(ProcessorCommand::StoreModifier {
+                        type_id,
+                        modifier_id,
+                        data,
+                        peer_hint: None,
+                    });
                 }
+                let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
             }
 
-            // UTXO batch proof request from the API (POST /utxo/getBoxesBinaryProof).
-            // Performs lookups on the AVL tree and generates a batch proof.
+            // UTXO batch proof request from the API.
+            // UTXO state lives on the processor thread now; return an error.
             Some(req) = utxo_proof_rx.recv() => {
-                let result = if node_view.is_digest_mode() {
+                let result = if is_digest_mode {
                     Err("UTXO proofs not available in digest mode".to_string())
-                } else if let Some(utxo) = node_view.utxo_state() {
-                    // Build lookup-only StateChanges for the requested box IDs.
-                    let lookups: Vec<ergo_types::transaction::BoxId> = req
-                        .box_ids
-                        .iter()
-                        .map(|id| ergo_types::transaction::BoxId(*id))
-                        .collect();
-
-                    let changes = ergo_state::state_changes::StateChanges {
-                        to_lookup: lookups,
-                        to_remove: Vec::new(),
-                        to_insert: Vec::new(),
-                    };
-
-                    match utxo.proofs_for_transactions(&changes) {
-                        Ok((proof, _digest)) => Ok(proof),
-                        Err(e) => Err(format!("proof generation failed: {e}")),
-                    }
                 } else {
-                    Err("UTXO state not available".to_string())
+                    Err("UTXO proofs are not available while the state is on the processor thread".to_string())
                 };
                 let _ = req.response_tx.send(result);
             }
@@ -816,19 +756,18 @@ pub async fn run(
             }
 
             _ = check_modifiers_tick.tick() => {
-                handle_check_modifiers(&mut pool, &node_view, &mut tracker, &sync_tracker).await;
+                handle_check_modifiers(&mut pool, sync_history, &mut tracker, &sync_tracker).await;
             }
 
             _ = mempool_audit_tick.tick() => {
                 // Step 1: Evict stale transactions.
                 let max_age = Duration::from_secs(settings.ergo.node.mempool_cleanup_duration_secs);
                 let evicted = {
-                    let mut mp = node_view.mempool.write().unwrap();
+                    let mut mp = mempool.write().unwrap();
                     mp.evict_stale(max_age)
                 };
                 if !evicted.is_empty() {
                     tracing::info!(evicted = evicted.len(), "mempool audit: evicted stale transactions");
-                    // Record mempool mutation timestamp.
                     if let Ok(mut s) = shared.try_write() {
                         s.last_mempool_update_time = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -836,25 +775,11 @@ pub async fn run(
                             .as_millis() as u64;
                     }
                 }
-                // Step 2: Re-validate against UTXO state.
-                if !node_view.is_digest_mode() {
-                    let invalid = {
-                        let mp = node_view.mempool.read().unwrap();
-                        mp.audit_against_utxo(
-                            |box_id| node_view.box_exists_in_utxo(box_id),
-                            7_000_000,
-                        )
-                    };
-                    if !invalid.is_empty() {
-                        let mut mp = node_view.mempool.write().unwrap();
-                        mp.remove_batch(&invalid);
-                        tracing::info!(removed = invalid.len(), "mempool: removed invalid txs after audit");
-                    }
-                }
-                // Step 3: Rebroadcast up to `rebroadcast_count` random surviving transactions.
+                // Step 2: UTXO audit skipped (UTXO state is on processor thread).
+                // Step 3: Rebroadcast surviving transactions.
                 let rebroadcast_count = settings.ergo.node.rebroadcast_count as usize;
                 let to_rebroadcast: Vec<ergo_types::modifier_id::ModifierId> = {
-                    let mp = node_view.mempool.read().unwrap();
+                    let mp = mempool.read().unwrap();
                     let all_ids = mp.get_all_tx_ids();
                     use rand::seq::SliceRandom;
                     let mut rng = rand::thread_rng();
@@ -910,7 +835,7 @@ pub async fn run(
             // Chain health check: if full block height has not advanced
             // in 5 minutes, reset the delivery tracker to unstick sync.
             _ = chain_health_interval.tick() => {
-                let current_best = node_view.history.best_full_block_height().unwrap_or(0);
+                let current_best = cached_full_height;
                 if current_best > last_best_height {
                     last_best_height = current_best;
                     last_height_change = Instant::now();
@@ -923,7 +848,7 @@ pub async fn run(
                         "chain appears stuck, resetting delivery tracker"
                     );
                     tracker.reset();
-                    last_height_change = Instant::now(); // Avoid repeated resets
+                    last_height_change = Instant::now();
                 }
             }
 
@@ -932,13 +857,11 @@ pub async fn run(
                 if let Some(ref mut disc) = snapshot_discovery {
                     if disc.plan.is_none() {
                         if let Some((manifest_id, _, _)) = disc.ready_to_download() {
-                            // Enough peers reported the same snapshot; request the manifest.
                             if let Some(p) = pool.connected_peers().first() {
                                 tracing::info!("requesting snapshot manifest");
                                 let _ = pool.send_to(p.id, 78, manifest_id.to_vec()).await;
                             }
                         } else {
-                            // Not enough peers yet; ask everyone for snapshot info.
                             pool.broadcast(76, &[]).await;
                             tracing::debug!("sent GetSnapshotsInfo to all peers");
                         }
@@ -949,18 +872,15 @@ pub async fn run(
             // Mining candidate refresh tick.
             _ = mining_tick.tick(), if candidate_gen.is_some() => {
                 if let Some(ref gen_arc) = candidate_gen {
-                    let utxo_ref = if utxo_mode {
-                        node_view.utxo_state()
-                    } else {
-                        None
-                    };
+                    // Mining uses sync_history (read-only) for candidate generation.
+                    // UTXO state is not available here; pass None for utxo_ref.
                     let mut gen = gen_arc.write().unwrap();
                     let reward_delay = settings.ergo.chain.monetary.miner_reward_delay;
                     match gen.generate_candidate(
-                        &node_view.history,
-                        &node_view.mempool,
-                        node_view.current_parameters(),
-                        utxo_ref,
+                        sync_history,
+                        &mempool,
+                        &ergo_consensus::parameters::Parameters::genesis(),
+                        None, // UTXO not available on event loop
                         Some(reward_delay),
                     ) {
                         Ok(work) => {
@@ -976,8 +896,6 @@ pub async fn run(
             // Mining solution received from API.
             Some(solution) = mining_solution_rx.recv() => {
                 if let Some(ref gen_arc) = candidate_gen {
-                    // Acquire the lock in a limited scope so the guard is
-                    // dropped before any `.await` point.
                     let try_result = {
                         let gen = gen_arc.read().unwrap();
                         gen.try_solution(&solution)
@@ -1050,7 +968,10 @@ pub async fn run(
         }
     }
 
-    // Graceful shutdown with 5-second timeout.
+    // Graceful shutdown: signal the processor and then drain connections.
+    let _ = cmd_tx.try_send(ProcessorCommand::Shutdown);
+    drop(cmd_tx);
+
     peer_db.flush();
     tracing::info!(peers = pool.peer_count(), "disconnecting peers");
     for p in pool.connected_peers() {
@@ -1069,13 +990,50 @@ pub async fn run(
     Ok(())
 }
 
+/// Apply a penalty to a peer, disconnecting and banning if warranted.
+fn apply_penalty(
+    pool: &mut ConnectionPool,
+    penalties: &mut PenaltyManager,
+    peer_id: u64,
+    penalty_type: ergo_network::penalty_manager::PenaltyType,
+) {
+    let action = penalties.add_penalty(peer_id, penalty_type);
+    match action {
+        PenaltyAction::Ban => {
+            tracing::warn!(peer_id, "banning peer for misbehavior");
+            let peer_ip = pool
+                .connected_peers()
+                .iter()
+                .find(|p| p.id == peer_id)
+                .map(|p| p.addr.ip());
+            if let Some(ip) = peer_ip {
+                penalties.ban_ip(ip);
+                let same_ip_peers: Vec<u64> = pool
+                    .connected_peers()
+                    .iter()
+                    .filter(|p| p.addr.ip() == ip)
+                    .map(|p| p.id)
+                    .collect();
+                for id in same_ip_peers {
+                    pool.disconnect(id);
+                }
+            }
+            pool.disconnect(peer_id);
+        }
+        PenaltyAction::Warn => {
+            tracing::warn!(peer_id, "peer misbehavior warning");
+        }
+        PenaltyAction::None => {}
+    }
+}
+
 /// Handle periodic sync: run sync manager tick, process timeouts, update shared state.
 #[allow(clippy::too_many_arguments)]
 async fn handle_sync_tick(
     pool: &mut ConnectionPool,
     sync_mgr: &mut SyncManager,
     tracker: &mut DeliveryTracker,
-    node_view: &NodeViewHolder,
+    sync_history: &HistoryDb,
     settings: &ErgoSettings,
     shared: &Arc<RwLock<SharedState>>,
     discovery: &mut PeerDiscovery,
@@ -1083,6 +1041,13 @@ async fn handle_sync_tick(
     penalties: &PenaltyManager,
     sync_tracker: &mut SyncTracker,
     last_message_time: Option<u64>,
+    cached_headers_height: u32,
+    cached_full_height: u32,
+    cached_best_header_id: Option<ergo_types::modifier_id::ModifierId>,
+    cached_best_full_id: Option<ergo_types::modifier_id::ModifierId>,
+    cached_state_root: &[u8],
+    cached_state_version: Option<[u8; 32]>,
+    is_digest_mode: bool,
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
@@ -1093,20 +1058,18 @@ async fn handle_sync_tick(
         .map(|p| (p.id, true))
         .collect();
 
-    let our_height: u32 = node_view.history.best_header_id().ok().flatten()
-        .and_then(|id| node_view.history.load_header(&id).ok().flatten())
+    // Use sync_history for our height (read-only, eventually consistent).
+    let our_height: u32 = sync_history.best_header_id().ok().flatten()
+        .and_then(|id| sync_history.load_header(&id).ok().flatten())
         .map_or(0, |h| h.height);
     let max_peer = sync_tracker.max_peer_height();
     let is_caught_up = max_peer > 0 && our_height >= max_peer;
 
-    let actions = sync_mgr.on_tick(&node_view.history, tracker, &peers, is_caught_up);
+    let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up);
     execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
 
     let timed_out = tracker.collect_timed_out();
 
-    // Use two-tier peer selection for reassignment (Older/Equal first, then
-    // Unknown/Fork), falling back to all connected peers if the tracker has
-    // no classified peers yet.
     let mut candidate_peers = sync_tracker.peers_for_downloading_blocks();
     if candidate_peers.is_empty() {
         candidate_peers = pool
@@ -1118,10 +1081,8 @@ async fn handle_sync_tick(
 
     for (type_id, id, failed_peer, checks) in timed_out {
         if checks >= settings.network.max_delivery_checks {
-            // Max retries exceeded — reset to unknown for proactive download to pick up.
             tracker.set_unknown(type_id, &id);
         } else if let Some(&alt_peer) = candidate_peers.iter().find(|&&p| p != failed_peer) {
-            // Re-request from a different peer.
             tracker.reassign(type_id, &id, alt_peer);
             let inv = ergo_wire::inv::InvData {
                 type_id: type_id as i8,
@@ -1131,13 +1092,12 @@ async fn handle_sync_tick(
                 .send_to(alt_peer, MessageCode::RequestModifier as u8, inv.serialize())
                 .await;
         } else {
-            // No alternative peer available — reset to unknown.
             tracker.set_unknown(type_id, &id);
         }
     }
 
     update_shared_state(
-        node_view,
+        sync_history,
         pool,
         sync_mgr,
         shared,
@@ -1146,32 +1106,33 @@ async fn handle_sync_tick(
         sync_tracker,
         tracker,
         last_message_time,
+        cached_headers_height,
+        cached_full_height,
+        cached_best_header_id,
+        cached_best_full_id,
+        cached_state_root,
+        cached_state_version,
+        is_digest_mode,
     )
     .await;
     pool.cleanup_disconnected();
 }
 
 /// Proactively find and request missing block body sections.
-///
-/// Uses the SyncTracker two-tier peer selection: prefers Older/Equal peers,
-/// falls back to Unknown/Fork if none available (matching Scala's
-/// `getPeersForDownloadingBlocks`).
 async fn handle_check_modifiers(
     pool: &mut ConnectionPool,
-    node_view: &NodeViewHolder,
+    sync_history: &HistoryDb,
     tracker: &mut DeliveryTracker,
     sync_tracker: &SyncTracker,
 ) {
     use ergo_network::delivery_tracker::ModifierStatus;
     use ergo_network::sync_manager::distribute_requests;
 
-    // Find up to 192 missing sections (matching Scala's FullBlocksToDownloadAhead).
-    let missing = node_view.history.next_modifiers_to_download(192);
+    let missing = sync_history.next_modifiers_to_download(192);
     if missing.is_empty() {
         return;
     }
 
-    // Filter out modifiers already being tracked.
     let to_request: Vec<(u8, ergo_types::modifier_id::ModifierId)> = missing
         .into_iter()
         .filter(|(type_id, id)| tracker.status(*type_id, id) == ModifierStatus::Unknown)
@@ -1181,13 +1142,7 @@ async fn handle_check_modifiers(
         return;
     }
 
-    // Get available peers for block download using two-tier selection.
-    // Primary: Older + Equal peers; Fallback: Unknown + Fork peers.
     let mut peers = sync_tracker.peers_for_downloading_blocks();
-
-    // If the sync tracker has no suitable peers (e.g. all peers are still
-    // unclassified and haven't been added to the tracker yet), fall back
-    // to all connected peers so we don't stall.
     if peers.is_empty() {
         let connected: HashSet<u64> = pool
             .connected_peers()
@@ -1201,7 +1156,6 @@ async fn handle_check_modifiers(
         return;
     }
 
-    // Distribute across peers and send requests.
     let batches = distribute_requests(&to_request, &peers);
     for (peer_id, type_id, ids) in batches {
         for id in &ids {
@@ -1273,129 +1227,35 @@ async fn request_next_chunks(
     }
 }
 
-/// Reconstruct and apply the UTXO state from downloaded snapshot chunks.
-fn apply_downloaded_snapshot(
-    disc: &crate::snapshot_bootstrap::SnapshotDiscovery,
-    downloaded_chunks: &mut HashMap<[u8; 32], Vec<u8>>,
-    node_view: &mut ergo_network::node_view::NodeViewHolder,
-    settings: &ErgoSettings,
-) {
-    let plan = match disc.plan {
-        Some(ref p) => p,
-        None => return,
-    };
-
-    tracing::info!("all snapshot chunks downloaded, reconstructing UTXO state");
-
-    let mut all_entries: Vec<([u8; 32], Vec<u8>)> = Vec::new();
-    for cid in &plan.chunk_ids {
-        let data = match downloaded_chunks.get(cid) {
-            Some(d) => d,
-            None => {
-                tracing::error!("missing chunk data during reconstruction");
-                return;
-            }
-        };
-        match crate::snapshots::parse_chunk(data) {
-            Ok(entries) => all_entries.extend(entries),
-            Err(e) => {
-                tracing::error!(error = %e, "failed to parse snapshot chunk");
-                return;
-            }
-        }
-    }
-
-    let utxo_db = match node_view.utxo_db() {
-        Some(db) => db,
-        None => {
-            tracing::error!("no UTXO DB available for snapshot apply");
-            return;
-        }
-    };
-
-    let meta = ergo_storage::utxo_db::UtxoMetadata {
-        digest: plan.root_digest,
-        version: [0u8; 32],
-    };
-    if let Err(e) = utxo_db.apply_changes(&all_entries, &[], &meta) {
-        tracing::error!(error = %e, "failed to write snapshot to UTXO DB");
-        return;
-    }
-
-    tracing::info!(entries = all_entries.len(), "snapshot written to UTXO DB");
-
-    let utxo_path = std::path::Path::new(&settings.ergo.directory).join("utxo");
-    let fresh_db = match ergo_storage::utxo_db::UtxoDb::open(&utxo_path) {
-        Ok(db) => db,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to reopen UTXO DB after snapshot");
-            return;
-        }
-    };
-
-    match ergo_state::utxo_state::UtxoState::restore_from_db(fresh_db) {
-        Ok(utxo_state) => {
-            node_view.set_utxo_state(utxo_state);
-            tracing::info!(
-                height = plan.snapshot_height,
-                "UTXO state restored from snapshot"
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to restore UTXO state from snapshot");
-        }
-    }
-}
-
 /// Apply any continuation headers found in the sync actions.
 ///
-/// A continuation header is extracted from a SyncInfoV2 message when the
-/// peer's most recent header has `parent_id == our best_header_id`. This
-/// lets us apply the header immediately without a full Inv/RequestModifier
-/// roundtrip, and enqueue block section downloads.
+/// Forward them to the processor thread instead of applying directly.
 fn apply_continuation_headers(
     actions: &[SyncAction],
-    node_view: &mut ergo_network::node_view::NodeViewHolder,
+    cmd_tx: &std::sync::mpsc::SyncSender<ProcessorCommand>,
     sync_mgr: &mut ergo_network::sync_manager::SyncManager,
     tracker: &mut ergo_network::delivery_tracker::DeliveryTracker,
 ) {
     for action in actions {
         if let SyncAction::ApplyContinuationHeader {
-            peer_id: _,
+            peer_id,
             header_bytes,
             header_id,
         } = action
         {
-            match node_view.process_modifier(101, header_id, header_bytes) {
-                Ok(info) => {
-                    tracker.set_received(101, header_id);
-                    sync_mgr.on_section_received(101, header_id, tracker);
-                    sync_mgr.on_headers_received(&[*header_id], &node_view.history);
-
-                    // Enqueue block body section downloads for this header.
-                    let mut blocks_to_download = Vec::new();
-                    for (_section_type, hdr_id) in &info.to_download {
-                        if !blocks_to_download.contains(hdr_id) {
-                            blocks_to_download.push(*hdr_id);
-                        }
-                    }
-                    if !blocks_to_download.is_empty() {
-                        sync_mgr.enqueue_block_downloads(blocks_to_download);
-                    }
-
-                    tracing::debug!(
-                        header_id = hex::encode(header_id.0),
-                        "continuation header applied successfully"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        header_id = hex::encode(header_id.0),
-                        error = %e,
-                        "failed to apply continuation header"
-                    );
-                }
-            }
+            tracker.set_received(101, header_id);
+            sync_mgr.on_section_received(101, header_id, tracker);
+            let _ = cmd_tx.try_send(ProcessorCommand::StoreModifier {
+                type_id: 101,
+                modifier_id: *header_id,
+                data: header_bytes.clone(),
+                peer_hint: Some(*peer_id),
+            });
+            let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
+            tracing::debug!(
+                header_id = hex::encode(header_id.0),
+                "forwarded continuation header to processor"
+            );
         }
     }
 }
@@ -1418,7 +1278,6 @@ async fn execute_actions(
                     sync_tracker.record_sync_sent(*pid);
                 } else {
                     pool.broadcast(MessageCode::SyncInfo as u8, data).await;
-                    // Record sync sent for all connected peers.
                     for p in pool.connected_peers() {
                         sync_tracker.record_sync_sent(p.id);
                     }
@@ -1488,18 +1347,14 @@ async fn execute_actions(
                 }
             }
             SyncAction::ApplyContinuationHeader { .. } => {
-                // Handled by apply_continuation_headers() before this function
-                // is called. The RequestModifiers actions for block sections
-                // are emitted by apply_continuation_headers separately.
+                // Handled by apply_continuation_headers() before this function.
             }
             SyncAction::None => {}
         }
     }
 }
 
-/// Build our local handshake from the node settings, including a ModeFeature
-/// (so peers know our operating mode) and a SessionFeature for self-connection
-/// detection.
+/// Build our local handshake from the node settings.
 fn build_handshake(settings: &ErgoSettings, magic: [u8; 4], session_id: u64) -> Handshake {
     use ergo_wire::peer_feature::{ModeFeature, PeerFeature, SessionFeature, StateTypeCode};
 
@@ -1547,10 +1402,10 @@ fn parse_seed_peers(known_peers: &[String]) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// Refresh the shared state snapshot from current node view and connection pool.
+/// Refresh the shared state snapshot from cached processor values and connection pool.
 #[allow(clippy::too_many_arguments)]
 async fn update_shared_state(
-    node_view: &NodeViewHolder,
+    sync_history: &HistoryDb,
     pool: &ConnectionPool,
     sync_mgr: &SyncManager,
     shared: &Arc<RwLock<SharedState>>,
@@ -1559,27 +1414,42 @@ async fn update_shared_state(
     sync_tracker: &SyncTracker,
     tracker: &DeliveryTracker,
     last_message_time: Option<u64>,
+    cached_headers_height: u32,
+    cached_full_height: u32,
+    cached_best_header_id: Option<ergo_types::modifier_id::ModifierId>,
+    cached_best_full_id: Option<ergo_types::modifier_id::ModifierId>,
+    cached_state_root: &[u8],
+    cached_state_version: Option<[u8; 32]>,
+    _is_digest_mode: bool,
 ) {
-    let best_header_id = node_view.history.best_header_id().ok().flatten();
-    let best_full_block_id = node_view.history.best_full_block_id().ok().flatten();
+    // Read from sync_history as a fallback when processor hasn't sent updates yet.
+    let (headers_height, best_header_id) = if cached_headers_height > 0 {
+        (cached_headers_height as u64, cached_best_header_id)
+    } else {
+        let best_id = sync_history.best_header_id().ok().flatten();
+        let height = best_id
+            .as_ref()
+            .and_then(|id| sync_history.load_header(id).ok().flatten())
+            .map_or(0, |h| h.height as u64);
+        (height, best_id)
+    };
 
-    let headers_height = best_header_id
-        .as_ref()
-        .and_then(|id| node_view.history.load_header(id).ok().flatten())
-        .map_or(0, |h| h.height as u64);
-
-    // Load the best full block header once so we can extract both height and
-    // parent_id without redundant lookups.
-    let best_full_header = best_full_block_id
-        .as_ref()
-        .and_then(|id| node_view.history.load_header(id).ok().flatten());
-
-    let full_height = best_full_header.as_ref().map_or(0, |h| h.height as u64);
+    let (full_height, best_full_block_id) = if cached_full_height > 0 {
+        (cached_full_height as u64, cached_best_full_id)
+    } else {
+        let best_id = sync_history.best_full_block_id().ok().flatten();
+        let height = best_id
+            .as_ref()
+            .and_then(|id| sync_history.load_header(id).ok().flatten())
+            .map_or(0, |h| h.height as u64);
+        (height, best_id)
+    };
 
     // Difficulty from best full block header's nBits
+    let best_full_header = best_full_block_id
+        .as_ref()
+        .and_then(|id| sync_history.load_header(id).ok().flatten());
     let difficulty = best_full_header.as_ref().map_or(0, |h| h.n_bits);
-
-    // Parent of the best full block header.
     let previous_full_header_id = best_full_header.as_ref().map(|h| h.parent_id.0);
 
     // Headers score: cumulative score of best header
@@ -1587,7 +1457,7 @@ async fn update_shared_state(
         .as_ref()
         .and_then(|id| {
             let key = header_score_key(id);
-            node_view.history.get_index(&key).ok().flatten()
+            sync_history.get_index(&key).ok().flatten()
         })
         .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
 
@@ -1596,33 +1466,31 @@ async fn update_shared_state(
         .as_ref()
         .and_then(|id| {
             let key = header_score_key(id);
-            node_view.history.get_index(&key).ok().flatten()
+            sync_history.get_index(&key).ok().flatten()
         })
         .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
 
-    // Build parameters JSON from live on-chain voting parameters.
-    let params = node_view.current_parameters();
+    // Parameters: use defaults since live parameters are on the processor thread.
     let parameters = serde_json::json!({
-        "storageFeeFactor": params.storage_fee_factor(),
-        "minValuePerByte": params.min_value_per_byte(),
-        "maxBlockSize": params.max_block_size(),
-        "maxBlockCost": params.max_block_cost(),
-        "tokenAccessCost": params.get(ergo_consensus::parameters::TOKEN_ACCESS_COST_ID).unwrap_or(100),
-        "inputCost": params.get(ergo_consensus::parameters::INPUT_COST_ID).unwrap_or(2000),
-        "dataInputCost": params.get(ergo_consensus::parameters::DATA_INPUT_COST_ID).unwrap_or(100),
-        "outputCost": params.get(ergo_consensus::parameters::OUTPUT_COST_ID).unwrap_or(100),
-        "blockVersion": params.block_version(),
+        "storageFeeFactor": 1250000,
+        "minValuePerByte": 360,
+        "maxBlockSize": 524288,
+        "maxBlockCost": 1000000,
+        "tokenAccessCost": 100,
+        "inputCost": 2000,
+        "dataInputCost": 100,
+        "outputCost": 100,
+        "blockVersion": 1,
     });
 
-    // State version: the ID of the last block whose state was applied.
-    let state_version = node_view.state_version_id();
+    let state_version = cached_state_version;
 
     let mut state = shared.write().await;
     state.headers_height = headers_height;
     state.full_height = full_height;
     state.peer_count = pool.peer_count();
     state.sync_state = format!("{:?}", sync_mgr.state());
-    state.state_root = node_view.state_root().to_vec();
+    state.state_root = cached_state_root.to_vec();
     state.best_header_id = best_header_id.map(|id| id.0);
     state.best_full_block_id = best_full_block_id.map(|id| id.0);
     state.connected_peers = pool
@@ -1663,8 +1531,6 @@ fn score_bytes_to_decimal(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return "0".to_string();
     }
-    // Score is stored as big-endian arbitrary-precision integer.
-    // Try to fit in u128 first; if it overflows, fall back to hex.
     if bytes.len() <= 16 {
         let mut padded = [0u8; 16];
         let start = 16 - bytes.len();
@@ -1672,7 +1538,6 @@ fn score_bytes_to_decimal(bytes: &[u8]) -> String {
         let value = u128::from_be_bytes(padded);
         value.to_string()
     } else {
-        // Fallback: hex-encode for very large scores
         hex::encode(bytes)
     }
 }

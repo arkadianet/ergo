@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use ergo_network::block_processor::{self, ProcessorCommand, ProcessorEvent, ProcessorState};
 use ergo_network::mempool::ErgoMemPool;
 use ergo_network::node_view::NodeViewHolder;
 use ergo_network::peer_conn::PeerConnection;
@@ -83,17 +84,24 @@ async fn main() {
     );
 
     let db_path = Path::new(&settings.ergo.directory).join("history");
-    let history = HistoryDb::open(&db_path)
-        .unwrap_or_else(|e| panic!("cannot open database: {e}"));
 
-    let best_header = history.best_header_id().unwrap();
-    let best_block = history.best_full_block_id().unwrap();
-    tracing::info!(best_header = ?best_header, best_block = ?best_block, "database opened");
+    // Open a temporary read-write HistoryDb just to log the current state.
+    {
+        let history = HistoryDb::open(&db_path)
+            .unwrap_or_else(|e| panic!("cannot open database: {e}"));
+        let best_header = history.best_header_id().unwrap();
+        let best_block = history.best_full_block_id().unwrap();
+        tracing::info!(best_header = ?best_header, best_block = ?best_block, "database opened");
+        // history (rw) dropped here, freeing the primary lock
+    }
 
-    // Open a read-only DB handle for the HTTP API (RocksDB supports
-    // concurrent read-only readers alongside one read-write primary).
+    // Open a read-only DB handle for the HTTP API.
     let api_history = HistoryDb::open_read_only(&db_path)
         .unwrap_or_else(|e| panic!("cannot open API database: {e}"));
+
+    // Open a read-only DB handle for the event loop (sync protocol).
+    let sync_history = HistoryDb::open_read_only(&db_path)
+        .unwrap_or_else(|e| panic!("cannot open sync database: {e}"));
 
     let mempool = Arc::new(std::sync::RwLock::new(
         ErgoMemPool::with_min_fee(
@@ -101,66 +109,126 @@ async fn main() {
             settings.ergo.node.minimal_fee_amount,
         ),
     ));
-    let genesis_digest = settings.ergo.chain.genesis_state_digest();
-    let is_utxo_mode = settings.ergo.node.state_type == "utxo";
-    let mut node_view =
-        NodeViewHolder::with_recovery(history, mempool.clone(), !is_utxo_mode, genesis_digest);
 
-    // Set up UTXO persistence if in UTXO mode.
-    if is_utxo_mode {
-        let utxo_path = Path::new(&settings.ergo.directory).join("utxo");
-        match ergo_storage::utxo_db::UtxoDb::open(&utxo_path) {
-            Ok(utxo_db) => match utxo_db.metadata() {
-                Ok(Some(meta)) => {
-                    tracing::info!(
-                        version = hex::encode(meta.version),
-                        "found existing UTXO DB, restoring state"
-                    );
-                    match ergo_state::utxo_state::UtxoState::restore_from_db(utxo_db) {
-                        Ok(utxo_state) => {
-                            let entries = utxo_state
-                                .utxo_db()
-                                .map(|db| db.entry_count())
-                                .unwrap_or(0);
-                            tracing::info!(entries, "UTXO state restored from persistent DB");
-                            node_view.set_utxo_state(utxo_state);
-                        }
+    let is_utxo_mode = settings.ergo.node.state_type == "utxo";
+    let is_digest_mode = !is_utxo_mode;
+
+    // Create processor channels.
+    let (cmd_tx, cmd_rx) =
+        std::sync::mpsc::sync_channel::<ProcessorCommand>(block_processor::CHANNEL_CAPACITY);
+    let (evt_tx, mut evt_rx) =
+        tokio::sync::mpsc::channel::<ProcessorEvent>(block_processor::CHANNEL_CAPACITY);
+
+    // Clone settings for the processor thread.
+    let proc_settings = settings.clone();
+    let proc_db_path = db_path.clone();
+    let proc_mempool = mempool.clone();
+
+    // Spawn the processor thread. The NodeViewHolder is constructed inside
+    // the factory closure, so it lives entirely on the processor thread.
+    let processor_handle = std::thread::Builder::new()
+        .name("block-processor".into())
+        .spawn(move || {
+            block_processor::run_processor_with_state(cmd_rx, evt_tx, move || {
+                let history = HistoryDb::open(&proc_db_path)
+                    .unwrap_or_else(|e| panic!("processor: cannot open database: {e}"));
+
+                let genesis_digest = proc_settings.ergo.chain.genesis_state_digest();
+                let is_utxo = proc_settings.ergo.node.state_type == "utxo";
+                let mut node_view = NodeViewHolder::with_recovery(
+                    history,
+                    proc_mempool,
+                    !is_utxo,
+                    genesis_digest,
+                );
+
+                // Set up UTXO persistence if in UTXO mode.
+                if is_utxo {
+                    let utxo_path =
+                        Path::new(&proc_settings.ergo.directory).join("utxo");
+                    match ergo_storage::utxo_db::UtxoDb::open(&utxo_path) {
+                        Ok(utxo_db) => match utxo_db.metadata() {
+                            Ok(Some(meta)) => {
+                                tracing::info!(
+                                    version = hex::encode(meta.version),
+                                    "processor: found existing UTXO DB, restoring state"
+                                );
+                                match ergo_state::utxo_state::UtxoState::restore_from_db(
+                                    utxo_db,
+                                ) {
+                                    Ok(utxo_state) => {
+                                        let entries = utxo_state
+                                            .utxo_db()
+                                            .map(|db| db.entry_count())
+                                            .unwrap_or(0);
+                                        tracing::info!(
+                                            entries,
+                                            "processor: UTXO state restored"
+                                        );
+                                        node_view.set_utxo_state(utxo_state);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "processor: UTXO restore failed, starting fresh"
+                                        );
+                                        let fresh_db =
+                                            ergo_storage::utxo_db::UtxoDb::open(&utxo_path)
+                                                .unwrap();
+                                        node_view.set_utxo_state(
+                                            ergo_state::utxo_state::UtxoState::with_persistence(
+                                                fresh_db,
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::info!(
+                                    "processor: no existing UTXO DB data, starting fresh"
+                                );
+                                node_view.set_utxo_state(
+                                    ergo_state::utxo_state::UtxoState::with_persistence(utxo_db),
+                                );
+                            }
+                        },
                         Err(e) => {
-                            tracing::warn!(error = %e, "failed to restore UTXO state, starting fresh");
-                            let fresh_db =
-                                ergo_storage::utxo_db::UtxoDb::open(&utxo_path).unwrap();
-                            node_view.set_utxo_state(
-                                ergo_state::utxo_state::UtxoState::with_persistence(fresh_db),
+                            tracing::error!(
+                                error = %e,
+                                "processor: failed to open UTXO DB"
                             );
                         }
                     }
                 }
-                _ => {
-                    tracing::info!("no existing UTXO DB data, starting fresh with persistence");
-                    node_view.set_utxo_state(
-                        ergo_state::utxo_state::UtxoState::with_persistence(utxo_db),
+
+                if proc_settings.ergo.node.blocks_to_keep >= 0 {
+                    node_view.set_blocks_to_keep(proc_settings.ergo.node.blocks_to_keep);
+                }
+                node_view
+                    .set_checkpoint_height(proc_settings.ergo.node.checkpoint_height);
+                node_view.set_v2_activation_config(
+                    proc_settings.ergo.chain.version2_activation_height,
+                    proc_settings
+                        .ergo
+                        .chain
+                        .version2_activation_difficulty_hex
+                        .clone(),
+                );
+
+                // Restore state/history consistency (recovery after crash).
+                if let Err(e) = node_view.restore_consistency() {
+                    tracing::error!(
+                        error = %e,
+                        "processor: consistency restore failed, continuing anyway"
                     );
                 }
-            },
-            Err(e) => {
-                tracing::error!(error = %e, "failed to open UTXO DB, running without persistence");
-            }
-        }
-    }
 
-    if settings.ergo.node.blocks_to_keep >= 0 {
-        node_view.set_blocks_to_keep(settings.ergo.node.blocks_to_keep);
-    }
-    node_view.set_checkpoint_height(settings.ergo.node.checkpoint_height);
-    node_view.set_v2_activation_config(
-        settings.ergo.chain.version2_activation_height,
-        settings.ergo.chain.version2_activation_difficulty_hex.clone(),
-    );
+                ProcessorState::new(node_view)
+            });
+        })
+        .expect("failed to spawn processor thread");
 
-    // Restore state/history consistency (recovery after crash).
-    if let Err(e) = node_view.restore_consistency() {
-        tracing::error!(error = %e, "consistency restore failed, continuing anyway");
-    }
+    tracing::info!("block processor thread spawned");
 
     // Conditionally start the extra indexer.
     let extra_path = Path::new(&settings.ergo.directory)
@@ -426,7 +494,11 @@ async fn main() {
 
     if let Err(e) = event_loop::run(
         settings,
-        node_view,
+        cmd_tx,
+        &mut evt_rx,
+        &sync_history,
+        mempool,
+        is_digest_mode,
         shared,
         &mut tx_submit_rx,
         &mut peer_connect_rx,
@@ -444,6 +516,13 @@ async fn main() {
     .await
     {
         tracing::error!(error = %e, "event loop exited with error");
+    }
+
+    // Signal the processor to shut down and wait for it to finish.
+    // cmd_tx is already dropped when the event loop exits (it was moved into run()).
+    // Just join the thread.
+    if let Err(e) = processor_handle.join() {
+        tracing::error!("processor thread panicked: {:?}", e);
     }
 
     tracing::info!("ergo-node stopped");
