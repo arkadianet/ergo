@@ -275,6 +275,8 @@ fn build_emission_tx(
     if reward == 0 {
         return None; // Past emission schedule.
     }
+    // EIP-27: compute reemission charge (0 before activation height 777,217).
+    let reemission_charge = ergo_network::emission::reemission_for_height(next_height);
 
     // Get the tracked emission box ID.
     let emission_box_id = utxo.emission_box_id()?;
@@ -310,18 +312,26 @@ fn build_emission_tx(
         extension_bytes: Vec::new(),
     };
 
-    // Build output 1: new emission box (reduced value, same ErgoTree, same tokens/registers).
+    // EIP-27: deduct reemission charge from the first token (ERG reemission token)
+    // in the emission box. Before activation height this is a no-op (charge == 0).
+    let mut new_tokens = emission_box.candidate.tokens.clone();
+    if reemission_charge > 0 && !new_tokens.is_empty() {
+        new_tokens[0].1 = new_tokens[0].1.saturating_sub(reemission_charge);
+    }
+
+    // Build output 1: new emission box (reduced value, same ErgoTree, adjusted tokens).
     let new_emission_box = ErgoBoxCandidate {
         value: emission_box.candidate.value - reward,
         ergo_tree_bytes: emission_box.candidate.ergo_tree_bytes.clone(),
         creation_height: next_height,
-        tokens: emission_box.candidate.tokens.clone(),
+        tokens: new_tokens,
         additional_registers: emission_box.candidate.additional_registers.clone(),
     };
 
     // Build output 2: miner reward box.
+    // EIP-27: miner receives reward minus the reemission charge.
     let miner_output = ErgoBoxCandidate {
-        value: reward,
+        value: reward.saturating_sub(reemission_charge),
         ergo_tree_bytes: miner_reward_prop(miner_pk, reward_delay),
         creation_height: next_height,
         tokens: Vec::new(),
@@ -378,6 +388,10 @@ pub fn collect_txs(
     let mut consumed_box_ids: std::collections::HashSet<[u8; 32]> =
         std::collections::HashSet::new();
 
+    // UTXO overlay: outputs from earlier txs in this block available to later txs (chained txs).
+    let mut utxo_overlay: std::collections::HashMap<[u8; 32], ErgoBox> =
+        std::collections::HashMap::new();
+
     // Safe gap: reserve headroom for the fee tx and rounding.
     let safe_gap: u64 = if max_block_cost >= 5_000_000 { 500_000 } else { 0 };
     let cost_limit = max_block_cost.saturating_sub(safe_gap);
@@ -392,6 +406,17 @@ pub fn collect_txs(
         total_size += etx_size;
         total_cost += etx_cost;
         selected.push(etx.clone());
+
+        // Add emission tx outputs to overlay so mempool txs can spend them.
+        for (idx, output) in etx.output_candidates.iter().enumerate() {
+            let bid = compute_box_id(&etx.tx_id, idx as u16);
+            utxo_overlay.insert(bid.0, ErgoBox {
+                candidate: output.clone(),
+                transaction_id: etx.tx_id.clone(),
+                index: idx as u16,
+                box_id: bid,
+            });
+        }
     }
 
     // 2. Add mempool txs greedily in priority order.
@@ -418,8 +443,10 @@ pub fn collect_txs(
                 tx_valid = false;
                 break;
             }
-            // Check input exists in UTXO state (if available).
-            if let Some(utxo) = utxo_state {
+            // Check input exists in UTXO overlay (chained tx) or UTXO state.
+            if let Some(overlay_box) = utxo_overlay.get(&input.box_id.0) {
+                input_boxes.push(overlay_box.clone());
+            } else if let Some(utxo) = utxo_state {
                 match utxo.get_ergo_box(&input.box_id) {
                     Ok(Some(b)) => input_boxes.push(b),
                     _ => {
@@ -436,15 +463,19 @@ pub fn collect_txs(
 
         // Sigma script validation (when UTXO state + sigma context available).
         if let (Some(utxo), Some(ctx)) = (utxo_state, sigma_ctx) {
-            // Resolve data input boxes.
+            // Resolve data input boxes (check overlay first for chained txs).
             let mut data_boxes = Vec::new();
             let mut data_ok = true;
             for di in &tx.data_inputs {
-                match utxo.get_ergo_box(&di.box_id) {
-                    Ok(Some(b)) => data_boxes.push(b),
-                    _ => {
-                        data_ok = false;
-                        break;
+                if let Some(overlay_box) = utxo_overlay.get(&di.box_id.0) {
+                    data_boxes.push(overlay_box.clone());
+                } else {
+                    match utxo.get_ergo_box(&di.box_id) {
+                        Ok(Some(b)) => data_boxes.push(b),
+                        _ => {
+                            data_ok = false;
+                            break;
+                        }
                     }
                 }
             }
@@ -497,6 +528,18 @@ pub fn collect_txs(
         total_size += tx_size;
         total_cost += tx_cost;
         selected.push(tx);
+
+        // Add outputs to UTXO overlay so later txs can spend them (chained txs).
+        let last_tx = selected.last().unwrap();
+        for (idx, output) in last_tx.output_candidates.iter().enumerate() {
+            let bid = compute_box_id(&last_tx.tx_id, idx as u16);
+            utxo_overlay.insert(bid.0, ErgoBox {
+                candidate: output.clone(),
+                transaction_id: last_tx.tx_id.clone(),
+                index: idx as u16,
+                box_id: bid,
+            });
+        }
     }
 
     // 3. Append fee collection tx (collects fees from all selected txs).
@@ -1653,6 +1696,47 @@ mod tests {
     }
 
     #[test]
+    fn reemission_charge_zero_before_activation() {
+        // Before height 777,217, reemission charge should be zero.
+        let charge = ergo_network::emission::reemission_for_height(500_000);
+        assert_eq!(charge, 0, "reemission charge should be zero before activation");
+    }
+
+    #[test]
+    fn reemission_charge_positive_after_activation() {
+        // After activation height 777,217, there should be a reemission charge.
+        let height = ergo_network::emission::REEMISSION_ACTIVATION_HEIGHT + 1;
+        let charge = ergo_network::emission::reemission_for_height(height);
+        assert!(charge > 0, "reemission charge should be positive after activation");
+        // The charge should be the basic charge amount (12 ERG) when emission is high enough.
+        assert_eq!(
+            charge,
+            ergo_network::emission::BASIC_CHARGE_AMOUNT,
+            "charge should be 12 ERG at this height"
+        );
+    }
+
+    #[test]
+    fn emission_tx_deducts_reemission_tokens_after_activation() {
+        // Verify that build_emission_tx correctly deducts reemission tokens
+        // from the emission box output after activation height.
+        let height = ergo_network::emission::REEMISSION_ACTIVATION_HEIGHT + 10;
+        let reward = ergo_network::emission::miner_reward_at_height(height);
+        let charge = ergo_network::emission::reemission_for_height(height);
+        assert!(charge > 0, "should have reemission charge at this height");
+
+        // Miner receives reward minus the reemission charge.
+        let miner_value = reward.saturating_sub(charge);
+        assert!(miner_value > 0, "miner should still get some reward");
+        assert!(miner_value < reward, "miner value should be less than full reward");
+        assert_eq!(
+            reward - miner_value,
+            charge,
+            "difference should equal reemission charge"
+        );
+    }
+
+    #[test]
     fn default_mining_reward_delay_is_720() {
         assert_eq!(DEFAULT_MINING_REWARD_DELAY, 720);
     }
@@ -1922,5 +2006,199 @@ mod tests {
         )
         .unwrap();
         assert_eq!(MINERS_FEE_ERGO_TREE, expected.as_slice());
+    }
+
+    // ── collect_txs chained transaction (UTXO overlay) tests ────────
+
+    #[test]
+    fn test_collect_txs_chained_txs_via_utxo_overlay() {
+        // Tx A creates an output; Tx B spends that output. Without the UTXO
+        // overlay, Tx B would be eliminated because its input doesn't exist
+        // in the UTXO DB. With the overlay, both should be selected.
+        let pk = [0x02; 33];
+        let params = Parameters::genesis();
+        let next_height = 100u32;
+
+        // Tx A: spends some pre-existing box and produces an output.
+        let mut tx_a = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: BoxId([0xA0; 32]),
+                proof_bytes: Vec::new(),
+                extension_bytes: Vec::new(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![
+                ErgoBoxCandidate {
+                    value: 5_000_000_000,
+                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                    creation_height: next_height,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                },
+                // Fee output for tx_a.
+                ErgoBoxCandidate {
+                    value: 1_000_000,
+                    ergo_tree_bytes: MINERS_FEE_ERGO_TREE.to_vec(),
+                    creation_height: next_height,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                },
+            ],
+            tx_id: TxId([0u8; 32]),
+        };
+        tx_a.tx_id = compute_tx_id(&tx_a);
+
+        // Compute the box ID of tx_a's first output — this is what tx_b will spend.
+        let chained_box_id = compute_box_id(&tx_a.tx_id, 0);
+
+        // Tx B: spends the first output of Tx A.
+        let mut tx_b = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: chained_box_id,
+                proof_bytes: Vec::new(),
+                extension_bytes: Vec::new(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![
+                ErgoBoxCandidate {
+                    value: 4_000_000_000,
+                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x03],
+                    creation_height: next_height,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                },
+                // Fee output for tx_b.
+                ErgoBoxCandidate {
+                    value: 1_000_000,
+                    ergo_tree_bytes: MINERS_FEE_ERGO_TREE.to_vec(),
+                    creation_height: next_height,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                },
+            ],
+            tx_id: TxId([0u8; 32]),
+        };
+        tx_b.tx_id = compute_tx_id(&tx_b);
+
+        // Run collect_txs without a UTXO state — the overlay is the only
+        // mechanism that can resolve the chained input.
+        let (selected, eliminated) = collect_txs(
+            vec![tx_a.clone(), tx_b.clone()],
+            None,
+            10_000_000,
+            1_000_000_000,
+            &params,
+            next_height,
+            &pk,
+            None, // no utxo_state
+            None,
+            720,
+        );
+
+        // Both txs should be selected (plus a fee collection tx).
+        assert!(
+            eliminated.is_empty(),
+            "no txs should be eliminated, but got: {:?}",
+            eliminated.iter().map(hex::encode).collect::<Vec<_>>()
+        );
+        assert!(
+            selected.iter().any(|t| t.tx_id == tx_a.tx_id),
+            "tx_a should be selected"
+        );
+        assert!(
+            selected.iter().any(|t| t.tx_id == tx_b.tx_id),
+            "tx_b should be selected"
+        );
+        // tx_a should come before tx_b in the selection.
+        let pos_a = selected.iter().position(|t| t.tx_id == tx_a.tx_id).unwrap();
+        let pos_b = selected.iter().position(|t| t.tx_id == tx_b.tx_id).unwrap();
+        assert!(pos_a < pos_b, "tx_a should precede tx_b");
+    }
+
+    #[test]
+    fn test_collect_txs_chained_tx_double_spend_prevented() {
+        // If tx_b spends an output of tx_a, and tx_c also tries to spend the
+        // same output, tx_c should be eliminated as a double-spend.
+        let pk = [0x02; 33];
+        let params = Parameters::genesis();
+        let next_height = 200u32;
+
+        let mut tx_a = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: BoxId([0xB0; 32]),
+                proof_bytes: Vec::new(),
+                extension_bytes: Vec::new(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![ErgoBoxCandidate {
+                value: 10_000_000_000,
+                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                creation_height: next_height,
+                tokens: Vec::new(),
+                additional_registers: Vec::new(),
+            }],
+            tx_id: TxId([0u8; 32]),
+        };
+        tx_a.tx_id = compute_tx_id(&tx_a);
+
+        let chained_box_id = compute_box_id(&tx_a.tx_id, 0);
+
+        // tx_b spends tx_a's output.
+        let mut tx_b = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: chained_box_id,
+                proof_bytes: Vec::new(),
+                extension_bytes: Vec::new(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![ErgoBoxCandidate {
+                value: 5_000_000_000,
+                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x03],
+                creation_height: next_height,
+                tokens: Vec::new(),
+                additional_registers: Vec::new(),
+            }],
+            tx_id: TxId([0u8; 32]),
+        };
+        tx_b.tx_id = compute_tx_id(&tx_b);
+
+        // tx_c also tries to spend the same output as tx_b.
+        let mut tx_c = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: chained_box_id,
+                proof_bytes: Vec::new(),
+                extension_bytes: Vec::new(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![ErgoBoxCandidate {
+                value: 3_000_000_000,
+                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x04],
+                creation_height: next_height,
+                tokens: Vec::new(),
+                additional_registers: Vec::new(),
+            }],
+            tx_id: TxId([0u8; 32]),
+        };
+        tx_c.tx_id = compute_tx_id(&tx_c);
+
+        let (selected, eliminated) = collect_txs(
+            vec![tx_a.clone(), tx_b.clone(), tx_c.clone()],
+            None,
+            10_000_000,
+            1_000_000_000,
+            &params,
+            next_height,
+            &pk,
+            None,
+            None,
+            720,
+        );
+
+        // tx_c should be eliminated (double-spend of the chained output).
+        assert_eq!(eliminated.len(), 1);
+        assert_eq!(eliminated[0], tx_c.tx_id.0);
+        assert!(selected.iter().any(|t| t.tx_id == tx_a.tx_id));
+        assert!(selected.iter().any(|t| t.tx_id == tx_b.tx_id));
+        assert!(!selected.iter().any(|t| t.tx_id == tx_c.tx_id));
     }
 }
