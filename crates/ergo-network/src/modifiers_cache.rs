@@ -109,6 +109,20 @@ impl ModifiersCache {
         self.headers.is_empty() && self.body_sections.is_empty()
     }
 
+    /// Drains all entries from both cache tiers, returning them as a `Vec`.
+    ///
+    /// Headers are drained first, then body sections.
+    pub fn drain_all(&mut self) -> Vec<(ModifierId, u8, Vec<u8>)> {
+        let mut result = Vec::with_capacity(self.len());
+        while let Some((id, cached)) = self.headers.pop_lru() {
+            result.push((id, cached.type_id, cached.data));
+        }
+        while let Some((id, cached)) = self.body_sections.pop_lru() {
+            result.push((id, cached.type_id, cached.data));
+        }
+        result
+    }
+
     /// Drains all headers from the cache, returning them as a `Vec`.
     pub fn drain_all_headers(&mut self) -> Vec<(ModifierId, u8, Vec<u8>)> {
         let mut out = Vec::with_capacity(self.headers.len());
@@ -306,5 +320,23 @@ mod tests {
         let bodies = cache.drain_all_body_sections();
         assert_eq!(bodies.len(), 2);
         assert_eq!(cache.len(), 1); // only the header remains
+    }
+
+    #[test]
+    fn drain_all_returns_all_entries() {
+        let mut cache = ModifiersCache::with_default_capacities();
+        let id1 = make_id(1);
+        let id2 = make_id(2);
+        cache.put(id1, 101, vec![0xAA]);
+        cache.put(id2, 102, vec![0xBB]);
+
+        let drained = cache.drain_all();
+        assert_eq!(drained.len(), 2);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        // Verify both entries are present (order: headers first, then body).
+        assert!(drained.iter().any(|(id, ty, data)| *id == id1 && *ty == 101 && data == &[0xAA]));
+        assert!(drained.iter().any(|(id, ty, data)| *id == id2 && *ty == 102 && data == &[0xBB]));
     }
 }
