@@ -120,6 +120,18 @@ impl ExtraIndexerDb {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, IndexerDbError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
+        opts.increase_parallelism(
+            std::thread::available_parallelism()
+                .map(|n| n.get() as i32)
+                .unwrap_or(4),
+        );
+        let cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024);
+        let mut bb = rocksdb::BlockBasedOptions::default();
+        bb.set_block_cache(&cache);
+        bb.set_bloom_filter(10.0, false);
+        opts.set_block_based_table_factory(&bb);
+        opts.set_write_buffer_size(32 * 1024 * 1024);
+        opts.set_max_write_buffer_number(3);
         let db = DB::open(&opts, path)?;
         Ok(Self { db })
     }

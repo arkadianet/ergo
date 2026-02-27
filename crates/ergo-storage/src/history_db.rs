@@ -47,9 +47,35 @@ impl HistoryDb {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        opts.increase_parallelism(
+            std::thread::available_parallelism()
+                .map(|n| n.get() as i32)
+                .unwrap_or(4),
+        );
+        opts.set_max_background_jobs(4);
 
-        let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, Options::default());
-        let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, Options::default());
+        // Shared block cache (256 MB).
+        let cache = rocksdb::Cache::new_lru_cache(256 * 1024 * 1024);
+
+        // CF_OBJECTS: block sections (write-heavy during sync).
+        let mut obj_bb = rocksdb::BlockBasedOptions::default();
+        obj_bb.set_block_cache(&cache);
+        obj_bb.set_bloom_filter(10.0, false);
+        let mut obj_opts = Options::default();
+        obj_opts.set_write_buffer_size(64 * 1024 * 1024);
+        obj_opts.set_max_write_buffer_number(3);
+        obj_opts.set_block_based_table_factory(&obj_bb);
+        let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, obj_opts);
+
+        // CF_INDEXES: consensus metadata (frequent point lookups).
+        let mut idx_bb = rocksdb::BlockBasedOptions::default();
+        idx_bb.set_block_cache(&cache);
+        idx_bb.set_bloom_filter(10.0, false);
+        let mut idx_opts = Options::default();
+        idx_opts.set_write_buffer_size(32 * 1024 * 1024);
+        idx_opts.set_max_write_buffer_number(3);
+        idx_opts.set_block_based_table_factory(&idx_bb);
+        let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, idx_opts);
 
         let db = DB::open_cf_descriptors(&opts, path, vec![cf_objects, cf_indexes])?;
         Ok(Self { db })
