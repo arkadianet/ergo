@@ -220,6 +220,7 @@ async fn main() {
     } else {
         None
     };
+    let snapshots_db_arc = snapshots_db_opt.map(Arc::new);
 
     // Create wallet if feature enabled.
     #[cfg(feature = "wallet")]
@@ -288,6 +289,7 @@ async fn main() {
         candidate_generator: candidate_gen_arc.clone(),
         mining_solution_tx: Some(mining_solution_tx),
         mining_pub_key_hex: settings.ergo.node.mining_pub_key_hex.clone(),
+        snapshots_db: snapshots_db_arc.clone(),
         #[cfg(feature = "wallet")]
         wallet: wallet_arc.clone(),
     };
@@ -421,7 +423,7 @@ async fn main() {
         indexer_tx,
         &mut mining_solution_rx,
         candidate_gen_arc,
-        snapshots_db_opt,
+        snapshots_db_arc,
         wallet_arc,
         session_id,
     )

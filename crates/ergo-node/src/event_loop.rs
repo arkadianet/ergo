@@ -127,7 +127,7 @@ pub async fn run(
     indexer_tx: Option<tokio::sync::mpsc::Sender<ergo_indexer::task::IndexerEvent>>,
     mining_solution_rx: &mut tokio::sync::mpsc::Receiver<MiningSolution>,
     candidate_gen: Option<Arc<std::sync::RwLock<CandidateGenerator>>>,
-    snapshots_db: Option<crate::snapshots::SnapshotsDb>,
+    snapshots_db: Option<Arc<crate::snapshots::SnapshotsDb>>,
     wallet: WalletArc,
     session_id: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {

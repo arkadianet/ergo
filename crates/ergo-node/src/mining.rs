@@ -419,7 +419,7 @@ pub fn collect_txs(
             let bid = compute_box_id(&etx.tx_id, idx as u16);
             utxo_overlay.insert(bid.0, ErgoBox {
                 candidate: output.clone(),
-                transaction_id: etx.tx_id.clone(),
+                transaction_id: etx.tx_id,
                 index: idx as u16,
                 box_id: bid,
             });
@@ -542,7 +542,7 @@ pub fn collect_txs(
             let bid = compute_box_id(&last_tx.tx_id, idx as u16);
             utxo_overlay.insert(bid.0, ErgoBox {
                 candidate: output.clone(),
-                transaction_id: last_tx.tx_id.clone(),
+                transaction_id: last_tx.tx_id,
                 index: idx as u16,
                 box_id: bid,
             });

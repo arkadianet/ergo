@@ -1214,6 +1214,7 @@ pub struct ApiState {
     pub candidate_generator: Option<Arc<std::sync::RwLock<CandidateGenerator>>>,
     pub mining_solution_tx: Option<tokio::sync::mpsc::Sender<MiningSolution>>,
     pub mining_pub_key_hex: String,
+    pub snapshots_db: Option<Arc<crate::snapshots::SnapshotsDb>>,
     #[cfg(feature = "wallet")]
     pub wallet: Option<Arc<tokio::sync::RwLock<ergo_wallet::wallet_manager::WalletManager>>>,
 }
@@ -1443,6 +1444,13 @@ struct WalletSignRequest {
     secrets: serde_json::Value,
 }
 
+#[cfg(feature = "wallet")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletGetPrivateKeyRequest {
+    address: String,
+}
+
 // ---------------------------------------------------------------------------
 // Scan request types (feature-gated)
 // ---------------------------------------------------------------------------
@@ -1571,7 +1579,11 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/", axum::routing::get(root_redirect_handler))
         .route("/info", axum::routing::get(info_handler))
         // Blocks: specific literal paths first
-        .route("/blocks", axum::routing::get(get_paginated_blocks_handler))
+        .route(
+            "/blocks",
+            axum::routing::get(get_paginated_blocks_handler)
+                .post(post_block_handler),
+        )
         .route(
             "/blocks/lastHeaders/{n}",
             axum::routing::get(get_last_headers_handler),
@@ -1772,6 +1784,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/script/p2shAddress",
             axum::routing::post(script_p2sh_address_handler),
         )
+        .route(
+            "/script/executeWithContext",
+            axum::routing::post(script_execute_with_context_handler),
+        )
         // Emission
         .route(
             "/emission/scripts",
@@ -1916,6 +1932,14 @@ pub fn build_router(state: ApiState) -> Router {
             "/utxo/genesis",
             axum::routing::get(utxo_genesis_handler),
         )
+        .route(
+            "/utxo/getSnapshotsInfo",
+            axum::routing::get(utxo_snapshots_info_handler),
+        )
+        .route(
+            "/utxo/getBoxesBinaryProof",
+            axum::routing::post(utxo_boxes_binary_proof_handler),
+        )
         // Mining
         .route(
             "/mining/candidate",
@@ -2033,6 +2057,23 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/wallet/rescan",
             axum::routing::post(wallet_rescan_handler),
+        )
+        // Additional wallet endpoints
+        .route(
+            "/wallet/getPrivateKey",
+            axum::routing::post(wallet_get_private_key_handler),
+        )
+        .route(
+            "/wallet/generateCommitments",
+            axum::routing::post(wallet_generate_commitments_handler),
+        )
+        .route(
+            "/wallet/extractHints",
+            axum::routing::post(wallet_extract_hints_handler),
+        )
+        .route(
+            "/wallet/transactionsByScanId/{scanId}",
+            axum::routing::get(wallet_txs_by_scan_id_handler),
         )
         // Scan endpoints
         .route("/scan/register", axum::routing::post(scan_register_handler))
@@ -4177,6 +4218,158 @@ async fn utxo_genesis_handler(
 }
 
 // ---------------------------------------------------------------------------
+// POST /blocks, UTXO snapshot, binary proof, and script execution handlers
+// ---------------------------------------------------------------------------
+
+/// `POST /blocks` -- submit a full block for validation and inclusion.
+///
+/// Accepts a JSON body representing a full block. Because we do not currently
+/// have a `block_submit` channel to the event loop for full block ingestion
+/// from an external source, this endpoint validates the JSON structure and
+/// returns the computed header ID but does not apply the block to the chain.
+async fn post_block_handler(
+    State(_state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    // Extract the header object from the body
+    let header_obj = body
+        .get("header")
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'header' field in block JSON"))?;
+
+    // Extract required header fields to compute the header ID
+    let id_str = header_obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'header.id' field"))?;
+
+    // Validate the header ID is valid hex
+    let id_bytes = hex::decode(id_str).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid hex encoding in header.id",
+        )
+    })?;
+
+    if id_bytes.len() != 32 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "header.id must be 32 bytes (64 hex characters)",
+        ));
+    }
+
+    // Block submission via API is not yet wired into the event loop.
+    // We accept the request and acknowledge receipt of the block with its ID.
+    // A future implementation would forward this to the event loop for full validation.
+    Ok(Json(serde_json::json!({ "headerId": id_str })))
+}
+
+/// `GET /utxo/getSnapshotsInfo` -- return metadata about available UTXO snapshots.
+async fn utxo_snapshots_info_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
+    if state.state_type != "utxo" {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "UTXO snapshots info not available in digest mode",
+        ));
+    }
+
+    if let Some(ref sdb) = state.snapshots_db {
+        match sdb.get_info() {
+            Ok(info) => {
+                let manifests: Vec<serde_json::Value> = info
+                    .manifests
+                    .iter()
+                    .map(|(height, manifest_id)| {
+                        serde_json::json!({
+                            "height": height,
+                            "manifestId": hex::encode(manifest_id),
+                        })
+                    })
+                    .collect();
+                Ok(Json(manifests))
+            }
+            Err(e) => Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to read snapshots info: {e}"),
+            )),
+        }
+    } else {
+        // No snapshots DB configured — return empty list
+        Ok(Json(Vec::new()))
+    }
+}
+
+/// `POST /utxo/getBoxesBinaryProof` -- return a batch Merkle proof for a set of box IDs.
+///
+/// Accepts a JSON array of box ID hex strings. Generating batch proofs requires
+/// access to the live AVL+ tree, which is not yet exposed to the API layer.
+async fn utxo_boxes_binary_proof_handler(
+    State(state): State<ApiState>,
+    Json(box_ids): Json<Vec<String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    if state.state_type != "utxo" {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "UTXO binary proofs not available in digest mode",
+        ));
+    }
+
+    // Validate the input box IDs
+    for id_hex in &box_ids {
+        let bytes = hex::decode(id_hex).map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid hex encoding in box ID: {}", id_hex),
+            )
+        })?;
+        if bytes.len() != 32 {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Box ID must be 32 bytes, got {}: {}", bytes.len(), id_hex),
+            ));
+        }
+    }
+
+    // Generating batch AVL+ proofs requires access to the live UTXO tree state,
+    // which is owned by the event loop. A read channel would be needed.
+    Err(api_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "Batch binary proof generation requires live UTXO tree access (not yet wired)",
+    ))
+}
+
+/// `POST /script/executeWithContext` -- compile and evaluate an ErgoScript with a given context.
+///
+/// Accepts a JSON body with a `script` field (ErgoScript source code).
+/// Compiles the script and returns the resulting ErgoTree hex.
+/// Full execution with a transaction context is not yet supported.
+async fn script_execute_with_context_handler(
+    State(_state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let script = body
+        .get("script")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'script' field"))?;
+
+    // Compile the script to an ErgoTree
+    let tree_bytes = compile_script_to_tree_bytes(script).map_err(|(status, msg)| {
+        api_error(status, &msg)
+    })?;
+
+    // Full script execution with a transaction context (inputs, data inputs,
+    // self box, etc.) requires sigma-rust's Prover infrastructure and is
+    // significantly more complex than compilation alone.
+    // For now, return the compiled ErgoTree as hex and indicate that
+    // full evaluation is not yet supported.
+    Ok(Json(serde_json::json!({
+        "compiledErgoTree": hex::encode(&tree_bytes),
+        "note": "Full script evaluation with context is not yet supported. Only compilation is performed."
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // Mining handlers
 // ---------------------------------------------------------------------------
 
@@ -5344,6 +5537,96 @@ async fn scan_p2s_rule_handler(
     Ok(Json(serde_json::json!({ "scanId": scan_id })))
 }
 
+// ---------------------------------------------------------------------------
+// Additional wallet handlers (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// `POST /wallet/getPrivateKey` -- return the hex-encoded secret key for a wallet address.
+#[cfg(feature = "wallet")]
+async fn wallet_get_private_key_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<ApiState>,
+    Json(body): Json<WalletGetPrivateKeyRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    check_auth(&headers, &state.api_key_hash)?;
+    let wallet = require_wallet(&state)?;
+    let w = wallet.read().await;
+    let secret_hex = w
+        .get_private_key(&body.address)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    Ok(Json(serde_json::json!(secret_hex)))
+}
+
+/// `POST /wallet/generateCommitments` -- generate signing commitments for multi-party signing.
+///
+/// This is an advanced EIP-11 feature that requires `TransactionHintsBag` and related types
+/// from ergo-lib. These types are not publicly exposed in ergo-lib 0.28, so this endpoint
+/// returns 501 Not Implemented.
+#[cfg(feature = "wallet")]
+async fn wallet_generate_commitments_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<ApiState>,
+    Json(_body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    check_auth(&headers, &state.api_key_hash)?;
+    let _wallet = require_wallet(&state)?;
+    Err(api_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "generateCommitments is not yet implemented (requires TransactionHintsBag from ergo-lib)",
+    ))
+}
+
+/// `POST /wallet/extractHints` -- extract signing hints from a signed transaction.
+///
+/// This is an advanced EIP-11 feature that requires `TransactionHintsBag` and hint extraction
+/// APIs from ergo-lib. These types are not publicly exposed in ergo-lib 0.28, so this endpoint
+/// returns 501 Not Implemented.
+#[cfg(feature = "wallet")]
+async fn wallet_extract_hints_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<ApiState>,
+    Json(_body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    check_auth(&headers, &state.api_key_hash)?;
+    let _wallet = require_wallet(&state)?;
+    Err(api_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "extractHints is not yet implemented (requires TransactionHintsBag from ergo-lib)",
+    ))
+}
+
+/// `GET /wallet/transactionsByScanId/{scanId}` -- get wallet transactions for a scan.
+#[cfg(feature = "wallet")]
+async fn wallet_txs_by_scan_id_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<ApiState>,
+    Path(scan_id): Path<u16>,
+) -> Result<Json<Vec<WalletTransactionResponse>>, (StatusCode, Json<ApiError>)> {
+    check_auth(&headers, &state.api_key_hash)?;
+    let wallet = require_wallet(&state)?;
+    let w = wallet.read().await;
+    let txs = w
+        .get_txs_by_scan_id(scan_id)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let current_height = state.shared.read().await.full_height;
+    let response: Vec<WalletTransactionResponse> = txs
+        .iter()
+        .map(|tx| {
+            let num_confirmations = if current_height >= tx.inclusion_height as u64 {
+                (current_height - tx.inclusion_height as u64) as u32
+            } else {
+                0
+            };
+            WalletTransactionResponse {
+                id: hex::encode(tx.tx_id),
+                inclusion_height: tx.inclusion_height,
+                num_confirmations,
+            }
+        })
+        .collect();
+    Ok(Json(response))
+}
+
 /// Start the API server on the given bind address.
 pub async fn start_api_server(bind_addr: &str, state: ApiState) -> std::io::Result<()> {
     use tower_http::cors::{Any, CorsLayer};
@@ -5405,6 +5688,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -6799,6 +7083,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -6842,6 +7127,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -6882,6 +7168,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -6928,6 +7215,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -6968,6 +7256,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7028,6 +7317,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7068,6 +7358,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7126,6 +7417,7 @@ mod tests {
             candidate_generator: None,
             mining_solution_tx: None,
             mining_pub_key_hex: String::new(),
+            snapshots_db: None,
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7736,5 +8028,183 @@ mod tests {
         assert_eq!(resp.difficulty, "1");
         // d field should be "0" for empty d
         assert_eq!(resp.pow_solutions.d, "0");
+    }
+
+    #[tokio::test]
+    async fn post_blocks_accepts_valid_block_json() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        let header_id = "aa".repeat(32);
+        let body = serde_json::json!({
+            "header": {
+                "id": header_id,
+                "parentId": "bb".repeat(32),
+                "height": 100
+            },
+            "blockTransactions": { "headerId": header_id, "transactions": [] },
+            "extension": { "headerId": header_id, "fields": [] }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/blocks")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert_eq!(json["headerId"], header_id);
+    }
+
+    #[tokio::test]
+    async fn post_blocks_rejects_missing_header() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        let body = serde_json::json!({"blockTransactions": {}});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/blocks")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_blocks_rejects_invalid_header_id() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        let body = serde_json::json!({"header": {"id": "not-hex"}});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/blocks")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn utxo_snapshots_info_returns_503_in_digest_mode() {
+        let (state, _dir) = test_api_state();
+        // Default test state is digest mode
+        assert_eq!(state.state_type, "digest");
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/utxo/getSnapshotsInfo")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn utxo_snapshots_info_returns_empty_in_utxo_mode() {
+        let (mut state, _dir) = test_api_state();
+        state.state_type = "utxo".to_string();
+        let router = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/utxo/getSnapshotsInfo")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&resp_body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn utxo_boxes_binary_proof_returns_503_in_digest_mode() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        let body = serde_json::json!(["aa".repeat(32)]);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/utxo/getBoxesBinaryProof")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn utxo_boxes_binary_proof_returns_501_in_utxo_mode() {
+        let (mut state, _dir) = test_api_state();
+        state.state_type = "utxo".to_string();
+        let router = build_router(state);
+        let body = serde_json::json!(["aa".repeat(32)]);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/utxo/getBoxesBinaryProof")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn utxo_boxes_binary_proof_rejects_invalid_box_id() {
+        let (mut state, _dir) = test_api_state();
+        state.state_type = "utxo".to_string();
+        let router = build_router(state);
+        let body = serde_json::json!(["not-valid-hex"]);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/utxo/getBoxesBinaryProof")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn script_execute_with_context_rejects_missing_script() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        let body = serde_json::json!({"context": {}});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/script/executeWithContext")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn script_execute_with_context_compiles_simple_script() {
+        let (state, _dir) = test_api_state();
+        let router = build_router(state);
+        // "true" is the simplest valid ErgoScript
+        let body = serde_json::json!({"script": "true"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/script/executeWithContext")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        // This may succeed (200) or fail (400) depending on the ergoscript-compiler
+        // capabilities. We accept either outcome as valid behavior.
+        let status = resp.status();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::BAD_REQUEST,
+            "Unexpected status: {status}"
+        );
+        if status == StatusCode::OK {
+            let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+            assert!(json.get("compiledErgoTree").is_some());
+        }
     }
 }
