@@ -508,6 +508,60 @@ impl NodeViewHolder {
         Ok(info)
     }
 
+    /// Process a header that has already been parsed and PoW-validated
+    /// (e.g., in a parallel batch via rayon). Only parent-dependent checks
+    /// remain: height sequencing, timestamp ordering, future-timestamp
+    /// drift, and required difficulty.
+    pub fn process_prevalidated_header(
+        &mut self,
+        modifier_id: &ModifierId,
+        header: &ergo_types::header::Header,
+    ) -> Result<ProgressInfo, NodeViewError> {
+        if header.is_genesis() {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if let Err(e) =
+                ergo_consensus::header_validation::validate_genesis_header_skip_pow(
+                    header, now_ms, None, None,
+                )
+            {
+                return Err(NodeViewError::Validation(format!(
+                    "genesis header validation failed: {e}"
+                )));
+            }
+        } else {
+            let parent = self
+                .history
+                .load_header(&header.parent_id)?
+                .ok_or_else(|| {
+                    NodeViewError::Validation(format!(
+                        "parent header not found for header at height {}",
+                        header.height
+                    ))
+                })?;
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let required_n_bits = self.compute_required_difficulty(header, &parent);
+            if let Err(e) =
+                ergo_consensus::header_validation::validate_child_header_skip_pow(
+                    header, &parent, now_ms, required_n_bits,
+                )
+            {
+                return Err(NodeViewError::Validation(format!(
+                    "header {} validation failed: {e}",
+                    header.height
+                )));
+            }
+        }
+        self.history.store_header_with_score(modifier_id, header)?;
+        let info = self.history.process_header(modifier_id)?;
+        Ok(info)
+    }
+
     /// Internal: apply `ProgressInfo` by processing blocks in `to_apply`
     /// and handling chain reorganizations via `to_remove`.
     ///
@@ -3034,5 +3088,66 @@ mod tests {
         // put_no_fee_check should succeed
         mp.put_no_fee_check(tx).unwrap();
         assert_eq!(mp.size(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // process_prevalidated_header
+    // -----------------------------------------------------------------------
+
+    // 34. process_prevalidated_header stores header and returns download list.
+    #[test]
+    fn process_prevalidated_header_stores_and_indexes() {
+        let (db, _dir) = open_test_db();
+        let mut nv = make_node_view_skip_difficulty(db);
+
+        // Store a parent header first so the child can find it.
+        let parent_id = make_id(0xF0);
+        let parent = make_header(99, 0x00);
+        nv.history.store_header_with_score(&parent_id, &parent).unwrap();
+        nv.history.process_header(&parent_id).unwrap();
+
+        // Build a child header referencing the parent.
+        let mut child = make_header(100, 0xF0);
+        child.parent_id = parent_id;
+        child.timestamp = parent.timestamp + 60_000;
+        let child_bytes = ergo_wire::header_ser::serialize_header(&child);
+        let child_id = ModifierId(test_blake2b256(&child_bytes));
+
+        let info = nv
+            .process_prevalidated_header(&child_id, &child)
+            .unwrap();
+
+        // Should produce download requests for the 3 body sections.
+        assert_eq!(info.to_download.len(), 3);
+        let type_ids: Vec<u8> = info.to_download.iter().map(|(t, _)| *t).collect();
+        assert!(type_ids.contains(&102)); // BlockTransactions
+        assert!(type_ids.contains(&104)); // ADProofs
+        assert!(type_ids.contains(&108)); // Extension
+
+        // Header should be retrievable from the DB.
+        let loaded = nv.history.load_header(&child_id).unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().height, 100);
+    }
+
+    // 35. process_prevalidated_header rejects header with missing parent.
+    #[test]
+    fn process_prevalidated_header_rejects_orphan() {
+        let (db, _dir) = open_test_db();
+        let mut nv = make_node_view_skip_difficulty(db);
+
+        // Build a header whose parent does not exist in the DB.
+        let header = make_header(100, 0xBB);
+        let header_bytes = ergo_wire::header_ser::serialize_header(&header);
+        let header_id = ModifierId(test_blake2b256(&header_bytes));
+
+        let result = nv.process_prevalidated_header(&header_id, &header);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("parent header not found"),
+            "expected 'parent header not found' in error, got: {err_msg}"
+        );
     }
 }
