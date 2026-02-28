@@ -277,4 +277,54 @@ mod tests {
         let result = ErgoSyncInfo::parse(&data);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn v2_round_trip_ten_headers() {
+        let headers: Vec<_> = (0..10)
+            .map(|i| {
+                let mut h = Header::default_for_test();
+                h.height = i;
+                h
+            })
+            .collect();
+        let v2 = ErgoSyncInfoV2 {
+            last_headers: headers,
+        };
+        let bytes = v2.serialize();
+        let parsed = ErgoSyncInfo::parse(&bytes).unwrap();
+        match parsed {
+            ErgoSyncInfo::V2(v) => {
+                assert_eq!(v.last_headers.len(), 10);
+                for (i, h) in v.last_headers.iter().enumerate() {
+                    assert_eq!(h.height, i as u32);
+                }
+            }
+            _ => panic!("expected V2"),
+        }
+    }
+
+    #[test]
+    fn v2_round_trip_fifty_headers() {
+        let headers: Vec<_> = (0..50)
+            .map(|i| {
+                let mut h = Header::default_for_test();
+                h.height = i;
+                h
+            })
+            .collect();
+        let v2 = ErgoSyncInfoV2 {
+            last_headers: headers,
+        };
+        let bytes = v2.serialize();
+        let parsed = ErgoSyncInfo::parse(&bytes).unwrap();
+        match parsed {
+            ErgoSyncInfo::V2(v) => {
+                assert_eq!(v.last_headers.len(), 50);
+                for (i, h) in v.last_headers.iter().enumerate() {
+                    assert_eq!(h.height, i as u32);
+                }
+            }
+            _ => panic!("expected V2"),
+        }
+    }
 }

@@ -354,4 +354,17 @@ mod tests {
         let v2 = ProtocolVersion { major: 4, minor: 0, patch: 100 };
         assert_eq!(format!("{}", v2), "4.0.100");
     }
+
+    #[test]
+    fn eip37_fork_implies_sync_v2_support() {
+        let eip37 = ProtocolVersion::EIP37_FORK;
+        let sync_v2 = ProtocolVersion::SYNC_V2_MIN;
+        // EIP37_FORK (4.0.100) must be >= SYNC_V2_MIN (4.0.16)
+        // This guarantees all connected peers support SyncInfo V2,
+        // since we reject peers below EIP37_FORK during handshake.
+        assert!(
+            eip37 >= sync_v2,
+            "EIP37_FORK ({eip37}) must be >= SYNC_V2_MIN ({sync_v2})"
+        );
+    }
 }
