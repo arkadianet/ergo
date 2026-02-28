@@ -1392,6 +1392,7 @@ pub fn validate_headers_parallel(
 mod tests {
     use super::*;
     use crate::modifiers_cache::ModifiersCache;
+    use crate::sync_tracker::PeerChainStatus;
     use ergo_wire::inv::InvData;
 
     fn make_id(byte: u8) -> ModifierId {
@@ -2844,5 +2845,201 @@ mod tests {
             !cache.is_empty(),
             "orphan header should be placed in the modifiers cache"
         );
+    }
+
+    #[test]
+    fn handle_inv_header_single_peer_when_sender_not_older() {
+        // When inv_sender is not classified Older, should fallback to single-peer
+        let mut tracker = DeliveryTracker::new(60, 2);
+        let mut sync_tracker = SyncTracker::new();
+        sync_tracker.update_status(1, PeerChainStatus::Younger, Some(50));
+        let mut metrics = SyncMetrics::new(10);
+        let connected = vec![1u64];
+
+        let ids: Vec<ModifierId> = (0..100u8)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                ModifierId(bytes)
+            })
+            .collect();
+
+        let inv = InvData {
+            type_id: HEADER_TYPE_ID as i8,
+            ids,
+        };
+        let body = inv.serialize();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let history = HistoryDb::open(tmp.path()).unwrap();
+        let mempool = crate::mempool::ErgoMemPool::new(1000);
+
+        let result = handle_inv(
+            1,
+            &body,
+            &mut tracker,
+            &history,
+            &mempool,
+            false,
+            &sync_tracker,
+            &connected,
+            &mut metrics,
+        );
+
+        // Should have exactly 1 RequestModifiers action to peer 1
+        assert_eq!(result.actions.len(), 1);
+        match &result.actions[0] {
+            SyncAction::RequestModifiers {
+                peer_id,
+                type_id,
+                ids,
+            } => {
+                assert_eq!(*peer_id, 1);
+                assert_eq!(*type_id, HEADER_TYPE_ID);
+                assert_eq!(ids.len(), 100);
+            }
+            _ => panic!("expected RequestModifiers"),
+        }
+    }
+
+    #[test]
+    fn handle_inv_header_multi_peer_partitioning() {
+        // 3 Older peers: should partition across all 3
+        let mut tracker = DeliveryTracker::new(60, 2);
+        let mut sync_tracker = SyncTracker::new();
+        sync_tracker.update_status(1, PeerChainStatus::Older, Some(1000));
+        sync_tracker.update_status(2, PeerChainStatus::Older, Some(1000));
+        sync_tracker.update_status(3, PeerChainStatus::Older, Some(1000));
+        let mut metrics = SyncMetrics::new(10);
+        let connected = vec![1u64, 2, 3];
+
+        let ids: Vec<ModifierId> = (0..150u8)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                ModifierId(bytes)
+            })
+            .collect();
+
+        let inv = InvData {
+            type_id: HEADER_TYPE_ID as i8,
+            ids,
+        };
+        let body = inv.serialize();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let history = HistoryDb::open(tmp.path()).unwrap();
+        let mempool = crate::mempool::ErgoMemPool::new(1000);
+
+        let result = handle_inv(
+            1,
+            &body,
+            &mut tracker,
+            &history,
+            &mempool,
+            false,
+            &sync_tracker,
+            &connected,
+            &mut metrics,
+        );
+
+        // Should have 3 RequestModifiers actions
+        assert_eq!(result.actions.len(), 3);
+        let mut total_ids = 0;
+        for action in &result.actions {
+            match action {
+                SyncAction::RequestModifiers { type_id, ids, .. } => {
+                    assert_eq!(*type_id, HEADER_TYPE_ID);
+                    assert_eq!(ids.len(), 50);
+                    total_ids += ids.len();
+                }
+                _ => panic!("expected RequestModifiers"),
+            }
+        }
+        assert_eq!(total_ids, 150);
+    }
+
+    #[test]
+    fn handle_inv_global_cap_backpressure() {
+        // Fill tracker to global cap, verify no new requests emitted
+        let mut tracker = DeliveryTracker::new(60, 2);
+        // Insert 2400 outstanding headers
+        for i in 0..2400u32 {
+            let mut bytes = [0u8; 32];
+            bytes[0..4].copy_from_slice(&i.to_be_bytes());
+            tracker.set_requested(101, ModifierId(bytes), 99);
+        }
+
+        let mut sync_tracker = SyncTracker::new();
+        sync_tracker.update_status(1, PeerChainStatus::Older, Some(1000));
+        let mut metrics = SyncMetrics::new(10);
+        let connected = vec![1u64];
+
+        let new_id = ModifierId([0xFF; 32]);
+        let inv = InvData {
+            type_id: HEADER_TYPE_ID as i8,
+            ids: vec![new_id],
+        };
+        let body = inv.serialize();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let history = HistoryDb::open(tmp.path()).unwrap();
+        let mempool = crate::mempool::ErgoMemPool::new(1000);
+
+        let result = handle_inv(
+            1,
+            &body,
+            &mut tracker,
+            &history,
+            &mempool,
+            false,
+            &sync_tracker,
+            &connected,
+            &mut metrics,
+        );
+
+        // Should emit nothing due to global cap
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn handle_inv_non_header_unchanged() {
+        // Non-header type_id should use single-peer, no partitioning
+        let mut tracker = DeliveryTracker::new(60, 2);
+        let mut sync_tracker = SyncTracker::new();
+        sync_tracker.update_status(1, PeerChainStatus::Older, Some(1000));
+        sync_tracker.update_status(2, PeerChainStatus::Older, Some(1000));
+        let mut metrics = SyncMetrics::new(10);
+        let connected = vec![1u64, 2];
+
+        let id = ModifierId([0xBB; 32]);
+        let inv = InvData {
+            type_id: 102,
+            ids: vec![id],
+        }; // block transactions
+        let body = inv.serialize();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let history = HistoryDb::open(tmp.path()).unwrap();
+        let mempool = crate::mempool::ErgoMemPool::new(1000);
+
+        let result = handle_inv(
+            1,
+            &body,
+            &mut tracker,
+            &history,
+            &mempool,
+            false,
+            &sync_tracker,
+            &connected,
+            &mut metrics,
+        );
+
+        // Should have exactly 1 action to peer 1 (no partitioning for non-headers)
+        assert_eq!(result.actions.len(), 1);
+        match &result.actions[0] {
+            SyncAction::RequestModifiers { peer_id, .. } => assert_eq!(*peer_id, 1),
+            _ => panic!("expected RequestModifiers"),
+        }
     }
 }
