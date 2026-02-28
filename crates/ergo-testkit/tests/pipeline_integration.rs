@@ -990,6 +990,7 @@ fn node_view_serves_request_modifier() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     // Should produce exactly one SendModifiers action.
@@ -1109,6 +1110,7 @@ fn handle_peers_response_extracts_addresses() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     assert_eq!(
@@ -1180,6 +1182,7 @@ fn handle_get_peers_returns_connected_list() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     assert_eq!(
@@ -1252,6 +1255,7 @@ fn tx_inv_triggers_request_for_unknown() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     assert_eq!(result.actions.len(), 1);
@@ -1314,6 +1318,7 @@ fn tx_modifier_enters_mempool_and_relays() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     // Tx should be in mempool.
@@ -1383,6 +1388,7 @@ fn tx_inv_skips_known_mempool_tx() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     // Should NOT request -- tx is already in mempool.
@@ -1653,6 +1659,7 @@ fn modifiers_cache_buffers_out_of_order() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     // The extension should be stored in the DB (put_modifier stores it
@@ -1892,6 +1899,7 @@ fn sync_info_younger_peer_gets_continuation_ids() {
         true,
         &mut None,
         &mut ergo_network::message_handler::TxCostTracker::new(),
+        10,
     );
 
     // Since our height is 10 and peer is at 5, peer is Younger.

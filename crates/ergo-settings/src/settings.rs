@@ -209,6 +209,8 @@ pub struct NetworkSettings {
     pub peer_discovery: bool,
     #[serde(default = "default_inactive_deadline")]
     pub inactive_connection_deadline_secs: u64,
+    #[serde(default = "default_sync_info_max_headers")]
+    pub sync_info_max_headers: u32,
 }
 
 fn default_handshake_timeout() -> u64 { 30 }
@@ -223,6 +225,7 @@ fn default_sync_interval() -> u64 { 2 }
 fn default_sync_interval_stable() -> u64 { 30 }
 fn default_peer_discovery() -> bool { true }
 fn default_inactive_deadline() -> u64 { 600 }
+fn default_sync_info_max_headers() -> u32 { 10 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiSettings {

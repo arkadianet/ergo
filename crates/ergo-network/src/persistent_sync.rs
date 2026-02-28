@@ -14,9 +14,6 @@ use ergo_wire::sync_info::{ErgoSyncInfo, ErgoSyncInfoV2};
 use ergo_wire::vlq::CodecError;
 use thiserror::Error;
 
-/// Maximum number of headers to include in a SyncInfo V2 message.
-const MAX_SYNC_HEADERS: u32 = 10;
-
 /// Modifier type ID for headers.
 const HEADER_TYPE_ID: u8 = 101;
 
@@ -52,12 +49,18 @@ pub enum PersistentSyncError {
 // build_sync_info_persistent
 // ---------------------------------------------------------------------------
 
+/// Clamp sync_info_max_headers to valid range [1, 50].
+pub fn clamp_sync_info_max_headers(value: u32) -> u32 {
+    value.clamp(1, 50)
+}
+
 /// Build an `ErgoSyncInfo` V2 message from the persistent database state.
 ///
-/// If the database contains headers, includes the last N (up to 10) headers,
-/// newest first (tip is `last_headers[0]`), matching the Scala reference node
-/// convention. If the database is empty, returns an empty V2 SyncInfo.
-pub fn build_sync_info_persistent(db: &HistoryDb) -> Result<ErgoSyncInfo, PersistentSyncError> {
+/// If the database contains headers, includes the last N (up to `max_headers`,
+/// clamped to 1..=50) headers, newest first (tip is `last_headers[0]`), matching
+/// the Scala reference node convention. If the database is empty, returns an
+/// empty V2 SyncInfo.
+pub fn build_sync_info_persistent(db: &HistoryDb, max_headers: u32) -> Result<ErgoSyncInfo, PersistentSyncError> {
     let best_id = match db.best_header_id()? {
         None => {
             return Ok(ErgoSyncInfo::V2(ErgoSyncInfoV2 {
@@ -73,8 +76,10 @@ pub fn build_sync_info_persistent(db: &HistoryDb) -> Result<ErgoSyncInfo, Persis
         .expect("best header ID set but header missing");
     let best_height = best_header.height;
 
-    let start = if best_height > MAX_SYNC_HEADERS {
-        best_height - MAX_SYNC_HEADERS + 1
+    let max_h = clamp_sync_info_max_headers(max_headers);
+
+    let start = if best_height > max_h {
+        best_height - max_h + 1
     } else {
         1
     };
@@ -181,7 +186,7 @@ mod tests {
     #[test]
     fn sync_info_empty_db() {
         let (db, _dir) = open_test_db();
-        let sync = build_sync_info_persistent(&db).unwrap();
+        let sync = build_sync_info_persistent(&db, 10).unwrap();
         match sync {
             ErgoSyncInfo::V2(v2) => assert!(v2.last_headers.is_empty()),
             _ => panic!("expected V2"),
@@ -195,7 +200,7 @@ mod tests {
         let id = make_id(0x01);
         db.store_header(&id, &header).unwrap();
 
-        let sync = build_sync_info_persistent(&db).unwrap();
+        let sync = build_sync_info_persistent(&db, 10).unwrap();
         match sync {
             ErgoSyncInfo::V2(v2) => assert_eq!(v2.last_headers.len(), 1),
             _ => panic!("expected V2"),
@@ -213,7 +218,7 @@ mod tests {
             db.store_header(&id, &header).unwrap();
         }
 
-        let sync = build_sync_info_persistent(&db).unwrap();
+        let sync = build_sync_info_persistent(&db, 10).unwrap();
         match sync {
             ErgoSyncInfo::V2(v2) => {
                 assert_eq!(v2.last_headers.len(), 10);
@@ -242,7 +247,7 @@ mod tests {
         // Second open: verify SyncInfo has 5 headers.
         {
             let db = HistoryDb::open(dir.path()).unwrap();
-            let sync = build_sync_info_persistent(&db).unwrap();
+            let sync = build_sync_info_persistent(&db, 10).unwrap();
             match sync {
                 ErgoSyncInfo::V2(v2) => {
                     assert_eq!(v2.last_headers.len(), 5);
@@ -253,5 +258,35 @@ mod tests {
                 _ => panic!("expected V2"),
             }
         }
+    }
+
+    #[test]
+    fn clamp_sync_info_headers_zero() {
+        assert_eq!(clamp_sync_info_max_headers(0), 1);
+    }
+
+    #[test]
+    fn clamp_sync_info_headers_one() {
+        assert_eq!(clamp_sync_info_max_headers(1), 1);
+    }
+
+    #[test]
+    fn clamp_sync_info_headers_ten() {
+        assert_eq!(clamp_sync_info_max_headers(10), 10);
+    }
+
+    #[test]
+    fn clamp_sync_info_headers_fifty() {
+        assert_eq!(clamp_sync_info_max_headers(50), 50);
+    }
+
+    #[test]
+    fn clamp_sync_info_headers_above_max() {
+        assert_eq!(clamp_sync_info_max_headers(51), 50);
+    }
+
+    #[test]
+    fn clamp_sync_info_headers_large() {
+        assert_eq!(clamp_sync_info_max_headers(u32::MAX), 50);
     }
 }

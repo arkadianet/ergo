@@ -183,6 +183,7 @@ pub fn handle_message(
     is_synced_for_txs: bool,
     last_sync_header_applied: &mut Option<u32>,
     tx_cost_tracker: &mut TxCostTracker,
+    max_headers: u32,
 ) -> HandleResult {
     match msg.code {
         1 => handle_get_peers(peer_id, connected_peers),
@@ -203,13 +204,14 @@ pub fn handle_message(
                 sync_tracker,
                 tracker,
                 last_sync_header_applied,
+                max_headers,
             )
         }
         55 => {
             let mp = node_view.mempool.read().unwrap();
             handle_inv(peer_id, &msg.body, tracker, &node_view.history, &mp, is_synced_for_txs)
         }
-        33 => handle_modifiers(peer_id, &msg.body, node_view, sync_mgr, tracker, cache, is_synced_for_txs, tx_cost_tracker),
+        33 => handle_modifiers(peer_id, &msg.body, node_view, sync_mgr, tracker, cache, is_synced_for_txs, tx_cost_tracker, max_headers),
         22 => {
             let mp = node_view.mempool.read().unwrap();
             handle_request_modifier(peer_id, &msg.body, &node_view.history, &mp)
@@ -290,6 +292,7 @@ fn handle_sync_info(
     sync_tracker: &mut SyncTracker,
     tracker: &DeliveryTracker,
     last_sync_header_applied: &mut Option<u32>,
+    max_headers: u32,
 ) -> HandleResult {
     let parsed = match ErgoSyncInfo::parse(body) {
         Ok(si) => si,
@@ -344,7 +347,7 @@ fn handle_sync_info(
     match status {
         crate::sync_tracker::PeerChainStatus::Older => {
             // Peer is ahead — send our SyncInfo so they know our state.
-            let sync_info = match persistent_sync::build_sync_info_persistent(history) {
+            let sync_info = match persistent_sync::build_sync_info_persistent(history, max_headers) {
                 Ok(si) => si,
                 Err(_) => return HandleResult::empty(),
             };
@@ -435,7 +438,7 @@ fn handle_sync_info(
         }
         _ => {
             // Equal or Unknown — broadcast our SyncInfo (existing behavior).
-            let sync_info = match persistent_sync::build_sync_info_persistent(history) {
+            let sync_info = match persistent_sync::build_sync_info_persistent(history, max_headers) {
                 Ok(si) => si,
                 Err(_) => return HandleResult::empty(),
             };
@@ -576,6 +579,7 @@ fn handle_modifiers(
     cache: &mut crate::modifiers_cache::ModifiersCache,
     is_synced_for_txs: bool,
     tx_cost_tracker: &mut TxCostTracker,
+    max_headers: u32,
 ) -> HandleResult {
     let mods = match ModifiersData::parse(body) {
         Ok(m) => m,
@@ -743,7 +747,7 @@ fn handle_modifiers(
     // of waiting for the next periodic sync tick.
     let mut actions = Vec::new();
     if !new_headers.is_empty() {
-        if let Ok(ErgoSyncInfo::V2(v2)) = persistent_sync::build_sync_info_persistent(&node_view.history) {
+        if let Ok(ErgoSyncInfo::V2(v2)) = persistent_sync::build_sync_info_persistent(&node_view.history, max_headers) {
             actions.push(SyncAction::SendSyncInfo {
                 peer_id: Some(peer_id),
                 data: v2.serialize(),
@@ -1009,6 +1013,7 @@ pub fn handle_message_without_modifiers(
     is_synced_for_txs: bool,
     last_sync_header_applied: &mut Option<u32>,
     _tx_cost_tracker: &mut TxCostTracker,
+    max_headers: u32,
 ) -> HandleResult {
     match msg.code {
         1 => handle_get_peers(peer_id, connected_peers),
@@ -1029,6 +1034,7 @@ pub fn handle_message_without_modifiers(
                 sync_tracker,
                 tracker,
                 last_sync_header_applied,
+                max_headers,
             )
         }
         55 => {
@@ -1255,7 +1261,7 @@ mod tests {
             code: 99,
             body: vec![],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert!(result.actions.is_empty());
         assert!(result.new_headers.is_empty());
@@ -1276,7 +1282,7 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1317,7 +1323,7 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1343,7 +1349,7 @@ mod tests {
             body: sync_info.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert!(!result.actions.is_empty());
         assert!(matches!(&result.actions[0], SyncAction::SendSyncInfo { .. }));
@@ -1369,7 +1375,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert!(node_view.history.contains_modifier(108, &ext_id).unwrap());
         assert!(result.new_headers.is_empty());
@@ -1396,7 +1402,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let _result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let _result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
         // If we get here without panicking, the flow is correct.
     }
 
@@ -1440,7 +1446,7 @@ mod tests {
         let body = serialize_peers(&peers);
 
         let msg = RawMessage { code: 2, body };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1459,7 +1465,7 @@ mod tests {
 
         let body = ergo_wire::peer_spec::serialize_peers(&[]);
         let msg = RawMessage { code: 2, body };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(result.actions.is_empty());
     }
 
@@ -1473,7 +1479,7 @@ mod tests {
             code: 2,
             body: vec![0xFF, 0xFF],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(result.actions.is_empty());
     }
 
@@ -1497,7 +1503,7 @@ mod tests {
             body: vec![],
         };
         let result =
-            handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &connected, &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+            handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &connected, &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1520,7 +1526,7 @@ mod tests {
             code: 1,
             body: vec![],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1561,7 +1567,7 @@ mod tests {
             code: 22,
             body: inv.serialize(),
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1591,7 +1597,7 @@ mod tests {
             code: 22,
             body: inv.serialize(),
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
 
         assert!(result.actions.is_empty());
     }
@@ -1606,7 +1612,7 @@ mod tests {
             code: 22,
             body: vec![0xFF],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(result.actions.is_empty());
     }
 
@@ -1658,7 +1664,7 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10);
 
         // Should only request id(2), since id(1) is in the mempool.
         assert_eq!(result.actions.len(), 1);
@@ -1731,7 +1737,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10);
 
         // Transaction should be in mempool.
         let mp = node_view.mempool.read().unwrap();
@@ -1765,7 +1771,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new());
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10);
 
         // Mempool should be empty.
         let mp = node_view.mempool.read().unwrap();
@@ -1811,6 +1817,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Peer should now be tracked (with Equal status since both heights are 0).
@@ -1835,11 +1842,11 @@ mod tests {
         let msg = RawMessage { code: 65, body: sync_info.serialize() };
 
         // First call should process normally.
-        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new());
+        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(!r1.actions.is_empty());
 
         // Second call within 100ms should be rate-limited.
-        let r2 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new());
+        let r2 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(r2.actions.is_empty());
     }
 
@@ -1855,11 +1862,11 @@ mod tests {
         let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 { last_headers: vec![] };
         let msg = RawMessage { code: 65, body: sync_info.serialize() };
 
-        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new());
+        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(!r1.actions.is_empty());
 
         // Different peer should not be rate-limited.
-        let r2 = handle_message(2, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new());
+        let r2 = handle_message(2, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
         assert!(!r2.actions.is_empty());
     }
 
@@ -1899,6 +1906,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Should have a SpamMessage penalty for the invalid modifier.
@@ -1942,6 +1950,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // No penalties — modifier was requested.
@@ -1998,6 +2007,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Should have an InvalidBlock penalty for ID mismatch.
@@ -2046,6 +2056,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // No penalties — ID matches.
@@ -2089,6 +2100,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
         assert!(result.actions.is_empty());
     }
@@ -2117,6 +2129,7 @@ mod tests {
             true,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
         assert!(!result.actions.is_empty());
     }
@@ -2145,6 +2158,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
         assert!(!result.actions.is_empty());
     }
@@ -2192,6 +2206,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Mempool should be empty - tx was filtered before processing.
@@ -2257,6 +2272,7 @@ mod tests {
             &mut sync_tracker, &mut cache, &mut last_sync_from, false,
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Should have at least 2 actions: SendSyncInfo + ApplyContinuationHeader.
@@ -2319,6 +2335,7 @@ mod tests {
             &mut sync_tracker, &mut cache, &mut last_sync_from, false,
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Should NOT have an ApplyContinuationHeader action.
@@ -2380,6 +2397,7 @@ mod tests {
             &mut sync_tracker, &mut cache, &mut last_sync_from, false,
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // Should NOT have ApplyContinuationHeader because height == last_applied.
@@ -2530,6 +2548,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // PoW failure should produce an InvalidBlock penalty.
@@ -2629,6 +2648,7 @@ mod tests {
             false,
             &mut None,
             &mut TxCostTracker::new(),
+            10,
         );
 
         // No penalties — the header is valid, just orphaned.

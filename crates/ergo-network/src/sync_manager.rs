@@ -139,6 +139,7 @@ impl SyncManager {
         available_peers: &[(PeerId, bool)],
         is_caught_up: bool,
         prebuilt_sync_data: Option<Vec<u8>>,
+        max_headers: u32,
     ) -> Vec<SyncAction> {
         let mut actions = Vec::new();
 
@@ -147,7 +148,7 @@ impl SyncManager {
         // Use prebuilt data from the processor thread when available (always fresh),
         // falling back to the secondary DB (may be stale during initial sync).
         let has_prebuilt = prebuilt_sync_data.is_some();
-        let sync_data = prebuilt_sync_data.or_else(|| serialize_sync_info(history));
+        let sync_data = prebuilt_sync_data.or_else(|| serialize_sync_info(history, max_headers));
         if let Some(ref data) = sync_data {
             tracing::debug!(has_prebuilt, data_len = data.len(), "on_tick: SyncInfo produced");
             actions.push(SyncAction::SendSyncInfo {
@@ -289,8 +290,8 @@ impl SyncManager {
 }
 
 /// Build and serialize sync info, returning `None` on error.
-fn serialize_sync_info(history: &HistoryDb) -> Option<Vec<u8>> {
-    let sync_info = persistent_sync::build_sync_info_persistent(history).ok()?;
+fn serialize_sync_info(history: &HistoryDb, max_headers: u32) -> Option<Vec<u8>> {
+    let sync_info = persistent_sync::build_sync_info_persistent(history, max_headers).ok()?;
     match sync_info {
         ErgoSyncInfo::V2(v2) => Some(v2.serialize()),
         ErgoSyncInfo::V1(_) => None,
@@ -355,7 +356,7 @@ mod tests {
         let peers = vec![(1u64, true), (2u64, true), (3u64, false)];
 
         let mut mgr = SyncManager::new(10, 64);
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert!(!actions.is_empty());
@@ -396,7 +397,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         let request_count = actions
             .iter()
@@ -437,7 +438,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::Synced;
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
 
         assert!(!actions.is_empty());
         assert!(matches!(
@@ -588,7 +589,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         // In UTXO mode, only BlockTransactions (102) and Extension (108) are requested.
         let request_actions: Vec<_> = actions
@@ -615,7 +616,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         let request_actions: Vec<_> = actions
             .iter()
@@ -658,7 +659,7 @@ mod tests {
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
         // Headers caught up → should transition to BlockDownload.
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         assert!(actions.iter().any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
@@ -676,7 +677,7 @@ mod tests {
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
         // Headers NOT caught up → should stay in HeaderSync.
-        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert_eq!(mgr.blocks_remaining(), 2); // blocks still queued
@@ -692,7 +693,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
         // Empty queue but NOT caught up — should stay in BlockDownload.
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         // Should still send SyncInfo even in BlockDownload.
@@ -709,7 +710,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
         // Empty queue AND caught up — should transition to Synced.
-        let _actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
 
         assert_eq!(mgr.state(), SyncState::Synced);
     }
@@ -725,7 +726,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         // Should include both SyncInfo (for parallel header download) and RequestModifiers.
         assert!(actions.iter().any(|a| matches!(a, SyncAction::SendSyncInfo { .. })));
@@ -743,7 +744,7 @@ mod tests {
         mgr.state = SyncState::Synced;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
 
         // Should transition to BlockDownload and request sections.
         assert_eq!(mgr.state(), SyncState::BlockDownload);

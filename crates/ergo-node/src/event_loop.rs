@@ -611,6 +611,7 @@ pub async fn run(
                         is_synced_for_txs,
                         &mut last_sync_header_applied,
                         &mut tx_cost_tracker,
+                        settings.network.sync_info_max_headers,
                     );
 
                     // Handle continuation headers: forward to processor thread.
@@ -1236,7 +1237,7 @@ async fn handle_sync_tick(
         None
     };
 
-    let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up, prebuilt_sync);
+    let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up, prebuilt_sync, settings.network.sync_info_max_headers);
     execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
 
     let timed_out = tracker.collect_timed_out();
