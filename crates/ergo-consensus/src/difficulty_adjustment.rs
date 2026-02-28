@@ -41,7 +41,8 @@ pub fn calculate_classic(
     let first_ts = previous_headers.first().unwrap().1;
     let last_ts = previous_headers.last().unwrap().1;
     if first_ts >= last_ts {
-        return previous_headers.last().unwrap().2;
+        // Scala uses `previousHeaders.head.requiredDifficulty` (first element).
+        return previous_headers.first().unwrap().2;
     }
 
     let desired = BigInt::from(desired_interval_ms);
@@ -91,8 +92,14 @@ pub fn calculate_eip37(
         .to_bigint()
         .unwrap();
 
-    // 1. Predictive difficulty (classic, without normalization).
-    let predictive = calculate_classic_raw(previous_headers, epoch_length, desired_interval_ms);
+    // 1. Predictive difficulty (classic, WITH normalization).
+    //    Scala's `calculate()` normalizes via encodeCompactBits/decodeCompactBits
+    //    round-trip before returning. We must do the same so that the quantized
+    //    value (not the full-precision BigInt) enters the clamping/averaging steps.
+    let predictive_nbits = calculate_classic(previous_headers, epoch_length, desired_interval_ms);
+    let predictive = decode_compact_bits(predictive_nbits as u64)
+        .to_bigint()
+        .unwrap();
 
     // 2. Clamp predictive to +/-50% of last difficulty.
     let limited_predictive = clamp_50(&predictive, &last_diff);
@@ -146,50 +153,6 @@ pub fn previous_heights_for_recalculation(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Classic algorithm returning the raw BigInt (no normalization).
-fn calculate_classic_raw(
-    previous_headers: &[(u32, u64, u32)],
-    epoch_length: u32,
-    desired_interval_ms: u64,
-) -> BigInt {
-    if previous_headers.len() <= 1 {
-        return previous_headers
-            .last()
-            .map(|h| decode_compact_bits(h.2 as u64).to_bigint().unwrap())
-            .unwrap_or_else(BigInt::zero);
-    }
-
-    let first_ts = previous_headers.first().unwrap().1;
-    let last_ts = previous_headers.last().unwrap().1;
-    if first_ts >= last_ts {
-        return decode_compact_bits(previous_headers.last().unwrap().2 as u64)
-            .to_bigint()
-            .unwrap();
-    }
-
-    let desired = BigInt::from(desired_interval_ms);
-    let epoch_len = BigInt::from(epoch_length);
-
-    let data: Vec<(BigInt, BigInt)> = previous_headers
-        .windows(2)
-        .map(|w| {
-            let start_ts = w[0].1;
-            let (end_h, end_ts, end_nbits) = w[1];
-            let end_diff = decode_compact_bits(end_nbits as u64).to_bigint().unwrap();
-            let actual_time = BigInt::from(end_ts) - BigInt::from(start_ts);
-            let adjusted = &end_diff * &desired * &epoch_len / &actual_time;
-            (BigInt::from(end_h), adjusted)
-        })
-        .collect();
-
-    let diff = interpolate(&data, epoch_length);
-    if diff >= BigInt::one() {
-        diff
-    } else {
-        BigInt::one()
-    }
-}
 
 /// Bitcoin-style difficulty calculation using only the last two epoch headers.
 fn bitcoin_calculate(
