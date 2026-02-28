@@ -893,35 +893,46 @@ pub async fn run(
                 if stale.is_empty() {
                     continue;
                 }
-                let mut cands = sync_tracker.peers_for_downloading_blocks();
+                let cands = sync_tracker.peers_for_downloading_blocks();
                 if cands.is_empty() {
-                    cands = pool.connected_peers().iter().map(|p| p.id).collect();
+                    continue;
                 }
-                // Batch all stale IDs into one RequestModifier per target peer.
+
                 let mut reassigned = 0u32;
-                let mut batch_ids: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
-                let mut target_peer: Option<u64> = None;
+                let mut deferred = 0u32;
+                let mut per_peer_batch: HashMap<u64, Vec<ergo_types::modifier_id::ModifierId>> = HashMap::new();
+
                 for (id, stale_peer) in &stale {
-                    if let Some(&alt) = cands.iter().find(|&&p| p != *stale_peer) {
+                    // Find an alternative peer that is not the stale peer and under the cap
+                    if let Some(&alt) = cands.iter().find(|&&p| {
+                        p != *stale_peer && tracker.outstanding_header_count(p) < 800
+                    }) {
                         tracker.reassign(101, id, alt);
-                        if target_peer.is_none() {
-                            target_peer = Some(alt);
-                        }
-                        batch_ids.push(*id);
+                        per_peer_batch.entry(alt).or_default().push(*id);
                         reassigned += 1;
+                        sync_metrics.record_reassignment(*stale_peer, alt, 0);
+                    } else {
+                        deferred += 1;
                     }
                 }
-                if let Some(alt) = target_peer {
-                    if !batch_ids.is_empty() {
-                        let inv = ergo_wire::inv::InvData {
-                            type_id: 101,
-                            ids: batch_ids,
-                        };
-                        let _ = pool.send_to(alt, MessageCode::RequestModifier as u8, inv.serialize()).await;
-                    }
+
+                // Send batched RequestModifiers per target peer
+                for (alt, ids) in &per_peer_batch {
+                    let inv = ergo_wire::inv::InvData {
+                        type_id: 101,
+                        ids: ids.clone(),
+                    };
+                    let _ = pool.send_to(*alt, MessageCode::RequestModifier as u8, inv.serialize()).await;
                 }
-                if reassigned > 0 {
-                    tracing::info!(stale = stale.len(), reassigned, "stale header tick: reassigned");
+
+                if reassigned > 0 || deferred > 0 {
+                    tracing::info!(
+                        stale = stale.len(),
+                        reassigned,
+                        deferred,
+                        target_peers = per_peer_batch.len(),
+                        "stale header tick"
+                    );
                 }
             }
 
