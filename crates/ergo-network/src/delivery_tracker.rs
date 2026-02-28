@@ -186,6 +186,22 @@ impl DeliveryTracker {
             .collect()
     }
 
+    /// Count outstanding header (type_id=101) requests assigned to a specific peer.
+    pub fn outstanding_header_count(&self, peer_id: PeerId) -> usize {
+        self.requested
+            .iter()
+            .filter(|(&(type_id, _), info)| type_id == 101 && info.peer_id == peer_id)
+            .count()
+    }
+
+    /// Count total outstanding header (type_id=101) requests across all peers.
+    pub fn total_outstanding_headers(&self) -> usize {
+        self.requested
+            .keys()
+            .filter(|(type_id, _)| *type_id == 101)
+            .count()
+    }
+
     /// Create a JSON-serializable snapshot of the current delivery state.
     pub fn snapshot(&self) -> DeliveryTrackerSnapshot {
         DeliveryTrackerSnapshot {
@@ -487,5 +503,27 @@ mod tests {
         tracker.set_requested(101, id, 1);
         let stale = tracker.collect_stale_headers(Duration::from_secs(3));
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn outstanding_header_count_per_peer() {
+        let mut tracker = DeliveryTracker::new(60, 3);
+        tracker.set_requested(101, make_id(0x40), 1);
+        tracker.set_requested(101, make_id(0x41), 1);
+        tracker.set_requested(101, make_id(0x42), 2);
+        tracker.set_requested(102, make_id(0x43), 1); // body section, not header
+        assert_eq!(tracker.outstanding_header_count(1), 2);
+        assert_eq!(tracker.outstanding_header_count(2), 1);
+        assert_eq!(tracker.outstanding_header_count(99), 0);
+    }
+
+    #[test]
+    fn total_outstanding_headers() {
+        let mut tracker = DeliveryTracker::new(60, 3);
+        tracker.set_requested(101, make_id(0x50), 1);
+        tracker.set_requested(101, make_id(0x51), 2);
+        tracker.set_requested(101, make_id(0x52), 3);
+        tracker.set_requested(102, make_id(0x53), 1); // not a header
+        assert_eq!(tracker.total_outstanding_headers(), 3);
     }
 }
