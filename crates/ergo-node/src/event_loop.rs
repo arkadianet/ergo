@@ -15,6 +15,7 @@ use ergo_network::mempool::ErgoMemPool;
 use ergo_network::peer_discovery::PeerDiscovery;
 use ergo_network::penalty_manager::{PenaltyAction, PenaltyManager};
 use ergo_network::sync_manager::{SyncAction, SyncManager};
+use ergo_network::sync_metrics::SyncMetrics;
 use ergo_network::sync_tracker::SyncTracker;
 use ergo_settings::settings::ErgoSettings;
 use ergo_storage::history_db::{header_score_key, HistoryDb};
@@ -202,6 +203,7 @@ pub async fn run(
     );
     let mut penalties = PenaltyManager::new();
     let mut sync_tracker = SyncTracker::new();
+    let mut sync_metrics = SyncMetrics::new(10);
 
     let data_dir = std::path::Path::new(&settings.ergo.directory);
     let mut peer_db = ergo_network::peer_db::PeerDb::new(data_dir);
@@ -593,10 +595,14 @@ pub async fn run(
                     }
 
                     // --- All other message codes (SyncInfo, Inv, GetPeers, Peers, RequestModifier) ---
-                    let peer_addrs: Vec<std::net::SocketAddr> = pool
-                        .connected_peers()
+                    let connected_info = pool.connected_peers();
+                    let peer_addrs: Vec<std::net::SocketAddr> = connected_info
                         .iter()
                         .map(|p| p.addr)
+                        .collect();
+                    let connected_peer_ids: Vec<u64> = connected_info
+                        .iter()
+                        .map(|p| p.id)
                         .collect();
                     let result = message_handler::handle_message_without_modifiers(
                         incoming.peer_id,
@@ -612,6 +618,8 @@ pub async fn run(
                         &mut last_sync_header_applied,
                         &mut tx_cost_tracker,
                         settings.network.sync_info_max_headers,
+                        &connected_peer_ids,
+                        &mut sync_metrics,
                     );
 
                     // Handle continuation headers: forward to processor thread.
@@ -861,6 +869,7 @@ pub async fn run(
             _ = status_tick.tick() => {
                 penalties.cleanup_expired_bans();
                 peer_db.maybe_flush();
+                sync_metrics.maybe_emit_rollup();
                 let state = shared.read().await;
                 tracing::info!(
                     sync_state = ?sync_mgr.state(),

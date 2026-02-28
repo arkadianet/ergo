@@ -20,10 +20,12 @@ use rayon::prelude::*;
 
 use crate::connection_pool::PeerId;
 use crate::delivery_tracker::{DeliveryTracker, ModifierStatus};
+use crate::header_partitioner::{self, EligiblePeers, DEFAULT_MIN_PER_PEER};
 use crate::node_view::NodeViewHolder;
 use crate::penalty_manager::PenaltyType;
 use crate::persistent_sync;
 use crate::sync_manager::{SyncAction, SyncManager};
+use crate::sync_metrics::SyncMetrics;
 use crate::sync_tracker::{classify_peer, SyncTracker};
 
 // ---------------------------------------------------------------------------
@@ -184,6 +186,8 @@ pub fn handle_message(
     last_sync_header_applied: &mut Option<u32>,
     tx_cost_tracker: &mut TxCostTracker,
     max_headers: u32,
+    connected_peer_ids: &[PeerId],
+    metrics: &mut SyncMetrics,
 ) -> HandleResult {
     match msg.code {
         1 => handle_get_peers(peer_id, connected_peers),
@@ -209,7 +213,10 @@ pub fn handle_message(
         }
         55 => {
             let mp = node_view.mempool.read().unwrap();
-            handle_inv(peer_id, &msg.body, tracker, &node_view.history, &mp, is_synced_for_txs)
+            handle_inv(
+                peer_id, &msg.body, tracker, &node_view.history, &mp,
+                is_synced_for_txs, sync_tracker, connected_peer_ids, metrics,
+            )
         }
         33 => handle_modifiers(peer_id, &msg.body, node_view, sync_mgr, tracker, cache, is_synced_for_txs, tx_cost_tracker, max_headers),
         22 => {
@@ -474,6 +481,7 @@ fn handle_sync_info(
 ///
 /// For transaction announcements (type_id 2), checks the mempool instead
 /// of the history database since unconfirmed transactions live in memory.
+#[allow(clippy::too_many_arguments)]
 fn handle_inv(
     peer_id: PeerId,
     body: &[u8],
@@ -481,6 +489,9 @@ fn handle_inv(
     history: &HistoryDb,
     mempool: &crate::mempool::ErgoMemPool,
     is_synced_for_txs: bool,
+    sync_tracker: &SyncTracker,
+    connected_peer_ids: &[PeerId],
+    metrics: &mut SyncMetrics,
 ) -> HandleResult {
     use std::time::Duration;
 
@@ -491,44 +502,47 @@ fn handle_inv(
 
     let type_id = inv.type_id as u8;
 
-    // During initial sync, ignore transaction inventory announcements since
-    // the UTXO set is incomplete and transactions cannot be verified.
     if type_id == 2 && !is_synced_for_txs {
         return HandleResult::empty();
     }
 
     let total_inv_ids = inv.ids.len();
     let stale_threshold = Duration::from_secs(1);
+
+    // Phase 1: Filter IDs preserving Inv order. DO NOT set_requested yet.
     let mut to_request: Vec<ModifierId> = Vec::new();
+    let mut stale_ids: std::collections::HashSet<ModifierId> = std::collections::HashSet::new();
     let mut stale_count = 0u32;
 
-    for id in inv.ids {
-        let status = tracker.status(type_id, &id);
+    for id in &inv.ids {
+        let status = tracker.status(type_id, id);
         match status {
             ModifierStatus::Unknown => {
                 let already_have = if type_id == 2 {
                     mempool.contains(&ergo_types::transaction::TxId(id.0))
                 } else {
-                    history.contains_modifier(type_id, &id).unwrap_or(true)
+                    history.contains_modifier(type_id, id).unwrap_or(true)
                 };
                 if !already_have {
-                    tracker.set_requested(type_id, id, peer_id);
-                    to_request.push(id);
+                    to_request.push(*id);
+                } else {
+                    metrics.record_dup_prevented();
                 }
             }
             ModifierStatus::Requested if type_id == HEADER_TYPE_ID => {
-                // Header already requested from another peer — if the request
-                // is stale (>1s), reassign to this announcing peer for faster
-                // delivery.
-                if let Some(age) = tracker.request_age(type_id, &id) {
+                if let Some(age) = tracker.request_age(type_id, id) {
                     if age >= stale_threshold {
-                        tracker.reassign(type_id, &id, peer_id);
-                        to_request.push(id);
+                        to_request.push(*id);
+                        stale_ids.insert(*id);
                         stale_count += 1;
+                    } else {
+                        metrics.record_dup_prevented();
                     }
                 }
             }
-            _ => {} // Received, Invalid, or fresh Requested — skip
+            _ => {
+                metrics.record_dup_prevented();
+            }
         }
     }
 
@@ -537,23 +551,161 @@ fn handle_inv(
         return HandleResult::empty();
     }
 
-    if stale_count > 0 {
-        tracing::info!(
-            type_id,
-            new = to_request.len() as u32 - stale_count,
-            stale_reassigned = stale_count,
-            "handle_inv: requesting (with stale reassignment)"
-        );
-    } else {
+    // Phase 2: Non-header types — single peer, unchanged behavior
+    if type_id != HEADER_TYPE_ID {
+        for id in &to_request {
+            tracker.set_requested(type_id, *id, peer_id);
+        }
         tracing::info!(type_id, requested = to_request.len(), "handle_inv: requesting from announcing peer");
+        return HandleResult {
+            actions: vec![SyncAction::RequestModifiers {
+                peer_id,
+                type_id,
+                ids: to_request,
+            }],
+            new_headers: Vec::new(),
+            penalties: Vec::new(),
+            applied_blocks: Vec::new(),
+        };
     }
 
+    // Phase 3: Header-specific multi-peer partitioning
+    const GLOBAL_OUTSTANDING_CAP: usize = 2400;
+    const PER_PEER_OUTSTANDING_CAP: usize = 800;
+
+    let global_outstanding = tracker.total_outstanding_headers();
+    if global_outstanding >= GLOBAL_OUTSTANDING_CAP {
+        tracing::warn!(
+            global_outstanding,
+            to_request_len = to_request.len(),
+            "cap_backpressure: global outstanding cap exceeded, skipping batch"
+        );
+        return HandleResult::empty();
+    }
+
+    let batch_id = metrics.new_batch_id();
+
+    tracing::info!(
+        batch_id,
+        peer = peer_id,
+        inv_len = total_inv_ids,
+        to_request_len = to_request.len(),
+        stale_reassigned = stale_count,
+        "inv_received"
+    );
+
+    let eligible = header_partitioner::select_eligible_peers(
+        peer_id,
+        sync_tracker,
+        connected_peer_ids,
+    );
+
+    let actions = match eligible {
+        EligiblePeers::Partition(mut peers) => {
+            peers.retain(|&pid| {
+                tracker.outstanding_header_count(pid) < PER_PEER_OUTSTANDING_CAP
+            });
+            if peers.is_empty() {
+                tracing::warn!(
+                    batch_id,
+                    "cap_backpressure_all_peers: all eligible peers at outstanding cap"
+                );
+                return HandleResult::empty();
+            }
+
+            let assignments = header_partitioner::partition_header_ids(
+                &to_request,
+                &peers,
+                DEFAULT_MIN_PER_PEER,
+            );
+
+            let summary: Vec<(PeerId, usize)> = assignments
+                .iter()
+                .map(|(pid, chunk)| (*pid, chunk.len()))
+                .collect();
+            metrics.record_partition(batch_id, total_inv_ids, to_request.len(), &summary);
+
+            let mut result_actions = Vec::with_capacity(assignments.len());
+            let mut offset = 0;
+            for (assigned_peer, chunk) in &assignments {
+                for id in chunk {
+                    if stale_ids.contains(id) {
+                        tracker.reassign(type_id, id, *assigned_peer);
+                    } else {
+                        tracker.set_requested(type_id, *id, *assigned_peer);
+                    }
+                }
+
+                metrics.record_requests_sent(
+                    batch_id,
+                    *assigned_peer,
+                    chunk.len(),
+                    offset,
+                    offset + chunk.len().saturating_sub(1),
+                );
+                offset += chunk.len();
+
+                result_actions.push(SyncAction::RequestModifiers {
+                    peer_id: *assigned_peer,
+                    type_id,
+                    ids: chunk.clone(),
+                });
+            }
+
+            result_actions
+        }
+        EligiblePeers::SinglePeerFallback(fallback_peer, reason) => {
+            if tracker.outstanding_header_count(fallback_peer) >= PER_PEER_OUTSTANDING_CAP {
+                tracing::warn!(
+                    batch_id,
+                    peer = fallback_peer,
+                    reason,
+                    "cap_backpressure_single_peer: fallback peer at outstanding cap"
+                );
+                return HandleResult::empty();
+            }
+
+            tracing::warn!(
+                batch_id,
+                peer = fallback_peer,
+                reason,
+                to_request_len = to_request.len(),
+                "single_peer_fallback: partitioning skipped"
+            );
+
+            metrics.record_partition(
+                batch_id,
+                total_inv_ids,
+                to_request.len(),
+                &[(fallback_peer, to_request.len())],
+            );
+
+            for id in &to_request {
+                if stale_ids.contains(id) {
+                    tracker.reassign(type_id, id, fallback_peer);
+                } else {
+                    tracker.set_requested(type_id, *id, fallback_peer);
+                }
+            }
+
+            metrics.record_requests_sent(
+                batch_id,
+                fallback_peer,
+                to_request.len(),
+                0,
+                to_request.len().saturating_sub(1),
+            );
+
+            vec![SyncAction::RequestModifiers {
+                peer_id: fallback_peer,
+                type_id,
+                ids: to_request,
+            }]
+        }
+    };
+
     HandleResult {
-        actions: vec![SyncAction::RequestModifiers {
-            peer_id,
-            type_id,
-            ids: to_request,
-        }],
+        actions,
         new_headers: Vec::new(),
         penalties: Vec::new(),
         applied_blocks: Vec::new(),
@@ -1014,6 +1166,8 @@ pub fn handle_message_without_modifiers(
     last_sync_header_applied: &mut Option<u32>,
     _tx_cost_tracker: &mut TxCostTracker,
     max_headers: u32,
+    connected_peer_ids: &[PeerId],
+    metrics: &mut SyncMetrics,
 ) -> HandleResult {
     match msg.code {
         1 => handle_get_peers(peer_id, connected_peers),
@@ -1039,7 +1193,10 @@ pub fn handle_message_without_modifiers(
         }
         55 => {
             let mp = mempool.read().unwrap();
-            handle_inv(peer_id, &msg.body, tracker, history, &mp, is_synced_for_txs)
+            handle_inv(
+                peer_id, &msg.body, tracker, history, &mp,
+                is_synced_for_txs, sync_tracker, connected_peer_ids, metrics,
+            )
         }
         22 => {
             let mp = mempool.read().unwrap();
@@ -1261,7 +1418,7 @@ mod tests {
             code: 99,
             body: vec![],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert!(result.actions.is_empty());
         assert!(result.new_headers.is_empty());
@@ -1282,7 +1439,7 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1323,7 +1480,7 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1349,7 +1506,7 @@ mod tests {
             body: sync_info.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert!(!result.actions.is_empty());
         assert!(matches!(&result.actions[0], SyncAction::SendSyncInfo { .. }));
@@ -1375,7 +1532,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert!(node_view.history.contains_modifier(108, &ext_id).unwrap());
         assert!(result.new_headers.is_empty());
@@ -1402,7 +1559,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let _result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let _result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         // If we get here without panicking, the flow is correct.
     }
 
@@ -1446,7 +1603,7 @@ mod tests {
         let body = serialize_peers(&peers);
 
         let msg = RawMessage { code: 2, body };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1465,7 +1622,7 @@ mod tests {
 
         let body = ergo_wire::peer_spec::serialize_peers(&[]);
         let msg = RawMessage { code: 2, body };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(result.actions.is_empty());
     }
 
@@ -1479,7 +1636,7 @@ mod tests {
             code: 2,
             body: vec![0xFF, 0xFF],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(result.actions.is_empty());
     }
 
@@ -1503,7 +1660,7 @@ mod tests {
             body: vec![],
         };
         let result =
-            handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &connected, &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+            handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &connected, &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1526,7 +1683,7 @@ mod tests {
             code: 1,
             body: vec![],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1567,7 +1724,7 @@ mod tests {
             code: 22,
             body: inv.serialize(),
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1597,7 +1754,7 @@ mod tests {
             code: 22,
             body: inv.serialize(),
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         assert!(result.actions.is_empty());
     }
@@ -1612,7 +1769,7 @@ mod tests {
             code: 22,
             body: vec![0xFF],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(result.actions.is_empty());
     }
 
@@ -1664,7 +1821,7 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         // Should only request id(2), since id(1) is in the mempool.
         assert_eq!(result.actions.len(), 1);
@@ -1737,7 +1894,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         // Transaction should be in mempool.
         let mp = node_view.mempool.read().unwrap();
@@ -1771,7 +1928,7 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10);
+        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
         // Mempool should be empty.
         let mp = node_view.mempool.read().unwrap();
@@ -1818,6 +1975,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Peer should now be tracked (with Equal status since both heights are 0).
@@ -1842,11 +2001,11 @@ mod tests {
         let msg = RawMessage { code: 65, body: sync_info.serialize() };
 
         // First call should process normally.
-        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
+        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(!r1.actions.is_empty());
 
         // Second call within 100ms should be rate-limited.
-        let r2 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
+        let r2 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(r2.actions.is_empty());
     }
 
@@ -1862,11 +2021,11 @@ mod tests {
         let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 { last_headers: vec![] };
         let msg = RawMessage { code: 65, body: sync_info.serialize() };
 
-        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
+        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(!r1.actions.is_empty());
 
         // Different peer should not be rate-limited.
-        let r2 = handle_message(2, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10);
+        let r2 = handle_message(2, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
         assert!(!r2.actions.is_empty());
     }
 
@@ -1907,6 +2066,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Should have a SpamMessage penalty for the invalid modifier.
@@ -1951,6 +2112,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // No penalties — modifier was requested.
@@ -2008,6 +2171,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Should have an InvalidBlock penalty for ID mismatch.
@@ -2057,6 +2222,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // No penalties — ID matches.
@@ -2101,6 +2268,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
         assert!(result.actions.is_empty());
     }
@@ -2130,6 +2299,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
         assert!(!result.actions.is_empty());
     }
@@ -2159,6 +2330,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
         assert!(!result.actions.is_empty());
     }
@@ -2207,6 +2380,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Mempool should be empty - tx was filtered before processing.
@@ -2273,6 +2448,8 @@ mod tests {
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Should have at least 2 actions: SendSyncInfo + ApplyContinuationHeader.
@@ -2336,6 +2513,8 @@ mod tests {
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Should NOT have an ApplyContinuationHeader action.
@@ -2398,6 +2577,8 @@ mod tests {
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // Should NOT have ApplyContinuationHeader because height == last_applied.
@@ -2549,6 +2730,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // PoW failure should produce an InvalidBlock penalty.
@@ -2649,6 +2832,8 @@ mod tests {
             &mut None,
             &mut TxCostTracker::new(),
             10,
+            &[],
+            &mut SyncMetrics::new(10),
         );
 
         // No penalties — the header is valid, just orphaned.
