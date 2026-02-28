@@ -219,7 +219,7 @@ fn default_max_delivery_checks() -> u32 { 2 }
 fn default_desired_inv() -> u32 { 400 }
 fn default_max_modifiers_cache() -> u32 { 1024 }
 fn default_max_peer_spec() -> u32 { 64 }
-fn default_sync_interval() -> u64 { 5 }
+fn default_sync_interval() -> u64 { 2 }
 fn default_sync_interval_stable() -> u64 { 30 }
 fn default_peer_discovery() -> bool { true }
 fn default_inactive_deadline() -> u64 { 600 }
@@ -305,7 +305,7 @@ handshake_timeout_secs = 30
 max_connections = 30
 connection_timeout_secs = 1
 delivery_timeout_secs = 10
-max_delivery_checks = 100
+max_delivery_checks = 2
 desired_inv_objects = 400
 max_modifiers_cache_size = 1024
 max_peer_spec_objects = 64

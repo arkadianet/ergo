@@ -99,8 +99,15 @@ async fn main() {
     let api_history = HistoryDb::open_read_only(&db_path)
         .unwrap_or_else(|e| panic!("cannot open API database: {e}"));
 
-    // Open a read-only DB handle for the event loop (sync protocol).
-    let sync_history = HistoryDb::open_read_only(&db_path)
+    // Open a secondary DB handle for the event loop (sync protocol).
+    // Secondary mode allows periodic refresh via try_catch_up_with_primary()
+    // so the sync protocol sees headers written by the processor thread.
+    // The secondary path must be OUTSIDE the primary path to avoid interfering
+    // with RocksDB's WAL and SST file management.
+    let sync_secondary_path = Path::new(&settings.ergo.directory).join("history_sync_secondary");
+    std::fs::create_dir_all(&sync_secondary_path)
+        .unwrap_or_else(|e| panic!("cannot create sync secondary dir: {e}"));
+    let sync_history = HistoryDb::open_as_secondary(&db_path, &sync_secondary_path)
         .unwrap_or_else(|e| panic!("cannot open sync database: {e}"));
 
     let mempool = Arc::new(std::sync::RwLock::new(

@@ -67,6 +67,13 @@ pub struct InboundPeer {
     pub handshake: Handshake,
 }
 
+/// A completed outbound connection from a background discovery task.
+struct PendingOutboundConn {
+    conn: PeerConnection,
+    addr: SocketAddr,
+    handshake: Handshake,
+}
+
 /// Shared state accessible from the event loop and HTTP API.
 pub struct SharedState {
     pub headers_height: u64,
@@ -171,6 +178,7 @@ pub async fn run(
         .unwrap_or([1, 0, 2, 4]);
 
     let our_handshake = build_handshake(&settings, magic, session_id);
+    let our_handshake_for_discovery = our_handshake.clone();
 
     let mut pool = ConnectionPool::with_handshake_timeout(
         magic,
@@ -216,15 +224,29 @@ pub async fn run(
 
     let sync_interval = Duration::from_secs(settings.network.sync_interval_secs);
     let mut sync_tick = tokio::time::interval(sync_interval);
+    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut discovery_tick = tokio::time::interval(Duration::from_secs(60));
+    discovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut status_tick = tokio::time::interval(Duration::from_secs(10));
+    status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut check_modifiers_tick = tokio::time::interval(Duration::from_secs(10));
+    check_modifiers_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut mempool_audit_tick = tokio::time::interval(Duration::from_secs(60));
+    mempool_audit_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut dead_conn_tick = tokio::time::interval(Duration::from_secs(60));
+    dead_conn_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut eviction_tick = tokio::time::interval(Duration::from_secs(3600));
+    eviction_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut stale_header_tick = tokio::time::interval(Duration::from_secs(1));
+    stale_header_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Channel for completed outbound connections from background discovery tasks.
+    let (pending_conn_tx, mut pending_conn_rx) =
+        tokio::sync::mpsc::channel::<PendingOutboundConn>(32);
 
     let mining_interval = Duration::from_secs(settings.ergo.node.candidate_generation_interval_s);
     let mut mining_tick = tokio::time::interval(mining_interval);
+    mining_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Snapshot bootstrap: discovery coordinator + chunk storage.
     let mut snapshot_discovery: Option<crate::snapshot_bootstrap::SnapshotDiscovery> =
@@ -237,12 +259,14 @@ pub async fn run(
         };
     let mut downloaded_chunks: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
     let mut snapshot_tick = tokio::time::interval(Duration::from_secs(30));
+    snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Chain health monitoring: detect globally stuck sync and reset the
     // DeliveryTracker so that stale pending requests don't block progress.
     let mut last_best_height: u32 = 0;
     let mut last_height_change = Instant::now();
     let mut chain_health_interval = tokio::time::interval(Duration::from_secs(60));
+    chain_health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Per-peer rate limiting for SyncInfo messages (100ms lock time).
     let mut last_sync_from: HashMap<u64, Instant> = HashMap::new();
@@ -265,6 +289,11 @@ pub async fn run(
     let mut cached_best_full_id: Option<ergo_types::modifier_id::ModifierId> = None;
     let mut cached_state_root: Vec<u8> = vec![0u8; 33];
     let mut cached_state_version: Option<[u8; 32]> = None;
+    // Cached sync headers from the processor (newest first), used to build
+    // SyncInfoV2 without reading from the secondary DB.
+    let mut cached_sync_headers: Vec<ergo_types::header::Header> = Vec::new();
+    // Tracks the last peer that delivered headers, for targeted SyncInfo response.
+    let mut last_header_peer: Option<u64> = None;
 
     // Propagate mining status into shared state once at startup.
     {
@@ -296,6 +325,7 @@ pub async fn run(
                     &cached_state_root,
                     cached_state_version,
                     is_digest_mode,
+                    &cached_sync_headers,
                 ).await;
 
                 // Recompute whether the node is synced enough for tx acceptance.
@@ -306,6 +336,7 @@ pub async fn run(
 
             msg = pool.recv() => {
                 if let Some(incoming) = msg {
+                    tracing::info!(peer_id = incoming.peer_id, code = incoming.message.code, body_len = incoming.message.body.len(), "recv msg");
                     last_msg_time = Some(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -461,36 +492,103 @@ pub async fn run(
                                 apply_penalty(&mut pool, &mut penalties, *peer_id, *penalty_type);
                             }
 
+                            // Log heights of validated headers.
+                            {
+                                let mut heights: Vec<u32> = validated_headers.iter().map(|(_, h, _)| h.height).collect();
+                                heights.sort_unstable();
+                                let min_h = heights.first().copied().unwrap_or(0);
+                                let max_h = heights.last().copied().unwrap_or(0);
+                                tracing::trace!(
+                                    total = mods.modifiers.len(),
+                                    validated = validated_headers.len(),
+                                    penalties = header_penalties.len(),
+                                    min_h, max_h,
+                                    "parallel PoW result"
+                                );
+                            }
+
+                            // Sort by height so the processor receives them in
+                            // chain order, minimizing cache insertions for
+                            // out-of-order delivery (matches Scala's sortBy).
+                            let mut validated_headers = validated_headers;
+                            validated_headers.sort_by_key(|(_, h, _)| h.height);
+
                             // Forward validated headers to processor thread.
-                            for (mid, header, _data) in validated_headers {
-                                sync_mgr.on_section_received(101, &mid, &mut tracker);
-                                let _ = cmd_tx.try_send(ProcessorCommand::StorePrevalidatedHeader {
+                            last_header_peer = Some(incoming.peer_id);
+                            let mut sent = 0usize;
+                            let mut dropped = 0usize;
+                            let mut disconnected = false;
+                            for (mid, header, data) in validated_headers {
+                                match cmd_tx.try_send(ProcessorCommand::StorePrevalidatedHeader {
                                     modifier_id: mid,
                                     header: Box::new(header),
+                                    raw_data: data,
                                     peer_hint: Some(incoming.peer_id),
-                                });
+                                }) {
+                                    Ok(()) => {
+                                        // Only mark as received AFTER the processor accepted it.
+                                        sync_mgr.on_section_received(101, &mid, &mut tracker);
+                                        sent += 1;
+                                    }
+                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                        disconnected = true;
+                                        dropped += 1;
+                                        break;
+                                    }
+                                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                        // Header stays in Requested state — stale detection
+                                        // or timeout will re-request it from another peer.
+                                        dropped += 1;
+                                    }
+                                }
                             }
-                            let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
+                            let cache_sent = cmd_tx.try_send(ProcessorCommand::ApplyFromCache).is_ok();
+                            if dropped > 0 {
+                                tracing::warn!(sent, dropped, cache_sent, disconnected, "processor channel backpressure — headers will be re-requested");
+                            } else {
+                                tracing::trace!(sent, dropped, cache_sent, "forwarded to processor");
+                            }
+                            if disconnected {
+                                tracing::error!("processor thread died, shutting down");
+                                break;
+                            }
                             continue;
                         }
 
-                        // Body sections: check if requested, then forward to processor.
+                        // Body sections: skip invalid/received, forward everything else.
+                        let mut body_disconnected = false;
                         for (id, data) in &mods.modifiers {
                             let mod_status = tracker.status(type_id, id);
-                            if mod_status != ergo_network::delivery_tracker::ModifierStatus::Requested {
+                            if mod_status == ergo_network::delivery_tracker::ModifierStatus::Invalid {
                                 penalties.add_penalty(incoming.peer_id, ergo_network::penalty_manager::PenaltyType::SpamMessage);
                                 continue;
                             }
-                            tracker.set_received(type_id, id);
-                            sync_mgr.on_section_received(type_id, id, &mut tracker);
-                            let _ = cmd_tx.try_send(ProcessorCommand::StoreModifier {
+                            if mod_status == ergo_network::delivery_tracker::ModifierStatus::Received {
+                                continue;
+                            }
+                            match cmd_tx.try_send(ProcessorCommand::StoreModifier {
                                 type_id,
                                 modifier_id: *id,
                                 data: data.clone(),
                                 peer_hint: Some(incoming.peer_id),
-                            });
+                            }) {
+                                Ok(()) => {
+                                    // Only mark as received AFTER the processor accepted it.
+                                    sync_mgr.on_section_received(type_id, id, &mut tracker);
+                                }
+                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                    body_disconnected = true;
+                                    break;
+                                }
+                                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                    tracing::warn!(type_id, modifier_id = hex::encode(id.0), "processor channel full — body section will be re-requested");
+                                }
+                            }
                         }
-                        let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
+                        if body_disconnected {
+                            tracing::error!("processor thread died, shutting down");
+                            break;
+                        }
                         continue;
                     }
 
@@ -602,18 +700,27 @@ pub async fn run(
                 match evt {
                     ProcessorEvent::HeadersApplied { new_header_ids, to_download } => {
                         if !new_header_ids.is_empty() {
-                            // Read best height from sync_history (read-only, eventually consistent).
-                            let best_height = sync_history.best_header_id().ok().flatten()
-                                .and_then(|id| sync_history.load_header(&id).ok().flatten())
-                                .map(|h| h.height).unwrap_or(0);
-                            tracing::info!(new = new_header_ids.len(), headers_height = best_height, "received headers");
+                            tracing::info!(new = new_header_ids.len(), headers_height = cached_headers_height, "received headers");
+
+                            // Refresh secondary DB for has_all_sections check in on_headers_received.
+                            let _ = sync_history.try_catch_up_with_primary();
                             sync_mgr.on_headers_received(&new_header_ids, sync_history);
 
-                            // Fast sync: send updated SyncInfoV2 to trigger header chain loop.
-                            if let Ok(ergo_wire::sync_info::ErgoSyncInfo::V2(v2)) =
-                                ergo_network::persistent_sync::build_sync_info_persistent(sync_history)
-                            {
-                                pool.broadcast(MessageCode::SyncInfo as u8, &v2.serialize()).await;
+                            // Send SyncInfoV2 from processor-provided headers.
+                            if !cached_sync_headers.is_empty() {
+                                let v2 = ergo_wire::sync_info::ErgoSyncInfoV2 {
+                                    last_headers: cached_sync_headers.clone(),
+                                };
+                                let sync_tip = v2.last_headers.first().map(|h| h.height).unwrap_or(0);
+                                let sync_bytes = v2.serialize();
+
+                                // Send targeted SyncInfo to the delivering peer first for
+                                // a tight request/response loop, then broadcast to all.
+                                if let Some(peer) = last_header_peer {
+                                    tracing::debug!(sync_tip, peer, "targeted SyncInfoV2 to delivering peer");
+                                    let _ = pool.send_to(peer, MessageCode::SyncInfo as u8, sync_bytes.clone()).await;
+                                }
+                                pool.broadcast(MessageCode::SyncInfo as u8, &sync_bytes).await;
                             }
                         }
                         if !to_download.is_empty() {
@@ -684,6 +791,7 @@ pub async fn run(
                         best_header_id, best_full_id,
                         state_root, applied_blocks: _,
                         rollback_height: _,
+                        sync_headers,
                     } => {
                         cached_headers_height = headers_height;
                         cached_full_height = full_height;
@@ -692,13 +800,20 @@ pub async fn run(
                         cached_state_root = state_root;
                         // Derive state_version from best_full_id
                         cached_state_version = best_full_id.map(|id| id.0);
+                        cached_sync_headers = sync_headers;
                     }
                     ProcessorEvent::ModifierCached { .. } => {}
                 }
             }
 
+            // Completed outbound connections from background discovery tasks.
+            Some(pending) = pending_conn_rx.recv() => {
+                let id = pool.add_outbound(pending.conn, pending.addr, &pending.handshake);
+                tracing::info!(peer_id = id, addr = %pending.addr, "connected (background)");
+            }
+
             _ = discovery_tick.tick() => {
-                handle_discovery_tick(&mut pool, &mut discovery, &settings, &penalties).await;
+                handle_discovery_tick(&mut pool, &mut discovery, &settings, &penalties, &pending_conn_tx, magic, &our_handshake_for_discovery, session_id).await;
             }
 
             Some(submission) = tx_submit_rx.recv() => {
@@ -757,6 +872,47 @@ pub async fn run(
 
             _ = check_modifiers_tick.tick() => {
                 handle_check_modifiers(&mut pool, sync_history, &mut tracker, &sync_tracker).await;
+            }
+
+            // Fast stale-header reassignment: every 1 s, check for header
+            // requests that have been pending for >2 s and re-request them
+            // from an alternative peer.  This runs independently of sync_tick
+            // so that recovery doesn't wait for the next 5 s SyncInfoV2 cycle.
+            _ = stale_header_tick.tick() => {
+                let stale = tracker.collect_stale_headers(Duration::from_secs(2));
+                if stale.is_empty() {
+                    continue;
+                }
+                let mut cands = sync_tracker.peers_for_downloading_blocks();
+                if cands.is_empty() {
+                    cands = pool.connected_peers().iter().map(|p| p.id).collect();
+                }
+                // Batch all stale IDs into one RequestModifier per target peer.
+                let mut reassigned = 0u32;
+                let mut batch_ids: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
+                let mut target_peer: Option<u64> = None;
+                for (id, stale_peer) in &stale {
+                    if let Some(&alt) = cands.iter().find(|&&p| p != *stale_peer) {
+                        tracker.reassign(101, id, alt);
+                        if target_peer.is_none() {
+                            target_peer = Some(alt);
+                        }
+                        batch_ids.push(*id);
+                        reassigned += 1;
+                    }
+                }
+                if let Some(alt) = target_peer {
+                    if !batch_ids.is_empty() {
+                        let inv = ergo_wire::inv::InvData {
+                            type_id: 101,
+                            ids: batch_ids,
+                        };
+                        let _ = pool.send_to(alt, MessageCode::RequestModifier as u8, inv.serialize()).await;
+                    }
+                }
+                if reassigned > 0 {
+                    tracing::info!(stale = stale.len(), reassigned, "stale header tick: reassigned");
+                }
             }
 
             _ = mempool_audit_tick.tick() => {
@@ -1048,9 +1204,14 @@ async fn handle_sync_tick(
     cached_state_root: &[u8],
     cached_state_version: Option<[u8; 32]>,
     is_digest_mode: bool,
+    cached_sync_headers: &[ergo_types::header::Header],
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
+
+    // Best-effort refresh of secondary DB for operations that still use it
+    // (has_all_sections, next_modifiers_to_download, etc.).
+    let _ = sync_history.try_catch_up_with_primary();
 
     let peers: Vec<_> = pool
         .connected_peers()
@@ -1058,14 +1219,24 @@ async fn handle_sync_tick(
         .map(|p| (p.id, true))
         .collect();
 
-    // Use sync_history for our height (read-only, eventually consistent).
-    let our_height: u32 = sync_history.best_header_id().ok().flatten()
-        .and_then(|id| sync_history.load_header(&id).ok().flatten())
-        .map_or(0, |h| h.height);
+    // Use cached_headers_height from processor's StateUpdate (always fresh)
+    // instead of reading from the potentially-stale secondary DB.
+    let our_height: u32 = cached_headers_height;
     let max_peer = sync_tracker.max_peer_height();
     let is_caught_up = max_peer > 0 && our_height >= max_peer;
 
-    let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up);
+    // Build prebuilt SyncInfo bytes from processor-provided headers (always fresh).
+    // This is passed to on_tick so it uses fresh data instead of the stale secondary DB.
+    let prebuilt_sync = if !cached_sync_headers.is_empty() {
+        let v2 = ergo_wire::sync_info::ErgoSyncInfoV2 {
+            last_headers: cached_sync_headers.to_vec(),
+        };
+        Some(v2.serialize())
+    } else {
+        None
+    };
+
+    let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up, prebuilt_sync);
     execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
 
     let timed_out = tracker.collect_timed_out();
@@ -1095,6 +1266,13 @@ async fn handle_sync_tick(
             tracker.set_unknown(type_id, &id);
         }
     }
+
+    // Periodic cleanup: evict old entries from received (5 min) and invalid (30 min)
+    // maps to prevent unbounded growth.
+    // Note: stale header reassignment is handled by the dedicated 1s
+    // stale_header_tick in the main select! loop (batched, not per-ID).
+    tracker.cleanup_received(Duration::from_secs(300));
+    tracker.cleanup_invalid(Duration::from_secs(1800));
 
     update_shared_state(
         sync_history,
@@ -1176,12 +1354,21 @@ async fn handle_check_modifiers(
     );
 }
 
-/// Handle periodic peer discovery: request peers and connect to new ones.
+/// Handle periodic peer discovery: request peers and spawn background connect tasks.
+///
+/// Connections are spawned as independent tokio tasks that send completed
+/// connections back via `pending_conn_tx`. This prevents unreachable peers
+/// from blocking the event loop.
+#[allow(clippy::too_many_arguments)]
 async fn handle_discovery_tick(
     pool: &mut ConnectionPool,
     discovery: &mut PeerDiscovery,
     settings: &ErgoSettings,
     penalties: &PenaltyManager,
+    pending_conn_tx: &tokio::sync::mpsc::Sender<PendingOutboundConn>,
+    magic: [u8; 4],
+    our_handshake: &Handshake,
+    session_id: u64,
 ) {
     let peers = pool.connected_peers();
     if !peers.is_empty() {
@@ -1198,15 +1385,29 @@ async fn handle_discovery_tick(
         .collect();
 
     if pool.peer_count() < settings.network.max_connections as usize {
+        let hs_timeout = settings.network.handshake_timeout_secs;
         for addr in discovery.peers_to_connect(&connected).into_iter().take(3) {
             if penalties.is_ip_banned(&addr.ip()) {
                 tracing::debug!(%addr, "skipping discovery connect to banned IP");
                 continue;
             }
-            match pool.connect(addr).await {
-                Ok(id) => tracing::info!(peer_id = id, %addr, "connected"),
-                Err(e) => tracing::debug!(%addr, error = %e, "connect failed"),
-            }
+            // Spawn connection as a background task so it doesn't block the event loop.
+            let tx = pending_conn_tx.clone();
+            let hs = our_handshake.clone();
+            tokio::spawn(async move {
+                match PeerConnection::connect(addr, magic, &hs, hs_timeout, Some(session_id)).await {
+                    Ok((conn, peer_hs)) => {
+                        let _ = tx.send(PendingOutboundConn {
+                            conn,
+                            addr,
+                            handshake: peer_hs,
+                        }).await;
+                    }
+                    Err(e) => {
+                        tracing::debug!(%addr, error = %e, "background connect failed");
+                    }
+                }
+            });
         }
     }
 }
@@ -1251,8 +1452,7 @@ fn apply_continuation_headers(
                 data: header_bytes.clone(),
                 peer_hint: Some(*peer_id),
             });
-            let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
-            tracing::debug!(
+            tracing::trace!(
                 header_id = hex::encode(header_id.0),
                 "forwarded continuation header to processor"
             );
@@ -1272,11 +1472,14 @@ async fn execute_actions(
         match action {
             SyncAction::SendSyncInfo { peer_id, data } => {
                 if let Some(pid) = peer_id {
+                    tracing::debug!(peer = pid, data_len = data.len(), "SendSyncInfo → targeted");
                     let _ = pool
                         .send_to(*pid, MessageCode::SyncInfo as u8, data.clone())
                         .await;
                     sync_tracker.record_sync_sent(*pid);
                 } else {
+                    let n = pool.peer_count();
+                    tracing::info!(peers = n, data_len = data.len(), "SendSyncInfo → broadcast");
                     pool.broadcast(MessageCode::SyncInfo as u8, data).await;
                     for p in pool.connected_peers() {
                         sync_tracker.record_sync_sent(p.id);

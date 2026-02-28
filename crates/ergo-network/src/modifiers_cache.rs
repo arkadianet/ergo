@@ -7,6 +7,7 @@
 
 use std::num::NonZeroUsize;
 
+use ergo_types::header::Header;
 use ergo_types::modifier_id::ModifierId;
 use lru::LruCache;
 
@@ -26,6 +27,8 @@ pub struct CachedModifier {
     pub type_id: u8,
     /// Raw serialized modifier bytes.
     pub data: Vec<u8>,
+    /// For headers (type_id=101), the pre-parsed header for height inspection.
+    pub header: Option<Header>,
 }
 
 /// Two-tier LRU cache for buffering modifiers received out of order.
@@ -65,8 +68,9 @@ impl ModifiersCache {
         id: ModifierId,
         type_id: u8,
         data: Vec<u8>,
+        header: Option<Header>,
     ) -> Option<(ModifierId, u8, Vec<u8>)> {
-        let entry = CachedModifier { type_id, data };
+        let entry = CachedModifier { type_id, data, header };
         let cache = self.cache_for_mut(type_id);
 
         // If at capacity and this key is not already present, the LRU entry
@@ -158,6 +162,40 @@ impl ModifiersCache {
         out
     }
 
+    /// Find and remove the first cached header at `current_headers_height + 1`.
+    pub fn pop_header_candidate(
+        &mut self,
+        current_headers_height: u32,
+    ) -> Option<(ModifierId, u8, Vec<u8>, Option<Header>)> {
+        let target_height = current_headers_height + 1;
+        let candidate_id = self.headers.iter().find_map(|(id, cm)| {
+            if let Some(ref h) = cm.header {
+                if h.height == target_height {
+                    return Some(*id);
+                }
+            }
+            None
+        });
+        candidate_id.and_then(|id| {
+            self.headers
+                .pop(&id)
+                .map(|cm| (id, cm.type_id, cm.data, cm.header))
+        })
+    }
+
+    /// Find and remove a cached body section matching one of the given header IDs.
+    pub fn pop_body_candidate(
+        &mut self,
+        header_ids_at_next_height: &[ModifierId],
+    ) -> Option<(ModifierId, u8, Vec<u8>, Option<Header>)> {
+        for hid in header_ids_at_next_height {
+            if let Some(cm) = self.body_sections.pop(hid) {
+                return Some((*hid, cm.type_id, cm.data, cm.header));
+            }
+        }
+        None
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
@@ -194,7 +232,7 @@ mod tests {
     fn put_header_goes_to_headers_cache() {
         let mut cache = ModifiersCache::with_default_capacities();
         let id = make_id(1);
-        cache.put(id, 101, vec![0xAA]);
+        cache.put(id, 101, vec![0xAA], None);
         assert_eq!(cache.len(), 1);
         assert!(cache.contains(&id, 101));
         // Should not be in body sections
@@ -207,9 +245,9 @@ mod tests {
         let id_bt = make_id(1);
         let id_ad = make_id(2);
         let id_ext = make_id(3);
-        cache.put(id_bt, 102, vec![0x01]);
-        cache.put(id_ad, 104, vec![0x02]);
-        cache.put(id_ext, 108, vec![0x03]);
+        cache.put(id_bt, 102, vec![0x01], None);
+        cache.put(id_ad, 104, vec![0x02], None);
+        cache.put(id_ext, 108, vec![0x03], None);
         assert_eq!(cache.len(), 3);
         assert!(cache.contains(&id_bt, 102));
         assert!(cache.contains(&id_ad, 104));
@@ -222,7 +260,7 @@ mod tests {
     fn remove_returns_entry() {
         let mut cache = ModifiersCache::with_default_capacities();
         let id = make_id(42);
-        cache.put(id, 101, vec![0xBB, 0xCC]);
+        cache.put(id, 101, vec![0xBB, 0xCC], None);
         let removed = cache.remove(&id, 101);
         assert!(removed.is_some());
         let (rid, rtype, rdata) = removed.unwrap();
@@ -240,11 +278,11 @@ mod tests {
         let id2 = make_id(2);
         let id3 = make_id(3);
 
-        assert!(cache.put(id1, 101, vec![0x01]).is_none());
-        assert!(cache.put(id2, 101, vec![0x02]).is_none());
+        assert!(cache.put(id1, 101, vec![0x01], None).is_none());
+        assert!(cache.put(id2, 101, vec![0x02], None).is_none());
 
         // This insert should evict id1 (the LRU entry).
-        let evicted = cache.put(id3, 101, vec![0x03]);
+        let evicted = cache.put(id3, 101, vec![0x03], None);
         assert!(evicted.is_some());
         let (eid, etype, edata) = evicted.unwrap();
         assert_eq!(eid, id1);
@@ -274,9 +312,9 @@ mod tests {
         let id_b = make_id(20);
         let id_c = make_id(30);
 
-        cache.put(id_a, 102, vec![0xA0]);
-        cache.put(id_b, 104, vec![0xB0]);
-        cache.put(id_c, 108, vec![0xC0]);
+        cache.put(id_a, 102, vec![0xA0], None);
+        cache.put(id_b, 104, vec![0xB0], None);
+        cache.put(id_c, 108, vec![0xC0], None);
 
         // Only drain body sections matching id_a and id_c.
         let drained = cache.drain_body_sections_for(&[id_a, id_c]);
@@ -296,11 +334,11 @@ mod tests {
         let mut cache = ModifiersCache::with_default_capacities();
         let id1 = make_id(1);
         let id2 = make_id(2);
-        cache.put(id1, 101, vec![0x01]);
-        cache.put(id2, 101, vec![0x02]);
+        cache.put(id1, 101, vec![0x01], None);
+        cache.put(id2, 101, vec![0x02], None);
         // Also add a body section to verify it's not drained.
         let id3 = make_id(3);
-        cache.put(id3, 102, vec![0x03]);
+        cache.put(id3, 102, vec![0x03], None);
 
         let headers = cache.drain_all_headers();
         assert_eq!(headers.len(), 2);
@@ -311,11 +349,11 @@ mod tests {
     fn drain_all_body_sections_empties_body_cache() {
         let mut cache = ModifiersCache::with_default_capacities();
         let id1 = make_id(1);
-        cache.put(id1, 101, vec![0x01]);
+        cache.put(id1, 101, vec![0x01], None);
         let id2 = make_id(2);
         let id3 = make_id(3);
-        cache.put(id2, 102, vec![0x02]);
-        cache.put(id3, 108, vec![0x03]);
+        cache.put(id2, 102, vec![0x02], None);
+        cache.put(id3, 108, vec![0x03], None);
 
         let bodies = cache.drain_all_body_sections();
         assert_eq!(bodies.len(), 2);
@@ -327,8 +365,8 @@ mod tests {
         let mut cache = ModifiersCache::with_default_capacities();
         let id1 = make_id(1);
         let id2 = make_id(2);
-        cache.put(id1, 101, vec![0xAA]);
-        cache.put(id2, 102, vec![0xBB]);
+        cache.put(id1, 101, vec![0xAA], None);
+        cache.put(id2, 102, vec![0xBB], None);
 
         let drained = cache.drain_all();
         assert_eq!(drained.len(), 2);
@@ -338,5 +376,97 @@ mod tests {
         // Verify both entries are present (order: headers first, then body).
         assert!(drained.iter().any(|(id, ty, data)| *id == id1 && *ty == 101 && data == &[0xAA]));
         assert!(drained.iter().any(|(id, ty, data)| *id == id2 && *ty == 102 && data == &[0xBB]));
+    }
+
+    // ------------------------------------------------------------------
+    // pop_header_candidate / pop_body_candidate tests
+    // ------------------------------------------------------------------
+
+    fn make_header_at_height(height: u32) -> Header {
+        let mut h = Header::default_for_test();
+        h.height = height;
+        h
+    }
+
+    #[test]
+    fn pop_header_candidate_sequential() {
+        let mut cache = ModifiersCache::new(100, 100);
+        // Insert heights 5, 3, 4 (out of order)
+        for h in [5u32, 3, 4] {
+            let header = make_header_at_height(h);
+            cache.put(make_id(h as u8), 101, vec![h as u8], Some(header));
+        }
+
+        // Pop at chain height 2 -> should get height 3
+        let c = cache.pop_header_candidate(2).unwrap();
+        assert_eq!(c.3.unwrap().height, 3);
+
+        // Pop at chain height 3 -> should get height 4
+        let c = cache.pop_header_candidate(3).unwrap();
+        assert_eq!(c.3.unwrap().height, 4);
+
+        // Pop at chain height 4 -> should get height 5
+        let c = cache.pop_header_candidate(4).unwrap();
+        assert_eq!(c.3.unwrap().height, 5);
+
+        // Cache is empty now
+        assert!(cache.pop_header_candidate(5).is_none());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn pop_header_candidate_skips_wrong_height() {
+        let mut cache = ModifiersCache::new(100, 100);
+        let header = make_header_at_height(10);
+        cache.put(make_id(10), 101, vec![10], Some(header));
+
+        // Chain at 5, need 6 — no match
+        assert!(cache.pop_header_candidate(5).is_none());
+        // Entry is still in cache
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn pop_header_candidate_returns_none_on_empty() {
+        let mut cache = ModifiersCache::new(100, 100);
+        assert!(cache.pop_header_candidate(0).is_none());
+    }
+
+    #[test]
+    fn pop_header_candidate_ignores_entries_without_parsed_header() {
+        let mut cache = ModifiersCache::new(100, 100);
+        // Insert a header entry with no parsed Header (legacy path)
+        cache.put(make_id(1), 101, vec![0x01], None);
+
+        // Even at correct height, can't match without parsed header
+        assert!(cache.pop_header_candidate(0).is_none());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn pop_body_candidate_matches_header_id() {
+        let mut cache = ModifiersCache::new(100, 100);
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        cache.put(id_a, 102, vec![0xAA], None);
+        cache.put(id_b, 104, vec![0xBB], None);
+
+        // Only id_a is at next height
+        let c = cache.pop_body_candidate(&[id_a]).unwrap();
+        assert_eq!(c.0, id_a);
+        assert_eq!(c.1, 102);
+
+        // id_b still in cache
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn pop_body_candidate_returns_none_when_no_match() {
+        let mut cache = ModifiersCache::new(100, 100);
+        cache.put(make_id(1), 102, vec![0xAA], None);
+
+        // No matching header ID
+        assert!(cache.pop_body_candidate(&[make_id(99)]).is_none());
+        assert_eq!(cache.len(), 1);
     }
 }

@@ -138,16 +138,24 @@ impl SyncManager {
         tracker: &mut DeliveryTracker,
         available_peers: &[(PeerId, bool)],
         is_caught_up: bool,
+        prebuilt_sync_data: Option<Vec<u8>>,
     ) -> Vec<SyncAction> {
         let mut actions = Vec::new();
 
         // Always broadcast SyncInfo regardless of state, matching Scala's
         // periodic `SendLocalSyncInfo` that fires independently of sync phase.
-        if let Some(data) = serialize_sync_info(history) {
+        // Use prebuilt data from the processor thread when available (always fresh),
+        // falling back to the secondary DB (may be stale during initial sync).
+        let has_prebuilt = prebuilt_sync_data.is_some();
+        let sync_data = prebuilt_sync_data.or_else(|| serialize_sync_info(history));
+        if let Some(ref data) = sync_data {
+            tracing::debug!(has_prebuilt, data_len = data.len(), "on_tick: SyncInfo produced");
             actions.push(SyncAction::SendSyncInfo {
                 peer_id: None,
-                data,
+                data: data.clone(),
             });
+        } else {
+            tracing::warn!("on_tick: NO SyncInfo data — prebuilt=None, serialize_sync_info=None");
         }
 
         match self.state {
@@ -347,7 +355,7 @@ mod tests {
         let peers = vec![(1u64, true), (2u64, true), (3u64, false)];
 
         let mut mgr = SyncManager::new(10, 64);
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert!(!actions.is_empty());
@@ -388,7 +396,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         let request_count = actions
             .iter()
@@ -429,7 +437,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::Synced;
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
 
         assert!(!actions.is_empty());
         assert!(matches!(
@@ -580,7 +588,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         // In UTXO mode, only BlockTransactions (102) and Extension (108) are requested.
         let request_actions: Vec<_> = actions
@@ -607,7 +615,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         let request_actions: Vec<_> = actions
             .iter()
@@ -650,7 +658,7 @@ mod tests {
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
         // Headers caught up → should transition to BlockDownload.
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         assert!(actions.iter().any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
@@ -668,7 +676,7 @@ mod tests {
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
         // Headers NOT caught up → should stay in HeaderSync.
-        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert_eq!(mgr.blocks_remaining(), 2); // blocks still queued
@@ -684,7 +692,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
         // Empty queue but NOT caught up — should stay in BlockDownload.
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         // Should still send SyncInfo even in BlockDownload.
@@ -701,7 +709,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
         // Empty queue AND caught up — should transition to Synced.
-        let _actions = mgr.on_tick(&history, &mut tracker, &peers, true);
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
 
         assert_eq!(mgr.state(), SyncState::Synced);
     }
@@ -717,7 +725,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![make_id(1)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None);
 
         // Should include both SyncInfo (for parallel header download) and RequestModifiers.
         assert!(actions.iter().any(|a| matches!(a, SyncAction::SendSyncInfo { .. })));
@@ -735,7 +743,7 @@ mod tests {
         mgr.state = SyncState::Synced;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None);
 
         // Should transition to BlockDownload and request sections.
         assert_eq!(mgr.state(), SyncState::BlockDownload);

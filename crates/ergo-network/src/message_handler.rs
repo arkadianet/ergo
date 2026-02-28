@@ -463,6 +463,12 @@ fn handle_sync_info(
 /// Filter out modifiers we already have or have already requested, then
 /// request the unknown ones from the announcing peer.
 ///
+/// For header requests (type_id 101), also detects stale requests that have
+/// been pending from another peer for >1 second and reassigns them to this
+/// announcing peer.  This prevents multi-second stalls when the original
+/// peer is slow, because the natural Inv flood from multiple peers provides
+/// near-instant recovery.
+///
 /// For transaction announcements (type_id 2), checks the mempool instead
 /// of the history database since unconfirmed transactions live in memory.
 fn handle_inv(
@@ -473,6 +479,8 @@ fn handle_inv(
     mempool: &crate::mempool::ErgoMemPool,
     is_synced_for_txs: bool,
 ) -> HandleResult {
+    use std::time::Duration;
+
     let inv = match InvData::parse(body) {
         Ok(inv) => inv,
         Err(_) => return HandleResult::empty(),
@@ -486,34 +494,62 @@ fn handle_inv(
         return HandleResult::empty();
     }
 
-    let unknown: Vec<ModifierId> = inv
-        .ids
-        .into_iter()
-        .filter(|id| {
-            if tracker.status(type_id, id) != ModifierStatus::Unknown {
-                return false;
-            }
-            if type_id == 2 {
-                !mempool.contains(&ergo_types::transaction::TxId(id.0))
-            } else {
-                !history.contains_modifier(type_id, id).unwrap_or(true)
-            }
-        })
-        .collect();
+    let total_inv_ids = inv.ids.len();
+    let stale_threshold = Duration::from_secs(1);
+    let mut to_request: Vec<ModifierId> = Vec::new();
+    let mut stale_count = 0u32;
 
-    if unknown.is_empty() {
+    for id in inv.ids {
+        let status = tracker.status(type_id, &id);
+        match status {
+            ModifierStatus::Unknown => {
+                let already_have = if type_id == 2 {
+                    mempool.contains(&ergo_types::transaction::TxId(id.0))
+                } else {
+                    history.contains_modifier(type_id, &id).unwrap_or(true)
+                };
+                if !already_have {
+                    tracker.set_requested(type_id, id, peer_id);
+                    to_request.push(id);
+                }
+            }
+            ModifierStatus::Requested if type_id == HEADER_TYPE_ID => {
+                // Header already requested from another peer — if the request
+                // is stale (>1s), reassign to this announcing peer for faster
+                // delivery.
+                if let Some(age) = tracker.request_age(type_id, &id) {
+                    if age >= stale_threshold {
+                        tracker.reassign(type_id, &id, peer_id);
+                        to_request.push(id);
+                        stale_count += 1;
+                    }
+                }
+            }
+            _ => {} // Received, Invalid, or fresh Requested — skip
+        }
+    }
+
+    if to_request.is_empty() {
+        tracing::trace!(type_id, total_inv_ids, "handle_inv: all known");
         return HandleResult::empty();
     }
 
-    for id in &unknown {
-        tracker.set_requested(type_id, *id, peer_id);
+    if stale_count > 0 {
+        tracing::info!(
+            type_id,
+            new = to_request.len() as u32 - stale_count,
+            stale_reassigned = stale_count,
+            "handle_inv: requesting (with stale reassignment)"
+        );
+    } else {
+        tracing::info!(type_id, requested = to_request.len(), "handle_inv: requesting from announcing peer");
     }
 
     HandleResult {
         actions: vec![SyncAction::RequestModifiers {
             peer_id,
             type_id,
-            ids: unknown,
+            ids: to_request,
         }],
         new_headers: Vec::new(),
         penalties: Vec::new(),
@@ -561,31 +597,30 @@ fn handle_modifiers(
     if type_id == HEADER_TYPE_ID {
         // ----- Header path: parallel PoW validation via rayon -----
 
-        // Phase 1 — Sequential filter: keep only requested headers.
-        let requested: Vec<(usize, &ModifierId, &Vec<u8>)> = mods
+        // Phase 1 — Sequential filter: skip invalid/already-received headers.
+        let mut has_invalid = false;
+        let accepted: Vec<(usize, &ModifierId, &Vec<u8>)> = mods
             .modifiers
             .iter()
             .enumerate()
             .filter(|(_idx, (id, _data))| {
                 let mod_status = tracker.status(type_id, id);
-                if mod_status != ModifierStatus::Requested {
-                    tracing::debug!(
-                        modifier_id = hex::encode(id.0),
-                        ?mod_status,
-                        "ignoring unrequested header"
-                    );
-                    penalties.push((PenaltyType::SpamMessage, peer_id));
+                if mod_status == ModifierStatus::Invalid {
+                    has_invalid = true;
                     false
                 } else {
-                    true
+                    mod_status != ModifierStatus::Received
                 }
             })
             .map(|(idx, (id, data))| (idx, id, data))
             .collect();
+        if has_invalid {
+            penalties.push((PenaltyType::SpamMessage, peer_id));
+        }
 
         // Phase 2 — Parallel: verify ID, parse, and validate PoW.
         let validated: Vec<HeaderValidationResult> =
-            requested
+            accepted
                 .par_iter()
                 .map(|&(idx, id, data)| {
                     let actual_id = ModifierId(blake2b256(data));
@@ -623,8 +658,8 @@ fn handle_modifiers(
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(modifier_id = ?id, error = %e, "caching header for retry");
-                            cache.put(id, HEADER_TYPE_ID, requested[idx].2.clone());
+                            tracing::trace!(modifier_id = ?id, error = %e, "caching header for retry");
+                            cache.put(id, HEADER_TYPE_ID, accepted[idx].2.clone(), None);
                         }
                     }
                 }
@@ -640,16 +675,14 @@ fn handle_modifiers(
             }
         }
     } else {
-        // ----- Non-header path: sequential processing (unchanged) -----
+        // ----- Non-header path: sequential processing -----
         for (id, data) in &mods.modifiers {
             let mod_status = tracker.status(type_id, id);
-            if mod_status != ModifierStatus::Requested {
-                tracing::debug!(
-                    modifier_id = hex::encode(id.0),
-                    ?mod_status,
-                    "ignoring unrequested modifier"
-                );
+            if mod_status == ModifierStatus::Invalid {
                 penalties.push((PenaltyType::SpamMessage, peer_id));
+                continue;
+            }
+            if mod_status == ModifierStatus::Received {
                 continue;
             }
 
@@ -665,8 +698,8 @@ fn handle_modifiers(
                     }
                 }
                 Err(e) => {
-                    tracing::debug!(modifier_id = ?id, error = %e, "caching modifier for retry");
-                    cache.put(*id, type_id, data.clone());
+                    tracing::trace!(modifier_id = ?id, error = %e, "caching modifier for retry");
+                    cache.put(*id, type_id, data.clone(), None);
                 }
             }
         }
@@ -763,7 +796,7 @@ fn apply_from_cache(
                     }
                 }
                 Err(_) => {
-                    cache.put(id, type_id, data);
+                    cache.put(id, type_id, data, None);
                 }
             }
         }
@@ -782,7 +815,7 @@ fn apply_from_cache(
                     }
                 }
                 Err(_) => {
-                    cache.put(id, type_id, data);
+                    cache.put(id, type_id, data, None);
                 }
             }
         }
@@ -1115,30 +1148,36 @@ pub fn validate_headers_parallel(
     let mut penalties = Vec::new();
     let mut invalid_ids = Vec::new();
 
-    // Phase 1 -- Sequential filter: keep only requested headers.
-    let requested: Vec<(usize, &ModifierId, &Vec<u8>)> = mods
+    // Phase 1 -- Sequential filter: skip only previously-invalid headers.
+    // Matching Scala: unrequested modifiers are processed normally (peers may
+    // send extra headers from sync continuation). Only penalise for modifiers
+    // we already validated and rejected.
+    let mut has_invalid = false;
+    let accepted: Vec<(usize, &ModifierId, &Vec<u8>)> = mods
         .modifiers
         .iter()
         .enumerate()
         .filter(|(_idx, (id, _data))| {
             let mod_status = tracker.status(type_id, id);
-            if mod_status != ModifierStatus::Requested {
+            if mod_status == ModifierStatus::Invalid {
                 tracing::debug!(
                     modifier_id = hex::encode(id.0),
-                    ?mod_status,
-                    "ignoring unrequested header"
+                    "skipping previously-invalid header"
                 );
-                penalties.push((PenaltyType::SpamMessage, peer_id));
+                has_invalid = true;
                 false
             } else {
-                true
+                mod_status != ModifierStatus::Received
             }
         })
         .map(|(idx, (id, data))| (idx, id, data))
         .collect();
+    if has_invalid {
+        penalties.push((PenaltyType::SpamMessage, peer_id));
+    }
 
     // Phase 2 -- Parallel: verify ID, parse, and validate PoW.
-    let validated: Vec<HeaderValidationResult> = requested
+    let validated: Vec<HeaderValidationResult> = accepted
         .par_iter()
         .map(|&(_idx, id, data)| {
             let actual_id = ModifierId(blake2b256(data));
@@ -1160,7 +1199,7 @@ pub fn validate_headers_parallel(
 
     // Phase 3 -- Collect results.
     let mut validated_headers = Vec::new();
-    for (result, &(_idx, _id, data)) in validated.into_iter().zip(requested.iter()) {
+    for (result, &(_idx, _id, data)) in validated.into_iter().zip(accepted.iter()) {
         match result {
             Ok((_idx2, mid, header)) => {
                 tracker.set_received(type_id, &mid);
@@ -1829,13 +1868,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn handle_modifiers_rejects_unrequested() {
+    fn handle_modifiers_penalises_previously_invalid() {
         let (mut node_view, _dir) = open_test_node_view();
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
         let ext_id = make_id(42);
-        // Do NOT call tracker.set_requested — modifier is unrequested.
+        // Mark as invalid — previously failed validation.
+        tracker.set_invalid(&ext_id);
 
         let mods = ModifiersData {
             type_id: 108,
@@ -1861,7 +1901,7 @@ mod tests {
             &mut TxCostTracker::new(),
         );
 
-        // Should have a SpamMessage penalty.
+        // Should have a SpamMessage penalty for the invalid modifier.
         assert!(!result.penalties.is_empty());
         assert!(matches!(result.penalties[0].0, PenaltyType::SpamMessage));
 

@@ -146,6 +146,46 @@ impl DeliveryTracker {
         }
     }
 
+    /// Return the age of a pending request, or `None` if not in `Requested` state.
+    pub fn request_age(&self, type_id: u8, id: &ModifierId) -> Option<Duration> {
+        self.requested
+            .get(&(type_id, *id))
+            .map(|info| Instant::now().duration_since(info.requested_at))
+    }
+
+    /// Evict entries from `received` older than `max_age`.
+    pub fn cleanup_received(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.received.retain(|_, ts| now.duration_since(*ts) < max_age);
+    }
+
+    /// Evict entries from `invalid` older than `max_age`.
+    pub fn cleanup_invalid(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.invalid.retain(|_, ts| now.duration_since(*ts) < max_age);
+    }
+
+    /// Collect header requests (type_id 101) older than `stale_threshold` that
+    /// haven't yet reached the full `delivery_timeout`.
+    ///
+    /// Returns `(modifier_id, peer_id)` pairs. Does **not** increment the
+    /// check counter or remove any entries — the caller should use `reassign`
+    /// to hand them to an alternative peer.
+    pub fn collect_stale_headers(&self, stale_threshold: Duration) -> Vec<(ModifierId, PeerId)> {
+        let now = Instant::now();
+        self.requested
+            .iter()
+            .filter(|(&(type_id, _), info)| {
+                if type_id != 101 {
+                    return false;
+                }
+                let age = now.duration_since(info.requested_at);
+                age >= stale_threshold && age < self.delivery_timeout
+            })
+            .map(|(&(_, id), info)| (id, info.peer_id))
+            .collect()
+    }
+
     /// Create a JSON-serializable snapshot of the current delivery state.
     pub fn snapshot(&self) -> DeliveryTrackerSnapshot {
         DeliveryTrackerSnapshot {
@@ -375,5 +415,77 @@ mod tests {
         assert_eq!(dt.status(101, &id1), ModifierStatus::Unknown);
         assert_eq!(dt.status(101, &id2), ModifierStatus::Unknown);
         assert_eq!(dt.pending_count(), 0);
+    }
+
+    #[test]
+    fn cleanup_received_evicts_old() {
+        let mut tracker = DeliveryTracker::new(60, 3);
+        let id = make_id(0x20);
+        // Insert directly with a backdated timestamp
+        tracker.received.insert(
+            (101, id),
+            Instant::now() - Duration::from_secs(600),
+        );
+        assert_eq!(tracker.status(101, &id), ModifierStatus::Received);
+        tracker.cleanup_received(Duration::from_secs(300));
+        assert_eq!(tracker.status(101, &id), ModifierStatus::Unknown);
+    }
+
+    #[test]
+    fn cleanup_invalid_evicts_old() {
+        let mut tracker = DeliveryTracker::new(60, 3);
+        let id = make_id(0x21);
+        // Insert directly with a backdated timestamp
+        tracker.invalid.insert(id, Instant::now() - Duration::from_secs(3600));
+        assert_eq!(tracker.status(101, &id), ModifierStatus::Invalid);
+        tracker.cleanup_invalid(Duration::from_secs(1800));
+        assert_eq!(tracker.status(101, &id), ModifierStatus::Unknown);
+    }
+
+    #[test]
+    fn collect_stale_headers_only_101() {
+        // delivery_timeout=10s so stale threshold 3s is within range
+        let mut tracker = DeliveryTracker::new(10, 3);
+        let hdr_id = make_id(0x30);
+        let body_id = make_id(0x31);
+        // Backdate both requests to 5s ago
+        let past = Instant::now() - Duration::from_secs(5);
+        tracker.requested.insert(
+            (101, hdr_id),
+            RequestInfo { peer_id: 1, requested_at: past, checks: 0 },
+        );
+        tracker.requested.insert(
+            (102, body_id),
+            RequestInfo { peer_id: 2, requested_at: past, checks: 0 },
+        );
+        let stale = tracker.collect_stale_headers(Duration::from_secs(3));
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].0, hdr_id);
+        assert_eq!(stale[0].1, 1);
+    }
+
+    #[test]
+    fn collect_stale_headers_does_not_increment_checks() {
+        let mut tracker = DeliveryTracker::new(10, 3);
+        let id = make_id(0x32);
+        let past = Instant::now() - Duration::from_secs(5);
+        tracker.requested.insert(
+            (101, id),
+            RequestInfo { peer_id: 1, requested_at: past, checks: 0 },
+        );
+        let _ = tracker.collect_stale_headers(Duration::from_secs(3));
+        // checks should still be 0
+        let info = tracker.requested.get(&(101, id)).unwrap();
+        assert_eq!(info.checks, 0);
+    }
+
+    #[test]
+    fn collect_stale_headers_ignores_fresh() {
+        let mut tracker = DeliveryTracker::new(10, 3);
+        let id = make_id(0x33);
+        // Just requested (fresh)
+        tracker.set_requested(101, id, 1);
+        let stale = tracker.collect_stale_headers(Duration::from_secs(3));
+        assert!(stale.is_empty());
     }
 }

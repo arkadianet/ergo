@@ -104,7 +104,17 @@ impl PeerConnection {
         handshake_timeout_secs: u64,
         our_session_id: Option<u64>,
     ) -> Result<(Self, Handshake), PeerConnError> {
-        let mut stream = TcpStream::connect(addr).await?;
+        // Cap TCP connect to 5 seconds to prevent blocking the caller for
+        // the full OS timeout (~135s on Linux) when a peer is unreachable.
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(addr),
+        )
+        .await
+        .map_err(|_| PeerConnError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "TCP connect timed out (5s)",
+        )))??;
 
         // Send our handshake as raw bytes (no message frame).
         let hs_bytes = our_handshake.serialize();

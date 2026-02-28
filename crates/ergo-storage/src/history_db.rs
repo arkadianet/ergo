@@ -93,6 +93,30 @@ impl HistoryDb {
         Ok(Self { db })
     }
 
+    /// Opens a RocksDB database as a secondary instance that can be refreshed
+    /// to see writes from the primary via [`try_catch_up_with_primary`].
+    pub fn open_as_secondary<P: AsRef<Path>>(
+        primary_path: P,
+        secondary_path: P,
+    ) -> Result<Self, StorageError> {
+        let opts = Options::default();
+        let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, Options::default());
+        let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, Options::default());
+        let db = DB::open_cf_descriptors_as_secondary(
+            &opts,
+            primary_path,
+            secondary_path,
+            vec![cf_objects, cf_indexes],
+        )?;
+        Ok(Self { db })
+    }
+
+    /// Refreshes a secondary instance to see the latest writes from the
+    /// primary. No-op on read-write or read-only instances.
+    pub fn try_catch_up_with_primary(&self) -> Result<(), StorageError> {
+        self.db.try_catch_up_with_primary().map_err(StorageError::Rocks)
+    }
+
     // -----------------------------------------------------------------------
     // Modifier (objects CF) operations
     // -----------------------------------------------------------------------

@@ -14,10 +14,18 @@ use ergo_types::header::Header;
 use ergo_types::modifier_id::ModifierId;
 
 /// Bounded channel capacity for both command and event channels.
-pub const CHANNEL_CAPACITY: usize = 256;
+/// Must be larger than the maximum modifier batch size (400 headers + 1 ApplyFromCache).
+pub const CHANNEL_CAPACITY: usize = 2048;
 
 /// Maximum number of commands to drain per batch iteration.
-const MAX_BATCH_SIZE: usize = 64;
+///
+/// Must be >= 450 to cover a full header Inv cycle (up to 400 headers + 1
+/// `ApplyFromCache`).  A smaller value causes multiple intermediate
+/// `HeadersApplied` events per cycle, each triggering a `SyncInfoV2`
+/// broadcast that generates a flood of useless Inv responses and delays the
+/// final broadcast that carries the correct chain tip — stalling header sync
+/// for up to one `sync_tick` interval (5 s).
+const MAX_BATCH_SIZE: usize = 512;
 
 /// Header modifier type ID.
 const HEADER_TYPE_ID: u8 = 101;
@@ -47,6 +55,8 @@ pub enum ProcessorCommand {
         modifier_id: ModifierId,
         /// The parsed header (boxed to keep enum size small).
         header: Box<Header>,
+        /// Original wire bytes (needed if the header must be cached for retry).
+        raw_data: Vec<u8>,
         /// The peer that delivered this modifier, if known.
         peer_hint: Option<PeerId>,
     },
@@ -115,6 +125,9 @@ pub enum ProcessorEvent {
         applied_blocks: Vec<ModifierId>,
         /// If a rollback occurred, the height we rolled back to.
         rollback_height: Option<u32>,
+        /// Last N headers (newest first) for SyncInfoV2 construction.
+        /// Loaded from the processor's own DB, bypassing the secondary DB.
+        sync_headers: Vec<Header>,
     },
 }
 
@@ -200,9 +213,14 @@ fn processor_loop_with_state(
     evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     state: &mut ProcessorState,
 ) {
+    // Send initial StateUpdate so the event loop has valid cached_sync_headers
+    // and cached_headers_height from the very first sync_tick, without needing
+    // to wait for a command to arrive.
+    send_state_update(state, evt_tx);
+
     loop {
         // Block until a command arrives or the timeout elapses.
-        let first = match cmd_rx.recv_timeout(Duration::from_millis(100)) {
+        let first = match cmd_rx.recv_timeout(Duration::from_millis(10)) {
             Ok(cmd) => cmd,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
@@ -245,6 +263,7 @@ fn processor_loop_with_state(
                 ProcessorCommand::StorePrevalidatedHeader {
                     modifier_id,
                     header,
+                    raw_data,
                     peer_hint,
                 } => {
                     let mut accum = BatchAccum {
@@ -252,7 +271,7 @@ fn processor_loop_with_state(
                         blocks_to_download: &mut blocks_to_download,
                     };
                     process_prevalidated_header(
-                        state, evt_tx, modifier_id, *header, peer_hint, &mut accum,
+                        state, evt_tx, modifier_id, *header, raw_data, peer_hint, &mut accum,
                     );
                 }
                 ProcessorCommand::ApplyFromCache => {
@@ -266,14 +285,20 @@ fn processor_loop_with_state(
         }
 
         // After each batch: emit accumulated events.
+        // IMPORTANT: StateUpdate must be sent BEFORE HeadersApplied so the
+        // event loop's cached_sync_headers are fresh when it broadcasts
+        // SyncInfoV2 in response to HeadersApplied.  Without this ordering,
+        // the SyncInfoV2 would contain a stale tip, causing peers to send Inv
+        // for already-received headers which are all filtered out — stalling
+        // the sync loop until the next periodic sync tick.
+        tracing::debug!(new_headers = new_headers.len(), blocks_to_dl = blocks_to_download.len(), "processor: batch done");
+        send_state_update(state, evt_tx);
         if !new_headers.is_empty() || !blocks_to_download.is_empty() {
             let _ = evt_tx.blocking_send(ProcessorEvent::HeadersApplied {
                 new_header_ids: std::mem::take(&mut new_headers),
                 to_download: std::mem::take(&mut blocks_to_download),
             });
         }
-
-        send_state_update(state, evt_tx);
 
         if shutdown {
             return;
@@ -319,7 +344,7 @@ fn process_store_modifier(
         }
         Err(e) => {
             // Put in cache for later retry.
-            state.cache.put(modifier_id, type_id, data);
+            state.cache.put(modifier_id, type_id, data, None);
             let _ = evt_tx.blocking_send(ProcessorEvent::ModifierCached {
                 type_id,
                 modifier_id,
@@ -336,68 +361,165 @@ fn process_store_modifier(
 }
 
 /// Process a `StorePrevalidatedHeader` command.
+///
+/// If the header fails because its parent isn't stored yet (out-of-order
+/// delivery), we re-serialize and cache it for later retry via
+/// `ApplyFromCache`.  Only truly invalid headers produce a
+/// `ValidationFailed` event.
 fn process_prevalidated_header(
     state: &mut ProcessorState,
     evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     modifier_id: ModifierId,
     header: Header,
+    raw_data: Vec<u8>,
     peer_hint: Option<PeerId>,
     accum: &mut BatchAccum<'_>,
 ) {
+    tracing::trace!(height = header.height, genesis = header.is_genesis(), "processor: handling prevalidated header");
     match state.node_view.process_prevalidated_header(&modifier_id, &header) {
         Ok(info) => {
+            tracing::trace!(height = header.height, "processor: header applied OK");
             accum.new_headers.push(modifier_id);
             for (_ty, dl_id) in &info.to_download {
                 accum.blocks_to_download.push(*dl_id);
             }
         }
         Err(e) => {
-            let _ = evt_tx.blocking_send(ProcessorEvent::ValidationFailed {
-                modifier_id,
-                peer_hint,
-                error: format!("prevalidated header failed: {e}"),
-            });
+            let err_str = e.to_string();
+            if err_str.contains("parent header not found") {
+                tracing::trace!(height = header.height, "processor: cached (parent not found)");
+                // Out-of-order: cache original wire bytes for retry with parsed header.
+                state.cache.put(modifier_id, HEADER_TYPE_ID, raw_data, Some(header));
+            } else {
+                tracing::warn!(height = header.height, %e, "processor: header REJECTED");
+                let _ = evt_tx.blocking_send(ProcessorEvent::ValidationFailed {
+                    modifier_id,
+                    peer_hint,
+                    error: format!("prevalidated header failed: {e}"),
+                });
+            }
         }
     }
 }
 
-/// Drain all entries from the cache and attempt to apply each one.
-/// Entries that fail are re-inserted. Iterates up to `MAX_BATCH_SIZE` times
-/// to handle cascading dependencies.
+/// Apply cached modifiers using the `popCandidate` pattern.
+///
+/// Phase 1: Pop headers one at a time at `current_height + 1` using
+/// `pop_header_candidate`. Uses `process_prevalidated_header` (skips PoW)
+/// since the header was already PoW-validated before being cached.
+///
+/// Phase 2: Pop body sections whose header ID matches the next full-block
+/// height using `pop_body_candidate`.
 fn apply_from_cache_processor(
     state: &mut ProcessorState,
     evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
     accum: &mut BatchAccum<'_>,
 ) {
-    for _iteration in 0..MAX_BATCH_SIZE {
-        let entries = state.cache.drain_all();
-        if entries.is_empty() {
-            break;
-        }
+    // Phase 1: Apply cached headers using pop_header_candidate.
+    let headers_height = state.node_view.history.best_header_height().unwrap_or(0);
+    let mut current_height = headers_height;
+    let mut applied_headers = 0usize;
 
-        let mut any_applied = false;
-        for (id, type_id, data) in entries {
-            match state.node_view.process_modifier(type_id, &id, &data) {
+    loop {
+        let candidate = state.cache.pop_header_candidate(current_height);
+        let Some((id, _type_id, data, header_opt)) = candidate else {
+            break;
+        };
+
+        if let Some(header) = header_opt {
+            match state.node_view.process_prevalidated_header(&id, &header) {
                 Ok(info) => {
-                    any_applied = true;
-                    if type_id == HEADER_TYPE_ID {
-                        accum.new_headers.push(id);
+                    applied_headers += 1;
+                    current_height = header.height;
+                    accum.new_headers.push(id);
+                    for (_ty, dl_id) in &info.to_download {
+                        accum.blocks_to_download.push(*dl_id);
                     }
+                    emit_applied_blocks(state, evt_tx);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        height = header.height,
+                        %e,
+                        "cache pop_candidate: header validation failed, re-caching"
+                    );
+                    state.cache.put(id, HEADER_TYPE_ID, data, Some(header));
+                    break;
+                }
+            }
+        } else {
+            match state.node_view.process_modifier(HEADER_TYPE_ID, &id, &data) {
+                Ok(info) => {
+                    applied_headers += 1;
+                    current_height = state
+                        .node_view
+                        .history
+                        .best_header_height()
+                        .unwrap_or(current_height);
+                    accum.new_headers.push(id);
                     for (_ty, dl_id) in &info.to_download {
                         accum.blocks_to_download.push(*dl_id);
                     }
                     emit_applied_blocks(state, evt_tx);
                 }
                 Err(_) => {
-                    // Re-insert for future retry.
-                    state.cache.put(id, type_id, data);
+                    state.cache.put(id, HEADER_TYPE_ID, data, None);
+                    break;
                 }
             }
         }
+    }
 
-        if !any_applied {
+    if applied_headers > 0 {
+        tracing::debug!(applied_headers, new_height = current_height, "cache drain: headers applied");
+    }
+
+    // Phase 2: Apply cached body sections using pop_body_candidate.
+    let mut applied_bodies = 0usize;
+    loop {
+        let full_height = state
+            .node_view
+            .history
+            .best_full_block_height()
+            .unwrap_or(0);
+        let next_height = full_height + 1;
+        let header_ids = state
+            .node_view
+            .history
+            .header_ids_at_height(next_height)
+            .unwrap_or_default();
+        if header_ids.is_empty() {
             break;
         }
+
+        let candidate = state.cache.pop_body_candidate(&header_ids);
+        let Some((id, type_id, data, _header)) = candidate else {
+            break;
+        };
+
+        match state.node_view.process_modifier(type_id, &id, &data) {
+            Ok(info) => {
+                applied_bodies += 1;
+                for (_ty, dl_id) in &info.to_download {
+                    accum.blocks_to_download.push(*dl_id);
+                }
+                emit_applied_blocks(state, evt_tx);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    modifier_id = hex::encode(id.0),
+                    type_id,
+                    %e,
+                    "cache pop_candidate: body validation failed, re-caching"
+                );
+                state.cache.put(id, type_id, data, None);
+                break;
+            }
+        }
+    }
+
+    if applied_bodies > 0 {
+        tracing::debug!(applied_bodies, "cache drain: body sections applied");
     }
 }
 
@@ -448,6 +570,11 @@ fn send_state_update(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::Sen
     let applied_blocks = state.node_view.take_applied_blocks();
     let rollback_height = state.node_view.take_rollback_height();
 
+    // Load last N headers (newest first) for SyncInfoV2 construction.
+    // This runs on the processor's own read-write DB, so it always reflects
+    // the latest applied headers — no secondary DB staleness issues.
+    let sync_headers = load_sync_headers(&state.node_view.history, MAX_SYNC_HEADERS);
+
     let _ = evt_tx.blocking_send(ProcessorEvent::StateUpdate {
         headers_height,
         full_height,
@@ -456,7 +583,36 @@ fn send_state_update(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::Sen
         state_root,
         applied_blocks,
         rollback_height,
+        sync_headers,
     });
+}
+
+/// Maximum number of headers to include in SyncInfoV2.
+const MAX_SYNC_HEADERS: u32 = 10;
+
+/// Load the last `count` headers (newest first) from the database,
+/// walking backwards from the best header by height.
+fn load_sync_headers(history: &ergo_storage::history_db::HistoryDb, count: u32) -> Vec<Header> {
+    let best_height = history.best_header_height().unwrap_or(0);
+    if best_height == 0 {
+        return Vec::new();
+    }
+    let start = if best_height > count {
+        best_height - count + 1
+    } else {
+        1
+    };
+    let mut headers = Vec::with_capacity(count as usize);
+    for h in (start..=best_height).rev() {
+        if let Ok(ids) = history.header_ids_at_height(h) {
+            if let Some(id) = ids.first() {
+                if let Ok(Some(header)) = history.load_header(id) {
+                    headers.push(header);
+                }
+            }
+        }
+    }
+    headers
 }
 
 // ---------------------------------------------------------------------------

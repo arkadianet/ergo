@@ -168,6 +168,27 @@ impl ConnectionPool {
         addr: SocketAddr,
         peer_hs: &Handshake,
     ) -> PeerId {
+        self.register_peer(conn, addr, peer_hs, ConnectionDirection::Incoming)
+    }
+
+    /// Register an already-handshaked outbound connection (from a background connect task).
+    pub fn add_outbound(
+        &mut self,
+        conn: PeerConnection,
+        addr: SocketAddr,
+        peer_hs: &Handshake,
+    ) -> PeerId {
+        self.register_peer(conn, addr, peer_hs, ConnectionDirection::Outgoing)
+    }
+
+    /// Common helper: register a peer with the given direction.
+    fn register_peer(
+        &mut self,
+        conn: PeerConnection,
+        addr: SocketAddr,
+        peer_hs: &Handshake,
+        direction: ConnectionDirection,
+    ) -> PeerId {
         let peer_name = peer_hs.peer_spec.agent_name.clone();
         let version = peer_hs.peer_spec.protocol_version;
 
@@ -202,7 +223,7 @@ impl ConnectionPool {
                 connected_at,
                 task,
                 version,
-                direction: ConnectionDirection::Incoming,
+                direction,
                 mode_feature,
                 last_activity,
             },
@@ -340,6 +361,7 @@ async fn peer_task(
             msg = outbox_rx.recv() => {
                 match msg {
                     Some((code, body)) => {
+                        tracing::trace!(peer_id, code, body_len = body.len(), "peer_task: sending msg");
                         if let Err(e) = conn.send_message(code, &body).await {
                             tracing::debug!(peer_id, error = %e, "peer write error");
                             break;
