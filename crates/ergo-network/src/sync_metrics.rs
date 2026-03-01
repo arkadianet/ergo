@@ -178,6 +178,12 @@ impl SyncMetrics {
 
     /// Record that headers have been applied (or rejected).
     ///
+    /// Increment the headers_applied counter without batch tracking.
+    /// Used by the event loop when ProcessorEvent::HeadersApplied arrives.
+    pub fn add_headers_applied(&mut self, count: u64) {
+        self.headers_applied += count;
+    }
+
     /// Updates the batch's delivered count.  If the batch is fully delivered
     /// (delivered >= to_request_len), it is removed from tracking.
     #[allow(clippy::too_many_arguments)]

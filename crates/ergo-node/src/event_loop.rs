@@ -718,6 +718,7 @@ pub async fn run(
                     ProcessorEvent::HeadersApplied { new_header_ids, to_download } => {
                         if !new_header_ids.is_empty() {
                             tracing::info!(new = new_header_ids.len(), headers_height = cached_headers_height, "received headers");
+                            sync_metrics.add_headers_applied(new_header_ids.len() as u64);
 
                             // Refresh secondary DB for has_all_sections check in on_headers_received.
                             let _ = sync_history.try_catch_up_with_primary();
