@@ -216,6 +216,7 @@ pub fn handle_message(
             handle_inv(
                 peer_id, &msg.body, tracker, &node_view.history, &mp,
                 is_synced_for_txs, sync_tracker, connected_peer_ids, metrics,
+                false,
             )
         }
         33 => handle_modifiers(peer_id, &msg.body, node_view, sync_mgr, tracker, cache, is_synced_for_txs, tx_cost_tracker, max_headers),
@@ -492,6 +493,7 @@ fn handle_inv(
     sync_tracker: &SyncTracker,
     connected_peer_ids: &[PeerId],
     metrics: &mut SyncMetrics,
+    force_single_peer: bool,
 ) -> HandleResult {
     use std::time::Duration;
 
@@ -594,11 +596,19 @@ fn handle_inv(
         "inv_received"
     );
 
-    let eligible = header_partitioner::select_eligible_peers(
-        peer_id,
-        sync_tracker,
-        connected_peer_ids,
-    );
+    // During HeaderSync with a targeted peer, skip multi-peer partitioning.
+    // Partitioning fills the delivery tracker with in-flight IDs that overlap
+    // with subsequent Inv responses from the targeted loop, reducing each
+    // cycle's to_request_len from ~399 to ~26 and killing throughput.
+    let eligible = if force_single_peer {
+        EligiblePeers::SinglePeerFallback(peer_id, "force_single_peer (HeaderSync)")
+    } else {
+        header_partitioner::select_eligible_peers(
+            peer_id,
+            sync_tracker,
+            connected_peer_ids,
+        )
+    };
 
     let actions = match eligible {
         EligiblePeers::Partition(mut peers) => {
@@ -1168,6 +1178,7 @@ pub fn handle_message_without_modifiers(
     max_headers: u32,
     connected_peer_ids: &[PeerId],
     metrics: &mut SyncMetrics,
+    force_single_peer: bool,
 ) -> HandleResult {
     match msg.code {
         1 => handle_get_peers(peer_id, connected_peers),
@@ -1196,6 +1207,7 @@ pub fn handle_message_without_modifiers(
             handle_inv(
                 peer_id, &msg.body, tracker, history, &mp,
                 is_synced_for_txs, sync_tracker, connected_peer_ids, metrics,
+                force_single_peer,
             )
         }
         22 => {
@@ -2884,6 +2896,7 @@ mod tests {
             &sync_tracker,
             &connected,
             &mut metrics,
+            false,
         );
 
         // Should have exactly 1 RequestModifiers action to peer 1
@@ -2941,6 +2954,7 @@ mod tests {
             &sync_tracker,
             &connected,
             &mut metrics,
+            false,
         );
 
         // Should have 3 RequestModifiers actions
@@ -2996,6 +3010,7 @@ mod tests {
             &sync_tracker,
             &connected,
             &mut metrics,
+            false,
         );
 
         // Should emit nothing due to global cap
@@ -3033,6 +3048,7 @@ mod tests {
             &sync_tracker,
             &connected,
             &mut metrics,
+            false,
         );
 
         // Should have exactly 1 action to peer 1 (no partitioning for non-headers)

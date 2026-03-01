@@ -620,6 +620,12 @@ pub async fn run(
                         .iter()
                         .map(|p| p.id)
                         .collect();
+                    // During HeaderSync, force single-peer header requests.
+                    // Multi-peer partitioning is slower because headers must be
+                    // applied sequentially — only one peer's chunk extends the
+                    // chain, the rest go to cache and become redundant.
+                    let force_single_peer = sync_mgr.state()
+                        == ergo_network::sync_manager::SyncState::HeaderSync;
                     let result = message_handler::handle_message_without_modifiers(
                         incoming.peer_id,
                         &incoming.message,
@@ -636,6 +642,7 @@ pub async fn run(
                         settings.network.sync_info_max_headers,
                         &connected_peer_ids,
                         &mut sync_metrics,
+                        force_single_peer,
                     );
 
                     // Handle continuation headers: forward to processor thread.
@@ -733,8 +740,8 @@ pub async fn run(
                             sync_mgr.on_headers_received(&new_header_ids, sync_history);
 
                             // Send targeted SyncInfoV2 to the delivering peer for a
-                            // tight request/response loop.  No broadcast here — that is
-                            // handled by the periodic sync_tick (every 5 s).
+                            // tight request/response loop.  No broadcast here — that
+                            // is handled by the periodic sync_tick.
                             if let Some(peer) = last_header_peer {
                                 if !cached_sync_headers.is_empty() {
                                     let v2 = ergo_wire::sync_info::ErgoSyncInfoV2 {
