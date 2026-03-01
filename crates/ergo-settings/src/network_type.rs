@@ -36,7 +36,7 @@ impl NetworkType {
     pub fn magic_bytes(self) -> [u8; 4] {
         match self {
             Self::MainNet => [1, 0, 2, 4],
-            Self::TestNet => [2, 0, 0, 1],
+            Self::TestNet => [2, 0, 2, 3],
             Self::DevNet => [2, 2, 2, 2],
         }
     }
@@ -78,6 +78,6 @@ mod tests {
 
     #[test]
     fn magic_bytes_testnet() {
-        assert_eq!(NetworkType::TestNet.magic_bytes(), [2, 0, 0, 1]);
+        assert_eq!(NetworkType::TestNet.magic_bytes(), [2, 0, 2, 3]);
     }
 }
