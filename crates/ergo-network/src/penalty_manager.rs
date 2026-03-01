@@ -56,8 +56,8 @@ impl PenaltyManager {
             scores: HashMap::new(),
             banned: HashMap::new(),
             banned_ips: HashMap::new(),
-            ban_threshold: 100,
-            warn_threshold: 50,
+            ban_threshold: 500,
+            warn_threshold: 250,
             ban_duration: Duration::from_secs(3600),
             decay_per_second: 1,
         }
@@ -167,25 +167,28 @@ mod tests {
     }
 
     #[test]
-    fn invalid_block_triggers_immediate_ban() {
+    fn single_invalid_block_does_not_ban() {
         let mut mgr = PenaltyManager::new();
         let action = mgr.add_penalty(1, PenaltyType::InvalidBlock);
-        assert_eq!(action, PenaltyAction::Ban);
-        assert!(mgr.is_banned(1));
+        // InvalidBlock weight=100, ban_threshold=500 → not enough to ban
+        assert_eq!(action, PenaltyAction::None);
+        assert!(!mgr.is_banned(1));
     }
 
     #[test]
     fn cumulative_penalties_trigger_ban() {
         let mut mgr = PenaltyManager::new();
-        // 10 spam messages = 100 points = ban
-        for i in 0..9 {
+        // 50 spam messages × 10 = 500 points = ban
+        // First 24 (score 10..240) → None, iterations 24..48 (score 250..490) → Warn
+        for i in 0..49 {
             let action = mgr.add_penalty(1, PenaltyType::SpamMessage);
-            if i < 4 {
+            if i < 24 {
                 assert_eq!(action, PenaltyAction::None, "iteration {i}");
             } else {
                 assert_eq!(action, PenaltyAction::Warn, "iteration {i}");
             }
         }
+        // 50th message: score = 500 → Ban
         let action = mgr.add_penalty(1, PenaltyType::SpamMessage);
         assert_eq!(action, PenaltyAction::Ban);
     }
@@ -194,22 +197,34 @@ mod tests {
     fn is_banned_returns_true_after_ban() {
         let mut mgr = PenaltyManager::new();
         assert!(!mgr.is_banned(1));
-        mgr.add_penalty(1, PenaltyType::InvalidHeader);
+        // 5 × InvalidHeader(100) = 500 = ban_threshold
+        for _ in 0..5 {
+            mgr.add_penalty(1, PenaltyType::InvalidHeader);
+        }
         assert!(mgr.is_banned(1));
     }
 
     #[test]
     fn warn_threshold_returns_warn() {
         let mut mgr = PenaltyManager::new();
+        // 5 × InvalidTransaction(50) = 250 = warn_threshold
+        // First 4 are None (score 50..200)
+        for _ in 0..4 {
+            let action = mgr.add_penalty(1, PenaltyType::InvalidTransaction);
+            assert_eq!(action, PenaltyAction::None);
+        }
+        // 5th reaches 250 → Warn
         let action = mgr.add_penalty(1, PenaltyType::InvalidTransaction);
-        // 50 points = warn threshold
         assert_eq!(action, PenaltyAction::Warn);
     }
 
     #[test]
     fn cleanup_removes_expired_bans() {
         let mut mgr = PenaltyManager::new();
-        mgr.add_penalty(1, PenaltyType::InvalidBlock);
+        // 5 × InvalidBlock(100) = 500 → ban
+        for _ in 0..5 {
+            mgr.add_penalty(1, PenaltyType::InvalidBlock);
+        }
         assert!(mgr.is_banned(1));
 
         // Manually set ban time to the past
@@ -222,9 +237,14 @@ mod tests {
     #[test]
     fn banned_peer_ids_returns_banned() {
         let mut mgr = PenaltyManager::new();
-        // InvalidBlock has weight 100 = instant ban
-        mgr.add_penalty(42, PenaltyType::InvalidBlock);
-        mgr.add_penalty(99, PenaltyType::InvalidHeader);
+        // 5 × InvalidBlock(100) = 500 → ban for peer 42
+        for _ in 0..5 {
+            mgr.add_penalty(42, PenaltyType::InvalidBlock);
+        }
+        // 5 × InvalidHeader(100) = 500 → ban for peer 99
+        for _ in 0..5 {
+            mgr.add_penalty(99, PenaltyType::InvalidHeader);
+        }
         let banned = mgr.banned_peer_ids();
         assert!(banned.contains(&42));
         assert!(banned.contains(&99));
@@ -234,7 +254,10 @@ mod tests {
     #[test]
     fn banned_peer_ids_excludes_expired() {
         let mut mgr = PenaltyManager::new();
-        mgr.add_penalty(42, PenaltyType::InvalidBlock);
+        // 5 × InvalidBlock(100) = 500 → ban
+        for _ in 0..5 {
+            mgr.add_penalty(42, PenaltyType::InvalidBlock);
+        }
         assert!(mgr.banned_peer_ids().contains(&42));
 
         // Manually expire the ban
