@@ -299,9 +299,6 @@ pub async fn run(
     // Cached sync headers from the processor (newest first), used to build
     // SyncInfoV2 without reading from the secondary DB.
     let mut cached_sync_headers: Vec<ergo_types::header::Header> = Vec::new();
-    // Rate-limit targeted SyncInfo in HeadersApplied: at most once per 200ms
-    // to avoid flooding the delivering peer during rapid cache drain.
-    let mut last_targeted_sync = Instant::now() - Duration::from_secs(1);
     // Tracks the last peer that delivered headers, for targeted SyncInfo response.
     let mut last_header_peer: Option<u64> = None;
 
@@ -311,11 +308,21 @@ pub async fn run(
         s.is_mining = candidate_gen.is_some();
     }
 
+    // During HeaderSync the targeted SyncInfo loop drives header discovery;
+    // broadcasting to all peers creates redundant Inv responses that steal IDs
+    // from the targeted pipeline.  Broadcast only every 6th tick (~30 s) during
+    // header sync to keep the targeted loop uncontested while still discovering
+    // new peer chain statuses.
+    let mut sync_broadcast_counter: u32 = 0;
+
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
             _ = sync_tick.tick() => {
+                sync_broadcast_counter += 1;
+                let suppress_broadcast = sync_mgr.state() == ergo_network::sync_manager::SyncState::HeaderSync
+                    && sync_broadcast_counter % 6 != 0;
                 handle_sync_tick(
                     &mut pool,
                     &mut sync_mgr,
@@ -336,6 +343,7 @@ pub async fn run(
                     cached_state_version,
                     is_digest_mode,
                     &cached_sync_headers,
+                    suppress_broadcast,
                 ).await;
 
                 // Recompute whether the node is synced enough for tx acceptance.
@@ -724,14 +732,11 @@ pub async fn run(
                             let _ = sync_history.try_catch_up_with_primary();
                             sync_mgr.on_headers_received(&new_header_ids, sync_history);
 
-                            // Send targeted SyncInfoV2 to the delivering peer only,
-                            // rate-limited to at most once per 200ms.  Broadcast to all
-                            // peers is handled by the periodic sync_tick.
-                            const TARGETED_SYNC_COOLDOWN: Duration = Duration::from_millis(200);
+                            // Send targeted SyncInfoV2 to the delivering peer for a
+                            // tight request/response loop.  No broadcast here — that is
+                            // handled by the periodic sync_tick (every 5 s).
                             if let Some(peer) = last_header_peer {
-                                if !cached_sync_headers.is_empty()
-                                    && last_targeted_sync.elapsed() >= TARGETED_SYNC_COOLDOWN
-                                {
+                                if !cached_sync_headers.is_empty() {
                                     let v2 = ergo_wire::sync_info::ErgoSyncInfoV2 {
                                         last_headers: cached_sync_headers.clone(),
                                     };
@@ -739,7 +744,6 @@ pub async fn run(
                                     let sync_bytes = v2.serialize();
                                     tracing::debug!(sync_tip, peer, "targeted SyncInfoV2 to delivering peer");
                                     let _ = pool.send_to(peer, MessageCode::SyncInfo as u8, sync_bytes).await;
-                                    last_targeted_sync = Instant::now();
                                 }
                             }
                         }
@@ -1237,6 +1241,7 @@ async fn handle_sync_tick(
     cached_state_version: Option<[u8; 32]>,
     is_digest_mode: bool,
     cached_sync_headers: &[ergo_types::header::Header],
+    suppress_broadcast: bool,
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
@@ -1269,6 +1274,18 @@ async fn handle_sync_tick(
     };
 
     let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up, prebuilt_sync, settings.network.sync_info_max_headers);
+
+    // During header sync, suppress broadcast SyncInfo (peer_id=None) to let
+    // the targeted SyncInfo loop run without competition from overlapping Inv
+    // responses.  Non-broadcast actions (block requests, etc.) still execute.
+    let actions: Vec<SyncAction> = if suppress_broadcast {
+        actions
+            .into_iter()
+            .filter(|a| !matches!(a, SyncAction::SendSyncInfo { peer_id: None, .. }))
+            .collect()
+    } else {
+        actions
+    };
     execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
 
     let timed_out = tracker.collect_timed_out();
