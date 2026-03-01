@@ -37,6 +37,7 @@ pub enum PenaltyAction {
 struct PeerPenalty {
     score: u32,
     last_update: Instant,
+    last_penalty_time: Instant,
 }
 
 /// Manages per-peer penalty scores with time decay.
@@ -48,6 +49,9 @@ pub struct PenaltyManager {
     warn_threshold: u32,
     ban_duration: Duration,
     decay_per_second: u32,
+    /// Minimum interval between penalty accumulations for the same peer.
+    /// Matches Scala's `penaltySafeInterval = 2m`.
+    safe_interval: Duration,
 }
 
 impl PenaltyManager {
@@ -60,26 +64,49 @@ impl PenaltyManager {
             warn_threshold: 250,
             ban_duration: Duration::from_secs(3600),
             decay_per_second: 1,
+            safe_interval: Duration::from_secs(120), // 2 minutes, matches Scala penaltySafeInterval
         }
     }
 
     /// Add a penalty to a peer and return the resulting action.
+    ///
+    /// Penalties within `safe_interval` (2 minutes) of the last applied penalty
+    /// for the same peer are suppressed, preventing rapid escalation from
+    /// transient network issues. Matches Scala's `penaltySafeInterval`.
     pub fn add_penalty(&mut self, peer_id: PeerId, penalty: PenaltyType) -> PenaltyAction {
+        let now = Instant::now();
+        let safe_interval = self.safe_interval;
         let entry = self.scores.entry(peer_id).or_insert(PeerPenalty {
             score: 0,
-            last_update: Instant::now(),
+            last_update: now,
+            // Initialize to the past so the first penalty always applies
+            last_penalty_time: now - safe_interval,
         });
 
         // Apply time decay
         let elapsed = entry.last_update.elapsed().as_secs() as u32;
         entry.score = entry.score.saturating_sub(elapsed * self.decay_per_second);
-        entry.last_update = Instant::now();
+        entry.last_update = now;
 
-        // Add penalty
+        // Safe interval check: suppress accumulation if within safe interval
+        if entry.last_penalty_time.elapsed() < safe_interval {
+            // Return current action level without adding penalty
+            if entry.score >= self.ban_threshold {
+                self.banned.insert(peer_id, now);
+                self.scores.remove(&peer_id);
+                return PenaltyAction::Ban;
+            } else if entry.score >= self.warn_threshold {
+                return PenaltyAction::Warn;
+            }
+            return PenaltyAction::None;
+        }
+
+        // Apply penalty (outside safe interval)
         entry.score = entry.score.saturating_add(penalty.weight());
+        entry.last_penalty_time = now;
 
         if entry.score >= self.ban_threshold {
-            self.banned.insert(peer_id, Instant::now());
+            self.banned.insert(peer_id, now);
             self.scores.remove(&peer_id);
             PenaltyAction::Ban
         } else if entry.score >= self.warn_threshold {
@@ -149,6 +176,23 @@ impl Default for PenaltyManager {
     }
 }
 
+impl PenaltyManager {
+    /// Add a penalty bypassing the safe interval check.
+    /// Only available in tests — useful for tests that need to accumulate
+    /// multiple rapid penalties without waiting 2 minutes between each.
+    #[cfg(test)]
+    pub fn add_penalty_bypass_safe_interval(
+        &mut self,
+        peer_id: PeerId,
+        penalty: PenaltyType,
+    ) -> PenaltyAction {
+        if let Some(entry) = self.scores.get_mut(&peer_id) {
+            entry.last_penalty_time = Instant::now() - self.safe_interval;
+        }
+        self.add_penalty(peer_id, penalty)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,7 +225,7 @@ mod tests {
         // 50 spam messages × 10 = 500 points = ban
         // First 24 (score 10..240) → None, iterations 24..48 (score 250..490) → Warn
         for i in 0..49 {
-            let action = mgr.add_penalty(1, PenaltyType::SpamMessage);
+            let action = mgr.add_penalty_bypass_safe_interval(1, PenaltyType::SpamMessage);
             if i < 24 {
                 assert_eq!(action, PenaltyAction::None, "iteration {i}");
             } else {
@@ -189,7 +233,7 @@ mod tests {
             }
         }
         // 50th message: score = 500 → Ban
-        let action = mgr.add_penalty(1, PenaltyType::SpamMessage);
+        let action = mgr.add_penalty_bypass_safe_interval(1, PenaltyType::SpamMessage);
         assert_eq!(action, PenaltyAction::Ban);
     }
 
@@ -199,7 +243,7 @@ mod tests {
         assert!(!mgr.is_banned(1));
         // 5 × InvalidHeader(100) = 500 = ban_threshold
         for _ in 0..5 {
-            mgr.add_penalty(1, PenaltyType::InvalidHeader);
+            mgr.add_penalty_bypass_safe_interval(1, PenaltyType::InvalidHeader);
         }
         assert!(mgr.is_banned(1));
     }
@@ -210,11 +254,11 @@ mod tests {
         // 5 × InvalidTransaction(50) = 250 = warn_threshold
         // First 4 are None (score 50..200)
         for _ in 0..4 {
-            let action = mgr.add_penalty(1, PenaltyType::InvalidTransaction);
+            let action = mgr.add_penalty_bypass_safe_interval(1, PenaltyType::InvalidTransaction);
             assert_eq!(action, PenaltyAction::None);
         }
         // 5th reaches 250 → Warn
-        let action = mgr.add_penalty(1, PenaltyType::InvalidTransaction);
+        let action = mgr.add_penalty_bypass_safe_interval(1, PenaltyType::InvalidTransaction);
         assert_eq!(action, PenaltyAction::Warn);
     }
 
@@ -223,7 +267,7 @@ mod tests {
         let mut mgr = PenaltyManager::new();
         // 5 × InvalidBlock(100) = 500 → ban
         for _ in 0..5 {
-            mgr.add_penalty(1, PenaltyType::InvalidBlock);
+            mgr.add_penalty_bypass_safe_interval(1, PenaltyType::InvalidBlock);
         }
         assert!(mgr.is_banned(1));
 
@@ -239,11 +283,11 @@ mod tests {
         let mut mgr = PenaltyManager::new();
         // 5 × InvalidBlock(100) = 500 → ban for peer 42
         for _ in 0..5 {
-            mgr.add_penalty(42, PenaltyType::InvalidBlock);
+            mgr.add_penalty_bypass_safe_interval(42, PenaltyType::InvalidBlock);
         }
         // 5 × InvalidHeader(100) = 500 → ban for peer 99
         for _ in 0..5 {
-            mgr.add_penalty(99, PenaltyType::InvalidHeader);
+            mgr.add_penalty_bypass_safe_interval(99, PenaltyType::InvalidHeader);
         }
         let banned = mgr.banned_peer_ids();
         assert!(banned.contains(&42));
@@ -256,7 +300,7 @@ mod tests {
         let mut mgr = PenaltyManager::new();
         // 5 × InvalidBlock(100) = 500 → ban
         for _ in 0..5 {
-            mgr.add_penalty(42, PenaltyType::InvalidBlock);
+            mgr.add_penalty_bypass_safe_interval(42, PenaltyType::InvalidBlock);
         }
         assert!(mgr.banned_peer_ids().contains(&42));
 
@@ -313,5 +357,35 @@ mod tests {
             .insert(ip, Instant::now() - Duration::from_secs(7200));
         mgr.cleanup_expired_bans();
         assert!(mgr.banned_ips().is_empty());
+    }
+
+    #[test]
+    fn penalty_safe_interval_suppresses_rapid_penalties() {
+        let mut mgr = PenaltyManager::new();
+        // First penalty applies normally
+        let action = mgr.add_penalty(1, PenaltyType::SpamMessage);
+        assert_eq!(action, PenaltyAction::None);
+        assert_eq!(mgr.score(1), 10);
+
+        // Second penalty within 2 minutes should be suppressed
+        let action = mgr.add_penalty(1, PenaltyType::SpamMessage);
+        assert_eq!(action, PenaltyAction::None);
+        assert_eq!(mgr.score(1), 10); // unchanged — suppressed by safe interval
+    }
+
+    #[test]
+    fn penalty_safe_interval_allows_after_expiry() {
+        let mut mgr = PenaltyManager::new();
+        mgr.add_penalty(1, PenaltyType::SpamMessage);
+        assert_eq!(mgr.score(1), 10);
+
+        // Manually set last_penalty_time to >2 minutes ago
+        if let Some(entry) = mgr.scores.get_mut(&1) {
+            entry.last_penalty_time = Instant::now() - Duration::from_secs(121);
+        }
+
+        // Now penalty should apply
+        mgr.add_penalty(1, PenaltyType::SpamMessage);
+        assert_eq!(mgr.score(1), 20);
     }
 }
