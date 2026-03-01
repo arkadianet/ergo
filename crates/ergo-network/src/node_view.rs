@@ -102,6 +102,8 @@ pub struct NodeViewHolder {
     v2_activation_height: u32,
     /// Initial difficulty hex string for Autolykos v2 (e.g. "6f98d5000000").
     v2_activation_difficulty_hex: String,
+    /// Maximum allowed timestamp drift in milliseconds (10 * block_interval).
+    max_time_drift_ms: u64,
 }
 
 /// Compute required nBits for a new block at the given height.
@@ -153,11 +155,8 @@ pub fn compute_required_difficulty_from_history(
     }
 
     // Epoch boundary: need historical headers for recalculation.
-    let required_heights = previous_heights_for_recalculation(
-        header_height,
-        epoch_length,
-        USE_LAST_EPOCHS,
-    );
+    let required_heights =
+        previous_heights_for_recalculation(header_height, epoch_length, USE_LAST_EPOCHS);
 
     let mut header_data: Vec<(u32, u64, u32)> = Vec::with_capacity(required_heights.len());
     for &h in &required_heights {
@@ -217,6 +216,7 @@ impl NodeViewHolder {
             checkpoint_height: 0,
             v2_activation_height: 417_792,
             v2_activation_difficulty_hex: "6f98d5000000".to_string(),
+            max_time_drift_ms: ergo_consensus::header_validation::DEFAULT_MAX_TIME_DRIFT_MS,
         }
     }
 
@@ -232,25 +232,23 @@ impl NodeViewHolder {
         genesis_digest: Vec<u8>,
     ) -> Self {
         let (state_root, state_version) = match history.get_state_version() {
-            Ok(Some(version_id)) => {
-                match history.load_header(&version_id) {
-                    Ok(Some(header)) => {
-                        tracing::info!(
-                            height = header.height,
-                            state_version = ?version_id,
-                            "recovering state from persisted version"
-                        );
-                        (header.state_root.0.to_vec(), version_id)
-                    }
-                    _ => {
-                        tracing::warn!(
-                            state_version = ?version_id,
-                            "state version header not found, starting from genesis"
-                        );
-                        (genesis_digest.clone(), ModifierId([0u8; 32]))
-                    }
+            Ok(Some(version_id)) => match history.load_header(&version_id) {
+                Ok(Some(header)) => {
+                    tracing::info!(
+                        height = header.height,
+                        state_version = ?version_id,
+                        "recovering state from persisted version"
+                    );
+                    (header.state_root.0.to_vec(), version_id)
                 }
-            }
+                _ => {
+                    tracing::warn!(
+                        state_version = ?version_id,
+                        "state version header not found, starting from genesis"
+                    );
+                    (genesis_digest.clone(), ModifierId([0u8; 32]))
+                }
+            },
             _ => {
                 tracing::info!("no persisted state version, starting from genesis");
                 (genesis_digest.clone(), ModifierId([0u8; 32]))
@@ -273,6 +271,7 @@ impl NodeViewHolder {
             checkpoint_height: 0,
             v2_activation_height: 417_792,
             v2_activation_difficulty_hex: "6f98d5000000".to_string(),
+            max_time_drift_ms: ergo_consensus::header_validation::DEFAULT_MAX_TIME_DRIFT_MS,
         }
     }
 
@@ -306,6 +305,14 @@ impl NodeViewHolder {
     pub fn set_v2_activation_config(&mut self, height: u32, diff_hex: String) {
         self.v2_activation_height = height;
         self.v2_activation_difficulty_hex = diff_hex;
+    }
+
+    /// Set the maximum time drift from the chain's block interval.
+    ///
+    /// `block_interval_secs` is the desired block interval in seconds
+    /// (e.g. 120 for mainnet). MaxTimeDrift = 10 * block_interval.
+    pub fn set_max_time_drift_from_interval(&mut self, block_interval_secs: u64) {
+        self.max_time_drift_ms = block_interval_secs * 10 * 1000;
     }
 
     /// Ensure state and history are consistent on startup.
@@ -412,7 +419,10 @@ impl NodeViewHolder {
             return; // Already pruned up to this height
         }
         for height in old_minimal..new_minimal {
-            let ids = self.history.header_ids_at_height(height).unwrap_or_default();
+            let ids = self
+                .history
+                .header_ids_at_height(height)
+                .unwrap_or_default();
             for id in &ids {
                 // Delete body sections: BlockTransactions(102), ADProofs(104)
                 let _ = self.history.delete_modifier(102, id);
@@ -456,7 +466,11 @@ impl NodeViewHolder {
                     .unwrap_or_default()
                     .as_millis() as u64;
                 if let Err(e) = ergo_consensus::header_validation::validate_genesis_header(
-                    &header, now_ms, None, None,
+                    &header,
+                    now_ms,
+                    None,
+                    None,
+                    self.max_time_drift_ms,
                 ) {
                     return Err(NodeViewError::Validation(format!(
                         "genesis header validation failed: {e}"
@@ -476,11 +490,14 @@ impl NodeViewHolder {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                let required_n_bits =
-                    self.compute_required_difficulty(&header, &parent);
-                if let Err(e) =
-                    validate_child_header(&header, &parent, now_ms, required_n_bits)
-                {
+                let required_n_bits = self.compute_required_difficulty(&header, &parent);
+                if let Err(e) = validate_child_header(
+                    &header,
+                    &parent,
+                    now_ms,
+                    required_n_bits,
+                    self.max_time_drift_ms,
+                ) {
                     return Err(NodeViewError::Validation(format!(
                         "header {} validation failed: {e}",
                         header.height
@@ -545,11 +562,13 @@ impl NodeViewHolder {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            if let Err(e) =
-                ergo_consensus::header_validation::validate_genesis_header_skip_pow(
-                    header, now_ms, None, None,
-                )
-            {
+            if let Err(e) = ergo_consensus::header_validation::validate_genesis_header_skip_pow(
+                header,
+                now_ms,
+                None,
+                None,
+                self.max_time_drift_ms,
+            ) {
                 return Err(NodeViewError::Validation(format!(
                     "genesis header validation failed: {e}"
                 )));
@@ -569,11 +588,13 @@ impl NodeViewHolder {
                 .unwrap_or_default()
                 .as_millis() as u64;
             let required_n_bits = self.compute_required_difficulty(header, &parent);
-            if let Err(e) =
-                ergo_consensus::header_validation::validate_child_header_skip_pow(
-                    header, &parent, now_ms, required_n_bits,
-                )
-            {
+            if let Err(e) = ergo_consensus::header_validation::validate_child_header_skip_pow(
+                header,
+                &parent,
+                now_ms,
+                required_n_bits,
+                self.max_time_drift_ms,
+            ) {
                 return Err(NodeViewError::Validation(format!(
                     "header {} validation failed: {e}",
                     header.height
@@ -630,8 +651,7 @@ impl NodeViewHolder {
                     // overwrite the state root from its header anyway.
                     match self.digest_state.rollback_to_version(branch_point) {
                         Ok(()) => {
-                            self.current_state_root =
-                                self.digest_state.state_root().to_vec();
+                            self.current_state_root = self.digest_state.state_root().to_vec();
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -643,10 +663,9 @@ impl NodeViewHolder {
                 } else {
                     self.utxo_state
                         .rollback_to_version(branch_point)
-                        .map_err(|e| {
-                            NodeViewError::State(format!("rollback failed: {e}"))
-                        })?;
-                    self.current_state_root = self.utxo_state
+                        .map_err(|e| NodeViewError::State(format!("rollback failed: {e}")))?;
+                    self.current_state_root = self
+                        .utxo_state
                         .state_root()
                         .map_err(|e| NodeViewError::State(format!("{e}")))?;
                 }
@@ -800,9 +819,7 @@ impl NodeViewHolder {
                 )));
             }
             Err(e) => {
-                return Err(NodeViewError::State(format!(
-                    "load parent header: {e}"
-                )));
+                return Err(NodeViewError::State(format!("load parent header: {e}")));
             }
         };
 
@@ -901,9 +918,9 @@ impl NodeViewHolder {
                     return Ok(());
                 }
                 ModifierValidity::Invalid => {
-                    return Err(NodeViewError::Validation(
-                        format!("block {block_id:?} previously marked invalid"),
-                    ));
+                    return Err(NodeViewError::Validation(format!(
+                        "block {block_id:?} previously marked invalid"
+                    )));
                 }
             }
         }
@@ -912,27 +929,23 @@ impl NodeViewHolder {
         let block = self
             .history
             .assemble_full_block(block_id)?
-            .ok_or_else(|| {
-                NodeViewError::State(format!("cannot assemble block {block_id:?}"))
-            })?;
+            .ok_or_else(|| NodeViewError::State(format!("cannot assemble block {block_id:?}")))?;
 
         // Stage 1b: Reject if header is marked invalid (rule 303).
         if let Ok(Some(ModifierValidity::Invalid)) = self.history.get_validity(block_id) {
-            return Err(NodeViewError::Validation(
-                format!("header {block_id:?} marked invalid"),
-            ));
+            return Err(NodeViewError::Validation(format!(
+                "header {block_id:?} marked invalid"
+            )));
         }
 
         // Stage 1c: Reject block sections for pruned headers (rule 305).
         if self.blocks_to_keep >= 0 {
             let min_height = self.history.minimal_full_block_height().unwrap_or(0);
             if min_height > 0 && block.header.height < min_height {
-                return Err(NodeViewError::Validation(
-                    format!(
-                        "block at height {} too old (min: {})",
-                        block.header.height, min_height
-                    ),
-                ));
+                return Err(NodeViewError::Validation(format!(
+                    "block at height {} too old (min: {})",
+                    block.header.height, min_height
+                )));
             }
         }
 
@@ -942,14 +955,12 @@ impl NodeViewHolder {
                 self.history.get_validity(&block.header.parent_id),
                 Ok(Some(ModifierValidity::Invalid))
             );
-            validate_parent_semantics(&block.header.parent_id, parent_is_invalid).map_err(
-                |e| {
-                    NodeViewError::Validation(format!(
-                        "parent semantics check failed at height {}: {e}",
-                        block.header.height
-                    ))
-                },
-            )?;
+            validate_parent_semantics(&block.header.parent_id, parent_is_invalid).map_err(|e| {
+                NodeViewError::Validation(format!(
+                    "parent semantics check failed at height {}: {e}",
+                    block.header.height
+                ))
+            })?;
         }
 
         // Stage 1e: Block transactions size check (rule 306).
@@ -988,8 +999,7 @@ impl NodeViewHolder {
         })?;
 
         // Stage 2c: Vote validation (rules 212-215).
-        let epoch_starts =
-            block.header.height > 0 && block.header.height % self.epoch_length == 0;
+        let epoch_starts = block.header.height > 0 && block.header.height % self.epoch_length == 0;
         ergo_consensus::vote_validation::validate_votes(&block.header.votes, epoch_starts)
             .map_err(|e| {
                 NodeViewError::Validation(format!(
@@ -1001,7 +1011,11 @@ impl NodeViewHolder {
         // Stage 2c2: Fork vote prohibition check (rule 407).
         // If the block votes contain SoftFork (120), verify that voting for a
         // fork is not prohibited at this height.
-        if block.header.votes.contains(&ergo_consensus::parameters::SOFT_FORK_ID) {
+        if block
+            .header
+            .votes
+            .contains(&ergo_consensus::parameters::SOFT_FORK_ID)
+        {
             ergo_consensus::parameters::check_fork_vote(
                 block.header.height,
                 &self.voting_epoch_info.parameters,
@@ -1055,11 +1069,8 @@ impl NodeViewHolder {
                 use crate::nipopow::{unpack_interlinks, update_interlinks};
                 let current_interlinks = unpack_interlinks(&block.extension);
                 let parent_interlinks = unpack_interlinks(&p_ext);
-                let expected = update_interlinks(
-                    &p_hdr,
-                    &block.header.parent_id,
-                    &parent_interlinks,
-                );
+                let expected =
+                    update_interlinks(&p_hdr, &block.header.parent_id, &parent_interlinks);
 
                 if current_interlinks != expected {
                     return Err(NodeViewError::InvalidExtension(format!(
@@ -1078,17 +1089,15 @@ impl NodeViewHolder {
         // Stage 4: Parse transactions from raw bytes.
         let mut transactions = Vec::with_capacity(block.block_transactions.tx_bytes.len());
         for (i, tx_bytes) in block.block_transactions.tx_bytes.iter().enumerate() {
-            let tx = parse_transaction(tx_bytes).map_err(|e| {
-                NodeViewError::Codec(format!("tx {} parse failed: {e}", i))
-            })?;
+            let tx = parse_transaction(tx_bytes)
+                .map_err(|e| NodeViewError::Codec(format!("tx {} parse failed: {e}", i)))?;
             transactions.push(tx);
         }
 
         // Stage 5: Stateless validation for each transaction.
         for (i, tx) in transactions.iter().enumerate() {
-            validate_tx_stateless(tx, &vs).map_err(|e| {
-                NodeViewError::TxValidation(format!("tx {} stateless: {e}", i))
-            })?;
+            validate_tx_stateless(tx, &vs)
+                .map_err(|e| NodeViewError::TxValidation(format!("tx {} stateless: {e}", i)))?;
         }
 
         // Stage 5b: Stateful validation (UTXO mode only).
@@ -1098,12 +1107,9 @@ impl NodeViewHolder {
             for (i, tx) in transactions.iter().enumerate() {
                 let mut input_boxes = Vec::with_capacity(tx.inputs.len());
                 for input in &tx.inputs {
-                    let ergo_box = self
-                        .utxo_state
-                        .get_ergo_box(&input.box_id)
-                        .map_err(|e| {
-                            NodeViewError::State(format!("tx {} input box lookup: {e}", i))
-                        })?;
+                    let ergo_box = self.utxo_state.get_ergo_box(&input.box_id).map_err(|e| {
+                        NodeViewError::State(format!("tx {} input box lookup: {e}", i))
+                    })?;
                     let ergo_box = ergo_box.ok_or_else(|| {
                         NodeViewError::State(format!(
                             "tx {} input box {:?} not found in UTXO set",
@@ -1112,12 +1118,20 @@ impl NodeViewHolder {
                     })?;
                     input_boxes.push(ergo_box);
                 }
-                let min_value_per_byte =
-                    self.voting_epoch_info.parameters.min_value_per_byte().max(0) as u64;
-                validate_tx_stateful(tx, &input_boxes, block.header.height, block.header.version, min_value_per_byte, &vs)
-                    .map_err(|e| {
-                        NodeViewError::TxValidation(format!("tx {} stateful: {e}", i))
-                    })?;
+                let min_value_per_byte = self
+                    .voting_epoch_info
+                    .parameters
+                    .min_value_per_byte()
+                    .max(0) as u64;
+                validate_tx_stateful(
+                    tx,
+                    &input_boxes,
+                    block.header.height,
+                    block.header.version,
+                    min_value_per_byte,
+                    &vs,
+                )
+                .map_err(|e| NodeViewError::TxValidation(format!("tx {} stateful: {e}", i)))?;
                 all.push(input_boxes);
             }
             all
@@ -1130,10 +1144,11 @@ impl NodeViewHolder {
             for (i, tx) in transactions.iter().enumerate() {
                 let input_boxes = &all_input_boxes[i];
                 ergo_consensus::reemission::verify_reemission_spending(
-                    tx, input_boxes, block.header.height,
-                ).map_err(|e| {
-                    NodeViewError::TxValidation(format!("tx {} reemission: {e}", i))
-                })?;
+                    tx,
+                    input_boxes,
+                    block.header.height,
+                )
+                .map_err(|e| NodeViewError::TxValidation(format!("tx {} reemission: {e}", i)))?;
             }
         }
 
@@ -1160,7 +1175,8 @@ impl NodeViewHolder {
             for (i, tx) in transactions.iter().enumerate() {
                 // Compute initial cost for this transaction.
                 let initial_cost = ergo_consensus::sigma_verify::compute_initial_tx_cost(
-                    tx, &self.voting_epoch_info.parameters,
+                    tx,
+                    &self.voting_epoch_info.parameters,
                 );
                 accumulated_cost = accumulated_cost.saturating_add(initial_cost);
 
@@ -1169,8 +1185,11 @@ impl NodeViewHolder {
 
                 // Add token access cost (Rule 501).
                 let token_cost = ergo_consensus::sigma_verify::compute_token_access_cost(
-                    input_boxes, &tx.output_candidates, &self.voting_epoch_info.parameters,
-                ).map_err(|e| NodeViewError::TxValidation(format!("tx {} token cost: {e}", i)))?;
+                    input_boxes,
+                    &tx.output_candidates,
+                    &self.voting_epoch_info.parameters,
+                )
+                .map_err(|e| NodeViewError::TxValidation(format!("tx {} token cost: {e}", i)))?;
                 accumulated_cost = accumulated_cost.saturating_add(token_cost);
 
                 if accumulated_cost > max_block_cost {
@@ -1194,8 +1213,14 @@ impl NodeViewHolder {
                     }
                 }
 
-                let sigma_cost = verify_transaction(tx, input_boxes, &data_boxes, &sigma_ctx, self.checkpoint_height)
-                    .map_err(|e| NodeViewError::TxValidation(format!("tx {} sigma: {e}", i)))?;
+                let sigma_cost = verify_transaction(
+                    tx,
+                    input_boxes,
+                    &data_boxes,
+                    &sigma_ctx,
+                    self.checkpoint_height,
+                )
+                .map_err(|e| NodeViewError::TxValidation(format!("tx {} sigma: {e}", i)))?;
                 accumulated_cost = accumulated_cost.saturating_add(sigma_cost);
             }
 
@@ -1218,9 +1243,17 @@ impl NodeViewHolder {
         } else {
             let expected_root = block.header.state_root.0.as_slice();
             self.utxo_state
-                .apply_block(&transactions, block.header.height, block.header.version, block_id, Some(expected_root), &vs)
+                .apply_block(
+                    &transactions,
+                    block.header.height,
+                    block.header.version,
+                    block_id,
+                    Some(expected_root),
+                    &vs,
+                )
                 .map_err(|e| NodeViewError::State(format!("utxo state: {e}")))?;
-            self.current_state_root = self.utxo_state
+            self.current_state_root = self
+                .utxo_state
                 .state_root()
                 .map_err(|e| NodeViewError::State(format!("{e}")))?;
         }
@@ -1240,13 +1273,16 @@ impl NodeViewHolder {
         self.applied_blocks.push(*block_id);
 
         // Stage 7b: Process votes and update parameters.
-        self.voting_epoch_info.process_block_votes(&block.header.votes);
+        self.voting_epoch_info
+            .process_block_votes(&block.header.votes);
 
         // At epoch boundary, parse Extension parameters and start new epoch.
         if block.header.height > 0 && block.header.height % self.epoch_length == 0 {
             match Parameters::from_extension(block.header.height, &block.extension) {
                 Ok(declared) => {
-                    let computed = self.voting_epoch_info.compute_epoch_result(self.epoch_length, block.header.height);
+                    let computed = self
+                        .voting_epoch_info
+                        .compute_epoch_result(self.epoch_length, block.header.height);
                     // Enforce parameter matching (Scala matchParameters).
                     // Below checkpoint, log-only for leniency during initial sync.
                     // Above checkpoint, reject blocks with mismatched parameters.
@@ -1284,7 +1320,8 @@ impl NodeViewHolder {
             }
 
             // Update validation settings from the epoch boundary Extension (rules 411/412).
-            if let Err(e) = self.voting_epoch_info
+            if let Err(e) = self
+                .voting_epoch_info
                 .update_validation_settings(&block.extension)
             {
                 return Err(NodeViewError::Validation(e));
@@ -1292,7 +1329,10 @@ impl NodeViewHolder {
         }
 
         // Stage 8: Evict conflicting mempool transactions.
-        self.mempool.write().unwrap().remove_for_block(&transactions);
+        self.mempool
+            .write()
+            .unwrap()
+            .remove_for_block(&transactions);
 
         // Stage 9: Prune old block body sections if blocks_to_keep is configured.
         self.prune_old_blocks(block.header.height);
@@ -1333,7 +1373,9 @@ impl NodeViewHolder {
 
     /// Check if a validation rule is currently active.
     pub fn is_rule_active(&self, rule_id: u16) -> bool {
-        self.voting_epoch_info.validation_settings.is_active(rule_id)
+        self.voting_epoch_info
+            .validation_settings
+            .is_active(rule_id)
     }
 
     /// Get a reference to the current validation settings.
@@ -1467,20 +1509,22 @@ impl NodeViewHolder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_types::ad_proofs::ADProofs;
     use ergo_types::block_transactions::BlockTransactions;
     use ergo_types::extension::Extension;
     use ergo_types::header::Header;
-    use ergo_types::ad_proofs::ADProofs;
     use tempfile::TempDir;
 
     /// Compute Blake2b-256 of raw data (test helper).
     fn test_blake2b256(data: &[u8]) -> [u8; 32] {
-        use blake2::Blake2bVar;
         use blake2::digest::{Update, VariableOutput};
+        use blake2::Blake2bVar;
         let mut hasher = Blake2bVar::new(32).expect("valid output size");
         hasher.update(data);
         let mut out = [0u8; 32];
-        hasher.finalize_variable(&mut out).expect("correct output size");
+        hasher
+            .finalize_variable(&mut out)
+            .expect("correct output size");
         out
     }
 
@@ -1742,11 +1786,7 @@ mod tests {
 
         // Build a chain switch ProgressInfo.
         let branch_point = make_id(0x00);
-        let info = ProgressInfo::chain_switch(
-            branch_point,
-            vec![old_id],
-            vec![new_id],
-        );
+        let info = ProgressInfo::chain_switch(branch_point, vec![old_id], vec![new_id]);
         nv.apply_progress(&info).unwrap();
 
         // Old chain block should be marked Invalid.
@@ -1836,7 +1876,9 @@ mod tests {
         // -- Common ancestor block --
         let ancestor_id = make_id(0xA0);
         let ancestor_header = make_header(99, 0xA0);
-        nv.history.store_header(&ancestor_id, &ancestor_header).unwrap();
+        nv.history
+            .store_header(&ancestor_id, &ancestor_header)
+            .unwrap();
         nv.history
             .store_block_transactions(&ancestor_id, &sample_block_transactions(&ancestor_id))
             .unwrap();
@@ -1850,7 +1892,9 @@ mod tests {
         // -- Chain A: two blocks on top of ancestor --
         let chain_a1_id = make_id(0xA1);
         let chain_a1_header = make_header(100, 0xA1);
-        nv.history.store_header(&chain_a1_id, &chain_a1_header).unwrap();
+        nv.history
+            .store_header(&chain_a1_id, &chain_a1_header)
+            .unwrap();
         nv.history
             .store_block_transactions(&chain_a1_id, &sample_block_transactions(&chain_a1_id))
             .unwrap();
@@ -1860,7 +1904,9 @@ mod tests {
 
         let chain_a2_id = make_id(0xA2);
         let chain_a2_header = make_header(101, 0xA2);
-        nv.history.store_header(&chain_a2_id, &chain_a2_header).unwrap();
+        nv.history
+            .store_header(&chain_a2_id, &chain_a2_header)
+            .unwrap();
         nv.history
             .store_block_transactions(&chain_a2_id, &sample_block_transactions(&chain_a2_id))
             .unwrap();
@@ -1884,7 +1930,9 @@ mod tests {
         // -- Chain B: two blocks from ancestor (longer/better chain) --
         let chain_b1_id = make_id(0xB1);
         let chain_b1_header = make_header(100, 0xB1);
-        nv.history.store_header(&chain_b1_id, &chain_b1_header).unwrap();
+        nv.history
+            .store_header(&chain_b1_id, &chain_b1_header)
+            .unwrap();
         nv.history
             .store_block_transactions(&chain_b1_id, &sample_block_transactions(&chain_b1_id))
             .unwrap();
@@ -1894,7 +1942,9 @@ mod tests {
 
         let chain_b2_id = make_id(0xB2);
         let chain_b2_header = make_header(101, 0xB2);
-        nv.history.store_header(&chain_b2_id, &chain_b2_header).unwrap();
+        nv.history
+            .store_header(&chain_b2_id, &chain_b2_header)
+            .unwrap();
         nv.history
             .store_block_transactions(&chain_b2_id, &sample_block_transactions(&chain_b2_id))
             .unwrap();
@@ -1980,11 +2030,7 @@ mod tests {
 
         // Build chain switch.
         let branch_point = make_id(0x00);
-        let info_switch = ProgressInfo::chain_switch(
-            branch_point,
-            vec![old_id],
-            vec![new_id],
-        );
+        let info_switch = ProgressInfo::chain_switch(branch_point, vec![old_id], vec![new_id]);
         nv.apply_progress(&info_switch).unwrap();
 
         // Old block marked Invalid.
@@ -2045,11 +2091,8 @@ mod tests {
 
         // Chain switch: remove old, apply [ok, bad].
         let branch_point = make_id(0x00);
-        let info_switch = ProgressInfo::chain_switch(
-            branch_point,
-            vec![old_id],
-            vec![new_id_ok, new_id_bad],
-        );
+        let info_switch =
+            ProgressInfo::chain_switch(branch_point, vec![old_id], vec![new_id_ok, new_id_bad]);
         let result = nv.apply_progress(&info_switch);
 
         // Should fail because new_id_bad cannot be assembled.
@@ -2201,11 +2244,7 @@ mod tests {
         let (db, _dir) = open_test_db();
         let nv = make_node_view(db);
 
-        let block = make_full_block_for_difficulty(
-            1,
-            ModifierId::GENESIS_PARENT,
-            12345,
-        );
+        let block = make_full_block_for_difficulty(1, ModifierId::GENESIS_PARENT, 12345);
         // Should return Ok regardless of nBits value.
         nv.verify_difficulty(&block).unwrap();
     }
@@ -2375,7 +2414,9 @@ mod tests {
         let parent = make_header(100, 0x01);
         let parent_bytes = ergo_wire::header_ser::serialize_header(&parent);
         let parent_id = compute_header_id(&parent_bytes);
-        nv.history.store_header_with_score(&parent_id, &parent).unwrap();
+        nv.history
+            .store_header_with_score(&parent_id, &parent)
+            .unwrap();
 
         // Build child with WRONG height (200 instead of 101).
         let mut bad_child = make_header(200, 0x02);
@@ -2512,7 +2553,8 @@ mod tests {
         let id = make_id(0xDA);
         let mut header = make_header(100, 0xDA);
         let ad_proofs = sample_ad_proofs(&id);
-        header.ad_proofs_root = ergo_types::modifier_id::Digest32(test_blake2b256(&ad_proofs.proof_bytes));
+        header.ad_proofs_root =
+            ergo_types::modifier_id::Digest32(test_blake2b256(&ad_proofs.proof_bytes));
         nv.history.store_header(&id, &header).unwrap();
         nv.history
             .store_block_transactions(&id, &sample_block_transactions(&id))
@@ -2543,7 +2585,8 @@ mod tests {
         let id1 = make_id(0xDB);
         let mut header1 = make_header(100, 0xDB);
         let ad_proofs1 = sample_ad_proofs(&id1);
-        header1.ad_proofs_root = ergo_types::modifier_id::Digest32(test_blake2b256(&ad_proofs1.proof_bytes));
+        header1.ad_proofs_root =
+            ergo_types::modifier_id::Digest32(test_blake2b256(&ad_proofs1.proof_bytes));
         nv.history.store_header(&id1, &header1).unwrap();
         nv.history
             .store_block_transactions(&id1, &sample_block_transactions(&id1))
@@ -2599,9 +2642,10 @@ mod tests {
         let id1 = make_id(0xDD);
         let epoch_ext = Extension {
             header_id: id1,
-            fields: vec![
-                ([0x00, ergo_consensus::parameters::BLOCK_VERSION_ID], 2_i32.to_be_bytes().to_vec()),
-            ],
+            fields: vec![(
+                [0x00, ergo_consensus::parameters::BLOCK_VERSION_ID],
+                2_i32.to_be_bytes().to_vec(),
+            )],
         };
         // Compute the correct extension_root for this Extension.
         // Scala kvToLeaf format: [key_length_byte] ++ key ++ value
@@ -2625,9 +2669,7 @@ mod tests {
         nv.history
             .store_block_transactions(&id1, &sample_block_transactions(&id1))
             .unwrap();
-        nv.history
-            .store_extension(&id1, &epoch_ext)
-            .unwrap();
+        nv.history.store_extension(&id1, &epoch_ext).unwrap();
 
         let info1 = ProgressInfo::apply(vec![id1]);
         nv.apply_progress(&info1).unwrap();
@@ -2689,8 +2731,8 @@ mod tests {
     // 29. VotingEpochInfo is accessible and properly initialized.
     #[test]
     fn voting_epoch_info_is_accessible() {
-        use ergo_consensus::voting::VotingEpochInfo;
         use ergo_consensus::parameters::Parameters;
+        use ergo_consensus::voting::VotingEpochInfo;
         let info = VotingEpochInfo::new(Parameters::genesis(), 0);
         assert!(info.voting_data.epoch_votes.is_empty());
     }
@@ -2708,7 +2750,7 @@ mod tests {
     // 31. is_rule_active delegates to validation_settings.
     #[test]
     fn is_rule_active_delegates_to_validation_settings() {
-        use ergo_consensus::validation_rules::{TX_DUST, TX_NO_INPUTS, HDR_POW};
+        use ergo_consensus::validation_rules::{HDR_POW, TX_DUST, TX_NO_INPUTS};
         let (db, _dir) = open_test_db();
         let nv = make_node_view(db);
         // All initial rules should be active.
@@ -3043,8 +3085,7 @@ mod tests {
         // Compute the expected nBits from the v2 difficulty hex.
         let v2_diff_bytes = hex::decode(&v2_diff_hex).unwrap();
         let v2_diff = num_bigint::BigUint::from_bytes_be(&v2_diff_bytes);
-        let expected_nbits =
-            ergo_consensus::difficulty::encode_compact_bits(&v2_diff) as u32;
+        let expected_nbits = ergo_consensus::difficulty::encode_compact_bits(&v2_diff) as u32;
 
         // --- Block at height v2_height (parent_height = v2_height - 1) ---
         // parent_height + 1 == v2_height, so v2 difficulty applies.
@@ -3056,15 +3097,12 @@ mod tests {
         nv.history.store_header(&parent_id_a, &parent_a).unwrap();
 
         // Correct nBits: should pass.
-        let block_ok = make_full_block_for_difficulty(
-            v2_height, parent_id_a, expected_nbits as u64,
-        );
+        let block_ok =
+            make_full_block_for_difficulty(v2_height, parent_id_a, expected_nbits as u64);
         assert!(nv.verify_difficulty(&block_ok).is_ok());
 
         // Wrong nBits: should fail.
-        let block_bad = make_full_block_for_difficulty(
-            v2_height, parent_id_a, 99999,
-        );
+        let block_bad = make_full_block_for_difficulty(v2_height, parent_id_a, 99999);
         let err = nv.verify_difficulty(&block_bad).unwrap_err();
         assert!(
             matches!(err, NodeViewError::Validation(ref msg) if msg.contains("v2 activation difficulty mismatch")),
@@ -3081,15 +3119,12 @@ mod tests {
         nv.history.store_header(&parent_id_b, &parent_b).unwrap();
 
         // Correct nBits: should pass.
-        let block_ok2 = make_full_block_for_difficulty(
-            v2_height + 1, parent_id_b, expected_nbits as u64,
-        );
+        let block_ok2 =
+            make_full_block_for_difficulty(v2_height + 1, parent_id_b, expected_nbits as u64);
         assert!(nv.verify_difficulty(&block_ok2).is_ok());
 
         // Wrong nBits: should fail.
-        let block_bad2 = make_full_block_for_difficulty(
-            v2_height + 1, parent_id_b, 77777,
-        );
+        let block_bad2 = make_full_block_for_difficulty(v2_height + 1, parent_id_b, 77777);
         let err2 = nv.verify_difficulty(&block_bad2).unwrap_err();
         assert!(
             matches!(err2, NodeViewError::Validation(ref msg) if msg.contains("v2 activation difficulty mismatch")),
@@ -3168,7 +3203,9 @@ mod tests {
         // Store a parent header first so the child can find it.
         let parent_id = make_id(0xF0);
         let parent = make_header(99, 0x00);
-        nv.history.store_header_with_score(&parent_id, &parent).unwrap();
+        nv.history
+            .store_header_with_score(&parent_id, &parent)
+            .unwrap();
         nv.history.process_header(&parent_id).unwrap();
 
         // Build a child header referencing the parent.
@@ -3178,9 +3215,7 @@ mod tests {
         let child_bytes = ergo_wire::header_ser::serialize_header(&child);
         let child_id = ModifierId(test_blake2b256(&child_bytes));
 
-        let info = nv
-            .process_prevalidated_header(&child_id, &child)
-            .unwrap();
+        let info = nv.process_prevalidated_header(&child_id, &child).unwrap();
 
         // Should produce download requests for the 3 body sections.
         assert_eq!(info.to_download.len(), 3);

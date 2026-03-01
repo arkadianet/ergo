@@ -221,6 +221,9 @@ async fn main() {
                         .version2_activation_difficulty_hex
                         .clone(),
                 );
+                node_view.set_max_time_drift_from_interval(
+                    proc_settings.ergo.chain.block_interval_secs,
+                );
 
                 // Restore state/history consistency (recovery after crash).
                 if let Err(e) = node_view.restore_consistency() {

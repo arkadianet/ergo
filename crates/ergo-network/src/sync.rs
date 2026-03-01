@@ -5,6 +5,7 @@
 
 use ergo_consensus::header_validation::{
     validate_child_header, validate_genesis_header, HeaderValidationError,
+    DEFAULT_MAX_TIME_DRIFT_MS,
 };
 use ergo_types::modifier_id::ModifierId;
 use ergo_wire::header_ser::parse_header;
@@ -127,12 +128,12 @@ pub fn process_modifiers_response(
 
         // Validate: genesis headers vs child headers.
         if header.is_genesis() {
-            validate_genesis_header(&header, now_ms, None, None)?;
+            validate_genesis_header(&header, now_ms, None, None, DEFAULT_MAX_TIME_DRIFT_MS)?;
         } else {
             let parent = chain
                 .get(&header.parent_id)
                 .ok_or(SyncError::ParentNotFound(header.parent_id))?;
-            validate_child_header(&header, parent, now_ms, None)?;
+            validate_child_header(&header, parent, now_ms, None, DEFAULT_MAX_TIME_DRIFT_MS)?;
         }
 
         chain.insert(*id, header);

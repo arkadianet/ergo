@@ -4,8 +4,8 @@
 //! reference implementation. Covers height sequencing, timestamp ordering,
 //! future-timestamp drift, genesis parent ID, and proof-of-work checks.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 use ergo_types::header::Header;
 use ergo_types::modifier_id::ModifierId;
@@ -15,11 +15,11 @@ use thiserror::Error;
 use crate::autolykos;
 use crate::difficulty_adjustment::{calculate_classic, calculate_eip37};
 
-/// Maximum allowed drift between a header's timestamp and the current wall-clock
-/// time. Equal to 10 × block_interval where block_interval = 2 minutes.
-///
-/// `MaxTimeDrift = 10 * 2min = 20min = 1_200_000 ms`
-const MAX_TIME_DRIFT_MS: u64 = 20 * 60 * 1000; // 1_200_000
+/// Default maximum allowed drift between a header's timestamp and the current
+/// wall-clock time. Derived as `10 * block_interval` where block_interval = 2 min
+/// on mainnet. Callers should derive this from the chain's `block_interval_secs`
+/// setting: `block_interval_secs * 10 * 1000`.
+pub const DEFAULT_MAX_TIME_DRIFT_MS: u64 = 10 * 120 * 1000; // 1_200_000
 
 /// EIP-37 activation height on mainnet.
 const EIP37_ACTIVATION_HEIGHT: u32 = 844_673;
@@ -34,7 +34,9 @@ fn compute_header_id_bytes(header: &Header) -> [u8; 32] {
     let mut hasher = Blake2bVar::new(32).expect("valid output size");
     hasher.update(&serialized);
     let mut out = [0u8; 32];
-    hasher.finalize_variable(&mut out).expect("correct output size");
+    hasher
+        .finalize_variable(&mut out)
+        .expect("correct output size");
     out
 }
 
@@ -131,17 +133,19 @@ pub fn validate_timestamp(header: &Header, parent: &Header) -> Result<(), Header
 
 /// Validate that the header timestamp is not too far in the future.
 ///
+/// `max_time_drift_ms` is derived from `10 * block_interval_secs * 1000`.
 /// The check is: if `header.timestamp > now_ms`, then
-/// `header.timestamp - now_ms <= MAX_TIME_DRIFT_MS`. Headers with timestamps
+/// `header.timestamp - now_ms <= max_time_drift_ms`. Headers with timestamps
 /// at or before `now_ms` always pass.
 pub fn validate_future_timestamp(
     header: &Header,
     now_ms: u64,
+    max_time_drift_ms: u64,
 ) -> Result<(), HeaderValidationError> {
     if header.timestamp <= now_ms {
         // Timestamp is in the past or exactly now — always OK.
         Ok(())
-    } else if header.timestamp - now_ms <= MAX_TIME_DRIFT_MS {
+    } else if header.timestamp - now_ms <= max_time_drift_ms {
         Ok(())
     } else {
         Err(HeaderValidationError::FutureTimestamp {
@@ -336,10 +340,11 @@ pub fn validate_child_header(
     parent: &Header,
     now_ms: u64,
     required_n_bits: Option<u32>,
+    max_time_drift_ms: u64,
 ) -> Result<(), HeaderValidationError> {
     validate_height(header, parent)?;
     validate_timestamp(header, parent)?;
-    validate_future_timestamp(header, now_ms)?;
+    validate_future_timestamp(header, now_ms, max_time_drift_ms)?;
     validate_required_difficulty(header, required_n_bits)?;
     validate_pow(header)?;
     Ok(())
@@ -354,10 +359,11 @@ pub fn validate_child_header_skip_pow(
     parent: &Header,
     now_ms: u64,
     required_n_bits: Option<u32>,
+    max_time_drift_ms: u64,
 ) -> Result<(), HeaderValidationError> {
     validate_height(header, parent)?;
     validate_timestamp(header, parent)?;
-    validate_future_timestamp(header, now_ms)?;
+    validate_future_timestamp(header, now_ms, max_time_drift_ms)?;
     validate_required_difficulty(header, required_n_bits)?;
     Ok(())
 }
@@ -376,12 +382,13 @@ pub fn validate_genesis_header(
     now_ms: u64,
     genesis_id: Option<&str>,
     initial_n_bits: Option<u32>,
+    max_time_drift_ms: u64,
 ) -> Result<(), HeaderValidationError> {
     validate_genesis_parent(header)?;
     validate_genesis_height(header)?;
     validate_genesis_id(header, genesis_id)?;
     validate_required_difficulty(header, initial_n_bits)?;
-    validate_future_timestamp(header, now_ms)?;
+    validate_future_timestamp(header, now_ms, max_time_drift_ms)?;
     validate_pow(header)?;
     Ok(())
 }
@@ -394,12 +401,13 @@ pub fn validate_genesis_header_skip_pow(
     now_ms: u64,
     genesis_id: Option<&str>,
     initial_n_bits: Option<u32>,
+    max_time_drift_ms: u64,
 ) -> Result<(), HeaderValidationError> {
     validate_genesis_parent(header)?;
     validate_genesis_height(header)?;
     validate_genesis_id(header, genesis_id)?;
     validate_required_difficulty(header, initial_n_bits)?;
-    validate_future_timestamp(header, now_ms)?;
+    validate_future_timestamp(header, now_ms, max_time_drift_ms)?;
     Ok(())
 }
 
@@ -501,41 +509,57 @@ mod tests {
     #[test]
     fn validate_future_timestamp_ok() {
         let now_ms = 1_700_000_000_000u64;
+        let drift = 1_200_000u64;
         let h = Header {
-            timestamp: now_ms + 60_000, // 1 min in future
+            timestamp: now_ms + 60_000,
             ..Header::default_for_test()
         };
-        assert!(validate_future_timestamp(&h, now_ms).is_ok());
+        assert!(validate_future_timestamp(&h, now_ms, drift).is_ok());
     }
 
     #[test]
     fn validate_future_timestamp_too_far() {
         let now_ms = 1_700_000_000_000u64;
+        let drift = 1_200_000u64;
         let h = Header {
-            timestamp: now_ms + 30 * 60_000, // 30 min in future
+            timestamp: now_ms + 30 * 60_000,
             ..Header::default_for_test()
         };
-        assert!(validate_future_timestamp(&h, now_ms).is_err());
+        assert!(validate_future_timestamp(&h, now_ms, drift).is_err());
     }
 
     #[test]
     fn validate_future_timestamp_at_boundary() {
         let now_ms = 1_700_000_000_000u64;
+        let drift = 1_200_000u64;
         let h = Header {
-            timestamp: now_ms + MAX_TIME_DRIFT_MS, // exactly at boundary
+            timestamp: now_ms + drift,
             ..Header::default_for_test()
         };
-        assert!(validate_future_timestamp(&h, now_ms).is_ok()); // <= means boundary is OK
+        assert!(validate_future_timestamp(&h, now_ms, drift).is_ok());
     }
 
     #[test]
     fn validate_future_timestamp_past_ok() {
         let now_ms = 1_700_000_000_000u64;
+        let drift = 1_200_000u64;
         let h = Header {
-            timestamp: now_ms - 60_000, // 1 min in past
+            timestamp: now_ms - 60_000,
             ..Header::default_for_test()
         };
-        assert!(validate_future_timestamp(&h, now_ms).is_ok());
+        assert!(validate_future_timestamp(&h, now_ms, drift).is_ok());
+    }
+
+    #[test]
+    fn validate_future_timestamp_custom_drift() {
+        let now_ms = 1_700_000_000_000u64;
+        let drift = 600_000u64; // 10 * 60s block interval
+        let h = Header {
+            timestamp: now_ms + 700_000,
+            ..Header::default_for_test()
+        };
+        assert!(validate_future_timestamp(&h, now_ms, drift).is_err());
+        assert!(validate_future_timestamp(&h, now_ms, 1_200_000).is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -638,8 +662,7 @@ mod tests {
         let base_nbits = encode_compact_bits(&BigUint::from(1_000_000u64)) as u32;
         let headers = vec![(0u32, 0u64, base_nbits)];
 
-        let expected =
-            crate::difficulty_adjustment::calculate_classic(&headers, 1024, 120_000);
+        let expected = crate::difficulty_adjustment::calculate_classic(&headers, 1024, 120_000);
 
         let result = validate_difficulty(1, expected, 0, &headers, 1024, 120_000, false);
         assert!(result.is_ok());
@@ -868,8 +891,10 @@ mod tests {
             ..Header::default_for_test()
         };
         // initial_n_bits = None → skip difficulty check
-        assert!(validate_genesis_header(&h, h.timestamp, None, None).is_ok()
-            || true); // PoW may fail for test header, that's fine — we just check no panic
+        assert!(
+            validate_genesis_header(&h, h.timestamp, None, None, DEFAULT_MAX_TIME_DRIFT_MS).is_ok()
+                || true
+        ); // PoW may fail for test header, that's fine — we just check no panic
     }
 
     #[test]
@@ -894,7 +919,10 @@ mod tests {
         };
         // initial_n_bits doesn't match → rejected
         let err = validate_required_difficulty(&h, Some(0x1a0fffff)).unwrap_err();
-        assert!(matches!(err, HeaderValidationError::DifficultyMismatch { .. }));
+        assert!(matches!(
+            err,
+            HeaderValidationError::DifficultyMismatch { .. }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -914,7 +942,14 @@ mod tests {
             ..Header::default_for_test()
         };
         let now_ms = child.timestamp + 60_000;
-        assert!(validate_child_header_skip_pow(&child, &parent, now_ms, None).is_ok());
+        assert!(validate_child_header_skip_pow(
+            &child,
+            &parent,
+            now_ms,
+            None,
+            DEFAULT_MAX_TIME_DRIFT_MS
+        )
+        .is_ok());
     }
 
     #[test]
@@ -930,8 +965,21 @@ mod tests {
             ..Header::default_for_test()
         };
         let now_ms = child.timestamp + 60_000;
-        let err = validate_child_header_skip_pow(&child, &parent, now_ms, None).unwrap_err();
-        assert!(matches!(err, HeaderValidationError::HeightMismatch { expected: 100, got: 105 }));
+        let err = validate_child_header_skip_pow(
+            &child,
+            &parent,
+            now_ms,
+            None,
+            DEFAULT_MAX_TIME_DRIFT_MS,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            HeaderValidationError::HeightMismatch {
+                expected: 100,
+                got: 105
+            }
+        ));
     }
 
     #[test]
@@ -943,7 +991,14 @@ mod tests {
             ..Header::default_for_test()
         };
         let now_ms = genesis.timestamp + 60_000;
-        assert!(validate_genesis_header_skip_pow(&genesis, now_ms, None, None).is_ok());
+        assert!(validate_genesis_header_skip_pow(
+            &genesis,
+            now_ms,
+            None,
+            None,
+            DEFAULT_MAX_TIME_DRIFT_MS
+        )
+        .is_ok());
     }
 
     #[test]
@@ -955,7 +1010,17 @@ mod tests {
             ..Header::default_for_test()
         };
         let now_ms = genesis.timestamp + 60_000;
-        let err = validate_genesis_header_skip_pow(&genesis, now_ms, None, None).unwrap_err();
-        assert!(matches!(err, HeaderValidationError::GenesisHeightInvalid(2)));
+        let err = validate_genesis_header_skip_pow(
+            &genesis,
+            now_ms,
+            None,
+            None,
+            DEFAULT_MAX_TIME_DRIFT_MS,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            HeaderValidationError::GenesisHeightInvalid(2)
+        ));
     }
 }

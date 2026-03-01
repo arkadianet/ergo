@@ -5,6 +5,7 @@
 
 use ergo_consensus::header_validation::{
     validate_child_header, validate_genesis_header, HeaderValidationError,
+    DEFAULT_MAX_TIME_DRIFT_MS,
 };
 use ergo_storage::history_db::{HistoryDb, StorageError};
 use ergo_types::modifier_id::ModifierId;
@@ -60,7 +61,10 @@ pub fn clamp_sync_info_max_headers(value: u32) -> u32 {
 /// clamped to 1..=50) headers, newest first (tip is `last_headers[0]`), matching
 /// the Scala reference node convention. If the database is empty, returns an
 /// empty V2 SyncInfo.
-pub fn build_sync_info_persistent(db: &HistoryDb, max_headers: u32) -> Result<ErgoSyncInfo, PersistentSyncError> {
+pub fn build_sync_info_persistent(
+    db: &HistoryDb,
+    max_headers: u32,
+) -> Result<ErgoSyncInfo, PersistentSyncError> {
     let best_id = match db.best_header_id()? {
         None => {
             return Ok(ErgoSyncInfo::V2(ErgoSyncInfoV2 {
@@ -136,12 +140,12 @@ pub fn process_modifiers_persistent(
 
         // Validate: genesis headers vs child headers.
         if header.is_genesis() {
-            validate_genesis_header(&header, now_ms, None, None)?;
+            validate_genesis_header(&header, now_ms, None, None, DEFAULT_MAX_TIME_DRIFT_MS)?;
         } else {
             let parent = db
                 .load_header(&header.parent_id)?
                 .ok_or(PersistentSyncError::ParentNotFound(header.parent_id))?;
-            validate_child_header(&header, &parent, now_ms, None)?;
+            validate_child_header(&header, &parent, now_ms, None, DEFAULT_MAX_TIME_DRIFT_MS)?;
         }
 
         db.store_header_with_score(id, &header)?;
