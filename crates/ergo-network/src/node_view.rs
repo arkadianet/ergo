@@ -508,6 +508,16 @@ impl NodeViewHolder {
             ));
         };
 
+        // Diagnostic: log body section reception details
+        tracing::info!(
+            type_id,
+            data_len = data.len(),
+            header_id_hex = hex::encode(header_id.0),
+            section_id_hex = hex::encode(modifier_id.0),
+            first_64_hex = hex::encode(&data[..data.len().min(64)]),
+            "body section received"
+        );
+
         self.history.put_modifier(type_id, &header_id, data)?;
 
         let info = self
@@ -2953,10 +2963,31 @@ mod tests {
         let header = make_header(100, 0x70);
 
         // Create block transactions with a large payload.
+        // Use valid serialized transactions so parse succeeds.
+        use ergo_wire::transaction_ser::serialize_transaction;
+        let make_tx = |fill: u8| {
+            serialize_transaction(&ergo_types::transaction::ErgoTransaction {
+                inputs: vec![ergo_types::transaction::Input {
+                    box_id: ergo_types::transaction::BoxId([fill; 32]),
+                    proof_bytes: Vec::new(),
+                    extension_bytes: vec![0x00],
+                }],
+                data_inputs: Vec::new(),
+                output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
+                    value: 1_000_000_000,
+                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    creation_height: 100_000,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                }],
+                tx_id: ergo_types::transaction::TxId([0; 32]),
+            })
+        };
+        // 3 transactions × ~45 bytes each ≈ 135 bytes, exceeds max of 100
         let bt = BlockTransactions {
             header_id: id,
             block_version: 2,
-            tx_bytes: vec![vec![0xAB; 200]], // 200 bytes, exceeds max of 100
+            tx_bytes: vec![make_tx(0x01), make_tx(0x02), make_tx(0x03)],
         };
 
         nv.history.store_header(&id, &header).unwrap();

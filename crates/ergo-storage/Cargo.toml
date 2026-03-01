@@ -11,6 +11,8 @@ ergo-consensus = { path = "../ergo-consensus" }
 blake2 = { workspace = true }
 thiserror = { workspace = true }
 rocksdb = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 ergo-types = { path = "../ergo-types", features = ["test-utils"] }

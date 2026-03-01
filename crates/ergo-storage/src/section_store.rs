@@ -92,8 +92,23 @@ impl HistoryDb {
         match self.get_modifier(BLOCK_TX_TYPE_ID, id)? {
             None => Ok(None),
             Some(data) => {
-                let bt = parse_block_transactions(&data)
-                    .map_err(|e| StorageError::Codec(e.to_string()))?;
+                let bt = parse_block_transactions(&data).map_err(|e| {
+                    tracing::error!(
+                        header_id_hex = hex::encode(id.0),
+                        data_len = data.len(),
+                        first_100_hex = hex::encode(&data[..data.len().min(100)]),
+                        error = %e,
+                        "parse_block_transactions failed"
+                    );
+                    StorageError::Codec(e.to_string())
+                })?;
+                tracing::info!(
+                    header_id_hex = hex::encode(id.0),
+                    tx_count = bt.tx_bytes.len(),
+                    block_version = bt.block_version,
+                    first_tx_len = bt.tx_bytes.first().map(|t| t.len()).unwrap_or(0),
+                    "parsed BlockTransactions OK"
+                );
                 Ok(Some(bt))
             }
         }
@@ -137,10 +152,33 @@ mod tests {
     }
 
     fn sample_block_transactions() -> BlockTransactions {
+        use ergo_types::transaction::*;
+        use ergo_wire::transaction_ser::serialize_transaction;
+
+        // Build real serialized transactions (parser now parses inline)
+        let make_tx = |box_fill: u8, val: u64| {
+            serialize_transaction(&ErgoTransaction {
+                inputs: vec![Input {
+                    box_id: BoxId([box_fill; 32]),
+                    proof_bytes: Vec::new(),
+                    extension_bytes: vec![0x00],
+                }],
+                data_inputs: Vec::new(),
+                output_candidates: vec![ErgoBoxCandidate {
+                    value: val,
+                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    creation_height: 100_000,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                }],
+                tx_id: TxId([0; 32]),
+            })
+        };
+
         BlockTransactions {
             header_id: ModifierId([0xCC; 32]),
             block_version: 2,
-            tx_bytes: vec![vec![0x01, 0x02, 0x03], vec![0x04, 0x05]],
+            tx_bytes: vec![make_tx(0x11, 1_000_000_000), make_tx(0x22, 500_000_000)],
         }
     }
 

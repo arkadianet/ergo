@@ -1,6 +1,11 @@
 use crate::modifier_id::ModifierId;
 
 /// Maximum number of transactions allowed in a single block.
+///
+/// Matches Scala's `BlockTransactionsSerializer.MaxTransactionsInBlock = 10000000`.
+/// This value is used as the sentinel threshold for detecting v2+ block version
+/// encoding: if the first VLQ value > 10,000,000 then it encodes block version,
+/// otherwise it is the tx count for a v1 block.
 pub const MAX_TRANSACTIONS_IN_BLOCK: u32 = 10_000_000;
 
 /// The transactions section of a block, containing the serialized

@@ -386,10 +386,30 @@ mod tests {
     }
 
     fn sample_block_transactions(header_id: &ModifierId) -> BlockTransactions {
+        use ergo_types::transaction::*;
+        use ergo_wire::transaction_ser::serialize_transaction;
+
+        let tx_bytes = serialize_transaction(&ErgoTransaction {
+            inputs: vec![Input {
+                box_id: BoxId([0x11; 32]),
+                proof_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![ErgoBoxCandidate {
+                value: 1_000_000_000,
+                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                creation_height: 100_000,
+                tokens: Vec::new(),
+                additional_registers: Vec::new(),
+            }],
+            tx_id: TxId([0; 32]),
+        });
+
         BlockTransactions {
             header_id: *header_id,
             block_version: 2,
-            tx_bytes: vec![vec![0x01, 0x02, 0x03]],
+            tx_bytes: vec![tx_bytes],
         }
     }
 

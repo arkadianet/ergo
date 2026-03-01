@@ -807,10 +807,12 @@ dependencies = [
  "ergo-consensus",
  "ergo-types",
  "ergo-wire",
+ "hex",
  "num-bigint",
  "rocksdb",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

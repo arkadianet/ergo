@@ -33,7 +33,16 @@ pub fn serialize_transaction_without_proofs(tx: &ErgoTransaction) -> Vec<u8> {
 /// Parse a transaction from raw bytes.
 pub fn parse_transaction(data: &[u8]) -> Result<ErgoTransaction, CodecError> {
     let reader = &mut &data[..];
+    parse_transaction_from_reader(reader)
+}
 
+/// Parse a transaction from a shared reader, advancing it past the transaction bytes.
+///
+/// This is used by `parse_block_transactions` to parse inline transactions
+/// from a shared byte stream (Scala writes transactions without length prefixes).
+pub fn parse_transaction_from_reader(
+    reader: &mut &[u8],
+) -> Result<ErgoTransaction, CodecError> {
     // --- Inputs ---
     let input_count = get_sigma_u16(reader)? as usize;
     let mut inputs = Vec::with_capacity(input_count);
