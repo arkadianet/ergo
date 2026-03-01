@@ -167,11 +167,11 @@ impl SyncManager {
                 // section traffic from starving header synchronization.
                 if is_caught_up && !self.blocks_to_download.is_empty() {
                     self.state = SyncState::BlockDownload;
-                    self.request_block_sections(&mut actions, tracker, available_peers);
+                    self.request_block_sections(&mut actions, tracker, available_peers, history);
                 }
             }
             SyncState::BlockDownload => {
-                self.request_block_sections(&mut actions, tracker, available_peers);
+                self.request_block_sections(&mut actions, tracker, available_peers, history);
 
                 if self.blocks_to_download.is_empty()
                     && tracker.pending_count() == 0
@@ -185,7 +185,7 @@ impl SyncManager {
                 // (e.g., via on_headers_received from a newly-Older peer).
                 if !self.blocks_to_download.is_empty() {
                     self.state = SyncState::BlockDownload;
-                    self.request_block_sections(&mut actions, tracker, available_peers);
+                    self.request_block_sections(&mut actions, tracker, available_peers, history);
                 }
             }
         }
@@ -246,11 +246,17 @@ impl SyncManager {
     }
 
     /// Request the next batch of block sections from available peers.
+    ///
+    /// The `blocks_to_download` queue contains **header_ids**. This method
+    /// loads each header from `history` to compute the wire-format section_ids
+    /// (`blake2b256([type_id] ++ header_id ++ root)`) for the `RequestModifier`
+    /// messages sent to peers.
     fn request_block_sections(
         &mut self,
         actions: &mut Vec<SyncAction>,
         tracker: &mut DeliveryTracker,
         available_peers: &[(PeerId, bool)],
+        history: &HistoryDb,
     ) {
         let peers_with_blocks: Vec<PeerId> = available_peers
             .iter()
@@ -270,8 +276,22 @@ impl SyncManager {
             let batch: Vec<ModifierId> = self.blocks_to_download.drain(..batch_size).collect();
             let peer_id = peers_with_blocks[peer_idx % peers_with_blocks.len()];
 
-            for &type_id in self.body_section_types() {
-                for id in &batch {
+            // Build per-type section_id lists by loading headers
+            let mut by_type: std::collections::HashMap<u8, Vec<ModifierId>> =
+                std::collections::HashMap::new();
+            for header_id in &batch {
+                if let Ok(Some(header)) = history.load_header(header_id) {
+                    for (type_id, section_id) in header.section_ids(header_id) {
+                        // Only request types we need (digest vs UTXO mode)
+                        if self.body_section_types().contains(&type_id) {
+                            by_type.entry(type_id).or_default().push(section_id);
+                        }
+                    }
+                }
+            }
+
+            for (type_id, ids) in by_type {
+                for id in &ids {
                     if tracker.status(type_id, id) == ModifierStatus::Unknown {
                         tracker.set_requested(type_id, *id, peer_id);
                     }
@@ -279,7 +299,7 @@ impl SyncManager {
                 actions.push(SyncAction::RequestModifiers {
                     peer_id,
                     type_id,
-                    ids: batch.clone(),
+                    ids,
                 });
             }
 
@@ -336,10 +356,26 @@ pub fn distribute_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_types::modifier_id::ModifierId;
+    use ergo_types::header::Header;
+    use ergo_types::modifier_id::{Digest32, ModifierId};
 
     fn make_id(byte: u8) -> ModifierId {
         ModifierId([byte; 32])
+    }
+
+    /// Store test headers in the DB so request_block_sections can compute section_ids.
+    fn store_test_headers(history: &ergo_storage::history_db::HistoryDb, ids: &[ModifierId]) {
+        for (i, id) in ids.iter().enumerate() {
+            let mut h = Header::default_for_test();
+            h.height = (i + 1) as u32;
+            h.transactions_root = Digest32([(i as u8).wrapping_add(0x10); 32]);
+            h.ad_proofs_root = Digest32([(i as u8).wrapping_add(0x20); 32]);
+            h.extension_root = Digest32([(i as u8).wrapping_add(0x30); 32]);
+            if i > 0 {
+                h.parent_id = ids[i - 1];
+            }
+            history.store_header_with_score(id, &h).unwrap();
+        }
     }
 
     #[test]
@@ -388,22 +424,55 @@ mod tests {
 
     #[test]
     fn on_tick_block_download_requests_sections() {
+        use ergo_types::header::Header;
+        use ergo_types::modifier_id::Digest32;
+
         let dir = tempfile::tempdir().unwrap();
         let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
         let mut tracker = DeliveryTracker::new(30, 3);
         let peers = vec![(1u64, true)];
 
+        // Store real headers so request_block_sections can compute section_ids.
+        let mut h1 = Header::default_for_test();
+        h1.height = 1;
+        h1.transactions_root = Digest32([0x11; 32]);
+        h1.ad_proofs_root = Digest32([0x22; 32]);
+        h1.extension_root = Digest32([0x33; 32]);
+        let id1 = make_id(1);
+        history.store_header_with_score(&id1, &h1).unwrap();
+
+        let mut h2 = Header::default_for_test();
+        h2.height = 2;
+        h2.parent_id = id1;
+        h2.transactions_root = Digest32([0x44; 32]);
+        h2.ad_proofs_root = Digest32([0x55; 32]);
+        h2.extension_root = Digest32([0x66; 32]);
+        let id2 = make_id(2);
+        history.store_header_with_score(&id2, &h2).unwrap();
+
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
-        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+        mgr.enqueue_block_downloads(vec![id1, id2]);
 
         let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
+        // Should have 3 RequestModifiers actions (one per body section type)
         let request_count = actions
             .iter()
             .filter(|a| matches!(a, SyncAction::RequestModifiers { .. }))
             .count();
         assert_eq!(request_count, 3);
+
+        // Verify the IDs in requests are section_ids (not header_ids)
+        for action in &actions {
+            if let SyncAction::RequestModifiers { ids, .. } = action {
+                for id in ids {
+                    // Section IDs must differ from header IDs
+                    assert_ne!(*id, id1);
+                    assert_ne!(*id, id2);
+                }
+            }
+        }
     }
 
     #[test]
@@ -585,9 +654,12 @@ mod tests {
         let mut tracker = DeliveryTracker::new(30, 3);
         let peers = vec![(1u64, true)];
 
+        let ids = vec![make_id(1), make_id(2)];
+        store_test_headers(&history, &ids);
+
         let mut mgr = SyncManager::with_utxo_mode(10, 64, true);
         mgr.state = SyncState::BlockDownload;
-        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+        mgr.enqueue_block_downloads(ids);
 
         let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
@@ -612,9 +684,12 @@ mod tests {
         let mut tracker = DeliveryTracker::new(30, 3);
         let peers = vec![(1u64, true)];
 
+        let ids = vec![make_id(1), make_id(2)];
+        store_test_headers(&history, &ids);
+
         let mut mgr = SyncManager::with_utxo_mode(10, 64, false);
         mgr.state = SyncState::BlockDownload;
-        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+        mgr.enqueue_block_downloads(ids);
 
         let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
@@ -654,9 +729,12 @@ mod tests {
         let mut tracker = DeliveryTracker::new(30, 3);
         let peers = vec![(1u64, true)];
 
+        let ids = vec![make_id(1), make_id(2)];
+        store_test_headers(&history, &ids);
+
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::HeaderSync;
-        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+        mgr.enqueue_block_downloads(ids);
 
         // Headers caught up → should transition to BlockDownload.
         let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
@@ -722,9 +800,12 @@ mod tests {
         let mut tracker = DeliveryTracker::new(30, 3);
         let peers = vec![(1u64, true)];
 
+        let ids = vec![make_id(1)];
+        store_test_headers(&history, &ids);
+
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
-        mgr.enqueue_block_downloads(vec![make_id(1)]);
+        mgr.enqueue_block_downloads(ids);
 
         let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
@@ -740,9 +821,12 @@ mod tests {
         let mut tracker = DeliveryTracker::new(30, 3);
         let peers = vec![(1u64, true)];
 
+        let ids = vec![make_id(1), make_id(2)];
+        store_test_headers(&history, &ids);
+
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::Synced;
-        mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
+        mgr.enqueue_block_downloads(ids);
 
         let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
 

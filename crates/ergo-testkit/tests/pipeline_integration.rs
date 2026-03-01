@@ -44,8 +44,11 @@ fn sample_ext_fields() -> Vec<([u8; 2], Vec<u8>)> {
 }
 
 /// Compute the Merkle extension_root matching `sample_ext_fields()`.
+/// Scala kvToLeaf format: [key_length_byte] ++ key ++ value.
 fn sample_ext_root() -> [u8; 32] {
-    let leaf: Vec<u8> = vec![0x01, 0x00, 0x00]; // key ++ value
+    // key = [0x01, 0x00] (2 bytes), value = [0x00] (1 byte)
+    // kvToLeaf = [key_len=0x02] ++ key ++ value = [0x02, 0x01, 0x00, 0x00]
+    let leaf: Vec<u8> = vec![0x02, 0x01, 0x00, 0x00];
     let mut prefixed = vec![0x00u8]; // LEAF_PREFIX
     prefixed.extend_from_slice(&leaf);
     blake2b256(&prefixed)
@@ -553,6 +556,7 @@ fn node_view_full_pipeline_empty_block() {
     let len = initial_root.len().min(33);
     state_root[..len].copy_from_slice(&initial_root[..len]);
     header.state_root = ADDigest(state_root);
+    header.transactions_root = Digest32(ergo_consensus::merkle::empty_merkle_root());
     header.extension_root = Digest32(sample_ext_root());
 
     // Store sections via typed methods.
@@ -645,9 +649,10 @@ fn node_view_rejects_tampered_merkle_root() {
     let len = initial_root.len().min(33);
     state_root[..len].copy_from_slice(&initial_root[..len]);
     header.state_root = ADDigest(state_root);
-    // Tamper: empty tx_bytes should produce all-zero merkle root, but we
-    // set it to [0xFF; 32].
+    // Tamper: empty tx_bytes should produce empty_merkle_root(), but we
+    // set it to [0xFF; 32] to trigger a mismatch.
     header.transactions_root = Digest32([0xFF; 32]);
+    header.extension_root = Digest32(ergo_consensus::merkle::empty_merkle_root());
 
     nv.history.store_header(&id, &header).unwrap();
     nv.history
@@ -742,8 +747,15 @@ fn node_view_rejects_invalid_stateless_tx() {
 
     let tx_bytes = serialize_transaction(&bad_tx);
 
-    // Compute the correct transactions_root for this single tx.
-    let tx_root = merkle_root(&[tx_bytes.as_slice()]).unwrap();
+    // Compute the correct transactions_root using tx_id (not raw bytes).
+    // For v2 blocks: leaves = [tx_id] ++ [witness_id]
+    let mut concat_proofs = Vec::new();
+    for input in &bad_tx.inputs {
+        concat_proofs.extend_from_slice(&input.proof_bytes);
+    }
+    let witness_hash = blake2b256(&concat_proofs);
+    let witness_id = &witness_hash[1..]; // 31 bytes
+    let tx_root = merkle_root(&[bad_tx.tx_id.0.as_slice(), witness_id]).unwrap();
 
     // Build a header with the correct transactions_root.
     let id = ModifierId([0x30; 32]);
@@ -864,6 +876,7 @@ fn node_view_mempool_eviction_after_block() {
     let len = initial_root.len().min(33);
     state_root[..len].copy_from_slice(&initial_root[..len]);
     header.state_root = ADDigest(state_root);
+    header.transactions_root = Digest32(ergo_consensus::merkle::empty_merkle_root());
     header.extension_root = Digest32(sample_ext_root());
 
     nv.history.store_header(&id, &header).unwrap();
@@ -967,15 +980,17 @@ fn node_view_serves_request_modifier() {
     let mut sync_mgr = SyncManager::new(10, 64);
     let mut tracker = DeliveryTracker::new(30, 3);
 
-    // Store a modifier in the database.
-    let modifier_id = ModifierId([0x42; 32]);
+    // Store a modifier under header_id and add section_id mapping.
+    let header_id = ModifierId([0x42; 32]);
+    let section_id = ModifierId([0x99; 32]); // wire section_id
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
-    nv.history.put_modifier(108, &modifier_id, &payload).unwrap();
+    nv.history.put_modifier(108, &header_id, &payload).unwrap();
+    nv.history.store_section_mapping(108, &section_id, &header_id).unwrap();
 
-    // Build a RequestModifier message (code 22) requesting that ID.
+    // Build a RequestModifier message (code 22) requesting by section_id.
     let inv = InvData {
         type_id: 108,
-        ids: vec![modifier_id],
+        ids: vec![section_id],
     };
     let msg = RawMessage {
         code: 22,
@@ -1012,7 +1027,7 @@ fn node_view_serves_request_modifier() {
                 .expect("SendModifiers data should be valid ModifiersData");
             assert_eq!(mods.type_id, 108);
             assert_eq!(mods.modifiers.len(), 1);
-            assert_eq!(mods.modifiers[0].0, modifier_id);
+            assert_eq!(mods.modifiers[0].0, section_id);
             assert_eq!(mods.modifiers[0].1, payload);
         }
         other => panic!("expected SendModifiers, got: {other:?}"),
@@ -1458,11 +1473,19 @@ fn next_modifiers_to_download_finds_gaps() {
         "should find missing Extension (type 108)"
     );
 
-    // All missing modifiers should reference the same header_id.
+    // Returned IDs are computed section_ids (not raw header_ids).
+    let expected_sections = header.section_ids(&header_id);
+    for (type_id, section_id) in &expected_sections {
+        assert!(
+            missing.iter().any(|(t, mid)| t == type_id && mid == section_id),
+            "missing section_id for type {type_id}"
+        );
+    }
+    // Verify they differ from header_id.
     for (_, mid) in &missing {
-        assert_eq!(
+        assert_ne!(
             *mid, header_id,
-            "all missing modifiers should reference the stored header"
+            "section_ids should differ from header_id"
         );
     }
 }
@@ -1633,10 +1656,12 @@ fn modifiers_cache_buffers_out_of_order() {
     let mut sync_tracker = SyncTracker::new();
     let mut cache = ModifiersCache::with_default_capacities();
 
-    // Use a real blake2b256 hash of the data as the modifier ID so it passes
-    // modifier ID verification (the ID must match the hash of the data).
-    let ext_data = vec![0xAB; 20];
-    let ext_id = {
+    // Body section data: first 32 bytes = header_id, rest = payload.
+    let header_id = ModifierId([0xAB; 32]);
+    let mut ext_data = Vec::with_capacity(52);
+    ext_data.extend_from_slice(&header_id.0);
+    ext_data.extend_from_slice(&[0xCD; 20]);
+    let section_id = {
         use blake2::Blake2bVar;
         use blake2::digest::{Update, VariableOutput};
         let mut hasher = Blake2bVar::new(32).unwrap();
@@ -1646,12 +1671,12 @@ fn modifiers_cache_buffers_out_of_order() {
         ModifierId(out)
     };
     // Mark as requested so it passes spam detection.
-    tracker.set_requested(108, ext_id, 1);
+    tracker.set_requested(108, section_id, 1);
 
     // Step 1: Send extension (type 108) for a header that doesn't exist yet.
     let mods = ModifiersData {
         type_id: 108,
-        modifiers: vec![(ext_id, ext_data)],
+        modifiers: vec![(section_id, ext_data)],
     };
     let msg = RawMessage {
         code: 33,
@@ -1676,11 +1701,10 @@ fn modifiers_cache_buffers_out_of_order() {
         &mut ergo_network::sync_metrics::SyncMetrics::new(10),
     );
 
-    // The extension should be stored in the DB (put_modifier stores it
-    // before process_block_section checks for block completeness).
+    // The extension should be stored under header_id (extracted from data[0..32]).
     assert!(
-        nv.history.contains_modifier(108, &ext_id).unwrap(),
-        "extension should be stored in history DB (put_modifier stores it)"
+        nv.history.contains_modifier(108, &header_id).unwrap(),
+        "extension should be stored in history DB under header_id"
     );
 
     // No block was applied (the header doesn't exist, block is incomplete).
@@ -1768,6 +1792,7 @@ fn state_version_persists_after_block_application() {
     let len = initial_root.len().min(33);
     state_root[..len].copy_from_slice(&initial_root[..len]);
     header.state_root = ADDigest(state_root);
+    header.transactions_root = Digest32(ergo_consensus::merkle::empty_merkle_root());
     header.extension_root = Digest32(sample_ext_root());
 
     // Apply a block in the first NodeViewHolder.

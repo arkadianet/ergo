@@ -178,6 +178,55 @@ impl HistoryDb {
     }
 
     // -----------------------------------------------------------------------
+    // Section ID → Header ID mapping
+    // -----------------------------------------------------------------------
+
+    /// Prefix byte for section_id → header_id mappings.
+    /// Uses 0xFD to avoid collision with modifier type IDs (101-108).
+    const SECTION_MAP_PREFIX: u8 = 0xFD;
+
+    /// Builds the 34-byte key for a section_id mapping:
+    /// `[0xFD, type_id, section_id(32)]`.
+    fn section_map_key(type_id: u8, section_id: &ModifierId) -> [u8; 34] {
+        let mut key = [0u8; 34];
+        key[0] = Self::SECTION_MAP_PREFIX;
+        key[1] = type_id;
+        key[2..34].copy_from_slice(&section_id.0);
+        key
+    }
+
+    /// Stores a mapping from wire section_id to internal header_id.
+    pub fn store_section_mapping(
+        &self,
+        type_id: u8,
+        section_id: &ModifierId,
+        header_id: &ModifierId,
+    ) -> Result<(), StorageError> {
+        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
+        let key = Self::section_map_key(type_id, section_id);
+        self.db.put_cf(&cf, key, header_id.0)?;
+        Ok(())
+    }
+
+    /// Looks up the header_id for a given wire section_id.
+    pub fn lookup_header_for_section(
+        &self,
+        type_id: u8,
+        section_id: &ModifierId,
+    ) -> Result<Option<ModifierId>, StorageError> {
+        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
+        let key = Self::section_map_key(type_id, section_id);
+        match self.db.get_cf(&cf, key)? {
+            Some(bytes) if bytes.len() == 32 => {
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&bytes);
+                Ok(Some(ModifierId(id)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Index operations
     // -----------------------------------------------------------------------
 

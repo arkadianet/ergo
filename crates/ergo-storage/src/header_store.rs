@@ -180,6 +180,12 @@ impl HistoryDb {
             self.set_best_header_id(id)?;
         }
 
+        // 4. Store section_id → header_id mappings for body section lookups.
+        let section_ids = header.section_ids(id);
+        for (type_id, section_id) in &section_ids {
+            self.store_section_mapping(*type_id, section_id, id)?;
+        }
+
         Ok(is_best)
     }
 

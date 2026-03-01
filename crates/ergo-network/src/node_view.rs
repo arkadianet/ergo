@@ -494,12 +494,25 @@ impl NodeViewHolder {
             return Ok(info);
         }
 
-        // For block sections, store first then check completeness.
-        self.history.put_modifier(type_id, modifier_id, data)?;
+        // For block sections, the modifier_id from the network is the
+        // computed section_id.  The actual header_id is embedded in the
+        // first 32 bytes of the serialized data.  We extract it and store
+        // under header_id (our internal DB key), not section_id.
+        let header_id = if data.len() >= 32 {
+            let mut hid = [0u8; 32];
+            hid.copy_from_slice(&data[..32]);
+            ModifierId(hid)
+        } else {
+            return Err(NodeViewError::Codec(
+                "body section data too short to extract header_id".into(),
+            ));
+        };
+
+        self.history.put_modifier(type_id, &header_id, data)?;
 
         let info = self
             .history
-            .process_block_section(type_id, modifier_id, modifier_id)?;
+            .process_block_section(type_id, modifier_id, &header_id)?;
 
         if !info.to_apply.is_empty() {
             self.apply_progress(&info)?;
@@ -1525,6 +1538,9 @@ mod tests {
         h.height = height;
         h.parent_id = ModifierId([fill; 32]);
         h.state_root = ergo_types::modifier_id::ADDigest(state_root);
+        // Empty tx_bytes → empty merkle root
+        h.transactions_root =
+            ergo_types::modifier_id::Digest32(ergo_consensus::merkle::empty_merkle_root());
         // Set extension_root to match sample_extension() (non-empty).
         h.extension_root = ergo_types::modifier_id::Digest32(sample_extension_root());
         h
@@ -1534,7 +1550,7 @@ mod tests {
         BlockTransactions {
             header_id: *header_id,
             block_version: 2,
-            tx_bytes: Vec::new(), // Empty tx list matches all-zero transactions_root
+            tx_bytes: Vec::new(), // Empty tx list matches empty_merkle_root()
         }
     }
 
@@ -1550,8 +1566,10 @@ mod tests {
     }
 
     /// Compute the Merkle root that matches `sample_extension`.
+    /// Uses Scala kvToLeaf format: [key_length_byte] ++ key ++ value.
     fn sample_extension_root() -> [u8; 32] {
         let mut leaf = Vec::new();
+        leaf.push(SAMPLE_EXT_FIELD.0.len() as u8); // key length prefix
         leaf.extend_from_slice(&SAMPLE_EXT_FIELD.0);
         leaf.extend_from_slice(SAMPLE_EXT_FIELD.1);
         // leaf_hash = blake2b256(0x00 || leaf)
@@ -1581,15 +1599,22 @@ mod tests {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view(db);
 
-        let id = make_id(0xAA);
-        let data = b"some-section-data";
+        // Body section data starts with 32-byte header_id.
+        // The modifier_id passed in is the section_id (from the wire).
+        let header_id = make_id(0xAA);
+        let section_id = make_id(0xBB); // different from header_id
+        let mut data = Vec::with_capacity(64);
+        data.extend_from_slice(&header_id.0); // first 32 bytes = header_id
+        data.extend_from_slice(b"extra-section-payload");
 
         // Use a non-header type so we exercise the block-section path.
         // type_id 102 = BlockTransactions. The block won't be complete
         // (no header or extension), so no apply happens.
-        nv.process_modifier(102, &id, data).unwrap();
+        nv.process_modifier(102, &section_id, &data).unwrap();
 
-        assert!(nv.history.contains_modifier(102, &id).unwrap());
+        // Should be stored under header_id (extracted from data), not section_id.
+        assert!(nv.history.contains_modifier(102, &header_id).unwrap());
+        assert!(!nv.history.contains_modifier(102, &section_id).unwrap());
     }
 
     // 3. state_root returns current digest.
@@ -2098,8 +2123,15 @@ mod tests {
 
         let tx_bytes = serialize_transaction(&bad_tx);
 
-        // Compute the correct transactions_root for this single tx.
-        let tx_root = merkle_root(&[tx_bytes.as_slice()]).unwrap();
+        // Compute the correct transactions_root using tx_id (not raw bytes).
+        // For v2 blocks: leaves = [tx_id] ++ [witness_id]
+        let mut concat_proofs = Vec::new();
+        for input in &bad_tx.inputs {
+            concat_proofs.extend_from_slice(&input.proof_bytes);
+        }
+        let witness_hash = test_blake2b256(&concat_proofs);
+        let witness_id = &witness_hash[1..]; // 31 bytes
+        let tx_root = merkle_root(&[bad_tx.tx_id.0.as_slice(), witness_id]).unwrap();
 
         let id = make_id(0xF3);
         let mut header = make_header(100, 0xF3);
@@ -2562,11 +2594,13 @@ mod tests {
             ],
         };
         // Compute the correct extension_root for this Extension.
+        // Scala kvToLeaf format: [key_length_byte] ++ key ++ value
         let ext_leaves: Vec<Vec<u8>> = epoch_ext
             .fields
             .iter()
             .map(|(key, value)| {
-                let mut leaf = Vec::with_capacity(key.len() + value.len());
+                let mut leaf = Vec::with_capacity(1 + key.len() + value.len());
+                leaf.push(key.len() as u8);
                 leaf.extend_from_slice(key);
                 leaf.extend_from_slice(value);
                 leaf

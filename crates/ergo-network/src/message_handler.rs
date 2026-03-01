@@ -522,8 +522,15 @@ fn handle_inv(
             ModifierStatus::Unknown => {
                 let already_have = if type_id == 2 {
                     mempool.contains(&ergo_types::transaction::TxId(id.0))
-                } else {
+                } else if type_id == HEADER_TYPE_ID {
+                    // Headers are stored by header_id — direct lookup works.
                     history.contains_modifier(type_id, id).unwrap_or(true)
+                } else {
+                    // Body sections use computed section_ids on the wire but
+                    // are stored internally by header_id. We can't efficiently
+                    // check by section_id here, so rely on the tracker's
+                    // Requested/Received status to prevent duplicates.
+                    false
                 };
                 if !already_have {
                     to_request.push(*id);
@@ -1118,8 +1125,17 @@ fn handle_request_modifier(
             } else {
                 history.get_modifier(type_id, id).ok().flatten()
             }
-        } else {
+        } else if type_id == HEADER_TYPE_ID {
+            // Headers are stored by header_id — direct lookup.
             history.get_modifier(type_id, id).ok().flatten()
+        } else {
+            // Body sections: peer requests by computed section_id.
+            // Our DB stores by header_id, so use the reverse mapping.
+            if let Ok(Some(header_id)) = history.lookup_header_for_section(type_id, id) {
+                history.get_modifier(type_id, &header_id).ok().flatten()
+            } else {
+                None
+            }
         };
 
         if let Some(data) = data_opt {
@@ -1531,14 +1547,18 @@ mod tests {
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
-        let data = vec![0u8; 20];
-        let ext_id = ModifierId(blake2b256(&data));
+        // Body section data: first 32 bytes = header_id, rest = payload.
+        let header_id = ModifierId([0xAA; 32]);
+        let mut data = Vec::with_capacity(64);
+        data.extend_from_slice(&header_id.0);
+        data.extend_from_slice(&[0u8; 20]); // payload
+        let section_id = ModifierId(blake2b256(&data));
         // Mark as requested so spam detection allows processing.
-        tracker.set_requested(108, ext_id, 1);
+        tracker.set_requested(108, section_id, 1);
 
         let mods = ModifiersData {
             type_id: 108,
-            modifiers: vec![(ext_id, data)],
+            modifiers: vec![(section_id, data)],
         };
         let msg = RawMessage {
             code: 33,
@@ -1547,7 +1567,8 @@ mod tests {
 
         let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
 
-        assert!(node_view.history.contains_modifier(108, &ext_id).unwrap());
+        // Stored under header_id (extracted from data[0..32]), not section_id.
+        assert!(node_view.history.contains_modifier(108, &header_id).unwrap());
         assert!(result.new_headers.is_empty());
         assert!(result.penalties.is_empty());
     }
@@ -1717,10 +1738,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
 
-        let id1 = make_id(1);
-        let id2 = make_id(2);
+        let header_id = make_id(1);
+        let section_id = make_id(0xF1); // wire section_id (differs from header_id)
+        let unknown_section_id = make_id(2);
         let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        history.put_modifier(108, &id1, &payload).unwrap();
+
+        // Store body section under header_id and add section_id mapping.
+        history.put_modifier(108, &header_id, &payload).unwrap();
+        history.store_section_mapping(108, &section_id, &header_id).unwrap();
 
         let mempool = std::sync::Arc::new(std::sync::RwLock::new(
             crate::mempool::ErgoMemPool::with_min_fee(100, 0),
@@ -1729,9 +1754,10 @@ mod tests {
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
+        // Peer requests by section_id (the wire format).
         let inv = InvData {
             type_id: 108,
-            ids: vec![id1, id2],
+            ids: vec![section_id, unknown_section_id],
         };
         let msg = RawMessage {
             code: 22,
@@ -1746,7 +1772,8 @@ mod tests {
                 let mods = ModifiersData::parse(data).unwrap();
                 assert_eq!(mods.type_id, 108);
                 assert_eq!(mods.modifiers.len(), 1);
-                assert_eq!(mods.modifiers[0].0, id1);
+                // Response uses the section_id requested by the peer.
+                assert_eq!(mods.modifiers[0].0, section_id);
                 assert_eq!(mods.modifiers[0].1, payload);
             }
             _ => panic!("expected SendModifiers"),
@@ -2097,14 +2124,18 @@ mod tests {
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
-        let data = vec![0u8; 20];
-        let ext_id = ModifierId(blake2b256(&data));
+        // Body section: first 32 bytes = header_id, rest = payload.
+        let header_id = ModifierId([0xCC; 32]);
+        let mut data = Vec::with_capacity(52);
+        data.extend_from_slice(&header_id.0);
+        data.extend_from_slice(&[0u8; 20]);
+        let section_id = ModifierId(blake2b256(&data));
         // Mark as requested first — this should pass spam detection.
-        tracker.set_requested(108, ext_id, 1);
+        tracker.set_requested(108, section_id, 1);
 
         let mods = ModifiersData {
             type_id: 108,
-            modifiers: vec![(ext_id, data)],
+            modifiers: vec![(section_id, data)],
         };
         let msg = RawMessage {
             code: 33,
@@ -2132,12 +2163,12 @@ mod tests {
         // No penalties — modifier was requested.
         assert!(result.penalties.is_empty());
 
-        // Modifier should be stored in the history DB.
-        assert!(node_view.history.contains_modifier(108, &ext_id).unwrap());
+        // Stored under header_id (extracted from data[0..32]).
+        assert!(node_view.history.contains_modifier(108, &header_id).unwrap());
 
-        // Tracker should now show Received status.
+        // Tracker should now show Received status for the section_id.
         assert_eq!(
-            tracker.status(108, &ext_id),
+            tracker.status(108, &section_id),
             crate::delivery_tracker::ModifierStatus::Received
         );
     }
@@ -2208,13 +2239,17 @@ mod tests {
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
-        let data = vec![0u8; 20];
-        let real_id = ModifierId(blake2b256(&data));
-        tracker.set_requested(108, real_id, 1);
+        // Body section: first 32 bytes = header_id, rest = payload.
+        let header_id = ModifierId([0xDD; 32]);
+        let mut data = Vec::with_capacity(52);
+        data.extend_from_slice(&header_id.0);
+        data.extend_from_slice(&[0u8; 20]);
+        let section_id = ModifierId(blake2b256(&data));
+        tracker.set_requested(108, section_id, 1);
 
         let mods = ModifiersData {
             type_id: 108,
-            modifiers: vec![(real_id, data)],
+            modifiers: vec![(section_id, data)],
         };
         let msg = RawMessage {
             code: 33,
@@ -2239,15 +2274,15 @@ mod tests {
             &mut SyncMetrics::new(10),
         );
 
-        // No penalties — ID matches.
+        // No penalties — modifier accepted.
         assert!(result.penalties.is_empty());
 
-        // Modifier should be stored in the history DB.
-        assert!(node_view.history.contains_modifier(108, &real_id).unwrap());
+        // Stored under header_id (extracted from data[0..32]).
+        assert!(node_view.history.contains_modifier(108, &header_id).unwrap());
 
-        // Tracker should now show Received status.
+        // Tracker should now show Received status for section_id.
         assert_eq!(
-            tracker.status(108, &real_id),
+            tracker.status(108, &section_id),
             crate::delivery_tracker::ModifierStatus::Received
         );
     }

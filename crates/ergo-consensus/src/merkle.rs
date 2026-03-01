@@ -47,6 +47,13 @@ pub struct MerkleProofStep {
     pub hash: [u8; 32],
 }
 
+/// The Merkle root for an empty sequence of elements.
+///
+/// Matches Scala's `Algos.emptyMerkleTreeRoot = Algos.hash(Array[Byte]())`.
+pub fn empty_merkle_root() -> [u8; 32] {
+    blake2b256(&[])
+}
+
 /// Compute the Merkle root of a list of data elements.
 ///
 /// Returns `None` if `elements` is empty.

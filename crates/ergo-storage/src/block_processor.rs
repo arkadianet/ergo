@@ -105,8 +105,10 @@ impl HistoryDb {
     /// Walk the header chain from `best_full_block_height + 1` forward,
     /// collecting missing block body sections up to `max` entries.
     ///
-    /// Returns `Vec<(type_id, header_id)>` for sections that need downloading.
-    /// Stops when `max` entries are collected or when no headers exist at a height.
+    /// Returns `Vec<(type_id, section_id)>` for sections that need downloading.
+    /// The section_id is the computed wire ID (`blake2b256([type_id] ++ header_id ++ root)`),
+    /// which peers use to identify body sections on the network.
+    /// Internal DB lookups still use header_id.
     pub fn next_modifiers_to_download(&self, max: usize) -> Vec<(u8, ModifierId)> {
         let start_height = self.best_full_block_height().unwrap_or(0) + 1;
         let mut result = Vec::new();
@@ -118,9 +120,16 @@ impl HistoryDb {
             };
 
             for header_id in ids {
-                for &type_id in &[BLOCK_TX_TYPE_ID, AD_PROOFS_TYPE_ID, EXTENSION_TYPE_ID] {
-                    if !self.contains_modifier(type_id, &header_id).unwrap_or(true) {
-                        result.push((type_id, header_id));
+                let header = match self.load_header(&header_id) {
+                    Ok(Some(h)) => h,
+                    _ => continue,
+                };
+                let sections = header.section_ids(&header_id);
+                for (type_id, section_id) in &sections {
+                    // Check by header_id (internal DB key)
+                    if !self.contains_modifier(*type_id, &header_id).unwrap_or(true) {
+                        // Return section_id for the wire
+                        result.push((*type_id, *section_id));
                         if result.len() >= max {
                             return result;
                         }
@@ -794,6 +803,8 @@ mod tests {
     // 18. Finds missing body sections for a header that has no body stored.
     #[test]
     fn next_modifiers_to_download_finds_missing_sections() {
+        use ergo_types::header::compute_section_id;
+
         let (db, _dir) = open_test_db();
 
         // Store a header at height 1 (no best full block set, so scan starts at 1).
@@ -805,10 +816,17 @@ mod tests {
         let result = db.next_modifiers_to_download(10);
 
         // Should find 3 missing sections: BlockTransactions(102), ADProofs(104), Extension(108).
+        // IDs returned are computed section_ids (not header_ids).
         assert_eq!(result.len(), 3);
-        assert!(result.iter().any(|(t, mid)| *t == BLOCK_TX_TYPE_ID && *mid == id));
-        assert!(result.iter().any(|(t, mid)| *t == AD_PROOFS_TYPE_ID && *mid == id));
-        assert!(result.iter().any(|(t, mid)| *t == EXTENSION_TYPE_ID && *mid == id));
+        let expected_sections = header.section_ids(&id);
+        for (type_id, section_id) in &expected_sections {
+            assert!(result.iter().any(|(t, mid)| *t == *type_id && *mid == *section_id),
+                "missing section_id for type {type_id}");
+        }
+        // Verify they are NOT the raw header_id.
+        for (_, mid) in &result {
+            assert_ne!(*mid, id, "section_id should differ from header_id");
+        }
     }
 
     // 19. Skips blocks that already have all body sections.

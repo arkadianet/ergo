@@ -61,6 +61,11 @@ impl ModifiersCache {
 
     /// Inserts a modifier into the appropriate cache tier.
     ///
+    /// For body sections (type_id != 101), the first 32 bytes of `data`
+    /// contain the header_id. The cache key is the header_id so that
+    /// `drain_body_sections_for` and `pop_body_candidate` can look up
+    /// by header_id.
+    ///
     /// Returns the evicted entry `(id, type_id, data)` if the cache was at
     /// capacity before the insert, or `None` otherwise.
     pub fn put(
@@ -70,13 +75,23 @@ impl ModifiersCache {
         data: Vec<u8>,
         header: Option<Header>,
     ) -> Option<(ModifierId, u8, Vec<u8>)> {
+        // For body sections, use header_id (first 32 bytes of data) as cache key
+        // so drain_body_sections_for/pop_body_candidate work correctly.
+        let cache_key = if type_id != HEADER_TYPE_ID && data.len() >= 32 {
+            let mut hid = [0u8; 32];
+            hid.copy_from_slice(&data[..32]);
+            ModifierId(hid)
+        } else {
+            id
+        };
+
         let entry = CachedModifier { type_id, data, header };
         let cache = self.cache_for_mut(type_id);
 
         // If at capacity and this key is not already present, the LRU entry
         // will be evicted.  We need to capture it manually because
         // `LruCache::push` only returns the *old value for the same key*.
-        let evicted = if cache.len() == cache.cap().get() && cache.peek(&id).is_none() {
+        let evicted = if cache.len() == cache.cap().get() && cache.peek(&cache_key).is_none() {
             // Pop the least-recently-used entry before inserting.
             cache
                 .pop_lru()
@@ -85,7 +100,7 @@ impl ModifiersCache {
             None
         };
 
-        cache.push(id, entry);
+        cache.push(cache_key, entry);
         evicted
     }
 
