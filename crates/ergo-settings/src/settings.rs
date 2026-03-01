@@ -217,11 +217,11 @@ fn default_handshake_timeout() -> u64 { 30 }
 fn default_max_connections() -> u32 { 30 }
 fn default_connection_timeout() -> u64 { 1 }
 fn default_delivery_timeout() -> u64 { 10 }
-fn default_max_delivery_checks() -> u32 { 2 }
+fn default_max_delivery_checks() -> u32 { 100 }
 fn default_desired_inv() -> u32 { 400 }
 fn default_max_modifiers_cache() -> u32 { 1024 }
 fn default_max_peer_spec() -> u32 { 64 }
-fn default_sync_interval() -> u64 { 2 }
+fn default_sync_interval() -> u64 { 5 }
 fn default_sync_interval_stable() -> u64 { 30 }
 fn default_peer_discovery() -> bool { true }
 fn default_inactive_deadline() -> u64 { 600 }
@@ -502,5 +502,30 @@ timeout_secs = 5
             "a5df145d41ab15a01e0cd3ffbab046f0d029e5412293072ad0f5827428589b9302"
         );
         assert!(chain.genesis_id.is_empty());
+    }
+
+    #[test]
+    fn max_delivery_checks_default_matches_scala() {
+        // Strip the explicit max_delivery_checks line so the default function is used
+        let config_no_delivery = MINIMAL_CONFIG
+            .lines()
+            .filter(|l| !l.starts_with("max_delivery_checks"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let settings: ErgoSettings = toml::from_str(&config_no_delivery).unwrap();
+        assert_eq!(settings.network.max_delivery_checks, 100);
+    }
+
+    #[test]
+    fn sync_interval_default_matches_scala() {
+        // Strip sync_interval_secs from config so the serde default is used
+        let config_no_sync_interval = MINIMAL_CONFIG
+            .lines()
+            .filter(|l| !l.starts_with("sync_interval_secs"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let settings: ErgoSettings = toml::from_str(&config_no_sync_interval).unwrap();
+        assert_eq!(settings.network.sync_interval_secs, 5);
     }
 }
