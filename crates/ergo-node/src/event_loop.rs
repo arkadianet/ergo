@@ -217,7 +217,12 @@ pub async fn run(
 
     let mut last_msg_time: Option<u64> = None;
 
-    for addr in discovery.peers_to_connect(&HashSet::new()) {
+    // Connect to a small batch of peers at startup; the rest will be
+    // connected via the periodic discovery_tick to avoid blocking the
+    // event loop when peer_db contains many saved addresses.
+    const MAX_STARTUP_CONNECTIONS: usize = 10;
+    let startup_peers = discovery.peers_to_connect(&HashSet::new());
+    for addr in startup_peers.into_iter().take(MAX_STARTUP_CONNECTIONS) {
         match pool.connect(addr).await {
             Ok(id) => tracing::info!(peer_id = id, %addr, "connected to peer"),
             Err(e) => tracing::warn!(%addr, error = %e, "failed to connect"),
@@ -294,6 +299,9 @@ pub async fn run(
     // Cached sync headers from the processor (newest first), used to build
     // SyncInfoV2 without reading from the secondary DB.
     let mut cached_sync_headers: Vec<ergo_types::header::Header> = Vec::new();
+    // Rate-limit targeted SyncInfo in HeadersApplied: at most once per 200ms
+    // to avoid flooding the delivering peer during rapid cache drain.
+    let mut last_targeted_sync = Instant::now() - Duration::from_secs(1);
     // Tracks the last peer that delivered headers, for targeted SyncInfo response.
     let mut last_header_peer: Option<u64> = None;
 
@@ -715,21 +723,23 @@ pub async fn run(
                             let _ = sync_history.try_catch_up_with_primary();
                             sync_mgr.on_headers_received(&new_header_ids, sync_history);
 
-                            // Send SyncInfoV2 from processor-provided headers.
-                            if !cached_sync_headers.is_empty() {
-                                let v2 = ergo_wire::sync_info::ErgoSyncInfoV2 {
-                                    last_headers: cached_sync_headers.clone(),
-                                };
-                                let sync_tip = v2.last_headers.first().map(|h| h.height).unwrap_or(0);
-                                let sync_bytes = v2.serialize();
-
-                                // Send targeted SyncInfo to the delivering peer first for
-                                // a tight request/response loop, then broadcast to all.
-                                if let Some(peer) = last_header_peer {
+                            // Send targeted SyncInfoV2 to the delivering peer only,
+                            // rate-limited to at most once per 200ms.  Broadcast to all
+                            // peers is handled by the periodic sync_tick.
+                            const TARGETED_SYNC_COOLDOWN: Duration = Duration::from_millis(200);
+                            if let Some(peer) = last_header_peer {
+                                if !cached_sync_headers.is_empty()
+                                    && last_targeted_sync.elapsed() >= TARGETED_SYNC_COOLDOWN
+                                {
+                                    let v2 = ergo_wire::sync_info::ErgoSyncInfoV2 {
+                                        last_headers: cached_sync_headers.clone(),
+                                    };
+                                    let sync_tip = v2.last_headers.first().map(|h| h.height).unwrap_or(0);
+                                    let sync_bytes = v2.serialize();
                                     tracing::debug!(sync_tip, peer, "targeted SyncInfoV2 to delivering peer");
-                                    let _ = pool.send_to(peer, MessageCode::SyncInfo as u8, sync_bytes.clone()).await;
+                                    let _ = pool.send_to(peer, MessageCode::SyncInfo as u8, sync_bytes).await;
+                                    last_targeted_sync = Instant::now();
                                 }
-                                pool.broadcast(MessageCode::SyncInfo as u8, &sync_bytes).await;
                             }
                         }
                         if !to_download.is_empty() {
