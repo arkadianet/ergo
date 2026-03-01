@@ -198,10 +198,7 @@ impl HistoryDb {
     /// Returns a [`ProgressInfo`] with `to_download` containing the three
     /// section types needed for a full block: BlockTransactions (102),
     /// ADProofs (104), and Extension (108).
-    pub fn process_header(
-        &self,
-        header_id: &ModifierId,
-    ) -> Result<ProgressInfo, StorageError> {
+    pub fn process_header(&self, header_id: &ModifierId) -> Result<ProgressInfo, StorageError> {
         let to_download = vec![
             (BLOCK_TX_TYPE_ID, *header_id),
             (AD_PROOFS_TYPE_ID, *header_id),
@@ -256,10 +253,8 @@ impl HistoryDb {
                     // New block is on a heavier chain — compute fork info.
                     match self.find_common_ancestor(header_id, &best_id)? {
                         Some(branch_point) => {
-                            let to_remove =
-                                self.chain_from_ancestor(&branch_point, &best_id)?;
-                            let to_apply =
-                                self.chain_from_ancestor(&branch_point, header_id)?;
+                            let to_remove = self.chain_from_ancestor(&branch_point, &best_id)?;
+                            let to_apply = self.chain_from_ancestor(&branch_point, header_id)?;
                             Ok(ProgressInfo::chain_switch(
                                 branch_point,
                                 to_remove,
@@ -840,8 +835,12 @@ mod tests {
         assert_eq!(result.len(), 3);
         let expected_sections = header.section_ids(&id);
         for (type_id, section_id) in &expected_sections {
-            assert!(result.iter().any(|(t, mid)| *t == *type_id && *mid == *section_id),
-                "missing section_id for type {type_id}");
+            assert!(
+                result
+                    .iter()
+                    .any(|(t, mid)| *t == *type_id && *mid == *section_id),
+                "missing section_id for type {type_id}"
+            );
         }
         // Verify they are NOT the raw header_id.
         for (_, mid) in &result {

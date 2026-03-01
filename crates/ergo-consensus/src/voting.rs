@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use ergo_types::extension::Extension;
 
-use crate::parameters::{Parameters, NO_PARAMETER, SOFT_FORK_EPOCHS, ACTIVATION_EPOCHS};
+use crate::parameters::{Parameters, ACTIVATION_EPOCHS, NO_PARAMETER, SOFT_FORK_EPOCHS};
 use crate::validation_rules::ValidationSettings;
 
 // ---------------------------------------------------------------------------
@@ -121,7 +121,8 @@ impl VotingEpochInfo {
     /// At the epoch boundary, compute the updated parameter set by applying
     /// all approved vote changes and the soft-fork state machine.
     pub fn compute_epoch_result(&self, epoch_length: u32, boundary_height: u32) -> Parameters {
-        let mut result = self.parameters
+        let mut result = self
+            .parameters
             .update_params(&self.voting_data.epoch_votes, epoch_length);
         result.height = boundary_height;
         result.update_fork(
@@ -139,10 +140,7 @@ impl VotingEpochInfo {
     /// Implements rules 411/412: parse settings from Extension, then verify
     /// they match the expected settings computed from vote-derived updates.
     /// For the first epoch (epoch_start_height == 0), accept parsed as-is.
-    pub fn update_validation_settings(
-        &mut self,
-        ext: &Extension,
-    ) -> Result<(), String> {
+    pub fn update_validation_settings(&mut self, ext: &Extension) -> Result<(), String> {
         let parsed = match ValidationSettings::from_extension(ext) {
             Ok(s) => s,
             Err(e) => return Err(format!("rule 411: cannot parse validation settings: {e}")),
@@ -155,7 +153,9 @@ impl VotingEpochInfo {
         }
 
         // Compute expected settings from current settings + parameter state.
-        let expected = self.validation_settings.expected_after_voting(&self.parameters);
+        let expected = self
+            .validation_settings
+            .expected_after_voting(&self.parameters);
 
         if parsed != expected {
             return Err(
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn update_validation_settings_from_extension() {
-        use crate::validation_rules::{TX_DUST, TX_NO_INPUTS, ValidationSettingsUpdate};
+        use crate::validation_rules::{ValidationSettingsUpdate, TX_DUST, TX_NO_INPUTS};
         use ergo_types::extension::VALIDATION_RULES_PREFIX;
         use ergo_types::modifier_id::ModifierId;
 
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn start_new_epoch_preserves_validation_settings() {
-        use crate::validation_rules::{TX_DUST, ValidationSettingsUpdate};
+        use crate::validation_rules::{ValidationSettingsUpdate, TX_DUST};
         use ergo_types::extension::VALIDATION_RULES_PREFIX;
         use ergo_types::modifier_id::ModifierId;
 
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn update_validation_settings_subsequent_epoch_rejects_mismatch() {
-        use crate::validation_rules::{TX_DUST, ValidationSettingsUpdate};
+        use crate::validation_rules::{ValidationSettingsUpdate, TX_DUST};
         use ergo_types::extension::VALIDATION_RULES_PREFIX;
         use ergo_types::modifier_id::ModifierId;
 

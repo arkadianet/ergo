@@ -261,10 +261,7 @@ mod tests {
         //   = 1 + 251,617/64,800 = 1 + 3 = 4
         // emission = 75 - 3*4 = 63 ERG
         // 63 >= 12 + 3 = 15, so charge = 12 ERG
-        assert_eq!(
-            reemission_for_height(777_217),
-            12 * COINS_IN_ONE_ERG
-        );
+        assert_eq!(reemission_for_height(777_217), 12 * COINS_IN_ONE_ERG);
     }
 
     #[test]
@@ -284,10 +281,7 @@ mod tests {
         assert_eq!(info.height, 1);
         // Miner reward = 67.5 ERG - reemission(0) = 67.5 ERG
         // (height 1 < reemission activation, so no charge)
-        assert_eq!(
-            info.miner_reward,
-            67 * COINS_IN_ONE_ERG + 500_000_000
-        );
+        assert_eq!(info.miner_reward, 67 * COINS_IN_ONE_ERG + 500_000_000);
         assert_eq!(info.total_coins_issued, 75 * COINS_IN_ONE_ERG);
         assert_eq!(
             info.total_remaining_coins,
@@ -310,8 +304,7 @@ mod tests {
         // First block of epoch 1 (height FIXED_RATE_PERIOD): emits 72 ERG.
         // Total = (FIXED_RATE_PERIOD - 1) blocks * 75 ERG + 1 block * 72 ERG.
         let one_into_epoch1 = issued_coins_after_height(FIXED_RATE_PERIOD);
-        let expected =
-            FIXED_RATE * u64::from(FIXED_RATE_PERIOD - 1) + 72 * COINS_IN_ONE_ERG;
+        let expected = FIXED_RATE * u64::from(FIXED_RATE_PERIOD - 1) + 72 * COINS_IN_ONE_ERG;
         assert_eq!(one_into_epoch1, expected);
     }
 
@@ -327,10 +320,7 @@ mod tests {
         );
 
         // First block after foundation period: h = 655,200
-        assert_eq!(
-            miner_reward_at_height(655_200),
-            emission_at_height(655_200)
-        );
+        assert_eq!(miner_reward_at_height(655_200), emission_at_height(655_200));
     }
 
     #[test]
@@ -358,9 +348,14 @@ mod tests {
         let info = emission_info(1);
         let json = serde_json::to_value(&info).unwrap();
         assert!(json.get("minerReward").is_some(), "expected minerReward");
-        assert!(json.get("totalCoinsIssued").is_some(), "expected totalCoinsIssued");
-        assert!(json.get("totalRemainingCoins").is_some(), "expected totalRemainingCoins");
+        assert!(
+            json.get("totalCoinsIssued").is_some(),
+            "expected totalCoinsIssued"
+        );
+        assert!(
+            json.get("totalRemainingCoins").is_some(),
+            "expected totalRemainingCoins"
+        );
         assert!(json.get("miner_reward").is_none(), "unexpected snake_case");
     }
-
 }

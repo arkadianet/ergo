@@ -65,16 +65,15 @@ pub async fn run_indexer(
     // 3. Event loop: receive events and process.
     while let Some(event) = rx.recv().await {
         match event {
-            IndexerEvent::BlockApplied { header_id: _, height } => {
+            IndexerEvent::BlockApplied {
+                header_id: _,
+                height,
+            } => {
                 // Only process if this is the next expected height.
                 if height == state.indexed_height + 1 {
-                    if let Err(e) = process_block_at_height(
-                        &db,
-                        &history,
-                        &mut state,
-                        &mut buffer,
-                        height,
-                    ) {
+                    if let Err(e) =
+                        process_block_at_height(&db, &history, &mut state, &mut buffer, height)
+                    {
                         tracing::error!(height, error = %e, "indexer failed to process block");
                     }
                 } else if height > state.indexed_height + 1 {
@@ -85,9 +84,7 @@ pub async fn run_indexer(
             }
             IndexerEvent::Rollback { target_height } => {
                 if target_height < state.indexed_height {
-                    if let Err(e) =
-                        remove_after(&db, &mut state, &mut buffer, target_height)
-                    {
+                    if let Err(e) = remove_after(&db, &mut state, &mut buffer, target_height) {
                         tracing::error!(target_height, error = %e, "indexer rollback failed");
                     } else {
                         tracing::info!(target_height, "indexer rolled back");
@@ -214,9 +211,7 @@ mod tests {
             header_id: [0xAA; 32],
             height: 100,
         };
-        let _rollback = IndexerEvent::Rollback {
-            target_height: 50,
-        };
+        let _rollback = IndexerEvent::Rollback { target_height: 50 };
     }
 
     #[test]

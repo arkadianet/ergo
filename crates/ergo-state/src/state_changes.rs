@@ -1,4 +1,4 @@
-use ergo_types::transaction::{BoxId, ErgoTransaction, compute_box_id};
+use ergo_types::transaction::{compute_box_id, BoxId, ErgoTransaction};
 use ergo_wire::box_ser::serialize_ergo_box;
 use std::collections::HashSet;
 
@@ -63,9 +63,7 @@ pub fn compute_state_changes(txs: &[ErgoTransaction]) -> StateChanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_types::transaction::{
-        DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
-    };
+    use ergo_types::transaction::{DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
 
     /// Helper to build a minimal transaction.
     fn make_tx(
@@ -85,9 +83,7 @@ mod tests {
 
         let data_inputs = data_input_box_ids
             .iter()
-            .map(|id| DataInput {
-                box_id: BoxId(*id),
-            })
+            .map(|id| DataInput { box_id: BoxId(*id) })
             .collect();
 
         let output_candidates = (0..num_outputs)
@@ -150,7 +146,10 @@ mod tests {
             "self-spent box should not appear in to_remove"
         );
         assert!(
-            !changes.to_insert.iter().any(|(id, _)| *id == created_box_id),
+            !changes
+                .to_insert
+                .iter()
+                .any(|(id, _)| *id == created_box_id),
             "self-spent box should not appear in to_insert"
         );
 

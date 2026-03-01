@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-use ergo_avldb::{AuthenticatedTree, ADKey, ADValue, KeyValue, Operation};
+use ergo_avldb::{ADKey, ADValue, AuthenticatedTree, KeyValue, Operation};
 use ergo_consensus::tx_stateful_validation::validate_tx_stateful;
 use ergo_consensus::validation_rules::ValidationSettings;
 use ergo_types::modifier_id::ModifierId;
-use ergo_types::transaction::{BoxId, DEFAULT_MIN_VALUE_PER_BYTE, ErgoBox, ErgoTransaction, TxId};
+use ergo_types::transaction::{BoxId, ErgoBox, ErgoTransaction, TxId, DEFAULT_MIN_VALUE_PER_BYTE};
 
 use crate::digest_state::StateError;
 use crate::state_changes::{compute_state_changes, StateChanges};
@@ -230,9 +230,7 @@ impl UtxoState {
     /// Lookup a box by ID using unauthenticated lookup (no proof).
     pub fn get_box(&self, box_id: &BoxId) -> Option<Vec<u8>> {
         let key: ADKey = Bytes::copy_from_slice(&box_id.0);
-        self.tree
-            .unauthenticated_lookup(&key)
-            .map(|v| v.to_vec())
+        self.tree.unauthenticated_lookup(&key).map(|v| v.to_vec())
     }
 
     /// Look up a box by ID from the UTXO AVL tree (unauthenticated) and
@@ -283,8 +281,15 @@ impl UtxoState {
                 let ergo_box = deserialize_ergo_box(&box_bytes, &input.box_id)?;
                 input_boxes.push(ergo_box);
             }
-            validate_tx_stateful(tx, &input_boxes, block_height, block_version, DEFAULT_MIN_VALUE_PER_BYTE, settings)
-                .map_err(|e| StateError::TxStateful(format!("{e}")))?;
+            validate_tx_stateful(
+                tx,
+                &input_boxes,
+                block_height,
+                block_version,
+                DEFAULT_MIN_VALUE_PER_BYTE,
+                settings,
+            )
+            .map_err(|e| StateError::TxStateful(format!("{e}")))?;
         }
 
         // 2. Compute state changes and apply to the tree.
@@ -302,8 +307,7 @@ impl UtxoState {
             }
         }
 
-        let inserted_box_ids: Vec<BoxId> =
-            changes.to_insert.iter().map(|(id, _)| *id).collect();
+        let inserted_box_ids: Vec<BoxId> = changes.to_insert.iter().map(|(id, _)| *id).collect();
 
         let undo = UndoEntry {
             version: self.version,
@@ -538,7 +542,10 @@ mod tests {
             .apply_changes(&insert_changes, None)
             .expect("insert should succeed");
         let digest_after_insert = state.state_root().expect("digest after insert");
-        assert_ne!(digest_empty, digest_after_insert, "digest should change after insert");
+        assert_ne!(
+            digest_empty, digest_after_insert,
+            "digest should change after insert"
+        );
 
         // Remove the box
         let remove_changes = StateChanges {
@@ -594,9 +601,7 @@ mod tests {
             to_lookup: Vec::new(),
         };
 
-        let proof = state
-            .apply_changes(&changes, None)
-            .expect("should succeed");
+        let proof = state.apply_changes(&changes, None).expect("should succeed");
         assert!(!proof.is_empty(), "proof should not be empty");
     }
 
@@ -733,11 +738,22 @@ mod tests {
 
         // Apply block without digest verification
         let proof = state
-            .apply_block(&[tx], 200_000, 1, &header_id, None, &ValidationSettings::initial())
+            .apply_block(
+                &[tx],
+                200_000,
+                1,
+                &header_id,
+                None,
+                &ValidationSettings::initial(),
+            )
             .expect("apply_block should succeed");
 
         assert!(!proof.is_empty(), "proof should not be empty");
-        assert_eq!(*state.version(), header_id, "version should be updated to header_id");
+        assert_eq!(
+            *state.version(),
+            header_id,
+            "version should be updated to header_id"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -770,7 +786,14 @@ mod tests {
 
         let header_id = ModifierId([0xDD; 32]);
 
-        let result = state.apply_block(&[tx], 200_000, 1, &header_id, None, &ValidationSettings::initial());
+        let result = state.apply_block(
+            &[tx],
+            200_000,
+            1,
+            &header_id,
+            None,
+            &ValidationSettings::initial(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -823,7 +846,14 @@ mod tests {
 
         let header_id = ModifierId([0xFF; 32]);
 
-        let result = state.apply_block(&[tx], 200_000, 1, &header_id, None, &ValidationSettings::initial());
+        let result = state.apply_block(
+            &[tx],
+            200_000,
+            1,
+            &header_id,
+            None,
+            &ValidationSettings::initial(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -843,7 +873,14 @@ mod tests {
 
         // No transactions means no validation, just apply empty changes
         let proof = state
-            .apply_block(&[], 100, 1, &header_id, None, &ValidationSettings::initial())
+            .apply_block(
+                &[],
+                100,
+                1,
+                &header_id,
+                None,
+                &ValidationSettings::initial(),
+            )
             .expect("empty block should succeed");
 
         assert!(!proof.is_empty(), "proof should not be empty");
@@ -887,7 +924,14 @@ mod tests {
 
         let header_id = ModifierId([block_id_byte; 32]);
         state
-            .apply_block(&[tx], block_height, 1, &header_id, None, &ValidationSettings::initial())
+            .apply_block(
+                &[tx],
+                block_height,
+                1,
+                &header_id,
+                None,
+                &ValidationSettings::initial(),
+            )
             .expect("apply_block should succeed");
 
         compute_box_id(&tx_id, 0)
@@ -979,7 +1023,14 @@ mod tests {
 
         let header_id = ModifierId([0xD1; 32]);
         state
-            .apply_block(&[tx], 200, 1, &header_id, None, &ValidationSettings::initial())
+            .apply_block(
+                &[tx],
+                200,
+                1,
+                &header_id,
+                None,
+                &ValidationSettings::initial(),
+            )
             .expect("apply_block should succeed");
 
         // Compute the output box ID using the real derivation.
@@ -1029,10 +1080,7 @@ mod tests {
             value: 2_000_000_000,
             ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
             creation_height: 600_000,
-            tokens: vec![
-                (BoxId([0xAA; 32]), 1_000),
-                (BoxId([0xBB; 32]), 999_999),
-            ],
+            tokens: vec![(BoxId([0xAA; 32]), 1_000), (BoxId([0xBB; 32]), 999_999)],
             additional_registers: Vec::new(),
         };
 
@@ -1134,7 +1182,14 @@ mod tests {
         };
         let header_id = ModifierId([0xEE; 32]);
         state
-            .apply_block(&[tx], 200_000, 1, &header_id, None, &ValidationSettings::initial())
+            .apply_block(
+                &[tx],
+                200_000,
+                1,
+                &header_id,
+                None,
+                &ValidationSettings::initial(),
+            )
             .unwrap();
 
         // Verify the DB was updated.
@@ -1189,7 +1244,14 @@ mod tests {
         };
         let header_id = ModifierId([0xB1; 32]);
         state
-            .apply_block(&[tx], 200_000, 1, &header_id, None, &ValidationSettings::initial())
+            .apply_block(
+                &[tx],
+                200_000,
+                1,
+                &header_id,
+                None,
+                &ValidationSettings::initial(),
+            )
             .unwrap();
 
         // The DB should have the new output and metadata pointing to header_id.
@@ -1256,7 +1318,14 @@ mod tests {
             };
             let header_id = ModifierId([0xEE; 32]);
             state
-                .apply_block(&[tx], 200_000, 1, &header_id, None, &ValidationSettings::initial())
+                .apply_block(
+                    &[tx],
+                    200_000,
+                    1,
+                    &header_id,
+                    None,
+                    &ValidationSettings::initial(),
+                )
                 .unwrap();
 
             digest_after_block = state.state_root().unwrap();
@@ -1408,9 +1477,7 @@ mod tests {
             .expect("speculative");
 
         // Actually apply to state_b.
-        let real_proof = state_b
-            .apply_changes(&changes, None)
-            .expect("real apply");
+        let real_proof = state_b.apply_changes(&changes, None).expect("real apply");
         let real_digest = state_b.state_root().expect("real digest");
 
         // The proofs and digests should match.
@@ -1439,7 +1506,10 @@ mod tests {
             .proofs_for_transactions(&empty_changes)
             .expect("empty changes should succeed");
 
-        assert!(!proof.is_empty(), "proof should not be empty even for no-op");
+        assert!(
+            !proof.is_empty(),
+            "proof should not be empty even for no-op"
+        );
         assert_eq!(
             original_digest, new_digest,
             "digest should be unchanged for empty changes"

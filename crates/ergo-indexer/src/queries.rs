@@ -197,13 +197,8 @@ pub fn boxes_by_token(
         None => return Ok((Vec::new(), 0)),
     };
 
-    let all_indexes = collect_all_indexes(
-        &token.box_indexes,
-        db,
-        &key,
-        token.box_segment_count,
-        true,
-    )?;
+    let all_indexes =
+        collect_all_indexes(&token.box_indexes, db, &key, token.box_segment_count, true)?;
 
     paginate_box_indexes(db, all_indexes, offset, limit, unspent_only, sort_desc)
 }

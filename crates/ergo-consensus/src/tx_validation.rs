@@ -121,9 +121,7 @@ pub fn validate_tx_stateless(
 mod tests {
     use super::*;
     use crate::validation_rules::ValidationSettings;
-    use ergo_types::transaction::{
-        DataInput, ErgoBoxCandidate, Input, TxId,
-    };
+    use ergo_types::transaction::{DataInput, ErgoBoxCandidate, Input, TxId};
 
     /// Shorthand for initial validation settings (all rules active).
     fn vs() -> ValidationSettings {
@@ -362,10 +360,7 @@ mod tests {
     #[test]
     fn valid_tx_with_tokens_data_inputs_multiple_outputs_passes() {
         let tx = ErgoTransaction {
-            inputs: vec![
-                make_input(box_id(0x01)),
-                make_input(box_id(0x02)),
-            ],
+            inputs: vec![make_input(box_id(0x01)), make_input(box_id(0x02))],
             data_inputs: vec![
                 DataInput {
                     box_id: box_id(0x10),
@@ -379,10 +374,7 @@ mod tests {
                     value: 1_000_000_000,
                     ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
                     creation_height: 100_000,
-                    tokens: vec![
-                        (box_id(0xa0), 500),
-                        (box_id(0xa1), 1_000_000),
-                    ],
+                    tokens: vec![(box_id(0xa0), 500), (box_id(0xa1), 1_000_000)],
                     additional_registers: Vec::new(),
                 },
                 ErgoBoxCandidate {

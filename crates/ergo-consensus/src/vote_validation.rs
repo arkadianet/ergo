@@ -43,10 +43,7 @@ pub enum VoteValidationError {
 /// Validate the 3-byte vote array in a block header.
 ///
 /// `epoch_starts` is true when `height % epoch_length == 0 && height > 0`.
-pub fn validate_votes(
-    votes: &[u8; 3],
-    epoch_starts: bool,
-) -> Result<(), VoteValidationError> {
+pub fn validate_votes(votes: &[u8; 3], epoch_starts: bool) -> Result<(), VoteValidationError> {
     // Filter out zero (no-op) votes.
     let active: Vec<u8> = votes
         .iter()

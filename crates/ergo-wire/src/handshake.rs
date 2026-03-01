@@ -10,8 +10,16 @@ pub struct ProtocolVersion {
 }
 
 impl ProtocolVersion {
-    pub const EIP37_FORK: Self = Self { major: 4, minor: 0, patch: 100 };
-    pub const SYNC_V2_MIN: Self = Self { major: 4, minor: 0, patch: 16 };
+    pub const EIP37_FORK: Self = Self {
+        major: 4,
+        minor: 0,
+        patch: 100,
+    };
+    pub const SYNC_V2_MIN: Self = Self {
+        major: 4,
+        minor: 0,
+        patch: 16,
+    };
 
     /// Parse a version string like "6.0.1" into a ProtocolVersion.
     pub fn from_version_str(s: &str) -> Option<Self> {
@@ -152,7 +160,8 @@ impl PeerSpec {
             pos += port_bytes_consumed;
 
             if ip_len == 4 {
-                let ip = std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+                let ip =
+                    std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
                 Some(SocketAddr::new(std::net::IpAddr::V4(ip), port))
             } else {
                 let mut octets = [0u8; 16];
@@ -243,7 +252,11 @@ mod tests {
             time: 1700000000000,
             peer_spec: PeerSpec {
                 agent_name: "ergoref".to_string(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 1 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 1,
+                },
                 node_name: "ergo-rust-test".to_string(),
                 declared_address: None,
                 features: vec![
@@ -279,7 +292,11 @@ mod tests {
             time: 1700000000000,
             peer_spec: PeerSpec {
                 agent_name: "ergoref".to_string(),
-                protocol_version: ProtocolVersion { major: 5, minor: 0, patch: 12 },
+                protocol_version: ProtocolVersion {
+                    major: 5,
+                    minor: 0,
+                    patch: 12,
+                },
                 node_name: "test".to_string(),
                 declared_address: Some(addr),
                 features: vec![],
@@ -294,7 +311,11 @@ mod tests {
 
     #[test]
     fn protocol_version_serialization() {
-        let v = ProtocolVersion { major: 6, minor: 0, patch: 1 };
+        let v = ProtocolVersion {
+            major: 6,
+            minor: 0,
+            patch: 1,
+        };
         let bytes = v.serialize();
         assert_eq!(bytes, vec![6, 0, 1]);
         let parsed = ProtocolVersion::parse(&bytes).unwrap();
@@ -307,7 +328,11 @@ mod tests {
             time: 1700000000000,
             peer_spec: PeerSpec {
                 agent_name: "ergoref".to_string(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 1 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 1,
+                },
                 node_name: "test".to_string(),
                 declared_address: None,
                 features: vec![],
@@ -320,10 +345,24 @@ mod tests {
     #[test]
     fn protocol_version_from_str() {
         let v = ProtocolVersion::from_version_str("6.0.1").unwrap();
-        assert_eq!(v, ProtocolVersion { major: 6, minor: 0, patch: 1 });
+        assert_eq!(
+            v,
+            ProtocolVersion {
+                major: 6,
+                minor: 0,
+                patch: 1
+            }
+        );
 
         let v2 = ProtocolVersion::from_version_str("5.0.12").unwrap();
-        assert_eq!(v2, ProtocolVersion { major: 5, minor: 0, patch: 12 });
+        assert_eq!(
+            v2,
+            ProtocolVersion {
+                major: 5,
+                minor: 0,
+                patch: 12
+            }
+        );
 
         assert!(ProtocolVersion::from_version_str("6.0").is_none());
         assert!(ProtocolVersion::from_version_str("abc").is_none());
@@ -332,10 +371,26 @@ mod tests {
 
     #[test]
     fn protocol_version_ordering() {
-        let v4_0_99 = ProtocolVersion { major: 4, minor: 0, patch: 99 };
-        let v4_0_100 = ProtocolVersion { major: 4, minor: 0, patch: 100 };
-        let v5_0_0 = ProtocolVersion { major: 5, minor: 0, patch: 0 };
-        let v4_9_255 = ProtocolVersion { major: 4, minor: 9, patch: 255 };
+        let v4_0_99 = ProtocolVersion {
+            major: 4,
+            minor: 0,
+            patch: 99,
+        };
+        let v4_0_100 = ProtocolVersion {
+            major: 4,
+            minor: 0,
+            patch: 100,
+        };
+        let v5_0_0 = ProtocolVersion {
+            major: 5,
+            minor: 0,
+            patch: 0,
+        };
+        let v4_9_255 = ProtocolVersion {
+            major: 4,
+            minor: 9,
+            patch: 255,
+        };
         assert!(v4_0_99 < v4_0_100);
         assert!(v4_0_100 < v5_0_0);
         assert!(v5_0_0 > v4_9_255);
@@ -349,9 +404,17 @@ mod tests {
 
     #[test]
     fn protocol_version_display() {
-        let v = ProtocolVersion { major: 5, minor: 0, patch: 0 };
+        let v = ProtocolVersion {
+            major: 5,
+            minor: 0,
+            patch: 0,
+        };
         assert_eq!(format!("{}", v), "5.0.0");
-        let v2 = ProtocolVersion { major: 4, minor: 0, patch: 100 };
+        let v2 = ProtocolVersion {
+            major: 4,
+            minor: 0,
+            patch: 100,
+        };
         assert_eq!(format!("{}", v2), "4.0.100");
     }
 

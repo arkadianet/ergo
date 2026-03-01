@@ -114,8 +114,7 @@ pub fn convert_tx_id(id: &TxId) -> SigmaTxId {
 
 /// Parse an ErgoTree from raw serialized bytes.
 pub fn convert_ergo_tree(bytes: &[u8]) -> Result<SigmaErgoTree, SigmaVerifyError> {
-    SigmaErgoTree::sigma_parse_bytes(bytes)
-        .map_err(|e| SigmaVerifyError::TreeParse(format!("{e}")))
+    SigmaErgoTree::sigma_parse_bytes(bytes).map_err(|e| SigmaVerifyError::TreeParse(format!("{e}")))
 }
 
 /// Convert our token list to sigma-rust tokens.
@@ -182,9 +181,7 @@ pub fn convert_proof_bytes(bytes: &[u8]) -> SigmaProofBytes {
 ///
 /// An empty slice yields an empty ContextExtension.
 /// Non-empty bytes are deserialized via sigma parsing.
-pub fn convert_context_extension(
-    bytes: &[u8],
-) -> Result<SigmaContextExtension, SigmaVerifyError> {
+pub fn convert_context_extension(bytes: &[u8]) -> Result<SigmaContextExtension, SigmaVerifyError> {
     if bytes.is_empty() {
         return Ok(SigmaContextExtension::empty());
     }
@@ -249,9 +246,7 @@ pub fn convert_ergo_box(our_box: &ErgoBox) -> Result<SigmaErgoBox, SigmaVerifyEr
 }
 
 /// Convert a single Input to sigma-rust Input.
-fn convert_input(
-    input: &Input,
-) -> Result<ergo_lib::chain::transaction::Input, SigmaVerifyError> {
+fn convert_input(input: &Input) -> Result<ergo_lib::chain::transaction::Input, SigmaVerifyError> {
     let box_id = convert_box_id(&input.box_id);
     let proof = convert_proof_bytes(&input.proof_bytes);
     let extension = convert_context_extension(&input.extension_bytes)?;
@@ -263,9 +258,7 @@ fn convert_input(
 }
 
 /// Convert our ErgoTransaction to sigma-rust Transaction.
-pub fn convert_transaction(
-    tx: &ErgoTransaction,
-) -> Result<SigmaTransaction, SigmaVerifyError> {
+pub fn convert_transaction(tx: &ErgoTransaction) -> Result<SigmaTransaction, SigmaVerifyError> {
     let inputs: Vec<ergo_lib::chain::transaction::Input> = tx
         .inputs
         .iter()
@@ -307,9 +300,7 @@ pub fn convert_header(header: &Header) -> Result<SigmaHeader, SigmaVerifyError> 
         let d = if header.pow_solution.d.is_empty() {
             None
         } else {
-            Some(num_bigint::BigUint::from_bytes_be(
-                &header.pow_solution.d,
-            ))
+            Some(num_bigint::BigUint::from_bytes_be(&header.pow_solution.d))
         };
         (Some(Box::new(w)), d)
     } else {
@@ -494,11 +485,14 @@ pub fn compute_initial_tx_cost(
     tx: &ErgoTransaction,
     parameters: &crate::parameters::Parameters,
 ) -> u64 {
-    let input_cost = parameters.get(crate::parameters::INPUT_COST_ID)
+    let input_cost = parameters
+        .get(crate::parameters::INPUT_COST_ID)
         .unwrap_or(2000) as u64;
-    let data_input_cost = parameters.get(crate::parameters::DATA_INPUT_COST_ID)
+    let data_input_cost = parameters
+        .get(crate::parameters::DATA_INPUT_COST_ID)
         .unwrap_or(100) as u64;
-    let output_cost = parameters.get(crate::parameters::OUTPUT_COST_ID)
+    let output_cost = parameters
+        .get(crate::parameters::OUTPUT_COST_ID)
         .unwrap_or(100) as u64;
 
     INTERPRETER_INIT_COST
@@ -624,15 +618,13 @@ pub fn verify_transaction(
     )
     .map_err(|e| SigmaVerifyError::Verification(format!("TransactionContext: {e}")))?;
 
-    let cost = tx_context
-        .validate(&sigma_state_ctx)
-        .map_err(|e| match e {
-            ergo_lib::chain::transaction::ergo_transaction::TxValidationError::ReducedToFalse(
-                idx,
-                _,
-            ) => SigmaVerifyError::ScriptFalse(idx),
-            other => SigmaVerifyError::Verification(format!("{other}")),
-        })?;
+    let cost = tx_context.validate(&sigma_state_ctx).map_err(|e| match e {
+        ergo_lib::chain::transaction::ergo_transaction::TxValidationError::ReducedToFalse(
+            idx,
+            _,
+        ) => SigmaVerifyError::ScriptFalse(idx),
+        other => SigmaVerifyError::Verification(format!("{other}")),
+    })?;
 
     Ok(cost)
 }
@@ -758,7 +750,10 @@ mod tests {
         // In the jit-costing branch, sigma_parse_bytes returns an error
         // for clearly invalid bytes instead of storing them in an Unparsed variant.
         let result = convert_ergo_tree(&[0xFF, 0xFF]);
-        assert!(result.is_err(), "invalid ErgoTree bytes should produce a parse error");
+        assert!(
+            result.is_err(),
+            "invalid ErgoTree bytes should produce a parse error"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("ErgoTree parse error"),
@@ -954,7 +949,10 @@ mod tests {
         assert_eq!(proof_err.to_string(), "Proof bytes error: bad proof");
 
         let script_false = SigmaVerifyError::ScriptFalse(3);
-        assert_eq!(script_false.to_string(), "Script reduced to false at input 3");
+        assert_eq!(
+            script_false.to_string(),
+            "Script reduced to false at input 3"
+        );
 
         let cost_err = SigmaVerifyError::CostExceeded(99999);
         assert_eq!(cost_err.to_string(), "Cost exceeded: total 99999");
@@ -1104,8 +1102,7 @@ mod tests {
             current_miner_pk: {
                 // sigma-rust EcPoint::default() is the identity; we need a valid
                 // compressed point for scorex_parse_bytes. Use generator point instead.
-                let gen_hex =
-                    "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+                let gen_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
                 let gen_bytes = base16::decode(gen_hex).unwrap();
                 let mut arr = [0u8; 33];
                 arr.copy_from_slice(&gen_bytes);
@@ -1348,14 +1345,42 @@ mod tests {
         let params = Parameters::genesis();
         let tx = ErgoTransaction {
             inputs: vec![
-                Input { box_id: BoxId([0; 32]), proof_bytes: vec![], extension_bytes: vec![] },
-                Input { box_id: BoxId([1; 32]), proof_bytes: vec![], extension_bytes: vec![] },
+                Input {
+                    box_id: BoxId([0; 32]),
+                    proof_bytes: vec![],
+                    extension_bytes: vec![],
+                },
+                Input {
+                    box_id: BoxId([1; 32]),
+                    proof_bytes: vec![],
+                    extension_bytes: vec![],
+                },
             ],
-            data_inputs: vec![DataInput { box_id: BoxId([2; 32]) }],
+            data_inputs: vec![DataInput {
+                box_id: BoxId([2; 32]),
+            }],
             output_candidates: vec![
-                ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
-                ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
-                ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
+                ErgoBoxCandidate {
+                    value: 1_000_000,
+                    ergo_tree_bytes: vec![0x00],
+                    creation_height: 1,
+                    tokens: vec![],
+                    additional_registers: vec![],
+                },
+                ErgoBoxCandidate {
+                    value: 1_000_000,
+                    ergo_tree_bytes: vec![0x00],
+                    creation_height: 1,
+                    tokens: vec![],
+                    additional_registers: vec![],
+                },
+                ErgoBoxCandidate {
+                    value: 1_000_000,
+                    ergo_tree_bytes: vec![0x00],
+                    creation_height: 1,
+                    tokens: vec![],
+                    additional_registers: vec![],
+                },
             ],
             tx_id: TxId([0; 32]),
         };
@@ -1559,8 +1584,7 @@ mod tests {
         // NOT the first header's parent_id (0xBB...).
         let pre_header_parent_bytes: &[u8] = sigma_ctx.pre_header.parent_id.0.as_ref();
         assert_eq!(
-            pre_header_parent_bytes,
-            &[0xAA; 32],
+            pre_header_parent_bytes, &[0xAA; 32],
             "PreHeader parent_id should use current_parent_id, not last_headers[0].parent_id"
         );
     }

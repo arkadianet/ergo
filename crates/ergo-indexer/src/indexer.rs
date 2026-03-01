@@ -9,10 +9,12 @@ use ergo_types::modifier_id::ModifierId;
 use ergo_types::transaction::{compute_box_id, ErgoTransaction};
 
 use crate::db::{
-    global_box_index_key, global_tx_index_key, indexed_height_key, numeric_box_key,
-    numeric_tx_key, token_key, tree_hash_key, ExtraIndexerDb, IndexerDbError,
+    global_box_index_key, global_tx_index_key, indexed_height_key, numeric_box_key, numeric_tx_key,
+    token_key, tree_hash_key, ExtraIndexerDb, IndexerDbError,
 };
-use crate::segment::{find_and_negate_index, find_and_unnegate_index, remove_index_entry, split_segments};
+use crate::segment::{
+    find_and_negate_index, find_and_unnegate_index, remove_index_entry, split_segments,
+};
 use crate::template::template_hash;
 use crate::types::{
     BalanceInfo, IndexedContractTemplate, IndexedErgoAddress, IndexedErgoBox,
@@ -236,12 +238,8 @@ pub fn index_block(
                     // --- Update contract template ---
                     let tmpl_hash = template_hash(&indexed_box.ergo_tree);
                     let tmpl_key = crate::db::template_hash_key(&tmpl_hash);
-                    let maybe_tmpl = load_entry(
-                        db,
-                        buffer,
-                        &tmpl_key,
-                        IndexedContractTemplate::deserialize,
-                    )?;
+                    let maybe_tmpl =
+                        load_entry(db, buffer, &tmpl_key, IndexedContractTemplate::deserialize)?;
 
                     if let Some(mut tmpl) = maybe_tmpl {
                         let (_, seg_updates) = find_and_negate_index(
@@ -359,13 +357,12 @@ pub fn index_block(
             // --- Update/create contract template ---
             let tmpl_hash = template_hash(&output.ergo_tree_bytes);
             let tmpl_key = crate::db::template_hash_key(&tmpl_hash);
-            let mut tmpl =
-                load_entry(db, buffer, &tmpl_key, IndexedContractTemplate::deserialize)?
-                    .unwrap_or_else(|| IndexedContractTemplate {
-                        template_hash: tmpl_key,
-                        box_indexes: Vec::new(),
-                        box_segment_count: 0,
-                    });
+            let mut tmpl = load_entry(db, buffer, &tmpl_key, IndexedContractTemplate::deserialize)?
+                .unwrap_or_else(|| IndexedContractTemplate {
+                    template_hash: tmpl_key,
+                    box_indexes: Vec::new(),
+                    box_segment_count: 0,
+                });
 
             tmpl.box_indexes.push(state.global_box_index as i64);
             let seg_updates = split_segments(
@@ -481,9 +478,9 @@ pub fn remove_after(
         tx_target = state.global_tx_index; // default: nothing to undo
         for n in (0..state.global_tx_index).rev() {
             let ntx_key = numeric_tx_key(n);
-            let ntx_data = db.get(&ntx_key)?.ok_or_else(|| {
-                IndexerDbError::Codec(format!("missing NumericTxIndex at {n}"))
-            })?;
+            let ntx_data = db
+                .get(&ntx_key)?
+                .ok_or_else(|| IndexerDbError::Codec(format!("missing NumericTxIndex at {n}")))?;
             let ntx = NumericTxIndex::deserialize(&ntx_data)?;
             let tx_data = db.get(&ntx.tx_id.0)?.ok_or_else(|| {
                 IndexerDbError::Codec(format!(
@@ -508,9 +505,9 @@ pub fn remove_after(
         box_target = state.global_box_index; // default: nothing to undo
         for n in (0..state.global_box_index).rev() {
             let nb_key = numeric_box_key(n);
-            let nb_data = db.get(&nb_key)?.ok_or_else(|| {
-                IndexerDbError::Codec(format!("missing NumericBoxIndex at {n}"))
-            })?;
+            let nb_data = db
+                .get(&nb_key)?
+                .ok_or_else(|| IndexerDbError::Codec(format!("missing NumericBoxIndex at {n}")))?;
             let nb = NumericBoxIndex::deserialize(&nb_data)?;
             let box_data = db.get(&nb.box_id.0)?.ok_or_else(|| {
                 IndexerDbError::Codec(format!(
@@ -584,8 +581,11 @@ pub fn remove_after(
                     // Add back balance.
                     addr.balance.nano_ergs += ibox.value;
                     for (token_id, amount) in &ibox.tokens {
-                        if let Some(pos) =
-                            addr.balance.tokens.iter().position(|(id, _)| id == token_id)
+                        if let Some(pos) = addr
+                            .balance
+                            .tokens
+                            .iter()
+                            .position(|(id, _)| id == token_id)
                         {
                             addr.balance.tokens[pos].1 += amount;
                         } else {
@@ -675,11 +675,13 @@ pub fn remove_after(
                     db.put(seg_key, seg_data)?;
                 }
 
-                addr.balance.nano_ergs =
-                    addr.balance.nano_ergs.saturating_sub(ibox.value);
+                addr.balance.nano_ergs = addr.balance.nano_ergs.saturating_sub(ibox.value);
                 for (token_id, amount) in &ibox.tokens {
-                    if let Some(pos) =
-                        addr.balance.tokens.iter().position(|(id, _)| id == token_id)
+                    if let Some(pos) = addr
+                        .balance
+                        .tokens
+                        .iter()
+                        .position(|(id, _)| id == token_id)
                     {
                         let current = addr.balance.tokens[pos].1;
                         if current <= *amount {
@@ -912,11 +914,7 @@ mod tests {
 
         let (tx_bytes, tx) = make_test_tx(
             [0xBB; 32],
-            vec![make_output(
-                100_000,
-                vec![0x00, 0x01],
-                vec![],
-            )],
+            vec![make_output(100_000, vec![0x00, 0x01], vec![])],
             vec![],
         );
 
@@ -958,11 +956,7 @@ mod tests {
 
         let (tx_bytes, tx) = make_test_tx(
             [0xCC; 32],
-            vec![make_output(
-                999_999,
-                vec![0x00, 0x08, 0xCD],
-                vec![],
-            )],
+            vec![make_output(999_999, vec![0x00, 0x08, 0xCD], vec![])],
             vec![],
         );
 
@@ -983,18 +977,9 @@ mod tests {
         assert_eq!(indexed_tx.height, 1);
 
         // Progress counters persisted.
-        assert_eq!(
-            db.get_progress_u32(&indexed_height_key()).unwrap(),
-            1
-        );
-        assert_eq!(
-            db.get_progress_u64(&global_tx_index_key()).unwrap(),
-            1
-        );
-        assert_eq!(
-            db.get_progress_u64(&global_box_index_key()).unwrap(),
-            1
-        );
+        assert_eq!(db.get_progress_u32(&indexed_height_key()).unwrap(), 1);
+        assert_eq!(db.get_progress_u64(&global_tx_index_key()).unwrap(), 1);
+        assert_eq!(db.get_progress_u64(&global_box_index_key()).unwrap(), 1);
 
         // Buffer is reset.
         assert_eq!(buffer.mod_count(), 0);

@@ -14,7 +14,7 @@ use ergo_storage::history_db::HistoryDb;
 use ergo_types::address;
 use ergo_types::modifier_id::ModifierId;
 use ergo_types::transaction::{
-    BoxId, DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId, compute_box_id,
+    compute_box_id, BoxId, DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
 };
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::transaction_ser::{compute_tx_id, parse_transaction, serialize_transaction};
@@ -244,7 +244,6 @@ struct TxJsonTransaction {
     data_inputs: Vec<TxJsonDataInput>,
     outputs: Vec<TxJsonOutput>,
 }
-
 
 /// JSON response for the mempool size endpoint.
 #[derive(Debug, Serialize)]
@@ -572,7 +571,9 @@ pub struct UnconfirmedPaginationParams {
     limit: usize,
 }
 
-fn default_unconfirmed_limit() -> usize { 50 }
+fn default_unconfirmed_limit() -> usize {
+    50
+}
 
 /// Query params for pool histogram.
 #[derive(Debug, Deserialize)]
@@ -583,8 +584,12 @@ pub struct HistogramParams {
     maxtime: u64,
 }
 
-fn default_histogram_bins() -> usize { 10 }
-fn default_histogram_max_time() -> u64 { 60_000 }
+fn default_histogram_bins() -> usize {
+    10
+}
+fn default_histogram_max_time() -> u64 {
+    60_000
+}
 
 /// Query params for fee estimation.
 #[derive(Debug, Deserialize)]
@@ -593,7 +598,9 @@ pub struct FeeEstimateParams {
     _wait_time: u64,
 }
 
-fn default_wait_time() -> u64 { 1000 }
+fn default_wait_time() -> u64 {
+    1000
+}
 
 /// Query params for wait time estimation.
 #[derive(Debug, Deserialize)]
@@ -602,7 +609,9 @@ pub struct WaitTimeParams {
     fee: u64,
 }
 
-fn default_fee_param() -> u64 { 1_000_000 }
+fn default_fee_param() -> u64 {
+    1_000_000
+}
 
 /// Pagination query parameters for blockchain API endpoints.
 #[derive(Debug, Deserialize)]
@@ -615,7 +624,9 @@ pub struct BlockchainPaginationParams {
     pub sort_direction: Option<String>,
 }
 
-fn default_blockchain_limit() -> u32 { 5 }
+fn default_blockchain_limit() -> u32 {
+    5
+}
 
 /// Pagination + mempool filter params for unspent box endpoints.
 #[derive(Debug, Deserialize)]
@@ -639,8 +650,8 @@ pub struct UnspentBoxParams {
 
 /// Parse a hex-encoded 32-byte modifier ID.
 fn parse_modifier_id(hex_str: &str) -> Result<ModifierId, (StatusCode, Json<ApiError>)> {
-    let bytes =
-        hex::decode(hex_str).map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
     if bytes.len() != 32 {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -717,10 +728,7 @@ fn header_to_response(header: &ergo_types::header::Header) -> HeaderResponse {
 }
 
 /// Convert a [`Header`] to a [`HeaderResponse`] using a known ID.
-fn header_to_response_with_id(
-    header: &ergo_types::header::Header,
-    id_hex: &str,
-) -> HeaderResponse {
+fn header_to_response_with_id(header: &ergo_types::header::Header, id_hex: &str) -> HeaderResponse {
     let serialized = serialize_header(header);
     let id_bytes_vec = hex::decode(id_hex).unwrap_or_default();
     let mut id_bytes = [0u8; 32];
@@ -879,7 +887,11 @@ fn network_prefix(network: &str) -> address::NetworkPrefix {
 fn popow_header_to_response(popow: &ergo_types::nipopow::PoPowHeader) -> PoPowHeaderResponse {
     PoPowHeaderResponse {
         header: header_to_response(&popow.header),
-        interlinks: popow.interlinks.iter().map(|id| hex::encode(id.0)).collect(),
+        interlinks: popow
+            .interlinks
+            .iter()
+            .map(|id| hex::encode(id.0))
+            .collect(),
     }
 }
 
@@ -899,7 +911,9 @@ fn proof_to_response(proof: &ergo_types::nipopow::NipopowProof) -> NipopowProofR
 // ---------------------------------------------------------------------------
 
 /// Return a reference to the extra indexer DB, or 503 if not enabled.
-fn require_indexer(state: &ApiState) -> Result<&ergo_indexer::db::ExtraIndexerDb, (StatusCode, String)> {
+fn require_indexer(
+    state: &ApiState,
+) -> Result<&ergo_indexer::db::ExtraIndexerDb, (StatusCode, String)> {
     state.extra_db.as_deref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Extra indexing is not enabled".into(),
@@ -908,10 +922,13 @@ fn require_indexer(state: &ApiState) -> Result<&ergo_indexer::db::ExtraIndexerDb
 
 /// Parse a hex string into a 32-byte array, returning a typed error tuple.
 fn hex_to_32bytes(hex_str: &str) -> Result<[u8; 32], (StatusCode, String)> {
-    let bytes = hex::decode(hex_str)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
     if bytes.len() != 32 {
-        return Err((StatusCode::BAD_REQUEST, "ID must be 32 bytes (64 hex chars)".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "ID must be 32 bytes (64 hex chars)".into(),
+        ));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
@@ -935,9 +952,10 @@ fn address_to_ergo_tree(addr: &str, _network: &str) -> Result<Vec<u8>, (StatusCo
             // Content bytes are the raw ErgoTree
             Ok(decoded.content_bytes)
         }
-        address::AddressType::P2SH => {
-            Err((StatusCode::BAD_REQUEST, "P2SH addresses cannot be converted back to ErgoTree".into()))
-        }
+        address::AddressType::P2SH => Err((
+            StatusCode::BAD_REQUEST,
+            "P2SH addresses cannot be converted back to ErgoTree".into(),
+        )),
     }
 }
 
@@ -962,7 +980,10 @@ fn encode_byte_array_constant(data: &[u8]) -> Vec<u8> {
 }
 
 /// Convert an [`IndexedErgoBox`] to an API response.
-fn box_to_response(b: &ergo_indexer::types::IndexedErgoBox, network: &str) -> IndexedErgoBoxResponse {
+fn box_to_response(
+    b: &ergo_indexer::types::IndexedErgoBox,
+    network: &str,
+) -> IndexedErgoBoxResponse {
     let prefix = if network.to_lowercase().contains("test") {
         address::NetworkPrefix::Testnet
     } else {
@@ -974,10 +995,14 @@ fn box_to_response(b: &ergo_indexer::types::IndexedErgoBox, network: &str) -> In
         box_id: hex::encode(b.box_id.0),
         value: b.value,
         ergo_tree: hex::encode(&b.ergo_tree),
-        assets: b.tokens.iter().map(|(id, amt)| TokenAmountResponse {
-            token_id: hex::encode(id.0),
-            amount: *amt,
-        }).collect(),
+        assets: b
+            .tokens
+            .iter()
+            .map(|(id, amt)| TokenAmountResponse {
+                token_id: hex::encode(id.0),
+                amount: *amt,
+            })
+            .collect(),
         creation_height: b.inclusion_height,
         global_index: b.global_index,
         inclusion_height: b.inclusion_height,
@@ -995,15 +1020,27 @@ fn tx_to_response(
     current_height: u32,
     network: &str,
 ) -> IndexedErgoTransactionResponse {
-    let inputs: Vec<IndexedErgoBoxResponse> = tx.input_indexes.iter().filter_map(|&idx| {
-        ergo_indexer::queries::get_box_by_index(db, idx).ok().flatten()
-            .map(|b| box_to_response(&b, network))
-    }).collect();
+    let inputs: Vec<IndexedErgoBoxResponse> = tx
+        .input_indexes
+        .iter()
+        .filter_map(|&idx| {
+            ergo_indexer::queries::get_box_by_index(db, idx)
+                .ok()
+                .flatten()
+                .map(|b| box_to_response(&b, network))
+        })
+        .collect();
 
-    let outputs: Vec<IndexedErgoBoxResponse> = tx.output_indexes.iter().filter_map(|&idx| {
-        ergo_indexer::queries::get_box_by_index(db, idx).ok().flatten()
-            .map(|b| box_to_response(&b, network))
-    }).collect();
+    let outputs: Vec<IndexedErgoBoxResponse> = tx
+        .output_indexes
+        .iter()
+        .filter_map(|&idx| {
+            ergo_indexer::queries::get_box_by_index(db, idx)
+                .ok()
+                .flatten()
+                .map(|b| box_to_response(&b, network))
+        })
+        .collect();
 
     IndexedErgoTransactionResponse {
         id: hex::encode(tx.tx_id.0),
@@ -1031,8 +1068,8 @@ fn token_to_response(t: &ergo_indexer::types::IndexedToken) -> IndexedTokenRespo
 
 /// Compute blake2b-256 hash of a byte slice.
 fn blake2b256(data: &[u8]) -> [u8; 32] {
-    use blake2::Blake2bVar;
     use blake2::digest::{Update, VariableOutput};
+    use blake2::Blake2bVar;
     let mut hasher = Blake2bVar::new(32).unwrap();
     hasher.update(data);
     let mut out = [0u8; 32];
@@ -1079,7 +1116,12 @@ fn build_indexed_block_response(
     for tx_bytes in &block_txs.tx_bytes {
         if let Ok(parsed_tx) = parse_transaction(tx_bytes) {
             if let Ok(Some(indexed_tx)) = ergo_indexer::queries::get_tx(db, &parsed_tx.tx_id.0) {
-                tx_responses.push(tx_to_response(&indexed_tx, db, current_height, &state.network));
+                tx_responses.push(tx_to_response(
+                    &indexed_tx,
+                    db,
+                    current_height,
+                    &state.network,
+                ));
             }
         }
     }
@@ -1131,8 +1173,8 @@ fn apply_mempool_box_filters(
     // 2. includeUnconfirmed: add matching unconfirmed outputs
     if params.include_unconfirmed {
         if let Some(tree_bytes) = ergo_tree_bytes {
-            use blake2::Blake2bVar;
             use blake2::digest::{Update, VariableOutput};
+            use blake2::Blake2bVar;
             let mut hasher = Blake2bVar::new(32).unwrap();
             hasher.update(tree_bytes);
             let mut tree_hash = [0u8; 32];
@@ -1226,9 +1268,7 @@ pub struct ApiState {
 // ---------------------------------------------------------------------------
 
 /// Return `Err(503)` when the node is not running in UTXO mode.
-fn require_utxo_state(
-    state_type: &str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn require_utxo_state(state_type: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     if state_type != "utxo" {
         Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1524,9 +1564,7 @@ fn require_wallet(
 
 /// Convert a [`TrackedBox`] to the wallet box JSON response format.
 #[cfg(feature = "wallet")]
-fn tracked_box_to_response(
-    tb: &ergo_wallet::tracked_box::TrackedBox,
-) -> WalletBoxResponse {
+fn tracked_box_to_response(tb: &ergo_wallet::tracked_box::TrackedBox) -> WalletBoxResponse {
     let tokens: Vec<WalletTokenResponse> = tb
         .tokens
         .iter()
@@ -1583,8 +1621,7 @@ pub fn build_router(state: ApiState) -> Router {
         // Blocks: specific literal paths first
         .route(
             "/blocks",
-            axum::routing::get(get_paginated_blocks_handler)
-                .post(post_block_handler),
+            axum::routing::get(get_paginated_blocks_handler).post(post_block_handler),
         )
         .route(
             "/blocks/lastHeaders/{n}",
@@ -1647,10 +1684,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/peers/blacklisted",
             axum::routing::get(peers_blacklisted_handler),
         )
-        .route(
-            "/peers/connect",
-            axum::routing::post(peers_connect_handler),
-        )
+        .route("/peers/connect", axum::routing::post(peers_connect_handler))
         .route("/peers/status", axum::routing::get(peers_status_handler))
         .route(
             "/peers/syncInfo",
@@ -1681,10 +1715,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/transactions/poolHistogram",
             axum::routing::get(pool_histogram_handler),
         )
-        .route(
-            "/transactions/getFee",
-            axum::routing::get(get_fee_handler),
-        )
+        .route("/transactions/getFee", axum::routing::get(get_fee_handler))
         .route(
             "/transactions/waitTime",
             axum::routing::get(wait_time_handler),
@@ -1727,8 +1758,7 @@ pub fn build_router(state: ApiState) -> Router {
         )
         .route(
             "/transactions/unconfirmed/{tx_id}",
-            axum::routing::get(get_unconfirmed_by_id_handler)
-                .head(head_unconfirmed_handler),
+            axum::routing::get(get_unconfirmed_by_id_handler).head(head_unconfirmed_handler),
         )
         .route(
             "/transactions/unconfirmed",
@@ -1800,10 +1830,7 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::get(emission_handler),
         )
         // Node control
-        .route(
-            "/node/shutdown",
-            axum::routing::post(node_shutdown_handler),
-        )
+        .route("/node/shutdown", axum::routing::post(node_shutdown_handler))
         // Blockchain (indexed) endpoints
         .route(
             "/blockchain/indexedHeight",
@@ -1910,10 +1937,7 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::post(blockchain_block_by_header_ids_handler),
         )
         // UTXO endpoints
-        .route(
-            "/utxo/byId/{boxId}",
-            axum::routing::get(utxo_by_id_handler),
-        )
+        .route("/utxo/byId/{boxId}", axum::routing::get(utxo_by_id_handler))
         .route(
             "/utxo/byIdBinary/{boxId}",
             axum::routing::get(utxo_by_id_binary_handler),
@@ -1930,10 +1954,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/utxo/withPool/byIdBinary/{boxId}",
             axum::routing::get(utxo_with_pool_by_id_binary_handler),
         )
-        .route(
-            "/utxo/genesis",
-            axum::routing::get(utxo_genesis_handler),
-        )
+        .route("/utxo/genesis", axum::routing::get(utxo_genesis_handler))
         .route(
             "/utxo/getSnapshotsInfo",
             axum::routing::get(utxo_snapshots_info_handler),
@@ -1967,22 +1988,13 @@ pub fn build_router(state: ApiState) -> Router {
     // Wallet lifecycle endpoints (feature-gated)
     #[cfg(feature = "wallet")]
     let router = router
-        .route(
-            "/wallet/status",
-            axum::routing::get(wallet_status_handler),
-        )
-        .route(
-            "/wallet/init",
-            axum::routing::post(wallet_init_handler),
-        )
+        .route("/wallet/status", axum::routing::get(wallet_status_handler))
+        .route("/wallet/init", axum::routing::post(wallet_init_handler))
         .route(
             "/wallet/restore",
             axum::routing::post(wallet_restore_handler),
         )
-        .route(
-            "/wallet/unlock",
-            axum::routing::post(wallet_unlock_handler),
-        )
+        .route("/wallet/unlock", axum::routing::post(wallet_unlock_handler))
         .route("/wallet/lock", axum::routing::get(wallet_lock_handler))
         // Address and balance endpoints
         .route(
@@ -2018,10 +2030,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/wallet/boxes/collect",
             axum::routing::post(wallet_collect_boxes_handler),
         )
-        .route(
-            "/wallet/boxes",
-            axum::routing::get(wallet_boxes_handler),
-        )
+        .route("/wallet/boxes", axum::routing::get(wallet_boxes_handler))
         .route(
             "/wallet/transactions",
             axum::routing::get(wallet_transactions_handler),
@@ -2056,10 +2065,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/wallet/check",
             axum::routing::post(wallet_check_seed_handler),
         )
-        .route(
-            "/wallet/rescan",
-            axum::routing::post(wallet_rescan_handler),
-        )
+        .route("/wallet/rescan", axum::routing::post(wallet_rescan_handler))
         // Additional wallet endpoints
         .route(
             "/wallet/getPrivateKey",
@@ -2097,10 +2103,7 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::post(scan_stop_tracking_handler),
         )
         .route("/scan/addBox", axum::routing::post(scan_add_box_handler))
-        .route(
-            "/scan/p2sRule",
-            axum::routing::post(scan_p2s_rule_handler),
-        );
+        .route("/scan/p2sRule", axum::routing::post(scan_p2s_rule_handler));
 
     router.with_state(state)
 }
@@ -2120,13 +2123,12 @@ async fn panel_handler() -> axum::response::Html<&'static str> {
 }
 
 /// GET /api-docs/openapi.yaml — Serve the OpenAPI specification.
-async fn openapi_yaml_handler() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str)
-{
+async fn openapi_yaml_handler() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/yaml; charset=utf-8",
-        )],
+        [(axum::http::header::CONTENT_TYPE, "text/yaml; charset=utf-8")],
         crate::web_ui::OPENAPI_YAML,
     )
 }
@@ -2159,9 +2161,21 @@ async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfoResponse> {
     };
 
     // Heights of 0 mean no headers/blocks yet — report as null
-    let headers_height = if shared.headers_height > 0 { Some(shared.headers_height) } else { None };
-    let full_height = if shared.full_height > 0 { Some(shared.full_height) } else { None };
-    let max_peer_height = if shared.max_peer_height > 0 { Some(shared.max_peer_height) } else { None };
+    let headers_height = if shared.headers_height > 0 {
+        Some(shared.headers_height)
+    } else {
+        None
+    };
+    let full_height = if shared.full_height > 0 {
+        Some(shared.full_height)
+    } else {
+        None
+    };
+    let max_peer_height = if shared.max_peer_height > 0 {
+        Some(shared.max_peer_height)
+    } else {
+        None
+    };
 
     // Mining is enabled when a candidate generator has been initialized.
     let is_mining = shared.is_mining || state.candidate_generator.is_some();
@@ -2266,14 +2280,21 @@ async fn peers_connect_handler(
     let addr: std::net::SocketAddr = addr_str
         .parse()
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid socket address"))?;
-    let sender = state
-        .peer_connect
-        .as_ref()
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Peer connect channel not available"))?;
-    sender
-        .try_send(addr)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to send peer connect request"))?;
-    Ok(Json(serde_json::json!({ "status": "connecting", "address": addr.to_string() })))
+    let sender = state.peer_connect.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Peer connect channel not available",
+        )
+    })?;
+    sender.try_send(addr).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Failed to send peer connect request",
+        )
+    })?;
+    Ok(Json(
+        serde_json::json!({ "status": "connecting", "address": addr.to_string() }),
+    ))
 }
 
 /// `GET /peers/status` — P2P layer status.
@@ -2291,19 +2312,25 @@ async fn peers_status_handler(State(state): State<ApiState>) -> Json<PeerStatusR
 }
 
 /// `GET /peers/syncInfo` — SyncTracker state dump.
-async fn peers_sync_info_handler(
-    State(state): State<ApiState>,
-) -> Json<serde_json::Value> {
+async fn peers_sync_info_handler(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let shared = state.shared.read().await;
-    Json(shared.sync_tracker_snapshot.clone().unwrap_or_else(|| serde_json::json!({})))
+    Json(
+        shared
+            .sync_tracker_snapshot
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({})),
+    )
 }
 
 /// `GET /peers/trackInfo` — DeliveryTracker state dump.
-async fn peers_track_info_handler(
-    State(state): State<ApiState>,
-) -> Json<serde_json::Value> {
+async fn peers_track_info_handler(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let shared = state.shared.read().await;
-    Json(shared.delivery_tracker_snapshot.clone().unwrap_or_else(|| serde_json::json!({})))
+    Json(
+        shared
+            .delivery_tracker_snapshot
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({})),
+    )
 }
 
 /// Convert a Scala-compatible JSON transaction to our internal `ErgoTransaction`.
@@ -2376,8 +2403,8 @@ fn convert_json_tx_to_ergo_tx(json_tx: &TxJsonTransaction) -> Result<ErgoTransac
                 .assets
                 .iter()
                 .map(|a| {
-                    let tid = hex::decode(&a.token_id)
-                        .map_err(|_| "invalid tokenId hex".to_string())?;
+                    let tid =
+                        hex::decode(&a.token_id).map_err(|_| "invalid tokenId hex".to_string())?;
                     if tid.len() != 32 {
                         return Err("tokenId must be 32 bytes".into());
                     }
@@ -2460,13 +2487,17 @@ async fn submit_transaction_handler(
     State(state): State<ApiState>,
     Json(json_tx): Json<TxJsonTransaction>,
 ) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let tx = convert_json_tx_to_ergo_tx(&json_tx)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))?;
+    let tx =
+        convert_json_tx_to_ergo_tx(&json_tx).map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))?;
 
     let bytes = serialize_transaction(&tx);
 
-    validate_tx_stateless(&tx, &ValidationSettings::initial())
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Stateless transaction validation failed"))?;
+    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Stateless transaction validation failed",
+        )
+    })?;
 
     ergo_network::mempool::validate_for_pool(
         bytes.len(),
@@ -2474,15 +2505,24 @@ async fn submit_transaction_handler(
         state.max_transaction_size,
         &tx.tx_id,
     )
-    .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Transaction rejected by mempool policy"))?;
+    .map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Transaction rejected by mempool policy",
+        )
+    })?;
 
     let tx_id = tx.tx_id;
 
     // Insert into mempool (scoped to drop the lock guard before any .await).
     {
         let mut mp = state.mempool.write().unwrap();
-        mp.put_with_size(tx, bytes.len())
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to insert transaction into mempool"))?;
+        mp.put_with_size(tx, bytes.len()).map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Failed to insert transaction into mempool",
+            )
+        })?;
     }
 
     // Signal event loop to broadcast and wait for confirmation.
@@ -2510,9 +2550,7 @@ async fn get_unconfirmed_handler(
     Json(txs)
 }
 
-async fn get_unconfirmed_size_handler(
-    State(state): State<ApiState>,
-) -> Json<MempoolSizeResponse> {
+async fn get_unconfirmed_size_handler(State(state): State<ApiState>) -> Json<MempoolSizeResponse> {
     let mp = state.mempool.read().unwrap();
     Json(MempoolSizeResponse { size: mp.size() })
 }
@@ -2550,20 +2588,29 @@ async fn check_transaction_handler(
     State(state): State<ApiState>,
     Json(json_tx): Json<TxJsonTransaction>,
 ) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let tx = convert_json_tx_to_ergo_tx(&json_tx)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))?;
+    let tx =
+        convert_json_tx_to_ergo_tx(&json_tx).map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))?;
 
     let bytes = serialize_transaction(&tx);
 
-    validate_tx_stateless(&tx, &ValidationSettings::initial())
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Stateless transaction validation failed"))?;
+    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Stateless transaction validation failed",
+        )
+    })?;
     ergo_network::mempool::validate_for_pool(
         bytes.len(),
         &state.blacklisted_transactions,
         state.max_transaction_size,
         &tx.tx_id,
     )
-    .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Transaction rejected by mempool policy"))?;
+    .map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Transaction rejected by mempool policy",
+        )
+    })?;
 
     // Return plain JSON string tx_id (matching Scala format)
     Ok(Json(hex::encode(tx.tx_id.0)))
@@ -2578,8 +2625,12 @@ async fn submit_transaction_bytes_handler(
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
     let tx = parse_transaction(&bytes)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to parse transaction"))?;
-    validate_tx_stateless(&tx, &ValidationSettings::initial())
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Stateless transaction validation failed"))?;
+    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Stateless transaction validation failed",
+        )
+    })?;
 
     ergo_network::mempool::validate_for_pool(
         bytes.len(),
@@ -2587,15 +2638,24 @@ async fn submit_transaction_bytes_handler(
         state.max_transaction_size,
         &tx.tx_id,
     )
-    .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Transaction rejected by mempool policy"))?;
+    .map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Transaction rejected by mempool policy",
+        )
+    })?;
 
     let tx_id = tx.tx_id;
 
     // Insert into mempool (scoped to drop the lock guard before any .await).
     {
         let mut mp = state.mempool.write().unwrap();
-        mp.put_with_size(tx, bytes.len())
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to insert transaction into mempool"))?;
+        mp.put_with_size(tx, bytes.len()).map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Failed to insert transaction into mempool",
+            )
+        })?;
     }
 
     if let Some(sender) = state.tx_submit.clone() {
@@ -2616,15 +2676,24 @@ async fn check_transaction_bytes_handler(
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
     let tx = parse_transaction(&bytes)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to parse transaction"))?;
-    validate_tx_stateless(&tx, &ValidationSettings::initial())
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Stateless transaction validation failed"))?;
+    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Stateless transaction validation failed",
+        )
+    })?;
     ergo_network::mempool::validate_for_pool(
         bytes.len(),
         &state.blacklisted_transactions,
         state.max_transaction_size,
         &tx.tx_id,
     )
-    .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Transaction rejected by mempool policy"))?;
+    .map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Transaction rejected by mempool policy",
+        )
+    })?;
     Ok(Json(TxSubmitResponse {
         tx_id: hex::encode(tx.tx_id.0),
     }))
@@ -2681,7 +2750,9 @@ async fn wait_time_handler(
         // Below minimum fee, long wait proportional to mempool size
         60_000 + mp.size() as u64 * 10_000
     };
-    Json(WaitTimeResponse { wait_time_millis: wait })
+    Json(WaitTimeResponse {
+        wait_time_millis: wait,
+    })
 }
 
 /// `HEAD /transactions/unconfirmed/{tx_id}` — check if tx is in mempool (200/404, no body).
@@ -2708,11 +2779,13 @@ async fn head_unconfirmed_handler(
 }
 
 /// `GET /transactions/unconfirmed/transactionIds` — all unconfirmed tx IDs.
-async fn get_unconfirmed_tx_ids_handler(
-    State(state): State<ApiState>,
-) -> Json<Vec<String>> {
+async fn get_unconfirmed_tx_ids_handler(State(state): State<ApiState>) -> Json<Vec<String>> {
     let mp = state.mempool.read().unwrap();
-    let ids: Vec<String> = mp.get_all_tx_ids().iter().map(|id| hex::encode(id.0)).collect();
+    let ids: Vec<String> = mp
+        .get_all_tx_ids()
+        .iter()
+        .map(|id| hex::encode(id.0))
+        .collect();
     Json(ids)
 }
 
@@ -2856,10 +2929,8 @@ async fn post_unconfirmed_by_ergo_tree_handler(
     let tree_hash = blake2b256(&tree_bytes);
     let pool = state.mempool.read().unwrap();
     let txs = pool.find_txs_by_tree_hash(&tree_hash);
-    let result: Vec<TransactionResponse> = txs
-        .iter()
-        .map(|tx| ergo_tx_to_response(tx, 0))
-        .collect();
+    let result: Vec<TransactionResponse> =
+        txs.iter().map(|tx| ergo_tx_to_response(tx, 0)).collect();
     Ok(Json(result))
 }
 
@@ -2907,12 +2978,8 @@ async fn post_unconfirmed_outputs_by_registers_handler(
                     &format!("invalid register key: {key}"),
                 )
             })?;
-        let val = hex::decode(hex_val).map_err(|_| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid hex for {key}"),
-            )
-        })?;
+        let val = hex::decode(hex_val)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, &format!("invalid hex for {key}")))?;
         filter.push((reg_idx, val));
     }
     let pool = state.mempool.read().unwrap();
@@ -2943,17 +3010,24 @@ async fn get_paginated_blocks_handler(
     State(state): State<ApiState>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
-    let best_height = state
-        .history
-        .best_header_height()
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read best header height"))?;
+    let best_height = state.history.best_header_height().map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read best header height",
+        )
+    })?;
 
     if best_height == 0 {
         // No headers stored yet — check if there really is a best header.
         if state
             .history
             .best_header_id()
-            .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read best header ID"))?
+            .map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to read best header ID",
+                )
+            })?
             .is_none()
         {
             return Ok(Json(Vec::new()));
@@ -2975,7 +3049,12 @@ async fn get_paginated_blocks_handler(
         let ids = state
             .history
             .header_ids_at_height(height as u32)
-            .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read header IDs at height"))?;
+            .map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to read header IDs at height",
+                )
+            })?;
         for id in &ids {
             result.push(hex::encode(id.0));
         }
@@ -3020,15 +3099,16 @@ async fn get_chain_slice_handler(
 
     let mut responses = Vec::new();
     for height in from..=capped_to {
-        let ids = state
-            .history
-            .header_ids_at_height(height)
-            .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read header IDs at height"))?;
+        let ids = state.history.header_ids_at_height(height).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to read header IDs at height",
+            )
+        })?;
         for id in &ids {
-            let header = state
-                .history
-                .load_header(id)
-                .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header"))?;
+            let header = state.history.load_header(id).map_err(|_| {
+                api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header")
+            })?;
             if let Some(header) = header {
                 responses.push(header_to_response_with_id(&header, &hex::encode(id.0)));
             }
@@ -3061,7 +3141,12 @@ async fn get_block_transactions_handler(
     let data = state
         .history
         .get_modifier(102, &id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load block transactions"))?
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load block transactions",
+            )
+        })?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block transactions not found"))?;
 
     Ok(Json(hex::encode(data)))
@@ -3114,9 +3199,7 @@ async fn get_modifier_handler(
 // ---------------------------------------------------------------------------
 
 /// `GET /utils/address/{addr}` — validate an Ergo address.
-async fn validate_address_handler(
-    Path(addr): Path<String>,
-) -> Json<AddressValidationResponse> {
+async fn validate_address_handler(Path(addr): Path<String>) -> Json<AddressValidationResponse> {
     match address::validate_address(&addr) {
         Ok(_) => Json(AddressValidationResponse {
             address: addr,
@@ -3232,7 +3315,9 @@ async fn blake2b_hash_handler(Json(input): Json<String>) -> Json<serde_json::Val
     let mut hasher = blake2::Blake2bVar::new(32).expect("valid output size");
     hasher.update(input.as_bytes());
     let mut hash = [0u8; 32];
-    hasher.finalize_variable(&mut hash).expect("valid output size");
+    hasher
+        .finalize_variable(&mut hash)
+        .expect("valid output size");
     Json(serde_json::json!({ "hash": hex::encode(hash) }))
 }
 
@@ -3242,9 +3327,7 @@ async fn emission_handler(Path(height): Path<u32>) -> Json<ergo_network::emissio
 }
 
 /// `GET /emission/scripts` — emission contract addresses.
-async fn emission_scripts_handler(
-    State(state): State<ApiState>,
-) -> Json<EmissionScriptsResponse> {
+async fn emission_scripts_handler(State(state): State<ApiState>) -> Json<EmissionScriptsResponse> {
     let network = network_prefix(&state.network);
 
     // Minimal placeholder ErgoTree bytes for emission contracts.
@@ -3280,7 +3363,12 @@ async fn merkle_proof_handler(
     let block_txs = state
         .history
         .load_block_transactions(&header_id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load block transactions"))?
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load block transactions",
+            )
+        })?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block transactions not found"))?;
 
     // Compute tx IDs: blake2b256 of each serialized transaction.
@@ -3303,8 +3391,13 @@ async fn merkle_proof_handler(
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Transaction not found in block"))?;
 
     let tx_id_slices: Vec<&[u8]> = tx_ids.iter().map(|id| id.as_slice()).collect();
-    let proof_steps = ergo_consensus::merkle::merkle_proof(&tx_id_slices, leaf_index)
-        .ok_or_else(|| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to compute Merkle proof"))?;
+    let proof_steps =
+        ergo_consensus::merkle::merkle_proof(&tx_id_slices, leaf_index).ok_or_else(|| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to compute Merkle proof",
+            )
+        })?;
 
     // Format levels: each is hex(side_byte ++ 32-byte sibling hash).
     let levels: Vec<String> = proof_steps
@@ -3345,7 +3438,12 @@ async fn popow_header_by_id_handler(
     let ext = state
         .history
         .load_extension(&id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load extension"))?
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load extension",
+            )
+        })?
         .unwrap_or(ergo_types::extension::Extension {
             header_id: id,
             fields: Vec::new(),
@@ -3359,10 +3457,12 @@ async fn popow_header_by_height_handler(
     State(state): State<ApiState>,
     Path(height): Path<u32>,
 ) -> Result<Json<PoPowHeaderResponse>, (StatusCode, Json<ApiError>)> {
-    let ids = state
-        .history
-        .header_ids_at_height(height)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read header IDs at height"))?;
+    let ids = state.history.header_ids_at_height(height).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read header IDs at height",
+        )
+    })?;
     let id = ids
         .first()
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "No header found at height"))?;
@@ -3374,7 +3474,12 @@ async fn popow_header_by_height_handler(
     let ext = state
         .history
         .load_extension(id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load extension"))?
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load extension",
+            )
+        })?
         .unwrap_or(ergo_types::extension::Extension {
             header_id: *id,
             fields: Vec::new(),
@@ -3462,11 +3567,7 @@ async fn script_p2s_address_handler(
 ) -> Result<Json<ScriptCompileResponse>, (StatusCode, String)> {
     let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
     let network_prefix = network_prefix_from_str(&state.network);
-    let addr = address::encode_address(
-        network_prefix,
-        address::AddressType::P2S,
-        &tree_bytes,
-    );
+    let addr = address::encode_address(network_prefix, address::AddressType::P2S, &tree_bytes);
     Ok(Json(ScriptCompileResponse { address: addr }))
 }
 
@@ -3478,11 +3579,7 @@ async fn script_p2sh_address_handler(
     let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
     let hash = blake2b256(&tree_bytes);
     let network_prefix = network_prefix_from_str(&state.network);
-    let addr = address::encode_address(
-        network_prefix,
-        address::AddressType::P2SH,
-        &hash[..24],
-    );
+    let addr = address::encode_address(network_prefix, address::AddressType::P2SH, &hash[..24]);
     Ok(Json(ScriptCompileResponse { address: addr }))
 }
 
@@ -3502,10 +3599,9 @@ fn compile_script_to_tree_bytes(source: &str) -> Result<Vec<u8>, (StatusCode, St
         Ok(Ok(tree)) => tree,
         Ok(Err(e)) => {
             // Try formatting the error; if that panics too, fall back to Debug fmt.
-            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                e.pretty_desc(&src)
-            }))
-            .unwrap_or_else(|_| format!("{e:?}"));
+            let msg =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| e.pretty_desc(&src)))
+                    .unwrap_or_else(|_| format!("{e:?}"));
             return Err((StatusCode::BAD_REQUEST, format!("Compilation error: {msg}")));
         }
         Err(_) => {
@@ -3563,7 +3659,12 @@ async fn blockchain_tx_by_id_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Transaction not found".into()))?;
     let shared = state.shared.read().await;
-    Ok(Json(tx_to_response(&tx, db, shared.full_height as u32, &state.network)))
+    Ok(Json(tx_to_response(
+        &tx,
+        db,
+        shared.full_height as u32,
+        &state.network,
+    )))
 }
 
 /// `GET /blockchain/transaction/byIndex/{n}` — look up an indexed transaction by global index.
@@ -3576,7 +3677,12 @@ async fn blockchain_tx_by_index_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Transaction not found".into()))?;
     let shared = state.shared.read().await;
-    Ok(Json(tx_to_response(&tx, db, shared.full_height as u32, &state.network)))
+    Ok(Json(tx_to_response(
+        &tx,
+        db,
+        shared.full_height as u32,
+        &state.network,
+    )))
 }
 
 /// `POST /blockchain/transaction/byAddress` — transactions for an address (body = address string).
@@ -3588,11 +3694,20 @@ async fn blockchain_txs_by_address_post_handler(
     let db = require_indexer(&state)?;
     let ergo_tree = address_to_ergo_tree(body.trim(), &state.network)?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (txs, total) = ergo_indexer::queries::txs_by_address(db, &ergo_tree, params.offset, params.limit, sort_desc)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (txs, total) = ergo_indexer::queries::txs_by_address(
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        sort_desc,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let shared = state.shared.read().await;
     let height = shared.full_height as u32;
-    let items = txs.iter().map(|tx| tx_to_response(tx, db, height, &state.network)).collect();
+    let items = txs
+        .iter()
+        .map(|tx| tx_to_response(tx, db, height, &state.network))
+        .collect();
     Ok(Json(PaginatedTxResponse { items, total }))
 }
 
@@ -3605,11 +3720,20 @@ async fn blockchain_txs_by_address_get_handler(
     let db = require_indexer(&state)?;
     let ergo_tree = address_to_ergo_tree(&addr, &state.network)?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (txs, total) = ergo_indexer::queries::txs_by_address(db, &ergo_tree, params.offset, params.limit, sort_desc)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (txs, total) = ergo_indexer::queries::txs_by_address(
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        sort_desc,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let shared = state.shared.read().await;
     let height = shared.full_height as u32;
-    let items = txs.iter().map(|tx| tx_to_response(tx, db, height, &state.network)).collect();
+    let items = txs
+        .iter()
+        .map(|tx| tx_to_response(tx, db, height, &state.network))
+        .collect();
     Ok(Json(PaginatedTxResponse { items, total }))
 }
 
@@ -3664,10 +3788,18 @@ async fn blockchain_boxes_by_token_handler(
     let token_id = ModifierId(token_id_arr);
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_token(
-        db, &token_id, params.offset, params.limit, false, sort_desc,
+        db,
+        &token_id,
+        params.offset,
+        params.limit,
+        false,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let items = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     Ok(Json(PaginatedBoxResponse { items, total }))
 }
 
@@ -3682,11 +3814,18 @@ async fn blockchain_unspent_boxes_by_token_handler(
     let token_id = ModifierId(token_id_arr);
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_token(
-        db, &token_id, params.offset, params.limit, true, sort_desc,
+        db,
+        &token_id,
+        params.offset,
+        params.limit,
+        true,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> =
-        boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let mut items: Vec<IndexedErgoBoxResponse> = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     let mut total = total;
     let mp = state.mempool.read().unwrap();
     apply_mempool_box_filters(&mut items, &mut total, &mp, &params, None, &state.network);
@@ -3703,10 +3842,18 @@ async fn blockchain_boxes_by_address_post_handler(
     let ergo_tree = address_to_ergo_tree(body.trim(), &state.network)?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db, &ergo_tree, params.offset, params.limit, false, sort_desc,
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        false,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let items = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     Ok(Json(PaginatedBoxResponse { items, total }))
 }
 
@@ -3720,10 +3867,18 @@ async fn blockchain_boxes_by_address_get_handler(
     let ergo_tree = address_to_ergo_tree(&addr, &state.network)?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db, &ergo_tree, params.offset, params.limit, false, sort_desc,
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        false,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let items = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     Ok(Json(PaginatedBoxResponse { items, total }))
 }
 
@@ -3737,11 +3892,18 @@ async fn blockchain_unspent_boxes_by_address_post_handler(
     let ergo_tree = address_to_ergo_tree(body.trim(), &state.network)?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db, &ergo_tree, params.offset, params.limit, true, sort_desc,
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        true,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> =
-        boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let mut items: Vec<IndexedErgoBoxResponse> = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     let mut total = total;
     let mp = state.mempool.read().unwrap();
     apply_mempool_box_filters(
@@ -3765,11 +3927,18 @@ async fn blockchain_unspent_boxes_by_address_get_handler(
     let ergo_tree = address_to_ergo_tree(&addr, &state.network)?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db, &ergo_tree, params.offset, params.limit, true, sort_desc,
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        true,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> =
-        boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let mut items: Vec<IndexedErgoBoxResponse> = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     let mut total = total;
     let mp = state.mempool.read().unwrap();
     apply_mempool_box_filters(
@@ -3790,14 +3959,22 @@ async fn blockchain_boxes_by_template_handler(
     Query(params): Query<BlockchainPaginationParams>,
 ) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
     let db = require_indexer(&state)?;
-    let template_hash = hex::decode(&hash)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
+    let template_hash =
+        hex::decode(&hash).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_template(
-        db, &template_hash, params.offset, params.limit, false, sort_desc,
+        db,
+        &template_hash,
+        params.offset,
+        params.limit,
+        false,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let items = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     Ok(Json(PaginatedBoxResponse { items, total }))
 }
 
@@ -3808,15 +3985,22 @@ async fn blockchain_unspent_boxes_by_template_handler(
     Query(params): Query<UnspentBoxParams>,
 ) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
     let db = require_indexer(&state)?;
-    let template_hash = hex::decode(&hash)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
+    let template_hash =
+        hex::decode(&hash).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_template(
-        db, &template_hash, params.offset, params.limit, true, sort_desc,
+        db,
+        &template_hash,
+        params.offset,
+        params.limit,
+        true,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> =
-        boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let mut items: Vec<IndexedErgoBoxResponse> = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     let mut total = total;
     let mp = state.mempool.read().unwrap();
     apply_mempool_box_filters(&mut items, &mut total, &mp, &params, None, &state.network);
@@ -3845,10 +4029,18 @@ async fn blockchain_boxes_by_ergo_tree_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex ErgoTree".into()))?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db, &ergo_tree, params.offset, params.limit, false, sort_desc,
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        false,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let items = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     Ok(Json(PaginatedBoxResponse { items, total }))
 }
 
@@ -3863,11 +4055,18 @@ async fn blockchain_unspent_boxes_by_ergo_tree_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex ErgoTree".into()))?;
     let sort_desc = params.sort_direction.as_deref() != Some("asc");
     let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db, &ergo_tree, params.offset, params.limit, true, sort_desc,
+        db,
+        &ergo_tree,
+        params.offset,
+        params.limit,
+        true,
+        sort_desc,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> =
-        boxes.iter().map(|b| box_to_response(b, &state.network)).collect();
+    let mut items: Vec<IndexedErgoBoxResponse> = boxes
+        .iter()
+        .map(|b| box_to_response(b, &state.network))
+        .collect();
     let mut total = total;
     let mp = state.mempool.read().unwrap();
     apply_mempool_box_filters(
@@ -4030,10 +4229,7 @@ async fn blockchain_block_by_header_id_handler(
         .history
         .load_block_transactions(&header_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            "Block transactions not found".into(),
-        ))?;
+        .ok_or((StatusCode::NOT_FOUND, "Block transactions not found".into()))?;
 
     let shared = state.shared.read().await;
     let current_height = shared.full_height as u32;
@@ -4235,24 +4431,27 @@ async fn post_block_handler(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     // Extract the header bytes (hex-encoded serialized header).
-    let header_hex = body
-        .get("header")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'header' field (hex string)"))?;
-
-    let header_bytes = hex::decode(header_hex).map_err(|_| {
-        api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding in header")
+    let header_hex = body.get("header").and_then(|v| v.as_str()).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Missing 'header' field (hex string)",
+        )
     })?;
+
+    let header_bytes = hex::decode(header_hex)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding in header"))?;
 
     // Parse the header to validate PoW.
     let header = ergo_wire::header_ser::parse_header(&header_bytes).map_err(|e| {
-        api_error(StatusCode::BAD_REQUEST, &format!("Failed to parse header: {e}"))
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("Failed to parse header: {e}"),
+        )
     })?;
 
     // Validate proof-of-work (lightweight pre-check, matching Scala's `powScheme.validate`).
-    ergo_consensus::autolykos::validate_pow(&header).map_err(|e| {
-        api_error(StatusCode::BAD_REQUEST, &format!("Invalid PoW: {e}"))
-    })?;
+    ergo_consensus::autolykos::validate_pow(&header)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("Invalid PoW: {e}")))?;
 
     // Compute the header ID from the serialized bytes.
     let header_id = compute_header_id(&header_bytes);
@@ -4265,35 +4464,37 @@ async fn post_block_handler(
 
     // Optional body sections: blockTransactions, extension, adProofs
     if let Some(bt_hex) = body.get("blockTransactions").and_then(|v| v.as_str()) {
-        let bt_bytes = hex::decode(bt_hex).map_err(|_| {
-            api_error(StatusCode::BAD_REQUEST, "Invalid hex in blockTransactions")
-        })?;
+        let bt_bytes = hex::decode(bt_hex)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in blockTransactions"))?;
         modifiers.push((102u8, header_id, bt_bytes));
     }
 
     if let Some(ext_hex) = body.get("extension").and_then(|v| v.as_str()) {
-        let ext_bytes = hex::decode(ext_hex).map_err(|_| {
-            api_error(StatusCode::BAD_REQUEST, "Invalid hex in extension")
-        })?;
+        let ext_bytes = hex::decode(ext_hex)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in extension"))?;
         modifiers.push((108u8, header_id, ext_bytes));
     }
 
     if let Some(ap_hex) = body.get("adProofs").and_then(|v| v.as_str()) {
-        let ap_bytes = hex::decode(ap_hex).map_err(|_| {
-            api_error(StatusCode::BAD_REQUEST, "Invalid hex in adProofs")
-        })?;
+        let ap_bytes = hex::decode(ap_hex)
+            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in adProofs"))?;
         modifiers.push((104u8, header_id, ap_bytes));
     }
 
     // Fire-and-forget: send to the event loop.
-    let sender = state
-        .block_submit
-        .as_ref()
-        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "Block submit channel not available"))?;
+    let sender = state.block_submit.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Block submit channel not available",
+        )
+    })?;
 
     let submission = crate::event_loop::BlockSubmission { modifiers };
     sender.try_send(submission).map_err(|_| {
-        api_error(StatusCode::SERVICE_UNAVAILABLE, "Event loop busy, block submit channel full")
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Event loop busy, block submit channel full",
+        )
     })?;
 
     // Return OK immediately with the header ID (Scala pattern: fire-and-forget).
@@ -4374,10 +4575,12 @@ async fn utxo_boxes_binary_proof_handler(
     }
 
     // Send a proof request to the event loop via the oneshot channel pattern.
-    let sender = state
-        .utxo_proof
-        .as_ref()
-        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "UTXO proof channel not available"))?;
+    let sender = state.utxo_proof.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "UTXO proof channel not available",
+        )
+    })?;
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let request = crate::event_loop::UtxoProofRequest {
@@ -4386,14 +4589,15 @@ async fn utxo_boxes_binary_proof_handler(
     };
 
     sender.try_send(request).map_err(|_| {
-        api_error(StatusCode::SERVICE_UNAVAILABLE, "Event loop busy, proof request channel full")
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Event loop busy, proof request channel full",
+        )
     })?;
 
     // Await the response with a timeout.
     match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await {
-        Ok(Ok(Ok(proof_bytes))) => {
-            Ok(Json(serde_json::json!(hex::encode(proof_bytes))))
-        }
+        Ok(Ok(Ok(proof_bytes))) => Ok(Json(serde_json::json!(hex::encode(proof_bytes)))),
         Ok(Ok(Err(e))) => Err(api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Proof generation failed: {e}"),
@@ -4424,9 +4628,8 @@ async fn script_execute_with_context_handler(
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'script' field"))?;
 
     // Compile the script to an ErgoTree
-    let tree_bytes = compile_script_to_tree_bytes(script).map_err(|(status, msg)| {
-        api_error(status, &msg)
-    })?;
+    let tree_bytes =
+        compile_script_to_tree_bytes(script).map_err(|(status, msg)| api_error(status, &msg))?;
 
     // Full script execution with a transaction context (inputs, data inputs,
     // self box, etc.) requires sigma-rust's Prover infrastructure and is
@@ -4447,18 +4650,22 @@ async fn script_execute_with_context_handler(
 async fn mining_candidate_handler(
     State(state): State<ApiState>,
 ) -> Result<Json<MiningCandidateResponse>, (StatusCode, String)> {
-    let gen_lock = state
-        .candidate_generator
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "mining is not enabled".to_string()))?;
+    let gen_lock = state.candidate_generator.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "mining is not enabled".to_string(),
+    ))?;
 
-    let gen = gen_lock
-        .read()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("lock poisoned: {e}")))?;
+    let gen = gen_lock.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("lock poisoned: {e}"),
+        )
+    })?;
 
-    let (_candidate, header_template) = gen
-        .current()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "no mining candidate available yet".to_string()))?;
+    let (_candidate, header_template) = gen.current().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no mining candidate available yet".to_string(),
+    ))?;
 
     // Recompute msg and target from header template.
     let msg = ergo_consensus::autolykos::msg_by_header(header_template);
@@ -4481,18 +4688,22 @@ async fn mining_candidate_with_txs_handler(
     State(state): State<ApiState>,
     _body: String,
 ) -> Result<Json<CandidateWithTxsResponse>, (StatusCode, String)> {
-    let gen_lock = state
-        .candidate_generator
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "mining is not enabled".to_string()))?;
+    let gen_lock = state.candidate_generator.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "mining is not enabled".to_string(),
+    ))?;
 
-    let gen = gen_lock
-        .read()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("lock poisoned: {e}")))?;
+    let gen = gen_lock.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("lock poisoned: {e}"),
+        )
+    })?;
 
-    let (candidate, header_template) = gen
-        .current()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "no mining candidate available yet".to_string()))?;
+    let (candidate, header_template) = gen.current().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no mining candidate available yet".to_string(),
+    ))?;
 
     // Recompute msg and target from header template.
     let msg = ergo_consensus::autolykos::msg_by_header(header_template);
@@ -4531,14 +4742,17 @@ async fn mining_solution_handler(
         ));
     }
 
-    let tx = state
-        .mining_solution_tx
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "mining is not enabled".to_string()))?;
+    let tx = state.mining_solution_tx.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "mining is not enabled".to_string(),
+    ))?;
 
-    tx.send(solution)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "solution channel closed".to_string()))?;
+    tx.send(solution).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "solution channel closed".to_string(),
+        )
+    })?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
@@ -4819,8 +5033,7 @@ async fn wallet_unspent_boxes_handler(
             } else {
                 0
             };
-            let conf_ok =
-                confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf);
+            let conf_ok = confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf);
             let height_ok = b.inclusion_height >= min_h && b.inclusion_height <= max_h;
             conf_ok && height_ok
         })
@@ -4858,8 +5071,7 @@ async fn wallet_boxes_handler(
             } else {
                 0
             };
-            let conf_ok =
-                confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf);
+            let conf_ok = confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf);
             let height_ok = b.inclusion_height >= min_h && b.inclusion_height <= max_h;
             conf_ok && height_ok
         })
@@ -4973,10 +5185,7 @@ async fn wallet_transaction_by_id_handler(
             })))
         }
         Ok(None) => Err(api_error(StatusCode::NOT_FOUND, "transaction not found")),
-        Err(e) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &e.to_string(),
-        )),
+        Err(e) => Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
     }
 }
 
@@ -5215,8 +5424,7 @@ async fn wallet_payment_send_handler(
     let _wallet = require_wallet(&state)?;
 
     let payment_requests = convert_payment_requests(&body);
-    let (signed_bytes, tx_id) =
-        build_and_sign_tx(&state, &payment_requests, default_fee()).await?;
+    let (signed_bytes, tx_id) = build_and_sign_tx(&state, &payment_requests, default_fee()).await?;
 
     submit_signed_tx(&state, &signed_bytes, tx_id).await?;
 
@@ -5237,8 +5445,7 @@ async fn wallet_tx_generate_handler(
     let _wallet = require_wallet(&state)?;
 
     let payment_requests = convert_payment_requests(&body.requests);
-    let (signed_bytes, _tx_id) =
-        build_and_sign_tx(&state, &payment_requests, body.fee).await?;
+    let (signed_bytes, _tx_id) = build_and_sign_tx(&state, &payment_requests, body.fee).await?;
 
     Ok(Json(serde_json::json!({
         "bytes": hex::encode(&signed_bytes),
@@ -5326,7 +5533,12 @@ async fn wallet_tx_sign_handler(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid hex: {e}")))?;
 
     let signed_format = ergo_lib::chain::transaction::Transaction::sigma_parse_bytes(&tx_bytes)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("failed to parse tx bytes: {e}")))?;
+        .map_err(|e| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                &format!("failed to parse tx bytes: {e}"),
+            )
+        })?;
 
     let unsigned_inputs: Vec<ergo_lib::chain::transaction::UnsignedInput> = signed_format
         .inputs
@@ -5353,7 +5565,12 @@ async fn wallet_tx_sign_handler(
         data_inputs,
         output_candidates,
     )
-    .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("failed to build unsigned tx: {e}")))?;
+    .map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("failed to build unsigned tx: {e}"),
+        )
+    })?;
 
     let keys = w
         .keys()
@@ -5418,8 +5635,7 @@ async fn wallet_tx_send_handler(
     let _wallet = require_wallet(&state)?;
 
     let payment_requests = convert_payment_requests(&body.requests);
-    let (signed_bytes, tx_id) =
-        build_and_sign_tx(&state, &payment_requests, body.fee).await?;
+    let (signed_bytes, tx_id) = build_and_sign_tx(&state, &payment_requests, body.fee).await?;
 
     submit_signed_tx(&state, &signed_bytes, tx_id).await?;
 
@@ -5531,8 +5747,7 @@ async fn scan_stop_tracking_handler(
     check_auth(&headers, &state.api_key_hash)?;
     let wallet = require_wallet(&state)?;
     let mut w = wallet.write().await;
-    let box_id = hex_to_32bytes(&body.box_id)
-        .map_err(|(code, msg)| api_error(code, &msg))?;
+    let box_id = hex_to_32bytes(&body.box_id).map_err(|(code, msg)| api_error(code, &msg))?;
     w.stop_tracking(body.scan_id, &box_id)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
     Ok(Json(serde_json::json!({
@@ -5551,8 +5766,7 @@ async fn scan_add_box_handler(
     check_auth(&headers, &state.api_key_hash)?;
     let wallet = require_wallet(&state)?;
     let mut w = wallet.write().await;
-    let box_id = hex_to_32bytes(&body.box_id)
-        .map_err(|(code, msg)| api_error(code, &msg))?;
+    let box_id = hex_to_32bytes(&body.box_id).map_err(|(code, msg)| api_error(code, &msg))?;
     let ergo_tree_bytes = hex::decode(&body.ergo_tree)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in ergoTree"))?;
     let tracked_box = ergo_wallet::tracked_box::TrackedBox {
@@ -5790,7 +6004,8 @@ mod tests {
             full_blocks_score: "12300".to_string(),
             launch_time: 1700000000000,
             last_seen_message_time: 1700001000000,
-            genesis_block_id: "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b".to_string(),
+            genesis_block_id: "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"
+                .to_string(),
             is_mining: false,
             is_explorer: false,
             eip27_supported: true,
@@ -5807,8 +6022,14 @@ mod tests {
         assert_eq!(json["stateType"], "digest");
         assert_eq!(json["difficulty"], "100663296");
         assert_eq!(json["network"], "mainnet");
-        assert!(json.get("bestFullHeaderId").is_some(), "expected bestFullHeaderId");
-        assert!(json.get("previousFullHeaderId").is_some(), "expected previousFullHeaderId");
+        assert!(
+            json.get("bestFullHeaderId").is_some(),
+            "expected bestFullHeaderId"
+        );
+        assert!(
+            json.get("previousFullHeaderId").is_some(),
+            "expected previousFullHeaderId"
+        );
         assert!(json.get("stateVersion").is_some(), "expected stateVersion");
         assert!(json.get("isExplorer").is_some(), "expected isExplorer");
         assert_eq!(json["eip27Supported"], true);
@@ -5839,7 +6060,8 @@ mod tests {
             full_blocks_score: "0".to_string(),
             launch_time: 1700000000000,
             last_seen_message_time: 0,
-            genesis_block_id: "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b".to_string(),
+            genesis_block_id: "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"
+                .to_string(),
             is_mining: false,
             is_explorer: false,
             eip27_supported: true,
@@ -5850,37 +6072,60 @@ mod tests {
             last_mempool_update_time: 0,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert!(json.get("headersHeight").is_some(), "expected headersHeight");
+        assert!(
+            json.get("headersHeight").is_some(),
+            "expected headersHeight"
+        );
         assert!(json.get("appVersion").is_some(), "expected appVersion");
         assert!(json.get("peersCount").is_some(), "expected peersCount");
         assert!(json.get("stateType").is_some(), "expected stateType");
         assert!(json.get("fullHeight").is_some(), "expected fullHeight");
         assert!(json.get("syncState").is_some(), "expected syncState");
-        assert!(json.get("unconfirmedCount").is_some(), "expected unconfirmedCount");
+        assert!(
+            json.get("unconfirmedCount").is_some(),
+            "expected unconfirmedCount"
+        );
         assert!(json.get("bestHeaderId").is_some(), "expected bestHeaderId");
-        assert!(json.get("bestFullHeaderId").is_some(), "expected bestFullHeaderId");
+        assert!(
+            json.get("bestFullHeaderId").is_some(),
+            "expected bestFullHeaderId"
+        );
         assert!(json.get("stateRoot").is_some(), "expected stateRoot");
-        assert!(json.get("previousFullHeaderId").is_some(), "expected previousFullHeaderId");
+        assert!(
+            json.get("previousFullHeaderId").is_some(),
+            "expected previousFullHeaderId"
+        );
         assert!(json.get("stateVersion").is_some(), "expected stateVersion");
         assert!(json.get("isExplorer").is_some(), "expected isExplorer");
-        assert!(json.get("eip27Supported").is_some(), "expected eip27Supported");
-        assert!(json.get("eip37Supported").is_some(), "expected eip37Supported");
+        assert!(
+            json.get("eip27Supported").is_some(),
+            "expected eip27Supported"
+        );
+        assert!(
+            json.get("eip37Supported").is_some(),
+            "expected eip37Supported"
+        );
         assert!(json.get("restApiUrl").is_some(), "expected restApiUrl");
         // snake_case should NOT be present
-        assert!(json.get("headers_height").is_none(), "unexpected snake_case headers_height");
-        assert!(json.get("app_version").is_none(), "unexpected snake_case app_version");
-        assert!(json.get("best_full_block_id").is_none(), "unexpected snake_case best_full_block_id");
+        assert!(
+            json.get("headers_height").is_none(),
+            "unexpected snake_case headers_height"
+        );
+        assert!(
+            json.get("app_version").is_none(),
+            "unexpected snake_case app_version"
+        );
+        assert!(
+            json.get("best_full_block_id").is_none(),
+            "unexpected snake_case best_full_block_id"
+        );
     }
-
 
     #[tokio::test]
     async fn info_response_has_all_scala_fields() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
-        let req = Request::builder()
-            .uri("/info")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/info").body(Body::empty()).unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
@@ -5889,23 +6134,47 @@ mod tests {
         assert!(json.get("maxPeerHeight").is_some(), "missing maxPeerHeight");
         assert!(json.get("difficulty").is_some(), "missing difficulty");
         assert!(json.get("headersScore").is_some(), "missing headersScore");
-        assert!(json.get("fullBlocksScore").is_some(), "missing fullBlocksScore");
+        assert!(
+            json.get("fullBlocksScore").is_some(),
+            "missing fullBlocksScore"
+        );
         assert!(json.get("launchTime").is_some(), "missing launchTime");
-        assert!(json.get("genesisBlockId").is_some(), "missing genesisBlockId");
+        assert!(
+            json.get("genesisBlockId").is_some(),
+            "missing genesisBlockId"
+        );
         assert!(json.get("isMining").is_some(), "missing isMining");
         assert!(json.get("currentTime").is_some(), "missing currentTime");
         assert!(json.get("parameters").is_some(), "missing parameters");
-        assert!(json.get("lastSeenMessageTime").is_some(), "missing lastSeenMessageTime");
+        assert!(
+            json.get("lastSeenMessageTime").is_some(),
+            "missing lastSeenMessageTime"
+        );
         // New Scala-compatible fields
-        assert!(json.get("bestFullHeaderId").is_some(), "missing bestFullHeaderId");
-        assert!(json.get("previousFullHeaderId").is_some(), "missing previousFullHeaderId");
+        assert!(
+            json.get("bestFullHeaderId").is_some(),
+            "missing bestFullHeaderId"
+        );
+        assert!(
+            json.get("previousFullHeaderId").is_some(),
+            "missing previousFullHeaderId"
+        );
         assert!(json.get("stateVersion").is_some(), "missing stateVersion");
         assert!(json.get("isExplorer").is_some(), "missing isExplorer");
-        assert!(json.get("eip27Supported").is_some(), "missing eip27Supported");
-        assert!(json.get("eip37Supported").is_some(), "missing eip37Supported");
+        assert!(
+            json.get("eip27Supported").is_some(),
+            "missing eip27Supported"
+        );
+        assert!(
+            json.get("eip37Supported").is_some(),
+            "missing eip37Supported"
+        );
         assert!(json.get("restApiUrl").is_some(), "missing restApiUrl");
         // difficulty should be a string
-        assert!(json["difficulty"].is_string(), "difficulty should be a string");
+        assert!(
+            json["difficulty"].is_string(),
+            "difficulty should be a string"
+        );
         // network should be lowercase
         let network = json["network"].as_str().unwrap();
         assert!(
@@ -5913,9 +6182,18 @@ mod tests {
             "network should be lowercase, got: {network}"
         );
         // Heights should be null when 0 (fresh node)
-        assert!(json["headersHeight"].is_null(), "headersHeight should be null on fresh node");
-        assert!(json["fullHeight"].is_null(), "fullHeight should be null on fresh node");
-        assert!(json["maxPeerHeight"].is_null(), "maxPeerHeight should be null on fresh node");
+        assert!(
+            json["headersHeight"].is_null(),
+            "headersHeight should be null on fresh node"
+        );
+        assert!(
+            json["fullHeight"].is_null(),
+            "fullHeight should be null on fresh node"
+        );
+        assert!(
+            json["maxPeerHeight"].is_null(),
+            "maxPeerHeight should be null on fresh node"
+        );
     }
 
     #[tokio::test]
@@ -5923,10 +6201,7 @@ mod tests {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
 
-        let req = Request::builder()
-            .uri("/info")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/info").body(Body::empty()).unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -5996,9 +6271,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         let ids: Vec<String> = serde_json::from_slice(&body).unwrap();
         assert!(ids.is_empty());
     }
@@ -6015,9 +6288,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         let peers: Vec<PeerResponse> = serde_json::from_slice(&body).unwrap();
         assert!(peers.is_empty());
     }
@@ -6055,9 +6326,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 4096)
-            .await
-            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let peers: Vec<PeerResponse> = serde_json::from_slice(&body).unwrap();
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].address, "192.168.1.1:9030");
@@ -6441,7 +6710,9 @@ mod tests {
 
         let fake_id = "dd".repeat(32);
         let req = Request::builder()
-            .uri(format!("/transactions/unconfirmed/outputs/byBoxId/{fake_id}"))
+            .uri(format!(
+                "/transactions/unconfirmed/outputs/byBoxId/{fake_id}"
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -6455,7 +6726,9 @@ mod tests {
 
         let fake_id = "ee".repeat(32);
         let req = Request::builder()
-            .uri(format!("/transactions/unconfirmed/outputs/byTokenId/{fake_id}"))
+            .uri(format!(
+                "/transactions/unconfirmed/outputs/byTokenId/{fake_id}"
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -6650,7 +6923,9 @@ mod tests {
         let router = build_router(state);
         let fake_id = "aa".repeat(32);
         let req = Request::builder()
-            .uri(format!("/transactions/unconfirmed/inputs/byBoxId/{fake_id}"))
+            .uri(format!(
+                "/transactions/unconfirmed/inputs/byBoxId/{fake_id}"
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -6670,7 +6945,9 @@ mod tests {
 
         let router = build_router(state);
         let req = Request::builder()
-            .uri(format!("/transactions/unconfirmed/inputs/byBoxId/{input_box_id}"))
+            .uri(format!(
+                "/transactions/unconfirmed/inputs/byBoxId/{input_box_id}"
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
@@ -6890,11 +7167,7 @@ mod tests {
     async fn address_to_raw_roundtrip() {
         let (state, _dir) = test_api_state();
         let pk_hex = "02".to_string() + &"cd".repeat(32);
-        let addr = address::raw_to_address(
-            &pk_hex,
-            address::NetworkPrefix::Testnet,
-        )
-        .unwrap();
+        let addr = address::raw_to_address(&pk_hex, address::NetworkPrefix::Testnet).unwrap();
         let router = build_router(state);
         let req = Request::builder()
             .uri(format!("/utils/addressToRaw/{addr}"))
@@ -7585,7 +7858,11 @@ mod tests {
         // The ergoscript-compiler 0.24 only supports HEIGHT, literals, and
         // arithmetic — use a simple expression that compiles successfully.
         let bytes = compile_script_to_tree_bytes("HEIGHT + 1");
-        assert!(bytes.is_ok(), "compilation should succeed: {:?}", bytes.err());
+        assert!(
+            bytes.is_ok(),
+            "compilation should succeed: {:?}",
+            bytes.err()
+        );
         let bytes = bytes.unwrap();
         assert!(!bytes.is_empty(), "ErgoTree bytes should not be empty");
     }
@@ -7657,7 +7934,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let addr = json["address"].as_str().unwrap();
         assert!(!addr.is_empty());
@@ -7683,7 +7962,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let addr = json["address"].as_str().unwrap();
         assert!(!addr.is_empty());
@@ -7731,8 +8012,7 @@ mod tests {
     async fn mining_candidate_returns_503_when_no_candidate() {
         let (mut state, _dir) = test_api_state();
         let gen = CandidateGenerator::new([0x02; 33], [0, 0, 0]);
-        state.candidate_generator =
-            Some(Arc::new(std::sync::RwLock::new(gen)));
+        state.candidate_generator = Some(Arc::new(std::sync::RwLock::new(gen)));
         let router = build_router(state);
         let req = Request::builder()
             .uri("/mining/candidate")
@@ -8091,7 +8371,7 @@ mod tests {
         let mut header = ergo_types::header::Header::default_for_test();
         // Give it a valid nBits so difficulty is non-zero
         header.n_bits = 0x01010000; // difficulty = 1
-        // Set non-zero pk so the assertion passes
+                                    // Set non-zero pk so the assertion passes
         header.pow_solution.miner_pk = [0x02; 33];
         header.pow_solution.w = [0x03; 33];
         header.pow_solution.nonce = [0x04; 8];

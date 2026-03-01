@@ -171,8 +171,7 @@ mod tests {
     fn header_500001_roundtrip() {
         let header = mainnet_header_500001();
         let serialized = header_ser::serialize_header(&header);
-        let parsed =
-            header_ser::parse_header(&serialized).expect("parse mainnet header 500001");
+        let parsed = header_ser::parse_header(&serialized).expect("parse mainnet header 500001");
         let reserialized = header_ser::serialize_header(&parsed);
         assert_eq!(
             serialized, reserialized,
@@ -184,8 +183,7 @@ mod tests {
     fn header_800000_roundtrip() {
         let header = mainnet_header_800000();
         let serialized = header_ser::serialize_header(&header);
-        let parsed =
-            header_ser::parse_header(&serialized).expect("parse mainnet header 800000");
+        let parsed = header_ser::parse_header(&serialized).expect("parse mainnet header 800000");
         let reserialized = header_ser::serialize_header(&parsed);
         assert_eq!(
             serialized, reserialized,
@@ -201,8 +199,7 @@ mod tests {
     fn header_500001_parsed_fields() {
         let header = mainnet_header_500001();
         let serialized = header_ser::serialize_header(&header);
-        let parsed =
-            header_ser::parse_header(&serialized).expect("parse mainnet header 500001");
+        let parsed = header_ser::parse_header(&serialized).expect("parse mainnet header 500001");
 
         assert_eq!(parsed.version, 2);
         assert_eq!(parsed.height, 500_001);
@@ -222,8 +219,7 @@ mod tests {
     fn header_800000_parsed_fields() {
         let header = mainnet_header_800000();
         let serialized = header_ser::serialize_header(&header);
-        let parsed =
-            header_ser::parse_header(&serialized).expect("parse mainnet header 800000");
+        let parsed = header_ser::parse_header(&serialized).expect("parse mainnet header 800000");
 
         assert_eq!(parsed.version, 2);
         assert_eq!(parsed.height, 800_000);
@@ -275,10 +271,7 @@ mod tests {
         // Flip a nonce byte — should invalidate PoW
         header.pow_solution.nonce[0] ^= 0xFF;
         let result = autolykos::validate_pow(&header);
-        assert!(
-            result.is_err(),
-            "PoW should fail for a tampered nonce"
-        );
+        assert!(result.is_err(), "PoW should fail for a tampered nonce");
     }
 
     #[test]
@@ -287,10 +280,7 @@ mod tests {
         // Change timestamp — should invalidate PoW since msg changes
         header.timestamp += 1;
         let result = autolykos::validate_pow(&header);
-        assert!(
-            result.is_err(),
-            "PoW should fail for a tampered timestamp"
-        );
+        assert!(result.is_err(), "PoW should fail for a tampered timestamp");
     }
 
     // -----------------------------------------------------------------------
@@ -301,10 +291,8 @@ mod tests {
     fn mainnet_header_1() -> Header {
         // d value: decimal 46909460813884299753486408728361968139945651324239558400157099627
         // converted to big-endian bytes
-        let d_bytes = hex::decode(
-            "7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b",
-        )
-        .expect("valid d hex");
+        let d_bytes = hex::decode("7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b")
+            .expect("valid d hex");
 
         Header {
             version: 1,
@@ -342,8 +330,7 @@ mod tests {
     }
 
     /// Known header ID for block 1 from the Ergo explorer.
-    const HEADER_1_ID: &str =
-        "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b";
+    const HEADER_1_ID: &str = "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b";
 
     // -----------------------------------------------------------------------
     // Test: v1 header ID computation
@@ -372,8 +359,7 @@ mod tests {
     fn header_v1_roundtrip() {
         let header = mainnet_header_1();
         let serialized = header_ser::serialize_header(&header);
-        let parsed =
-            header_ser::parse_header(&serialized).expect("parse mainnet header 1");
+        let parsed = header_ser::parse_header(&serialized).expect("parse mainnet header 1");
         let reserialized = header_ser::serialize_header(&parsed);
         assert_eq!(
             serialized, reserialized,
@@ -389,8 +375,7 @@ mod tests {
     fn header_v1_parsed_fields() {
         let header = mainnet_header_1();
         let serialized = header_ser::serialize_header(&header);
-        let parsed =
-            header_ser::parse_header(&serialized).expect("parse mainnet header 1");
+        let parsed = header_ser::parse_header(&serialized).expect("parse mainnet header 1");
 
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.height, 1);

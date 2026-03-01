@@ -116,16 +116,12 @@ impl HistoryDb {
             None => Ok(None),
             Some(bytes) => {
                 if bytes.is_empty() {
-                    return Err(StorageError::Codec(
-                        "validity value is empty".to_string(),
-                    ));
+                    return Err(StorageError::Codec("validity value is empty".to_string()));
                 }
                 match bytes[0] {
                     0 => Ok(Some(ModifierValidity::Invalid)),
                     1 => Ok(Some(ModifierValidity::Valid)),
-                    v => Err(StorageError::Codec(format!(
-                        "unknown validity byte: {v}"
-                    ))),
+                    v => Err(StorageError::Codec(format!("unknown validity byte: {v}"))),
                 }
             }
         }
@@ -269,7 +265,8 @@ mod tests {
         let id_invalid = test_modifier_id(0xC2);
 
         db.set_validity(&id_valid, ModifierValidity::Valid).unwrap();
-        db.set_validity(&id_invalid, ModifierValidity::Invalid).unwrap();
+        db.set_validity(&id_invalid, ModifierValidity::Invalid)
+            .unwrap();
 
         assert_eq!(
             db.get_validity(&id_valid).unwrap(),
@@ -360,10 +357,7 @@ mod tests {
 
         {
             let db = HistoryDb::open(dir.path()).unwrap();
-            assert_eq!(
-                db.get_validity(&id).unwrap(),
-                Some(ModifierValidity::Valid)
-            );
+            assert_eq!(db.get_validity(&id).unwrap(), Some(ModifierValidity::Valid));
         }
     }
 

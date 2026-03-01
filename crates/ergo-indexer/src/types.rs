@@ -115,9 +115,7 @@ impl<'a> Cursor<'a> {
         match v {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(IndexerDbError::Codec(format!(
-                "invalid bool value: {v}"
-            ))),
+            _ => Err(IndexerDbError::Codec(format!("invalid bool value: {v}"))),
         }
     }
 }
@@ -154,8 +152,17 @@ impl IndexedErgoBox {
     pub fn serialize(&self) -> Vec<u8> {
         let has_spending = self.spending_tx_id.is_some();
         let spending_extra = if has_spending { 32 + 4 } else { 0 };
-        let capacity = 1 + 4 + 1 + spending_extra + 32 + 4 + self.ergo_tree.len()
-            + 8 + 4 + self.tokens.len() * 40 + 8;
+        let capacity = 1
+            + 4
+            + 1
+            + spending_extra
+            + 32
+            + 4
+            + self.ergo_tree.len()
+            + 8
+            + 4
+            + self.tokens.len() * 40
+            + 8;
         let mut buf = Vec::with_capacity(capacity);
 
         buf.push(TYPE_ID_INDEXED_BOX);
@@ -242,9 +249,16 @@ pub struct IndexedErgoTransaction {
 
 impl IndexedErgoTransaction {
     pub fn serialize(&self) -> Vec<u8> {
-        let capacity = 1 + 32 + 4 + 4 + 4 + 8
-            + 4 + self.input_indexes.len() * 8
-            + 4 + self.output_indexes.len() * 8;
+        let capacity = 1
+            + 32
+            + 4
+            + 4
+            + 4
+            + 8
+            + 4
+            + self.input_indexes.len() * 8
+            + 4
+            + self.output_indexes.len() * 8;
         let mut buf = Vec::with_capacity(capacity);
 
         buf.push(TYPE_ID_INDEXED_TX);
@@ -316,11 +330,17 @@ pub struct IndexedErgoAddress {
 
 impl IndexedErgoAddress {
     pub fn serialize(&self) -> Vec<u8> {
-        let capacity = 1 + 32 + 8
-            + 4 + self.balance.tokens.len() * 40
-            + 4 + self.tx_indexes.len() * 8
-            + 4 + self.box_indexes.len() * 8
-            + 4 + 4;
+        let capacity = 1
+            + 32
+            + 8
+            + 4
+            + self.balance.tokens.len() * 40
+            + 4
+            + self.tx_indexes.len() * 8
+            + 4
+            + self.box_indexes.len() * 8
+            + 4
+            + 4;
         let mut buf = Vec::with_capacity(capacity);
 
         buf.push(TYPE_ID_INDEXED_ADDRESS);
@@ -604,15 +624,16 @@ impl IndexedToken {
             None
         };
 
-        let name = if c.read_bool()? {
-            let len = c.read_u32()? as usize;
-            let bytes = c.read_bytes(len)?;
-            Some(String::from_utf8(bytes).map_err(|e| {
-                IndexerDbError::Codec(format!("invalid UTF-8 in token name: {e}"))
-            })?)
-        } else {
-            None
-        };
+        let name =
+            if c.read_bool()? {
+                let len = c.read_u32()? as usize;
+                let bytes = c.read_bytes(len)?;
+                Some(String::from_utf8(bytes).map_err(|e| {
+                    IndexerDbError::Codec(format!("invalid UTF-8 in token name: {e}"))
+                })?)
+            } else {
+                None
+            };
 
         let description = if c.read_bool()? {
             let len = c.read_u32()? as usize;
@@ -671,10 +692,7 @@ mod tests {
             spending_height: None,
             ergo_tree: vec![0x00, 0x08, 0xCD, 0x03],
             value: 1_000_000_000,
-            tokens: vec![
-                (test_modifier_id(0xBB), 100),
-                (test_modifier_id(0xCC), 200),
-            ],
+            tokens: vec![(test_modifier_id(0xBB), 100), (test_modifier_id(0xCC), 200)],
             global_index: 42,
         };
         let bytes = original.serialize();

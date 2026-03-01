@@ -23,28 +23,26 @@ impl PeerDb {
         let path = data_dir.join("peers.json");
         let peers = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(contents) => {
-                    match serde_json::from_str::<Vec<String>>(&contents) {
-                        Ok(addrs) => {
-                            let mut set = HashSet::new();
-                            for s in addrs {
-                                match s.parse::<SocketAddr>() {
-                                    Ok(addr) => {
-                                        set.insert(addr);
-                                    }
-                                    Err(e) => {
-                                        warn!("PeerDb: invalid address '{}': {}", s, e);
-                                    }
+                Ok(contents) => match serde_json::from_str::<Vec<String>>(&contents) {
+                    Ok(addrs) => {
+                        let mut set = HashSet::new();
+                        for s in addrs {
+                            match s.parse::<SocketAddr>() {
+                                Ok(addr) => {
+                                    set.insert(addr);
+                                }
+                                Err(e) => {
+                                    warn!("PeerDb: invalid address '{}': {}", s, e);
                                 }
                             }
-                            set
                         }
-                        Err(e) => {
-                            warn!("PeerDb: corrupt peers.json, ignoring: {}", e);
-                            HashSet::new()
-                        }
+                        set
                     }
-                }
+                    Err(e) => {
+                        warn!("PeerDb: corrupt peers.json, ignoring: {}", e);
+                        HashSet::new()
+                    }
+                },
                 Err(e) => {
                     warn!("PeerDb: failed to read peers.json: {}", e);
                     HashSet::new()

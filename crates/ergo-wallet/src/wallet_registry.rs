@@ -342,22 +342,14 @@ impl WalletRegistry {
     // -----------------------------------------------------------------------
 
     /// Associate a box with a scan.
-    pub fn add_scan_box(
-        &self,
-        scan_id: u16,
-        box_id: &[u8; 32],
-    ) -> Result<(), RegistryError> {
+    pub fn add_scan_box(&self, scan_id: u16, box_id: &[u8; 32]) -> Result<(), RegistryError> {
         let key = scan_box_key(scan_id, box_id);
         self.db.put(key, [])?;
         Ok(())
     }
 
     /// Remove a box-to-scan association.
-    pub fn remove_scan_box(
-        &self,
-        scan_id: u16,
-        box_id: &[u8; 32],
-    ) -> Result<(), RegistryError> {
+    pub fn remove_scan_box(&self, scan_id: u16, box_id: &[u8; 32]) -> Result<(), RegistryError> {
         let key = scan_box_key(scan_id, box_id);
         self.db.delete(key)?;
         Ok(())
@@ -569,7 +561,11 @@ mod tests {
         let (reg, _dir) = open_registry();
         let block_id = [0xAA; 32];
 
-        let boxes = vec![make_box(1, 100, 10), make_box(2, 200, 10), make_box(3, 300, 10)];
+        let boxes = vec![
+            make_box(1, 100, 10),
+            make_box(2, 200, 10),
+            make_box(3, 300, 10),
+        ];
 
         reg.update_on_block(10, &block_id, boxes, vec![], vec![])
             .unwrap();

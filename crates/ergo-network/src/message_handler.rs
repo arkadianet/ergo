@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use ergo_consensus::autolykos::validate_pow;
 use ergo_storage::history_db::HistoryDb;
 use ergo_types::modifier_id::ModifierId;
@@ -214,12 +214,29 @@ pub fn handle_message(
         55 => {
             let mp = node_view.mempool.read().unwrap();
             handle_inv(
-                peer_id, &msg.body, tracker, &node_view.history, &mp,
-                is_synced_for_txs, sync_tracker, connected_peer_ids, metrics,
+                peer_id,
+                &msg.body,
+                tracker,
+                &node_view.history,
+                &mp,
+                is_synced_for_txs,
+                sync_tracker,
+                connected_peer_ids,
+                metrics,
                 false,
             )
         }
-        33 => handle_modifiers(peer_id, &msg.body, node_view, sync_mgr, tracker, cache, is_synced_for_txs, tx_cost_tracker, max_headers),
+        33 => handle_modifiers(
+            peer_id,
+            &msg.body,
+            node_view,
+            sync_mgr,
+            tracker,
+            cache,
+            is_synced_for_txs,
+            tx_cost_tracker,
+            max_headers,
+        ),
         22 => {
             let mp = node_view.mempool.read().unwrap();
             handle_request_modifier(peer_id, &msg.body, &node_view.history, &mp)
@@ -316,11 +333,7 @@ fn handle_sync_info(
         .unwrap_or(0);
 
     let their_height = match &parsed {
-        ErgoSyncInfo::V2(v2) => v2
-            .last_headers
-            .first()
-            .map(|h| h.height)
-            .unwrap_or(0),
+        ErgoSyncInfo::V2(v2) => v2.last_headers.first().map(|h| h.height).unwrap_or(0),
         ErgoSyncInfo::V1(_) => 0,
     };
 
@@ -355,7 +368,8 @@ fn handle_sync_info(
     match status {
         crate::sync_tracker::PeerChainStatus::Older => {
             // Peer is ahead — send our SyncInfo so they know our state.
-            let sync_info = match persistent_sync::build_sync_info_persistent(history, max_headers) {
+            let sync_info = match persistent_sync::build_sync_info_persistent(history, max_headers)
+            {
                 Ok(si) => si,
                 Err(_) => return HandleResult::empty(),
             };
@@ -384,8 +398,8 @@ fn handle_sync_info(
                             // exceeds any previously applied sync header.
                             let is_unknown = tracker.status(HEADER_TYPE_ID, &header_id)
                                 == ModifierStatus::Unknown;
-                            let above_last = continuation.height
-                                > last_sync_header_applied.unwrap_or(0);
+                            let above_last =
+                                continuation.height > last_sync_header_applied.unwrap_or(0);
 
                             if is_unknown && above_last {
                                 tracing::info!(
@@ -446,7 +460,8 @@ fn handle_sync_info(
         }
         _ => {
             // Equal or Unknown — broadcast our SyncInfo (existing behavior).
-            let sync_info = match persistent_sync::build_sync_info_persistent(history, max_headers) {
+            let sync_info = match persistent_sync::build_sync_info_persistent(history, max_headers)
+            {
                 Ok(si) => si,
                 Err(_) => return HandleResult::empty(),
             };
@@ -565,7 +580,11 @@ fn handle_inv(
         for id in &to_request {
             tracker.set_requested(type_id, *id, peer_id);
         }
-        tracing::info!(type_id, requested = to_request.len(), "handle_inv: requesting from announcing peer");
+        tracing::info!(
+            type_id,
+            requested = to_request.len(),
+            "handle_inv: requesting from announcing peer"
+        );
         return HandleResult {
             actions: vec![SyncAction::RequestModifiers {
                 peer_id,
@@ -610,18 +629,12 @@ fn handle_inv(
     let eligible = if force_single_peer {
         EligiblePeers::SinglePeerFallback(peer_id, "force_single_peer (HeaderSync)")
     } else {
-        header_partitioner::select_eligible_peers(
-            peer_id,
-            sync_tracker,
-            connected_peer_ids,
-        )
+        header_partitioner::select_eligible_peers(peer_id, sync_tracker, connected_peer_ids)
     };
 
     let actions = match eligible {
         EligiblePeers::Partition(mut peers) => {
-            peers.retain(|&pid| {
-                tracker.outstanding_header_count(pid) < PER_PEER_OUTSTANDING_CAP
-            });
+            peers.retain(|&pid| tracker.outstanding_header_count(pid) < PER_PEER_OUTSTANDING_CAP);
             if peers.is_empty() {
                 tracing::warn!(
                     batch_id,
@@ -630,11 +643,8 @@ fn handle_inv(
                 return HandleResult::empty();
             }
 
-            let assignments = header_partitioner::partition_header_ids(
-                &to_request,
-                &peers,
-                DEFAULT_MIN_PER_PEER,
-            );
+            let assignments =
+                header_partitioner::partition_header_ids(&to_request, &peers, DEFAULT_MIN_PER_PEER);
 
             let summary: Vec<(PeerId, usize)> = assignments
                 .iter()
@@ -761,7 +771,13 @@ fn handle_modifiers(
         if !is_synced_for_txs {
             return HandleResult::empty();
         }
-        return handle_tx_modifiers(peer_id, &mods.modifiers, node_view, tracker, tx_cost_tracker);
+        return handle_tx_modifiers(
+            peer_id,
+            &mods.modifiers,
+            node_view,
+            tracker,
+            tx_cost_tracker,
+        );
     }
     let mut new_headers = Vec::new();
     let mut blocks_to_download = Vec::new();
@@ -792,27 +808,26 @@ fn handle_modifiers(
         }
 
         // Phase 2 — Parallel: verify ID, parse, and validate PoW.
-        let validated: Vec<HeaderValidationResult> =
-            accepted
-                .par_iter()
-                .map(|&(idx, id, data)| {
-                    let actual_id = ModifierId(blake2b256(data));
-                    if actual_id != *id {
-                        return Err((*id, format!(
+        let validated: Vec<HeaderValidationResult> = accepted
+            .par_iter()
+            .map(|&(idx, id, data)| {
+                let actual_id = ModifierId(blake2b256(data));
+                if actual_id != *id {
+                    return Err((
+                        *id,
+                        format!(
                             "ID mismatch: declared {} actual {}",
                             hex::encode(id.0),
                             hex::encode(actual_id.0),
-                        )));
-                    }
-                    let header = wire_parse_header(data).map_err(|e| {
-                        (*id, format!("parse failed: {e}"))
-                    })?;
-                    validate_pow(&header).map_err(|e| {
-                        (*id, format!("PoW invalid: {e}"))
-                    })?;
-                    Ok((idx, *id, header))
-                })
-                .collect();
+                        ),
+                    ));
+                }
+                let header =
+                    wire_parse_header(data).map_err(|e| (*id, format!("parse failed: {e}")))?;
+                validate_pow(&header).map_err(|e| (*id, format!("PoW invalid: {e}")))?;
+                Ok((idx, *id, header))
+            })
+            .collect();
 
         // Phase 3 — Sequential: apply pre-validated headers.
         for result in validated {
@@ -878,7 +893,14 @@ fn handle_modifiers(
         }
     }
 
-    apply_from_cache(cache, node_view, sync_mgr, tracker, &mut new_headers, &mut blocks_to_download);
+    apply_from_cache(
+        cache,
+        node_view,
+        sync_mgr,
+        tracker,
+        &mut new_headers,
+        &mut blocks_to_download,
+    );
 
     if !new_headers.is_empty() {
         let best_height = node_view
@@ -916,7 +938,9 @@ fn handle_modifiers(
     // of waiting for the next periodic sync tick.
     let mut actions = Vec::new();
     if !new_headers.is_empty() {
-        if let Ok(ErgoSyncInfo::V2(v2)) = persistent_sync::build_sync_info_persistent(&node_view.history, max_headers) {
+        if let Ok(ErgoSyncInfo::V2(v2)) =
+            persistent_sync::build_sync_info_persistent(&node_view.history, max_headers)
+        {
             actions.push(SyncAction::SendSyncInfo {
                 peer_id: Some(peer_id),
                 data: v2.serialize(),
@@ -995,7 +1019,11 @@ fn apply_from_cache(
     }
 
     if total_applied > 0 {
-        tracing::debug!(iterations, applied = total_applied, "apply_from_cache completed");
+        tracing::debug!(
+            iterations,
+            applied = total_applied,
+            "apply_from_cache completed"
+        );
     }
 }
 
@@ -1221,8 +1249,15 @@ pub fn handle_message_without_modifiers(
         55 => {
             let mp = mempool.read().unwrap();
             handle_inv(
-                peer_id, &msg.body, tracker, history, &mp,
-                is_synced_for_txs, sync_tracker, connected_peer_ids, metrics,
+                peer_id,
+                &msg.body,
+                tracker,
+                history,
+                &mp,
+                is_synced_for_txs,
+                sync_tracker,
+                connected_peer_ids,
+                metrics,
                 force_single_peer,
             )
         }
@@ -1382,7 +1417,8 @@ pub fn validate_headers_parallel(
                     ),
                 ));
             }
-            let header = wire_parse_header(data).map_err(|e| (*id, format!("parse failed: {e}")))?;
+            let header =
+                wire_parse_header(data).map_err(|e| (*id, format!("parse failed: {e}")))?;
             validate_pow(&header).map_err(|e| (*id, format!("PoW invalid: {e}")))?;
             Ok((0, *id, header)) // index not needed in this path
         })
@@ -1447,7 +1483,23 @@ mod tests {
             code: 99,
             body: vec![],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert!(result.actions.is_empty());
         assert!(result.new_headers.is_empty());
@@ -1468,7 +1520,23 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1509,7 +1577,23 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1535,10 +1619,29 @@ mod tests {
             body: sync_info.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert!(!result.actions.is_empty());
-        assert!(matches!(&result.actions[0], SyncAction::SendSyncInfo { .. }));
+        assert!(matches!(
+            &result.actions[0],
+            SyncAction::SendSyncInfo { .. }
+        ));
     }
 
     #[test]
@@ -1565,10 +1668,29 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         // Stored under header_id (extracted from data[0..32]), not section_id.
-        assert!(node_view.history.contains_modifier(108, &header_id).unwrap());
+        assert!(node_view
+            .history
+            .contains_modifier(108, &header_id)
+            .unwrap());
         assert!(result.new_headers.is_empty());
         assert!(result.penalties.is_empty());
     }
@@ -1593,7 +1715,23 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let _result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let _result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         // If we get here without panicking, the flow is correct.
     }
 
@@ -1637,7 +1775,23 @@ mod tests {
         let body = serialize_peers(&peers);
 
         let msg = RawMessage { code: 2, body };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1656,7 +1810,23 @@ mod tests {
 
         let body = ergo_wire::peer_spec::serialize_peers(&[]);
         let msg = RawMessage { code: 2, body };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(result.actions.is_empty());
     }
 
@@ -1670,7 +1840,23 @@ mod tests {
             code: 2,
             body: vec![0xFF, 0xFF],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(result.actions.is_empty());
     }
 
@@ -1693,8 +1879,23 @@ mod tests {
             code: 1,
             body: vec![],
         };
-        let result =
-            handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &connected, &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &connected,
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1717,7 +1918,23 @@ mod tests {
             code: 1,
             body: vec![],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1745,7 +1962,9 @@ mod tests {
 
         // Store body section under header_id and add section_id mapping.
         history.put_modifier(108, &header_id, &payload).unwrap();
-        history.store_section_mapping(108, &section_id, &header_id).unwrap();
+        history
+            .store_section_mapping(108, &section_id, &header_id)
+            .unwrap();
 
         let mempool = std::sync::Arc::new(std::sync::RwLock::new(
             crate::mempool::ErgoMemPool::with_min_fee(100, 0),
@@ -1763,7 +1982,23 @@ mod tests {
             code: 22,
             body: inv.serialize(),
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert_eq!(result.actions.len(), 1);
         match &result.actions[0] {
@@ -1794,7 +2029,23 @@ mod tests {
             code: 22,
             body: inv.serialize(),
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         assert!(result.actions.is_empty());
     }
@@ -1809,7 +2060,23 @@ mod tests {
             code: 22,
             body: vec![0xFF],
         };
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(result.actions.is_empty());
     }
 
@@ -1861,7 +2128,23 @@ mod tests {
             body: inv.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            true,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         // Should only request id(2), since id(1) is in the mempool.
         assert_eq!(result.actions.len(), 1);
@@ -1934,7 +2217,23 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            true,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         // Transaction should be in mempool.
         let mp = node_view.mempool.read().unwrap();
@@ -1968,7 +2267,23 @@ mod tests {
             body: mods.serialize(),
         };
 
-        let result = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut SyncTracker::new(), &mut ModifiersCache::with_default_capacities(), &mut HashMap::new(), true, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let result = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut SyncTracker::new(),
+            &mut ModifiersCache::with_default_capacities(),
+            &mut HashMap::new(),
+            true,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
 
         // Mempool should be empty.
         let mp = node_view.mempool.read().unwrap();
@@ -2037,15 +2352,52 @@ mod tests {
         let mut cache = ModifiersCache::with_default_capacities();
         let mut last_sync_from = HashMap::new();
 
-        let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 { last_headers: vec![] };
-        let msg = RawMessage { code: 65, body: sync_info.serialize() };
+        let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 {
+            last_headers: vec![],
+        };
+        let msg = RawMessage {
+            code: 65,
+            body: sync_info.serialize(),
+        };
 
         // First call should process normally.
-        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let r1 = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(!r1.actions.is_empty());
 
         // Second call within 100ms should be rate-limited.
-        let r2 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let r2 = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(r2.actions.is_empty());
     }
 
@@ -2058,14 +2410,51 @@ mod tests {
         let mut cache = ModifiersCache::with_default_capacities();
         let mut last_sync_from = HashMap::new();
 
-        let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 { last_headers: vec![] };
-        let msg = RawMessage { code: 65, body: sync_info.serialize() };
+        let sync_info = ergo_wire::sync_info::ErgoSyncInfoV2 {
+            last_headers: vec![],
+        };
+        let msg = RawMessage {
+            code: 65,
+            body: sync_info.serialize(),
+        };
 
-        let r1 = handle_message(1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let r1 = handle_message(
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(!r1.actions.is_empty());
 
         // Different peer should not be rate-limited.
-        let r2 = handle_message(2, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[], &mut sync_tracker, &mut cache, &mut last_sync_from, false, &mut None, &mut TxCostTracker::new(), 10, &[], &mut SyncMetrics::new(10));
+        let r2 = handle_message(
+            2,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
+            &mut None,
+            &mut TxCostTracker::new(),
+            10,
+            &[],
+            &mut SyncMetrics::new(10),
+        );
         assert!(!r2.actions.is_empty());
     }
 
@@ -2164,7 +2553,10 @@ mod tests {
         assert!(result.penalties.is_empty());
 
         // Stored under header_id (extracted from data[0..32]).
-        assert!(node_view.history.contains_modifier(108, &header_id).unwrap());
+        assert!(node_view
+            .history
+            .contains_modifier(108, &header_id)
+            .unwrap());
 
         // Tracker should now show Received status for the section_id.
         assert_eq!(
@@ -2224,7 +2616,10 @@ mod tests {
         assert!(matches!(result.penalties[0].0, PenaltyType::InvalidBlock));
 
         // Modifier should NOT be stored in the history DB.
-        assert!(!node_view.history.contains_modifier(HEADER_TYPE_ID, &fake_id).unwrap());
+        assert!(!node_view
+            .history
+            .contains_modifier(HEADER_TYPE_ID, &fake_id)
+            .unwrap());
 
         // Tracker should show Invalid status.
         assert_eq!(
@@ -2278,7 +2673,10 @@ mod tests {
         assert!(result.penalties.is_empty());
 
         // Stored under header_id (extracted from data[0..32]).
-        assert!(node_view.history.contains_modifier(108, &header_id).unwrap());
+        assert!(node_view
+            .history
+            .contains_modifier(108, &header_id)
+            .unwrap());
 
         // Tracker should now show Received status for section_id.
         assert_eq!(
@@ -2308,7 +2706,12 @@ mod tests {
 
         // is_synced_for_txs = false -> should filter tx inv
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
             &mut SyncTracker::new(),
             &mut ModifiersCache::with_default_capacities(),
             &mut HashMap::new(),
@@ -2339,7 +2742,12 @@ mod tests {
 
         // is_synced_for_txs = true -> should process normally
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
             &mut SyncTracker::new(),
             &mut ModifiersCache::with_default_capacities(),
             &mut HashMap::new(),
@@ -2370,7 +2778,12 @@ mod tests {
 
         // Even with is_synced_for_txs = false, non-tx inv should process
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
             &mut SyncTracker::new(),
             &mut ModifiersCache::with_default_capacities(),
             &mut HashMap::new(),
@@ -2420,7 +2833,12 @@ mod tests {
 
         // is_synced_for_txs = false -> should filter tx modifiers
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
             &mut SyncTracker::new(),
             &mut ModifiersCache::with_default_capacities(),
             &mut HashMap::new(),
@@ -2461,7 +2879,9 @@ mod tests {
 
         history.store_header(&genesis_id, &genesis).unwrap();
         // Also store the raw bytes as modifier so the header can be loaded.
-        history.put_modifier(101, &genesis_id, &genesis_bytes).unwrap();
+        history
+            .put_modifier(101, &genesis_id, &genesis_bytes)
+            .unwrap();
 
         let mempool = std::sync::Arc::new(std::sync::RwLock::new(
             crate::mempool::ErgoMemPool::with_min_fee(100, 0),
@@ -2491,8 +2911,16 @@ mod tests {
         };
 
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
-            &mut sync_tracker, &mut cache, &mut last_sync_from, false,
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
             10,
@@ -2501,14 +2929,18 @@ mod tests {
         );
 
         // Should have at least 2 actions: SendSyncInfo + ApplyContinuationHeader.
-        let has_continuation = result.actions.iter().any(|a| matches!(
-            a,
-            SyncAction::ApplyContinuationHeader { .. }
-        ));
+        let has_continuation = result
+            .actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::ApplyContinuationHeader { .. }));
         assert!(
             has_continuation,
             "expected ApplyContinuationHeader action, got: {:?}",
-            result.actions.iter().map(|a| std::mem::discriminant(a)).collect::<Vec<_>>()
+            result
+                .actions
+                .iter()
+                .map(|a| std::mem::discriminant(a))
+                .collect::<Vec<_>>()
         );
 
         // last_sync_header_applied should be updated.
@@ -2528,7 +2960,9 @@ mod tests {
         let genesis_id = ModifierId(blake2b256(&genesis_bytes));
 
         history.store_header(&genesis_id, &genesis).unwrap();
-        history.put_modifier(101, &genesis_id, &genesis_bytes).unwrap();
+        history
+            .put_modifier(101, &genesis_id, &genesis_bytes)
+            .unwrap();
 
         let mempool = std::sync::Arc::new(std::sync::RwLock::new(
             crate::mempool::ErgoMemPool::with_min_fee(100, 0),
@@ -2556,8 +2990,16 @@ mod tests {
         };
 
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
-            &mut sync_tracker, &mut cache, &mut last_sync_from, false,
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
             10,
@@ -2566,10 +3008,10 @@ mod tests {
         );
 
         // Should NOT have an ApplyContinuationHeader action.
-        let has_continuation = result.actions.iter().any(|a| matches!(
-            a,
-            SyncAction::ApplyContinuationHeader { .. }
-        ));
+        let has_continuation = result
+            .actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::ApplyContinuationHeader { .. }));
         assert!(
             !has_continuation,
             "should NOT have ApplyContinuationHeader when parent_id differs"
@@ -2592,7 +3034,9 @@ mod tests {
         let genesis_id = ModifierId(blake2b256(&genesis_bytes));
 
         history.store_header(&genesis_id, &genesis).unwrap();
-        history.put_modifier(101, &genesis_id, &genesis_bytes).unwrap();
+        history
+            .put_modifier(101, &genesis_id, &genesis_bytes)
+            .unwrap();
 
         let mempool = std::sync::Arc::new(std::sync::RwLock::new(
             crate::mempool::ErgoMemPool::with_min_fee(100, 0),
@@ -2620,8 +3064,16 @@ mod tests {
         };
 
         let result = handle_message(
-            1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
-            &mut sync_tracker, &mut cache, &mut last_sync_from, false,
+            1,
+            &msg,
+            &mut node_view,
+            &mut sync_mgr,
+            &mut tracker,
+            &[],
+            &mut sync_tracker,
+            &mut cache,
+            &mut last_sync_from,
+            false,
             &mut last_sync_header_applied,
             &mut TxCostTracker::new(),
             10,
@@ -2630,10 +3082,10 @@ mod tests {
         );
 
         // Should NOT have ApplyContinuationHeader because height == last_applied.
-        let has_continuation = result.actions.iter().any(|a| matches!(
-            a,
-            SyncAction::ApplyContinuationHeader { .. }
-        ));
+        let has_continuation = result
+            .actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::ApplyContinuationHeader { .. }));
         assert!(
             !has_continuation,
             "should NOT re-apply continuation header at already-applied height"
@@ -2728,13 +3180,13 @@ mod tests {
         t.record_cost(2, 2000);
         t.record_cost(3, 3000);
 
-        assert!(t.can_accept(1));  // 4000 < 5000
-        assert!(t.can_accept(2));  // 2000 < 5000
-        assert!(t.can_accept(3));  // 3000 < 5000
+        assert!(t.can_accept(1)); // 4000 < 5000
+        assert!(t.can_accept(2)); // 2000 < 5000
+        assert!(t.can_accept(3)); // 3000 < 5000
 
-        t.record_cost(1, 1000);    // peer 1 now at 5000
+        t.record_cost(1, 1000); // peer 1 now at 5000
         assert!(!t.can_accept(1)); // 5000 >= 5000
-        assert!(t.can_accept(2));  // still OK
+        assert!(t.can_accept(2)); // still OK
     }
 
     // -----------------------------------------------------------------------
@@ -2787,7 +3239,10 @@ mod tests {
         assert!(matches!(result.penalties[0].0, PenaltyType::InvalidBlock));
 
         // Header should NOT be stored.
-        assert!(!node_view.history.contains_modifier(HEADER_TYPE_ID, &id).unwrap());
+        assert!(!node_view
+            .history
+            .contains_modifier(HEADER_TYPE_ID, &id)
+            .unwrap());
 
         // Tracker should show Invalid status.
         assert_eq!(

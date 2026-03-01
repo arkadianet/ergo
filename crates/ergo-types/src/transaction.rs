@@ -474,10 +474,7 @@ mod tests {
             value: 1_000_000_000,
             ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
             creation_height: 500_000,
-            tokens: vec![
-                (BoxId([0xAA; 32]), 1_000),
-                (BoxId([0xBB; 32]), 999_999),
-            ],
+            tokens: vec![(BoxId([0xAA; 32]), 1_000), (BoxId([0xBB; 32]), 999_999)],
             additional_registers: Vec::new(),
         };
         let size = candidate.estimated_serialized_size();

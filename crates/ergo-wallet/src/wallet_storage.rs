@@ -120,13 +120,9 @@ impl WalletStorage {
     // -- Scan persistence ------------------------------------------------
 
     /// Persist a scan, keyed by its `scan_id`.
-    pub fn store_scan(
-        &self,
-        scan: &crate::scan_types::Scan,
-    ) -> Result<(), WalletStorageError> {
+    pub fn store_scan(&self, scan: &crate::scan_types::Scan) -> Result<(), WalletStorageError> {
         let key = scan_key(scan.scan_id);
-        let value =
-            serde_json::to_vec(scan).expect("Scan serialization must not fail");
+        let value = serde_json::to_vec(scan).expect("Scan serialization must not fail");
         self.db.put(key, value)?;
         Ok(())
     }
@@ -180,8 +176,7 @@ impl WalletStorage {
     pub fn next_scan_id(&self) -> Result<u16, WalletStorageError> {
         let current = self.get_last_scan_id();
         let next = current + 1;
-        self.db
-            .put([PREFIX_LAST_SCAN_ID], next.to_be_bytes())?;
+        self.db.put([PREFIX_LAST_SCAN_ID], next.to_be_bytes())?;
         Ok(next)
     }
 

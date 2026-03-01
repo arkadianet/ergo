@@ -196,7 +196,18 @@ mod tests {
 
     #[test]
     fn roundtrip_ulong() {
-        for val in [0u64, 1, 127, 128, 255, 256, 16383, 16384, 1_000_000, u64::MAX >> 1] {
+        for val in [
+            0u64,
+            1,
+            127,
+            128,
+            255,
+            256,
+            16383,
+            16384,
+            1_000_000,
+            u64::MAX >> 1,
+        ] {
             let mut buf = Vec::new();
             put_ulong(&mut buf, val);
             let decoded = get_ulong(&mut buf.as_slice()).unwrap();
@@ -256,7 +267,9 @@ mod tests {
     #[test]
     fn put_option_some() {
         let mut buf = Vec::new();
-        put_option(&mut buf, &Some(42u32), |b, v| { b.extend_from_slice(&v.to_be_bytes()); });
+        put_option(&mut buf, &Some(42u32), |b, v| {
+            b.extend_from_slice(&v.to_be_bytes());
+        });
         assert_eq!(buf[0], 1);
     }
 

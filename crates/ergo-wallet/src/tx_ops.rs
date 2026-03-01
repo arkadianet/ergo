@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::convert::TryInto;
 
-use ergo_consensus::sigma_verify::{SigmaStateContext, convert_state_context};
+use ergo_consensus::sigma_verify::{convert_state_context, SigmaStateContext};
 use ergo_lib::chain::ergo_box::box_builder::ErgoBoxCandidateBuilder;
 use ergo_lib::chain::transaction::unsigned::UnsignedTransaction;
 use ergo_lib::chain::transaction::Transaction;
@@ -81,7 +81,10 @@ impl std::fmt::Display for TxOpsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TxOpsError::InsufficientFunds { needed, available } => {
-                write!(f, "insufficient funds: needed {needed}, available {available}")
+                write!(
+                    f,
+                    "insufficient funds: needed {needed}, available {available}"
+                )
             }
             TxOpsError::InsufficientTokens {
                 token_id,
@@ -124,14 +127,10 @@ fn tracked_to_ergo_box(tb: &TrackedBox) -> Result<ErgoBox, TxOpsError> {
             .tokens
             .iter()
             .map(|(tid, amt)| {
-                let token_id: TokenId =
-                    ergo_chain_types::Digest32::from(*tid).into();
+                let token_id: TokenId = ergo_chain_types::Digest32::from(*tid).into();
                 let amount = TokenAmount::try_from(*amt)
                     .map_err(|e| TxOpsError::BuildError(format!("invalid token amount: {e}")))?;
-                Ok(Token {
-                    token_id,
-                    amount,
-                })
+                Ok(Token { token_id, amount })
             })
             .collect::<Result<Vec<_>, TxOpsError>>()?;
         Some(
@@ -155,8 +154,7 @@ fn tracked_to_ergo_box(tb: &TrackedBox) -> Result<ErgoBox, TxOpsError> {
                 reg_map.insert(reg_id, reg_val);
             }
         }
-        NonMandatoryRegisters::try_from(reg_map)
-            .unwrap_or_else(|_| NonMandatoryRegisters::empty())
+        NonMandatoryRegisters::try_from(reg_map).unwrap_or_else(|_| NonMandatoryRegisters::empty())
     };
 
     ErgoBox::new(
@@ -224,10 +222,7 @@ pub fn build_unsigned_tx(
             let token_id: TokenId = ergo_chain_types::Digest32::from(bytes).into();
             let amount = TokenAmount::try_from(amt)
                 .map_err(|e| TxOpsError::BuildError(format!("bad token amount: {e}")))?;
-            Ok(Token {
-                token_id,
-                amount,
-            })
+            Ok(Token { token_id, amount })
         })
         .collect::<Result<Vec<_>, TxOpsError>>()?;
 
@@ -266,10 +261,7 @@ pub fn build_unsigned_tx(
             let token_id: TokenId = ergo_chain_types::Digest32::from(bytes).into();
             let amount = TokenAmount::try_from(*amt)
                 .map_err(|e| TxOpsError::BuildError(format!("bad token amount: {e}")))?;
-            builder.add_token(Token {
-                token_id,
-                amount,
-            });
+            builder.add_token(Token { token_id, amount });
         }
         let candidate = builder
             .build()
@@ -473,11 +465,7 @@ mod tests {
     use super::*;
 
     /// Helper to create a test tracked box with given value and optional tokens.
-    fn make_box(
-        id_byte: u8,
-        value: u64,
-        tokens: Vec<([u8; 32], u64)>,
-    ) -> TrackedBox {
+    fn make_box(id_byte: u8, value: u64, tokens: Vec<([u8; 32], u64)>) -> TrackedBox {
         let mut box_id = [0u8; 32];
         box_id[0] = id_byte;
         let mut tx_id = [0u8; 32];
@@ -528,10 +516,7 @@ mod tests {
             "collected total {total} should be >= 3 ERG"
         );
         // Should not need all 3 boxes (first two suffice: 1+2=3 ERG)
-        assert!(
-            result.len() <= 3,
-            "should collect at most all boxes"
-        );
+        assert!(result.len() <= 3, "should collect at most all boxes");
     }
 
     #[test]
@@ -561,12 +546,7 @@ mod tests {
             make_box(3, 1_000_000_000, vec![(tok_a, 50)]),
         ];
         let tok_a_hex = hex::encode(tok_a);
-        let result = collect_boxes(
-            &boxes,
-            1_000_000_000,
-            &[(tok_a_hex.clone(), 120)],
-        )
-        .unwrap();
+        let result = collect_boxes(&boxes, 1_000_000_000, &[(tok_a_hex.clone(), 120)]).unwrap();
 
         // Should collect boxes that have tok_a to reach 120 (box 1 has 100, box 3 has 50)
         let total_tok_a: u64 = result
@@ -589,11 +569,7 @@ mod tests {
             make_box(2, 2_000_000_000, vec![]),
         ];
         let tok_a_hex = hex::encode(tok_a);
-        let result = collect_boxes(
-            &boxes,
-            1_000_000_000,
-            &[(tok_a_hex.clone(), 200)],
-        );
+        let result = collect_boxes(&boxes, 1_000_000_000, &[(tok_a_hex.clone(), 200)]);
         match result {
             Err(TxOpsError::InsufficientTokens {
                 token_id,
@@ -612,10 +588,7 @@ mod tests {
     fn collect_boxes_skips_spent() {
         let mut spent_box = make_box(1, 5_000_000_000, vec![]);
         spent_box.spent = true;
-        let boxes = vec![
-            spent_box,
-            make_box(2, 1_000_000_000, vec![]),
-        ];
+        let boxes = vec![spent_box, make_box(2, 1_000_000_000, vec![])];
         let result = collect_boxes(&boxes, 2_000_000_000, &[]);
         match result {
             Err(TxOpsError::InsufficientFunds { needed, available }) => {
@@ -645,9 +618,7 @@ mod tests {
     #[test]
     fn build_unsigned_tx_validates_funds() {
         // Create boxes with only minimal value, request far more than available
-        let boxes = vec![
-            make_box(1, 1_000_000, vec![]),
-        ];
+        let boxes = vec![make_box(1, 1_000_000, vec![])];
         let requests = vec![PaymentRequest {
             address: "9f4QF8AD1nQ3nJahQVkMj8hFSVVzVom77b52JU7EW71Zit1YUkY".into(),
             value: 100_000_000_000, // 100 ERG — way more than available
@@ -700,9 +671,7 @@ mod tests {
 
         let box_value = BoxValue::new(1_000_000_000).unwrap();
         let candidate = ergo_lib::chain::ergo_box::box_builder::ErgoBoxCandidateBuilder::new(
-            box_value,
-            ergo_tree,
-            100,
+            box_value, ergo_tree, 100,
         )
         .build()
         .unwrap();
@@ -711,12 +680,9 @@ mod tests {
             ergotree_ir::chain::ergo_box::BoxId::zero(),
             ergotree_ir::chain::context_extension::ContextExtension::empty(),
         );
-        let unsigned_tx = UnsignedTransaction::new_from_vec(
-            vec![unsigned_input],
-            vec![],
-            vec![candidate],
-        )
-        .unwrap();
+        let unsigned_tx =
+            UnsignedTransaction::new_from_vec(vec![unsigned_input], vec![], vec![candidate])
+                .unwrap();
 
         let mut miner_pk = [0u8; 33];
         miner_pk.copy_from_slice(&gen_bytes);

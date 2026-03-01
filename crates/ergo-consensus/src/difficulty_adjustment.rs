@@ -32,10 +32,7 @@ pub fn calculate_classic(
     desired_interval_ms: u64,
 ) -> u32 {
     if previous_headers.len() <= 1 {
-        return previous_headers
-            .last()
-            .map(|h| h.2)
-            .unwrap_or(0);
+        return previous_headers.last().map(|h| h.2).unwrap_or(0);
     }
 
     let first_ts = previous_headers.first().unwrap().1;
@@ -81,16 +78,11 @@ pub fn calculate_eip37(
     desired_interval_ms: u64,
 ) -> u32 {
     if previous_headers.len() < 2 {
-        return previous_headers
-            .last()
-            .map(|h| h.2)
-            .unwrap_or(0);
+        return previous_headers.last().map(|h| h.2).unwrap_or(0);
     }
 
     let last_nbits = previous_headers.last().unwrap().2;
-    let last_diff = decode_compact_bits(last_nbits as u64)
-        .to_bigint()
-        .unwrap();
+    let last_diff = decode_compact_bits(last_nbits as u64).to_bigint().unwrap();
 
     // 1. Predictive difficulty (classic, WITH normalization).
     //    Scala's `calculate()` normalizes via encodeCompactBits/decodeCompactBits

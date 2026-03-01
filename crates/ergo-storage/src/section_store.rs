@@ -25,11 +25,7 @@ const BLOCK_TX_TYPE_ID: u8 = 102;
 
 impl HistoryDb {
     /// Serialize and store an [`Extension`] section.
-    pub fn store_extension(
-        &self,
-        id: &ModifierId,
-        ext: &Extension,
-    ) -> Result<(), StorageError> {
+    pub fn store_extension(&self, id: &ModifierId, ext: &Extension) -> Result<(), StorageError> {
         let bytes = serialize_extension(ext);
         self.put_modifier(EXTENSION_TYPE_ID, id, &bytes)
     }
@@ -41,19 +37,14 @@ impl HistoryDb {
         match self.get_modifier(EXTENSION_TYPE_ID, id)? {
             None => Ok(None),
             Some(data) => {
-                let ext =
-                    parse_extension(&data).map_err(|e| StorageError::Codec(e.to_string()))?;
+                let ext = parse_extension(&data).map_err(|e| StorageError::Codec(e.to_string()))?;
                 Ok(Some(ext))
             }
         }
     }
 
     /// Serialize and store an [`ADProofs`] section.
-    pub fn store_ad_proofs(
-        &self,
-        id: &ModifierId,
-        proofs: &ADProofs,
-    ) -> Result<(), StorageError> {
+    pub fn store_ad_proofs(&self, id: &ModifierId, proofs: &ADProofs) -> Result<(), StorageError> {
         let bytes = serialize_ad_proofs(proofs);
         self.put_modifier(AD_PROOFS_TYPE_ID, id, &bytes)
     }
@@ -191,7 +182,10 @@ mod tests {
 
         db.store_extension(&id, &ext).unwrap();
 
-        let loaded = db.load_extension(&id).unwrap().expect("extension should exist");
+        let loaded = db
+            .load_extension(&id)
+            .unwrap()
+            .expect("extension should exist");
         assert_eq!(loaded, ext);
         assert_eq!(loaded.fields.len(), 2);
         assert_eq!(loaded.fields[0].0, [0x00, 0x01]);
@@ -207,9 +201,15 @@ mod tests {
 
         db.store_ad_proofs(&id, &proofs).unwrap();
 
-        let loaded = db.load_ad_proofs(&id).unwrap().expect("proofs should exist");
+        let loaded = db
+            .load_ad_proofs(&id)
+            .unwrap()
+            .expect("proofs should exist");
         assert_eq!(loaded, proofs);
-        assert_eq!(loaded.proof_bytes, vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03]);
+        assert_eq!(
+            loaded.proof_bytes,
+            vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03]
+        );
     }
 
     // 3. store_load_block_transactions — roundtrip with tx bytes

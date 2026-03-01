@@ -100,7 +100,10 @@ impl SyncMetrics {
                 .map(|(id, _)| id)
             {
                 self.active_batches.remove(&oldest_id);
-                tracing::warn!(evicted_batch_id = oldest_id, "evicted oldest batch at capacity");
+                tracing::warn!(
+                    evicted_batch_id = oldest_id,
+                    "evicted oldest batch at capacity"
+                );
             }
         }
 
@@ -203,14 +206,15 @@ impl SyncMetrics {
 
         let total_this_call = (applied + invalid + dup_blocked) as usize;
 
-        let (batch_age_ms, batch_complete) = if let Some(batch) = self.active_batches.get_mut(&batch_id) {
-            batch.delivered += total_this_call;
-            let age = batch.started.elapsed().as_millis() as u64;
-            let complete = batch.delivered >= batch.to_request_len;
-            (age, complete)
-        } else {
-            (0, false)
-        };
+        let (batch_age_ms, batch_complete) =
+            if let Some(batch) = self.active_batches.get_mut(&batch_id) {
+                batch.delivered += total_this_call;
+                let age = batch.started.elapsed().as_millis() as u64;
+                let complete = batch.delivered >= batch.to_request_len;
+                (age, complete)
+            } else {
+                (0, false)
+            };
 
         if batch_complete {
             self.active_batches.remove(&batch_id);
@@ -262,12 +266,7 @@ impl SyncMetrics {
     }
 
     /// Record a reassignment from one peer to another.
-    pub fn record_reassignment(
-        &mut self,
-        from_peer: PeerId,
-        to_peer: PeerId,
-        attempt: u32,
-    ) {
+    pub fn record_reassignment(&mut self, from_peer: PeerId, to_peer: PeerId, attempt: u32) {
         self.reassignments += 1;
 
         tracing::info!(

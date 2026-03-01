@@ -1,7 +1,7 @@
 //! Block-level validation: root hash checks and section header_id consistency.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use ergo_types::modifier_id::{Digest32, ModifierId};
 use ergo_types::transaction::ErgoFullBlock;
 
@@ -19,7 +19,9 @@ pub enum BlockValidationError {
     ExtensionRootMismatch { expected: Digest32, got: Digest32 },
     #[error("missing AD proofs in digest mode")]
     MissingAdProofs,
-    #[error("section header_id mismatch: section references {section_header_id}, expected {expected}")]
+    #[error(
+        "section header_id mismatch: section references {section_header_id}, expected {expected}"
+    )]
     SectionHeaderMismatch {
         section_header_id: ModifierId,
         expected: ModifierId,
@@ -33,7 +35,9 @@ fn blake2b256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Blake2bVar::new(32).expect("valid output size");
     hasher.update(data);
     let mut out = [0u8; 32];
-    hasher.finalize_variable(&mut out).expect("correct output size");
+    hasher
+        .finalize_variable(&mut out)
+        .expect("correct output size");
     out
 }
 
@@ -286,10 +290,7 @@ mod tests {
                 block_version: 1,
                 tx_bytes: vec![tx1_bytes, tx2_bytes],
             },
-            extension: Extension {
-                header_id,
-                fields,
-            },
+            extension: Extension { header_id, fields },
             ad_proofs: Some(ADProofs {
                 header_id,
                 proof_bytes,

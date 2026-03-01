@@ -177,10 +177,7 @@ impl Parameters {
     /// Only fields where key\[0\] == `SYSTEM_PARAMETERS_PREFIX` (0x00) and
     /// key\[1\] != `SOFT_FORK_DISABLING_RULES_ID` (124) are considered.
     /// Each value must be exactly 4 bytes (big-endian i32).
-    pub fn from_extension(
-        height: u32,
-        ext: &Extension,
-    ) -> Result<Self, ParameterError> {
+    pub fn from_extension(height: u32, ext: &Extension) -> Result<Self, ParameterError> {
         let mut table = BTreeMap::new();
         for (key, value) in &ext.fields {
             if key[0] != SYSTEM_PARAMETERS_PREFIX {
@@ -210,9 +207,7 @@ impl Parameters {
         self.table
             .iter()
             .filter(|(&id, _)| id != SOFT_FORK_DISABLING_RULES_ID)
-            .map(|(&id, &val)| {
-                ([SYSTEM_PARAMETERS_PREFIX, id], val.to_be_bytes().to_vec())
-            })
+            .map(|(&id, &val)| ([SYSTEM_PARAMETERS_PREFIX, id], val.to_be_bytes().to_vec()))
             .collect()
     }
 
@@ -225,11 +220,7 @@ impl Parameters {
     /// - `id` (the raw parameter ID) means *increase* the parameter.
     /// - `id + 128` (with high bit set) means *decrease* the parameter.
     ///   The map key is the vote byte as cast by miners.
-    pub fn update_params(
-        &self,
-        epoch_votes: &BTreeMap<u8, u32>,
-        epoch_length: u32,
-    ) -> Parameters {
+    pub fn update_params(&self, epoch_votes: &BTreeMap<u8, u32>, epoch_length: u32) -> Parameters {
         let threshold = epoch_length / 2;
         let mut new_table = self.table.clone();
 
@@ -317,8 +308,7 @@ impl Parameters {
         // Phase 1: Successful cleanup (after activation + 1 epoch).
         if let Some(starting) = sf_starting_height {
             let cleanup_height = starting as u64
-                + epoch_length as u64
-                    * (soft_fork_epochs as u64 + activation_epochs as u64 + 1);
+                + epoch_length as u64 * (soft_fork_epochs as u64 + activation_epochs as u64 + 1);
             if height as u64 == cleanup_height && approved(total_votes) {
                 self.table.remove(&SOFT_FORK_STARTING_HEIGHT_ID);
                 self.table.remove(&SOFT_FORK_VOTES_COLLECTED_ID);
@@ -327,8 +317,7 @@ impl Parameters {
 
         // Phase 2: Unsuccessful cleanup (after voting + 1 epoch, not approved).
         if let Some(starting) = sf_starting_height {
-            let fail_height = starting as u64
-                + epoch_length as u64 * (soft_fork_epochs as u64 + 1);
+            let fail_height = starting as u64 + epoch_length as u64 * (soft_fork_epochs as u64 + 1);
             if height as u64 == fail_height && !approved(total_votes) {
                 self.table.remove(&SOFT_FORK_STARTING_HEIGHT_ID);
                 self.table.remove(&SOFT_FORK_VOTES_COLLECTED_ID);
@@ -340,10 +329,8 @@ impl Parameters {
 
         // Phase 3: Start new voting (if fork vote passes this epoch).
         if fork_vote {
-            let can_start =
-                sf_starting_height_now.is_none() && height.is_multiple_of(epoch_length);
-            let just_cleaned =
-                sf_starting_height.is_some() && sf_starting_height_now.is_none();
+            let can_start = sf_starting_height_now.is_none() && height.is_multiple_of(epoch_length);
+            let just_cleaned = sf_starting_height.is_some() && sf_starting_height_now.is_none();
             if can_start || just_cleaned {
                 self.table
                     .insert(SOFT_FORK_STARTING_HEIGHT_ID, height as i32);
@@ -353,8 +340,7 @@ impl Parameters {
 
         // Phase 4: Vote accumulation (during voting period).
         if let Some(starting) = read_sf_start(&self.table) {
-            let voting_end =
-                starting as u64 + epoch_length as u64 * soft_fork_epochs as u64;
+            let voting_end = starting as u64 + epoch_length as u64 * soft_fork_epochs as u64;
             if (height as u64) <= voting_end {
                 self.table
                     .insert(SOFT_FORK_VOTES_COLLECTED_ID, total_votes as i32);
@@ -364,8 +350,7 @@ impl Parameters {
         // Phase 5: Activation (after voting + activation grace period, if approved).
         if let Some(starting) = sf_starting_height {
             let activation_height = starting as u64
-                + epoch_length as u64
-                    * (soft_fork_epochs as u64 + activation_epochs as u64);
+                + epoch_length as u64 * (soft_fork_epochs as u64 + activation_epochs as u64);
             if height as u64 == activation_height && approved(total_votes) {
                 let current_version = self.block_version();
                 self.table
@@ -441,10 +426,7 @@ impl Parameters {
     ///
     /// Defaults to `1` if the parameter is not present (genesis / pre-fork).
     pub fn block_version(&self) -> u8 {
-        self.table
-            .get(&BLOCK_VERSION_ID)
-            .copied()
-            .unwrap_or(1) as u8
+        self.table.get(&BLOCK_VERSION_ID).copied().unwrap_or(1) as u8
     }
 }
 
@@ -486,14 +468,10 @@ pub fn check_fork_vote(
 
         let h = height as u64;
         #[allow(clippy::nonminimal_bool)]
-        if (h >= finishing_height
-            && h < finishing_height + voting_epoch_length as u64
-            && !approved)
+        if (h >= finishing_height && h < finishing_height + voting_epoch_length as u64 && !approved)
             || (h >= finishing_height && h < after_activation_height && approved)
         {
-            return Err(format!(
-                "Voting for fork is prohibited at height {height}"
-            ));
+            return Err(format!("Voting for fork is prohibited at height {height}"));
         }
     }
     Ok(())
@@ -733,9 +711,12 @@ mod tests {
         p.update_fork(1024, &votes, 1024, 32, 32);
         assert_eq!(p.block_version(), 1);
         // Starting height 0 is treated as "not set".
-        assert!(
-            p.table.get(&SOFT_FORK_STARTING_HEIGHT_ID).copied().filter(|&h| h > 0).is_none()
-        );
+        assert!(p
+            .table
+            .get(&SOFT_FORK_STARTING_HEIGHT_ID)
+            .copied()
+            .filter(|&h| h > 0)
+            .is_none());
     }
 
     #[test]
@@ -768,7 +749,7 @@ mod tests {
         p.table.insert(SOFT_FORK_VOTES_COLLECTED_ID, 29000);
         let mut votes = BTreeMap::new();
         votes.insert(SOFT_FORK_ID, 500); // total = 500 + 29000 = 29500 > 29491
-        // Activation height = 1024 + 1024 * (32 + 32) = 66560
+                                         // Activation height = 1024 + 1024 * (32 + 32) = 66560
         p.update_fork(66560, &votes, 1024, 32, 32);
         assert_eq!(p.block_version(), 2);
     }
@@ -781,9 +762,12 @@ mod tests {
         let votes = BTreeMap::new();
         // Unsuccessful cleanup height = 1024 + 1024 * (32 + 1) = 34816
         p.update_fork(34816, &votes, 1024, 32, 32);
-        assert!(
-            p.table.get(&SOFT_FORK_STARTING_HEIGHT_ID).copied().filter(|&h| h > 0).is_none()
-        );
+        assert!(p
+            .table
+            .get(&SOFT_FORK_STARTING_HEIGHT_ID)
+            .copied()
+            .filter(|&h| h > 0)
+            .is_none());
         assert_eq!(p.block_version(), 1);
     }
 
@@ -803,7 +787,7 @@ mod tests {
         let mut params = Parameters::default();
         params.table.insert(SOFT_FORK_STARTING_HEIGHT_ID, 1000);
         params.table.insert(SOFT_FORK_VOTES_COLLECTED_ID, 100); // not enough for approval
-        // finishing_height = 1000 + 1024 * 32 = 33768
+                                                                // finishing_height = 1000 + 1024 * 32 = 33768
         let finishing_height = 1000 + 1024 * 32;
         // At finishing_height, should be prohibited (not approved, in cleanup epoch).
         assert!(check_fork_vote(finishing_height, &params, 1024, 32, 32).is_err());
@@ -814,7 +798,7 @@ mod tests {
         let mut params = Parameters::default();
         params.table.insert(SOFT_FORK_STARTING_HEIGHT_ID, 1000);
         params.table.insert(SOFT_FORK_VOTES_COLLECTED_ID, 100); // not enough for approval
-        // finishing_height = 1000 + 1024 * 32 = 33768
+                                                                // finishing_height = 1000 + 1024 * 32 = 33768
         let finishing_height = 1000 + 1024 * 32;
         // After cleanup epoch (finishing_height + voting_epoch_length), should be ok.
         assert!(check_fork_vote(finishing_height + 1024, &params, 1024, 32, 32).is_ok());

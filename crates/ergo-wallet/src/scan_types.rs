@@ -82,14 +82,12 @@ impl ScanningPredicate {
     /// - `ergo_tree_bytes` — raw ErgoTree bytes (register R1).
     /// - `tokens` — `(token_id, amount)` pairs carried by the box.
     /// - `value` — nanoERG value locked in the box (register R0).
-    pub fn matches(
-        &self,
-        ergo_tree_bytes: &[u8],
-        tokens: &[([u8; 32], u64)],
-        value: u64,
-    ) -> bool {
+    pub fn matches(&self, ergo_tree_bytes: &[u8], tokens: &[([u8; 32], u64)], value: u64) -> bool {
         match self {
-            ScanningPredicate::Equals { register, value: hex_val } => {
+            ScanningPredicate::Equals {
+                register,
+                value: hex_val,
+            } => {
                 let expected = match hex::decode(hex_val) {
                     Ok(v) => v,
                     Err(_) => return false,
@@ -98,7 +96,10 @@ impl ScanningPredicate {
                 reg_bytes == expected
             }
 
-            ScanningPredicate::Contains { register, value: hex_val } => {
+            ScanningPredicate::Contains {
+                register,
+                value: hex_val,
+            } => {
                 let needle = match hex::decode(hex_val) {
                     Ok(v) => v,
                     Err(_) => return false,
@@ -119,13 +120,13 @@ impl ScanningPredicate {
                 tokens.iter().any(|(tid, _)| *tid == target)
             }
 
-            ScanningPredicate::And { args } => {
-                args.iter().all(|p| p.matches(ergo_tree_bytes, tokens, value))
-            }
+            ScanningPredicate::And { args } => args
+                .iter()
+                .all(|p| p.matches(ergo_tree_bytes, tokens, value)),
 
-            ScanningPredicate::Or { args } => {
-                args.iter().any(|p| p.matches(ergo_tree_bytes, tokens, value))
-            }
+            ScanningPredicate::Or { args } => args
+                .iter()
+                .any(|p| p.matches(ergo_tree_bytes, tokens, value)),
         }
     }
 }
@@ -358,8 +359,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&pred).expect("serialize");
-        let restored: ScanningPredicate =
-            serde_json::from_str(&json).expect("deserialize");
+        let restored: ScanningPredicate = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(pred, restored);
     }
 

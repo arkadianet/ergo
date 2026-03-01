@@ -55,13 +55,10 @@ impl ModeFeature {
         if data.len() < 3 {
             return Err(CodecError::UnexpectedEof);
         }
-        let state_type = StateTypeCode::from_byte(data[0])
-            .ok_or(CodecError::UnexpectedEof)?;
+        let state_type = StateTypeCode::from_byte(data[0]).ok_or(CodecError::UnexpectedEof)?;
         let verifying_transactions = data[1] > 0;
         let mut reader = &data[2..];
-        let nipopow_bootstrapped = vlq::get_option(&mut reader, |r| {
-            vlq::get_int(r)
-        })?;
+        let nipopow_bootstrapped = vlq::get_option(&mut reader, |r| vlq::get_int(r))?;
         let blocks_to_keep = vlq::get_int(&mut reader)?;
         Ok(Self {
             state_type,
@@ -135,7 +132,10 @@ impl PeerFeature {
         match id {
             FEATURE_ID_MODE => Ok(Self::Mode(ModeFeature::parse(data)?)),
             FEATURE_ID_SESSION => Ok(Self::Session(SessionFeature::parse(data)?)),
-            _ => Ok(Self::Unknown { id, data: data.to_vec() }),
+            _ => Ok(Self::Unknown {
+                id,
+                data: data.to_vec(),
+            }),
         }
     }
 }

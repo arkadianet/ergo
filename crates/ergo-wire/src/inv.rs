@@ -143,10 +143,7 @@ impl ModifiersData {
             modifiers.push((id, payload));
         }
 
-        Ok(ModifiersData {
-            type_id,
-            modifiers,
-        })
+        Ok(ModifiersData { type_id, modifiers })
     }
 }
 

@@ -24,8 +24,7 @@ use crate::event_loop::SharedState;
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -48,8 +47,7 @@ async fn main() {
     }
 
     let config_str = if let Some(ref path) = config_path {
-        std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
     } else if let Some(ref net) = network_flag {
         match net.as_str() {
             "mainnet" => include_str!("../../../config/ergo-mainnet.toml").to_string(),
@@ -74,8 +72,8 @@ async fn main() {
         }
     };
 
-    let settings = ErgoSettings::from_toml(&config_str)
-        .unwrap_or_else(|e| panic!("invalid config: {e}"));
+    let settings =
+        ErgoSettings::from_toml(&config_str).unwrap_or_else(|e| panic!("invalid config: {e}"));
 
     tracing::info!(
         network = ?settings.ergo.network_type,
@@ -87,8 +85,8 @@ async fn main() {
 
     // Open a temporary read-write HistoryDb just to log the current state.
     {
-        let history = HistoryDb::open(&db_path)
-            .unwrap_or_else(|e| panic!("cannot open database: {e}"));
+        let history =
+            HistoryDb::open(&db_path).unwrap_or_else(|e| panic!("cannot open database: {e}"));
         let best_header = history.best_header_id().unwrap();
         let best_block = history.best_full_block_id().unwrap();
         tracing::info!(best_header = ?best_header, best_block = ?best_block, "database opened");
@@ -110,12 +108,10 @@ async fn main() {
     let sync_history = HistoryDb::open_as_secondary(&db_path, &sync_secondary_path)
         .unwrap_or_else(|e| panic!("cannot open sync database: {e}"));
 
-    let mempool = Arc::new(std::sync::RwLock::new(
-        ErgoMemPool::with_min_fee(
-            settings.ergo.node.mempool_capacity as usize,
-            settings.ergo.node.minimal_fee_amount,
-        ),
-    ));
+    let mempool = Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(
+        settings.ergo.node.mempool_capacity as usize,
+        settings.ergo.node.minimal_fee_amount,
+    )));
 
     let is_utxo_mode = settings.ergo.node.state_type == "utxo";
     let is_digest_mode = !is_utxo_mode;
@@ -142,17 +138,12 @@ async fn main() {
 
                 let genesis_digest = proc_settings.ergo.chain.genesis_state_digest();
                 let is_utxo = proc_settings.ergo.node.state_type == "utxo";
-                let mut node_view = NodeViewHolder::with_recovery(
-                    history,
-                    proc_mempool,
-                    !is_utxo,
-                    genesis_digest,
-                );
+                let mut node_view =
+                    NodeViewHolder::with_recovery(history, proc_mempool, !is_utxo, genesis_digest);
 
                 // Set up UTXO persistence if in UTXO mode.
                 if is_utxo {
-                    let utxo_path =
-                        Path::new(&proc_settings.ergo.directory).join("utxo");
+                    let utxo_path = Path::new(&proc_settings.ergo.directory).join("utxo");
                     match ergo_storage::utxo_db::UtxoDb::open(&utxo_path) {
                         Ok(utxo_db) => match utxo_db.metadata() {
                             Ok(Some(meta)) => {
@@ -160,18 +151,13 @@ async fn main() {
                                     version = hex::encode(meta.version),
                                     "processor: found existing UTXO DB, restoring state"
                                 );
-                                match ergo_state::utxo_state::UtxoState::restore_from_db(
-                                    utxo_db,
-                                ) {
+                                match ergo_state::utxo_state::UtxoState::restore_from_db(utxo_db) {
                                     Ok(utxo_state) => {
                                         let entries = utxo_state
                                             .utxo_db()
                                             .map(|db| db.entry_count())
                                             .unwrap_or(0);
-                                        tracing::info!(
-                                            entries,
-                                            "processor: UTXO state restored"
-                                        );
+                                        tracing::info!(entries, "processor: UTXO state restored");
                                         node_view.set_utxo_state(utxo_state);
                                     }
                                     Err(e) => {
@@ -211,8 +197,7 @@ async fn main() {
                 if proc_settings.ergo.node.blocks_to_keep >= 0 {
                     node_view.set_blocks_to_keep(proc_settings.ergo.node.blocks_to_keep);
                 }
-                node_view
-                    .set_checkpoint_height(proc_settings.ergo.node.checkpoint_height);
+                node_view.set_checkpoint_height(proc_settings.ergo.node.checkpoint_height);
                 node_view.set_v2_activation_config(
                     proc_settings.ergo.chain.version2_activation_height,
                     proc_settings
@@ -221,9 +206,8 @@ async fn main() {
                         .version2_activation_difficulty_hex
                         .clone(),
                 );
-                node_view.set_max_time_drift_from_interval(
-                    proc_settings.ergo.chain.block_interval_secs,
-                );
+                node_view
+                    .set_max_time_drift_from_interval(proc_settings.ergo.chain.block_interval_secs);
 
                 // Restore state/history consistency (recovery after crash).
                 if let Err(e) = node_view.restore_consistency() {
@@ -255,7 +239,11 @@ async fn main() {
                 .unwrap_or_else(|e| panic!("cannot open indexer history db: {e}")),
         );
 
-        tokio::spawn(ergo_indexer::task::run_indexer(extra_db, idx_history, idx_rx));
+        tokio::spawn(ergo_indexer::task::run_indexer(
+            extra_db,
+            idx_history,
+            idx_rx,
+        ));
 
         tracing::info!("extra indexer enabled");
         Some(idx_tx)
@@ -264,16 +252,18 @@ async fn main() {
     };
 
     // Open a read-only DB handle for the extra indexer API endpoints.
-    let extra_db_api: Option<Arc<ergo_indexer::db::ExtraIndexerDb>> = if settings.ergo.node.extra_index {
-        let extra_db_api = ergo_indexer::db::ExtraIndexerDb::open_read_only(&extra_path)
-            .unwrap_or_else(|e| panic!("cannot open extra indexer API db: {e}"));
-        Some(Arc::new(extra_db_api))
-    } else {
-        None
-    };
+    let extra_db_api: Option<Arc<ergo_indexer::db::ExtraIndexerDb>> =
+        if settings.ergo.node.extra_index {
+            let extra_db_api = ergo_indexer::db::ExtraIndexerDb::open_read_only(&extra_path)
+                .unwrap_or_else(|e| panic!("cannot open extra indexer API db: {e}"));
+            Some(Arc::new(extra_db_api))
+        } else {
+            None
+        };
 
     let shared = Arc::new(RwLock::new(SharedState::new()));
-    let (tx_submit_tx, mut tx_submit_rx) = tokio::sync::mpsc::channel::<crate::api::TxSubmission>(256);
+    let (tx_submit_tx, mut tx_submit_rx) =
+        tokio::sync::mpsc::channel::<crate::api::TxSubmission>(256);
     let (peer_connect_tx, mut peer_connect_rx) =
         tokio::sync::mpsc::channel::<std::net::SocketAddr>(16);
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -285,23 +275,22 @@ async fn main() {
         tokio::sync::mpsc::channel::<event_loop::UtxoProofRequest>(16);
 
     // Open SnapshotsDb if configured.
-    let snapshots_db_opt = if settings.ergo.node.storing_utxo_snapshots > 0
-        || settings.ergo.node.utxo_bootstrap
-    {
-        let snap_path = Path::new(&settings.ergo.directory).join("snapshots");
-        match snapshots::SnapshotsDb::open(&snap_path) {
-            Ok(sdb) => {
-                tracing::info!("snapshots DB opened");
-                Some(sdb)
+    let snapshots_db_opt =
+        if settings.ergo.node.storing_utxo_snapshots > 0 || settings.ergo.node.utxo_bootstrap {
+            let snap_path = Path::new(&settings.ergo.directory).join("snapshots");
+            match snapshots::SnapshotsDb::open(&snap_path) {
+                Ok(sdb) => {
+                    tracing::info!("snapshots DB opened");
+                    Some(sdb)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to open snapshots DB");
+                    None
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to open snapshots DB");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     let snapshots_db_arc = snapshots_db_opt.map(Arc::new);
 
     // Create wallet if feature enabled.
@@ -395,7 +384,10 @@ async fn main() {
                 mining_solution_tx_for_miners,
                 shutdown_rx_for_miners,
             );
-            tracing::info!(count = settings.ergo.node.internal_miners_count, "internal CPU miners started");
+            tracing::info!(
+                count = settings.ergo.node.internal_miners_count,
+                "internal CPU miners started"
+            );
             handles
         } else {
             Vec::new()
@@ -406,7 +398,10 @@ async fn main() {
 
     // Generate a random session ID for self-connection detection.
     let session_id: u64 = rand::random();
-    tracing::info!(session_id, "generated session ID for self-connection detection");
+    tracing::info!(
+        session_id,
+        "generated session ID for self-connection detection"
+    );
 
     // Create inbound peer channel and spawn TCP listener.
     let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<event_loop::InboundPeer>(32);
@@ -432,23 +427,30 @@ async fn main() {
                 patch: 2,
             }),
             node_name: settings.network.node_name.clone(),
-            declared_address: settings.network.declared_address.as_deref()
+            declared_address: settings
+                .network
+                .declared_address
+                .as_deref()
                 .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
-                .or_else(|| settings.network.bind_address.parse::<std::net::SocketAddr>().ok()
-                    .filter(|addr| !addr.ip().is_unspecified())),
+                .or_else(|| {
+                    settings
+                        .network
+                        .bind_address
+                        .parse::<std::net::SocketAddr>()
+                        .ok()
+                        .filter(|addr| !addr.ip().is_unspecified())
+                }),
             features: vec![
-                ergo_wire::peer_feature::PeerFeature::Mode(
-                    ergo_wire::peer_feature::ModeFeature {
-                        state_type: if is_utxo_mode {
-                            ergo_wire::peer_feature::StateTypeCode::Utxo
-                        } else {
-                            ergo_wire::peer_feature::StateTypeCode::Digest
-                        },
-                        verifying_transactions: true,
-                        nipopow_bootstrapped: None,
-                        blocks_to_keep: settings.ergo.node.blocks_to_keep,
+                ergo_wire::peer_feature::PeerFeature::Mode(ergo_wire::peer_feature::ModeFeature {
+                    state_type: if is_utxo_mode {
+                        ergo_wire::peer_feature::StateTypeCode::Utxo
+                    } else {
+                        ergo_wire::peer_feature::StateTypeCode::Digest
                     },
-                ),
+                    verifying_transactions: true,
+                    nipopow_bootstrapped: None,
+                    blocks_to_keep: settings.ergo.node.blocks_to_keep,
+                }),
                 ergo_wire::peer_feature::PeerFeature::Session(
                     ergo_wire::peer_feature::SessionFeature {
                         network_magic: magic,
@@ -478,7 +480,15 @@ async fn main() {
                     let inbound_tx = inbound_tx.clone();
                     let our_hs = our_handshake.clone();
                     tokio::spawn(async move {
-                        match PeerConnection::accept(stream, magic, &our_hs, handshake_timeout, Some(session_id)).await {
+                        match PeerConnection::accept(
+                            stream,
+                            magic,
+                            &our_hs,
+                            handshake_timeout,
+                            Some(session_id),
+                        )
+                        .await
+                        {
                             Ok((conn, peer_hs)) => {
                                 let inbound = event_loop::InboundPeer {
                                     conn,

@@ -114,11 +114,23 @@ mod tests {
 
     #[test]
     fn modifier_type_id_values() {
-        assert_eq!(ModifierTypeId::from_byte(2), Some(ModifierTypeId::Transaction));
+        assert_eq!(
+            ModifierTypeId::from_byte(2),
+            Some(ModifierTypeId::Transaction)
+        );
         assert_eq!(ModifierTypeId::from_byte(101), Some(ModifierTypeId::Header));
-        assert_eq!(ModifierTypeId::from_byte(102), Some(ModifierTypeId::BlockTransactions));
-        assert_eq!(ModifierTypeId::from_byte(104), Some(ModifierTypeId::ADProofs));
-        assert_eq!(ModifierTypeId::from_byte(108), Some(ModifierTypeId::Extension));
+        assert_eq!(
+            ModifierTypeId::from_byte(102),
+            Some(ModifierTypeId::BlockTransactions)
+        );
+        assert_eq!(
+            ModifierTypeId::from_byte(104),
+            Some(ModifierTypeId::ADProofs)
+        );
+        assert_eq!(
+            ModifierTypeId::from_byte(108),
+            Some(ModifierTypeId::Extension)
+        );
         assert_eq!(ModifierTypeId::from_byte(0), None);
         assert_eq!(ModifierTypeId::from_byte(99), None);
 

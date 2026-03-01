@@ -156,13 +156,15 @@ impl DeliveryTracker {
     /// Evict entries from `received` older than `max_age`.
     pub fn cleanup_received(&mut self, max_age: Duration) {
         let now = Instant::now();
-        self.received.retain(|_, ts| now.duration_since(*ts) < max_age);
+        self.received
+            .retain(|_, ts| now.duration_since(*ts) < max_age);
     }
 
     /// Evict entries from `invalid` older than `max_age`.
     pub fn cleanup_invalid(&mut self, max_age: Duration) {
         let now = Instant::now();
-        self.invalid.retain(|_, ts| now.duration_since(*ts) < max_age);
+        self.invalid
+            .retain(|_, ts| now.duration_since(*ts) < max_age);
     }
 
     /// Collect header requests (type_id 101) older than `stale_threshold` that
@@ -438,10 +440,9 @@ mod tests {
         let mut tracker = DeliveryTracker::new(60, 3);
         let id = make_id(0x20);
         // Insert directly with a backdated timestamp
-        tracker.received.insert(
-            (101, id),
-            Instant::now() - Duration::from_secs(600),
-        );
+        tracker
+            .received
+            .insert((101, id), Instant::now() - Duration::from_secs(600));
         assert_eq!(tracker.status(101, &id), ModifierStatus::Received);
         tracker.cleanup_received(Duration::from_secs(300));
         assert_eq!(tracker.status(101, &id), ModifierStatus::Unknown);
@@ -452,7 +453,9 @@ mod tests {
         let mut tracker = DeliveryTracker::new(60, 3);
         let id = make_id(0x21);
         // Insert directly with a backdated timestamp
-        tracker.invalid.insert(id, Instant::now() - Duration::from_secs(3600));
+        tracker
+            .invalid
+            .insert(id, Instant::now() - Duration::from_secs(3600));
         assert_eq!(tracker.status(101, &id), ModifierStatus::Invalid);
         tracker.cleanup_invalid(Duration::from_secs(1800));
         assert_eq!(tracker.status(101, &id), ModifierStatus::Unknown);
@@ -468,11 +471,19 @@ mod tests {
         let past = Instant::now() - Duration::from_secs(5);
         tracker.requested.insert(
             (101, hdr_id),
-            RequestInfo { peer_id: 1, requested_at: past, checks: 0 },
+            RequestInfo {
+                peer_id: 1,
+                requested_at: past,
+                checks: 0,
+            },
         );
         tracker.requested.insert(
             (102, body_id),
-            RequestInfo { peer_id: 2, requested_at: past, checks: 0 },
+            RequestInfo {
+                peer_id: 2,
+                requested_at: past,
+                checks: 0,
+            },
         );
         let stale = tracker.collect_stale_headers(Duration::from_secs(3));
         assert_eq!(stale.len(), 1);
@@ -487,7 +498,11 @@ mod tests {
         let past = Instant::now() - Duration::from_secs(5);
         tracker.requested.insert(
             (101, id),
-            RequestInfo { peer_id: 1, requested_at: past, checks: 0 },
+            RequestInfo {
+                peer_id: 1,
+                requested_at: past,
+                checks: 0,
+            },
         );
         let _ = tracker.collect_stale_headers(Duration::from_secs(3));
         // checks should still be 0

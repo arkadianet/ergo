@@ -150,7 +150,11 @@ impl SyncManager {
         let has_prebuilt = prebuilt_sync_data.is_some();
         let sync_data = prebuilt_sync_data.or_else(|| serialize_sync_info(history, max_headers));
         if let Some(ref data) = sync_data {
-            tracing::debug!(has_prebuilt, data_len = data.len(), "on_tick: SyncInfo produced");
+            tracing::debug!(
+                has_prebuilt,
+                data_len = data.len(),
+                "on_tick: SyncInfo produced"
+            );
             actions.push(SyncAction::SendSyncInfo {
                 peer_id: None,
                 data: data.clone(),
@@ -399,10 +403,7 @@ mod tests {
         // SyncInfo should be broadcast to all peers (peer_id: None), not just the first.
         assert!(matches!(
             &actions[0],
-            SyncAction::SendSyncInfo {
-                peer_id: None,
-                ..
-            }
+            SyncAction::SendSyncInfo { peer_id: None, .. }
         ));
     }
 
@@ -512,10 +513,7 @@ mod tests {
         assert!(!actions.is_empty());
         assert!(matches!(
             &actions[0],
-            SyncAction::SendSyncInfo {
-                peer_id: None,
-                ..
-            }
+            SyncAction::SendSyncInfo { peer_id: None, .. }
         ));
     }
 
@@ -552,7 +550,10 @@ mod tests {
             peer_id: 2,
             data: vec![0xAA],
         };
-        assert!(matches!(action, SyncAction::SendModifiers { peer_id: 2, .. }));
+        assert!(matches!(
+            action,
+            SyncAction::SendModifiers { peer_id: 2, .. }
+        ));
     }
 
     #[test]
@@ -578,7 +579,11 @@ mod tests {
             exclude: 42,
         };
         match action {
-            SyncAction::BroadcastInvExcept { type_id, ids, exclude } => {
+            SyncAction::BroadcastInvExcept {
+                type_id,
+                ids,
+                exclude,
+            } => {
                 assert_eq!(type_id, 2);
                 assert_eq!(ids.len(), 1);
                 assert_eq!(exclude, 42);
@@ -590,7 +595,9 @@ mod tests {
     #[test]
     fn sync_action_add_peers_variant() {
         let addr: std::net::SocketAddr = "10.0.0.1:9030".parse().unwrap();
-        let action = SyncAction::AddPeers { addresses: vec![addr] };
+        let action = SyncAction::AddPeers {
+            addresses: vec![addr],
+        };
         match action {
             SyncAction::AddPeers { addresses } => {
                 assert_eq!(addresses.len(), 1);
@@ -740,7 +747,9 @@ mod tests {
         let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
-        assert!(actions.iter().any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
     }
 
     #[test]
@@ -775,7 +784,9 @@ mod tests {
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         // Should still send SyncInfo even in BlockDownload.
-        assert!(actions.iter().any(|a| matches!(a, SyncAction::SendSyncInfo { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::SendSyncInfo { .. })));
     }
 
     #[test]
@@ -810,8 +821,12 @@ mod tests {
         let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         // Should include both SyncInfo (for parallel header download) and RequestModifiers.
-        assert!(actions.iter().any(|a| matches!(a, SyncAction::SendSyncInfo { .. })));
-        assert!(actions.iter().any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::SendSyncInfo { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
     }
 
     #[test]
@@ -832,6 +847,8 @@ mod tests {
 
         // Should transition to BlockDownload and request sections.
         assert_eq!(mgr.state(), SyncState::BlockDownload);
-        assert!(actions.iter().any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
     }
 }

@@ -144,7 +144,10 @@ mod tests {
         let tb = sample_box(4, 500_000, 400);
         let mut json_val: serde_json::Value = serde_json::to_value(&tb).unwrap();
         // Remove the field to simulate old data.
-        json_val.as_object_mut().unwrap().remove("additional_registers");
+        json_val
+            .as_object_mut()
+            .unwrap()
+            .remove("additional_registers");
         let json_bytes = serde_json::to_vec(&json_val).unwrap();
         let restored = TrackedBox::from_bytes(&json_bytes).unwrap();
         assert!(restored.additional_registers.is_empty());

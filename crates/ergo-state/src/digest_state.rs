@@ -167,11 +167,7 @@ impl DigestState {
     ///
     /// Directly replaces the stored digest and version with the
     /// provided values. Does not consult or modify the version history.
-    pub fn rollback_to(
-        &mut self,
-        version: &ModifierId,
-        digest: Vec<u8>,
-    ) -> Result<(), StateError> {
+    pub fn rollback_to(&mut self, version: &ModifierId, digest: Vec<u8>) -> Result<(), StateError> {
         self.root_digest = digest;
         self.version = *version;
         Ok(())
@@ -531,9 +527,7 @@ mod tests {
             to_insert: vec![(key_to_box_id(&key), val.to_vec())],
         };
 
-        state
-            .apply_full_block(&block, &block_id, &changes)
-            .unwrap();
+        state.apply_full_block(&block, &block_id, &changes).unwrap();
         assert_eq!(state.state_root(), &new_digest[..]);
 
         // Rollback to initial digest.

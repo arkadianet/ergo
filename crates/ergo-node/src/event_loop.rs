@@ -7,11 +7,10 @@ use tokio::sync::RwLock;
 
 use ergo_network::block_processor::{ProcessorCommand, ProcessorEvent};
 use ergo_network::connection_pool::ConnectionPool;
-use ergo_network::peer_conn::PeerConnection;
-use ergo_wire::handshake::ConnectionDirection;
 use ergo_network::delivery_tracker::DeliveryTracker;
-use ergo_network::message_handler;
 use ergo_network::mempool::ErgoMemPool;
+use ergo_network::message_handler;
+use ergo_network::peer_conn::PeerConnection;
 use ergo_network::peer_discovery::PeerDiscovery;
 use ergo_network::penalty_manager::{PenaltyAction, PenaltyManager};
 use ergo_network::sync_manager::{SyncAction, SyncManager};
@@ -19,6 +18,7 @@ use ergo_network::sync_metrics::SyncMetrics;
 use ergo_network::sync_tracker::SyncTracker;
 use ergo_settings::settings::ErgoSettings;
 use ergo_storage::history_db::{header_score_key, HistoryDb};
+use ergo_wire::handshake::ConnectionDirection;
 use ergo_wire::handshake::{Handshake, PeerSpec, ProtocolVersion};
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::message::MessageCode;
@@ -192,15 +192,9 @@ pub async fn run(
         settings.network.max_delivery_checks,
     );
     let utxo_mode = settings.ergo.node.state_type == "utxo";
-    let mut sync_mgr = SyncManager::with_utxo_mode(
-        settings.network.desired_inv_objects as usize,
-        64,
-        utxo_mode,
-    );
-    let mut discovery = PeerDiscovery::new(
-        parse_seed_peers(&settings.network.known_peers),
-        1000,
-    );
+    let mut sync_mgr =
+        SyncManager::with_utxo_mode(settings.network.desired_inv_objects as usize, 64, utxo_mode);
+    let mut discovery = PeerDiscovery::new(parse_seed_peers(&settings.network.known_peers), 1000);
     let mut penalties = PenaltyManager::new();
     let mut sync_tracker = SyncTracker::new();
     let mut sync_metrics = SyncMetrics::new(10);
@@ -322,7 +316,7 @@ pub async fn run(
             _ = sync_tick.tick() => {
                 sync_broadcast_counter += 1;
                 let suppress_broadcast = sync_mgr.state() == ergo_network::sync_manager::SyncState::HeaderSync
-                    && sync_broadcast_counter % 6 != 0;
+                    && !sync_broadcast_counter.is_multiple_of(6);
                 handle_sync_tick(
                     &mut pool,
                     &mut sync_mgr,
@@ -1280,7 +1274,14 @@ async fn handle_sync_tick(
         None
     };
 
-    let actions = sync_mgr.on_tick(sync_history, tracker, &peers, is_caught_up, prebuilt_sync, settings.network.sync_info_max_headers);
+    let actions = sync_mgr.on_tick(
+        sync_history,
+        tracker,
+        &peers,
+        is_caught_up,
+        prebuilt_sync,
+        settings.network.sync_info_max_headers,
+    );
 
     // During header sync, suppress broadcast SyncInfo (peer_id=None) to let
     // the targeted SyncInfo loop run without competition from overlapping Inv
@@ -1299,11 +1300,7 @@ async fn handle_sync_tick(
 
     let mut candidate_peers = sync_tracker.peers_for_downloading_blocks();
     if candidate_peers.is_empty() {
-        candidate_peers = pool
-            .connected_peers()
-            .iter()
-            .map(|p| p.id)
-            .collect();
+        candidate_peers = pool.connected_peers().iter().map(|p| p.id).collect();
     }
 
     for (type_id, id, failed_peer, checks) in timed_out {
@@ -1316,7 +1313,11 @@ async fn handle_sync_tick(
                 ids: vec![id],
             };
             let _ = pool
-                .send_to(alt_peer, MessageCode::RequestModifier as u8, inv.serialize())
+                .send_to(
+                    alt_peer,
+                    MessageCode::RequestModifier as u8,
+                    inv.serialize(),
+                )
                 .await;
         } else {
             tracker.set_unknown(type_id, &id);
@@ -1378,11 +1379,7 @@ async fn handle_check_modifiers(
 
     let mut peers = sync_tracker.peers_for_downloading_blocks();
     if peers.is_empty() {
-        let connected: HashSet<u64> = pool
-            .connected_peers()
-            .iter()
-            .map(|p| p.id)
-            .collect();
+        let connected: HashSet<u64> = pool.connected_peers().iter().map(|p| p.id).collect();
         peers = connected.into_iter().collect();
     }
 
@@ -1434,11 +1431,7 @@ async fn handle_discovery_tick(
             .await;
     }
 
-    let connected: HashSet<_> = pool
-        .connected_peers()
-        .iter()
-        .map(|p| p.addr)
-        .collect();
+    let connected: HashSet<_> = pool.connected_peers().iter().map(|p| p.addr).collect();
 
     if pool.peer_count() < settings.network.max_connections as usize {
         let hs_timeout = settings.network.handshake_timeout_secs;
@@ -1451,13 +1444,16 @@ async fn handle_discovery_tick(
             let tx = pending_conn_tx.clone();
             let hs = our_handshake.clone();
             tokio::spawn(async move {
-                match PeerConnection::connect(addr, magic, &hs, hs_timeout, Some(session_id)).await {
+                match PeerConnection::connect(addr, magic, &hs, hs_timeout, Some(session_id)).await
+                {
                     Ok((conn, peer_hs)) => {
-                        let _ = tx.send(PendingOutboundConn {
-                            conn,
-                            addr,
-                            handshake: peer_hs,
-                        }).await;
+                        let _ = tx
+                            .send(PendingOutboundConn {
+                                conn,
+                                addr,
+                                handshake: peer_hs,
+                            })
+                            .await;
                     }
                     Err(e) => {
                         tracing::debug!(%addr, error = %e, "background connect failed");

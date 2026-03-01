@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use ergo_types::transaction::{compute_box_id, BoxId, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
+use blake2::Blake2bVar;
+use ergo_types::transaction::{
+    compute_box_id, BoxId, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
+};
 
 /// Compute the blake2b-256 hash of the given data.
 fn blake2b256(data: &[u8]) -> [u8; 32] {
@@ -17,13 +19,13 @@ fn blake2b256(data: &[u8]) -> [u8; 32] {
 /// Well-known ErgoTree bytes for the miners' fee proposition contract.
 /// This is the `MINERS_FEE_BASE16_BYTES` from sigma-rust/ergo-lib.
 const MINERS_FEE_ERGO_TREE: &[u8] = &[
-    0x10, 0x05, 0x04, 0x00, 0x04, 0x00, 0x0e, 0x36, 0x10, 0x02, 0x04, 0xa0, 0x0b, 0x08, 0xcd,
-    0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-    0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
-    0xf8, 0x17, 0x98, 0xea, 0x02, 0xd1, 0x92, 0xa3, 0x9a, 0x8c, 0xc7, 0xa7, 0x01, 0x73, 0x00,
-    0x73, 0x01, 0x10, 0x01, 0x02, 0x04, 0x02, 0xd1, 0x96, 0x83, 0x03, 0x01, 0x93, 0xa3, 0x8c,
-    0xc7, 0xb2, 0xa5, 0x73, 0x00, 0x00, 0x01, 0x93, 0xc2, 0xb2, 0xa5, 0x73, 0x01, 0x00, 0x74,
-    0x73, 0x02, 0x73, 0x03, 0x83, 0x01, 0x08, 0xcd, 0xee, 0xac, 0x93, 0xb1, 0xa5, 0x73, 0x04,
+    0x10, 0x05, 0x04, 0x00, 0x04, 0x00, 0x0e, 0x36, 0x10, 0x02, 0x04, 0xa0, 0x0b, 0x08, 0xcd, 0x02,
+    0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+    0xea, 0x02, 0xd1, 0x92, 0xa3, 0x9a, 0x8c, 0xc7, 0xa7, 0x01, 0x73, 0x00, 0x73, 0x01, 0x10, 0x01,
+    0x02, 0x04, 0x02, 0xd1, 0x96, 0x83, 0x03, 0x01, 0x93, 0xa3, 0x8c, 0xc7, 0xb2, 0xa5, 0x73, 0x00,
+    0x00, 0x01, 0x93, 0xc2, 0xb2, 0xa5, 0x73, 0x01, 0x00, 0x74, 0x73, 0x02, 0x73, 0x03, 0x83, 0x01,
+    0x08, 0xcd, 0xee, 0xac, 0x93, 0xb1, 0xa5, 0x73, 0x04,
 ];
 
 /// Extract the mining fee from a transaction.
@@ -86,7 +88,10 @@ pub enum MempoolError {
     #[error("fee too low: got {got} nanoErg, minimum {min} nanoErg")]
     FeeTooLow { got: u64, min: u64 },
     #[error("double spend: new tx weight {new_weight} does not exceed average conflicting weight {avg_conflicting_weight}")]
-    DoubleSpendLoser { new_weight: u64, avg_conflicting_weight: u64 },
+    DoubleSpendLoser {
+        new_weight: u64,
+        avg_conflicting_weight: u64,
+    },
 }
 
 /// Validate a transaction for mempool insertion (size + blacklist).
@@ -231,16 +236,19 @@ impl ErgoMemPool {
             tx_id,
         };
         self.ordered.insert(key, tx_id);
-        self.pool.insert(tx_id, MempoolEntry {
-            tx,
-            created_at: Instant::now(),
-            created_at_millis: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            tx_size: 0,
-            weight: 0,
-        });
+        self.pool.insert(
+            tx_id,
+            MempoolEntry {
+                tx,
+                created_at: Instant::now(),
+                created_at_millis: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                tx_size: 0,
+                weight: 0,
+            },
+        );
         Ok(())
     }
 
@@ -250,7 +258,11 @@ impl ErgoMemPool {
     /// and supports Replace-By-Fee (RBF): when a double-spend is detected,
     /// the new transaction replaces all conflicting pool transactions if its
     /// weight exceeds the average weight of the conflicting set.
-    pub fn put_with_size(&mut self, tx: ErgoTransaction, tx_size: usize) -> Result<(), MempoolError> {
+    pub fn put_with_size(
+        &mut self,
+        tx: ErgoTransaction,
+        tx_size: usize,
+    ) -> Result<(), MempoolError> {
         // Minimum fee enforcement.
         let fee = extract_fee(&tx);
         if fee < self.minimal_fee_amount {
@@ -319,16 +331,19 @@ impl ErgoMemPool {
             tx_id,
         };
         self.ordered.insert(key, tx_id);
-        self.pool.insert(tx_id, MempoolEntry {
-            tx,
-            created_at: Instant::now(),
-            created_at_millis: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            tx_size,
-            weight,
-        });
+        self.pool.insert(
+            tx_id,
+            MempoolEntry {
+                tx,
+                created_at: Instant::now(),
+                created_at_millis: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                tx_size,
+                weight,
+            },
+        );
         Ok(())
     }
 
@@ -358,16 +373,19 @@ impl ErgoMemPool {
             tx_id,
         };
         self.ordered.insert(key, tx_id);
-        self.pool.insert(tx_id, MempoolEntry {
-            tx,
-            created_at: Instant::now(),
-            created_at_millis: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            tx_size: 0,
-            weight: 0,
-        });
+        self.pool.insert(
+            tx_id,
+            MempoolEntry {
+                tx,
+                created_at: Instant::now(),
+                created_at_millis: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                tx_size: 0,
+                weight: 0,
+            },
+        );
         Ok(())
     }
 
@@ -616,7 +634,11 @@ impl ErgoMemPool {
             if accumulated_cost > cost_limit {
                 break;
             }
-            let all_inputs_present = entry.tx.inputs.iter().all(|input| box_exists(&input.box_id));
+            let all_inputs_present = entry
+                .tx
+                .inputs
+                .iter()
+                .all(|input| box_exists(&input.box_id));
             if !all_inputs_present {
                 invalid.push(entry.tx.tx_id);
             }
@@ -796,10 +818,7 @@ mod tests {
 
         assert_eq!(pool.size(), 1);
         assert!(pool.get(&TxId([0x01; 32])).is_none(), "tx1 should be gone");
-        assert!(
-            pool.get(&TxId([0x02; 32])).is_some(),
-            "tx2 should remain"
-        );
+        assert!(pool.get(&TxId([0x02; 32])).is_some(), "tx2 should remain");
         assert!(!pool.is_double_spend(&BoxId([0xAA; 32])));
     }
 
@@ -835,8 +854,14 @@ mod tests {
         pool.remove_for_block(&[block_tx]);
 
         assert_eq!(pool.size(), 1);
-        assert!(pool.get(&TxId([0x01; 32])).is_none(), "tx1 should be removed (conflicting input)");
-        assert!(pool.get(&TxId([0x02; 32])).is_some(), "tx2 should remain (no conflict)");
+        assert!(
+            pool.get(&TxId([0x01; 32])).is_none(),
+            "tx1 should be removed (conflicting input)"
+        );
+        assert!(
+            pool.get(&TxId([0x02; 32])).is_some(),
+            "tx2 should remain (no conflict)"
+        );
     }
 
     #[test]
@@ -854,7 +879,10 @@ mod tests {
 
         assert_eq!(pool.size(), 0);
         assert!(pool.get(&tx_id).is_none(), "exact tx should be removed");
-        assert!(!pool.is_double_spend(&BoxId([0xAA; 32])), "input index should be cleaned up");
+        assert!(
+            !pool.is_double_spend(&BoxId([0xAA; 32])),
+            "input index should be cleaned up"
+        );
     }
 
     #[test]
@@ -1127,7 +1155,7 @@ mod tests {
                 creation_height: 100_000,
                 tokens: Vec::new(),
                 additional_registers: vec![
-                    (4, vec![0x05, 0x02]), // R4
+                    (4, vec![0x05, 0x02]),                         // R4
                     (5, vec![0x0e, 0x04, 0x74, 0x65, 0x73, 0x74]), // R5
                 ],
             }],
@@ -1151,10 +1179,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Search with R4 matching but R5 not matching
-        let filter = vec![
-            (4u8, vec![0x05, 0x02]),
-            (5u8, vec![0xFF]),
-        ];
+        let filter = vec![(4u8, vec![0x05, 0x02]), (5u8, vec![0xFF])];
         let results = pool.find_outputs_by_registers(&filter);
         assert!(results.is_empty());
     }
@@ -1253,10 +1278,7 @@ mod tests {
         pool.put(make_tx(0x01, &[0xAA])).unwrap();
         pool.put(make_tx(0x02, &[0xBB])).unwrap();
         // Only box 0xAA exists
-        let invalid = pool.audit_against_utxo(
-            |box_id| box_id.0 == [0xAA; 32],
-            7_000_000,
-        );
+        let invalid = pool.audit_against_utxo(|box_id| box_id.0 == [0xAA; 32], 7_000_000);
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0], TxId([0x02; 32]));
     }
@@ -1739,7 +1761,13 @@ mod tests {
         // make_tx has no fee output -> fee = 0
         let tx = make_tx(0x01, &[0xAA]);
         let err = pool.put(tx).unwrap_err();
-        assert!(matches!(err, MempoolError::FeeTooLow { got: 0, min: 1_000_000 }));
+        assert!(matches!(
+            err,
+            MempoolError::FeeTooLow {
+                got: 0,
+                min: 1_000_000
+            }
+        ));
     }
 
     #[test]
@@ -1755,7 +1783,13 @@ mod tests {
         let mut pool = ErgoMemPool::with_min_fee(100, 1_000_000);
         let tx = make_tx_with_fee(0x01, 0xAA, 500_000); // below min
         let err = pool.put_with_size(tx, 200).unwrap_err();
-        assert!(matches!(err, MempoolError::FeeTooLow { got: 500_000, min: 1_000_000 }));
+        assert!(matches!(
+            err,
+            MempoolError::FeeTooLow {
+                got: 500_000,
+                min: 1_000_000
+            }
+        ));
     }
 
     #[test]
@@ -1778,7 +1812,7 @@ mod tests {
     fn put_no_fee_check_bypasses_min_fee() {
         let mut pool = ErgoMemPool::with_min_fee(100, 1_000_000);
         let tx = make_tx(0x01, &[0xAA]); // fee = 0
-        // put() would reject, but put_no_fee_check accepts
+                                         // put() would reject, but put_no_fee_check accepts
         pool.put_no_fee_check(tx).unwrap();
         assert_eq!(pool.size(), 1);
     }
@@ -1802,8 +1836,14 @@ mod tests {
 
         // tx2 should have replaced tx1
         assert_eq!(pool.size(), 1);
-        assert!(pool.get(&TxId([0x01; 32])).is_none(), "tx1 should be replaced");
-        assert!(pool.get(&TxId([0x02; 32])).is_some(), "tx2 should be present");
+        assert!(
+            pool.get(&TxId([0x01; 32])).is_none(),
+            "tx1 should be replaced"
+        );
+        assert!(
+            pool.get(&TxId([0x02; 32])).is_some(),
+            "tx2 should be present"
+        );
     }
 
     #[test]
@@ -1877,9 +1917,18 @@ mod tests {
         pool.put_with_size(tx3, 400).unwrap();
 
         assert_eq!(pool.size(), 1);
-        assert!(pool.get(&TxId([0x01; 32])).is_none(), "tx1 should be replaced");
-        assert!(pool.get(&TxId([0x02; 32])).is_none(), "tx2 should be replaced");
-        assert!(pool.get(&TxId([0x03; 32])).is_some(), "tx3 should be present");
+        assert!(
+            pool.get(&TxId([0x01; 32])).is_none(),
+            "tx1 should be replaced"
+        );
+        assert!(
+            pool.get(&TxId([0x02; 32])).is_none(),
+            "tx2 should be replaced"
+        );
+        assert!(
+            pool.get(&TxId([0x03; 32])).is_some(),
+            "tx3 should be present"
+        );
     }
 
     #[test]

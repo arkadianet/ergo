@@ -1,5 +1,5 @@
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 use crate::modifier_id::{ADDigest, Digest32, ModifierId};
 
@@ -87,9 +87,18 @@ impl Header {
     /// Returns `(type_id, section_id)` for all three body section types.
     pub fn section_ids(&self, header_id: &ModifierId) -> [(u8, ModifierId); 3] {
         [
-            (BLOCK_TX_TYPE_ID, compute_section_id(BLOCK_TX_TYPE_ID, header_id, &self.transactions_root)),
-            (AD_PROOFS_TYPE_ID, compute_section_id(AD_PROOFS_TYPE_ID, header_id, &self.ad_proofs_root)),
-            (EXTENSION_TYPE_ID, compute_section_id(EXTENSION_TYPE_ID, header_id, &self.extension_root)),
+            (
+                BLOCK_TX_TYPE_ID,
+                compute_section_id(BLOCK_TX_TYPE_ID, header_id, &self.transactions_root),
+            ),
+            (
+                AD_PROOFS_TYPE_ID,
+                compute_section_id(AD_PROOFS_TYPE_ID, header_id, &self.ad_proofs_root),
+            ),
+            (
+                EXTENSION_TYPE_ID,
+                compute_section_id(EXTENSION_TYPE_ID, header_id, &self.extension_root),
+            ),
         ]
     }
 

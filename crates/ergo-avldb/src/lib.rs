@@ -242,7 +242,10 @@ mod tests {
         let _proof = tree.generate_proof();
 
         let digest_after = tree.digest().expect("digest after insert");
-        assert_ne!(digest_before, digest_after, "digest should change after insert");
+        assert_ne!(
+            digest_before, digest_after,
+            "digest should change after insert"
+        );
     }
 
     #[test]
@@ -259,11 +262,18 @@ mod tests {
         let digest_with_key = tree.digest().expect("digest with key");
 
         let removed = tree.remove(key.clone()).expect("remove should succeed");
-        assert_eq!(removed, Some(value), "removed value should match inserted value");
+        assert_eq!(
+            removed,
+            Some(value),
+            "removed value should match inserted value"
+        );
         let _proof = tree.generate_proof();
 
         let digest_without_key = tree.digest().expect("digest without key");
-        assert_ne!(digest_with_key, digest_without_key, "digest should change after remove");
+        assert_ne!(
+            digest_with_key, digest_without_key,
+            "digest should change after remove"
+        );
 
         // Key should no longer be found.
         assert!(

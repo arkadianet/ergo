@@ -174,8 +174,7 @@ impl Keystore {
         let key = derive_key(password, &salt);
 
         // Decrypt.
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .expect("key length is always 32 bytes");
+        let cipher = Aes256Gcm::new_from_slice(&key).expect("key length is always 32 bytes");
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext = cipher
             .decrypt(nonce, ciphertext_with_tag.as_ref())
@@ -204,8 +203,7 @@ impl Keystore {
         let key = derive_key(password, &salt);
 
         // Encrypt.
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .expect("key length is always 32 bytes");
+        let cipher = Aes256Gcm::new_from_slice(&key).expect("key length is always 32 bytes");
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext_with_tag = cipher
             .encrypt(nonce, mnemonic.as_bytes())
@@ -256,7 +254,10 @@ mod tests {
 
         // BIP-39 24-word mnemonic.
         let word_count = mnemonic.split_whitespace().count();
-        assert_eq!(word_count, 24, "expected 24-word mnemonic, got {word_count}");
+        assert_eq!(
+            word_count, 24,
+            "expected 24-word mnemonic, got {word_count}"
+        );
     }
 
     #[test]

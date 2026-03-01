@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use crate::network_type::NetworkType;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WalletSettings {
@@ -81,20 +81,48 @@ pub struct NodeSettings {
     pub make_snapshot_every: u32,
 }
 
-fn default_keep_versions() -> u32 { 200 }
-fn default_mempool_capacity() -> u32 { 1000 }
-fn default_cleanup_secs() -> u64 { 30 }
-fn default_sorting() -> String { "random".into() }
-fn default_rebroadcast() -> u32 { 3 }
-fn default_min_fee() -> u64 { 1_000_000 }
-fn default_header_chain_diff() -> u32 { 100 }
-fn default_ad_proofs_suffix() -> u32 { 114688 }
-fn default_use_external_miner() -> bool { true }
-fn default_internal_miner_polling_ms() -> u64 { 500 }
-fn default_candidate_generation_interval_s() -> u64 { 60 }
-fn default_p2p_utxo_snapshots() -> u32 { 2 }
-fn default_make_snapshot_every() -> u32 { 52224 }
-fn default_voting_targets() -> Vec<u8> { vec![0, 0, 0] }
+fn default_keep_versions() -> u32 {
+    200
+}
+fn default_mempool_capacity() -> u32 {
+    1000
+}
+fn default_cleanup_secs() -> u64 {
+    30
+}
+fn default_sorting() -> String {
+    "random".into()
+}
+fn default_rebroadcast() -> u32 {
+    3
+}
+fn default_min_fee() -> u64 {
+    1_000_000
+}
+fn default_header_chain_diff() -> u32 {
+    100
+}
+fn default_ad_proofs_suffix() -> u32 {
+    114688
+}
+fn default_use_external_miner() -> bool {
+    true
+}
+fn default_internal_miner_polling_ms() -> u64 {
+    500
+}
+fn default_candidate_generation_interval_s() -> u64 {
+    60
+}
+fn default_p2p_utxo_snapshots() -> u32 {
+    2
+}
+fn default_make_snapshot_every() -> u32 {
+    52224
+}
+fn default_voting_targets() -> Vec<u8> {
+    vec![0, 0, 0]
+}
 
 impl NodeSettings {
     /// Parse the configured mining public key (33-byte compressed EC point).
@@ -146,14 +174,17 @@ pub struct ChainSettings {
 fn default_genesis_state_digest() -> String {
     "a5df145d41ab15a01e0cd3ffbab046f0d029e5412293072ad0f5827428589b9302".to_string()
 }
-fn default_v2_height() -> u32 { 417_792 }
-fn default_v2_difficulty() -> String { "6f98d5000000".to_string() }
+fn default_v2_height() -> u32 {
+    417_792
+}
+fn default_v2_difficulty() -> String {
+    "6f98d5000000".to_string()
+}
 
 impl ChainSettings {
     /// Decode the genesis state digest hex string into bytes.
     pub fn genesis_state_digest(&self) -> Vec<u8> {
-        hex::decode(&self.genesis_state_digest_hex)
-            .unwrap_or_else(|_| vec![0u8; 33])
+        hex::decode(&self.genesis_state_digest_hex).unwrap_or_else(|_| vec![0u8; 33])
     }
 }
 
@@ -213,19 +244,45 @@ pub struct NetworkSettings {
     pub sync_info_max_headers: u32,
 }
 
-fn default_handshake_timeout() -> u64 { 30 }
-fn default_max_connections() -> u32 { 30 }
-fn default_connection_timeout() -> u64 { 1 }
-fn default_delivery_timeout() -> u64 { 10 }
-fn default_max_delivery_checks() -> u32 { 100 }
-fn default_desired_inv() -> u32 { 400 }
-fn default_max_modifiers_cache() -> u32 { 1024 }
-fn default_max_peer_spec() -> u32 { 64 }
-fn default_sync_interval() -> u64 { 5 }
-fn default_sync_interval_stable() -> u64 { 30 }
-fn default_peer_discovery() -> bool { true }
-fn default_inactive_deadline() -> u64 { 600 }
-fn default_sync_info_max_headers() -> u32 { 10 }
+fn default_handshake_timeout() -> u64 {
+    30
+}
+fn default_max_connections() -> u32 {
+    30
+}
+fn default_connection_timeout() -> u64 {
+    1
+}
+fn default_delivery_timeout() -> u64 {
+    10
+}
+fn default_max_delivery_checks() -> u32 {
+    100
+}
+fn default_desired_inv() -> u32 {
+    400
+}
+fn default_max_modifiers_cache() -> u32 {
+    1024
+}
+fn default_max_peer_spec() -> u32 {
+    64
+}
+fn default_sync_interval() -> u64 {
+    5
+}
+fn default_sync_interval_stable() -> u64 {
+    30
+}
+fn default_peer_discovery() -> bool {
+    true
+}
+fn default_inactive_deadline() -> u64 {
+    600
+}
+fn default_sync_info_max_headers() -> u32 {
+    10
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiSettings {
@@ -238,7 +295,9 @@ pub struct ApiSettings {
     pub timeout_secs: u64,
 }
 
-fn default_api_timeout() -> u64 { 5 }
+fn default_api_timeout() -> u64 {
+    5
+}
 
 impl ErgoSettings {
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
@@ -325,7 +384,10 @@ timeout_secs = 5
     #[test]
     fn parse_minimal_config() {
         let settings: ErgoSettings = toml::from_str(MINIMAL_CONFIG).unwrap();
-        assert_eq!(settings.ergo.network_type, crate::network_type::NetworkType::TestNet);
+        assert_eq!(
+            settings.ergo.network_type,
+            crate::network_type::NetworkType::TestNet
+        );
         assert_eq!(settings.ergo.node.mempool_capacity, 1000);
         assert_eq!(settings.ergo.chain.pow.k, 32);
         assert_eq!(settings.network.magic_bytes, vec![2, 0, 0, 1]);

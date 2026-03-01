@@ -143,10 +143,7 @@ mod tests {
             value: 2_000_000_000,
             ergo_tree_bytes: simple_ergo_tree(),
             creation_height: 600_000,
-            tokens: vec![
-                (BoxId([0xAA; 32]), 1_000),
-                (BoxId([0xBB; 32]), 999_999),
-            ],
+            tokens: vec![(BoxId([0xAA; 32]), 1_000), (BoxId([0xBB; 32]), 999_999)],
             additional_registers: Vec::new(),
         };
 

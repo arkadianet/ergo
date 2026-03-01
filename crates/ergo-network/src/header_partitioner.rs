@@ -103,10 +103,7 @@ pub fn select_eligible_peers(
             return EligiblePeers::SinglePeerFallback(inv_sender, reason);
         }
         None => {
-            return EligiblePeers::SinglePeerFallback(
-                inv_sender,
-                "inv_sender not tracked",
-            );
+            return EligiblePeers::SinglePeerFallback(inv_sender, "inv_sender not tracked");
         }
     }
 

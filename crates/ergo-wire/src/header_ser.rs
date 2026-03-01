@@ -3,7 +3,7 @@
 use ergo_types::header::{AutolykosSolution, Header, INITIAL_VERSION};
 use ergo_types::modifier_id::{ADDigest, Digest32, ModifierId};
 
-use crate::vlq::{put_uint, put_ulong, get_uint, get_ulong, CodecError};
+use crate::vlq::{get_uint, get_ulong, put_uint, put_ulong, CodecError};
 
 // ---------------------------------------------------------------------------
 // Serialization

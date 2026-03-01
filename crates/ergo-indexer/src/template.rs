@@ -18,8 +18,8 @@
 //! each constant; instead we fall back to treating the full bytes as the
 //! template.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 /// Bit mask for the constant-segregation flag in the ErgoTree header byte.
 const CONSTANT_SEGREGATION_FLAG: u8 = 0x10;

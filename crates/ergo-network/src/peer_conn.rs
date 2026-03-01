@@ -1,6 +1,4 @@
-use ergo_settings::constants::{
-    CHECKSUM_LENGTH, MAX_HANDSHAKE_SIZE, MESSAGE_HEADER_LENGTH,
-};
+use ergo_settings::constants::{CHECKSUM_LENGTH, MAX_HANDSHAKE_SIZE, MESSAGE_HEADER_LENGTH};
 use ergo_wire::codec::{self, FrameError, RawMessage};
 use ergo_wire::handshake::{Handshake, ProtocolVersion};
 use std::net::SocketAddr;
@@ -106,15 +104,14 @@ impl PeerConnection {
     ) -> Result<(Self, Handshake), PeerConnError> {
         // Cap TCP connect to 5 seconds to prevent blocking the caller for
         // the full OS timeout (~135s on Linux) when a peer is unreachable.
-        let mut stream = tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(addr),
-        )
-        .await
-        .map_err(|_| PeerConnError::Io(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "TCP connect timed out (5s)",
-        )))??;
+        let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+            .await
+            .map_err(|_| {
+                PeerConnError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TCP connect timed out (5s)",
+                ))
+            })??;
 
         // Send our handshake as raw bytes (no message frame).
         let hs_bytes = our_handshake.serialize();
@@ -288,7 +285,10 @@ fn check_peer_version(peer_hs: &Handshake) -> Result<(), PeerConnError> {
 /// and its `session_id` matches `our_session_id`, the connection is rejected.
 /// If no `SessionFeature` is present, the check passes (older peers may not
 /// include it).
-pub fn check_self_connection(peer_hs: &Handshake, our_session_id: u64) -> Result<(), PeerConnError> {
+pub fn check_self_connection(
+    peer_hs: &Handshake,
+    our_session_id: u64,
+) -> Result<(), PeerConnError> {
     for feature in &peer_hs.peer_spec.features {
         if let ergo_wire::peer_feature::PeerFeature::Session(sf) = feature {
             if sf.session_id == our_session_id as i64 {
@@ -438,7 +438,9 @@ mod tests {
         });
 
         // Client side.
-        let (conn, peer_hs) = PeerConnection::connect(addr, magic, &hs_a, 5, None).await.unwrap();
+        let (conn, peer_hs) = PeerConnection::connect(addr, magic, &hs_a, 5, None)
+            .await
+            .unwrap();
         assert_eq!(peer_hs.peer_spec.agent_name, "nodeB");
 
         let mut conn = conn;
@@ -461,7 +463,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "server".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "s".into(),
                 declared_address: None,
                 features: vec![],
@@ -472,7 +478,11 @@ mod tests {
             time: 200,
             peer_spec: PeerSpec {
                 agent_name: "client".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "c".into(),
                 declared_address: None,
                 features: vec![],
@@ -485,7 +495,10 @@ mod tests {
         let hs_server_clone = hs_server.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let (mut conn, peer_hs) = PeerConnection::accept(stream, magic, &hs_server_clone, 5, None).await.unwrap();
+            let (mut conn, peer_hs) =
+                PeerConnection::accept(stream, magic, &hs_server_clone, 5, None)
+                    .await
+                    .unwrap();
             assert_eq!(peer_hs.peer_spec.agent_name, "client");
             // Send a message to the client.
             conn.send_message(99, &[0xAA]).await.unwrap();
@@ -495,7 +508,9 @@ mod tests {
             assert_eq!(msg.body, vec![0xBB]);
         });
 
-        let (mut conn, peer_hs) = PeerConnection::connect(addr, magic, &hs_client, 5, None).await.unwrap();
+        let (mut conn, peer_hs) = PeerConnection::connect(addr, magic, &hs_client, 5, None)
+            .await
+            .unwrap();
         assert_eq!(peer_hs.peer_spec.agent_name, "server");
         // Receive message from server.
         let msg = conn.recv_message().await.unwrap();
@@ -518,7 +533,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "server".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "s".into(),
                 declared_address: None,
                 features: vec![],
@@ -529,7 +548,11 @@ mod tests {
             time: 200,
             peer_spec: PeerSpec {
                 agent_name: "old-client".into(),
-                protocol_version: ProtocolVersion { major: 3, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 3,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "old".into(),
                 declared_address: None,
                 features: vec![],
@@ -570,7 +593,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "client".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "c".into(),
                 declared_address: None,
                 features: vec![],
@@ -581,7 +608,11 @@ mod tests {
             time: 200,
             peer_spec: PeerSpec {
                 agent_name: "old-server".into(),
-                protocol_version: ProtocolVersion { major: 3, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 3,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "old".into(),
                 declared_address: None,
                 features: vec![],
@@ -617,7 +648,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "test".into(),
-                protocol_version: ProtocolVersion { major, minor, patch },
+                protocol_version: ProtocolVersion {
+                    major,
+                    minor,
+                    patch,
+                },
                 node_name: "t".into(),
                 declared_address: None,
                 features: vec![],
@@ -644,7 +679,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "test".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "t".into(),
                 declared_address: None,
                 features: vec![PeerFeature::Session(SessionFeature {
@@ -668,7 +707,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "test".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "t".into(),
                 declared_address: None,
                 features: vec![PeerFeature::Session(SessionFeature {
@@ -689,7 +732,11 @@ mod tests {
             time: 100,
             peer_spec: PeerSpec {
                 agent_name: "test".into(),
-                protocol_version: ProtocolVersion { major: 6, minor: 0, patch: 0 },
+                protocol_version: ProtocolVersion {
+                    major: 6,
+                    minor: 0,
+                    patch: 0,
+                },
                 node_name: "t".into(),
                 declared_address: None,
                 features: vec![],

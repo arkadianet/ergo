@@ -92,8 +92,7 @@ impl HistoryDb {
         match self.get_modifier(HEADER_TYPE_ID, id)? {
             None => Ok(None),
             Some(data) => {
-                let header =
-                    parse_header(&data).map_err(|e| StorageError::Codec(e.to_string()))?;
+                let header = parse_header(&data).map_err(|e| StorageError::Codec(e.to_string()))?;
                 Ok(Some(header))
             }
         }
@@ -414,7 +413,10 @@ mod tests {
         assert!(is_best);
 
         // Score must exist and equal difficulty_from_nbits(0x01010000).
-        let score = db.get_header_score(&id).unwrap().expect("score should exist");
+        let score = db
+            .get_header_score(&id)
+            .unwrap()
+            .expect("score should exist");
         let expected = crate::chain_scoring::add_scores(
             &[0],
             &crate::chain_scoring::difficulty_from_nbits(0x01010000),

@@ -25,7 +25,11 @@ fn build_handshake(magic: [u8; 4]) -> Handshake {
         time: now,
         peer_spec: PeerSpec {
             agent_name: "ergoref".to_string(),
-            protocol_version: ProtocolVersion { major: 5, minor: 0, patch: 12 },
+            protocol_version: ProtocolVersion {
+                major: 5,
+                minor: 0,
+                patch: 12,
+            },
             node_name: "ergo-rust-handshake-test".to_string(),
             declared_address: None,
             features: vec![
@@ -63,7 +67,9 @@ async fn try_handshake(peer_addr: &str, magic: [u8; 4]) -> Result<Handshake, Str
     let hs = build_handshake(magic);
     let raw_bytes = hs.serialize();
 
-    stream.write_all(&raw_bytes).await
+    stream
+        .write_all(&raw_bytes)
+        .await
         .map_err(|e| format!("{peer_addr}: send failed: {e}"))?;
 
     // Read response - peer also sends raw handshake bytes (no frame)
@@ -107,10 +113,12 @@ async fn handshake_with_ergo_peer() {
             Ok(peer_hs) => {
                 println!("Handshake successful with {addr}!");
                 println!("  Agent: {}", peer_hs.peer_spec.agent_name);
-                println!("  Version: {}.{}.{}",
+                println!(
+                    "  Version: {}.{}.{}",
                     peer_hs.peer_spec.protocol_version.major,
                     peer_hs.peer_spec.protocol_version.minor,
-                    peer_hs.peer_spec.protocol_version.patch);
+                    peer_hs.peer_spec.protocol_version.patch
+                );
                 println!("  Node name: {}", peer_hs.peer_spec.node_name);
                 println!("  Features: {}", peer_hs.peer_spec.features.len());
                 assert!(!peer_hs.peer_spec.agent_name.is_empty());
@@ -123,5 +131,8 @@ async fn handshake_with_ergo_peer() {
         }
     }
 
-    panic!("Could not handshake with any peer. Errors:\n{}", errors.join("\n"));
+    panic!(
+        "Could not handshake with any peer. Errors:\n{}",
+        errors.join("\n")
+    );
 }

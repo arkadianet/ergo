@@ -40,9 +40,7 @@ pub fn parse_transaction(data: &[u8]) -> Result<ErgoTransaction, CodecError> {
 ///
 /// This is used by `parse_block_transactions` to parse inline transactions
 /// from a shared byte stream (Scala writes transactions without length prefixes).
-pub fn parse_transaction_from_reader(
-    reader: &mut &[u8],
-) -> Result<ErgoTransaction, CodecError> {
+pub fn parse_transaction_from_reader(reader: &mut &[u8]) -> Result<ErgoTransaction, CodecError> {
     // --- Inputs ---
     let input_count = get_sigma_u16(reader)? as usize;
     let mut inputs = Vec::with_capacity(input_count);
@@ -189,7 +187,7 @@ fn parse_box_candidate(
     let mut additional_registers = Vec::with_capacity(reg_count);
     for i in 0..reg_count {
         let reg_id = 4 + i as u8; // R4, R5, R6, ...
-        // Capture raw bytes of the sigma constant
+                                  // Capture raw bytes of the sigma constant
         let start = *reader as &[u8];
         skip_sigma_constant(reader)?;
         let consumed = start.len() - reader.len();
@@ -591,8 +589,7 @@ mod tests {
         // Then 2 bytes of proof length
         let proof_len_offset = 2 + 32; // sigma_u16(1) + box_id
         assert_eq!(
-            without_proofs[proof_len_offset],
-            0x00,
+            without_proofs[proof_len_offset], 0x00,
             "proof length high byte should be 0"
         );
         assert_eq!(

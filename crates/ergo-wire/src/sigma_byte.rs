@@ -172,7 +172,11 @@ mod tests {
         let original_len = buf.len();
         let mut reader = buf.as_slice();
         skip_sigma_constant(&mut reader).unwrap();
-        assert_eq!(reader.len(), 0, "cursor should advance by {original_len} bytes");
+        assert_eq!(
+            reader.len(),
+            0,
+            "cursor should advance by {original_len} bytes"
+        );
     }
 
     #[test]

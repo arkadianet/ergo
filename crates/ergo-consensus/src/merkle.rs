@@ -1,7 +1,7 @@
 //! Binary Merkle tree using Blake2b-256 for Ergo block root computations.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 const LEAF_PREFIX: u8 = 0x00;
 const INTERNAL_PREFIX: u8 = 0x01;
@@ -10,7 +10,9 @@ fn blake2b256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Blake2bVar::new(32).expect("valid output size");
     hasher.update(data);
     let mut out = [0u8; 32];
-    hasher.finalize_variable(&mut out).expect("correct output size");
+    hasher
+        .finalize_variable(&mut out)
+        .expect("correct output size");
     out
 }
 
@@ -114,7 +116,10 @@ pub fn merkle_proof(elements: &[&[u8]], leaf_index: usize) -> Option<Vec<MerkleP
                     });
                     next_index = next_level.len();
                 }
-                next_level.push(internal_hash(&hashes[chunk_start], &hashes[chunk_start + 1]));
+                next_level.push(internal_hash(
+                    &hashes[chunk_start],
+                    &hashes[chunk_start + 1],
+                ));
             } else {
                 // Odd element promoted
                 if index == chunk_start {
@@ -163,10 +168,7 @@ mod tests {
         // Level 0: [leaf(a), leaf(b), leaf(c)]
         // Level 1: [internal(leaf(a), leaf(b)), leaf(c)]  (c promoted)
         // Level 2: internal(internal(leaf(a), leaf(b)), leaf(c))
-        let expected = internal_hash(
-            &internal_hash(&leaf_hash(a), &leaf_hash(b)),
-            &leaf_hash(c),
-        );
+        let expected = internal_hash(&internal_hash(&leaf_hash(a), &leaf_hash(b)), &leaf_hash(c));
         assert_eq!(merkle_root(&[a, b, c]).unwrap(), expected);
     }
 

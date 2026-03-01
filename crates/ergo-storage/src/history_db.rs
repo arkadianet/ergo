@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatchWithTransaction, DB};
 
 use ergo_types::modifier_id::ModifierId;
@@ -114,7 +114,9 @@ impl HistoryDb {
     /// Refreshes a secondary instance to see the latest writes from the
     /// primary. No-op on read-write or read-only instances.
     pub fn try_catch_up_with_primary(&self) -> Result<(), StorageError> {
-        self.db.try_catch_up_with_primary().map_err(StorageError::Rocks)
+        self.db
+            .try_catch_up_with_primary()
+            .map_err(StorageError::Rocks)
     }
 
     // -----------------------------------------------------------------------
@@ -156,21 +158,13 @@ impl HistoryDb {
     /// Checks whether a block section exists in the `objects` column family.
     ///
     /// Uses `get_pinned_cf` to avoid allocating a full copy of the value bytes.
-    pub fn contains_modifier(
-        &self,
-        type_id: u8,
-        id: &ModifierId,
-    ) -> Result<bool, StorageError> {
+    pub fn contains_modifier(&self, type_id: u8, id: &ModifierId) -> Result<bool, StorageError> {
         let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::modifier_key(type_id, id);
         Ok(self.db.get_pinned_cf(&cf, key)?.is_some())
     }
     /// Deletes a block section from the `objects` column family.
-    pub fn delete_modifier(
-        &self,
-        type_id: u8,
-        id: &ModifierId,
-    ) -> Result<(), StorageError> {
+    pub fn delete_modifier(&self, type_id: u8, id: &ModifierId) -> Result<(), StorageError> {
         let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::modifier_key(type_id, id);
         self.db.delete_cf(&cf, key)?;
@@ -321,7 +315,9 @@ fn blake2b256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Blake2bVar::new(32).expect("valid output size");
     hasher.update(data);
     let mut out = [0u8; 32];
-    hasher.finalize_variable(&mut out).expect("correct output size");
+    hasher
+        .finalize_variable(&mut out)
+        .expect("correct output size");
     out
 }
 
@@ -540,10 +536,7 @@ mod tests {
                 db.get_modifier(101, &id).unwrap().unwrap(),
                 b"persisted-mod"
             );
-            assert_eq!(
-                db.get_index(&idx_key).unwrap().unwrap(),
-                b"persisted-idx"
-            );
+            assert_eq!(db.get_index(&idx_key).unwrap().unwrap(), b"persisted-idx");
         }
     }
 
@@ -615,5 +608,4 @@ mod tests {
 
         assert!(!db.contains_modifier(102, &id).unwrap());
     }
-
 }

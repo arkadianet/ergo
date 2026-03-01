@@ -224,12 +224,7 @@ mod tests {
     }
 
     /// Create a simple OutputInfo.
-    fn make_output(
-        seed: u8,
-        tree: &[u8],
-        value: u64,
-        index: u16,
-    ) -> OutputInfo {
+    fn make_output(seed: u8, tree: &[u8], value: u64, index: u16) -> OutputInfo {
         OutputInfo {
             box_id: id32(seed),
             ergo_tree_bytes: tree.to_vec(),
@@ -243,11 +238,7 @@ mod tests {
     }
 
     /// Create a simple TxInfo.
-    fn make_tx(
-        seed: u8,
-        inputs: Vec<[u8; 32]>,
-        outputs: Vec<OutputInfo>,
-    ) -> TxInfo {
+    fn make_tx(seed: u8, inputs: Vec<[u8; 32]>, outputs: Vec<OutputInfo>) -> TxInfo {
         TxInfo {
             tx_id: id32(seed),
             input_box_ids: inputs,
@@ -273,11 +264,7 @@ mod tests {
             ],
         );
         // TX 2 — no matching outputs
-        let tx2 = make_tx(
-            2,
-            vec![],
-            vec![make_output(20, &other_tree, 3_000_000, 0)],
-        );
+        let tx2 = make_tx(2, vec![], vec![make_output(20, &other_tree, 3_000_000, 0)]);
 
         let mut wallet_trees = HashSet::new();
         wallet_trees.insert(wallet_tree);
@@ -339,14 +326,10 @@ mod tests {
 
         let tx1 = make_tx(
             1,
-            vec![id32(0x99)], // not tracked
+            vec![id32(0x99)],                                 // not tracked
             vec![make_output(10, &other_tree, 1_000_000, 0)], // not wallet
         );
-        let tx2 = make_tx(
-            2,
-            vec![],
-            vec![make_output(20, &other_tree, 2_000_000, 0)],
-        );
+        let tx2 = make_tx(2, vec![], vec![make_output(20, &other_tree, 2_000_000, 0)]);
 
         let mut wallet_trees = HashSet::new();
         wallet_trees.insert(wallet_tree);

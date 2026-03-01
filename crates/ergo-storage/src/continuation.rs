@@ -4,8 +4,8 @@
 //! header chain and to compute the list of canonical header IDs that the peer
 //! is missing.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 use ergo_types::header::Header;
 use ergo_types::modifier_id::ModifierId;
@@ -22,7 +22,9 @@ pub fn compute_header_id(bytes: &[u8]) -> ModifierId {
     let mut hasher = Blake2bVar::new(32).expect("valid output size");
     hasher.update(bytes);
     let mut out = [0u8; 32];
-    hasher.finalize_variable(&mut out).expect("correct output size");
+    hasher
+        .finalize_variable(&mut out)
+        .expect("correct output size");
     ModifierId(out)
 }
 

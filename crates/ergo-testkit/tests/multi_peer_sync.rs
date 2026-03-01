@@ -60,8 +60,7 @@ fn three_peers_ahead_distributes() {
                 assert_eq!(chunk.len(), 100);
             }
             // Verify all IDs assigned
-            let all: Vec<ModifierId> =
-                result.iter().flat_map(|(_, c)| c.iter().copied()).collect();
+            let all: Vec<ModifierId> = result.iter().flat_map(|(_, c)| c.iter().copied()).collect();
             assert_eq!(all, ids);
         }
         _ => panic!("expected Partition"),
@@ -143,14 +142,9 @@ fn partition_coverage_property() {
             let result = partition_header_ids(&ids, &peers, DEFAULT_MIN_PER_PEER);
 
             // Union equals original (capped at 400)
-            let all: Vec<ModifierId> =
-                result.iter().flat_map(|(_, c)| c.iter().copied()).collect();
+            let all: Vec<ModifierId> = result.iter().flat_map(|(_, c)| c.iter().copied()).collect();
             let expected_len = n.min(400);
-            assert_eq!(
-                all.len(),
-                expected_len,
-                "coverage failed for n={n}, k={k}"
-            );
+            assert_eq!(all.len(), expected_len, "coverage failed for n={n}, k={k}");
             assert_eq!(all, ids[..expected_len]);
 
             // Chunks are disjoint (verified by contiguous assignment)

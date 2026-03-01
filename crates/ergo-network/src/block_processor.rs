@@ -257,7 +257,13 @@ fn processor_loop_with_state(
                         blocks_to_download: &mut blocks_to_download,
                     };
                     process_store_modifier(
-                        state, evt_tx, type_id, modifier_id, data, peer_hint, &mut accum,
+                        state,
+                        evt_tx,
+                        type_id,
+                        modifier_id,
+                        data,
+                        peer_hint,
+                        &mut accum,
                     );
                 }
                 ProcessorCommand::StorePrevalidatedHeader {
@@ -271,7 +277,13 @@ fn processor_loop_with_state(
                         blocks_to_download: &mut blocks_to_download,
                     };
                     process_prevalidated_header(
-                        state, evt_tx, modifier_id, *header, raw_data, peer_hint, &mut accum,
+                        state,
+                        evt_tx,
+                        modifier_id,
+                        *header,
+                        raw_data,
+                        peer_hint,
+                        &mut accum,
                     );
                 }
                 ProcessorCommand::ApplyFromCache => {
@@ -291,7 +303,11 @@ fn processor_loop_with_state(
         // the SyncInfoV2 would contain a stale tip, causing peers to send Inv
         // for already-received headers which are all filtered out — stalling
         // the sync loop until the next periodic sync tick.
-        tracing::debug!(new_headers = new_headers.len(), blocks_to_dl = blocks_to_download.len(), "processor: batch done");
+        tracing::debug!(
+            new_headers = new_headers.len(),
+            blocks_to_dl = blocks_to_download.len(),
+            "processor: batch done"
+        );
         send_state_update(state, evt_tx);
         if !new_headers.is_empty() || !blocks_to_download.is_empty() {
             let _ = evt_tx.blocking_send(ProcessorEvent::HeadersApplied {
@@ -330,7 +346,10 @@ fn process_store_modifier(
     peer_hint: Option<PeerId>,
     accum: &mut BatchAccum<'_>,
 ) {
-    match state.node_view.process_modifier(type_id, &modifier_id, &data) {
+    match state
+        .node_view
+        .process_modifier(type_id, &modifier_id, &data)
+    {
         Ok(info) => {
             if type_id == HEADER_TYPE_ID {
                 accum.new_headers.push(modifier_id);
@@ -375,8 +394,15 @@ fn process_prevalidated_header(
     peer_hint: Option<PeerId>,
     accum: &mut BatchAccum<'_>,
 ) {
-    tracing::trace!(height = header.height, genesis = header.is_genesis(), "processor: handling prevalidated header");
-    match state.node_view.process_prevalidated_header(&modifier_id, &header) {
+    tracing::trace!(
+        height = header.height,
+        genesis = header.is_genesis(),
+        "processor: handling prevalidated header"
+    );
+    match state
+        .node_view
+        .process_prevalidated_header(&modifier_id, &header)
+    {
         Ok(info) => {
             tracing::trace!(height = header.height, "processor: header applied OK");
             accum.new_headers.push(modifier_id);
@@ -387,9 +413,14 @@ fn process_prevalidated_header(
         Err(e) => {
             let err_str = e.to_string();
             if err_str.contains("parent header not found") {
-                tracing::trace!(height = header.height, "processor: cached (parent not found)");
+                tracing::trace!(
+                    height = header.height,
+                    "processor: cached (parent not found)"
+                );
                 // Out-of-order: cache original wire bytes for retry with parsed header.
-                state.cache.put(modifier_id, HEADER_TYPE_ID, raw_data, Some(header));
+                state
+                    .cache
+                    .put(modifier_id, HEADER_TYPE_ID, raw_data, Some(header));
             } else {
                 tracing::warn!(height = header.height, %e, "processor: header REJECTED");
                 let _ = evt_tx.blocking_send(ProcessorEvent::ValidationFailed {
@@ -471,7 +502,11 @@ fn apply_from_cache_processor(
     }
 
     if applied_headers > 0 {
-        tracing::debug!(applied_headers, new_height = current_height, "cache drain: headers applied");
+        tracing::debug!(
+            applied_headers,
+            new_height = current_height,
+            "cache drain: headers applied"
+        );
     }
 
     // Phase 2: Apply cached body sections using pop_body_candidate.
@@ -525,7 +560,10 @@ fn apply_from_cache_processor(
 
 /// Emit `BlockApplied` events for any blocks applied during the last
 /// `process_modifier` call.
-fn emit_applied_blocks(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>) {
+fn emit_applied_blocks(
+    state: &mut ProcessorState,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
+) {
     for applied_id in state.node_view.take_applied_blocks() {
         let height = state
             .node_view
@@ -543,29 +581,18 @@ fn emit_applied_blocks(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::S
 }
 
 /// Read current heights from history and send a `StateUpdate` event.
-fn send_state_update(state: &mut ProcessorState, evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>) {
-    let headers_height = state
-        .node_view
-        .history
-        .best_header_height()
-        .unwrap_or(0);
+fn send_state_update(
+    state: &mut ProcessorState,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
+) {
+    let headers_height = state.node_view.history.best_header_height().unwrap_or(0);
     let full_height = state
         .node_view
         .history
         .best_full_block_height()
         .unwrap_or(0);
-    let best_header_id = state
-        .node_view
-        .history
-        .best_header_id()
-        .ok()
-        .flatten();
-    let best_full_id = state
-        .node_view
-        .history
-        .best_full_block_id()
-        .ok()
-        .flatten();
+    let best_header_id = state.node_view.history.best_header_id().ok().flatten();
+    let best_full_id = state.node_view.history.best_full_block_id().ok().flatten();
     let state_root = state.node_view.state_root().to_vec();
     let applied_blocks = state.node_view.take_applied_blocks();
     let rollback_height = state.node_view.take_rollback_height();
@@ -707,7 +734,10 @@ mod tests {
         cmd_tx.send(ProcessorCommand::Shutdown).unwrap();
         // The thread should exit within 1 second.
         let result = handle.join();
-        assert!(result.is_ok(), "processor thread should exit cleanly on Shutdown");
+        assert!(
+            result.is_ok(),
+            "processor thread should exit cleanly on Shutdown"
+        );
     }
 
     /// Spawn with test state, send a StoreModifier (type 102, dummy data),
@@ -759,6 +789,10 @@ mod tests {
                     | ProcessorEvent::ValidationFailed { .. }
             )
         });
-        assert!(has_expected, "expected ModifierCached, StateUpdate, or ValidationFailed event; got: {:?}", events);
+        assert!(
+            has_expected,
+            "expected ModifierCached, StateUpdate, or ValidationFailed event; got: {:?}",
+            events
+        );
     }
 }

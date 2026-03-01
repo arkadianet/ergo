@@ -8,8 +8,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::keystore::{Keystore, KeystoreError};
 use crate::keys::WalletKeys;
+use crate::keystore::{Keystore, KeystoreError};
 use crate::scan_logic::{self, TxInfo};
 use crate::tracked_box::TrackedBox;
 use crate::wallet_registry::{RegistryError, WalletDigest, WalletRegistry, WalletTransaction};
@@ -236,8 +236,8 @@ impl WalletManager {
         let mnemonic = self.keystore.unlock(password)?;
 
         // Derive the master key.
-        let keys =
-            WalletKeys::from_mnemonic(&mnemonic, "").map_err(|e| WalletError::Keys(e.to_string()))?;
+        let keys = WalletKeys::from_mnemonic(&mnemonic, "")
+            .map_err(|e| WalletError::Keys(e.to_string()))?;
 
         // Load stored addresses. If none exist, derive index 0.
         let mut addresses = self.storage.get_addresses();
@@ -259,8 +259,7 @@ impl WalletManager {
         // Build the ErgoTree set from all stored addresses.
         let mut ergo_trees = HashSet::new();
         for (_idx, addr) in &addresses {
-            let tree_bytes = address_to_ergo_tree_bytes(addr)
-                .map_err(WalletError::Address)?;
+            let tree_bytes = address_to_ergo_tree_bytes(addr).map_err(WalletError::Address)?;
             ergo_trees.insert(tree_bytes);
         }
 
@@ -315,8 +314,7 @@ impl WalletManager {
         self.storage.set_next_index(next_idx + 1)?;
 
         // Add the new address's ErgoTree to the tracking set.
-        let tree_bytes =
-            address_to_ergo_tree_bytes(&dk.address).map_err(WalletError::Address)?;
+        let tree_bytes = address_to_ergo_tree_bytes(&dk.address).map_err(WalletError::Address)?;
         ergo_trees.insert(tree_bytes);
 
         Ok((dk.path, dk.address))
@@ -340,8 +338,7 @@ impl WalletManager {
         self.storage.store_address(dk.index, &dk.address)?;
 
         // Add ErgoTree to tracking set.
-        let tree_bytes =
-            address_to_ergo_tree_bytes(&dk.address).map_err(WalletError::Address)?;
+        let tree_bytes = address_to_ergo_tree_bytes(&dk.address).map_err(WalletError::Address)?;
         ergo_trees.insert(tree_bytes);
 
         Ok(dk.address)
@@ -391,8 +388,7 @@ impl WalletManager {
         };
 
         let scans = self.storage.get_all_scans();
-        let result =
-            scan_logic::scan_block(txs, block_height, ergo_trees, tracked_box_ids, &scans);
+        let result = scan_logic::scan_block(txs, block_height, ergo_trees, tracked_box_ids, &scans);
 
         // Build WalletTransaction records from the scan result.
         let wallet_txs: Vec<WalletTransaction> = result
@@ -572,9 +568,9 @@ impl WalletManager {
         let sks = keys
             .secret_keys(&[idx])
             .map_err(|e| WalletError::Keys(e.to_string()))?;
-        let sk = sks.first().ok_or_else(|| {
-            WalletError::Keys("failed to derive secret key".into())
-        })?;
+        let sk = sks
+            .first()
+            .ok_or_else(|| WalletError::Keys("failed to derive secret key".into()))?;
         Ok(hex::encode(sk.to_bytes()))
     }
 
@@ -582,10 +578,7 @@ impl WalletManager {
     ///
     /// Walks all boxes tracked by the scan, collects their creating `tx_id`s,
     /// deduplicates, and returns the corresponding `WalletTransaction` records.
-    pub fn get_txs_by_scan_id(
-        &self,
-        scan_id: u16,
-    ) -> Result<Vec<WalletTransaction>, WalletError> {
+    pub fn get_txs_by_scan_id(&self, scan_id: u16) -> Result<Vec<WalletTransaction>, WalletError> {
         self.require_unlocked()?;
         let box_ids = self.registry.boxes_for_scan(scan_id);
         let mut seen_tx_ids = HashSet::new();
@@ -659,29 +652,19 @@ impl WalletManager {
     }
 
     /// Get all unspent boxes associated with a given scan.
-    pub fn unspent_boxes_for_scan(
-        &self,
-        scan_id: u16,
-    ) -> Result<Vec<TrackedBox>, WalletError> {
+    pub fn unspent_boxes_for_scan(&self, scan_id: u16) -> Result<Vec<TrackedBox>, WalletError> {
         self.require_unlocked()?;
         Ok(self.registry.unspent_boxes_for_scan(scan_id))
     }
 
     /// Get all spent boxes associated with a given scan.
-    pub fn spent_boxes_for_scan(
-        &self,
-        scan_id: u16,
-    ) -> Result<Vec<TrackedBox>, WalletError> {
+    pub fn spent_boxes_for_scan(&self, scan_id: u16) -> Result<Vec<TrackedBox>, WalletError> {
         self.require_unlocked()?;
         Ok(self.registry.spent_boxes_for_scan(scan_id))
     }
 
     /// Remove a box from a scan's tracking index.
-    pub fn stop_tracking(
-        &mut self,
-        scan_id: u16,
-        box_id: &[u8; 32],
-    ) -> Result<(), WalletError> {
+    pub fn stop_tracking(&mut self, scan_id: u16, box_id: &[u8; 32]) -> Result<(), WalletError> {
         self.require_unlocked()?;
         self.registry.remove_scan_box(scan_id, box_id)?;
         Ok(())
@@ -902,8 +885,14 @@ mod tests {
             wm_uninit.unlock(TEST_PASSWORD),
             Err(WalletError::NotInitialized)
         ));
-        assert!(matches!(wm_uninit.addresses(), Err(WalletError::NotInitialized)));
-        assert!(matches!(wm_uninit.balances(), Err(WalletError::NotInitialized)));
+        assert!(matches!(
+            wm_uninit.addresses(),
+            Err(WalletError::NotInitialized)
+        ));
+        assert!(matches!(
+            wm_uninit.balances(),
+            Err(WalletError::NotInitialized)
+        ));
         assert!(matches!(wm_uninit.keys(), Err(WalletError::NotInitialized)));
 
         // --- Locked: query operations fail ---

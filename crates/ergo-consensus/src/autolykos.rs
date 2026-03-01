@@ -82,10 +82,7 @@ static VALID_RANGE: LazyLock<BigUint> = LazyLock::new(|| {
 pub enum AutolykosError {
     /// The PoW hit does not satisfy the required difficulty target.
     #[error("PoW validation failed: hit {hit} >= target {target}")]
-    InvalidPow {
-        hit: String,
-        target: String,
-    },
+    InvalidPow { hit: String, target: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -191,10 +188,7 @@ pub fn gen_indexes(seed: &[u8], n: u32) -> Vec<u32> {
             let val = BigUint::from_bytes_be(slice);
             let idx = val % &n_big;
             // idx fits in u32 since n is u32
-            idx.to_u32_digits()
-                .first()
-                .copied()
-                .unwrap_or(0)
+            idx.to_u32_digits().first().copied().unwrap_or(0)
         })
         .collect()
 }
@@ -560,7 +554,10 @@ mod tests {
         let msg = [0xABu8; 32];
         let target = Q.clone();
         let result = find_nonce(&msg, &target, 100_000, 0, 100);
-        assert!(result.is_some(), "find_nonce should find a solution with Q as target");
+        assert!(
+            result.is_some(),
+            "find_nonce should find a solution with Q as target"
+        );
     }
 
     #[test]
@@ -569,7 +566,10 @@ mod tests {
         let msg = [0xCDu8; 32];
         let target = BigUint::from(1u32);
         let result = find_nonce(&msg, &target, 100_000, 0, 10);
-        assert!(result.is_none(), "find_nonce should return None for impossibly hard target");
+        assert!(
+            result.is_none(),
+            "find_nonce should return None for impossibly hard target"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -581,7 +581,10 @@ mod tests {
         let input = b"test input for hashModQ";
         let result = hash_mod_q(input);
         assert!(result < *Q, "hashModQ result must be < q");
-        assert!(!result.is_zero(), "hashModQ result should be non-zero for non-trivial input");
+        assert!(
+            !result.is_zero(),
+            "hashModQ result should be non-zero for non-trivial input"
+        );
     }
 
     #[test]
@@ -612,8 +615,10 @@ mod tests {
         let v2_indices = gen_indexes(&seed32, N_BASE);
         let v1_indices = gen_indexes_v1(&seed32, N_BASE);
         // Both hash the seed first, so same seed => same output
-        assert_eq!(v1_indices, v2_indices,
-            "v1 and v2 gen_indexes use the same algorithm, so same seed => same indices");
+        assert_eq!(
+            v1_indices, v2_indices,
+            "v1 and v2 gen_indexes use the same algorithm, so same seed => same indices"
+        );
     }
 
     #[test]
@@ -638,7 +643,7 @@ mod tests {
         let mut header = Header::default_for_test();
         header.version = 1;
         header.n_bits = 0x01010000; // minimal difficulty
-        // Set d to a very large value (should exceed target)
+                                    // Set d to a very large value (should exceed target)
         header.pow_solution.d = vec![0xFF; 32];
         let result = validate_pow(&header);
         assert!(result.is_err(), "v1 PoW should reject when d >= target");

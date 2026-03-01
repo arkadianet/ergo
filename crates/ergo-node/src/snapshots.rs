@@ -5,8 +5,8 @@
 //!   blake2b256 IDs of each chunk.
 //! - **Chunks** (data) each containing a batch of key-value entries up to ~1 MB.
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -119,8 +119,7 @@ impl SnapshotManifest {
         let mut digest = [0u8; 33];
         digest.copy_from_slice(&data[4..37]);
 
-        let chunk_count =
-            u32::from_be_bytes([data[37], data[38], data[39], data[40]]) as usize;
+        let chunk_count = u32::from_be_bytes([data[37], data[38], data[39], data[40]]) as usize;
 
         let chunks_end = 41 + chunk_count * 32;
         if data.len() < chunks_end + 8 {
@@ -204,12 +203,8 @@ impl SnapshotsInfo {
         let mut manifests = Vec::with_capacity(count);
         for i in 0..count {
             let base = 4 + i * 36;
-            let h = i32::from_be_bytes([
-                data[base],
-                data[base + 1],
-                data[base + 2],
-                data[base + 3],
-            ]) as u32;
+            let h = i32::from_be_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]])
+                as u32;
             let mut mid = [0u8; 32];
             mid.copy_from_slice(&data[base + 4..base + 36]);
             manifests.push((h, mid));
@@ -237,8 +232,8 @@ impl SnapshotsDb {
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, SnapshotError> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
-        let db = rocksdb::DB::open(&opts, path)
-            .map_err(|e| SnapshotError::Storage(e.to_string()))?;
+        let db =
+            rocksdb::DB::open(&opts, path).map_err(|e| SnapshotError::Storage(e.to_string()))?;
         Ok(Self { db })
     }
 
@@ -281,10 +276,7 @@ impl SnapshotsDb {
     }
 
     /// Load a manifest by its 32-byte ID.
-    pub fn load_manifest(
-        &self,
-        manifest_id: &[u8; 32],
-    ) -> Result<Option<Vec<u8>>, SnapshotError> {
+    pub fn load_manifest(&self, manifest_id: &[u8; 32]) -> Result<Option<Vec<u8>>, SnapshotError> {
         let mut key = vec![PREFIX_MANIFEST];
         key.extend_from_slice(manifest_id);
         self.db
@@ -400,7 +392,8 @@ pub fn maybe_create_snapshot(
         .map_err(|e| SnapshotError::Storage(format!("{e}")))?
         .ok_or_else(|| SnapshotError::Storage("no UTXO metadata".into()))?;
 
-    let (manifest, chunks) = create_snapshot_chunks(utxo_db.iter_entries(), height, metadata.digest);
+    let (manifest, chunks) =
+        create_snapshot_chunks(utxo_db.iter_entries(), height, metadata.digest);
 
     tracing::info!(
         height,
@@ -511,19 +504,22 @@ pub fn parse_chunk(data: &[u8]) -> Result<Vec<SnapshotEntry>, SnapshotError> {
     for _ in 0..count {
         // Need at least 32 (key) + 4 (value_len)
         if pos + 36 > data.len() {
-            return Err(SnapshotError::TruncatedData("chunk truncated at entry key/len"));
+            return Err(SnapshotError::TruncatedData(
+                "chunk truncated at entry key/len",
+            ));
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&data[pos..pos + 32]);
         pos += 32;
 
         let value_len =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                as usize;
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         if pos + value_len > data.len() {
-            return Err(SnapshotError::TruncatedData("chunk truncated at entry value"));
+            return Err(SnapshotError::TruncatedData(
+                "chunk truncated at entry value",
+            ));
         }
         let value = data[pos..pos + value_len].to_vec();
         pos += value_len;
@@ -878,8 +874,7 @@ mod tests {
         utxo_db.apply_changes(&[], &[], &meta).unwrap();
 
         // Height is correct but tip is far away.
-        let created =
-            maybe_create_snapshot(&utxo_db, &sdb, 52223, 52224, 2, 200_000).unwrap();
+        let created = maybe_create_snapshot(&utxo_db, &sdb, 52223, 52224, 2, 200_000).unwrap();
         assert!(!created);
     }
 

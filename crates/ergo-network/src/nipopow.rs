@@ -237,10 +237,7 @@ fn collect_suffix(
 }
 
 /// Build a `PoPowHeader` for a header, loading its extension from storage.
-fn build_popow_header(
-    history: &HistoryDb,
-    header: Header,
-) -> Result<PoPowHeader, NipopowError> {
+fn build_popow_header(history: &HistoryDb, header: Header) -> Result<PoPowHeader, NipopowError> {
     let header_id = compute_header_id(&serialize_header(&header));
     let extension = history
         .load_extension(&header_id)
@@ -490,7 +487,7 @@ mod tests {
     fn test_update_interlinks_level_0() {
         let mut header = Header::default_for_test();
         header.height = 100; // non-genesis
-        // Set n_bits very low so level = 0 (real target > required target)
+                             // Set n_bits very low so level = 0 (real target > required target)
         header.n_bits = 0x01010000;
 
         let parent_id = ModifierId([0xFF; 32]); // very large hash -> level 0

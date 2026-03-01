@@ -126,14 +126,14 @@ async fn sync_first_headers_from_mainnet() {
         // The peer may send other messages first (like GetPeers), so loop until we get Inv
         let inv_data = match timeout(Duration::from_secs(30), async {
             loop {
-                let msg = conn.recv_message().await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    Box::new(e)
-                })?;
+                let msg = conn
+                    .recv_message()
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
                 println!("  Received message code={}", msg.code);
                 if msg.code == MessageCode::Inv as u8 {
-                    return InvData::parse(&msg.body).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                        Box::new(e)
-                    });
+                    return InvData::parse(&msg.body)
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
                 }
                 // Ignore other messages (GetPeers, etc.)
             }
@@ -176,9 +176,10 @@ async fn sync_first_headers_from_mainnet() {
         // Step 4: Wait for Modifier (code 33) with header data
         let modifier_body = match timeout(Duration::from_secs(30), async {
             loop {
-                let msg = conn.recv_message().await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    Box::new(e)
-                })?;
+                let msg = conn
+                    .recv_message()
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
                 println!("  Received message code={}", msg.code);
                 if msg.code == MessageCode::Modifier as u8 {
                     return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(msg.body);
@@ -198,10 +199,7 @@ async fn sync_first_headers_from_mainnet() {
             }
         };
 
-        println!(
-            "  Got Modifier response ({} bytes)",
-            modifier_body.len()
-        );
+        println!("  Got Modifier response ({} bytes)", modifier_body.len());
 
         // Step 5: Process modifiers (parse, validate, insert)
         match process_modifiers_response(&modifier_body, &mut chain, now_ms()) {

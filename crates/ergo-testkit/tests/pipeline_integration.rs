@@ -425,18 +425,15 @@ fn chain_scoring_and_fork_detection() {
     };
 
     // Helper: store a header with score computation.
-    let store_header = |db: &HistoryDb,
-                        id: &ModifierId,
-                        height: u32,
-                        parent_id: ModifierId,
-                        n_bits: u64| {
-        let mut h = Header::default_for_test();
-        h.version = 2;
-        h.height = height;
-        h.parent_id = parent_id;
-        h.n_bits = n_bits;
-        db.store_header_with_score(id, &h).unwrap();
-    };
+    let store_header =
+        |db: &HistoryDb, id: &ModifierId, height: u32, parent_id: ModifierId, n_bits: u64| {
+            let mut h = Header::default_for_test();
+            h.version = 2;
+            h.height = height;
+            h.parent_id = parent_id;
+            h.n_bits = n_bits;
+            db.store_header_with_score(id, &h).unwrap();
+        };
 
     // Helper: store block body sections (block_transactions + extension).
     let store_body = |db: &HistoryDb, id: &ModifierId| {
@@ -541,7 +538,7 @@ fn node_view_full_pipeline_empty_block() {
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
-    // Test headers use version 2 (current mainnet), so set parameters to match.
+                                        // Test headers use version 2 (current mainnet), so set parameters to match.
     nv.voting_epoch_info
         .parameters
         .table
@@ -726,7 +723,7 @@ fn node_view_rejects_invalid_stateless_tx() {
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
-    // Test headers use version 2 (current mainnet), so set parameters to match.
+                                        // Test headers use version 2 (current mainnet), so set parameters to match.
     nv.voting_epoch_info
         .parameters
         .table
@@ -840,7 +837,7 @@ fn node_view_mempool_eviction_after_block() {
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
     let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
     nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
-    // Test headers use version 2 (current mainnet), so set parameters to match.
+                                        // Test headers use version 2 (current mainnet), so set parameters to match.
     nv.voting_epoch_info
         .parameters
         .table
@@ -865,7 +862,11 @@ fn node_view_mempool_eviction_after_block() {
     };
     let mempool_tx_id = mempool_tx.tx_id;
     nv.mempool.write().unwrap().put(mempool_tx).unwrap();
-    assert_eq!(nv.mempool.read().unwrap().size(), 1, "mempool should have 1 tx before block");
+    assert_eq!(
+        nv.mempool.read().unwrap().size(),
+        1,
+        "mempool should have 1 tx before block"
+    );
 
     // Build and apply an empty block (no transactions).
     let id = ModifierId([0x40; 32]);
@@ -929,10 +930,7 @@ fn node_view_mempool_eviction_after_block() {
 // ---------------------------------------------------------------------------
 
 /// Helper: open a fresh NodeViewHolder in digest mode for protocol handler tests.
-fn make_test_node_view() -> (
-    ergo_network::node_view::NodeViewHolder,
-    tempfile::TempDir,
-) {
+fn make_test_node_view() -> (ergo_network::node_view::NodeViewHolder, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
     let history = HistoryDb::open(dir.path()).unwrap();
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(
@@ -985,7 +983,9 @@ fn node_view_serves_request_modifier() {
     let section_id = ModifierId([0x99; 32]); // wire section_id
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
     nv.history.put_modifier(108, &header_id, &payload).unwrap();
-    nv.history.store_section_mapping(108, &section_id, &header_id).unwrap();
+    nv.history
+        .store_section_mapping(108, &section_id, &header_id)
+        .unwrap();
 
     // Build a RequestModifier message (code 22) requesting by section_id.
     let inv = InvData {
@@ -998,7 +998,12 @@ fn node_view_serves_request_modifier() {
     };
 
     let result = message_handler::handle_message(
-        1, &msg, &mut nv, &mut sync_mgr, &mut tracker, &[],
+        1,
+        &msg,
+        &mut nv,
+        &mut sync_mgr,
+        &mut tracker,
+        &[],
         &mut ergo_network::sync_tracker::SyncTracker::new(),
         &mut ergo_network::modifiers_cache::ModifiersCache::with_default_capacities(),
         &mut std::collections::HashMap::new(),
@@ -1058,7 +1063,8 @@ fn node_view_rejects_header_with_bad_height() {
 
     // Store parent directly (bypassing process_modifier which now rejects
     // orphan headers without a parent in the DB).
-    nv.history.store_header_with_score(&parent_id, &parent)
+    nv.history
+        .store_header_with_score(&parent_id, &parent)
         .expect("storing parent header should succeed");
 
     // Build a child header with WRONG height (200 instead of 101).
@@ -1120,7 +1126,12 @@ fn handle_peers_response_extracts_addresses() {
 
     let msg = RawMessage { code: 2, body };
     let result = message_handler::handle_message(
-        1, &msg, &mut nv, &mut sync_mgr, &mut tracker, &[],
+        1,
+        &msg,
+        &mut nv,
+        &mut sync_mgr,
+        &mut tracker,
+        &[],
         &mut ergo_network::sync_tracker::SyncTracker::new(),
         &mut ergo_network::modifiers_cache::ModifiersCache::with_default_capacities(),
         &mut std::collections::HashMap::new(),
@@ -1194,7 +1205,12 @@ fn handle_get_peers_returns_connected_list() {
     };
 
     let result = message_handler::handle_message(
-        42, &msg, &mut nv, &mut sync_mgr, &mut tracker, &connected,
+        42,
+        &msg,
+        &mut nv,
+        &mut sync_mgr,
+        &mut tracker,
+        &connected,
         &mut ergo_network::sync_tracker::SyncTracker::new(),
         &mut ergo_network::modifiers_cache::ModifiersCache::with_default_capacities(),
         &mut std::collections::HashMap::new(),
@@ -1218,8 +1234,8 @@ fn handle_get_peers_returns_connected_list() {
             assert_eq!(*peer_id, 42, "peer_id should match the requesting peer");
 
             // Parse the serialized Peers response and verify the addresses.
-            let parsed = ergo_wire::peer_spec::parse_peers(data)
-                .expect("SendPeers data should be valid");
+            let parsed =
+                ergo_wire::peer_spec::parse_peers(data).expect("SendPeers data should be valid");
             assert_eq!(
                 parsed.len(),
                 3,
@@ -1269,7 +1285,12 @@ fn tx_inv_triggers_request_for_unknown() {
     };
 
     let result = ergo_network::message_handler::handle_message(
-        1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+        1,
+        &msg,
+        &mut node_view,
+        &mut sync_mgr,
+        &mut tracker,
+        &[],
         &mut ergo_network::sync_tracker::SyncTracker::new(),
         &mut ergo_network::modifiers_cache::ModifiersCache::with_default_capacities(),
         &mut std::collections::HashMap::new(),
@@ -1334,7 +1355,12 @@ fn tx_modifier_enters_mempool_and_relays() {
     };
 
     let result = ergo_network::message_handler::handle_message(
-        1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+        1,
+        &msg,
+        &mut node_view,
+        &mut sync_mgr,
+        &mut tracker,
+        &[],
         &mut ergo_network::sync_tracker::SyncTracker::new(),
         &mut ergo_network::modifiers_cache::ModifiersCache::with_default_capacities(),
         &mut std::collections::HashMap::new(),
@@ -1406,7 +1432,12 @@ fn tx_inv_skips_known_mempool_tx() {
     };
 
     let result = ergo_network::message_handler::handle_message(
-        1, &msg, &mut node_view, &mut sync_mgr, &mut tracker, &[],
+        1,
+        &msg,
+        &mut node_view,
+        &mut sync_mgr,
+        &mut tracker,
+        &[],
         &mut ergo_network::sync_tracker::SyncTracker::new(),
         &mut ergo_network::modifiers_cache::ModifiersCache::with_default_capacities(),
         &mut std::collections::HashMap::new(),
@@ -1477,16 +1508,15 @@ fn next_modifiers_to_download_finds_gaps() {
     let expected_sections = header.section_ids(&header_id);
     for (type_id, section_id) in &expected_sections {
         assert!(
-            missing.iter().any(|(t, mid)| t == type_id && mid == section_id),
+            missing
+                .iter()
+                .any(|(t, mid)| t == type_id && mid == section_id),
             "missing section_id for type {type_id}"
         );
     }
     // Verify they differ from header_id.
     for (_, mid) in &missing {
-        assert_ne!(
-            *mid, header_id,
-            "section_ids should differ from header_id"
-        );
+        assert_ne!(*mid, header_id, "section_ids should differ from header_id");
     }
 }
 
@@ -1500,9 +1530,7 @@ fn next_modifiers_to_download_finds_gaps() {
 
 #[test]
 fn distribute_requests_balances_across_peers() {
-    let requests: Vec<(u8, ModifierId)> = (0..6)
-        .map(|i| (102u8, ModifierId([i; 32])))
-        .collect();
+    let requests: Vec<(u8, ModifierId)> = (0..6).map(|i| (102u8, ModifierId([i; 32]))).collect();
     let peers = vec![1u64, 2, 3];
 
     let batches = ergo_network::sync_manager::distribute_requests(&requests, &peers);
@@ -1662,8 +1690,8 @@ fn modifiers_cache_buffers_out_of_order() {
     ext_data.extend_from_slice(&header_id.0);
     ext_data.extend_from_slice(&[0xCD; 20]);
     let section_id = {
-        use blake2::Blake2bVar;
         use blake2::digest::{Update, VariableOutput};
+        use blake2::Blake2bVar;
         let mut hasher = Blake2bVar::new(32).unwrap();
         hasher.update(&ext_data);
         let mut out = [0u8; 32];
@@ -1798,10 +1826,11 @@ fn state_version_persists_after_block_application() {
     // Apply a block in the first NodeViewHolder.
     {
         let db = HistoryDb::open(db_path).unwrap();
-        let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
+        let mempool =
+            std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
         let mut nv = NodeViewHolder::new(db, mempool, false, initial_root.clone());
         nv.set_checkpoint_height(u32::MAX); // Skip difficulty checks in pipeline test
-        // Test headers use version 2 (current mainnet), so set parameters to match.
+                                            // Test headers use version 2 (current mainnet), so set parameters to match.
         nv.voting_epoch_info
             .parameters
             .table
@@ -1843,7 +1872,8 @@ fn state_version_persists_after_block_application() {
     // Recover in a new NodeViewHolder.
     {
         let db = HistoryDb::open(db_path).unwrap();
-        let mempool = std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
+        let mempool =
+            std::sync::Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(100, 0)));
         let nv = NodeViewHolder::with_recovery(db, mempool, false, vec![0u8; 33]);
 
         // The state root should match the applied block's header state root.
@@ -1902,12 +1932,7 @@ fn sync_info_younger_peer_gets_continuation_ids() {
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(
         ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
     ));
-    let mut nv = ergo_network::node_view::NodeViewHolder::new(
-        db,
-        mempool,
-        true,
-        vec![0u8; 33],
-    );
+    let mut nv = ergo_network::node_view::NodeViewHolder::new(db, mempool, true, vec![0u8; 33]);
     let mut sync_mgr = SyncManager::new(10, 64);
     let mut tracker = DeliveryTracker::new(30, 3);
     let mut sync_tracker = SyncTracker::new();
@@ -2102,7 +2127,11 @@ fn last_n_headers_chain_walk() {
 
     // Also verify last_n_headers with n larger than the chain returns all 10.
     let all = db.last_n_headers(100).unwrap();
-    assert_eq!(all.len(), 10, "should return all 10 headers when n > chain length");
+    assert_eq!(
+        all.len(),
+        10,
+        "should return all 10 headers when n > chain length"
+    );
     assert_eq!(all[0].height, 10);
     assert_eq!(all[9].height, 1);
 }
@@ -2147,7 +2176,10 @@ fn mempool_find_output_by_box_id() {
     let output = output.unwrap();
     assert_eq!(output.tx_id, tx_id, "tx_id should match");
     assert_eq!(output.index, 0, "output index should be 0");
-    assert_eq!(output.candidate.value, 1_000_000_000, "output value should match");
+    assert_eq!(
+        output.candidate.value, 1_000_000_000,
+        "output value should match"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2184,10 +2216,17 @@ fn mempool_find_outputs_by_token_id() {
     pool.put(tx).unwrap();
 
     let outputs = pool.find_outputs_by_token_id(&token_id);
-    assert_eq!(outputs.len(), 1, "should find exactly 1 output with the token");
+    assert_eq!(
+        outputs.len(),
+        1,
+        "should find exactly 1 output with the token"
+    );
     assert_eq!(outputs[0].tx_id, TxId([0x22; 32]), "tx_id should match");
     assert_eq!(outputs[0].index, 0, "output index should be 0");
-    assert_eq!(outputs[0].candidate.tokens[0].1, 1000, "token amount should be 1000");
+    assert_eq!(
+        outputs[0].candidate.tokens[0].1, 1000,
+        "token amount should be 1000"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2305,7 +2344,7 @@ fn test_unpack_interlinks_from_extension() {
         fields: vec![
             ([INTERLINKS_VECTOR_PREFIX, 0x02], val_c),
             ([INTERLINKS_VECTOR_PREFIX, 0x00], val_a),
-            ([0x00, 0x05], vec![0xFF]),  // non-interlink field, should be ignored
+            ([0x00, 0x05], vec![0xFF]), // non-interlink field, should be ignored
             ([INTERLINKS_VECTOR_PREFIX, 0x01], val_b),
         ],
     };
@@ -2339,8 +2378,8 @@ fn test_unpack_interlinks_from_extension() {
 #[test]
 fn test_address_encode_decode_integration() {
     use ergo_types::address::{
-        address_to_raw, decode_address, encode_address, ergo_tree_to_address,
-        raw_to_address, AddressType, NetworkPrefix,
+        address_to_raw, decode_address, encode_address, ergo_tree_to_address, raw_to_address,
+        AddressType, NetworkPrefix,
     };
 
     // 1. Encode a P2PK address for mainnet with a synthetic 33-byte pubkey.
@@ -2367,8 +2406,8 @@ fn test_address_encode_decode_integration() {
 
     // 4. Test raw_to_address with hex-encoded pubkey.
     let pubkey_hex = hex::encode(pubkey);
-    let raw_addr = raw_to_address(&pubkey_hex, NetworkPrefix::Mainnet)
-        .expect("raw_to_address should succeed");
+    let raw_addr =
+        raw_to_address(&pubkey_hex, NetworkPrefix::Mainnet).expect("raw_to_address should succeed");
     assert_eq!(
         raw_addr, encoded,
         "raw_to_address should produce the same address"
@@ -2402,9 +2441,7 @@ fn test_address_encode_decode_integration() {
 
 #[test]
 fn test_merkle_proof_verification() {
-    use ergo_consensus::merkle::{
-        internal_hash, leaf_hash, merkle_proof, merkle_root, MerkleSide,
-    };
+    use ergo_consensus::merkle::{internal_hash, leaf_hash, merkle_proof, merkle_root, MerkleSide};
 
     // Build 5 tx_id-like elements (32 bytes each, as if they were serialized tx data).
     let elements: Vec<Vec<u8>> = (0u8..5)
@@ -2726,8 +2763,7 @@ fn test_indexer_address_balance() {
     assert!(balance.is_some(), "balance should exist for the address");
     let balance = balance.unwrap();
     assert_eq!(
-        balance.nano_ergs,
-        1_500_000_000,
+        balance.nano_ergs, 1_500_000_000,
         "balance should be the sum of both outputs"
     );
     assert!(
@@ -2990,12 +3026,7 @@ fn test_node_view_checkpoint_height() {
     let mempool = std::sync::Arc::new(std::sync::RwLock::new(
         ergo_network::mempool::ErgoMemPool::with_min_fee(100, 0),
     ));
-    let mut nvh = ergo_network::node_view::NodeViewHolder::new(
-        db,
-        mempool,
-        true,
-        vec![0u8; 33],
-    );
+    let mut nvh = ergo_network::node_view::NodeViewHolder::new(db, mempool, true, vec![0u8; 33]);
     nvh.set_checkpoint_height(500_000);
     // Should not panic — checkpoint is set
 }
@@ -3067,19 +3098,59 @@ fn test_compute_initial_tx_cost_defaults() {
     // 3 inputs, 2 data inputs, 4 outputs
     let tx = ErgoTransaction {
         inputs: vec![
-            Input { box_id: BoxId([0; 32]), proof_bytes: vec![], extension_bytes: vec![] },
-            Input { box_id: BoxId([1; 32]), proof_bytes: vec![], extension_bytes: vec![] },
-            Input { box_id: BoxId([2; 32]), proof_bytes: vec![], extension_bytes: vec![] },
+            Input {
+                box_id: BoxId([0; 32]),
+                proof_bytes: vec![],
+                extension_bytes: vec![],
+            },
+            Input {
+                box_id: BoxId([1; 32]),
+                proof_bytes: vec![],
+                extension_bytes: vec![],
+            },
+            Input {
+                box_id: BoxId([2; 32]),
+                proof_bytes: vec![],
+                extension_bytes: vec![],
+            },
         ],
         data_inputs: vec![
-            DataInput { box_id: BoxId([3; 32]) },
-            DataInput { box_id: BoxId([4; 32]) },
+            DataInput {
+                box_id: BoxId([3; 32]),
+            },
+            DataInput {
+                box_id: BoxId([4; 32]),
+            },
         ],
         output_candidates: vec![
-            ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
-            ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
-            ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
-            ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
+            ErgoBoxCandidate {
+                value: 1_000_000,
+                ergo_tree_bytes: vec![0x00],
+                creation_height: 1,
+                tokens: vec![],
+                additional_registers: vec![],
+            },
+            ErgoBoxCandidate {
+                value: 1_000_000,
+                ergo_tree_bytes: vec![0x00],
+                creation_height: 1,
+                tokens: vec![],
+                additional_registers: vec![],
+            },
+            ErgoBoxCandidate {
+                value: 1_000_000,
+                ergo_tree_bytes: vec![0x00],
+                creation_height: 1,
+                tokens: vec![],
+                additional_registers: vec![],
+            },
+            ErgoBoxCandidate {
+                value: 1_000_000,
+                ergo_tree_bytes: vec![0x00],
+                creation_height: 1,
+                tokens: vec![],
+                additional_registers: vec![],
+            },
         ],
         tx_id: TxId([0; 32]),
     };
@@ -3089,8 +3160,8 @@ fn test_compute_initial_tx_cost_defaults() {
 
 #[test]
 fn test_compute_initial_tx_cost_custom_params() {
-    use ergo_consensus::sigma_verify::compute_initial_tx_cost;
     use ergo_consensus::parameters::*;
+    use ergo_consensus::sigma_verify::compute_initial_tx_cost;
     use ergo_types::transaction::*;
 
     let mut params = Parameters::genesis();
@@ -3099,15 +3170,21 @@ fn test_compute_initial_tx_cost_custom_params() {
     params.table.insert(OUTPUT_COST_ID, 200);
 
     let tx = ErgoTransaction {
-        inputs: vec![
-            Input { box_id: BoxId([0; 32]), proof_bytes: vec![], extension_bytes: vec![] },
-        ],
-        data_inputs: vec![
-            DataInput { box_id: BoxId([1; 32]) },
-        ],
-        output_candidates: vec![
-            ErgoBoxCandidate { value: 1_000_000, ergo_tree_bytes: vec![0x00], creation_height: 1, tokens: vec![], additional_registers: vec![] },
-        ],
+        inputs: vec![Input {
+            box_id: BoxId([0; 32]),
+            proof_bytes: vec![],
+            extension_bytes: vec![],
+        }],
+        data_inputs: vec![DataInput {
+            box_id: BoxId([1; 32]),
+        }],
+        output_candidates: vec![ErgoBoxCandidate {
+            value: 1_000_000,
+            ergo_tree_bytes: vec![0x00],
+            creation_height: 1,
+            tokens: vec![],
+            additional_registers: vec![],
+        }],
         tx_id: TxId([0; 32]),
     };
     // 10000 + 1*5000 + 1*500 + 1*200 = 15700
@@ -3170,8 +3247,8 @@ fn test_reemission_no_emission_tokens() {
 
 #[test]
 fn test_convert_parameters_roundtrip() {
-    use ergo_consensus::sigma_verify::convert_parameters;
     use ergo_consensus::parameters::*;
+    use ergo_consensus::sigma_verify::convert_parameters;
 
     // Verify genesis params convert and match expected values
     let params = Parameters::genesis();
@@ -3863,8 +3940,8 @@ fn test_utxo_db_reopen_persistence() {
 // Phase 21 — Wallet integration tests
 // ===========================================================================
 
-use ergo_wallet::keystore::Keystore;
 use ergo_wallet::keys::WalletKeys;
+use ergo_wallet::keystore::Keystore;
 use ergo_wallet::scan_logic::{scan_block as wallet_scan_block, OutputInfo, TxInfo};
 use ergo_wallet::tracked_box::TrackedBox;
 use ergo_wallet::tx_ops;
@@ -4019,10 +4096,7 @@ fn wallet_storage_persistence() {
         assert_eq!(addrs[1], (1, "9addr_one".to_string()));
         assert_eq!(addrs[2], (2, "9addr_two".to_string()));
 
-        assert_eq!(
-            ws.get_change_address(),
-            Some("9change_addr".to_string())
-        );
+        assert_eq!(ws.get_change_address(), Some("9change_addr".to_string()));
         assert_eq!(ws.get_next_index(), 3);
     }
 }
@@ -4242,7 +4316,10 @@ fn wallet_manager_full_lifecycle() {
     let status = wm.status();
     assert!(status.initialized);
     assert!(!status.unlocked);
-    assert!(wm.addresses().is_err(), "addresses should not be accessible when locked");
+    assert!(
+        wm.addresses().is_err(),
+        "addresses should not be accessible when locked"
+    );
 
     // Drop and reopen — should detect locked state.
     drop(wm);

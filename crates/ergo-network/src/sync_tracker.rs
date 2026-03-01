@@ -186,7 +186,10 @@ pub fn classify_peer(
     };
 
     // Check for fork: if we have comparable IDs and they differ
-    if matches!(height_status, PeerChainStatus::Equal | PeerChainStatus::Younger) {
+    if matches!(
+        height_status,
+        PeerChainStatus::Equal | PeerChainStatus::Younger
+    ) {
         if let (Some(their_id), Some(our_id)) = (their_best_id, our_id_at_their_height) {
             if their_id != our_id {
                 return PeerChainStatus::Fork;

@@ -33,7 +33,10 @@ pub fn serialize_block_transactions(bt: &BlockTransactions) -> Vec<u8> {
 
     // version sentinel: only for block_version > 1
     if bt.block_version > 1 {
-        put_uint(&mut buf, MAX_TRANSACTIONS_IN_BLOCK + bt.block_version as u32);
+        put_uint(
+            &mut buf,
+            MAX_TRANSACTIONS_IN_BLOCK + bt.block_version as u32,
+        );
     }
 
     // tx_count: VLQ UInt

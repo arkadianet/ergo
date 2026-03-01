@@ -32,13 +32,13 @@ use serde::{Deserialize, Serialize};
 /// is not publicly exported. It matches `MINERS_FEE_BASE16_BYTES` from
 /// sigma-rust / ergo-lib.
 const MINERS_FEE_ERGO_TREE: &[u8] = &[
-    0x10, 0x05, 0x04, 0x00, 0x04, 0x00, 0x0e, 0x36, 0x10, 0x02, 0x04, 0xa0, 0x0b, 0x08, 0xcd,
-    0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-    0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
-    0xf8, 0x17, 0x98, 0xea, 0x02, 0xd1, 0x92, 0xa3, 0x9a, 0x8c, 0xc7, 0xa7, 0x01, 0x73, 0x00,
-    0x73, 0x01, 0x10, 0x01, 0x02, 0x04, 0x02, 0xd1, 0x96, 0x83, 0x03, 0x01, 0x93, 0xa3, 0x8c,
-    0xc7, 0xb2, 0xa5, 0x73, 0x00, 0x00, 0x01, 0x93, 0xc2, 0xb2, 0xa5, 0x73, 0x01, 0x00, 0x74,
-    0x73, 0x02, 0x73, 0x03, 0x83, 0x01, 0x08, 0xcd, 0xee, 0xac, 0x93, 0xb1, 0xa5, 0x73, 0x04,
+    0x10, 0x05, 0x04, 0x00, 0x04, 0x00, 0x0e, 0x36, 0x10, 0x02, 0x04, 0xa0, 0x0b, 0x08, 0xcd, 0x02,
+    0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+    0xea, 0x02, 0xd1, 0x92, 0xa3, 0x9a, 0x8c, 0xc7, 0xa7, 0x01, 0x73, 0x00, 0x73, 0x01, 0x10, 0x01,
+    0x02, 0x04, 0x02, 0xd1, 0x96, 0x83, 0x03, 0x01, 0x93, 0xa3, 0x8c, 0xc7, 0xb2, 0xa5, 0x73, 0x00,
+    0x00, 0x01, 0x93, 0xc2, 0xb2, 0xa5, 0x73, 0x01, 0x00, 0x74, 0x73, 0x02, 0x73, 0x03, 0x83, 0x01,
+    0x08, 0xcd, 0xee, 0xac, 0x93, 0xb1, 0xa5, 0x73, 0x04,
 ];
 
 /// Maximum number of distinct token entries in a single fee-collection output.
@@ -417,12 +417,15 @@ pub fn collect_txs(
         // Add emission tx outputs to overlay so mempool txs can spend them.
         for (idx, output) in etx.output_candidates.iter().enumerate() {
             let bid = compute_box_id(&etx.tx_id, idx as u16);
-            utxo_overlay.insert(bid.0, ErgoBox {
-                candidate: output.clone(),
-                transaction_id: etx.tx_id,
-                index: idx as u16,
-                box_id: bid,
-            });
+            utxo_overlay.insert(
+                bid.0,
+                ErgoBox {
+                    candidate: output.clone(),
+                    transaction_id: etx.tx_id,
+                    index: idx as u16,
+                    box_id: bid,
+                },
+            );
         }
     }
 
@@ -540,12 +543,15 @@ pub fn collect_txs(
         let last_tx = selected.last().unwrap();
         for (idx, output) in last_tx.output_candidates.iter().enumerate() {
             let bid = compute_box_id(&last_tx.tx_id, idx as u16);
-            utxo_overlay.insert(bid.0, ErgoBox {
-                candidate: output.clone(),
-                transaction_id: last_tx.tx_id,
-                index: idx as u16,
-                box_id: bid,
-            });
+            utxo_overlay.insert(
+                bid.0,
+                ErgoBox {
+                    candidate: output.clone(),
+                    transaction_id: last_tx.tx_id,
+                    index: idx as u16,
+                    box_id: bid,
+                },
+            );
         }
     }
 
@@ -880,7 +886,8 @@ impl CandidateGenerator {
         .unwrap_or(parent_header.n_bits);
 
         // 4. Build extension: interlinks + parameters
-        let extension_fields = build_extension_fields(history, &parent_header, &parent_id, parameters);
+        let extension_fields =
+            build_extension_fields(history, &parent_header, &parent_id, parameters);
         let extension = Extension {
             header_id: ModifierId([0u8; 32]), // placeholder — will be set after header ID is known
             fields: extension_fields.clone(),
@@ -968,10 +975,7 @@ impl CandidateGenerator {
         };
 
         // 8. Compute transactions root via Merkle tree
-        let tx_serialized: Vec<Vec<u8>> = transactions
-            .iter()
-            .map(serialize_transaction)
-            .collect();
+        let tx_serialized: Vec<Vec<u8>> = transactions.iter().map(serialize_transaction).collect();
         let tx_slices: Vec<&[u8]> = tx_serialized.iter().map(|v| v.as_slice()).collect();
         let transactions_root = merkle_root(&tx_slices).unwrap_or([0u8; 32]);
 
@@ -1431,10 +1435,8 @@ mod tests {
             let mut buf = [0u8; 33];
             buf[0] = 0x02;
             // x = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
-            let x = hex::decode(
-                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
-            )
-            .unwrap();
+            let x = hex::decode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+                .unwrap();
             buf[1..].copy_from_slice(&x);
             buf
         };
@@ -1458,20 +1460,16 @@ mod tests {
         let pk1: [u8; 33] = {
             let mut buf = [0u8; 33];
             buf[0] = 0x02;
-            let x = hex::decode(
-                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
-            )
-            .unwrap();
+            let x = hex::decode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+                .unwrap();
             buf[1..].copy_from_slice(&x);
             buf
         };
         let pk2: [u8; 33] = {
             let mut buf = [0u8; 33];
             buf[0] = 0x03;
-            let x = hex::decode(
-                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
-            )
-            .unwrap();
+            let x = hex::decode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+                .unwrap();
             buf[1..].copy_from_slice(&x);
             buf
         };
@@ -1485,16 +1483,17 @@ mod tests {
         let pk: [u8; 33] = {
             let mut buf = [0u8; 33];
             buf[0] = 0x02;
-            let x = hex::decode(
-                "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798",
-            )
-            .unwrap();
+            let x = hex::decode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+                .unwrap();
             buf[1..].copy_from_slice(&x);
             buf
         };
         let tree_720 = miner_reward_prop(&pk, 720);
         let tree_1440 = miner_reward_prop(&pk, 1440);
-        assert_ne!(tree_720, tree_1440, "different delays should produce different trees");
+        assert_ne!(
+            tree_720, tree_1440,
+            "different delays should produce different trees"
+        );
     }
 
     // ── build_fee_collection_tx tests ───────────────────────────────
@@ -1642,20 +1641,22 @@ mod tests {
         let token_id_a = BoxId([0xAA; 32]);
         let token_id_b = BoxId([0xBB; 32]);
 
-        let tx = make_tx_with_fee_and_tokens(
-            500_000,
-            0xF1,
-            vec![(token_id_a, 100), (token_id_b, 50)],
-        );
-        let fee_tx =
-            build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
+        let tx =
+            make_tx_with_fee_and_tokens(500_000, 0xF1, vec![(token_id_a, 100), (token_id_b, 50)]);
+        let fee_tx = build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
 
         // Fee output should carry the tokens.
         let miner_out = &fee_tx.output_candidates[0];
         assert_eq!(miner_out.tokens.len(), 2);
         // Tokens are ordered by BTreeMap key order (token_id bytes).
-        assert!(miner_out.tokens.iter().any(|(id, amt)| *id == token_id_a && *amt == 100));
-        assert!(miner_out.tokens.iter().any(|(id, amt)| *id == token_id_b && *amt == 50));
+        assert!(miner_out
+            .tokens
+            .iter()
+            .any(|(id, amt)| *id == token_id_a && *amt == 100));
+        assert!(miner_out
+            .tokens
+            .iter()
+            .any(|(id, amt)| *id == token_id_b && *amt == 50));
     }
 
     #[test]
@@ -1689,8 +1690,7 @@ mod tests {
         }
 
         let tx = make_tx_with_fee_and_tokens(1_000_000, 0xF1, tokens);
-        let fee_tx =
-            build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
+        let fee_tx = build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
 
         let miner_out = &fee_tx.output_candidates[0];
         assert_eq!(
@@ -1721,7 +1721,10 @@ mod tests {
         // because 7.5 ERG goes to founders.
         let total = ergo_network::emission::emission_at_height(100);
         let miner = ergo_network::emission::miner_reward_at_height(100);
-        assert!(miner < total, "miner reward should be less than total emission during founders period");
+        assert!(
+            miner < total,
+            "miner reward should be less than total emission during founders period"
+        );
         assert_eq!(
             total - miner,
             ergo_network::emission::FOUNDERS_INITIAL_REWARD,
@@ -1740,7 +1743,10 @@ mod tests {
     fn reemission_charge_zero_before_activation() {
         // Before height 777,217, reemission charge should be zero.
         let charge = ergo_network::emission::reemission_for_height(500_000);
-        assert_eq!(charge, 0, "reemission charge should be zero before activation");
+        assert_eq!(
+            charge, 0,
+            "reemission charge should be zero before activation"
+        );
     }
 
     #[test]
@@ -1748,7 +1754,10 @@ mod tests {
         // After activation height 777,217, there should be a reemission charge.
         let height = ergo_network::emission::REEMISSION_ACTIVATION_HEIGHT + 1;
         let charge = ergo_network::emission::reemission_for_height(height);
-        assert!(charge > 0, "reemission charge should be positive after activation");
+        assert!(
+            charge > 0,
+            "reemission charge should be positive after activation"
+        );
         // The charge should be the basic charge amount (12 ERG) when emission is high enough.
         assert_eq!(
             charge,
@@ -1769,7 +1778,10 @@ mod tests {
         // Miner receives reward minus the reemission charge.
         let miner_value = reward.saturating_sub(charge);
         assert!(miner_value > 0, "miner should still get some reward");
-        assert!(miner_value < reward, "miner value should be less than full reward");
+        assert!(
+            miner_value < reward,
+            "miner value should be less than full reward"
+        );
         assert_eq!(
             reward - miner_value,
             charge,
@@ -1788,8 +1800,18 @@ mod tests {
     fn test_collect_txs_empty_mempool_no_emission() {
         let pk = [0x02; 33];
         let params = Parameters::genesis();
-        let (selected, eliminated) =
-            collect_txs(Vec::new(), None, 1_000_000, 1_000_000_000, &params, 100, &pk, None, None, 720);
+        let (selected, eliminated) = collect_txs(
+            Vec::new(),
+            None,
+            1_000_000,
+            1_000_000_000,
+            &params,
+            100,
+            &pk,
+            None,
+            None,
+            720,
+        );
         // No transactions at all, so no fee tx either.
         assert!(selected.is_empty());
         assert!(eliminated.is_empty());
@@ -1834,7 +1856,10 @@ mod tests {
         assert!(eliminated.is_empty());
         // Emission first, then mempool tx, then fee collection tx.
         assert!(selected.len() >= 2);
-        assert_eq!(selected[0].tx_id, emission.tx_id, "emission should be first");
+        assert_eq!(
+            selected[0].tx_id, emission.tx_id,
+            "emission should be first"
+        );
         // Last tx should be the fee collection tx (its outputs pay to miner).
         let last = selected.last().unwrap();
         assert_eq!(
@@ -1855,8 +1880,18 @@ mod tests {
         let limit = tx1_size + 1; // Just enough for tx1, not tx2.
 
         let params = Parameters::genesis();
-        let (selected, eliminated) =
-            collect_txs(vec![tx1.clone(), tx2.clone()], None, limit, 1_000_000_000, &params, 100, &pk, None, None, 720);
+        let (selected, eliminated) = collect_txs(
+            vec![tx1.clone(), tx2.clone()],
+            None,
+            limit,
+            1_000_000_000,
+            &params,
+            100,
+            &pk,
+            None,
+            None,
+            720,
+        );
 
         // tx2 should be eliminated.
         assert_eq!(eliminated.len(), 1);
@@ -1873,7 +1908,18 @@ mod tests {
         let tx = make_tx_with_fee(500_000);
 
         let params = Parameters::genesis();
-        let (selected, _) = collect_txs(vec![tx], None, 10_000_000, 1_000_000_000, &params, 100, &pk, None, None, 720);
+        let (selected, _) = collect_txs(
+            vec![tx],
+            None,
+            10_000_000,
+            1_000_000_000,
+            &params,
+            100,
+            &pk,
+            None,
+            None,
+            720,
+        );
 
         // Should be: mempool_tx, fee_collection_tx.
         assert_eq!(selected.len(), 2);
@@ -1901,7 +1947,7 @@ mod tests {
         let (selected, eliminated) = collect_txs(
             vec![tx1.clone(), tx2.clone()],
             None,
-            10_000_000,   // large size limit (not the bottleneck)
+            10_000_000, // large size limit (not the bottleneck)
             cost_limit,
             &params,
             100,

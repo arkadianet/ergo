@@ -223,9 +223,9 @@ mod tests {
     #[test]
     fn compute_serialized_size_multiple_fields() {
         let ext = make_ext(vec![
-            ([0x00, 0x01], vec![0x10]),        // 2 + 1 + 1 = 4
-            ([0x01, 0x00], vec![0xFF; 32]),     // 2 + 1 + 32 = 35
-            ([0x02, 0x05], vec![0x42]),         // 2 + 1 + 1 = 4
+            ([0x00, 0x01], vec![0x10]),     // 2 + 1 + 1 = 4
+            ([0x01, 0x00], vec![0xFF; 32]), // 2 + 1 + 32 = 35
+            ([0x02, 0x05], vec![0x42]),     // 2 + 1 + 1 = 4
         ]);
         // 32 (header_id) + 1 (VLQ for 3 fields) + 4 + 35 + 4 = 76
         assert_eq!(compute_extension_serialized_size(&ext), 76);

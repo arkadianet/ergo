@@ -85,7 +85,11 @@ impl ModifiersCache {
             id
         };
 
-        let entry = CachedModifier { type_id, data, header };
+        let entry = CachedModifier {
+            type_id,
+            data,
+            header,
+        };
         let cache = self.cache_for_mut(type_id);
 
         // If at capacity and this key is not already present, the LRU entry
@@ -108,9 +112,7 @@ impl ModifiersCache {
     /// tier, or `None` if not present.
     pub fn remove(&mut self, id: &ModifierId, type_id: u8) -> Option<(ModifierId, u8, Vec<u8>)> {
         let cache = self.cache_for_mut(type_id);
-        cache
-            .pop(id)
-            .map(|cm| (*id, cm.type_id, cm.data))
+        cache.pop(id).map(|cm| (*id, cm.type_id, cm.data))
     }
 
     /// Returns `true` if the modifier is present in the appropriate cache tier.
@@ -389,8 +391,12 @@ mod tests {
         assert_eq!(cache.len(), 0);
 
         // Verify both entries are present (order: headers first, then body).
-        assert!(drained.iter().any(|(id, ty, data)| *id == id1 && *ty == 101 && data == &[0xAA]));
-        assert!(drained.iter().any(|(id, ty, data)| *id == id2 && *ty == 102 && data == &[0xBB]));
+        assert!(drained
+            .iter()
+            .any(|(id, ty, data)| *id == id1 && *ty == 101 && data == &[0xAA]));
+        assert!(drained
+            .iter()
+            .any(|(id, ty, data)| *id == id2 && *ty == 102 && data == &[0xBB]));
     }
 
     // ------------------------------------------------------------------

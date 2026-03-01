@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use rocksdb::{Options, WriteBatch, DB};
 
 use ergo_types::modifier_id::ModifierId;
@@ -187,40 +187,28 @@ impl ExtraIndexerDb {
     /// Read a u32 progress counter.  Returns 0 if the key is absent.
     pub fn get_progress_u32(&self, key: &[u8; 32]) -> Result<u32, IndexerDbError> {
         match self.get(key)? {
-            Some(data) if data.len() == 4 => {
-                Ok(u32::from_be_bytes(data.try_into().unwrap()))
-            }
+            Some(data) if data.len() == 4 => Ok(u32::from_be_bytes(data.try_into().unwrap())),
             Some(_) => Err(IndexerDbError::Codec("invalid u32 length".into())),
             None => Ok(0),
         }
     }
 
     /// Write a u32 progress counter.
-    pub fn set_progress_u32(
-        &self,
-        key: &[u8; 32],
-        val: u32,
-    ) -> Result<(), IndexerDbError> {
+    pub fn set_progress_u32(&self, key: &[u8; 32], val: u32) -> Result<(), IndexerDbError> {
         self.put(key, &val.to_be_bytes())
     }
 
     /// Read a u64 progress counter.  Returns 0 if the key is absent.
     pub fn get_progress_u64(&self, key: &[u8; 32]) -> Result<u64, IndexerDbError> {
         match self.get(key)? {
-            Some(data) if data.len() == 8 => {
-                Ok(u64::from_be_bytes(data.try_into().unwrap()))
-            }
+            Some(data) if data.len() == 8 => Ok(u64::from_be_bytes(data.try_into().unwrap())),
             Some(_) => Err(IndexerDbError::Codec("invalid u64 length".into())),
             None => Ok(0),
         }
     }
 
     /// Write a u64 progress counter.
-    pub fn set_progress_u64(
-        &self,
-        key: &[u8; 32],
-        val: u64,
-    ) -> Result<(), IndexerDbError> {
+    pub fn set_progress_u64(&self, key: &[u8; 32], val: u64) -> Result<(), IndexerDbError> {
         self.put(key, &val.to_be_bytes())
     }
 }
@@ -305,10 +293,7 @@ mod tests {
         assert_ne!(numeric_box_key(0), numeric_box_key(1));
         assert_ne!(box_segment_key(&parent, 0), box_segment_key(&parent, 1));
         assert_ne!(tx_segment_key(&parent, 0), tx_segment_key(&parent, 1));
-        assert_ne!(
-            box_segment_key(&parent, 0),
-            tx_segment_key(&parent, 0),
-        );
+        assert_ne!(box_segment_key(&parent, 0), tx_segment_key(&parent, 0),);
 
         // token_key with different IDs produces different keys.
         let id_a = ModifierId([1u8; 32]);

@@ -180,8 +180,8 @@ pub fn decode_address(address: &str) -> Result<DecodedAddress, AddressError> {
     let network = NetworkPrefix::from_byte(network_nibble)
         .ok_or(AddressError::UnknownNetwork(network_nibble))?;
 
-    let address_type = AddressType::from_byte(type_nibble)
-        .ok_or(AddressError::UnknownNetwork(type_nibble))?;
+    let address_type =
+        AddressType::from_byte(type_nibble).ok_or(AddressError::UnknownNetwork(type_nibble))?;
 
     let content_bytes = payload[1..].to_vec();
 
@@ -203,10 +203,7 @@ pub fn validate_address(address: &str) -> Result<DecodedAddress, AddressError> {
 /// treated as a compressed public key and encoded as a P2PK address.
 /// Otherwise the full ErgoTree is encoded as a P2S address.
 pub fn ergo_tree_to_address(ergo_tree: &[u8], network: NetworkPrefix) -> String {
-    if ergo_tree.len() >= 36
-        && ergo_tree[0] == 0x00
-        && ergo_tree[1] == 0x08
-        && ergo_tree[2] == 0xcd
+    if ergo_tree.len() >= 36 && ergo_tree[0] == 0x00 && ergo_tree[1] == 0x08 && ergo_tree[2] == 0xcd
     {
         let pk = &ergo_tree[3..36];
         encode_address(network, AddressType::P2PK, pk)
@@ -217,8 +214,7 @@ pub fn ergo_tree_to_address(ergo_tree: &[u8], network: NetworkPrefix) -> String 
 
 /// Creates a P2PK address from a hex-encoded compressed public key (33 bytes).
 pub fn raw_to_address(pubkey_hex: &str, network: NetworkPrefix) -> Result<String, AddressError> {
-    let pk_bytes =
-        hex::decode(pubkey_hex).map_err(|e| AddressError::InvalidHex(e.to_string()))?;
+    let pk_bytes = hex::decode(pubkey_hex).map_err(|e| AddressError::InvalidHex(e.to_string()))?;
 
     Ok(encode_address(network, AddressType::P2PK, &pk_bytes))
 }
@@ -333,7 +329,7 @@ mod tests {
 
     #[test]
     fn raw_to_address_and_back() {
-        let pk_hex = "02" .to_string() + &"ab".repeat(32);
+        let pk_hex = "02".to_string() + &"ab".repeat(32);
         let addr = raw_to_address(&pk_hex, NetworkPrefix::Mainnet).unwrap();
         let raw_back = address_to_raw(&addr).unwrap();
         assert_eq!(raw_back, pk_hex);

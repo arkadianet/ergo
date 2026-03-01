@@ -11,7 +11,9 @@ use ergo_types::transaction::{
     BoxId, ErgoBox, ErgoTransaction, DEFAULT_MIN_VALUE_PER_BYTE, MAX_BOX_SIZE, MIN_BOX_VALUE,
 };
 
-use crate::validation_rules::{ValidationSettings, TX_DUST, TX_BOX_SIZE, TX_BOX_PROPOSITION_SIZE, TX_MONOTONIC_HEIGHT};
+use crate::validation_rules::{
+    ValidationSettings, TX_BOX_PROPOSITION_SIZE, TX_BOX_SIZE, TX_DUST, TX_MONOTONIC_HEIGHT,
+};
 
 /// Errors produced by stateful transaction validation.
 #[derive(Debug, thiserror::Error)]
@@ -290,7 +292,10 @@ mod tests {
     #[test]
     fn valid_tx_no_tokens_passes() {
         let (tx, boxes) = valid_tx_and_boxes();
-        assert!(validate_tx_stateful(&tx, &boxes, 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).is_ok());
+        assert!(
+            validate_tx_stateful(&tx, &boxes, 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+                .is_ok()
+        );
     }
 
     // ── Test 2: ERG not preserved → ErgNotPreserved ───────────────────
@@ -300,7 +305,8 @@ mod tests {
         let (mut tx, boxes) = valid_tx_and_boxes();
         // Output more than input
         tx.output_candidates[0].value = 2_000_000_000;
-        let err = validate_tx_stateful(&tx, &boxes, 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(&tx, &boxes, 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -336,7 +342,15 @@ mod tests {
             tx_id: TxId([0xbb; 32]),
         };
 
-        let err = validate_tx_stateful(&tx, &[box1, box2], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1, box2],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -368,7 +382,10 @@ mod tests {
             tx_id: TxId([0xcc; 32]),
         };
 
-        assert!(validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).is_ok());
+        assert!(
+            validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+                .is_ok()
+        );
     }
 
     // ── Test 5: new token minted from non-first input → error ─────────
@@ -392,7 +409,15 @@ mod tests {
             tx_id: TxId([0xdd; 32]),
         };
 
-        let err = validate_tx_stateful(&tx, &[box1, box2], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1, box2],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -424,7 +449,8 @@ mod tests {
         };
 
         // Fix the creation_height to be valid
-        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -464,7 +490,15 @@ mod tests {
             ..Default::default()
         });
 
-        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &settings_no_120).unwrap_err();
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings_no_120,
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -494,7 +528,8 @@ mod tests {
             tx_id: TxId([0x11; 32]),
         };
 
-        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -537,7 +572,15 @@ mod tests {
             tx_id: TxId([0x22; 32]),
         };
 
-        assert!(validate_tx_stateful(&tx, &[box1, box2], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).is_ok());
+        assert!(validate_tx_stateful(
+            &tx,
+            &[box1, box2],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs()
+        )
+        .is_ok());
     }
 
     // ── Test 10: multiple token types all preserved → passes ──────────
@@ -550,11 +593,7 @@ mod tests {
         let token_c = box_id(0xC1);
 
         let mut input_box = make_ergo_box(1_000_000_000, bid);
-        input_box.candidate.tokens = vec![
-            (token_a, 10_000),
-            (token_b, 5_000),
-            (token_c, 1),
-        ];
+        input_box.candidate.tokens = vec![(token_a, 10_000), (token_b, 5_000), (token_c, 1)];
 
         // Distribute all three token types across two outputs
         let mut out1 = make_candidate(700_000_000);
@@ -570,7 +609,15 @@ mod tests {
             tx_id: TxId([0x33; 32]),
         };
 
-        assert!(validate_tx_stateful(&tx, &[input_box], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).is_ok());
+        assert!(validate_tx_stateful(
+            &tx,
+            &[input_box],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs()
+        )
+        .is_ok());
     }
 
     // ── Test 11: dynamic dust — large box needs more than MIN_BOX_VALUE ──
@@ -613,8 +660,8 @@ mod tests {
             tx_id: TxId([0xf1; 32]),
         };
 
-        let err =
-            validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -661,7 +708,8 @@ mod tests {
         };
 
         assert!(
-            validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).is_ok()
+            validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+                .is_ok()
         );
     }
 
@@ -698,8 +746,15 @@ mod tests {
                 tx_id: TxId([0xf3; 32]),
             };
 
-            let err = validate_tx_stateful(&tx, &[input_box], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
-                .unwrap_err();
+            let err = validate_tx_stateful(
+                &tx,
+                &[input_box],
+                200_000,
+                1,
+                DEFAULT_MIN_VALUE_PER_BYTE,
+                &vs(),
+            )
+            .unwrap_err();
             assert!(
                 matches!(err, TxStatefulError::DustOutput { idx: 0, .. }),
                 "expected DustOutput for box with tokens, got {err:?}"
@@ -768,7 +823,14 @@ mod tests {
         };
 
         // With TX_DUST active, this should fail.
-        let err = validate_tx_stateful(&tx, &[box1.clone()], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs());
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1.clone()],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs(),
+        );
         assert!(
             matches!(err, Err(TxStatefulError::DustOutput { .. })),
             "expected DustOutput with active TX_DUST, got {err:?}"
@@ -776,16 +838,26 @@ mod tests {
 
         // With TX_DUST disabled, this should pass.
         let result = validate_tx_stateful(
-            &tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &disabled_vs,
+            &tx,
+            &[box1],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &disabled_vs,
         );
-        assert!(result.is_ok(), "expected Ok with disabled TX_DUST, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok with disabled TX_DUST, got {result:?}"
+        );
     }
 
     // ── Test 16: disabled proposition size rule allows oversized tree ──
 
     #[test]
     fn disabled_proposition_size_rule_allows_oversized_tree() {
-        use crate::validation_rules::{ValidationSettingsUpdate, TX_BOX_PROPOSITION_SIZE, TX_BOX_SIZE};
+        use crate::validation_rules::{
+            ValidationSettingsUpdate, TX_BOX_PROPOSITION_SIZE, TX_BOX_SIZE,
+        };
 
         let bid = box_id(0x01);
         let box1 = make_ergo_box(1_000_000_000, bid);
@@ -802,7 +874,14 @@ mod tests {
 
         // With all rules active, rule 120 (total box size) fires first since the
         // total box is also oversized when the ErgoTree exceeds MAX_BOX_SIZE.
-        let err = validate_tx_stateful(&tx, &[box1.clone()], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs());
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1.clone()],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs(),
+        );
         assert!(
             matches!(err, Err(TxStatefulError::BoxTooLarge { .. })),
             "expected BoxTooLarge with active rules, got {err:?}"
@@ -813,7 +892,14 @@ mod tests {
             rules_to_disable: vec![TX_BOX_SIZE, TX_DUST],
             ..Default::default()
         });
-        let err = validate_tx_stateful(&tx, &[box1.clone()], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &only_121);
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1.clone()],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &only_121,
+        );
         assert!(
             matches!(err, Err(TxStatefulError::ErgoTreeTooLarge { .. })),
             "expected ErgoTreeTooLarge with rule 120 disabled, got {err:?}"
@@ -825,9 +911,17 @@ mod tests {
             ..Default::default()
         });
         let result = validate_tx_stateful(
-            &tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &all_disabled,
+            &tx,
+            &[box1],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &all_disabled,
         );
-        assert!(result.is_ok(), "expected Ok with both box size rules disabled, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok with both box size rules disabled, got {result:?}"
+        );
     }
 
     // ── Test 17: estimated_serialized_size sanity ──
@@ -909,7 +1003,12 @@ mod tests {
         };
 
         let result = validate_tx_stateful(
-            &tx, &[input_box], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &settings,
+            &tx,
+            &[input_box],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
         );
         assert!(
             matches!(result, Err(TxStatefulError::BoxTooLarge { idx: 0, .. })),
@@ -923,9 +1022,17 @@ mod tests {
         let (tx, boxes) = valid_tx_and_boxes();
         let settings = ValidationSettings::initial();
         let result = validate_tx_stateful(
-            &tx, &boxes, 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &settings,
+            &tx,
+            &boxes,
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
         );
-        assert!(result.is_ok(), "expected Ok for normal-sized box, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok for normal-sized box, got {result:?}"
+        );
     }
 
     #[test]
@@ -965,7 +1072,12 @@ mod tests {
         // With TX_BOX_SIZE active → BoxTooLarge
         let settings = ValidationSettings::initial();
         let result = validate_tx_stateful(
-            &tx, &[input_box.clone()], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &settings,
+            &tx,
+            &[input_box.clone()],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
         );
         assert!(
             matches!(result, Err(TxStatefulError::BoxTooLarge { .. })),
@@ -979,9 +1091,17 @@ mod tests {
             ..Default::default()
         });
         let result = validate_tx_stateful(
-            &tx, &[input_box], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &disabled_vs,
+            &tx,
+            &[input_box],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &disabled_vs,
         );
-        assert!(result.is_ok(), "expected Ok with disabled TX_BOX_SIZE, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok with disabled TX_BOX_SIZE, got {result:?}"
+        );
     }
 
     // ── Test 18: monotonic height not enforced for v2 ────────────────
@@ -1007,8 +1127,18 @@ mod tests {
         };
 
         // For v2, monotonic height is NOT enforced → should pass
-        let result = validate_tx_stateful(&tx, &[input_box], 5000, 2, DEFAULT_MIN_VALUE_PER_BYTE, &settings);
-        assert!(result.is_ok(), "expected Ok for v2 (monotonic not enforced), got {result:?}");
+        let result = validate_tx_stateful(
+            &tx,
+            &[input_box],
+            5000,
+            2,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
+        );
+        assert!(
+            result.is_ok(),
+            "expected Ok for v2 (monotonic not enforced), got {result:?}"
+        );
     }
 
     // ── Test 19: monotonic height enforced for v3 ────────────────────
@@ -1033,9 +1163,23 @@ mod tests {
             tx_id: TxId([0xE2; 32]),
         };
 
-        let result = validate_tx_stateful(&tx, &[input_box], 5000, 3, DEFAULT_MIN_VALUE_PER_BYTE, &settings);
+        let result = validate_tx_stateful(
+            &tx,
+            &[input_box],
+            5000,
+            3,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
+        );
         assert!(
-            matches!(result, Err(TxStatefulError::MonotonicHeightViolation { idx: 0, output_height: 100, max_input_height: 200 })),
+            matches!(
+                result,
+                Err(TxStatefulError::MonotonicHeightViolation {
+                    idx: 0,
+                    output_height: 100,
+                    max_input_height: 200
+                })
+            ),
             "expected MonotonicHeightViolation for v3, got {result:?}"
         );
     }
@@ -1062,8 +1206,18 @@ mod tests {
             tx_id: TxId([0xE3; 32]),
         };
 
-        let result = validate_tx_stateful(&tx, &[input_box], 5000, 3, DEFAULT_MIN_VALUE_PER_BYTE, &settings);
-        assert!(result.is_ok(), "expected Ok when creation_height == max_input_height, got {result:?}");
+        let result = validate_tx_stateful(
+            &tx,
+            &[input_box],
+            5000,
+            3,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
+        );
+        assert!(
+            result.is_ok(),
+            "expected Ok when creation_height == max_input_height, got {result:?}"
+        );
     }
 
     // ── Test 21: monotonic height passes when higher ─────────────────
@@ -1088,8 +1242,18 @@ mod tests {
             tx_id: TxId([0xE4; 32]),
         };
 
-        let result = validate_tx_stateful(&tx, &[input_box], 5000, 3, DEFAULT_MIN_VALUE_PER_BYTE, &settings);
-        assert!(result.is_ok(), "expected Ok when creation_height > max_input_height, got {result:?}");
+        let result = validate_tx_stateful(
+            &tx,
+            &[input_box],
+            5000,
+            3,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &settings,
+        );
+        assert!(
+            result.is_ok(),
+            "expected Ok when creation_height > max_input_height, got {result:?}"
+        );
     }
 
     // ── Test 22: input sum overflow → InputSumOverflow ──────────────
@@ -1108,7 +1272,15 @@ mod tests {
             tx_id: TxId([0xF0; 32]),
         };
 
-        let err = validate_tx_stateful(&tx, &[box1, box2], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(
+            &tx,
+            &[box1, box2],
+            200_000,
+            1,
+            DEFAULT_MIN_VALUE_PER_BYTE,
+            &vs(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, TxStatefulError::InputSumOverflow),
             "expected InputSumOverflow, got {err:?}"
@@ -1135,7 +1307,8 @@ mod tests {
             tx_id: TxId([0xF1; 32]),
         };
 
-        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs()).unwrap_err();
+        let err = validate_tx_stateful(&tx, &[box1], 200_000, 1, DEFAULT_MIN_VALUE_PER_BYTE, &vs())
+            .unwrap_err();
         assert!(
             matches!(err, TxStatefulError::OutputSumOverflow),
             "expected OutputSumOverflow, got {err:?}"

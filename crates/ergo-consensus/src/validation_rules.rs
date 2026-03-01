@@ -627,7 +627,11 @@ mod tests {
             ErrorSeverity::Recoverable
         );
         assert_eq!(
-            settings.rules().get(&HDR_FUTURE_TIMESTAMP).unwrap().severity,
+            settings
+                .rules()
+                .get(&HDR_FUTURE_TIMESTAMP)
+                .unwrap()
+                .severity,
             ErrorSeverity::Recoverable
         );
         assert_eq!(
@@ -635,11 +639,19 @@ mod tests {
             ErrorSeverity::Recoverable
         );
         assert_eq!(
-            settings.rules().get(&BS_HEADERS_CHAIN_SYNCED).unwrap().severity,
+            settings
+                .rules()
+                .get(&BS_HEADERS_CHAIN_SYNCED)
+                .unwrap()
+                .severity,
             ErrorSeverity::Recoverable
         );
         assert_eq!(
-            settings.rules().get(&EX_IL_UNABLE_TO_VALIDATE).unwrap().severity,
+            settings
+                .rules()
+                .get(&EX_IL_UNABLE_TO_VALIDATE)
+                .unwrap()
+                .severity,
             ErrorSeverity::Recoverable
         );
         // A sampling of fatal rules.

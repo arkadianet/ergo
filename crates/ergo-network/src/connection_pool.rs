@@ -116,8 +116,14 @@ impl ConnectionPool {
 
     /// Connect to a peer, perform handshake, spawn its task, return PeerId.
     pub async fn connect(&mut self, addr: SocketAddr) -> Result<PeerId, PeerConnError> {
-        let (peer_conn, peer_hs) =
-            PeerConnection::connect(addr, self.magic, &self.our_handshake, self.handshake_timeout_secs, self.session_id).await?;
+        let (peer_conn, peer_hs) = PeerConnection::connect(
+            addr,
+            self.magic,
+            &self.our_handshake,
+            self.handshake_timeout_secs,
+            self.session_id,
+        )
+        .await?;
         let peer_name = peer_hs.peer_spec.agent_name.clone();
 
         let id = self.next_id;
@@ -500,12 +506,15 @@ mod tests {
         let hs_server_clone = hs_server.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            PeerConnection::accept(stream, magic, &hs_server_clone, 5, None).await.unwrap()
+            PeerConnection::accept(stream, magic, &hs_server_clone, 5, None)
+                .await
+                .unwrap()
         });
 
         // Client connects (outgoing).
-        let (_client_conn, _) =
-            PeerConnection::connect(addr, magic, &hs_client, 5, None).await.unwrap();
+        let (_client_conn, _) = PeerConnection::connect(addr, magic, &hs_client, 5, None)
+            .await
+            .unwrap();
 
         // Server gets the inbound connection.
         let (server_conn, peer_hs) = server.await.unwrap();
@@ -626,11 +635,14 @@ mod tests {
         let hs_server_clone = hs_server.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            PeerConnection::accept(stream, magic, &hs_server_clone, 5, None).await.unwrap()
+            PeerConnection::accept(stream, magic, &hs_server_clone, 5, None)
+                .await
+                .unwrap()
         });
 
-        let (_client_conn, _) =
-            PeerConnection::connect(addr, magic, &hs_client, 5, None).await.unwrap();
+        let (_client_conn, _) = PeerConnection::connect(addr, magic, &hs_client, 5, None)
+            .await
+            .unwrap();
 
         let (server_conn, peer_hs) = server.await.unwrap();
 
@@ -638,8 +650,14 @@ mod tests {
         let id = pool.add_inbound(server_conn, addr, &peer_hs);
 
         let activity = pool.peer_last_activity(id);
-        assert!(activity.is_some(), "peer_last_activity should return Some for connected peer");
-        assert!(activity.unwrap() > 0, "last_activity should be a positive epoch ms timestamp");
+        assert!(
+            activity.is_some(),
+            "peer_last_activity should return Some for connected peer"
+        );
+        assert!(
+            activity.unwrap() > 0,
+            "last_activity should be a positive epoch ms timestamp"
+        );
 
         pool.disconnect(id);
     }
@@ -686,11 +704,14 @@ mod tests {
         let hs_server_clone = hs_server.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            PeerConnection::accept(stream, magic, &hs_server_clone, 5, None).await.unwrap()
+            PeerConnection::accept(stream, magic, &hs_server_clone, 5, None)
+                .await
+                .unwrap()
         });
 
-        let (_client_conn, _) =
-            PeerConnection::connect(addr, magic, &hs_client, 5, None).await.unwrap();
+        let (_client_conn, _) = PeerConnection::connect(addr, magic, &hs_client, 5, None)
+            .await
+            .unwrap();
 
         let (server_conn, peer_hs) = server.await.unwrap();
 

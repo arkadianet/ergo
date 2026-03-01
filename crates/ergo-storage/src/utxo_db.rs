@@ -140,15 +140,17 @@ impl UtxoDb {
     ///
     /// Keys whose length is not 32 bytes are skipped (the metadata key is 1 byte).
     pub fn iter_entries(&self) -> impl Iterator<Item = ([u8; 32], Vec<u8>)> + '_ {
-        self.db.iterator(rocksdb::IteratorMode::Start).filter_map(|item| {
-            let (key, value) = item.ok()?;
-            if key.len() != 32 {
-                return None;
-            }
-            let mut box_id = [0u8; 32];
-            box_id.copy_from_slice(&key);
-            Some((box_id, value.to_vec()))
-        })
+        self.db
+            .iterator(rocksdb::IteratorMode::Start)
+            .filter_map(|item| {
+                let (key, value) = item.ok()?;
+                if key.len() != 32 {
+                    return None;
+                }
+                let mut box_id = [0u8; 32];
+                box_id.copy_from_slice(&key);
+                Some((box_id, value.to_vec()))
+            })
     }
 
     /// Returns the number of UTXO entries (excluding metadata).
@@ -203,7 +205,10 @@ mod tests {
         let meta = test_metadata(0x11, 0x22);
 
         db.apply_changes(
-            &[(id1, b"box-bytes-1".to_vec()), (id2, b"box-bytes-2".to_vec())],
+            &[
+                (id1, b"box-bytes-1".to_vec()),
+                (id2, b"box-bytes-2".to_vec()),
+            ],
             &[],
             &meta,
         )

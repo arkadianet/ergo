@@ -58,8 +58,8 @@ impl WalletKeys {
     /// `mnemonic_pass` is the optional mnemonic passphrase (often empty).
     pub fn from_mnemonic(mnemonic: &str, mnemonic_pass: &str) -> Result<Self, KeysError> {
         let seed = Mnemonic::to_seed(mnemonic, mnemonic_pass);
-        let master = ExtSecretKey::derive_master(seed)
-            .map_err(|e| KeysError::Derivation(e.to_string()))?;
+        let master =
+            ExtSecretKey::derive_master(seed).map_err(|e| KeysError::Derivation(e.to_string()))?;
         Ok(Self { master })
     }
 
@@ -158,7 +158,10 @@ mod tests {
         assert_eq!(dk.path, "m/44'/429'/0'/0/0");
 
         // Cross-check with the known test vector from ergo-lib.
-        assert_eq!(dk.address, "9eatpGQdYNjTi5ZZLK7Bo7C3ms6oECPnxbQTRn6sDcBNLMYSCa8");
+        assert_eq!(
+            dk.address,
+            "9eatpGQdYNjTi5ZZLK7Bo7C3ms6oECPnxbQTRn6sDcBNLMYSCa8"
+        );
     }
 
     #[test]
@@ -172,7 +175,10 @@ mod tests {
         assert_eq!(dk1.index, 1);
 
         // Cross-check index 1 with known test vector.
-        assert_eq!(dk1.address, "9iBhwkjzUAVBkdxWvKmk7ab7nFgZRFbGpXA9gP6TAoakFnLNomk");
+        assert_eq!(
+            dk1.address,
+            "9iBhwkjzUAVBkdxWvKmk7ab7nFgZRFbGpXA9gP6TAoakFnLNomk"
+        );
     }
 
     #[test]

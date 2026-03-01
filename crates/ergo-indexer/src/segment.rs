@@ -248,10 +248,7 @@ pub fn remove_index_entry(
     let neg_val = -(target as i64);
 
     // 1. Search current array (positive or negative).
-    if let Some(pos) = indexes
-        .iter()
-        .position(|&v| v == pos_val || v == neg_val)
-    {
+    if let Some(pos) = indexes.iter().position(|&v| v == pos_val || v == neg_val) {
         indexes.remove(pos);
         return Ok((true, Vec::new()));
     }
@@ -485,8 +482,7 @@ mod tests {
         // Current array.
         let current: Vec<i64> = vec![1025, 1026, 1027];
 
-        let all =
-            collect_all_indexes(&current, &db, &parent, 2, true).unwrap();
+        let all = collect_all_indexes(&current, &db, &parent, 2, true).unwrap();
 
         assert_eq!(all.len(), 512 + 512 + 3);
         // First 512 from segment 0.

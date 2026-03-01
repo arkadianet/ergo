@@ -306,7 +306,10 @@ mod tests {
         // After VLQ(1) + short_string("ergo-rust") + version(3) + short_string("node"):
         // 1 + (1+9) + 3 + (1+4) = 19 bytes
         // Byte 19 should be the option byte
-        assert_eq!(encoded[19], 0x01, "option byte should be 0x01 for IPv4 address");
+        assert_eq!(
+            encoded[19], 0x01,
+            "option byte should be 0x01 for IPv4 address"
+        );
     }
 
     #[test]
@@ -323,7 +326,11 @@ mod tests {
 
         // Also verify it's NOT the old BE format by checking total length:
         // Old format would be 29 bytes (4-byte BE port), new format is 28 (2-byte VLQ port)
-        assert_eq!(encoded.len(), 28, "total length should reflect VLQ port encoding");
+        assert_eq!(
+            encoded.len(),
+            28,
+            "total length should reflect VLQ port encoding"
+        );
     }
 
     #[test]
@@ -398,7 +405,7 @@ mod tests {
         buf.push(3); // feature id
         vlq::put_ushort(&mut buf, 2); // data length (VLQ ushort)
         buf.extend_from_slice(&[0xAB, 0xCD]); // feature data
-        // Feature 2: id=17, data=[0x01]
+                                              // Feature 2: id=17, data=[0x01]
         buf.push(17); // feature id
         vlq::put_ushort(&mut buf, 1); // data length
         buf.push(0x01); // feature data
@@ -475,7 +482,11 @@ mod tests {
         buf.push(0); // 0 features
 
         let decoded = parse_peers(&buf).unwrap();
-        assert_eq!(decoded.len(), 1, "only peer with address should be returned");
+        assert_eq!(
+            decoded.len(),
+            1,
+            "only peer with address should be returned"
+        );
         assert_eq!(
             decoded[0].address,
             "192.168.0.1:9030".parse::<SocketAddr>().unwrap()
