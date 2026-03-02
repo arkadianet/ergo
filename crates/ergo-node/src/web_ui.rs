@@ -33,399 +33,689 @@ pub const SWAGGER_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
-/// HTML page for the Node Panel admin dashboard.
+/// HTML page for the Node Panel admin dashboard (Preact + HTM SPA).
 pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ergo Node Panel</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9/dist/leaflet.css">
+
+  <!-- Chart.js (UMD) -->
+  <script src="https://unpkg.com/chart.js@4"></script>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
+
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    /* ================================================================
+       THEME DEFINITIONS
+       ================================================================ */
+
+    [data-theme="light"] {
+      --bg: #f5f7fa;
+      --bg-card: #ffffff;
+      --text: #1a1a2e;
+      --text-secondary: #6b7280;
+      --sidebar-bg: #ffffff;
+      --sidebar-active: #f0f2f5;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      --card-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      --card-border: 1px solid #e5e7eb;
+      --card-backdrop: none;
+    }
+
+    [data-theme="dark"] {
+      --bg: #0f1117;
+      --bg-card: #1a1d27;
+      --text: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --sidebar-bg: #141620;
+      --sidebar-active: #1e2235;
+      --border: rgba(255,255,255,0.08);
+      --accent: #3b82f6;
+      --accent-green: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-red: #f87171;
+      --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      --card-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      --card-border: 1px solid rgba(255,255,255,0.08);
+      --card-backdrop: none;
+    }
+
+    [data-theme="terminal"] {
+      --bg: #0a0a0a;
+      --bg-card: #111111;
+      --text: #00ff41;
+      --text-secondary: #00cc33;
+      --sidebar-bg: #0a0a0a;
+      --sidebar-active: #1a1a1a;
+      --border: rgba(0,255,65,0.15);
+      --accent: #00ff41;
+      --accent-green: #00ff41;
+      --accent-amber: #ff6600;
+      --accent-red: #ff0040;
+      --font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      --card-shadow: 0 0 8px rgba(0,255,65,0.1);
+      --card-border: 1px solid rgba(0,255,65,0.15);
+      --card-backdrop: none;
+      --glow: 0 0 4px rgba(0,255,65,0.4);
+    }
+
+    [data-theme="glass"] {
+      --bg: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+      --bg-card: rgba(255,255,255,0.08);
+      --text: #f0f0f0;
+      --text-secondary: #b0b0b0;
+      --sidebar-bg: rgba(255,255,255,0.05);
+      --sidebar-active: rgba(255,255,255,0.1);
+      --border: rgba(255,255,255,0.12);
+      --accent: #a78bfa;
+      --accent-green: #34d399;
+      --accent-amber: #fbbf24;
+      --accent-red: #f87171;
+      --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      --font-mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      --card-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      --card-border: 1px solid rgba(255,255,255,0.12);
+      --card-backdrop: blur(12px);
+    }
+
+    /* ================================================================
+       BASE LAYOUT CSS
+       ================================================================ */
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-      background: #f5f5f5;
-      color: #333;
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-family);
       min-height: 100vh;
     }
-    header {
-      background: #1a1a2e;
-      color: #fff;
-      padding: 1rem 2rem;
+
+    [data-theme="glass"] body {
+      background: var(--bg);
+      background-color: transparent;
+    }
+
+    [data-theme="terminal"] .glow-value {
+      text-shadow: var(--glow);
+    }
+
+    /* --- Header --- */
+    .header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 56px;
+      z-index: 100;
+      background: var(--sidebar-bg);
+      border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
+      padding: 0 1.5rem;
     }
-    header h1 { font-size: 1.4rem; font-weight: 600; }
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 0.8em;
-      font-weight: 600;
-      text-transform: uppercase;
+
+    [data-theme="glass"] .header {
+      background: rgba(255,255,255,0.05);
+      backdrop-filter: blur(12px);
     }
-    .badge-mainnet { background: #e3f2fd; color: #1565c0; }
-    .badge-testnet { background: #fce4ec; color: #c62828; }
-    .badge-synced { background: #e8f5e9; color: #2e7d32; }
-    .badge-syncing { background: #fff3e0; color: #e65100; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-      gap: 1.5rem;
-      padding: 1.5rem;
-      max-width: 1400px;
-      margin: 0 auto;
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
     }
-    .card {
-      background: #fff;
+
+    .header-logo {
+      width: 32px;
+      height: 32px;
+      background: var(--accent);
       border-radius: 8px;
-      padding: 1.5rem;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 1.2rem;
+      color: #fff;
     }
-    .card h2 {
+
+    [data-theme="terminal"] .header-logo {
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+    }
+
+    .header-title {
       font-size: 1.1rem;
       font-weight: 600;
-      margin-bottom: 1rem;
-      color: #1a1a2e;
-      border-bottom: 2px solid #e0e0e0;
-      padding-bottom: 0.5rem;
     }
-    .info-row {
+
+    .header-right {
       display: flex;
-      justify-content: space-between;
-      padding: 0.35rem 0;
-      border-bottom: 1px solid #f0f0f0;
+      align-items: center;
+      gap: 0.75rem;
     }
-    .info-row:last-child { border-bottom: none; }
-    .info-label { color: #888; font-size: 0.9em; }
-    .info-value { font-weight: 500; font-size: 0.9em; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.88em;
+
+    .theme-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 6px;
+      padding: 0.35rem 0.65rem;
+      font-size: 0.85rem;
+      font-family: var(--font-mono);
+      transition: background 0.15s, color 0.15s;
     }
-    th {
-      text-align: left;
-      padding: 0.5rem 0.4rem;
-      border-bottom: 2px solid #e0e0e0;
-      color: #666;
-      font-weight: 600;
-      font-size: 0.85em;
+
+    .theme-btn:hover {
+      background: var(--sidebar-active);
+      color: var(--text);
+    }
+
+    .hamburger {
+      display: none;
+      background: none;
+      border: none;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 1.4rem;
+      padding: 0.25rem;
+      line-height: 1;
+    }
+
+    /* --- Sidebar --- */
+    .sidebar {
+      position: fixed;
+      left: 0;
+      top: 56px;
+      bottom: 0;
+      width: 220px;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      z-index: 90;
+      transition: transform 0.3s;
+    }
+
+    [data-theme="glass"] .sidebar {
+      background: rgba(255,255,255,0.05);
+      backdrop-filter: blur(12px);
+    }
+
+    .sidebar-section-title {
       text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      padding: 1rem 1.2rem 0.4rem;
+      font-weight: 600;
     }
-    td {
-      padding: 0.45rem 0.4rem;
-      border-bottom: 1px solid #f0f0f0;
-    }
-    tr:nth-child(even) { background: #fafafa; }
-    .progress-container {
-      background: #e0e0e0;
-      border-radius: 10px;
-      height: 20px;
-      overflow: hidden;
-      margin: 0.75rem 0;
-    }
-    .progress-bar {
-      height: 100%;
-      border-radius: 10px;
-      background: linear-gradient(90deg, #4caf50, #81c784);
-      transition: width 0.5s ease;
-      min-width: 0;
-    }
-    .progress-bar-blocks {
-      background: linear-gradient(90deg, #1565c0, #42a5f5);
-    }
-    .hash {
-      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-      font-size: 0.85em;
-      color: #666;
-    }
-    .sync-section { text-align: center; padding: 1rem 0; }
-    .sync-pct { font-size: 2rem; font-weight: 700; color: #1a1a2e; }
-    .sync-label { margin-top: 0.5rem; font-size: 0.95em; }
-    .last-update { color: #aaa; font-size: 0.8em; margin-top: 0.75rem; }
-    .empty-msg { color: #aaa; font-style: italic; padding: 0.75rem 0; }
-    .error-msg { color: #c62828; font-style: italic; padding: 0.75rem 0; }
-    .nav-links { display: flex; gap: 1rem; align-items: center; }
-    .nav-links a {
-      color: rgba(255,255,255,0.8);
+
+    .sidebar-nav-item {
+      padding: 0.7rem 1.2rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 6px;
+      margin: 2px 8px;
       text-decoration: none;
-      font-size: 0.9em;
+      font-size: 0.9rem;
+      transition: background 0.15s, color 0.15s;
     }
-    .nav-links a:hover { color: #fff; }
-    @media (max-width: 860px) {
-      .grid { grid-template-columns: 1fr; padding: 1rem; }
-      header { flex-direction: column; gap: 0.5rem; text-align: center; }
+
+    .sidebar-nav-item.active {
+      background: var(--sidebar-active);
+      color: var(--accent);
+    }
+
+    .sidebar-nav-item:hover {
+      background: var(--sidebar-active);
+    }
+
+    .sidebar-nav-icon {
+      width: 1.2em;
+      text-align: center;
+      font-size: 1rem;
+    }
+
+    .sidebar-ext-link {
+      padding: 0.7rem 1.2rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 6px;
+      margin: 2px 8px;
+      text-decoration: none;
+      font-size: 0.9rem;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .sidebar-ext-link:hover {
+      background: var(--sidebar-active);
+    }
+
+    /* --- Sidebar overlay for mobile --- */
+    .sidebar-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 80;
+      display: none;
+    }
+
+    .sidebar-overlay.active {
+      display: block;
+    }
+
+    /* --- Main content --- */
+    .main-content {
+      margin-left: 220px;
+      margin-top: 56px;
+      padding: 1.5rem;
+      min-height: calc(100vh - 56px);
+    }
+
+    /* --- Card --- */
+    .card {
+      background: var(--bg-card);
+      border-radius: 10px;
+      padding: 1.5rem;
+      box-shadow: var(--card-shadow);
+      border: var(--card-border);
+      backdrop-filter: var(--card-backdrop);
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* --- Badges --- */
+    .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 4px;
+      font-size: 0.75em;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .badge-synced { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+    .badge-syncing { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
+    .badge-mainnet { background: rgba(37,99,235,0.15); color: var(--accent); }
+    .badge-testnet { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+
+    /* --- Hash --- */
+    .hash {
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+      color: var(--text-secondary);
+    }
+
+    /* --- Skeleton loading --- */
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1.0; }
+    }
+
+    .skeleton {
+      background: var(--border);
+      border-radius: 4px;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    /* --- Grid utilities --- */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+    }
+
+    .panel-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1.5rem;
+    }
+
+    /* ================================================================
+       MOBILE BREAKPOINTS
+       ================================================================ */
+
+    @media (max-width: 768px) {
+      .sidebar {
+        transform: translateX(-100%);
+      }
+
+      .sidebar.sidebar-open {
+        transform: translateX(0);
+      }
+
+      .hamburger {
+        display: block;
+      }
+
+      .main-content {
+        margin-left: 0;
+      }
+
+      .stat-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 480px) {
+      .stat-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 <body>
-  <header>
-    <div style="display:flex;align-items:center;gap:1rem;">
-      <h1>Ergo Node Panel</h1>
-      <span id="networkBadge" class="badge"></span>
+  <noscript>
+    <div style="padding:2rem;text-align:center;font-family:sans-serif;">
+      <h2>JavaScript Required</h2>
+      <p>The Ergo Node Panel requires JavaScript to function. Please enable JavaScript and reload.</p>
     </div>
-    <div class="nav-links">
-      <a href="/swagger">API Docs</a>
-      <a href="/info">Node Info</a>
-    </div>
-  </header>
+  </noscript>
+  <div id="app"></div>
 
-  <div class="grid">
-    <div class="card">
-      <h2>Node Info</h2>
-      <div id="nodeInfoContent">
-        <div class="empty-msg">Loading...</div>
-      </div>
-    </div>
+  <script type="module">
+    import { h, render, createContext } from 'https://unpkg.com/preact@10/dist/preact.module.js';
+    import { useState, useEffect, useCallback, useRef, useMemo, useContext } from 'https://unpkg.com/preact@10/hooks/dist/hooks.module.js';
+    import htm from 'https://unpkg.com/htm@3/dist/htm.module.js';
+    const html = htm.bind(h);
 
-    <div class="card">
-      <h2>Sync Status</h2>
-      <div id="syncContent">
-        <div class="empty-msg">Loading...</div>
-      </div>
-    </div>
+    // ================================================================
+    // THEME CONTEXT
+    // ================================================================
 
-    <div class="card">
-      <h2>Connected Peers</h2>
-      <div id="peersContent">
-        <div class="empty-msg">Loading...</div>
-      </div>
-    </div>
+    const THEMES = ['light', 'dark', 'terminal', 'glass'];
+    const THEME_ICONS = { light: 'sun', dark: 'moon', terminal: '>_', glass: 'gem' };
 
-    <div class="card">
-      <h2>Mempool</h2>
-      <div id="mempoolContent">
-        <div class="empty-msg">Loading...</div>
-      </div>
-    </div>
-  </div>
+    const ThemeContext = createContext();
 
-  <script>
-    function esc(s) {
-      var d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
-
-    function fmt(n) {
-      if (n == null) return '\u2014';
-      return Number(n).toLocaleString('en-US');
-    }
-
-    function truncHash(h) {
-      if (!h) return '\u2014';
-      if (h.length <= 20) return h;
-      return h.substring(0, 16) + '...';
-    }
-
-    function infoRow(label, value) {
-      return '<div class="info-row">' +
-        '<span class="info-label">' + esc(label) + '</span>' +
-        '<span class="info-value">' + esc(String(value)) + '</span>' +
-        '</div>';
-    }
-
-    function updateNodeInfo(info) {
-      var net = (info.network || 'unknown').toLowerCase();
-      var badge = document.getElementById('networkBadge');
-      badge.textContent = net;
-      badge.className = 'badge badge-' + (net === 'testnet' ? 'testnet' : 'mainnet');
-
-      var html = infoRow('Name', info.name || '\u2014');
-      html += infoRow('Version', info.appVersion || '\u2014');
-      html += infoRow('Network', net);
-      html += infoRow('State Type', info.stateType || '\u2014');
-      html += infoRow('Headers Height', fmt(info.headersHeight));
-      html += infoRow('Full Block Height', fmt(info.fullHeight));
-      html += infoRow('Max Peer Height', fmt(info.maxPeerHeight));
-      html += infoRow('Difficulty', fmt(info.difficulty));
-      html += infoRow('Mining', info.isMining ? 'Yes' : 'No');
-      html += infoRow('Peers', fmt(info.peersCount));
-      html += infoRow('Unconfirmed Txs', fmt(info.unconfirmedCount));
-      document.getElementById('nodeInfoContent').innerHTML = html;
-    }
-
-    function makeProgressRow(label, current, target, barClass) {
-      var pct = 0;
-      if (target > 0) { pct = Math.min(100, (current / target) * 100); }
-      var html = '<div style="margin-bottom:1rem;">';
-      html += '<div style="display:flex;justify-content:space-between;font-size:0.88em;margin-bottom:0.3rem;">';
-      html += '<span style="font-weight:600;color:#1a1a2e;">' + esc(label) + '</span>';
-      html += '<span style="color:#666;">' + fmt(current) + ' / ' + fmt(target) + ' (' + pct.toFixed(1) + '%)</span>';
-      html += '</div>';
-      html += '<div class="progress-container">';
-      html += '<div class="progress-bar' + (barClass ? ' ' + barClass : '') + '" style="width:' + pct.toFixed(1) + '%"></div>';
-      html += '</div></div>';
-      return html;
-    }
-
-    function updateSync(info) {
-      var headers = info.headersHeight || 0;
-      var full = info.fullHeight || 0;
-      var max = info.maxPeerHeight || 0;
-
-      var headersDone = max > 0 && headers >= max - 1;
-      var blocksDone = headers > 0 && full >= headers - 1;
-      var synced = headersDone && blocksDone;
-
-      var el = document.getElementById('syncContent');
-      var html = '';
-
-      // Overall status badge
-      var statusBadge;
-      if (synced) {
-        statusBadge = '<span class="badge badge-synced">Synced</span>';
-      } else if (!headersDone) {
-        statusBadge = '<span class="badge badge-syncing">Syncing Headers...</span>';
-      } else {
-        statusBadge = '<span class="badge badge-syncing">Downloading Blocks...</span>';
-      }
-      html += '<div style="text-align:center;margin-bottom:1rem;">' + statusBadge + '</div>';
-
-      // Headers progress: current vs max peer height
-      html += makeProgressRow('Headers', headers, max, '');
-
-      // Full blocks progress: current vs headers height
-      html += makeProgressRow('Full Blocks', full, headers, 'progress-bar-blocks');
-
-      html += '<div class="last-update">Last updated: ' + new Date().toLocaleTimeString() + '</div>';
-
-      el.innerHTML = html;
-    }
-
-    function updatePeers(peers) {
-      var el = document.getElementById('peersContent');
-      if (!peers || peers.length === 0) {
-        el.innerHTML = '<div class="empty-msg">No peers connected</div>';
-        return;
-      }
-
-      el.innerHTML = '';
-
-      var countDiv = document.createElement('div');
-      countDiv.style.cssText = 'margin-bottom:0.75rem;font-size:0.9em;color:#666;';
-      countDiv.textContent = peers.length + ' peer' + (peers.length !== 1 ? 's' : '') + ' connected';
-      el.appendChild(countDiv);
-
-      var table = document.createElement('table');
-      var thead = document.createElement('thead');
-      var headRow = document.createElement('tr');
-      ['Address', 'Name', 'Direction'].forEach(function(h) {
-        var th = document.createElement('th');
-        th.textContent = h;
-        headRow.appendChild(th);
+    function ThemeProvider({ children }) {
+      const [theme, setTheme] = useState(() => {
+        const saved = localStorage.getItem('ergo-panel-theme');
+        return saved && THEMES.includes(saved) ? saved : 'dark';
       });
-      thead.appendChild(headRow);
-      table.appendChild(thead);
 
-      var tbody = document.createElement('tbody');
-      for (var i = 0; i < peers.length; i++) {
-        var p = peers[i];
-        var tr = document.createElement('tr');
+      useEffect(() => {
+        document.documentElement.setAttribute('data-theme', theme);
+        localStorage.setItem('ergo-panel-theme', theme);
+      }, [theme]);
 
-        var tdAddr = document.createElement('td');
-        tdAddr.className = 'hash';
-        tdAddr.textContent = p.address || '\u2014';
-        tr.appendChild(tdAddr);
+      const cycleTheme = useCallback(() => {
+        setTheme(prev => {
+          const idx = THEMES.indexOf(prev);
+          return THEMES[(idx + 1) % THEMES.length];
+        });
+      }, []);
 
-        var tdName = document.createElement('td');
-        tdName.textContent = p.name || '\u2014';
-        tr.appendChild(tdName);
-
-        var tdDir = document.createElement('td');
-        tdDir.textContent = p.connectionType || '\u2014';
-        tr.appendChild(tdDir);
-
-        tbody.appendChild(tr);
-      }
-      table.appendChild(tbody);
-      el.appendChild(table);
+      return html`
+        <${ThemeContext.Provider} value=${{ theme, cycleTheme }}>
+          ${children}
+        <//>
+      `;
     }
 
-    function updateMempool(txs) {
-      var el = document.getElementById('mempoolContent');
-      if (!txs || txs.length === 0) {
-        el.innerHTML = '<div class="empty-msg">Mempool is empty</div>';
-        return;
-      }
+    // ================================================================
+    // ROUTER
+    // ================================================================
 
-      el.innerHTML = '';
+    function useRoute() {
+      const getRoute = () => {
+        const hash = location.hash.replace(/^#/, '');
+        return hash || '/dashboard';
+      };
 
-      var countDiv = document.createElement('div');
-      countDiv.style.cssText = 'margin-bottom:0.75rem;font-size:0.9em;color:#666;';
-      countDiv.textContent = txs.length + ' transaction' + (txs.length !== 1 ? 's' : '') + ' shown';
-      el.appendChild(countDiv);
+      const [route, setRoute] = useState(getRoute);
 
-      var table = document.createElement('table');
-      var thead = document.createElement('thead');
-      var headRow = document.createElement('tr');
-      ['Transaction ID', 'Inputs', 'Outputs'].forEach(function(h) {
-        var th = document.createElement('th');
-        th.textContent = h;
-        headRow.appendChild(th);
-      });
-      thead.appendChild(headRow);
-      table.appendChild(thead);
+      useEffect(() => {
+        const handler = () => setRoute(getRoute());
+        window.addEventListener('hashchange', handler);
+        return () => window.removeEventListener('hashchange', handler);
+      }, []);
 
-      var tbody = document.createElement('tbody');
-      for (var i = 0; i < txs.length; i++) {
-        var tx = txs[i];
-        var tr = document.createElement('tr');
-
-        var tdId = document.createElement('td');
-        tdId.className = 'hash';
-        tdId.textContent = truncHash(tx.id);
-        tr.appendChild(tdId);
-
-        var tdIn = document.createElement('td');
-        tdIn.textContent = tx.inputs ? String(tx.inputs.length) : '\u2014';
-        tr.appendChild(tdIn);
-
-        var tdOut = document.createElement('td');
-        tdOut.textContent = tx.outputs ? String(tx.outputs.length) : '\u2014';
-        tr.appendChild(tdOut);
-
-        tbody.appendChild(tr);
-      }
-      table.appendChild(tbody);
-      el.appendChild(table);
+      return route;
     }
 
-    function fetchAll() {
-      fetch('/info')
-        .then(function(r) { return r.json(); })
-        .then(function(info) {
-          updateNodeInfo(info);
-          updateSync(info);
-        })
-        .catch(function() {
-          document.getElementById('nodeInfoContent').innerHTML =
-            '<div class="error-msg">Error loading data</div>';
-          document.getElementById('syncContent').innerHTML =
-            '<div class="error-msg">Error loading data</div>';
-        });
+    // ================================================================
+    // NETWORK CONTEXT
+    // ================================================================
 
-      fetch('/peers/connected')
-        .then(function(r) { return r.json(); })
-        .then(function(peers) { updatePeers(peers); })
-        .catch(function() {
-          document.getElementById('peersContent').innerHTML =
-            '<div class="error-msg">Error loading data</div>';
-        });
+    const NetworkContext = createContext();
 
-      fetch('/transactions/unconfirmed?limit=10&offset=0')
-        .then(function(r) { return r.json(); })
-        .then(function(txs) { updateMempool(txs); })
-        .catch(function() {
-          document.getElementById('mempoolContent').innerHTML =
-            '<div class="error-msg">Error loading data</div>';
-        });
+    function NetworkProvider({ children }) {
+      const [network, setNetwork] = useState(null);
+      return html`
+        <${NetworkContext.Provider} value=${{ network, setNetwork }}>
+          ${children}
+        <//>
+      `;
     }
 
-    fetchAll();
-    setInterval(fetchAll, 5000);
+    // ================================================================
+    // SIDEBAR STATE (mobile)
+    // ================================================================
+
+    function useSidebar() {
+      const [open, setOpen] = useState(false);
+      const toggle = useCallback(() => setOpen(v => !v), []);
+      const close = useCallback(() => setOpen(false), []);
+      return { open, toggle, close };
+    }
+
+    // ================================================================
+    // HEADER COMPONENT
+    // ================================================================
+
+    function Header({ sidebarToggle }) {
+      const { theme, cycleTheme } = useContext(ThemeContext);
+      const { network } = useContext(NetworkContext);
+
+      const themeLabel = THEME_ICONS[theme] || theme;
+
+      const networkBadge = network
+        ? html`<span class="badge ${network === 'testnet' ? 'badge-testnet' : 'badge-mainnet'}">${network}</span>`
+        : null;
+
+      return html`
+        <div class="header">
+          <div class="header-left">
+            <button class="hamburger" onClick=${sidebarToggle} aria-label="Toggle menu">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="3" y1="5" x2="17" y2="5"/>
+                <line x1="3" y1="10" x2="17" y2="10"/>
+                <line x1="3" y1="15" x2="17" y2="15"/>
+              </svg>
+            </button>
+            <div class="header-logo">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <text x="9" y="14" text-anchor="middle" fill="currentColor" font-size="14" font-weight="700" font-family="serif">&#931;</text>
+              </svg>
+            </div>
+            <span class="header-title">Ergo Node Panel</span>
+          </div>
+          <div class="header-right">
+            ${networkBadge}
+            <button class="theme-btn" onClick=${cycleTheme} title="Cycle theme">${themeLabel}</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // ================================================================
+    // SIDEBAR COMPONENT
+    // ================================================================
+
+    const NAV_PAGES = [
+      { path: '/dashboard', label: 'Dashboard', icon: '\u25EB' },
+      { path: '/network',   label: 'Network',   icon: '\u2B21' },
+      { path: '/blockchain',label: 'Blockchain', icon: '\u26D3' },
+      { path: '/mempool',   label: 'Mempool',    icon: '\u21B9' },
+      { path: '/wallet',    label: 'Wallet',     icon: '\u229E' },
+      { path: '/system',    label: 'System',     icon: '\u2699' },
+    ];
+
+    const NAV_EXTERNAL = [
+      { href: '/swagger', label: 'Swagger', icon: '\u2630' },
+      { href: 'https://explorer.ergoplatform.com', label: 'Explorer', icon: '\u2197', external: true },
+      { href: 'https://ergoplatform.org', label: 'Website', icon: '\u2316', external: true },
+    ];
+
+    function Sidebar({ open, close }) {
+      const route = useRoute();
+
+      const navigate = useCallback((path) => {
+        location.hash = path;
+        close();
+      }, [close]);
+
+      return html`
+        <nav class="sidebar ${open ? 'sidebar-open' : ''}">
+          <div class="sidebar-section-title">Pages</div>
+          ${NAV_PAGES.map(item => html`
+            <div
+              class="sidebar-nav-item ${route === item.path ? 'active' : ''}"
+              onClick=${() => navigate(item.path)}
+              key=${item.path}
+            >
+              <span class="sidebar-nav-icon">${item.icon}</span>
+              <span>${item.label}</span>
+            </div>
+          `)}
+
+          <div class="sidebar-section-title" style="margin-top:0.5rem">External</div>
+          ${NAV_EXTERNAL.map(item => html`
+            <a
+              class="sidebar-ext-link"
+              href=${item.href}
+              target=${item.external ? '_blank' : '_self'}
+              rel=${item.external ? 'noopener noreferrer' : undefined}
+              key=${item.href}
+            >
+              <span class="sidebar-nav-icon">${item.icon}</span>
+              <span>${item.label}</span>
+            </a>
+          `)}
+        </nav>
+      `;
+    }
+
+    // ================================================================
+    // SIDEBAR OVERLAY (mobile)
+    // ================================================================
+
+    function SidebarOverlay({ open, close }) {
+      return html`<div class="sidebar-overlay ${open ? 'active' : ''}" onClick=${close}></div>`;
+    }
+
+    // ================================================================
+    // PLACEHOLDER PAGES
+    // ================================================================
+
+    function DashboardPage() {
+      return html`<div class="card"><h2>Dashboard</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+    }
+
+    function NetworkPage() {
+      return html`<div class="card"><h2>Network</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+    }
+
+    function BlockchainPage() {
+      return html`<div class="card"><h2>Blockchain</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+    }
+
+    function MempoolPage() {
+      return html`<div class="card"><h2>Mempool</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+    }
+
+    function WalletPage() {
+      return html`<div class="card"><h2>Wallet</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+    }
+
+    function SystemPage() {
+      return html`<div class="card"><h2>System</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+    }
+
+    // ================================================================
+    // ROUTER COMPONENT
+    // ================================================================
+
+    const ROUTES = {
+      '/dashboard': DashboardPage,
+      '/network': NetworkPage,
+      '/blockchain': BlockchainPage,
+      '/mempool': MempoolPage,
+      '/wallet': WalletPage,
+      '/system': SystemPage,
+    };
+
+    function Router() {
+      const route = useRoute();
+      const Page = ROUTES[route] || DashboardPage;
+      return html`<${Page} />`;
+    }
+
+    // ================================================================
+    // APP COMPONENT
+    // ================================================================
+
+    function App() {
+      const sidebar = useSidebar();
+
+      return html`
+        <${ThemeProvider}>
+          <${NetworkProvider}>
+            <${Header} sidebarToggle=${sidebar.toggle} />
+            <${Sidebar} open=${sidebar.open} close=${sidebar.close} />
+            <${SidebarOverlay} open=${sidebar.open} close=${sidebar.close} />
+            <main class="main-content">
+              <${Router} />
+            </main>
+          <//>
+        <//>
+      `;
+    }
+
+    // ================================================================
+    // MOUNT
+    // ================================================================
+
+    render(html`<${App} />`, document.getElementById('app'));
   </script>
 </body>
 </html>"##;
