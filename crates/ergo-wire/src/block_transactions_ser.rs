@@ -122,6 +122,19 @@ mod tests {
     /// Build a minimal valid serialized transaction (1 input, 0 data inputs,
     /// 0 tokens, 1 output, no registers, no proofs).
     fn make_serialized_tx(box_id_fill: u8, value: u64, creation_height: u32) -> Vec<u8> {
+        use crate::vlq::put_uint;
+        // Build a valid P2PK-like ErgoTree with size bit set
+        // header=0x08 (v0 + size bit), body = 0x08 0xCD <33-byte pubkey>
+        let mut tree = Vec::new();
+        tree.push(0x08);
+        let body: Vec<u8> = {
+            let mut b = vec![0x08, 0xCD];
+            b.extend_from_slice(&[0x02; 33]);
+            b
+        };
+        put_uint(&mut tree, body.len() as u32);
+        tree.extend_from_slice(&body);
+
         let tx = ErgoTransaction {
             inputs: vec![Input {
                 box_id: BoxId([box_id_fill; 32]),
@@ -131,7 +144,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: tree,
                 creation_height,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),

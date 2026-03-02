@@ -695,8 +695,8 @@ fn node_view_rejects_tampered_merkle_root() {
 // ---------------------------------------------------------------------------
 // Test 8: node_view_rejects_invalid_stateless_tx
 //
-// Build a real serialized transaction with 1 input and 0 outputs (fails
-// stateless validation with NoOutputs). Compute the correct Merkle root
+// Build a real serialized transaction with duplicate inputs (fails
+// stateless validation with DuplicateInput). Compute the correct Merkle root
 // for the serialized tx bytes and set the header's transactions_root
 // accordingly. The pipeline should pass structural validation (correct
 // merkle root) but fail at the stateless tx validation stage.
@@ -710,7 +710,7 @@ fn node_view_rejects_invalid_stateless_tx() {
     use ergo_state::utxo_state::UtxoState;
     use ergo_storage::block_processor::ProgressInfo;
     use ergo_storage::chain_scoring::ModifierValidity;
-    use ergo_types::transaction::{ErgoTransaction, Input, TxId};
+    use ergo_types::transaction::{ErgoBoxCandidate, ErgoTransaction, Input, TxId};
     use ergo_wire::transaction_ser::serialize_transaction;
 
     let dir = tempfile::TempDir::new().unwrap();
@@ -729,15 +729,41 @@ fn node_view_rejects_invalid_stateless_tx() {
         .table
         .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, 2);
 
-    // Build a transaction with 1 input and 0 outputs (invalid: NoOutputs).
+    // Build a valid P2PK ErgoTree with size bit set (parseable by sigma-rust).
+    let ergo_tree_bytes = {
+        use ergo_wire::vlq::put_uint;
+        let mut body = vec![0x08, 0xCD];
+        body.extend_from_slice(&[0x02; 33]); // dummy compressed point
+        let mut tree = Vec::new();
+        tree.push(0x08); // header: v0 + size bit
+        put_uint(&mut tree, body.len() as u32);
+        tree.extend_from_slice(&body);
+        tree
+    };
+
+    // Build a transaction with duplicate inputs (invalid: DuplicateInput).
+    let dup_box_id = BoxId([0x11; 32]);
     let mut bad_tx = ErgoTransaction {
-        inputs: vec![Input {
-            box_id: BoxId([0x11; 32]),
-            proof_bytes: Vec::new(),
-            extension_bytes: vec![0x00], // empty extension map
-        }],
+        inputs: vec![
+            Input {
+                box_id: dup_box_id,
+                proof_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
+            },
+            Input {
+                box_id: dup_box_id, // duplicate!
+                proof_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
+            },
+        ],
         data_inputs: Vec::new(),
-        output_candidates: Vec::new(), // 0 outputs -> NoOutputs
+        output_candidates: vec![ErgoBoxCandidate {
+            value: 1_000_000_000,
+            ergo_tree_bytes,
+            creation_height: 100_000,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        }],
         tx_id: TxId([0; 32]),
     };
     bad_tx.tx_id = ergo_wire::transaction_ser::compute_tx_id(&bad_tx);
@@ -792,7 +818,7 @@ fn node_view_rejects_invalid_stateless_tx() {
     // Should fail with a TxValidation error.
     assert!(
         result.is_err(),
-        "tx with 0 outputs should fail stateless validation"
+        "tx with duplicate inputs should fail stateless validation"
     );
     let err = result.unwrap_err();
     assert!(
@@ -1326,6 +1352,14 @@ fn tx_modifier_enters_mempool_and_relays() {
 
     // Build a valid transaction (must have extension_bytes = [0x00] for
     // the empty-extension wire format to round-trip through parse).
+    let valid_tree = {
+        let mut t = vec![0x08];
+        ergo_wire::vlq::put_uint(&mut t, 35);
+        t.push(0x08);
+        t.push(0xCD);
+        t.extend_from_slice(&[0x02; 33]);
+        t
+    };
     let tx = ergo_types::transaction::ErgoTransaction {
         inputs: vec![ergo_types::transaction::Input {
             box_id: ergo_types::transaction::BoxId([0xCC; 32]),
@@ -1335,7 +1369,7 @@ fn tx_modifier_enters_mempool_and_relays() {
         data_inputs: vec![],
         output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
             value: 1_000_000_000,
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+            ergo_tree_bytes: valid_tree,
             creation_height: 100_000,
             tokens: vec![],
             additional_registers: vec![],

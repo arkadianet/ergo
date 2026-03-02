@@ -1,19 +1,35 @@
-//! Binary serialization of Ergo transactions, matching the Scorex/Ergo wire format.
+//! Binary serialization of Ergo transactions, delegating to sigma-rust (ergo-lib).
 //!
-//! Key encoding conventions (ALL counts use Scorex VLQ, NOT fixed-width):
-//! - Input/output/data-input counts: VLQ u32 (`put_uint`)
-//! - Proof length: VLQ u32 (`put_uint`)
-//! - Box value: zigzag+VLQ i64 (`put_long`)
-//! - Tree length, creation_height, token_count, token_id_index: VLQ u32 (`put_uint`)
-//! - Token amount: zigzag+VLQ i64 (`put_long`)
-//! - Distinct token count: VLQ u32 (`put_uint`)
-//! - Register bitmap: 1-byte u8 (count in upper nibble)
+//! Our lightweight byte-oriented types (`ErgoTransaction`, `ErgoBoxCandidate`, etc.) are
+//! used across 12 crates. Rather than replacing them with sigma-rust types, we provide
+//! thin conversion functions at the serialization boundary:
+//!
+//! - **Serialize**: our types → sigma-rust types → `sigma_serialize_bytes()`
+//! - **Parse**: `sigma_parse_bytes()` → sigma-rust types → our types
 
-use blake2::{digest::consts::U32, Blake2b, Digest};
+use std::collections::HashMap;
+use std::convert::TryFrom;
+
+use ergo_lib::chain::transaction::ergo_transaction::ErgoTransaction as _;
+use ergo_lib::chain::transaction::input::prover_result::ProverResult as SigmaProverResult;
+use ergo_lib::chain::transaction::{DataInput as SigmaDataInput, Transaction as SigmaTransaction};
+use ergo_lib::ergo_chain_types::Digest32 as SigmaDigest32;
+use ergo_lib::ergotree_interpreter::sigma_protocol::prover::ProofBytes as SigmaProofBytes;
+use ergo_lib::ergotree_ir::chain::context_extension::ContextExtension as SigmaContextExtension;
+use ergo_lib::ergotree_ir::chain::ergo_box::box_value::BoxValue as SigmaBoxValue;
+use ergo_lib::ergotree_ir::chain::ergo_box::RegisterValue as SigmaRegisterValue;
+use ergo_lib::ergotree_ir::chain::ergo_box::{
+    BoxId as SigmaBoxId, BoxTokens, ErgoBoxCandidate as SigmaErgoBoxCandidate,
+    NonMandatoryRegisterId as SigmaNonMandatoryRegisterId,
+    NonMandatoryRegisters as SigmaNonMandatoryRegisters,
+};
+use ergo_lib::ergotree_ir::chain::token::{Token as SigmaToken, TokenAmount, TokenId};
+use ergo_lib::ergotree_ir::ergo_tree::ErgoTree as SigmaErgoTree;
+use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
 use ergo_types::transaction::*;
 
-use crate::sigma_byte::skip_sigma_constant;
-use crate::vlq::{get_long, get_uint, put_long, put_uint, CodecError};
+use crate::vlq::CodecError;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -21,76 +37,216 @@ use crate::vlq::{get_long, get_uint, put_long, put_uint, CodecError};
 
 /// Serialize a transaction to bytes (full, with proofs).
 pub fn serialize_transaction(tx: &ErgoTransaction) -> Vec<u8> {
-    serialize_tx_inner(tx, true)
+    let sigma_tx = to_sigma_transaction(tx).expect("valid tx conversion");
+    sigma_tx
+        .sigma_serialize_bytes()
+        .expect("sigma serialization")
 }
 
 /// Serialize a transaction without proofs (for tx_id computation).
 /// Proof bytes are replaced with VLQ(0).
 pub fn serialize_transaction_without_proofs(tx: &ErgoTransaction) -> Vec<u8> {
-    serialize_tx_inner(tx, false)
+    let mut tx_copy = tx.clone();
+    for input in &mut tx_copy.inputs {
+        input.proof_bytes.clear();
+    }
+    serialize_transaction(&tx_copy)
 }
 
 /// Parse a transaction from raw bytes.
 pub fn parse_transaction(data: &[u8]) -> Result<ErgoTransaction, CodecError> {
-    let reader = &mut &data[..];
-    parse_transaction_from_reader(reader)
+    let sigma_tx = SigmaTransaction::sigma_parse_bytes(data)
+        .map_err(|e| CodecError::InvalidData(format!("sigma parse: {e}")))?;
+    from_sigma_transaction(&sigma_tx)
 }
 
 /// Parse a transaction from a shared reader, advancing it past the transaction bytes.
 ///
 /// This is used by `parse_block_transactions` to parse inline transactions
 /// from a shared byte stream (Scala writes transactions without length prefixes).
+///
+/// Approach: parse with sigma-rust (which reads one complete tx from the front of
+/// the buffer), then re-serialize to measure the consumed byte count. This works
+/// because Ergo transaction serialization is canonical.
 pub fn parse_transaction_from_reader(reader: &mut &[u8]) -> Result<ErgoTransaction, CodecError> {
-    // --- Inputs ---
-    let input_count = get_uint(reader)? as usize;
-    let mut inputs = Vec::with_capacity(input_count);
-    for _ in 0..input_count {
-        let box_id = BoxId(read_array::<32>(reader)?);
-
-        // proof_bytes: sigma u16 length + raw bytes
-        let proof_len = get_uint(reader)? as usize;
-        let proof_bytes = read_bytes(reader, proof_len)?;
-
-        // extension_bytes: opaque, capture raw bytes
-        let extension_bytes = parse_extension_bytes(reader)?;
-
-        inputs.push(Input {
-            box_id,
-            proof_bytes,
-            extension_bytes,
-        });
+    let sigma_tx = SigmaTransaction::sigma_parse_bytes(reader)
+        .map_err(|e| CodecError::InvalidData(format!("sigma parse: {e}")))?;
+    let reserialized = sigma_tx
+        .sigma_serialize_bytes()
+        .map_err(|e| CodecError::InvalidData(format!("sigma reserialize: {e}")))?;
+    let consumed = reserialized.len();
+    if consumed > reader.len() {
+        return Err(CodecError::InvalidData(
+            "reserialized tx longer than input buffer".into(),
+        ));
     }
+    *reader = &reader[consumed..];
+    from_sigma_transaction(&sigma_tx)
+}
 
-    // --- Data inputs ---
-    let data_input_count = get_uint(reader)? as usize;
-    let mut data_inputs = Vec::with_capacity(data_input_count);
-    for _ in 0..data_input_count {
-        let box_id = BoxId(read_array::<32>(reader)?);
-        data_inputs.push(DataInput { box_id });
-    }
+/// Compute transaction ID = Blake2b256(serialize_without_proofs).
+///
+/// Uses sigma-rust's tx_id computation for consistency.
+pub fn compute_tx_id(tx: &ErgoTransaction) -> TxId {
+    let sigma_tx = to_sigma_transaction(tx).expect("valid tx conversion");
+    let id_digest: SigmaDigest32 = sigma_tx.id().0;
+    TxId(id_digest.into())
+}
 
-    // --- Distinct token IDs ---
-    let distinct_count = get_uint(reader)? as usize;
-    let mut distinct_token_ids = Vec::with_capacity(distinct_count);
-    for _ in 0..distinct_count {
-        distinct_token_ids.push(BoxId(read_array::<32>(reader)?));
-    }
+// ---------------------------------------------------------------------------
+// Conversion: our types → sigma-rust
+// ---------------------------------------------------------------------------
 
-    // --- Outputs ---
-    let output_count = get_uint(reader)? as usize;
-    let mut output_candidates = Vec::with_capacity(output_count);
-    for _ in 0..output_count {
-        output_candidates.push(parse_box_candidate(reader, &distinct_token_ids)?);
-    }
+/// Convert our `ErgoTransaction` → sigma-rust `Transaction`.
+fn to_sigma_transaction(tx: &ErgoTransaction) -> Result<SigmaTransaction, CodecError> {
+    let inputs: Vec<ergo_lib::chain::transaction::Input> = tx
+        .inputs
+        .iter()
+        .map(to_sigma_input)
+        .collect::<Result<_, _>>()?;
 
-    // Compute tx_id from the parsed transaction (without proofs)
-    let temp_tx = ErgoTransaction {
-        inputs: inputs.clone(),
-        data_inputs: data_inputs.clone(),
-        output_candidates: output_candidates.clone(),
-        tx_id: TxId([0; 32]), // placeholder
+    let data_inputs: Vec<SigmaDataInput> = tx
+        .data_inputs
+        .iter()
+        .map(|di| {
+            let box_id: SigmaBoxId = SigmaDigest32::from(di.box_id.0).into();
+            SigmaDataInput::from(box_id)
+        })
+        .collect();
+
+    let output_candidates: Vec<SigmaErgoBoxCandidate> = tx
+        .output_candidates
+        .iter()
+        .map(to_sigma_box_candidate)
+        .collect::<Result<_, _>>()?;
+
+    SigmaTransaction::new_from_vec(inputs, data_inputs, output_candidates)
+        .map_err(|e| CodecError::InvalidData(format!("tx conversion: {e}")))
+}
+
+/// Convert a single `Input` → sigma-rust `Input`.
+fn to_sigma_input(input: &Input) -> Result<ergo_lib::chain::transaction::Input, CodecError> {
+    let box_id: SigmaBoxId = SigmaDigest32::from(input.box_id.0).into();
+    let proof = SigmaProofBytes::from(input.proof_bytes.clone());
+    let extension = if input.extension_bytes.is_empty() || input.extension_bytes == [0x00] {
+        SigmaContextExtension::empty()
+    } else {
+        SigmaContextExtension::sigma_parse_bytes(&input.extension_bytes)
+            .map_err(|e| CodecError::InvalidData(format!("extension parse: {e}")))?
     };
-    let tx_id = compute_tx_id(&temp_tx);
+    let prover_result = SigmaProverResult { proof, extension };
+    Ok(ergo_lib::chain::transaction::Input::new(
+        box_id,
+        prover_result,
+    ))
+}
+
+/// Convert an `ErgoBoxCandidate` → sigma-rust `ErgoBoxCandidate`.
+fn to_sigma_box_candidate(
+    candidate: &ErgoBoxCandidate,
+) -> Result<SigmaErgoBoxCandidate, CodecError> {
+    let value = SigmaBoxValue::try_from(candidate.value)
+        .map_err(|e| CodecError::InvalidData(format!("box value: {e}")))?;
+    let ergo_tree = SigmaErgoTree::sigma_parse_bytes(&candidate.ergo_tree_bytes)
+        .map_err(|e| CodecError::InvalidData(format!("ergo tree: {e}")))?;
+
+    let tokens_vec: Vec<SigmaToken> = candidate
+        .tokens
+        .iter()
+        .map(|(token_id, amount)| {
+            let tid: TokenId = SigmaDigest32::from(token_id.0).into();
+            let ta = TokenAmount::try_from(*amount)
+                .map_err(|e| CodecError::InvalidData(format!("token amount: {e}")))?;
+            Ok(SigmaToken {
+                token_id: tid,
+                amount: ta,
+            })
+        })
+        .collect::<Result<_, CodecError>>()?;
+
+    let tokens = if tokens_vec.is_empty() {
+        None
+    } else {
+        Some(
+            BoxTokens::from_vec(tokens_vec)
+                .map_err(|e| CodecError::InvalidData(format!("tokens: {e}")))?,
+        )
+    };
+
+    let additional_registers = to_sigma_registers(&candidate.additional_registers)?;
+
+    Ok(SigmaErgoBoxCandidate {
+        value,
+        ergo_tree,
+        tokens,
+        additional_registers,
+        creation_height: candidate.creation_height,
+    })
+}
+
+/// Convert our register list → sigma-rust `NonMandatoryRegisters`.
+fn to_sigma_registers(regs: &[(u8, Vec<u8>)]) -> Result<SigmaNonMandatoryRegisters, CodecError> {
+    if regs.is_empty() {
+        return Ok(SigmaNonMandatoryRegisters::empty());
+    }
+
+    let mut map: HashMap<SigmaNonMandatoryRegisterId, SigmaRegisterValue> = HashMap::new();
+    for (idx, bytes) in regs {
+        let reg_id = match *idx {
+            4 => SigmaNonMandatoryRegisterId::R4,
+            5 => SigmaNonMandatoryRegisterId::R5,
+            6 => SigmaNonMandatoryRegisterId::R6,
+            7 => SigmaNonMandatoryRegisterId::R7,
+            8 => SigmaNonMandatoryRegisterId::R8,
+            9 => SigmaNonMandatoryRegisterId::R9,
+            other => {
+                return Err(CodecError::InvalidData(format!(
+                    "invalid register index: {other}"
+                )))
+            }
+        };
+        let reg_value = SigmaRegisterValue::sigma_parse_bytes(bytes);
+        map.insert(reg_id, reg_value);
+    }
+
+    SigmaNonMandatoryRegisters::try_from(map)
+        .map_err(|e| CodecError::InvalidData(format!("registers: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Conversion: sigma-rust → our types
+// ---------------------------------------------------------------------------
+
+/// Convert sigma-rust `Transaction` → our `ErgoTransaction`.
+fn from_sigma_transaction(sigma_tx: &SigmaTransaction) -> Result<ErgoTransaction, CodecError> {
+    let id_digest: SigmaDigest32 = sigma_tx.id().0;
+    let tx_id = TxId(id_digest.into());
+
+    let inputs: Vec<Input> = sigma_tx
+        .inputs
+        .iter()
+        .map(from_sigma_input)
+        .collect::<Result<_, _>>()?;
+
+    let data_inputs: Vec<DataInput> = sigma_tx
+        .data_inputs()
+        .map(|dis| {
+            dis.iter()
+                .map(|di| {
+                    let d32: SigmaDigest32 = di.box_id.into();
+                    DataInput {
+                        box_id: BoxId(d32.into()),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let output_candidates: Vec<ErgoBoxCandidate> = sigma_tx
+        .output_candidates
+        .iter()
+        .map(from_sigma_box_candidate)
+        .collect::<Result<_, _>>()?;
 
     Ok(ErgoTransaction {
         inputs,
@@ -100,100 +256,53 @@ pub fn parse_transaction_from_reader(reader: &mut &[u8]) -> Result<ErgoTransacti
     })
 }
 
-/// Compute transaction ID = Blake2b256(serialize_without_proofs).
-pub fn compute_tx_id(tx: &ErgoTransaction) -> TxId {
-    let bytes = serialize_transaction_without_proofs(tx);
-    let hash = Blake2b::<U32>::digest(&bytes);
-    let mut id = [0u8; 32];
-    id.copy_from_slice(&hash);
-    TxId(id)
+/// Convert a sigma-rust `Input` → our `Input`.
+fn from_sigma_input(input: &ergo_lib::chain::transaction::Input) -> Result<Input, CodecError> {
+    let d32: SigmaDigest32 = input.box_id.into();
+    let box_id = BoxId(d32.into());
+
+    let proof_bytes: Vec<u8> = Vec::from(input.spending_proof.proof.clone());
+
+    let extension_bytes = input
+        .spending_proof
+        .extension
+        .sigma_serialize_bytes()
+        .map_err(|e| CodecError::InvalidData(format!("extension serialize: {e}")))?;
+
+    Ok(Input {
+        box_id,
+        proof_bytes,
+        extension_bytes,
+    })
 }
 
-// ---------------------------------------------------------------------------
-// Box candidate serialization / parsing
-// ---------------------------------------------------------------------------
-
-/// Serialize an `ErgoBoxCandidate` with indexed token references.
-fn serialize_box_candidate(
-    candidate: &ErgoBoxCandidate,
-    distinct_token_ids: &[BoxId],
-    buf: &mut Vec<u8>,
-) {
-    // value: zigzag+VLQ i64
-    put_long(buf, candidate.value as i64);
-
-    // ergo_tree_bytes: VLQ u32 length + raw bytes
-    put_uint(buf, candidate.ergo_tree_bytes.len() as u32);
-    buf.extend_from_slice(&candidate.ergo_tree_bytes);
-
-    // creation_height: VLQ u32
-    put_uint(buf, candidate.creation_height);
-
-    // tokens: VLQ u32 count, then index + amount for each
-    put_uint(buf, candidate.tokens.len() as u32);
-    for (token_id, amount) in &candidate.tokens {
-        let index = distinct_token_ids
-            .iter()
-            .position(|id| id == token_id)
-            .expect("token_id must be in distinct_token_ids");
-        put_uint(buf, index as u32);
-        put_long(buf, *amount as i64);
-    }
-
-    // additional registers
-    if candidate.additional_registers.is_empty() {
-        buf.push(0x00);
-    } else {
-        buf.push((candidate.additional_registers.len() as u8) << 4);
-        for (_reg_id, reg_bytes) in &candidate.additional_registers {
-            buf.extend_from_slice(reg_bytes);
-        }
-    }
-}
-
-/// Parse an `ErgoBoxCandidate` with indexed token references.
-fn parse_box_candidate(
-    reader: &mut &[u8],
-    distinct_token_ids: &[BoxId],
+/// Convert a sigma-rust `ErgoBoxCandidate` → our `ErgoBoxCandidate`.
+fn from_sigma_box_candidate(
+    candidate: &SigmaErgoBoxCandidate,
 ) -> Result<ErgoBoxCandidate, CodecError> {
-    // value: zigzag+VLQ i64
-    let value = get_long(reader)? as u64;
+    let value: u64 = *candidate.value.as_u64();
 
-    // ergo_tree_bytes: VLQ u32 length + raw bytes
-    let tree_len = get_uint(reader)? as usize;
-    let ergo_tree_bytes = read_bytes(reader, tree_len)?;
+    let ergo_tree_bytes = candidate
+        .ergo_tree
+        .sigma_serialize_bytes()
+        .map_err(|e| CodecError::InvalidData(format!("ergo tree serialize: {e}")))?;
 
-    // creation_height: VLQ u32
-    let creation_height = get_uint(reader)?;
+    let creation_height = candidate.creation_height;
 
-    // tokens
-    let token_count = get_uint(reader)? as usize;
-    let mut tokens = Vec::with_capacity(token_count);
-    for _ in 0..token_count {
-        let index = get_uint(reader)? as usize;
-        if index >= distinct_token_ids.len() {
-            return Err(CodecError::InvalidData(format!(
-                "token index {index} out of bounds (distinct count: {})",
-                distinct_token_ids.len()
-            )));
-        }
-        let amount = get_long(reader)? as u64;
-        tokens.push((distinct_token_ids[index], amount));
-    }
+    let tokens: Vec<(BoxId, u64)> = candidate
+        .tokens
+        .as_ref()
+        .map(|bt| {
+            bt.iter()
+                .map(|t| {
+                    let d32: SigmaDigest32 = t.token_id.into();
+                    (BoxId(d32.into()), u64::from(t.amount))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // additional registers
-    let bitmap = read_u8(reader)?;
-    let reg_count = (bitmap >> 4) as usize;
-    let mut additional_registers = Vec::with_capacity(reg_count);
-    for i in 0..reg_count {
-        let reg_id = 4 + i as u8; // R4, R5, R6, ...
-                                  // Capture raw bytes of the sigma constant
-        let start = *reader as &[u8];
-        skip_sigma_constant(reader)?;
-        let consumed = start.len() - reader.len();
-        let reg_bytes = start[..consumed].to_vec();
-        additional_registers.push((reg_id, reg_bytes));
-    }
+    let additional_registers = from_sigma_registers(&candidate.additional_registers)?;
 
     Ok(ErgoBoxCandidate {
         value,
@@ -204,95 +313,50 @@ fn parse_box_candidate(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Internal serialization
-// ---------------------------------------------------------------------------
-
-fn serialize_tx_inner(tx: &ErgoTransaction, include_proofs: bool) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(256);
-
-    // --- Inputs ---
-    put_uint(&mut buf, tx.inputs.len() as u32);
-    for input in &tx.inputs {
-        buf.extend_from_slice(&input.box_id.0);
-
-        if include_proofs {
-            put_uint(&mut buf, input.proof_bytes.len() as u32);
-            buf.extend_from_slice(&input.proof_bytes);
-        } else {
-            put_uint(&mut buf, 0);
+/// Convert sigma-rust `NonMandatoryRegisters` → our register list.
+///
+/// Note: we use `get_constant()` instead of `get()` because sigma-rust's `get()`
+/// method has an indexing bug (uses `reg_id as usize` directly on a 0-based Vec,
+/// but R4's discriminant is 4). `get_constant()` correctly subtracts `START_INDEX`.
+fn from_sigma_registers(
+    regs: &SigmaNonMandatoryRegisters,
+) -> Result<Vec<(u8, Vec<u8>)>, CodecError> {
+    let mut result = Vec::new();
+    let register_ids = [
+        (4u8, SigmaNonMandatoryRegisterId::R4),
+        (5, SigmaNonMandatoryRegisterId::R5),
+        (6, SigmaNonMandatoryRegisterId::R6),
+        (7, SigmaNonMandatoryRegisterId::R7),
+        (8, SigmaNonMandatoryRegisterId::R8),
+        (9, SigmaNonMandatoryRegisterId::R9),
+    ];
+    for (i, (idx, reg_id)) in register_ids.iter().enumerate() {
+        if i >= regs.len() {
+            break;
         }
-
-        // extension_bytes: write as-is (already in wire format)
-        buf.extend_from_slice(&input.extension_bytes);
-    }
-
-    // --- Data inputs ---
-    put_uint(&mut buf, tx.data_inputs.len() as u32);
-    for di in &tx.data_inputs {
-        buf.extend_from_slice(&di.box_id.0);
-    }
-
-    // --- Distinct token IDs from all outputs ---
-    let distinct_token_ids = collect_distinct_token_ids(&tx.output_candidates);
-    put_uint(&mut buf, distinct_token_ids.len() as u32);
-    for token_id in &distinct_token_ids {
-        buf.extend_from_slice(&token_id.0);
-    }
-
-    // --- Outputs ---
-    put_uint(&mut buf, tx.output_candidates.len() as u32);
-    for candidate in &tx.output_candidates {
-        serialize_box_candidate(candidate, &distinct_token_ids, &mut buf);
-    }
-
-    buf
-}
-
-/// Collect distinct token IDs from all output candidates, preserving first-seen order.
-fn collect_distinct_token_ids(candidates: &[ErgoBoxCandidate]) -> Vec<BoxId> {
-    let mut seen = Vec::new();
-    for candidate in candidates {
-        for (token_id, _) in &candidate.tokens {
-            if !seen.contains(token_id) {
-                seen.push(*token_id);
+        match regs.get_constant(*reg_id) {
+            Ok(Some(constant)) => {
+                let bytes = constant
+                    .sigma_serialize_bytes()
+                    .map_err(|e| CodecError::InvalidData(format!("register R{idx}: {e}")))?;
+                result.push((*idx, bytes));
+            }
+            Ok(None) => break,
+            Err(_) => {
+                return Err(CodecError::InvalidData(format!(
+                    "unparseable register R{idx}"
+                )));
             }
         }
     }
-    seen
-}
-
-/// Parse extension bytes from the wire format.
-///
-/// The extension (ContextExtension) is serialized as:
-///   u8(count) then for each entry: u8(key_id) + sigma_constant_bytes.
-///
-/// We capture the raw bytes (including the count byte) as opaque data.
-fn parse_extension_bytes(reader: &mut &[u8]) -> Result<Vec<u8>, CodecError> {
-    let start = *reader as &[u8];
-    let count = read_u8(reader)?;
-
-    if count == 0 {
-        // Just the zero count byte
-        return Ok(vec![0x00]);
-    }
-
-    for _ in 0..count {
-        // key: 1 byte
-        let _key = read_u8(reader)?;
-        // value: sigma constant
-        skip_sigma_constant(reader)?;
-    }
-
-    let consumed = start.len() - reader.len();
-    Ok(start[..consumed].to_vec())
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
-// Low-level reader helpers
+// Low-level reader helpers (still used by block_transactions_ser.rs)
 // ---------------------------------------------------------------------------
 
-fn read_array<const N: usize>(reader: &mut &[u8]) -> Result<[u8; N], CodecError> {
+pub fn read_array<const N: usize>(reader: &mut &[u8]) -> Result<[u8; N], CodecError> {
     if reader.len() < N {
         return Err(CodecError::UnexpectedEof);
     }
@@ -302,7 +366,7 @@ fn read_array<const N: usize>(reader: &mut &[u8]) -> Result<[u8; N], CodecError>
     Ok(arr)
 }
 
-fn read_bytes(reader: &mut &[u8], len: usize) -> Result<Vec<u8>, CodecError> {
+pub fn read_bytes(reader: &mut &[u8], len: usize) -> Result<Vec<u8>, CodecError> {
     if reader.len() < len {
         return Err(CodecError::UnexpectedEof);
     }
@@ -311,13 +375,21 @@ fn read_bytes(reader: &mut &[u8], len: usize) -> Result<Vec<u8>, CodecError> {
     Ok(data)
 }
 
-fn read_u8(reader: &mut &[u8]) -> Result<u8, CodecError> {
+pub fn read_u8(reader: &mut &[u8]) -> Result<u8, CodecError> {
     if reader.is_empty() {
         return Err(CodecError::UnexpectedEof);
     }
     let byte = reader[0];
     *reader = &reader[1..];
     Ok(byte)
+}
+
+pub fn skip_bytes(reader: &mut &[u8], n: usize) -> Result<(), CodecError> {
+    if reader.len() < n {
+        return Err(CodecError::UnexpectedEof);
+    }
+    *reader = &reader[n..];
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +405,29 @@ mod tests {
         vec![0x00]
     }
 
+    /// Helper: make a P2PK-like ErgoTree with size bit set.
+    /// header=0x08 (v0, size bit set), body = 0x08 0xCD <33-byte pubkey>
+    fn make_p2pk_tree() -> Vec<u8> {
+        use crate::vlq::put_uint;
+        let mut body = vec![0x08, 0xCD];
+        body.extend_from_slice(&[0x02; 33]); // dummy compressed point
+        let mut tree = Vec::new();
+        tree.push(0x08); // header: v0 + size bit
+        put_uint(&mut tree, body.len() as u32);
+        tree.extend_from_slice(&body);
+        tree
+    }
+
+    /// Helper: make an ErgoTree with the "size included" bit set.
+    fn make_ergo_tree(body: &[u8]) -> Vec<u8> {
+        use crate::vlq::put_uint;
+        let mut tree = Vec::new();
+        tree.push(0x08); // header: v0 + size bit
+        put_uint(&mut tree, body.len() as u32);
+        tree.extend_from_slice(body);
+        tree
+    }
+
     /// Helper: make a simple ErgoTransaction.
     fn make_simple_tx() -> ErgoTransaction {
         let input = Input {
@@ -342,7 +437,7 @@ mod tests {
         };
         let output = ErgoBoxCandidate {
             value: 1_000_000_000, // 1 ERG
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+            ergo_tree_bytes: make_p2pk_tree(),
             creation_height: 100_000,
             tokens: Vec::new(),
             additional_registers: Vec::new(),
@@ -358,7 +453,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 1. Roundtrip: simple tx (1 input, 1 output, no tokens, no registers, empty extension)
+    // 1. Roundtrip: simple tx (1 input, 1 output, no tokens, no registers)
     // -----------------------------------------------------------------------
     #[test]
     fn roundtrip_simple_tx() {
@@ -398,14 +493,14 @@ mod tests {
             output_candidates: vec![
                 ErgoBoxCandidate {
                     value: 500_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    ergo_tree_bytes: make_p2pk_tree(),
                     creation_height: 200_000,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),
                 },
                 ErgoBoxCandidate {
                     value: 300_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0xab],
+                    ergo_tree_bytes: make_ergo_tree(&[0xAB, 0xCD]),
                     creation_height: 200_001,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),
@@ -420,7 +515,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 3. Roundtrip: tx with tokens (test deduplication — same token ID in two outputs)
+    // 3. Roundtrip: tx with tokens (test deduplication)
     // -----------------------------------------------------------------------
     #[test]
     fn roundtrip_tokens_deduplication() {
@@ -437,16 +532,15 @@ mod tests {
             output_candidates: vec![
                 ErgoBoxCandidate {
                     value: 1_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    ergo_tree_bytes: make_p2pk_tree(),
                     creation_height: 100,
                     tokens: vec![(token_a, 50), (token_b, 100)],
                     additional_registers: Vec::new(),
                 },
                 ErgoBoxCandidate {
                     value: 2_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    ergo_tree_bytes: make_p2pk_tree(),
                     creation_height: 100,
-                    // Same token_a in second output — should be deduplicated
                     tokens: vec![(token_a, 25)],
                     additional_registers: Vec::new(),
                 },
@@ -456,9 +550,6 @@ mod tests {
         tx.tx_id = compute_tx_id(&tx);
 
         let bytes = serialize_transaction(&tx);
-
-        // Verify deduplication: distinct token IDs should be [token_a, token_b]
-        // The serialized bytes after inputs/data-inputs should have put_uint(2) for 2 distinct IDs
         let parsed = parse_transaction(&bytes).unwrap();
         assert_eq!(parsed, tx);
     }
@@ -484,7 +575,7 @@ mod tests {
             ],
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: make_p2pk_tree(),
                 creation_height: 300_000,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -511,7 +602,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: make_p2pk_tree(),
                 creation_height: 100_000,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -533,7 +624,6 @@ mod tests {
         let tx = make_simple_tx();
         let id = compute_tx_id(&tx);
         assert_eq!(id.0.len(), 32);
-        // Should not be all zeros (extremely unlikely for a real hash)
         assert_ne!(id.0, [0u8; 32]);
     }
 
@@ -547,7 +637,6 @@ mod tests {
         let id1b = compute_tx_id(&tx1);
         assert_eq!(id1a, id1b, "same tx must produce same id");
 
-        // Different tx (different creation_height)
         let mut tx2 = make_simple_tx();
         tx2.output_candidates[0].creation_height = 999_999;
         let id2 = compute_tx_id(&tx2);
@@ -582,32 +671,21 @@ mod tests {
 
         // Without proofs should be shorter (no 10 proof bytes, just VLQ(0))
         assert!(without_proofs.len() < with_proofs.len());
-
-        // Verify: after box_id (32 bytes), the next byte should be 0x00 (VLQ(0))
-        // First byte is put_uint(input_count = 1) = VLQ(1) = [0x01]
-        // Then 32 bytes of box_id
-        // Then VLQ(0) = [0x00] for proof length
-        let proof_len_offset = 1 + 32; // VLQ(1) + box_id
-        assert_eq!(
-            without_proofs[proof_len_offset], 0x00,
-            "proof length VLQ(0) should be 0x00"
-        );
     }
 
     // -----------------------------------------------------------------------
-    // 10. Parse truncated input → UnexpectedEof
+    // 10. Parse truncated input → error
     // -----------------------------------------------------------------------
     #[test]
     fn parse_truncated_input_eof() {
         let tx = make_simple_tx();
         let bytes = serialize_transaction(&tx);
-        // Truncate mid-way through the first input's box_id
         let result = parse_transaction(&bytes[..10]);
-        assert!(matches!(result, Err(CodecError::UnexpectedEof)));
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------
-    // 11. Box candidate with registers (register count in bitmap upper nibble)
+    // 11. Box candidate with registers
     // -----------------------------------------------------------------------
     #[test]
     fn roundtrip_box_with_registers() {
@@ -629,7 +707,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: make_p2pk_tree(),
                 creation_height: 100_000,
                 tokens: Vec::new(),
                 additional_registers: vec![(4, reg_r4.clone()), (5, reg_r5.clone())],
@@ -642,53 +720,45 @@ mod tests {
         let parsed = parse_transaction(&bytes).unwrap();
         assert_eq!(parsed, tx);
 
-        // Verify register count encoding: 2 registers → bitmap byte = 0x20
+        // With registers should be longer than without
         let without_regs_tx = {
             let mut t = tx.clone();
             t.output_candidates[0].additional_registers.clear();
             t
         };
         let bytes_no_regs = serialize_transaction(&without_regs_tx);
-        // With registers should be longer
         assert!(bytes.len() > bytes_no_regs.len());
     }
 
     // -----------------------------------------------------------------------
-    // 12. Token index out of bounds → InvalidData
+    // 12. parse_transaction_from_reader: inline parsing with shared buffer
     // -----------------------------------------------------------------------
     #[test]
-    fn token_index_out_of_bounds() {
-        // Manually craft bytes where the token index exceeds distinct_token_ids count.
-        let mut buf = Vec::new();
+    fn parse_from_reader_advances_correctly() {
+        let tx1 = make_simple_tx();
+        let tx1_bytes = serialize_transaction(&tx1);
 
-        // 1 input
-        put_uint(&mut buf, 1);
-        buf.extend_from_slice(&[0x11; 32]); // box_id
-        put_uint(&mut buf, 0); // no proof
-        buf.push(0x00); // empty extension
+        // Create a second tx with different data
+        let mut tx2 = make_simple_tx();
+        tx2.output_candidates[0].value = 500_000_000;
+        tx2.output_candidates[0].creation_height = 200_000;
+        tx2.tx_id = compute_tx_id(&tx2);
+        let tx2_bytes = serialize_transaction(&tx2);
 
-        // 0 data inputs
-        put_uint(&mut buf, 0);
+        // Concatenate two serialized txs
+        let mut combined = tx1_bytes.clone();
+        combined.extend_from_slice(&tx2_bytes);
 
-        // 1 distinct token ID
-        put_uint(&mut buf, 1);
-        buf.extend_from_slice(&[0xAA; 32]); // the one token
+        let mut reader: &[u8] = &combined;
 
-        // 1 output
-        put_uint(&mut buf, 1);
-        put_long(&mut buf, 1_000_000); // value
-        put_uint(&mut buf, 3); // ergo_tree len
-        buf.extend_from_slice(&[0x00, 0x08, 0xcd]); // ergo_tree
-        put_uint(&mut buf, 100); // creation_height
-        put_uint(&mut buf, 1); // 1 token
-        put_uint(&mut buf, 5); // token index 5 — OUT OF BOUNDS (only 1 distinct)
-        put_long(&mut buf, 100); // amount
-        buf.push(0x00); // no registers
+        // Parse first tx
+        let parsed1 = parse_transaction_from_reader(&mut reader).unwrap();
+        assert_eq!(parsed1.tx_id, tx1.tx_id);
+        assert_eq!(reader.len(), tx2_bytes.len());
 
-        let result = parse_transaction(&buf);
-        assert!(
-            matches!(result, Err(CodecError::InvalidData(ref msg)) if msg.contains("out of bounds")),
-            "expected InvalidData with 'out of bounds', got: {result:?}"
-        );
+        // Parse second tx
+        let parsed2 = parse_transaction_from_reader(&mut reader).unwrap();
+        assert_eq!(parsed2.tx_id, tx2.tx_id);
+        assert_eq!(reader.len(), 0);
     }
 }

@@ -10,6 +10,9 @@ ergo-types = { path = "../ergo-types" }
 blake2 = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+ergo-lib = { version = "0.28", default-features = false }
+ergotree-ir = "0.28"
+sigma-ser = "0.19"
 
 [dev-dependencies]
 ergo-types = { path = "../ergo-types", features = ["test-utils"] }

@@ -2151,25 +2151,51 @@ mod tests {
         );
     }
 
-    // 15. validate_and_apply_block rejects a block containing a tx with 0 outputs.
+    // 15. validate_and_apply_block rejects a block containing a tx with duplicate inputs.
     #[test]
     fn validate_and_apply_block_rejects_invalid_tx() {
         use ergo_consensus::merkle::merkle_root;
-        use ergo_types::transaction::{BoxId, ErgoTransaction, Input, TxId};
+        use ergo_types::transaction::{BoxId, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
         use ergo_wire::transaction_ser::serialize_transaction;
 
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
 
-        // Build a transaction with 1 input and 0 outputs (invalid per stateless validation).
+        // Build a P2PK ErgoTree with size bit set (valid for sigma-rust).
+        let ergo_tree_bytes = {
+            use ergo_wire::vlq::put_uint;
+            let mut body = vec![0x08, 0xCD];
+            body.extend_from_slice(&[0x02; 33]); // dummy compressed point
+            let mut tree = Vec::new();
+            tree.push(0x08); // header: v0 + size bit
+            put_uint(&mut tree, body.len() as u32);
+            tree.extend_from_slice(&body);
+            tree
+        };
+
+        // Build a transaction with duplicate inputs (invalid per stateless validation).
+        let dup_box_id = BoxId([0x11; 32]);
         let mut bad_tx = ErgoTransaction {
-            inputs: vec![Input {
-                box_id: BoxId([0x11; 32]),
-                proof_bytes: Vec::new(),
-                extension_bytes: vec![0x00], // empty extension
-            }],
+            inputs: vec![
+                Input {
+                    box_id: dup_box_id,
+                    proof_bytes: Vec::new(),
+                    extension_bytes: vec![0x00],
+                },
+                Input {
+                    box_id: dup_box_id, // duplicate!
+                    proof_bytes: Vec::new(),
+                    extension_bytes: vec![0x00],
+                },
+            ],
             data_inputs: Vec::new(),
-            output_candidates: Vec::new(), // 0 outputs -> NoOutputs
+            output_candidates: vec![ErgoBoxCandidate {
+                value: 1_000_000_000,
+                ergo_tree_bytes,
+                creation_height: 100_000,
+                tokens: Vec::new(),
+                additional_registers: Vec::new(),
+            }],
             tx_id: TxId([0; 32]),
         };
         bad_tx.tx_id = ergo_wire::transaction_ser::compute_tx_id(&bad_tx);
@@ -3008,6 +3034,14 @@ mod tests {
         // Use valid serialized transactions so parse succeeds.
         use ergo_wire::transaction_ser::serialize_transaction;
         let make_tx = |fill: u8| {
+            let valid_tree = {
+                let mut t = vec![0x08];
+                ergo_wire::vlq::put_uint(&mut t, 35);
+                t.push(0x08);
+                t.push(0xCD);
+                t.extend_from_slice(&[0x02; 33]);
+                t
+            };
             serialize_transaction(&ergo_types::transaction::ErgoTransaction {
                 inputs: vec![ergo_types::transaction::Input {
                     box_id: ergo_types::transaction::BoxId([fill; 32]),
@@ -3017,7 +3051,7 @@ mod tests {
                 data_inputs: Vec::new(),
                 output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
                     value: 1_000_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    ergo_tree_bytes: valid_tree,
                     creation_height: 100_000,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),

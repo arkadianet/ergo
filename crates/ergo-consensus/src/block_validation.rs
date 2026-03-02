@@ -199,7 +199,15 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: {
+                    // Valid ErgoTree with size bit: header=0x08, body=[0x08, 0xCD, <33-byte key>]
+                    let mut t = vec![0x08];
+                    ergo_wire::vlq::put_uint(&mut t, 35); // body size
+                    t.push(0x08); // ProveDlog opcode
+                    t.push(0xCD); // group element marker
+                    t.extend_from_slice(&[0x02; 33]); // dummy compressed pubkey
+                    t
+                },
                 creation_height: height,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),

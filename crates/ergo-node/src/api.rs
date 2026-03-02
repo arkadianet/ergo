@@ -177,6 +177,34 @@ pub struct PeerResponse {
     pub last_message: u64,
     pub last_handshake: u64,
     pub connection_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verifying_transactions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks_to_keep: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geo: Option<crate::geoip::GeoInfo>,
+}
+
+/// Lightweight peer map entry for map rendering.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerMapEntry {
+    pub lat: f64,
+    pub lon: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    pub address: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_status: Option<String>,
 }
 
 /// JSON request body for submitting a transaction (legacy hex format).
@@ -1259,6 +1287,7 @@ pub struct ApiState {
     pub utxo_proof: Option<tokio::sync::mpsc::Sender<crate::event_loop::UtxoProofRequest>>,
     pub mining_pub_key_hex: String,
     pub snapshots_db: Option<Arc<crate::snapshots::SnapshotsDb>>,
+    pub geoip: crate::geoip::SharedGeoIp,
     #[cfg(feature = "wallet")]
     pub wallet: Option<Arc<tokio::sync::RwLock<ergo_wallet::wallet_manager::WalletManager>>>,
 }
@@ -1679,6 +1708,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/peers/connected",
             axum::routing::get(peers_connected_handler),
         )
+        .route("/peers/map", axum::routing::get(peers_map_handler))
         .route("/peers/all", axum::routing::get(peers_all_handler))
         .route(
             "/peers/blacklisted",
@@ -2118,8 +2148,17 @@ async fn swagger_handler() -> axum::response::Html<&'static str> {
 }
 
 /// GET /panel — Serve the Node Panel admin dashboard.
-async fn panel_handler() -> axum::response::Html<&'static str> {
-    axum::response::Html(crate::web_ui::PANEL_HTML)
+async fn panel_handler() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    axum::response::Html<&'static str>,
+) {
+    (
+        [(
+            axum::http::header::CACHE_CONTROL,
+            "no-cache, no-store, must-revalidate",
+        )],
+        axum::response::Html(crate::web_ui::PANEL_HTML),
+    )
 }
 
 /// GET /api-docs/openapi.yaml — Serve the OpenAPI specification.
@@ -2243,19 +2282,92 @@ async fn get_blocks_at_height_handler(
 
 async fn peers_connected_handler(State(state): State<ApiState>) -> Json<Vec<PeerResponse>> {
     let shared = state.shared.read().await;
+    // Build a peer_id → (status, height) map from the sync tracker snapshot.
+    let sync_map = build_sync_map(&shared);
     Json(
         shared
             .connected_peers
             .iter()
-            .map(|p| PeerResponse {
-                address: p.address.clone(),
-                name: p.name.clone(),
-                last_message: p.last_message.unwrap_or(0),
-                last_handshake: p.last_handshake,
-                connection_type: p.connection_type.clone(),
+            .map(|p| {
+                let (chain_status, height) =
+                    sync_map.get(&p.peer_id).cloned().unwrap_or((None, None));
+                let geo = parse_ip_from_addr(&p.address)
+                    .and_then(|ip| state.geoip.as_ref().as_ref().and_then(|g| g.lookup(ip)));
+                PeerResponse {
+                    address: p.address.clone(),
+                    name: p.name.clone(),
+                    last_message: p.last_message.unwrap_or(0),
+                    last_handshake: p.last_handshake,
+                    connection_type: p.connection_type.clone(),
+                    version: p.version.clone(),
+                    state_type: p.state_type.clone(),
+                    verifying_transactions: p.verifying_transactions,
+                    blocks_to_keep: p.blocks_to_keep,
+                    chain_status,
+                    height,
+                    geo,
+                }
             })
             .collect(),
     )
+}
+
+/// `GET /peers/map` — lightweight projection for map rendering.
+async fn peers_map_handler(State(state): State<ApiState>) -> Json<Vec<PeerMapEntry>> {
+    let shared = state.shared.read().await;
+    let sync_map = build_sync_map(&shared);
+    let geoip = state.geoip.as_ref().as_ref();
+    let mut entries = Vec::new();
+    if let Some(geo) = geoip {
+        for p in &shared.connected_peers {
+            if let Some(ip) = parse_ip_from_addr(&p.address) {
+                if let Some(info) = geo.lookup(ip) {
+                    if let (Some(lat), Some(lon)) = (info.latitude, info.longitude) {
+                        let chain_status = sync_map.get(&p.peer_id).and_then(|(s, _)| s.clone());
+                        entries.push(PeerMapEntry {
+                            lat,
+                            lon,
+                            country_code: info.country_code,
+                            address: p.address.clone(),
+                            name: p.name.clone(),
+                            chain_status,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Json(entries)
+}
+
+/// Build a map from peer_id to (chain_status, height) from the sync tracker snapshot.
+fn build_sync_map(
+    shared: &crate::event_loop::SharedState,
+) -> std::collections::HashMap<u64, (Option<String>, Option<u32>)> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(ref snap_val) = shared.sync_tracker_snapshot {
+        if let Some(peers) = snap_val.get("peers").and_then(|v| v.as_array()) {
+            for entry in peers {
+                if let Some(pid) = entry.get("peer_id").and_then(|v| v.as_u64()) {
+                    let status = entry
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let height = entry
+                        .get("height")
+                        .and_then(|v| v.as_u64())
+                        .map(|h| h as u32);
+                    map.insert(pid, (status, height));
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Parse an `IpAddr` from a "host:port" address string.
+fn parse_ip_from_addr(addr: &str) -> Option<std::net::IpAddr> {
+    addr.parse::<std::net::SocketAddr>().ok().map(|sa| sa.ip())
 }
 
 /// `GET /peers/all` — all known peers from discovery + peer_db.
@@ -5948,6 +6060,10 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
+    /// Valid P2PK ErgoTree hex for JSON test payloads (parseable by sigma-rust).
+    const TEST_ERGO_TREE_HEX: &str =
+        "082308cd0202020202020202020202020202020202020202020202020202020202020202020202";
+
     fn test_api_state() -> (ApiState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let history = HistoryDb::open(dir.path()).unwrap();
@@ -5975,6 +6091,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -6297,7 +6414,7 @@ mod tests {
     async fn peers_connected_returns_info() {
         let (state, _dir) = test_api_state();
 
-        // Pre-populate connected peers.
+        // Pre-populate connected peers with enriched fields.
         {
             let mut shared = state.shared.write().await;
             shared.connected_peers = vec![
@@ -6307,6 +6424,11 @@ mod tests {
                     last_handshake: 1640000000000,
                     last_message: Some(1640000000500),
                     connection_type: None,
+                    version: Some("6.0.1".to_string()),
+                    state_type: Some("utxo".to_string()),
+                    verifying_transactions: Some(true),
+                    blocks_to_keep: Some(-1),
+                    peer_id: 100,
                 },
                 ConnectedPeerInfo {
                     address: "10.0.0.1:9030".to_string(),
@@ -6314,6 +6436,11 @@ mod tests {
                     last_handshake: 1640000001000,
                     last_message: Some(1640000001500),
                     connection_type: Some("Incoming".to_string()),
+                    version: Some("5.0.2".to_string()),
+                    state_type: Some("digest".to_string()),
+                    verifying_transactions: Some(false),
+                    blocks_to_keep: Some(1440),
+                    peer_id: 200,
                 },
             ];
         }
@@ -6329,15 +6456,96 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let peers: Vec<PeerResponse> = serde_json::from_slice(&body).unwrap();
         assert_eq!(peers.len(), 2);
+        // Original fields
         assert_eq!(peers[0].address, "192.168.1.1:9030");
         assert_eq!(peers[0].name, "peer-a");
         assert_eq!(peers[0].last_message, 1640000000500);
         assert_eq!(peers[0].last_handshake, 1640000000000);
         assert!(peers[0].connection_type.is_none());
+        // Enriched fields
+        assert_eq!(peers[0].version, Some("6.0.1".to_string()));
+        assert_eq!(peers[0].state_type, Some("utxo".to_string()));
+        assert_eq!(peers[0].verifying_transactions, Some(true));
+        assert_eq!(peers[0].blocks_to_keep, Some(-1));
+        // No geoip configured → geo is None
+        assert!(peers[0].geo.is_none());
+
         assert_eq!(peers[1].address, "10.0.0.1:9030");
         assert_eq!(peers[1].name, "peer-b");
         assert_eq!(peers[1].last_handshake, 1640000001000);
         assert_eq!(peers[1].connection_type, Some("Incoming".to_string()));
+        assert_eq!(peers[1].version, Some("5.0.2".to_string()));
+        assert_eq!(peers[1].state_type, Some("digest".to_string()));
+        assert_eq!(peers[1].blocks_to_keep, Some(1440));
+    }
+
+    #[tokio::test]
+    async fn peers_connected_no_geoip_geo_fields_null() {
+        let (state, _dir) = test_api_state();
+        {
+            let mut shared = state.shared.write().await;
+            shared.connected_peers = vec![ConnectedPeerInfo {
+                address: "8.8.8.8:9030".to_string(),
+                name: "peer-x".to_string(),
+                last_handshake: 1640000000000,
+                last_message: Some(1640000000100),
+                connection_type: Some("Outgoing".to_string()),
+                version: Some("6.0.1".to_string()),
+                state_type: None,
+                verifying_transactions: None,
+                blocks_to_keep: None,
+                peer_id: 42,
+            }];
+        }
+
+        let router = build_router(state);
+        let req = Request::builder()
+            .uri("/peers/connected")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let peer = &val[0];
+        // Geo field should be absent (skip_serializing_if)
+        assert!(peer.get("geo").is_none());
+        // stateType should be absent when None
+        assert!(peer.get("stateType").is_none());
+    }
+
+    #[tokio::test]
+    async fn peers_map_empty_without_geoip() {
+        let (state, _dir) = test_api_state();
+        {
+            let mut shared = state.shared.write().await;
+            shared.connected_peers = vec![ConnectedPeerInfo {
+                address: "8.8.8.8:9030".to_string(),
+                name: "peer-x".to_string(),
+                last_handshake: 1640000000000,
+                last_message: Some(1640000000100),
+                connection_type: Some("Outgoing".to_string()),
+                version: Some("6.0.1".to_string()),
+                state_type: None,
+                verifying_transactions: None,
+                blocks_to_keep: None,
+                peer_id: 42,
+            }];
+        }
+
+        let router = build_router(state);
+        let req = Request::builder()
+            .uri("/peers/map")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let entries: Vec<PeerMapEntry> = serde_json::from_slice(&body).unwrap();
+        // No GeoIP DB configured → empty result
+        assert!(entries.is_empty());
     }
 
     #[tokio::test]
@@ -6349,7 +6557,7 @@ mod tests {
         let body = serde_json::json!({
             "inputs": [{"boxId": "aa".repeat(32), "spendingProof": {"proofBytes": "", "extension": {}}}],
             "dataInputs": [],
-            "outputs": [{"value": 1000000000, "ergoTree": "0008cd", "creationHeight": 100000, "assets": [], "additionalRegisters": {}}]
+            "outputs": [{"value": 1000000000, "ergoTree": TEST_ERGO_TREE_HEX, "creationHeight": 100000, "assets": [], "additionalRegisters": {}}]
         });
         let req = Request::builder()
             .method("POST")
@@ -6537,6 +6745,14 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn make_minimal_tx() -> ergo_types::transaction::ErgoTransaction {
+        let valid_tree = {
+            let mut t = vec![0x08]; // header: v0 + size bit
+            ergo_wire::vlq::put_uint(&mut t, 35);
+            t.push(0x08);
+            t.push(0xCD);
+            t.extend_from_slice(&[0x02; 33]);
+            t
+        };
         ergo_types::transaction::ErgoTransaction {
             inputs: vec![ergo_types::transaction::Input {
                 box_id: ergo_types::transaction::BoxId([0xAA; 32]),
@@ -6546,7 +6762,7 @@ mod tests {
             data_inputs: vec![],
             output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: valid_tree,
                 creation_height: 100_000,
                 tokens: vec![],
                 additional_registers: vec![],
@@ -6575,7 +6791,7 @@ mod tests {
         let body = serde_json::json!({
             "inputs": [{"boxId": "aa".repeat(32), "spendingProof": {"proofBytes": "", "extension": {}}}],
             "dataInputs": [],
-            "outputs": [{"value": 1000000, "ergoTree": "00", "creationHeight": 100, "assets": [], "additionalRegisters": {}}]
+            "outputs": [{"value": 1000000, "ergoTree": TEST_ERGO_TREE_HEX, "creationHeight": 100, "assets": [], "additionalRegisters": {}}]
         });
         let req = Request::builder()
             .method("POST")
@@ -7431,6 +7647,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7477,6 +7694,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7520,6 +7738,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7569,6 +7788,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7612,6 +7832,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7675,6 +7896,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7718,6 +7940,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -7779,6 +8002,7 @@ mod tests {
             utxo_proof: None,
             mining_pub_key_hex: String::new(),
             snapshots_db: None,
+            geoip: Arc::new(None),
             #[cfg(feature = "wallet")]
             wallet: None,
         };
@@ -8246,7 +8470,7 @@ mod tests {
         let json = serde_json::json!({
             "inputs": [{"boxId": "aa".repeat(32), "spendingProof": {"proofBytes": "", "extension": {}}}],
             "dataInputs": [{"boxId": "bb".repeat(32)}],
-            "outputs": [{"value": 1000000, "ergoTree": "00", "creationHeight": 100, "assets": [], "additionalRegisters": {}}]
+            "outputs": [{"value": 1000000, "ergoTree": TEST_ERGO_TREE_HEX, "creationHeight": 100, "assets": [], "additionalRegisters": {}}]
         });
         let json_tx: TxJsonTransaction = serde_json::from_value(json).unwrap();
         let tx = convert_json_tx_to_ergo_tx(&json_tx).unwrap();
@@ -8265,7 +8489,7 @@ mod tests {
             "dataInputs": [],
             "outputs": [{
                 "value": 2000000,
-                "ergoTree": "0008cd03",
+                "ergoTree": TEST_ERGO_TREE_HEX,
                 "creationHeight": 200,
                 "assets": [{"tokenId": "dd".repeat(32), "amount": 100}],
                 "additionalRegisters": {"R4": "0e00", "R5": "0500"}
@@ -8311,7 +8535,7 @@ mod tests {
         let body = serde_json::json!({
             "inputs": [{"boxId": "aa".repeat(32), "spendingProof": {"proofBytes": "", "extension": {}}}],
             "dataInputs": [],
-            "outputs": [{"value": 1000000, "ergoTree": "00", "creationHeight": 100, "assets": [], "additionalRegisters": {}}]
+            "outputs": [{"value": 1000000, "ergoTree": TEST_ERGO_TREE_HEX, "creationHeight": 100, "assets": [], "additionalRegisters": {}}]
         });
         let req = Request::builder()
             .method("POST")
@@ -8334,7 +8558,7 @@ mod tests {
         let router = build_router(state);
         let body = serde_json::json!({
             "inputs": [{"boxId": "bb".repeat(32), "spendingProof": {"proofBytes": ""}}],
-            "outputs": [{"value": 500000, "ergoTree": "00", "creationHeight": 50}]
+            "outputs": [{"value": 500000, "ergoTree": TEST_ERGO_TREE_HEX, "creationHeight": 50}]
         });
         let req = Request::builder()
             .method("POST")

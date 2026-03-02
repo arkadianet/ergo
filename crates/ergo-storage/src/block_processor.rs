@@ -384,6 +384,14 @@ mod tests {
         use ergo_types::transaction::*;
         use ergo_wire::transaction_ser::serialize_transaction;
 
+        let valid_tree = {
+            let mut t = vec![0x08];
+            ergo_wire::vlq::put_uint(&mut t, 35);
+            t.push(0x08);
+            t.push(0xCD);
+            t.extend_from_slice(&[0x02; 33]);
+            t
+        };
         let tx_bytes = serialize_transaction(&ErgoTransaction {
             inputs: vec![Input {
                 box_id: BoxId([0x11; 32]),
@@ -393,7 +401,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: valid_tree,
                 creation_height: 100_000,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),

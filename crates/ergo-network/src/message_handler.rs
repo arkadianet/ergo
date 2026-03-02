@@ -2189,6 +2189,14 @@ mod tests {
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
+        let valid_tree = {
+            let mut t = vec![0x08];
+            ergo_wire::vlq::put_uint(&mut t, 35);
+            t.push(0x08);
+            t.push(0xCD);
+            t.extend_from_slice(&[0x02; 33]);
+            t
+        };
         let tx = ergo_types::transaction::ErgoTransaction {
             inputs: vec![ergo_types::transaction::Input {
                 box_id: ergo_types::transaction::BoxId([0xAA; 32]),
@@ -2198,7 +2206,7 @@ mod tests {
             data_inputs: vec![],
             output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: valid_tree,
                 creation_height: 100_000,
                 tokens: vec![],
                 additional_registers: vec![],
@@ -2803,6 +2811,14 @@ mod tests {
         let mut sync_mgr = SyncManager::new(10, 64);
         let mut tracker = DeliveryTracker::new(30, 3);
 
+        let valid_tree = {
+            let mut t = vec![0x08];
+            ergo_wire::vlq::put_uint(&mut t, 35);
+            t.push(0x08);
+            t.push(0xCD);
+            t.extend_from_slice(&[0x02; 33]);
+            t
+        };
         let tx = ergo_types::transaction::ErgoTransaction {
             inputs: vec![ergo_types::transaction::Input {
                 box_id: ergo_types::transaction::BoxId([0xAA; 32]),
@@ -2812,7 +2828,7 @@ mod tests {
             data_inputs: vec![],
             output_candidates: vec![ergo_types::transaction::ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: valid_tree,
                 creation_height: 100_000,
                 tokens: vec![],
                 additional_registers: vec![],

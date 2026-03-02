@@ -205,7 +205,7 @@ fn build_fee_collection_tx(
                 fee_inputs.push(Input {
                     box_id,
                     proof_bytes: Vec::new(),
-                    extension_bytes: Vec::new(),
+                    extension_bytes: vec![0x00],
                 });
                 total_fee = total_fee.saturating_add(output.value);
                 // Aggregate tokens from this fee box.
@@ -309,7 +309,7 @@ fn build_emission_tx(
     let input = Input {
         box_id: *emission_box_id,
         proof_bytes: Vec::new(),
-        extension_bytes: Vec::new(),
+        extension_bytes: vec![0x00],
     };
 
     // EIP-27: deduct reemission charge from the first token (ERG reemission token)
@@ -1207,6 +1207,22 @@ mod tests {
     use super::*;
     use ergo_types::transaction::BoxId;
 
+    /// Valid P2PK ErgoTree with size bit set (parseable by sigma-rust).
+    /// Header 0x08 (v0 + size) + VLQ(35) + body [0x08, 0xCD, 33-byte pubkey].
+    fn test_p2pk_tree() -> Vec<u8> {
+        let mut tree = vec![0x08, 0x23, 0x08, 0xCD];
+        tree.extend_from_slice(&[0x02; 33]);
+        tree
+    }
+
+    /// Variant with a different last pubkey byte for distinct-tree tests.
+    fn test_p2pk_tree_alt(suffix: u8) -> Vec<u8> {
+        let mut tree = vec![0x08, 0x23, 0x08, 0xCD];
+        tree.extend_from_slice(&[0x02; 32]);
+        tree.push(suffix);
+        tree
+    }
+
     #[test]
     fn test_mining_solution_parse_nonce() {
         let sol = MiningSolution {
@@ -1506,14 +1522,14 @@ mod tests {
             inputs: vec![Input {
                 box_id: BoxId([box_seed; 32]),
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![
                 // Normal output (non-fee).
                 ErgoBoxCandidate {
                     value: 1_000_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                    ergo_tree_bytes: test_p2pk_tree(),
                     creation_height: 100_000,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),
@@ -1544,12 +1560,12 @@ mod tests {
             inputs: vec![Input {
                 box_id: BoxId([0xAA; 32]),
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                ergo_tree_bytes: test_p2pk_tree(),
                 creation_height: 100,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -1610,13 +1626,13 @@ mod tests {
             inputs: vec![Input {
                 box_id: BoxId([box_seed; 32]),
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![
                 ErgoBoxCandidate {
                     value: 1_000_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                    ergo_tree_bytes: test_p2pk_tree(),
                     creation_height: 100_000,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),
@@ -1681,6 +1697,8 @@ mod tests {
         let pk = [0x02; 33];
 
         // Build a fee output with more than MAX_ASSETS_PER_BOX (100) distinct tokens.
+        // We bypass compute_tx_id because sigma-rust caps BoxTokens at 122,
+        // but this test needs 150 tokens to verify our MAX_ASSETS_PER_BOX capping.
         let mut tokens: Vec<(BoxId, u64)> = Vec::new();
         for i in 0..150u8 {
             let mut id = [0u8; 32];
@@ -1689,7 +1707,31 @@ mod tests {
             tokens.push((BoxId(id), (i as u64) + 1));
         }
 
-        let tx = make_tx_with_fee_and_tokens(1_000_000, 0xF1, tokens);
+        let tx = ErgoTransaction {
+            inputs: vec![Input {
+                box_id: BoxId([0xF1; 32]),
+                proof_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![
+                ErgoBoxCandidate {
+                    value: 1_000_000_000,
+                    ergo_tree_bytes: test_p2pk_tree(),
+                    creation_height: 100_000,
+                    tokens: Vec::new(),
+                    additional_registers: Vec::new(),
+                },
+                ErgoBoxCandidate {
+                    value: 1_000_000,
+                    ergo_tree_bytes: MINERS_FEE_ERGO_TREE.to_vec(),
+                    creation_height: 100_000,
+                    tokens,
+                    additional_registers: Vec::new(),
+                },
+            ],
+            tx_id: TxId([0xF1; 32]), // dummy tx_id (skip sigma-rust)
+        };
         let fee_tx = build_fee_collection_tx(&[tx], 200, &pk, 720).expect("should produce fee tx");
 
         let miner_out = &fee_tx.output_candidates[0];
@@ -1824,7 +1866,7 @@ mod tests {
             inputs: vec![Input {
                 box_id: BoxId([0xEE; 32]),
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
@@ -2057,12 +2099,12 @@ mod tests {
             inputs: vec![Input {
                 box_id: shared_box,
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                ergo_tree_bytes: test_p2pk_tree(),
                 creation_height: 100,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -2075,12 +2117,12 @@ mod tests {
             inputs: vec![Input {
                 box_id: shared_box,
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 2_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x03],
+                ergo_tree_bytes: test_p2pk_tree_alt(0x03),
                 creation_height: 100,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -2138,13 +2180,13 @@ mod tests {
             inputs: vec![Input {
                 box_id: BoxId([0xA0; 32]),
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![
                 ErgoBoxCandidate {
                     value: 5_000_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                    ergo_tree_bytes: test_p2pk_tree(),
                     creation_height: next_height,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),
@@ -2170,13 +2212,13 @@ mod tests {
             inputs: vec![Input {
                 box_id: chained_box_id,
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![
                 ErgoBoxCandidate {
                     value: 4_000_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x03],
+                    ergo_tree_bytes: test_p2pk_tree_alt(0x03),
                     creation_height: next_height,
                     tokens: Vec::new(),
                     additional_registers: Vec::new(),
@@ -2241,12 +2283,12 @@ mod tests {
             inputs: vec![Input {
                 box_id: BoxId([0xB0; 32]),
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 10_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x02],
+                ergo_tree_bytes: test_p2pk_tree(),
                 creation_height: next_height,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -2262,12 +2304,12 @@ mod tests {
             inputs: vec![Input {
                 box_id: chained_box_id,
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 5_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x03],
+                ergo_tree_bytes: test_p2pk_tree_alt(0x03),
                 creation_height: next_height,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -2281,12 +2323,12 @@ mod tests {
             inputs: vec![Input {
                 box_id: chained_box_id,
                 proof_bytes: Vec::new(),
-                extension_bytes: Vec::new(),
+                extension_bytes: vec![0x00],
             }],
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 3_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x04],
+                ergo_tree_bytes: test_p2pk_tree_alt(0x04),
                 creation_height: next_height,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
