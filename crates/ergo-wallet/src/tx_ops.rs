@@ -170,13 +170,29 @@ fn tracked_to_ergo_box(tb: &TrackedBox) -> Result<ErgoBox, TxOpsError> {
 }
 
 // ---------------------------------------------------------------------------
+// BoxSelectionStrategy
+// ---------------------------------------------------------------------------
+
+/// Strategy for selecting input boxes to satisfy a transaction's target value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxSelectionStrategy {
+    /// Use `SimpleBoxSelector` with boxes in their original order.
+    #[default]
+    Simple,
+    /// Sort boxes largest-first before selection. Produces fewer inputs when
+    /// a single large box can satisfy the target, reducing transaction size
+    /// and fees.
+    ValueOptimized,
+}
+
+// ---------------------------------------------------------------------------
 // build_unsigned_tx
 // ---------------------------------------------------------------------------
 
 /// Build an unsigned transaction from payment requests.
 ///
 /// 1. Compute target ERG and tokens from all payment requests + fee
-/// 2. Select boxes using [`SimpleBoxSelector`]
+/// 2. Select boxes using [`SimpleBoxSelector`] (optionally pre-sorted by strategy)
 /// 3. Build outputs from payment requests
 /// 4. Build unsigned tx via [`TxBuilder`]
 ///
@@ -187,6 +203,27 @@ pub fn build_unsigned_tx(
     change_address: &str,
     unspent_boxes: &[TrackedBox],
     current_height: u32,
+) -> Result<(UnsignedTransaction, Vec<[u8; 32]>), TxOpsError> {
+    build_unsigned_tx_with_strategy(
+        requests,
+        fee,
+        change_address,
+        unspent_boxes,
+        current_height,
+        BoxSelectionStrategy::Simple,
+    )
+}
+
+/// Build an unsigned transaction with an explicit box selection strategy.
+///
+/// See [`build_unsigned_tx`] for the default (Simple) variant.
+pub fn build_unsigned_tx_with_strategy(
+    requests: &[PaymentRequest],
+    fee: u64,
+    change_address: &str,
+    unspent_boxes: &[TrackedBox],
+    current_height: u32,
+    strategy: BoxSelectionStrategy,
 ) -> Result<(UnsignedTransaction, Vec<[u8; 32]>), TxOpsError> {
     if requests.is_empty() {
         return Err(TxOpsError::BuildError(
@@ -227,10 +264,16 @@ pub fn build_unsigned_tx(
         .collect::<Result<Vec<_>, TxOpsError>>()?;
 
     // --- Convert TrackedBox -> ErgoBox --------------------------------------
-    let ergo_boxes: Vec<ErgoBox> = unspent_boxes
+    let mut ergo_boxes: Vec<ErgoBox> = unspent_boxes
         .iter()
         .map(tracked_to_ergo_box)
         .collect::<Result<Vec<_>, TxOpsError>>()?;
+
+    // Apply selection strategy: ValueOptimized sorts boxes largest-first
+    // so the greedy SimpleBoxSelector picks fewer, larger boxes.
+    if strategy == BoxSelectionStrategy::ValueOptimized {
+        ergo_boxes.sort_by(|a, b| b.value.as_u64().cmp(a.value.as_u64()));
+    }
 
     // --- Select inputs using SimpleBoxSelector ------------------------------
     let target_balance = BoxValue::new(total_erg)
@@ -609,6 +652,72 @@ mod tests {
         let total: u64 = result.iter().map(|b| b.value).sum();
         assert_eq!(total, 3_000_000_000);
         assert_eq!(result.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // BoxSelectionStrategy tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn box_selection_strategy_default_is_simple() {
+        assert_eq!(
+            BoxSelectionStrategy::default(),
+            BoxSelectionStrategy::Simple
+        );
+    }
+
+    #[test]
+    fn collect_boxes_value_optimized_prefers_large_box() {
+        // Three boxes: 1 ERG, 5 ERG, 2 ERG (in original order)
+        // Simple (original order) needs the first 2 boxes (1+5=6) to reach 3 ERG target.
+        // ValueOptimized (sorted largest-first: 5,2,1) only needs 1 box (5 ERG).
+        let boxes_orig = vec![
+            make_box(1, 1_000_000_000, vec![]),
+            make_box(2, 5_000_000_000, vec![]),
+            make_box(3, 2_000_000_000, vec![]),
+        ];
+
+        // Simple strategy: greedy from original order
+        let simple_result = collect_boxes(&boxes_orig, 3_000_000_000, &[]).unwrap();
+
+        // ValueOptimized: sort largest-first, then greedy
+        let mut sorted_boxes = boxes_orig.clone();
+        sorted_boxes.sort_by(|a, b| b.value.cmp(&a.value));
+        let optimized_result = collect_boxes(&sorted_boxes, 3_000_000_000, &[]).unwrap();
+
+        // Optimized should select fewer (or equal) boxes
+        assert!(
+            optimized_result.len() <= simple_result.len(),
+            "ValueOptimized ({}) should use <= boxes than Simple ({})",
+            optimized_result.len(),
+            simple_result.len()
+        );
+        // Specifically: optimized should need only 1 box (the 5 ERG one)
+        assert_eq!(optimized_result.len(), 1);
+        assert_eq!(optimized_result[0].value, 5_000_000_000);
+    }
+
+    #[test]
+    fn both_strategies_produce_valid_selection() {
+        // Both strategies should collect enough value for the target
+        let boxes = vec![
+            make_box(1, 1_000_000_000, vec![]),
+            make_box(2, 3_000_000_000, vec![]),
+            make_box(3, 2_000_000_000, vec![]),
+        ];
+        let target = 4_000_000_000u64;
+
+        // Simple
+        let simple = collect_boxes(&boxes, target, &[]).unwrap();
+        let simple_total: u64 = simple.iter().map(|b| b.value).sum();
+        assert!(simple_total >= target);
+
+        // ValueOptimized (pre-sort)
+        let mut sorted = boxes.clone();
+        sorted.sort_by(|a, b| b.value.cmp(&a.value));
+        let optimized = collect_boxes(&sorted, target, &[]).unwrap();
+        let opt_total: u64 = optimized.iter().map(|b| b.value).sum();
+        assert!(opt_total >= target);
     }
 
     // -----------------------------------------------------------------------

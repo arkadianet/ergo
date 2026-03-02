@@ -564,6 +564,14 @@ pub struct ScriptCompileResponse {
     pub address: String,
 }
 
+/// JSON response for `POST /script/compile`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptFullCompileResponse {
+    pub ergo_tree: String,
+    pub address: String,
+}
+
 // ---------------------------------------------------------------------------
 // Query params
 // ---------------------------------------------------------------------------
@@ -802,14 +810,6 @@ fn ergo_tx_to_response(tx: &ErgoTransaction, size: usize) -> TransactionResponse
                 })
                 .collect();
 
-            let mut registers = serde_json::Map::new();
-            for (reg_idx, val) in &out.additional_registers {
-                registers.insert(
-                    format!("R{}", reg_idx),
-                    serde_json::Value::String(hex::encode(val)),
-                );
-            }
-
             let box_id = {
                 let bid = compute_box_id(&tx.tx_id, idx as u16);
                 Some(hex::encode(bid.0))
@@ -821,7 +821,7 @@ fn ergo_tx_to_response(tx: &ErgoTransaction, size: usize) -> TransactionResponse
                 ergo_tree: hex::encode(&out.ergo_tree_bytes),
                 creation_height: out.creation_height,
                 assets,
-                additional_registers: serde_json::Value::Object(registers),
+                additional_registers: render_registers(&out.additional_registers, false),
             }
         })
         .collect();
@@ -1005,6 +1005,53 @@ fn encode_byte_array_constant(data: &[u8]) -> Vec<u8> {
     }
     result.extend_from_slice(data);
     result
+}
+
+/// Render a register value with sigma type information.
+///
+/// Parses the raw register bytes using sigma-rust's `RegisterValue` and
+/// returns a JSON object with `serializedValue` (hex), `sigmaType`, and
+/// `renderedValue`. Falls back to hex-only on parse failure.
+fn render_register_typed(bytes: &[u8]) -> serde_json::Value {
+    use ergo_lib::ergotree_ir::chain::ergo_box::RegisterValue;
+
+    let hex_val = hex::encode(bytes);
+
+    let reg_val = RegisterValue::sigma_parse_bytes(bytes);
+    match reg_val.as_constant() {
+        Ok(constant) => {
+            serde_json::json!({
+                "serializedValue": hex_val,
+                "sigmaType": format!("{}", constant.tpe),
+                "renderedValue": format!("{:?}", constant.v)
+            })
+        }
+        Err(_) => {
+            // Parse failure — fall back to hex only
+            serde_json::json!({
+                "serializedValue": hex_val,
+                "sigmaType": null,
+                "renderedValue": null
+            })
+        }
+    }
+}
+
+/// Render registers for a transaction output.
+///
+/// When `typed` is true, each register value includes sigma type information.
+/// When `typed` is false (default), register values are plain hex strings.
+fn render_registers(regs: &[(u8, Vec<u8>)], typed: bool) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (reg_idx, val) in regs {
+        let key = format!("R{}", reg_idx);
+        if typed {
+            map.insert(key, render_register_typed(val));
+        } else {
+            map.insert(key, serde_json::Value::String(hex::encode(val)));
+        }
+    }
+    serde_json::Value::Object(map)
 }
 
 /// Convert an [`IndexedErgoBox`] to an API response.
@@ -1845,6 +1892,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/script/p2shAddress",
             axum::routing::post(script_p2sh_address_handler),
+        )
+        .route(
+            "/script/compile",
+            axum::routing::post(script_compile_handler),
         )
         .route(
             "/script/executeWithContext",
@@ -3693,6 +3744,20 @@ async fn script_p2sh_address_handler(
     let network_prefix = network_prefix_from_str(&state.network);
     let addr = address::encode_address(network_prefix, address::AddressType::P2SH, &hash[..24]);
     Ok(Json(ScriptCompileResponse { address: addr }))
+}
+
+/// `POST /script/compile` — compile ErgoScript source to ErgoTree hex and P2S address.
+async fn script_compile_handler(
+    State(state): State<ApiState>,
+    Json(req): Json<ScriptCompileRequest>,
+) -> Result<Json<ScriptFullCompileResponse>, (StatusCode, String)> {
+    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
+    let network_prefix = network_prefix_from_str(&state.network);
+    let addr = address::encode_address(network_prefix, address::AddressType::P2S, &tree_bytes);
+    Ok(Json(ScriptFullCompileResponse {
+        ergo_tree: hex::encode(&tree_bytes),
+        address: addr,
+    }))
 }
 
 /// Compile ErgoScript source code to serialized ErgoTree bytes.
@@ -8058,6 +8123,44 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Register rendering tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_register_typed_sint_constant() {
+        // SInt constant 42: type byte 0x04 (SInt), value zigzag(42) = 84 = 0x54
+        let bytes = vec![0x04, 0x54];
+        let result = render_register_typed(&bytes);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["serializedValue"], "0454");
+        // sigma type should mention SInt
+        let sigma_type = obj["sigmaType"].as_str().unwrap();
+        assert!(
+            sigma_type.contains("Int"),
+            "sigma type should contain Int: {sigma_type}"
+        );
+    }
+
+    #[test]
+    fn render_registers_default_is_hex() {
+        let regs = vec![(4, vec![0x04, 0x54])];
+        let result = render_registers(&regs, false);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["R4"], "0454");
+    }
+
+    #[test]
+    fn render_registers_typed_includes_sigma_type() {
+        let regs = vec![(4, vec![0x04, 0x54])];
+        let result = render_registers(&regs, true);
+        let obj = result.as_object().unwrap();
+        let r4 = obj["R4"].as_object().unwrap();
+        assert!(r4.contains_key("serializedValue"));
+        assert!(r4.contains_key("sigmaType"));
+        assert!(r4.contains_key("renderedValue"));
+    }
+
+    // -----------------------------------------------------------------
     // UTXO endpoint tests
     // -----------------------------------------------------------------
 
@@ -8214,6 +8317,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_script_compile_returns_tree_and_address() {
+        let (state, _dir) = test_api_state();
+        let app = build_router(state);
+        let body = serde_json::json!({"source": "HEIGHT + 1"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/script/compile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tree_hex = json["ergoTree"].as_str().unwrap();
+        assert!(!tree_hex.is_empty(), "ergoTree should be non-empty hex");
+        let addr = json["address"].as_str().unwrap();
+        assert!(!addr.is_empty(), "address should be non-empty");
+        // Verify address decodes as P2S
+        let decoded = address::decode_address(addr).unwrap();
+        assert_eq!(decoded.address_type, address::AddressType::P2S);
+        // Verify ergoTree matches the address content
+        let tree_bytes = hex::decode(tree_hex).unwrap();
+        assert_eq!(decoded.content_bytes, tree_bytes);
     }
 
     // -----------------------------------------------------------------

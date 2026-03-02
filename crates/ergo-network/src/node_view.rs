@@ -1153,9 +1153,19 @@ impl NodeViewHolder {
         }
 
         // Stage 5c: Sigma proof verification (UTXO mode, above checkpoint).
+        //
+        // Three-phase pattern:
+        //   Phase 1 (sequential): convert context once, compute initial+token costs,
+        //           batch-resolve data input boxes, early-exit on cost budget.
+        //   Phase 2 (parallel via rayon): sigma verification across all txs.
+        //   Phase 3 (sequential): accumulate sigma costs in tx order, final budget check.
         if !self.digest_mode && block.header.height > self.checkpoint_height {
-            use ergo_consensus::sigma_verify::{verify_transaction, SigmaStateContext};
+            use ergo_consensus::sigma_verify::{
+                convert_state_context, verify_transaction_with_sigma_ctx, SigmaStateContext,
+            };
+            use rayon::prelude::*;
 
+            // ── Phase 1: Sequential prep ────────────────────────────
             let sigma_ctx = SigmaStateContext {
                 last_headers: self.get_last_headers(10),
                 current_height: block.header.height,
@@ -1169,21 +1179,58 @@ impl NodeViewHolder {
                 current_parent_id: block.header.parent_id.0,
             };
 
+            // Convert once and share across all txs (avoids per-tx EC-point
+            // parsing, parameter BTreeMap lookups, and PreHeader construction).
+            let sigma_state_ctx = convert_state_context(&sigma_ctx)
+                .map_err(|e| NodeViewError::TxValidation(format!("sigma context: {e}")))?;
+
             let max_block_cost = self.voting_epoch_info.parameters.max_block_cost() as u64;
             let mut accumulated_cost: u64 = 0;
 
+            // Deduplicate and batch-resolve all data input boxes into a cache.
+            let mut data_box_cache: std::collections::HashMap<
+                ergo_types::transaction::BoxId,
+                ergo_types::transaction::ErgoBox,
+            > = std::collections::HashMap::new();
             for (i, tx) in transactions.iter().enumerate() {
-                // Compute initial cost for this transaction.
+                for di in &tx.data_inputs {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        data_box_cache.entry(di.box_id)
+                    {
+                        let b = self
+                            .utxo_state
+                            .get_ergo_box(&di.box_id)
+                            .map_err(|e| {
+                                NodeViewError::TxValidation(format!(
+                                    "tx {} data input box lookup: {e}",
+                                    i
+                                ))
+                            })?
+                            .ok_or_else(|| {
+                                NodeViewError::TxValidation(format!(
+                                    "tx {} data input box {} not found in UTXO set",
+                                    i, di.box_id
+                                ))
+                            })?;
+                        entry.insert(b);
+                    }
+                }
+            }
+
+            // Per-tx prep: compute initial+token costs, build data_boxes vec.
+            struct TxPrep {
+                data_boxes: Vec<ergo_types::transaction::ErgoBox>,
+            }
+            let mut prepared: Vec<TxPrep> = Vec::with_capacity(transactions.len());
+
+            for (i, tx) in transactions.iter().enumerate() {
                 let initial_cost = ergo_consensus::sigma_verify::compute_initial_tx_cost(
                     tx,
                     &self.voting_epoch_info.parameters,
                 );
                 accumulated_cost = accumulated_cost.saturating_add(initial_cost);
 
-                // Use input_boxes from Stage 5b (needed for token access cost).
                 let input_boxes = &all_input_boxes[i];
-
-                // Add token access cost (Rule 501).
                 let token_cost = ergo_consensus::sigma_verify::compute_token_access_cost(
                     input_boxes,
                     &tx.output_candidates,
@@ -1199,32 +1246,43 @@ impl NodeViewHolder {
                     )));
                 }
 
-                // Resolve data input boxes (mandatory — Scala rule txDataBoxes).
-                let mut data_boxes = Vec::new();
-                for di in &tx.data_inputs {
-                    match self.utxo_state.get_ergo_box(&di.box_id) {
-                        Ok(Some(b)) => data_boxes.push(b),
-                        _ => {
-                            return Err(NodeViewError::TxValidation(format!(
-                                "tx {} data input box {} not found in UTXO set",
-                                i, di.box_id
-                            )));
-                        }
-                    }
-                }
+                // Build data_boxes from cache (HashMap lookup, not AVL traversal).
+                let data_boxes: Vec<ergo_types::transaction::ErgoBox> = tx
+                    .data_inputs
+                    .iter()
+                    .map(|di| data_box_cache[&di.box_id].clone())
+                    .collect();
 
-                let sigma_cost = verify_transaction(
-                    tx,
-                    input_boxes,
-                    &data_boxes,
-                    &sigma_ctx,
-                    self.checkpoint_height,
-                )
-                .map_err(|e| NodeViewError::TxValidation(format!("tx {} sigma: {e}", i)))?;
+                prepared.push(TxPrep { data_boxes });
+            }
+
+            // ── Phase 2: Parallel sigma verification via rayon ──────
+            let sigma_results: Vec<Result<u64, (usize, String)>> = transactions
+                .par_iter()
+                .zip(all_input_boxes.par_iter())
+                .zip(prepared.par_iter())
+                .enumerate()
+                .map(|(i, ((tx, input_boxes), prep))| {
+                    verify_transaction_with_sigma_ctx(
+                        tx,
+                        input_boxes,
+                        &prep.data_boxes,
+                        &sigma_state_ctx,
+                        block.header.height,
+                        self.checkpoint_height,
+                    )
+                    .map_err(|e| (i, format!("{e}")))
+                })
+                .collect();
+
+            // ── Phase 3: Sequential cost accumulation ───────────────
+            for result in sigma_results {
+                let sigma_cost = result.map_err(|(i, e)| {
+                    NodeViewError::TxValidation(format!("tx {} sigma: {e}", i))
+                })?;
                 accumulated_cost = accumulated_cost.saturating_add(sigma_cost);
             }
 
-            // Final check: the last tx's sigma cost may have pushed total over the limit.
             if accumulated_cost > max_block_cost {
                 return Err(NodeViewError::TxValidation(format!(
                     "total block cost {} exceeds max {}",
