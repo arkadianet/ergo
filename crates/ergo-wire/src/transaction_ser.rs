@@ -1,8 +1,8 @@
-//! Binary serialization of Ergo transactions, matching the sigma-rust wire format.
+//! Binary serialization of Ergo transactions, matching the Scorex/Ergo wire format.
 //!
-//! Key encoding conventions:
-//! - Input/output/data-input counts: fixed 2-byte BE u16 (`put_sigma_u16`)
-//! - Proof length: fixed 2-byte BE u16
+//! Key encoding conventions (ALL counts use Scorex VLQ, NOT fixed-width):
+//! - Input/output/data-input counts: VLQ u32 (`put_uint`)
+//! - Proof length: VLQ u32 (`put_uint`)
 //! - Box value: zigzag+VLQ i64 (`put_long`)
 //! - Tree length, creation_height, token_count, token_id_index: VLQ u32 (`put_uint`)
 //! - Token amount: zigzag+VLQ i64 (`put_long`)
@@ -12,7 +12,7 @@
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use ergo_types::transaction::*;
 
-use crate::sigma_byte::{get_sigma_u16, put_sigma_u16, skip_sigma_constant};
+use crate::sigma_byte::skip_sigma_constant;
 use crate::vlq::{get_long, get_uint, put_long, put_uint, CodecError};
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ pub fn serialize_transaction(tx: &ErgoTransaction) -> Vec<u8> {
 }
 
 /// Serialize a transaction without proofs (for tx_id computation).
-/// Proof bytes are replaced with u16(0).
+/// Proof bytes are replaced with VLQ(0).
 pub fn serialize_transaction_without_proofs(tx: &ErgoTransaction) -> Vec<u8> {
     serialize_tx_inner(tx, false)
 }
@@ -42,13 +42,13 @@ pub fn parse_transaction(data: &[u8]) -> Result<ErgoTransaction, CodecError> {
 /// from a shared byte stream (Scala writes transactions without length prefixes).
 pub fn parse_transaction_from_reader(reader: &mut &[u8]) -> Result<ErgoTransaction, CodecError> {
     // --- Inputs ---
-    let input_count = get_sigma_u16(reader)? as usize;
+    let input_count = get_uint(reader)? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {
         let box_id = BoxId(read_array::<32>(reader)?);
 
         // proof_bytes: sigma u16 length + raw bytes
-        let proof_len = get_sigma_u16(reader)? as usize;
+        let proof_len = get_uint(reader)? as usize;
         let proof_bytes = read_bytes(reader, proof_len)?;
 
         // extension_bytes: opaque, capture raw bytes
@@ -62,7 +62,7 @@ pub fn parse_transaction_from_reader(reader: &mut &[u8]) -> Result<ErgoTransacti
     }
 
     // --- Data inputs ---
-    let data_input_count = get_sigma_u16(reader)? as usize;
+    let data_input_count = get_uint(reader)? as usize;
     let mut data_inputs = Vec::with_capacity(data_input_count);
     for _ in 0..data_input_count {
         let box_id = BoxId(read_array::<32>(reader)?);
@@ -77,7 +77,7 @@ pub fn parse_transaction_from_reader(reader: &mut &[u8]) -> Result<ErgoTransacti
     }
 
     // --- Outputs ---
-    let output_count = get_sigma_u16(reader)? as usize;
+    let output_count = get_uint(reader)? as usize;
     let mut output_candidates = Vec::with_capacity(output_count);
     for _ in 0..output_count {
         output_candidates.push(parse_box_candidate(reader, &distinct_token_ids)?);
@@ -212,15 +212,15 @@ fn serialize_tx_inner(tx: &ErgoTransaction, include_proofs: bool) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
 
     // --- Inputs ---
-    put_sigma_u16(&mut buf, tx.inputs.len() as u16);
+    put_uint(&mut buf, tx.inputs.len() as u32);
     for input in &tx.inputs {
         buf.extend_from_slice(&input.box_id.0);
 
         if include_proofs {
-            put_sigma_u16(&mut buf, input.proof_bytes.len() as u16);
+            put_uint(&mut buf, input.proof_bytes.len() as u32);
             buf.extend_from_slice(&input.proof_bytes);
         } else {
-            put_sigma_u16(&mut buf, 0);
+            put_uint(&mut buf, 0);
         }
 
         // extension_bytes: write as-is (already in wire format)
@@ -228,7 +228,7 @@ fn serialize_tx_inner(tx: &ErgoTransaction, include_proofs: bool) -> Vec<u8> {
     }
 
     // --- Data inputs ---
-    put_sigma_u16(&mut buf, tx.data_inputs.len() as u16);
+    put_uint(&mut buf, tx.data_inputs.len() as u32);
     for di in &tx.data_inputs {
         buf.extend_from_slice(&di.box_id.0);
     }
@@ -241,7 +241,7 @@ fn serialize_tx_inner(tx: &ErgoTransaction, include_proofs: bool) -> Vec<u8> {
     }
 
     // --- Outputs ---
-    put_sigma_u16(&mut buf, tx.output_candidates.len() as u16);
+    put_uint(&mut buf, tx.output_candidates.len() as u32);
     for candidate in &tx.output_candidates {
         serialize_box_candidate(candidate, &distinct_token_ids, &mut buf);
     }
@@ -570,7 +570,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 9. serialize_without_proofs: proof bytes are replaced with u16(0)
+    // 9. serialize_without_proofs: proof bytes are replaced with VLQ(0)
     // -----------------------------------------------------------------------
     #[test]
     fn serialize_without_proofs_replaces_proofs() {
@@ -580,22 +580,17 @@ mod tests {
         let with_proofs = serialize_transaction(&tx);
         let without_proofs = serialize_transaction_without_proofs(&tx);
 
-        // Without proofs should be shorter (no 10 proof bytes, just u16(0))
+        // Without proofs should be shorter (no 10 proof bytes, just VLQ(0))
         assert!(without_proofs.len() < with_proofs.len());
 
-        // Verify: after box_id (32 bytes), the next 2 bytes should be 0x00, 0x00
-        // First 2 bytes are put_sigma_u16(input_count = 1) = [0x00, 0x01]
+        // Verify: after box_id (32 bytes), the next byte should be 0x00 (VLQ(0))
+        // First byte is put_uint(input_count = 1) = VLQ(1) = [0x01]
         // Then 32 bytes of box_id
-        // Then 2 bytes of proof length
-        let proof_len_offset = 2 + 32; // sigma_u16(1) + box_id
+        // Then VLQ(0) = [0x00] for proof length
+        let proof_len_offset = 1 + 32; // VLQ(1) + box_id
         assert_eq!(
             without_proofs[proof_len_offset], 0x00,
-            "proof length high byte should be 0"
-        );
-        assert_eq!(
-            without_proofs[proof_len_offset + 1],
-            0x00,
-            "proof length low byte should be 0"
+            "proof length VLQ(0) should be 0x00"
         );
     }
 
@@ -667,20 +662,20 @@ mod tests {
         let mut buf = Vec::new();
 
         // 1 input
-        put_sigma_u16(&mut buf, 1);
+        put_uint(&mut buf, 1);
         buf.extend_from_slice(&[0x11; 32]); // box_id
-        put_sigma_u16(&mut buf, 0); // no proof
+        put_uint(&mut buf, 0); // no proof
         buf.push(0x00); // empty extension
 
         // 0 data inputs
-        put_sigma_u16(&mut buf, 0);
+        put_uint(&mut buf, 0);
 
         // 1 distinct token ID
         put_uint(&mut buf, 1);
         buf.extend_from_slice(&[0xAA; 32]); // the one token
 
         // 1 output
-        put_sigma_u16(&mut buf, 1);
+        put_uint(&mut buf, 1);
         put_long(&mut buf, 1_000_000); // value
         put_uint(&mut buf, 3); // ergo_tree len
         buf.extend_from_slice(&[0x00, 0x08, 0xcd]); // ergo_tree

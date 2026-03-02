@@ -58,7 +58,7 @@ impl ModeFeature {
         let state_type = StateTypeCode::from_byte(data[0]).ok_or(CodecError::UnexpectedEof)?;
         let verifying_transactions = data[1] > 0;
         let mut reader = &data[2..];
-        let nipopow_bootstrapped = vlq::get_option(&mut reader, |r| vlq::get_int(r))?;
+        let nipopow_bootstrapped = vlq::get_option(&mut reader, vlq::get_int)?;
         let blocks_to_keep = vlq::get_int(&mut reader)?;
         Ok(Self {
             state_type,
