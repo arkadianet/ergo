@@ -19,6 +19,14 @@ const BODY_SECTION_TYPES_DIGEST: [u8; 3] = [BLOCK_TX_TYPE_ID, AD_PROOFS_TYPE_ID,
 /// Body section types for UTXO mode: ADProofs are not needed.
 const BODY_SECTION_TYPES_UTXO: [u8; 2] = [BLOCK_TX_TYPE_ID, EXTENSION_TYPE_ID];
 
+/// Average block interval in milliseconds (2 minutes).
+const BLOCK_INTERVAL_MS: u64 = 120_000;
+
+/// Number of blocks' worth of time we allow the header chain tip to lag behind
+/// wall-clock time and still consider headers "synced". Matches Scala's
+/// `HeadersChainDiff` mainnet default of 100.
+const HEADER_CHAIN_DIFF: u64 = 100;
+
 /// Current sync state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
@@ -89,6 +97,10 @@ pub struct SyncManager {
     download_window: usize,
     /// When true (UTXO mode), ADProofs (type 104) are not requested during download.
     utxo_mode: bool,
+    /// Becomes true (and stays true) once the header chain tip is within
+    /// `BLOCK_INTERVAL_MS * HEADER_CHAIN_DIFF` of wall-clock time.
+    /// Mirrors Scala's `isHeadersChainSynced` flag.
+    is_headers_chain_synced: bool,
 }
 
 impl SyncManager {
@@ -99,6 +111,7 @@ impl SyncManager {
             max_per_request,
             download_window,
             utxo_mode: false,
+            is_headers_chain_synced: false,
         }
     }
 
@@ -111,6 +124,7 @@ impl SyncManager {
             max_per_request,
             download_window,
             utxo_mode,
+            is_headers_chain_synced: false,
         }
     }
 
@@ -126,6 +140,32 @@ impl SyncManager {
 
     pub fn state(&self) -> SyncState {
         self.state
+    }
+
+    /// Returns whether the header chain is considered synced (tip is recent).
+    pub fn is_headers_chain_synced(&self) -> bool {
+        self.is_headers_chain_synced
+    }
+
+    /// Check if the header chain tip is within `BLOCK_INTERVAL_MS * HEADER_CHAIN_DIFF`
+    /// of the current wall-clock time. Once set, the flag stays true permanently.
+    ///
+    /// Returns `true` if the flag was *newly* set by this call.
+    pub fn check_headers_chain_synced(&mut self, header_timestamp_ms: u64) -> bool {
+        if self.is_headers_chain_synced {
+            return false;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let threshold = BLOCK_INTERVAL_MS * HEADER_CHAIN_DIFF;
+        if now_ms.saturating_sub(header_timestamp_ms) < threshold {
+            self.is_headers_chain_synced = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// Called on periodic tick. Decides what to do next.
@@ -166,10 +206,11 @@ impl SyncManager {
         match self.state {
             SyncState::Idle | SyncState::HeaderSync => {
                 self.state = SyncState::HeaderSync;
-                // Header-first sync: only start block download once headers
-                // are caught up to the network tip.  This prevents block
-                // section traffic from starving header synchronization.
-                if is_caught_up && !self.blocks_to_download.is_empty() {
+                // Transition to block download once the header chain tip is
+                // recent enough (within ~3.3 hours of wall clock), matching
+                // Scala's `isHeadersChainSynced` trigger.  This allows body
+                // downloads to begin while the last ~100 headers still sync.
+                if self.is_headers_chain_synced && !self.blocks_to_download.is_empty() {
                     self.state = SyncState::BlockDownload;
                     self.request_block_sections(&mut actions, tracker, available_peers, history);
                 }
@@ -730,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn header_sync_transitions_to_block_download_when_caught_up() {
+    fn header_sync_transitions_to_block_download_when_headers_chain_synced() {
         let dir = tempfile::tempdir().unwrap();
         let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
         let mut tracker = DeliveryTracker::new(30, 3);
@@ -743,8 +784,15 @@ mod tests {
         mgr.state = SyncState::HeaderSync;
         mgr.enqueue_block_downloads(ids);
 
-        // Headers caught up → should transition to BlockDownload.
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
+        // Simulate header chain synced via recent timestamp.
+        let recent_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 60_000; // 1 minute ago — well within threshold
+        assert!(mgr.check_headers_chain_synced(recent_ts));
+
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         assert!(actions
@@ -753,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn header_sync_stays_when_not_caught_up() {
+    fn header_sync_stays_when_headers_chain_not_synced() {
         let dir = tempfile::tempdir().unwrap();
         let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
         let mut tracker = DeliveryTracker::new(30, 3);
@@ -763,11 +811,44 @@ mod tests {
         mgr.state = SyncState::HeaderSync;
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
-        // Headers NOT caught up → should stay in HeaderSync.
+        // is_headers_chain_synced is false → should stay in HeaderSync.
         let _actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert_eq!(mgr.blocks_remaining(), 2); // blocks still queued
+    }
+
+    #[test]
+    fn check_headers_chain_synced_with_recent_timestamp() {
+        let mut mgr = SyncManager::new(10, 64);
+        assert!(!mgr.is_headers_chain_synced());
+
+        // Timestamp 1 minute ago — within 100 * 120s = 12000s threshold.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let recent = now_ms - 60_000;
+
+        assert!(mgr.check_headers_chain_synced(recent));
+        assert!(mgr.is_headers_chain_synced());
+        // Second call returns false (already set).
+        assert!(!mgr.check_headers_chain_synced(recent));
+    }
+
+    #[test]
+    fn check_headers_chain_synced_with_old_timestamp() {
+        let mut mgr = SyncManager::new(10, 64);
+
+        // Timestamp 24 hours ago — way beyond threshold.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let old = now_ms - 86_400_000;
+
+        assert!(!mgr.check_headers_chain_synced(old));
+        assert!(!mgr.is_headers_chain_synced());
     }
 
     #[test]

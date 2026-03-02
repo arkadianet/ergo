@@ -733,6 +733,18 @@ pub async fn run(
                             let _ = sync_history.try_catch_up_with_primary();
                             sync_mgr.on_headers_received(&new_header_ids, sync_history);
 
+                            // Check if the header chain tip is recent enough to
+                            // trigger block body downloads (Scala's isHeadersChainSynced).
+                            if let Some(newest) = cached_sync_headers.first() {
+                                if sync_mgr.check_headers_chain_synced(newest.timestamp) {
+                                    tracing::info!(
+                                        tip_timestamp = newest.timestamp,
+                                        tip_height = newest.height,
+                                        "headers chain synced — block body download will begin"
+                                    );
+                                }
+                            }
+
                             // Send targeted SyncInfoV2 to the delivering peer for a
                             // tight request/response loop.  No broadcast here — that
                             // is handled by the periodic sync_tick.
@@ -897,7 +909,12 @@ pub async fn run(
             }
 
             _ = check_modifiers_tick.tick() => {
-                handle_check_modifiers(&mut pool, sync_history, &mut tracker, &sync_tracker).await;
+                // Only proactively download block sections once the header
+                // chain tip is recent, matching Scala's isHeadersChainSynced
+                // gate on `nextModifiersToDownload`.
+                if sync_mgr.is_headers_chain_synced() {
+                    handle_check_modifiers(&mut pool, sync_history, &mut tracker, &sync_tracker).await;
+                }
             }
 
             // Fast stale-header reassignment: every 1 s, check for header
