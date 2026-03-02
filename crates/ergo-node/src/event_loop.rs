@@ -302,21 +302,11 @@ pub async fn run(
         s.is_mining = candidate_gen.is_some();
     }
 
-    // During HeaderSync the targeted SyncInfo loop drives header discovery;
-    // broadcasting to all peers creates redundant Inv responses that steal IDs
-    // from the targeted pipeline.  Broadcast only every 6th tick (~30 s) during
-    // header sync to keep the targeted loop uncontested while still discovering
-    // new peer chain statuses.
-    let mut sync_broadcast_counter: u32 = 0;
-
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
             _ = sync_tick.tick() => {
-                sync_broadcast_counter += 1;
-                let suppress_broadcast = sync_mgr.state() == ergo_network::sync_manager::SyncState::HeaderSync
-                    && !sync_broadcast_counter.is_multiple_of(6);
                 handle_sync_tick(
                     &mut pool,
                     &mut sync_mgr,
@@ -337,7 +327,6 @@ pub async fn run(
                     cached_state_version,
                     is_digest_mode,
                     &cached_sync_headers,
-                    suppress_broadcast,
                 ).await;
 
                 // Recompute whether the node is synced enough for tx acceptance.
@@ -1259,7 +1248,6 @@ async fn handle_sync_tick(
     cached_state_version: Option<[u8; 32]>,
     is_digest_mode: bool,
     cached_sync_headers: &[ergo_types::header::Header],
-    suppress_broadcast: bool,
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
@@ -1300,17 +1288,6 @@ async fn handle_sync_tick(
         settings.network.sync_info_max_headers,
     );
 
-    // During header sync, suppress broadcast SyncInfo (peer_id=None) to let
-    // the targeted SyncInfo loop run without competition from overlapping Inv
-    // responses.  Non-broadcast actions (block requests, etc.) still execute.
-    let actions: Vec<SyncAction> = if suppress_broadcast {
-        actions
-            .into_iter()
-            .filter(|a| !matches!(a, SyncAction::SendSyncInfo { peer_id: None, .. }))
-            .collect()
-    } else {
-        actions
-    };
     execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
 
     let timed_out = tracker.collect_timed_out();
