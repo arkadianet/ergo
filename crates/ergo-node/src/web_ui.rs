@@ -1151,7 +1151,258 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     // ================================================================
 
     function DashboardPage() {
-      return html`<div class="card"><h2>Dashboard</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+      const { data: info, loading, error } = useApi('/info', 5000);
+      const { setNetwork } = useContext(NetworkContext);
+      const { theme } = useContext(ThemeContext);
+      const chartRef = useRef(null);
+      const canvasRef = useRef(null);
+      const historyRef = useRef([]);
+
+      // Update network context when info loads
+      useEffect(() => {
+        if (info && info.network) {
+          setNetwork(info.network);
+        }
+      }, [info && info.network]);
+
+      // Push sync data to history on each info update
+      useEffect(() => {
+        if (!info) return;
+        const history = historyRef.current;
+        history.push({
+          time: Date.now(),
+          headers: info.headersHeight || 0,
+          blocks: info.fullHeight || 0,
+        });
+        // Keep last 120 entries
+        if (history.length > 120) {
+          history.splice(0, history.length - 120);
+        }
+      }, [info && info.headersHeight, info && info.fullHeight]);
+
+      // Chart.js effect: create/recreate on data or theme change
+      useEffect(() => {
+        if (!canvasRef.current) return;
+        const history = historyRef.current;
+
+        // Destroy previous chart
+        if (chartRef.current) {
+          chartRef.current.destroy();
+          chartRef.current = null;
+        }
+
+        if (history.length < 2) return;
+
+        // Compute rates
+        const labels = [];
+        const headersRates = [];
+        const blocksRates = [];
+
+        for (let i = 1; i < history.length; i++) {
+          const prev = history[i - 1];
+          const curr = history[i];
+          const dtSec = (curr.time - prev.time) / 1000;
+          if (dtSec <= 0) continue;
+          const hRate = Math.max(0, (curr.headers - prev.headers) / dtSec);
+          const bRate = Math.max(0, (curr.blocks - prev.blocks) / dtSec);
+          const d = new Date(curr.time);
+          const hh = String(d.getHours()).padStart(2, '0');
+          const mm = String(d.getMinutes()).padStart(2, '0');
+          const ss = String(d.getSeconds()).padStart(2, '0');
+          labels.push(hh + ':' + mm + ':' + ss);
+          headersRates.push(hRate);
+          blocksRates.push(bRate);
+        }
+
+        // Read colors from CSS variables
+        const cs = getComputedStyle(document.documentElement);
+        const greenColor = cs.getPropertyValue('--accent-green').trim() || '#10b981';
+        const blueColor = cs.getPropertyValue('--accent').trim() || '#2563eb';
+        const textSecondary = cs.getPropertyValue('--text-secondary').trim() || '#6b7280';
+        const borderColor = cs.getPropertyValue('--border').trim() || '#e5e7eb';
+
+        const ctx = canvasRef.current.getContext('2d');
+        chartRef.current = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: 'Headers/s',
+                data: headersRates,
+                borderColor: greenColor,
+                backgroundColor: greenColor + '22',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.3,
+                fill: true,
+              },
+              {
+                label: 'Blocks/s',
+                data: blocksRates,
+                borderColor: blueColor,
+                backgroundColor: blueColor + '22',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.3,
+                fill: true,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 300 },
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+              legend: {
+                labels: { color: textSecondary, boxWidth: 12, padding: 8, font: { size: 11 } },
+              },
+            },
+            scales: {
+              x: {
+                ticks: { color: textSecondary, maxTicksLimit: 8, font: { size: 10 } },
+                grid: { color: borderColor },
+              },
+              y: {
+                beginAtZero: true,
+                ticks: { color: textSecondary, font: { size: 10 } },
+                grid: { color: borderColor },
+              },
+            },
+          },
+        });
+
+        return () => {
+          if (chartRef.current) {
+            chartRef.current.destroy();
+            chartRef.current = null;
+          }
+        };
+      }, [info && info.headersHeight, info && info.fullHeight, theme]);
+
+      // Loading state
+      if (loading) {
+        return html`<div class="card"><h2>Dashboard</h2><${Skeleton} lines=${6} /></div>`;
+      }
+
+      // Error state with no data
+      if (error && !info) {
+        return html`
+          <div class="card">
+            <h2>Dashboard</h2>
+            <p style="color:var(--accent-red)">Failed to load node info \u2014 retrying...</p>
+          </div>
+        `;
+      }
+
+      // Compute statuses
+      const headersCaughtUp = info.headersHeight >= (info.maxPeerHeight || 0) - 1;
+      const blocksCaughtUp = info.fullHeight >= (info.headersHeight || 0) - 1;
+
+      const headersStatus = headersCaughtUp ? 'good'
+        : (info.maxPeerHeight > 0 ? 'warning' : 'normal');
+      const blocksStatus = blocksCaughtUp ? 'good'
+        : (info.headersHeight > 0 ? 'warning' : 'normal');
+
+      // Sync badge
+      let syncBadgeText, syncBadgeVariant;
+      if (headersCaughtUp && blocksCaughtUp) {
+        syncBadgeText = 'Synced';
+        syncBadgeVariant = 'synced';
+      } else if (!headersCaughtUp) {
+        syncBadgeText = 'Syncing Headers...';
+        syncBadgeVariant = 'syncing';
+      } else {
+        syncBadgeText = 'Downloading Blocks...';
+        syncBadgeVariant = 'syncing';
+      }
+
+      const now = new Date();
+      const lastUpdated = String(now.getHours()).padStart(2, '0') + ':'
+        + String(now.getMinutes()).padStart(2, '0') + ':'
+        + String(now.getSeconds()).padStart(2, '0');
+
+      const hasChartData = historyRef.current.length >= 2;
+
+      return html`
+        <div>
+          <div class="stat-grid" style="margin-bottom:1.5rem">
+            <${StatCard}
+              icon="\u2B06"
+              label="Headers Height"
+              value=${fmt(info.headersHeight)}
+              subValue=${' / ' + fmt(info.maxPeerHeight)}
+              status=${headersStatus}
+            />
+            <${StatCard}
+              icon="\u25FC"
+              label="Full Block Height"
+              value=${fmt(info.fullHeight)}
+              subValue=${' / ' + fmt(info.headersHeight)}
+              status=${blocksStatus}
+            />
+            <${StatCard}
+              icon="\u2B21"
+              label="Connected Peers"
+              value=${fmt(info.peersCount)}
+            />
+            <${StatCard}
+              icon="\u21B9"
+              label="Unconfirmed Txs"
+              value=${fmt(info.unconfirmedCount)}
+            />
+          </div>
+
+          <div class="panel-grid">
+            <div class="card">
+              <h2>Sync Status</h2>
+              <div style="margin-bottom:1rem">
+                <${Badge} text=${syncBadgeText} variant=${syncBadgeVariant} />
+              </div>
+              <div style="margin-bottom:0.75rem">
+                <${ProgressBar}
+                  label="Headers"
+                  current=${info.headersHeight || 0}
+                  max=${info.maxPeerHeight || 0}
+                  variant="green"
+                />
+              </div>
+              <div style="margin-bottom:1rem">
+                <${ProgressBar}
+                  label="Full Blocks"
+                  current=${info.fullHeight || 0}
+                  max=${info.headersHeight || 0}
+                  variant="blue"
+                />
+              </div>
+              <div style="position:relative;height:180px;margin-bottom:0.75rem">
+                ${!hasChartData && html`
+                  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--text-secondary);font-style:italic;font-size:0.9rem">
+                    Collecting sync data...
+                  </div>
+                `}
+                <canvas ref=${canvasRef} style="width:100%;height:100%"></canvas>
+              </div>
+              <div style="font-size:0.8rem;color:var(--text-secondary);text-align:right">
+                Last updated: ${lastUpdated}
+              </div>
+            </div>
+
+            <div class="card">
+              <h2>Node Info</h2>
+              <${InfoRow} label="Name" value=${info.name} />
+              <${InfoRow} label="Version" value=${info.appVersion} />
+              <${InfoRow} label="Network" value=${info.network} />
+              <${InfoRow} label="State Type" value=${info.stateType} />
+              <${InfoRow} label="Difficulty" value=${fmt(info.difficulty)} />
+              <${InfoRow} label="Mining" value=${info.isMining ? 'Yes' : 'No'} />
+              <${InfoRow} label="Launch Time" value=${new Date(info.launchTime).toLocaleString()} />
+              <${InfoRow} label="Genesis Block ID" value=${html`<${CopyHash} hash=${info.genesisBlockId} />`} />
+            </div>
+          </div>
+        </div>
+      `;
     }
 
     function NetworkPage() {
