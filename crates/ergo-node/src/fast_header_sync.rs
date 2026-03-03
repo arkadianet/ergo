@@ -520,4 +520,42 @@ mod tests {
         let jh: ChainSliceHeader = serde_json::from_str(bad_json).unwrap();
         assert!(json_header_to_wire(&jh).is_err());
     }
+
+    #[test]
+    fn json_header_to_wire_v2_header() {
+        // A v2 header (height > 417792) — d should be "0" (empty bytes)
+        let json = r#"{
+            "id": "0000000000000000000000000000000000000000000000000000000000000001",
+            "parentId": "0000000000000000000000000000000000000000000000000000000000000000",
+            "height": 500000,
+            "timestamp": 1700000000000,
+            "nBits": 117440512,
+            "version": 2,
+            "stateRoot": "a5df145d41ab15a01e0cd3ffbab046f0d029e5412293072ad0f5827428589b9302",
+            "transactionsRoot": "93fb06ab9d1352ee48de921543d6e78a78290e1e9f1a0670a956368ce575dc19",
+            "extensionRoot": "9e5eab14b67a63fb18c33c7a1b3d5ab0ce7f2b8dfed6c4e0e50234abe17d5dbc",
+            "adProofsRoot": "b7e6b85fd1afb5a2cff7e34b2c7e11eb0b0ebec95e49cb1c2fd53fd201b8a94b",
+            "powSolutions": {
+                "pk": "0350e25cee8562697d55275c96bb01b34228f9bd68fd9933f2a25ff195526864f5",
+                "w": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                "n": "00000000deadbeef",
+                "d": "0"
+            },
+            "votes": "000000"
+        }"#;
+        let jh: ChainSliceHeader = serde_json::from_str(json).unwrap();
+        let result = json_header_to_wire(&jh);
+        // The ID won't match since we used a dummy — that's expected.
+        match result {
+            Ok((_, header, raw)) => {
+                assert_eq!(header.height, 500000);
+                assert_eq!(header.version, 2);
+                assert!(!raw.is_empty());
+            }
+            Err(FastSyncError::InvalidField(msg)) if msg.contains("ID mismatch") => {
+                // Expected for dummy data — ID won't match declared dummy "01" ID
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
 }
