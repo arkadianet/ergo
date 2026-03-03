@@ -21,3 +21,4 @@ sigma-ser = "0.19"
 [dev-dependencies]
 base16 = "0.2"
 ergo-types = { path = "../ergo-types", features = ["test-utils"] }
+proptest = { workspace = true }

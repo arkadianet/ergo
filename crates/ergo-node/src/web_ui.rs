@@ -1638,7 +1638,10 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
           label: 'Address', key: 'address', sortable: true,
           render: (v) => html`<span class="hash">${v || '\u2014'}</span>`
         },
-        { label: 'Agent Name', key: 'name', sortable: true },
+        { label: 'Agent', key: 'name', sortable: true },
+        { label: 'Node Name', key: 'nodeName', sortable: true,
+          render: (v) => v || '\u2014'
+        },
         {
           label: 'Direction', key: 'connectionType',
           render: (v) => v === 'Incoming' ? '\u2193 In' : '\u2191 Out'

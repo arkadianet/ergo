@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use utoipa::OpenApi;
 
 use ergo_consensus::tx_validation::validate_tx_stateless;
 use ergo_consensus::validation_rules::ValidationSettings;
@@ -19,6 +20,9 @@ use ergo_types::transaction::{
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::transaction_ser::{compute_tx_id, parse_transaction, serialize_transaction};
 
+pub(crate) mod handlers;
+mod openapi;
+
 use crate::event_loop::SharedState;
 use crate::mining::{CandidateGenerator, MiningSolution};
 
@@ -27,7 +31,7 @@ use crate::mining::{CandidateGenerator, MiningSolution};
 // ---------------------------------------------------------------------------
 
 /// JSON response for the `/info` endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfoResponse {
     pub name: String,
@@ -57,12 +61,13 @@ pub struct NodeInfoResponse {
     pub eip37_supported: bool,
     pub rest_api_url: Option<String>,
     pub current_time: u64,
+    #[schema(value_type = Object)]
     pub parameters: serde_json::Value,
     pub last_mempool_update_time: u64,
 }
 
 /// JSON response for proof-of-work solution fields.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PowSolutionsResponse {
     pub pk: String,
@@ -72,7 +77,7 @@ pub struct PowSolutionsResponse {
 }
 
 /// JSON response for a block header.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderResponse {
     pub id: String,
@@ -95,7 +100,7 @@ pub struct HeaderResponse {
 }
 
 /// JSON response for a full block.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockResponse {
     pub header: HeaderResponse,
@@ -106,7 +111,7 @@ pub struct BlockResponse {
 }
 
 /// Full transaction JSON response.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionResponse {
     pub id: String,
@@ -116,27 +121,28 @@ pub struct TransactionResponse {
     pub size: usize,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct InputResponse {
     pub box_id: String,
     pub spending_proof: SpendingProofResponse,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendingProofResponse {
     pub proof_bytes: String,
+    #[schema(value_type = Object)]
     pub extension: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DataInputResponse {
     pub box_id: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputResponse {
     pub box_id: Option<String>,
@@ -144,24 +150,25 @@ pub struct OutputResponse {
     pub ergo_tree: String,
     pub creation_height: u32,
     pub assets: Vec<AssetResponse>,
+    #[schema(value_type = Object)]
     pub additional_registers: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetResponse {
     pub token_id: String,
     pub amount: u64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionResponse {
     pub header_id: String,
     pub fields: Vec<(String, String)>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockTransactionsResponse {
     pub header_id: String,
@@ -169,11 +176,13 @@ pub struct BlockTransactionsResponse {
 }
 
 /// JSON response for a connected peer.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerResponse {
     pub address: String,
     pub name: String,
+    /// User-configured node name from the handshake PeerSpec.
+    pub node_name: String,
     pub last_message: u64,
     pub last_handshake: u64,
     pub connection_type: Option<String>,
@@ -194,7 +203,7 @@ pub struct PeerResponse {
 }
 
 /// Lightweight peer map entry for map rendering.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerMapEntry {
     pub lat: f64,
@@ -209,14 +218,14 @@ pub struct PeerMapEntry {
 
 /// JSON request body for submitting a transaction (legacy hex format).
 /// Kept for backward compatibility; the main /transactions endpoint now uses TxJsonTransaction.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[allow(dead_code)]
 pub struct TxSubmitRequest {
     pub bytes: String,
 }
 
 /// JSON response after submitting a transaction.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TxSubmitResponse {
     pub tx_id: String,
@@ -266,7 +275,7 @@ struct TxJsonAsset {
 /// Scala-compatible JSON transaction body for `POST /transactions`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TxJsonTransaction {
+pub(crate) struct TxJsonTransaction {
     inputs: Vec<TxJsonInput>,
     #[serde(default)]
     data_inputs: Vec<TxJsonDataInput>,
@@ -274,14 +283,14 @@ struct TxJsonTransaction {
 }
 
 /// JSON response for the mempool size endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MempoolSizeResponse {
     pub size: usize,
 }
 
 /// JSON response for the modifier lookup endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModifierResponse {
     pub type_id: u8,
@@ -289,7 +298,7 @@ pub struct ModifierResponse {
 }
 
 /// Structured JSON error response matching the Scala node format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ApiError {
     pub error: u16,
     pub reason: String,
@@ -310,7 +319,7 @@ fn api_error(status: StatusCode, detail: &str) -> (StatusCode, Json<ApiError>) {
 }
 
 /// JSON response for P2P layer status.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerStatusResponse {
     pub connected_count: usize,
@@ -319,7 +328,7 @@ pub struct PeerStatusResponse {
 }
 
 /// JSON response for an unconfirmed output in the mempool.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UnconfirmedOutputResponse {
     pub box_id: String,
@@ -331,7 +340,7 @@ pub struct UnconfirmedOutputResponse {
 }
 
 /// JSON response for a mempool spending input lookup.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendingInputResponse {
     pub box_id: String,
@@ -340,7 +349,7 @@ pub struct SpendingInputResponse {
 }
 
 /// JSON response for GET /mining/candidate.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MiningCandidateResponse {
     pub msg: String,
     pub b: u64,
@@ -349,7 +358,7 @@ pub struct MiningCandidateResponse {
 }
 
 /// JSON response for POST /mining/candidateWithTxs.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateWithTxsResponse {
     pub msg: String,
@@ -360,21 +369,21 @@ pub struct CandidateWithTxsResponse {
 }
 
 /// JSON response for GET /mining/rewardAddress.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RewardAddressResponse {
     pub reward_address: String,
 }
 
 /// JSON response for GET /mining/rewardPublicKey.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RewardPublicKeyResponse {
     pub reward_pub_key: String,
 }
 
 /// JSON response for address validation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddressValidationResponse {
     pub address: String,
@@ -384,7 +393,7 @@ pub struct AddressValidationResponse {
 }
 
 /// JSON response for a block Merkle proof.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MerkleProofResponse {
     pub leaf: String,
@@ -392,7 +401,7 @@ pub struct MerkleProofResponse {
 }
 
 /// JSON response for emission contract script addresses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EmissionScriptsResponse {
     pub emission: String,
@@ -401,7 +410,7 @@ pub struct EmissionScriptsResponse {
 }
 
 /// JSON response for a single histogram bin.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HistogramBinResponse {
     pub n_txns: usize,
@@ -411,21 +420,21 @@ pub struct HistogramBinResponse {
 }
 
 /// JSON response for fee estimation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FeeEstimateResponse {
     pub fee: u64,
 }
 
 /// JSON response for wait time estimation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitTimeResponse {
     pub wait_time_millis: u64,
 }
 
 /// JSON response for the `/blockchain/indexedHeight` endpoint.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedHeightResponse {
     pub indexed_height: u32,
@@ -433,7 +442,7 @@ pub struct IndexedHeightResponse {
 }
 
 /// JSON response for an indexed UTXO box from the extra indexer.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedErgoBoxResponse {
     pub box_id: String,
@@ -449,7 +458,7 @@ pub struct IndexedErgoBoxResponse {
 }
 
 /// JSON response for a token amount within a box.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenAmountResponse {
     pub token_id: String,
@@ -457,7 +466,7 @@ pub struct TokenAmountResponse {
 }
 
 /// JSON response for an indexed transaction from the extra indexer.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedErgoTransactionResponse {
     pub id: String,
@@ -471,7 +480,7 @@ pub struct IndexedErgoTransactionResponse {
 }
 
 /// JSON response for paginated transaction results.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PaginatedTxResponse {
     pub items: Vec<IndexedErgoTransactionResponse>,
@@ -479,7 +488,7 @@ pub struct PaginatedTxResponse {
 }
 
 /// JSON response for paginated box results.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PaginatedBoxResponse {
     pub items: Vec<IndexedErgoBoxResponse>,
@@ -487,7 +496,7 @@ pub struct PaginatedBoxResponse {
 }
 
 /// JSON response for an indexed token from the extra indexer.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedTokenResponse {
     pub id: String,
@@ -499,7 +508,7 @@ pub struct IndexedTokenResponse {
 }
 
 /// JSON response for confirmed + unconfirmed balance.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceResponse {
     pub confirmed: BalanceInfoResponse,
@@ -507,7 +516,7 @@ pub struct BalanceResponse {
 }
 
 /// JSON response for a single balance component.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceInfoResponse {
     pub nano_ergs: u64,
@@ -515,7 +524,7 @@ pub struct BalanceInfoResponse {
 }
 
 /// JSON response for a single token balance entry.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenBalanceResponse {
     pub token_id: String,
@@ -525,7 +534,7 @@ pub struct TokenBalanceResponse {
 }
 
 /// JSON response for an indexed block with header + transactions.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedBlockResponse {
     pub header: HeaderResponse,
@@ -534,7 +543,7 @@ pub struct IndexedBlockResponse {
 }
 
 /// JSON response for a PoPow header.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PoPowHeaderResponse {
     pub header: HeaderResponse,
@@ -542,7 +551,7 @@ pub struct PoPowHeaderResponse {
 }
 
 /// JSON response for a NiPoPoW proof.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NipopowProofResponse {
     pub m: u32,
@@ -553,19 +562,19 @@ pub struct NipopowProofResponse {
 }
 
 /// JSON request body for script compilation endpoints.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ScriptCompileRequest {
     pub source: String,
 }
 
 /// JSON response for script compilation endpoints.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ScriptCompileResponse {
     pub address: String,
 }
 
 /// JSON response for `POST /script/compile`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptFullCompileResponse {
     pub ergo_tree: String,
@@ -1686,710 +1695,597 @@ fn tracked_box_to_meta_response(
 /// Build the API router.
 pub fn build_router(state: ApiState) -> Router {
     let router = Router::new()
-        .route("/swagger", axum::routing::get(swagger_handler))
-        .route("/panel", axum::routing::get(panel_handler))
+        .route(
+            "/swagger",
+            axum::routing::get(handlers::web_ui::swagger_handler),
+        )
+        .route(
+            "/panel",
+            axum::routing::get(handlers::web_ui::panel_handler),
+        )
         .route(
             "/api-docs/openapi.yaml",
-            axum::routing::get(openapi_yaml_handler),
+            axum::routing::get(handlers::web_ui::openapi_yaml_handler),
         )
-        .route("/", axum::routing::get(root_redirect_handler))
-        .route("/info", axum::routing::get(info_handler))
+        .route(
+            "/",
+            axum::routing::get(handlers::web_ui::root_redirect_handler),
+        )
+        .route("/info", axum::routing::get(handlers::info::info_handler))
         // Blocks: specific literal paths first
         .route(
             "/blocks",
-            axum::routing::get(get_paginated_blocks_handler).post(post_block_handler),
+            axum::routing::get(handlers::blocks::get_paginated_blocks_handler)
+                .post(handlers::blocks::post_block_handler),
         )
         .route(
             "/blocks/lastHeaders/{n}",
-            axum::routing::get(get_last_headers_handler),
+            axum::routing::get(handlers::blocks::get_last_headers_handler),
         )
         .route(
             "/blocks/chainSlice",
-            axum::routing::get(get_chain_slice_handler),
+            axum::routing::get(handlers::blocks::get_chain_slice_handler),
         )
         .route(
             "/blocks/headerIds",
-            axum::routing::post(post_header_ids_handler),
+            axum::routing::post(handlers::blocks::post_header_ids_handler),
         )
         .route(
             "/blocks/modifier/{modifier_id}",
-            axum::routing::get(get_modifier_handler),
+            axum::routing::get(handlers::blocks::get_modifier_handler),
         )
         .route(
             "/blocks/at/{height}",
-            axum::routing::get(get_blocks_at_height_handler),
+            axum::routing::get(handlers::blocks::get_blocks_at_height_handler),
         )
         // Blocks: parameterized paths with sub-paths
         .route(
             "/blocks/{header_id}/header",
-            axum::routing::get(get_header_only_handler),
+            axum::routing::get(handlers::blocks::get_header_only_handler),
         )
         .route(
             "/blocks/{header_id}/transactions",
-            axum::routing::get(get_block_transactions_handler),
+            axum::routing::get(handlers::blocks::get_block_transactions_handler),
         )
         .route(
             "/blocks/{header_id}/proofFor/{tx_id}",
-            axum::routing::get(merkle_proof_handler),
+            axum::routing::get(handlers::blocks::merkle_proof_handler),
         )
-        .route("/blocks/{header_id}", axum::routing::get(get_block_handler))
+        .route(
+            "/blocks/{header_id}",
+            axum::routing::get(handlers::blocks::get_block_handler),
+        )
         // NiPoPoW
         .route(
             "/nipopow/popowHeaderById/{id}",
-            axum::routing::get(popow_header_by_id_handler),
+            axum::routing::get(handlers::nipopow::popow_header_by_id_handler),
         )
         .route(
             "/nipopow/popowHeaderByHeight/{h}",
-            axum::routing::get(popow_header_by_height_handler),
+            axum::routing::get(handlers::nipopow::popow_header_by_height_handler),
         )
         .route(
             "/nipopow/proof/{m}/{k}/{id}",
-            axum::routing::get(nipopow_proof_at_handler),
+            axum::routing::get(handlers::nipopow::nipopow_proof_at_handler),
         )
         .route(
             "/nipopow/proof/{m}/{k}",
-            axum::routing::get(nipopow_proof_handler),
+            axum::routing::get(handlers::nipopow::nipopow_proof_handler),
         )
         // Peers
         .route(
             "/peers/connected",
-            axum::routing::get(peers_connected_handler),
+            axum::routing::get(handlers::peers::peers_connected_handler),
         )
-        .route("/peers/map", axum::routing::get(peers_map_handler))
-        .route("/peers/all", axum::routing::get(peers_all_handler))
+        .route(
+            "/peers/map",
+            axum::routing::get(handlers::peers::peers_map_handler),
+        )
+        .route(
+            "/peers/all",
+            axum::routing::get(handlers::peers::peers_all_handler),
+        )
         .route(
             "/peers/blacklisted",
-            axum::routing::get(peers_blacklisted_handler),
+            axum::routing::get(handlers::peers::peers_blacklisted_handler),
         )
-        .route("/peers/connect", axum::routing::post(peers_connect_handler))
-        .route("/peers/status", axum::routing::get(peers_status_handler))
+        .route(
+            "/peers/connect",
+            axum::routing::post(handlers::peers::peers_connect_handler),
+        )
+        .route(
+            "/peers/status",
+            axum::routing::get(handlers::peers::peers_status_handler),
+        )
         .route(
             "/peers/syncInfo",
-            axum::routing::get(peers_sync_info_handler),
+            axum::routing::get(handlers::peers::peers_sync_info_handler),
         )
         .route(
             "/peers/trackInfo",
-            axum::routing::get(peers_track_info_handler),
+            axum::routing::get(handlers::peers::peers_track_info_handler),
         )
         // Transactions
         .route(
             "/transactions/check",
-            axum::routing::post(check_transaction_handler),
+            axum::routing::post(handlers::transactions::check_transaction_handler),
         )
         .route(
             "/transactions/bytes",
-            axum::routing::post(submit_transaction_bytes_handler),
+            axum::routing::post(handlers::transactions::submit_transaction_bytes_handler),
         )
         .route(
             "/transactions/checkBytes",
-            axum::routing::post(check_transaction_bytes_handler),
+            axum::routing::post(handlers::transactions::check_transaction_bytes_handler),
         )
         .route(
             "/transactions",
-            axum::routing::post(submit_transaction_handler),
+            axum::routing::post(handlers::transactions::submit_transaction_handler),
         )
         .route(
             "/transactions/poolHistogram",
-            axum::routing::get(pool_histogram_handler),
+            axum::routing::get(handlers::transactions::pool_histogram_handler),
         )
-        .route("/transactions/getFee", axum::routing::get(get_fee_handler))
+        .route(
+            "/transactions/getFee",
+            axum::routing::get(handlers::transactions::get_fee_handler),
+        )
         .route(
             "/transactions/waitTime",
-            axum::routing::get(wait_time_handler),
+            axum::routing::get(handlers::transactions::wait_time_handler),
         )
         .route(
             "/transactions/unconfirmed/transactionIds",
-            axum::routing::get(get_unconfirmed_tx_ids_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_tx_ids_handler),
         )
         .route(
             "/transactions/unconfirmed/byTransactionIds",
-            axum::routing::post(post_by_transaction_ids_handler),
+            axum::routing::post(handlers::transactions::post_by_transaction_ids_handler),
         )
         .route(
             "/transactions/unconfirmed/inputs/byBoxId/{id}",
-            axum::routing::get(get_unconfirmed_inputs_by_box_id_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_inputs_by_box_id_handler),
         )
         .route(
             "/transactions/unconfirmed/outputs/byBoxId/{id}",
-            axum::routing::get(get_unconfirmed_output_by_box_id_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_output_by_box_id_handler),
         )
         .route(
             "/transactions/unconfirmed/outputs/byTokenId/{id}",
-            axum::routing::get(get_unconfirmed_outputs_by_token_id_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_outputs_by_token_id_handler),
         )
         .route(
             "/transactions/unconfirmed/byErgoTree",
-            axum::routing::post(post_unconfirmed_by_ergo_tree_handler),
+            axum::routing::post(handlers::transactions::post_unconfirmed_by_ergo_tree_handler),
         )
         .route(
             "/transactions/unconfirmed/outputs/byErgoTree",
-            axum::routing::post(post_unconfirmed_outputs_by_ergo_tree_handler),
+            axum::routing::post(
+                handlers::transactions::post_unconfirmed_outputs_by_ergo_tree_handler,
+            ),
         )
         .route(
             "/transactions/unconfirmed/outputs/byRegisters",
-            axum::routing::post(post_unconfirmed_outputs_by_registers_handler),
+            axum::routing::post(
+                handlers::transactions::post_unconfirmed_outputs_by_registers_handler,
+            ),
         )
         .route(
             "/transactions/unconfirmed/size",
-            axum::routing::get(get_unconfirmed_size_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_size_handler),
         )
         .route(
             "/transactions/unconfirmed/{tx_id}",
-            axum::routing::get(get_unconfirmed_by_id_handler).head(head_unconfirmed_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_by_id_handler)
+                .head(handlers::transactions::head_unconfirmed_handler),
         )
         .route(
             "/transactions/unconfirmed",
-            axum::routing::get(get_unconfirmed_handler),
+            axum::routing::get(handlers::transactions::get_unconfirmed_handler),
         )
         // Utils – Address
         .route(
             "/utils/address/{addr}",
-            axum::routing::get(validate_address_handler),
+            axum::routing::get(handlers::utils::validate_address_handler),
         )
         .route(
             "/utils/address",
-            axum::routing::post(validate_address_post_handler),
+            axum::routing::post(handlers::utils::validate_address_post_handler),
         )
         .route(
             "/utils/rawToAddress/{pubkey_hex}",
-            axum::routing::get(raw_to_address_handler),
+            axum::routing::get(handlers::utils::raw_to_address_handler),
         )
         .route(
             "/utils/addressToRaw/{addr}",
-            axum::routing::get(address_to_raw_handler),
+            axum::routing::get(handlers::utils::address_to_raw_handler),
         )
         .route(
             "/utils/ergoTreeToAddress/{ergo_tree_hex}",
-            axum::routing::get(ergo_tree_to_address_handler),
+            axum::routing::get(handlers::utils::ergo_tree_to_address_handler),
         )
         .route(
             "/utils/ergoTreeToAddress",
-            axum::routing::post(ergo_tree_to_address_post_handler),
+            axum::routing::post(handlers::utils::ergo_tree_to_address_post_handler),
         )
         // Utils
-        .route("/utils/seed", axum::routing::get(seed_handler))
+        .route(
+            "/utils/seed",
+            axum::routing::get(handlers::utils::seed_handler),
+        )
         .route(
             "/utils/seed/{length}",
-            axum::routing::get(seed_with_length_handler),
+            axum::routing::get(handlers::utils::seed_with_length_handler),
         )
         .route(
             "/utils/hash/blake2b",
-            axum::routing::post(blake2b_hash_handler),
+            axum::routing::post(handlers::utils::blake2b_hash_handler),
         )
         // Script utility
         .route(
             "/script/addressToTree/{addr}",
-            axum::routing::get(script_address_to_tree_handler),
+            axum::routing::get(handlers::script::script_address_to_tree_handler),
         )
         .route(
             "/script/addressToBytes/{addr}",
-            axum::routing::get(script_address_to_bytes_handler),
+            axum::routing::get(handlers::script::script_address_to_bytes_handler),
         )
         .route(
             "/script/p2sAddress",
-            axum::routing::post(script_p2s_address_handler),
+            axum::routing::post(handlers::script::script_p2s_address_handler),
         )
         .route(
             "/script/p2shAddress",
-            axum::routing::post(script_p2sh_address_handler),
+            axum::routing::post(handlers::script::script_p2sh_address_handler),
         )
         .route(
             "/script/compile",
-            axum::routing::post(script_compile_handler),
+            axum::routing::post(handlers::script::script_compile_handler),
         )
         .route(
             "/script/executeWithContext",
-            axum::routing::post(script_execute_with_context_handler),
+            axum::routing::post(handlers::script::script_execute_with_context_handler),
         )
         // Emission
         .route(
             "/emission/scripts",
-            axum::routing::get(emission_scripts_handler),
+            axum::routing::get(handlers::emission::emission_scripts_handler),
         )
         .route(
             "/emission/at/{height}",
-            axum::routing::get(emission_handler),
+            axum::routing::get(handlers::emission::emission_handler),
         )
         // Node control
-        .route("/node/shutdown", axum::routing::post(node_shutdown_handler))
+        .route(
+            "/node/shutdown",
+            axum::routing::post(handlers::node::node_shutdown_handler),
+        )
         // Blockchain (indexed) endpoints
         .route(
             "/blockchain/indexedHeight",
-            axum::routing::get(indexed_height_handler),
+            axum::routing::get(handlers::blockchain::indexed_height_handler),
         )
         .route(
             "/blockchain/transaction/byId/{id}",
-            axum::routing::get(blockchain_tx_by_id_handler),
+            axum::routing::get(handlers::blockchain::blockchain_tx_by_id_handler),
         )
         .route(
             "/blockchain/transaction/byIndex/{n}",
-            axum::routing::get(blockchain_tx_by_index_handler),
+            axum::routing::get(handlers::blockchain::blockchain_tx_by_index_handler),
         )
         .route(
             "/blockchain/transaction/byAddress/{addr}",
-            axum::routing::get(blockchain_txs_by_address_get_handler),
+            axum::routing::get(handlers::blockchain::blockchain_txs_by_address_get_handler),
         )
         .route(
             "/blockchain/transaction/byAddress",
-            axum::routing::post(blockchain_txs_by_address_post_handler),
+            axum::routing::post(handlers::blockchain::blockchain_txs_by_address_post_handler),
         )
         .route(
             "/blockchain/transaction/range",
-            axum::routing::get(blockchain_tx_range_handler),
+            axum::routing::get(handlers::blockchain::blockchain_tx_range_handler),
         )
         // Blockchain – Box endpoints (specific paths first)
         .route(
             "/blockchain/box/unspent/byTokenId/{id}",
-            axum::routing::get(blockchain_unspent_boxes_by_token_handler),
+            axum::routing::get(handlers::blockchain::blockchain_unspent_boxes_by_token_handler),
         )
         .route(
             "/blockchain/box/unspent/byAddress/{addr}",
-            axum::routing::get(blockchain_unspent_boxes_by_address_get_handler),
+            axum::routing::get(
+                handlers::blockchain::blockchain_unspent_boxes_by_address_get_handler,
+            ),
         )
         .route(
             "/blockchain/box/unspent/byAddress",
-            axum::routing::post(blockchain_unspent_boxes_by_address_post_handler),
+            axum::routing::post(
+                handlers::blockchain::blockchain_unspent_boxes_by_address_post_handler,
+            ),
         )
         .route(
             "/blockchain/box/unspent/byTemplateHash/{hash}",
-            axum::routing::get(blockchain_unspent_boxes_by_template_handler),
+            axum::routing::get(handlers::blockchain::blockchain_unspent_boxes_by_template_handler),
         )
         .route(
             "/blockchain/box/unspent/byErgoTree",
-            axum::routing::post(blockchain_unspent_boxes_by_ergo_tree_handler),
+            axum::routing::post(
+                handlers::blockchain::blockchain_unspent_boxes_by_ergo_tree_handler,
+            ),
         )
         .route(
             "/blockchain/box/byTokenId/{id}",
-            axum::routing::get(blockchain_boxes_by_token_handler),
+            axum::routing::get(handlers::blockchain::blockchain_boxes_by_token_handler),
         )
         .route(
             "/blockchain/box/byAddress/{addr}",
-            axum::routing::get(blockchain_boxes_by_address_get_handler),
+            axum::routing::get(handlers::blockchain::blockchain_boxes_by_address_get_handler),
         )
         .route(
             "/blockchain/box/byAddress",
-            axum::routing::post(blockchain_boxes_by_address_post_handler),
+            axum::routing::post(handlers::blockchain::blockchain_boxes_by_address_post_handler),
         )
         .route(
             "/blockchain/box/byTemplateHash/{hash}",
-            axum::routing::get(blockchain_boxes_by_template_handler),
+            axum::routing::get(handlers::blockchain::blockchain_boxes_by_template_handler),
         )
         .route(
             "/blockchain/box/byErgoTree",
-            axum::routing::post(blockchain_boxes_by_ergo_tree_handler),
+            axum::routing::post(handlers::blockchain::blockchain_boxes_by_ergo_tree_handler),
         )
         .route(
             "/blockchain/box/range",
-            axum::routing::get(blockchain_box_range_handler),
+            axum::routing::get(handlers::blockchain::blockchain_box_range_handler),
         )
         .route(
             "/blockchain/box/byIndex/{n}",
-            axum::routing::get(blockchain_box_by_index_handler),
+            axum::routing::get(handlers::blockchain::blockchain_box_by_index_handler),
         )
         .route(
             "/blockchain/box/byId/{id}",
-            axum::routing::get(blockchain_box_by_id_handler),
+            axum::routing::get(handlers::blockchain::blockchain_box_by_id_handler),
         )
         // Blockchain – Token endpoints
         .route(
             "/blockchain/token/byId/{id}",
-            axum::routing::get(blockchain_token_by_id_handler),
+            axum::routing::get(handlers::blockchain::blockchain_token_by_id_handler),
         )
         .route(
             "/blockchain/tokens",
-            axum::routing::post(blockchain_tokens_handler),
+            axum::routing::post(handlers::blockchain::blockchain_tokens_handler),
         )
         // Blockchain – Balance endpoints
         .route(
             "/blockchain/balance",
-            axum::routing::post(blockchain_balance_post_handler),
+            axum::routing::post(handlers::blockchain::blockchain_balance_post_handler),
         )
         .route(
             "/blockchain/balanceForAddress/{addr}",
-            axum::routing::get(blockchain_balance_get_handler),
+            axum::routing::get(handlers::blockchain::blockchain_balance_get_handler),
         )
         // Blockchain – Block endpoints
         .route(
             "/blockchain/block/byHeaderId/{id}",
-            axum::routing::get(blockchain_block_by_header_id_handler),
+            axum::routing::get(handlers::blockchain::blockchain_block_by_header_id_handler),
         )
         .route(
             "/blockchain/block/byHeaderIds",
-            axum::routing::post(blockchain_block_by_header_ids_handler),
+            axum::routing::post(handlers::blockchain::blockchain_block_by_header_ids_handler),
         )
         // UTXO endpoints
-        .route("/utxo/byId/{boxId}", axum::routing::get(utxo_by_id_handler))
+        .route(
+            "/utxo/byId/{boxId}",
+            axum::routing::get(handlers::utxo::utxo_by_id_handler),
+        )
         .route(
             "/utxo/byIdBinary/{boxId}",
-            axum::routing::get(utxo_by_id_binary_handler),
+            axum::routing::get(handlers::utxo::utxo_by_id_binary_handler),
         )
         .route(
             "/utxo/withPool/byId/{boxId}",
-            axum::routing::get(utxo_with_pool_by_id_handler),
+            axum::routing::get(handlers::utxo::utxo_with_pool_by_id_handler),
         )
         .route(
             "/utxo/withPool/byIds",
-            axum::routing::post(utxo_with_pool_by_ids_handler),
+            axum::routing::post(handlers::utxo::utxo_with_pool_by_ids_handler),
         )
         .route(
             "/utxo/withPool/byIdBinary/{boxId}",
-            axum::routing::get(utxo_with_pool_by_id_binary_handler),
+            axum::routing::get(handlers::utxo::utxo_with_pool_by_id_binary_handler),
         )
-        .route("/utxo/genesis", axum::routing::get(utxo_genesis_handler))
+        .route(
+            "/utxo/genesis",
+            axum::routing::get(handlers::utxo::utxo_genesis_handler),
+        )
         .route(
             "/utxo/getSnapshotsInfo",
-            axum::routing::get(utxo_snapshots_info_handler),
+            axum::routing::get(handlers::utxo::utxo_snapshots_info_handler),
         )
         .route(
             "/utxo/getBoxesBinaryProof",
-            axum::routing::post(utxo_boxes_binary_proof_handler),
+            axum::routing::post(handlers::utxo::utxo_boxes_binary_proof_handler),
         )
         // Mining
         .route(
             "/mining/candidate",
-            axum::routing::get(mining_candidate_handler),
+            axum::routing::get(handlers::mining::mining_candidate_handler),
         )
         .route(
             "/mining/candidateWithTxs",
-            axum::routing::post(mining_candidate_with_txs_handler),
+            axum::routing::post(handlers::mining::mining_candidate_with_txs_handler),
         )
         .route(
             "/mining/solution",
-            axum::routing::post(mining_solution_handler),
+            axum::routing::post(handlers::mining::mining_solution_handler),
         )
         .route(
             "/mining/rewardAddress",
-            axum::routing::get(mining_reward_address_handler),
+            axum::routing::get(handlers::mining::mining_reward_address_handler),
         )
         .route(
             "/mining/rewardPublicKey",
-            axum::routing::get(mining_reward_pubkey_handler),
+            axum::routing::get(handlers::mining::mining_reward_pubkey_handler),
         );
 
     // Wallet lifecycle endpoints (feature-gated)
     #[cfg(feature = "wallet")]
     let router = router
-        .route("/wallet/status", axum::routing::get(wallet_status_handler))
-        .route("/wallet/init", axum::routing::post(wallet_init_handler))
+        .route(
+            "/wallet/status",
+            axum::routing::get(handlers::wallet::wallet_status_handler),
+        )
+        .route(
+            "/wallet/init",
+            axum::routing::post(handlers::wallet::wallet_init_handler),
+        )
         .route(
             "/wallet/restore",
-            axum::routing::post(wallet_restore_handler),
+            axum::routing::post(handlers::wallet::wallet_restore_handler),
         )
-        .route("/wallet/unlock", axum::routing::post(wallet_unlock_handler))
-        .route("/wallet/lock", axum::routing::get(wallet_lock_handler))
+        .route(
+            "/wallet/unlock",
+            axum::routing::post(handlers::wallet::wallet_unlock_handler),
+        )
+        .route(
+            "/wallet/lock",
+            axum::routing::get(handlers::wallet::wallet_lock_handler),
+        )
         // Address and balance endpoints
         .route(
             "/wallet/addresses",
-            axum::routing::get(wallet_addresses_handler),
+            axum::routing::get(handlers::wallet::wallet_addresses_handler),
         )
         .route(
             "/wallet/deriveKey",
-            axum::routing::post(wallet_derive_key_handler),
+            axum::routing::post(handlers::wallet::wallet_derive_key_handler),
         )
         .route(
             "/wallet/deriveNextKey",
-            axum::routing::get(wallet_derive_next_key_handler),
+            axum::routing::get(handlers::wallet::wallet_derive_next_key_handler),
         )
         .route(
             "/wallet/balances/withUnconfirmed",
-            axum::routing::get(wallet_balances_with_unconfirmed_handler),
+            axum::routing::get(handlers::wallet::wallet_balances_with_unconfirmed_handler),
         )
         .route(
             "/wallet/balances",
-            axum::routing::get(wallet_balances_handler),
+            axum::routing::get(handlers::wallet::wallet_balances_handler),
         )
         .route(
             "/wallet/updateChangeAddress",
-            axum::routing::post(wallet_update_change_address_handler),
+            axum::routing::post(handlers::wallet::wallet_update_change_address_handler),
         )
         // Box and transaction query endpoints
         .route(
             "/wallet/boxes/unspent",
-            axum::routing::get(wallet_unspent_boxes_handler),
+            axum::routing::get(handlers::wallet::wallet_unspent_boxes_handler),
         )
         .route(
             "/wallet/boxes/collect",
-            axum::routing::post(wallet_collect_boxes_handler),
+            axum::routing::post(handlers::wallet::wallet_collect_boxes_handler),
         )
-        .route("/wallet/boxes", axum::routing::get(wallet_boxes_handler))
+        .route(
+            "/wallet/boxes",
+            axum::routing::get(handlers::wallet::wallet_boxes_handler),
+        )
         .route(
             "/wallet/transactions",
-            axum::routing::get(wallet_transactions_handler),
+            axum::routing::get(handlers::wallet::wallet_transactions_handler),
         )
         // Transaction generation and sending endpoints
         .route(
             "/wallet/payment/send",
-            axum::routing::post(wallet_payment_send_handler),
+            axum::routing::post(handlers::wallet::wallet_payment_send_handler),
         )
         .route(
             "/wallet/transaction/generate",
-            axum::routing::post(wallet_tx_generate_handler),
+            axum::routing::post(handlers::wallet::wallet_tx_generate_handler),
         )
         .route(
             "/wallet/transaction/generateUnsigned",
-            axum::routing::post(wallet_tx_generate_unsigned_handler),
+            axum::routing::post(handlers::wallet::wallet_tx_generate_unsigned_handler),
         )
         .route(
             "/wallet/transaction/sign",
-            axum::routing::post(wallet_tx_sign_handler),
+            axum::routing::post(handlers::wallet::wallet_tx_sign_handler),
         )
         .route(
             "/wallet/transaction/send",
-            axum::routing::post(wallet_tx_send_handler),
+            axum::routing::post(handlers::wallet::wallet_tx_send_handler),
         )
         // Wallet check, rescan, and transaction-by-id endpoints
         .route(
             "/wallet/transactionById/{txId}",
-            axum::routing::get(wallet_transaction_by_id_handler),
+            axum::routing::get(handlers::wallet::wallet_transaction_by_id_handler),
         )
         .route(
             "/wallet/check",
-            axum::routing::post(wallet_check_seed_handler),
+            axum::routing::post(handlers::wallet::wallet_check_seed_handler),
         )
-        .route("/wallet/rescan", axum::routing::post(wallet_rescan_handler))
+        .route(
+            "/wallet/rescan",
+            axum::routing::post(handlers::wallet::wallet_rescan_handler),
+        )
         // Additional wallet endpoints
         .route(
             "/wallet/getPrivateKey",
-            axum::routing::post(wallet_get_private_key_handler),
+            axum::routing::post(handlers::wallet::wallet_get_private_key_handler),
         )
         .route(
             "/wallet/generateCommitments",
-            axum::routing::post(wallet_generate_commitments_handler),
+            axum::routing::post(handlers::wallet::wallet_generate_commitments_handler),
         )
         .route(
             "/wallet/extractHints",
-            axum::routing::post(wallet_extract_hints_handler),
+            axum::routing::post(handlers::wallet::wallet_extract_hints_handler),
         )
         .route(
             "/wallet/transactionsByScanId/{scanId}",
-            axum::routing::get(wallet_txs_by_scan_id_handler),
+            axum::routing::get(handlers::wallet::wallet_txs_by_scan_id_handler),
         )
         // Scan endpoints
-        .route("/scan/register", axum::routing::post(scan_register_handler))
+        .route(
+            "/scan/register",
+            axum::routing::post(handlers::wallet::scan_register_handler),
+        )
         .route(
             "/scan/deregister",
-            axum::routing::post(scan_deregister_handler),
+            axum::routing::post(handlers::wallet::scan_deregister_handler),
         )
-        .route("/scan/listAll", axum::routing::get(scan_list_all_handler))
+        .route(
+            "/scan/listAll",
+            axum::routing::get(handlers::wallet::scan_list_all_handler),
+        )
         .route(
             "/scan/unspentBoxes/{scanId}",
-            axum::routing::get(scan_unspent_boxes_handler),
+            axum::routing::get(handlers::wallet::scan_unspent_boxes_handler),
         )
         .route(
             "/scan/spentBoxes/{scanId}",
-            axum::routing::get(scan_spent_boxes_handler),
+            axum::routing::get(handlers::wallet::scan_spent_boxes_handler),
         )
         .route(
             "/scan/stopTracking",
-            axum::routing::post(scan_stop_tracking_handler),
+            axum::routing::post(handlers::wallet::scan_stop_tracking_handler),
         )
-        .route("/scan/addBox", axum::routing::post(scan_add_box_handler))
-        .route("/scan/p2sRule", axum::routing::post(scan_p2s_rule_handler));
+        .route(
+            "/scan/addBox",
+            axum::routing::post(handlers::wallet::scan_add_box_handler),
+        )
+        .route(
+            "/scan/p2sRule",
+            axum::routing::post(handlers::wallet::scan_p2s_rule_handler),
+        );
 
-    router.with_state(state)
+    let swagger_router: Router<()> = utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
+        .url("/api-docs/openapi.json", openapi::ApiDoc::openapi())
+        .into();
+
+    router.with_state(state).merge(swagger_router)
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
-
-/// GET /swagger — Serve Swagger UI HTML page.
-async fn swagger_handler() -> axum::response::Html<&'static str> {
-    axum::response::Html(crate::web_ui::SWAGGER_HTML)
-}
-
-/// GET /panel — Serve the Node Panel admin dashboard.
-async fn panel_handler() -> (
-    [(axum::http::header::HeaderName, &'static str); 1],
-    axum::response::Html<&'static str>,
-) {
-    (
-        [(
-            axum::http::header::CACHE_CONTROL,
-            "no-cache, no-store, must-revalidate",
-        )],
-        axum::response::Html(crate::web_ui::PANEL_HTML),
-    )
-}
-
-/// GET /api-docs/openapi.yaml — Serve the OpenAPI specification.
-async fn openapi_yaml_handler() -> (
-    [(axum::http::header::HeaderName, &'static str); 1],
-    &'static str,
-) {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/yaml; charset=utf-8")],
-        crate::web_ui::OPENAPI_YAML,
-    )
-}
-
-/// GET / — Redirect to Swagger UI.
-async fn root_redirect_handler() -> axum::response::Redirect {
-    axum::response::Redirect::permanent("/swagger")
-}
-
-async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfoResponse> {
-    let unconfirmed_count = state.mempool.read().unwrap().size();
-    let shared = state.shared.read().await;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    // Normalize network name to lowercase for API response
-    let network_lc = state.network.to_lowercase();
-    let network_lower: &str = match network_lc.as_str() {
-        "mainnet" => "mainnet",
-        "testnet" => "testnet",
-        "devnet" => "devnet",
-        _ => "mainnet",
-    };
-
-    let genesis_id = match network_lower {
-        "testnet" => "0000000000000000000000000000000000000000000000000000000000000000",
-        _ => "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
-    };
-
-    // Heights of 0 mean no headers/blocks yet — report as null
-    let headers_height = if shared.headers_height > 0 {
-        Some(shared.headers_height)
-    } else {
-        None
-    };
-    let full_height = if shared.full_height > 0 {
-        Some(shared.full_height)
-    } else {
-        None
-    };
-    let max_peer_height = if shared.max_peer_height > 0 {
-        Some(shared.max_peer_height)
-    } else {
-        None
-    };
-
-    // Mining is enabled when a candidate generator has been initialized.
-    let is_mining = shared.is_mining || state.candidate_generator.is_some();
-
-    Json(NodeInfoResponse {
-        name: state.node_name.clone(),
-        app_version: state.app_version.clone(),
-        network: network_lower.to_string(),
-        headers_height,
-        full_height,
-        max_peer_height,
-        best_header_id: shared.best_header_id.map(hex::encode),
-        best_full_header_id: shared.best_full_block_id.map(hex::encode),
-        previous_full_header_id: shared.previous_full_header_id.map(hex::encode),
-        state_root: hex::encode(&shared.state_root),
-        state_version: shared.state_version.map(hex::encode),
-        state_type: state.state_type.clone(),
-        peers_count: shared.peer_count,
-        sync_state: shared.sync_state.clone(),
-        unconfirmed_count,
-        difficulty: shared.difficulty.to_string(),
-        headers_score: shared.headers_score.clone(),
-        full_blocks_score: shared.full_blocks_score.clone(),
-        launch_time: shared.start_time * 1000,
-        last_seen_message_time: shared.last_message_time.unwrap_or(0),
-        genesis_block_id: genesis_id.to_string(),
-        is_mining,
-        is_explorer: state.extra_db.is_some(),
-        eip27_supported: true,
-        eip37_supported: true,
-        rest_api_url: None,
-        current_time: now_ms,
-        parameters: shared.parameters.clone(),
-        last_mempool_update_time: shared.last_mempool_update_time,
-    })
-}
-
-async fn get_block_handler(
-    State(state): State<ApiState>,
-    Path(header_id_hex): Path<String>,
-) -> Result<Json<BlockResponse>, (StatusCode, Json<ApiError>)> {
-    let id = parse_modifier_id(&header_id_hex)?;
-
-    let header = state
-        .history
-        .load_header(&id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header"))?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block not found"))?;
-
-    let resp = build_block_response(&state, &header, &header_id_hex);
-
-    Ok(Json(resp))
-}
-
-async fn get_blocks_at_height_handler(
-    State(state): State<ApiState>,
-    Path(height): Path<u32>,
-) -> Json<Vec<String>> {
-    let ids = state
-        .history
-        .header_ids_at_height(height)
-        .unwrap_or_default();
-    Json(ids.iter().map(|id| hex::encode(id.0)).collect())
-}
-
-async fn peers_connected_handler(State(state): State<ApiState>) -> Json<Vec<PeerResponse>> {
-    let shared = state.shared.read().await;
-    // Build a peer_id → (status, height) map from the sync tracker snapshot.
-    let sync_map = build_sync_map(&shared);
-    Json(
-        shared
-            .connected_peers
-            .iter()
-            .map(|p| {
-                let (chain_status, height) =
-                    sync_map.get(&p.peer_id).cloned().unwrap_or((None, None));
-                let geo = parse_ip_from_addr(&p.address)
-                    .and_then(|ip| state.geoip.as_ref().as_ref().and_then(|g| g.lookup(ip)));
-                PeerResponse {
-                    address: p.address.clone(),
-                    name: p.name.clone(),
-                    last_message: p.last_message.unwrap_or(0),
-                    last_handshake: p.last_handshake,
-                    connection_type: p.connection_type.clone(),
-                    version: p.version.clone(),
-                    state_type: p.state_type.clone(),
-                    verifying_transactions: p.verifying_transactions,
-                    blocks_to_keep: p.blocks_to_keep,
-                    chain_status,
-                    height,
-                    geo,
-                }
-            })
-            .collect(),
-    )
-}
-
-/// `GET /peers/map` — lightweight projection for map rendering.
-async fn peers_map_handler(State(state): State<ApiState>) -> Json<Vec<PeerMapEntry>> {
-    let shared = state.shared.read().await;
-    let sync_map = build_sync_map(&shared);
-    let geoip = state.geoip.as_ref().as_ref();
-    let mut entries = Vec::new();
-    if let Some(geo) = geoip {
-        for p in &shared.connected_peers {
-            if let Some(ip) = parse_ip_from_addr(&p.address) {
-                if let Some(info) = geo.lookup(ip) {
-                    if let (Some(lat), Some(lon)) = (info.latitude, info.longitude) {
-                        let chain_status = sync_map.get(&p.peer_id).and_then(|(s, _)| s.clone());
-                        entries.push(PeerMapEntry {
-                            lat,
-                            lon,
-                            country_code: info.country_code,
-                            address: p.address.clone(),
-                            name: p.name.clone(),
-                            chain_status,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    Json(entries)
-}
 
 /// Build a map from peer_id to (chain_status, height) from the sync tracker snapshot.
 fn build_sync_map(
@@ -2419,81 +2315,6 @@ fn build_sync_map(
 /// Parse an `IpAddr` from a "host:port" address string.
 fn parse_ip_from_addr(addr: &str) -> Option<std::net::IpAddr> {
     addr.parse::<std::net::SocketAddr>().ok().map(|sa| sa.ip())
-}
-
-/// `GET /peers/all` — all known peers from discovery + peer_db.
-async fn peers_all_handler(State(state): State<ApiState>) -> Json<Vec<String>> {
-    let shared = state.shared.read().await;
-    Json(shared.known_peers.clone())
-}
-
-/// `GET /peers/blacklisted` — blacklisted/banned peer IDs from PenaltyManager.
-async fn peers_blacklisted_handler(State(state): State<ApiState>) -> Json<Vec<u64>> {
-    let shared = state.shared.read().await;
-    Json(shared.banned_peers.clone())
-}
-
-/// `POST /peers/connect` — manually initiate connection to "host:port".
-async fn peers_connect_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(addr_str): Json<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let addr: std::net::SocketAddr = addr_str
-        .parse()
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid socket address"))?;
-    let sender = state.peer_connect.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Peer connect channel not available",
-        )
-    })?;
-    sender.try_send(addr).map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Failed to send peer connect request",
-        )
-    })?;
-    Ok(Json(
-        serde_json::json!({ "status": "connecting", "address": addr.to_string() }),
-    ))
-}
-
-/// `GET /peers/status` — P2P layer status.
-async fn peers_status_handler(State(state): State<ApiState>) -> Json<PeerStatusResponse> {
-    let shared = state.shared.read().await;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    Json(PeerStatusResponse {
-        connected_count: shared.peer_count,
-        uptime_secs: now.saturating_sub(shared.start_time),
-        last_message_time: shared.last_message_time,
-    })
-}
-
-/// `GET /peers/syncInfo` — SyncTracker state dump.
-async fn peers_sync_info_handler(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    let shared = state.shared.read().await;
-    Json(
-        shared
-            .sync_tracker_snapshot
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({})),
-    )
-}
-
-/// `GET /peers/trackInfo` — DeliveryTracker state dump.
-async fn peers_track_info_handler(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    let shared = state.shared.read().await;
-    Json(
-        shared
-            .delivery_tracker_snapshot
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({})),
-    )
 }
 
 /// Convert a Scala-compatible JSON transaction to our internal `ErgoTransaction`.
@@ -2621,799 +2442,14 @@ fn convert_json_tx_to_ergo_tx(json_tx: &TxJsonTransaction) -> Result<ErgoTransac
     })
 }
 
-/// Wait for the event loop to confirm a transaction submission via oneshot channel.
-async fn await_tx_submission(
-    sender: tokio::sync::mpsc::Sender<TxSubmission>,
-    tx_id: [u8; 32],
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let submission = TxSubmission {
-        tx_id,
-        response: resp_tx,
-    };
-    sender
-        .try_send(submission)
-        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "event loop busy"))?;
-    match tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => Err(api_error(StatusCode::BAD_REQUEST, &e)),
-        Ok(Err(_)) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "event loop dropped response",
-        )),
-        Err(_) => Err(api_error(StatusCode::GATEWAY_TIMEOUT, "event loop timeout")),
-    }
-}
-
-/// `POST /transactions` -- accept a Scala-compatible JSON transaction, validate, and submit.
-async fn submit_transaction_handler(
-    State(state): State<ApiState>,
-    Json(json_tx): Json<TxJsonTransaction>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let tx =
-        convert_json_tx_to_ergo_tx(&json_tx).map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))?;
-
-    let bytes = serialize_transaction(&tx);
-
-    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Stateless transaction validation failed",
-        )
-    })?;
-
-    ergo_network::mempool::validate_for_pool(
-        bytes.len(),
-        &state.blacklisted_transactions,
-        state.max_transaction_size,
-        &tx.tx_id,
-    )
-    .map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Transaction rejected by mempool policy",
-        )
-    })?;
-
-    let tx_id = tx.tx_id;
-
-    // Insert into mempool (scoped to drop the lock guard before any .await).
-    {
-        let mut mp = state.mempool.write().unwrap();
-        mp.put_with_size(tx, bytes.len()).map_err(|_| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "Failed to insert transaction into mempool",
-            )
-        })?;
-    }
-
-    // Signal event loop to broadcast and wait for confirmation.
-    if let Some(sender) = state.tx_submit.clone() {
-        await_tx_submission(sender, tx_id.0).await?;
-    }
-
-    // Return plain JSON string tx_id (matching Scala format)
-    Ok(Json(hex::encode(tx_id.0)))
-}
-
-async fn get_unconfirmed_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<UnconfirmedPaginationParams>,
-) -> Json<Vec<TransactionResponse>> {
-    let mp = state.mempool.read().unwrap();
-    let limit = params.limit.min(100);
-    let txs: Vec<TransactionResponse> = mp
-        .get_all_with_size()
-        .into_iter()
-        .skip(params.offset)
-        .take(limit)
-        .map(|(tx, size)| ergo_tx_to_response(tx, size))
-        .collect();
-    Json(txs)
-}
-
-async fn get_unconfirmed_size_handler(State(state): State<ApiState>) -> Json<MempoolSizeResponse> {
-    let mp = state.mempool.read().unwrap();
-    Json(MempoolSizeResponse { size: mp.size() })
-}
-
-async fn get_unconfirmed_by_id_handler(
-    State(state): State<ApiState>,
-    Path(tx_id_hex): Path<String>,
-) -> Result<Json<TransactionResponse>, (StatusCode, Json<ApiError>)> {
-    let id_bytes = hex::decode(&tx_id_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
-    if id_bytes.len() != 32 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Transaction ID must be 32 bytes (64 hex chars)",
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&id_bytes);
-    let tx_id = TxId(arr);
-
-    let mp = state.mempool.read().unwrap();
-    let (tx, size) = mp
-        .get_with_size(&tx_id)
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Transaction not found in mempool"))?;
-
-    Ok(Json(ergo_tx_to_response(tx, size)))
-}
-
-// ---------------------------------------------------------------------------
 // Extended Transactions API handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /transactions/check` -- validate a JSON transaction without broadcasting.
-async fn check_transaction_handler(
-    State(state): State<ApiState>,
-    Json(json_tx): Json<TxJsonTransaction>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let tx =
-        convert_json_tx_to_ergo_tx(&json_tx).map_err(|e| api_error(StatusCode::BAD_REQUEST, &e))?;
-
-    let bytes = serialize_transaction(&tx);
-
-    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Stateless transaction validation failed",
-        )
-    })?;
-    ergo_network::mempool::validate_for_pool(
-        bytes.len(),
-        &state.blacklisted_transactions,
-        state.max_transaction_size,
-        &tx.tx_id,
-    )
-    .map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Transaction rejected by mempool policy",
-        )
-    })?;
-
-    // Return plain JSON string tx_id (matching Scala format)
-    Ok(Json(hex::encode(tx.tx_id.0)))
-}
-
-/// `POST /transactions/bytes` — submit a transaction as hex-encoded serialized bytes.
-async fn submit_transaction_bytes_handler(
-    State(state): State<ApiState>,
-    Json(hex_str): Json<String>,
-) -> Result<Json<TxSubmitResponse>, (StatusCode, Json<ApiError>)> {
-    let bytes = hex::decode(hex_str.trim())
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
-    let tx = parse_transaction(&bytes)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to parse transaction"))?;
-    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Stateless transaction validation failed",
-        )
-    })?;
-
-    ergo_network::mempool::validate_for_pool(
-        bytes.len(),
-        &state.blacklisted_transactions,
-        state.max_transaction_size,
-        &tx.tx_id,
-    )
-    .map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Transaction rejected by mempool policy",
-        )
-    })?;
-
-    let tx_id = tx.tx_id;
-
-    // Insert into mempool (scoped to drop the lock guard before any .await).
-    {
-        let mut mp = state.mempool.write().unwrap();
-        mp.put_with_size(tx, bytes.len()).map_err(|_| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "Failed to insert transaction into mempool",
-            )
-        })?;
-    }
-
-    if let Some(sender) = state.tx_submit.clone() {
-        await_tx_submission(sender, tx_id.0).await?;
-    }
-
-    Ok(Json(TxSubmitResponse {
-        tx_id: hex::encode(tx_id.0),
-    }))
-}
-
-/// `POST /transactions/checkBytes` — validate hex-encoded tx bytes without broadcasting.
-async fn check_transaction_bytes_handler(
-    State(state): State<ApiState>,
-    Json(hex_str): Json<String>,
-) -> Result<Json<TxSubmitResponse>, (StatusCode, Json<ApiError>)> {
-    let bytes = hex::decode(hex_str.trim())
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
-    let tx = parse_transaction(&bytes)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Failed to parse transaction"))?;
-    validate_tx_stateless(&tx, &ValidationSettings::initial()).map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Stateless transaction validation failed",
-        )
-    })?;
-    ergo_network::mempool::validate_for_pool(
-        bytes.len(),
-        &state.blacklisted_transactions,
-        state.max_transaction_size,
-        &tx.tx_id,
-    )
-    .map_err(|_| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Transaction rejected by mempool policy",
-        )
-    })?;
-    Ok(Json(TxSubmitResponse {
-        tx_id: hex::encode(tx.tx_id.0),
-    }))
-}
-
-/// `GET /transactions/poolHistogram?bins=10&maxtime=60000`
-async fn pool_histogram_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<HistogramParams>,
-) -> Json<Vec<HistogramBinResponse>> {
-    let mp = state.mempool.read().unwrap();
-    let bins = params.bins.clamp(1, 100);
-    let histogram = mp.pool_histogram(bins, params.maxtime);
-    Json(
-        histogram
-            .into_iter()
-            .map(|bin| HistogramBinResponse {
-                n_txns: bin.n_txns,
-                total_size: bin.total_size,
-                from_millis: bin.from_millis,
-                to_millis: bin.to_millis,
-            })
-            .collect(),
-    )
-}
-
-/// `GET /transactions/getFee?waitTime=1000`
-async fn get_fee_handler(
-    State(state): State<ApiState>,
-    Query(_params): Query<FeeEstimateParams>,
-) -> Json<FeeEstimateResponse> {
-    let mp = state.mempool.read().unwrap();
-    // Simple heuristic: base fee scaled by mempool occupancy
-    let min_fee: u64 = 1_000_000; // 0.001 ERG minimum
-    let pool_size = mp.size() as u64;
-    let fee = min_fee + pool_size * 100_000; // increase by 0.0001 ERG per pooled tx
-    Json(FeeEstimateResponse { fee })
-}
-
-/// `GET /transactions/waitTime?fee=1000000`
-async fn wait_time_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<WaitTimeParams>,
-) -> Json<WaitTimeResponse> {
-    let mp = state.mempool.read().unwrap();
-    // Simple heuristic: if fee >= min, expected wait is short
-    let min_fee: u64 = 1_000_000;
-    let wait = if params.fee >= min_fee {
-        let excess = params.fee.saturating_sub(min_fee);
-        // Higher fee = shorter wait. Base 60s, reduced by fee premium
-        let reduction = excess / 100_000; // each 0.0001 ERG reduces wait by 1s
-        60_000u64.saturating_sub(reduction * 1000)
-    } else {
-        // Below minimum fee, long wait proportional to mempool size
-        60_000 + mp.size() as u64 * 10_000
-    };
-    Json(WaitTimeResponse {
-        wait_time_millis: wait,
-    })
-}
-
-/// `HEAD /transactions/unconfirmed/{tx_id}` — check if tx is in mempool (200/404, no body).
-async fn head_unconfirmed_handler(
-    State(state): State<ApiState>,
-    Path(tx_id_hex): Path<String>,
-) -> StatusCode {
-    let Ok(id_bytes) = hex::decode(&tx_id_hex) else {
-        return StatusCode::BAD_REQUEST;
-    };
-    if id_bytes.len() != 32 {
-        return StatusCode::BAD_REQUEST;
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&id_bytes);
-    let tx_id = TxId(arr);
-
-    let mp = state.mempool.read().unwrap();
-    if mp.contains(&tx_id) {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
-    }
-}
-
-/// `GET /transactions/unconfirmed/transactionIds` — all unconfirmed tx IDs.
-async fn get_unconfirmed_tx_ids_handler(State(state): State<ApiState>) -> Json<Vec<String>> {
-    let mp = state.mempool.read().unwrap();
-    let ids: Vec<String> = mp
-        .get_all_tx_ids()
-        .iter()
-        .map(|id| hex::encode(id.0))
-        .collect();
-    Json(ids)
-}
-
-/// `POST /transactions/unconfirmed/byTransactionIds` — filter IDs by mempool presence.
-async fn post_by_transaction_ids_handler(
-    State(state): State<ApiState>,
-    Json(ids): Json<Vec<String>>,
-) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
-    if ids.len() > 100 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Too many IDs; maximum is 100",
-        ));
-    }
-    let mp = state.mempool.read().unwrap();
-    let mut present = Vec::new();
-    for id_hex in &ids {
-        let Ok(id_bytes) = hex::decode(id_hex) else {
-            continue;
-        };
-        if id_bytes.len() != 32 {
-            continue;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&id_bytes);
-        let tx_id = TxId(arr);
-        if mp.contains(&tx_id) {
-            present.push(id_hex.clone());
-        }
-    }
-    Ok(Json(present))
-}
-
-/// `GET /transactions/unconfirmed/outputs/byBoxId/{id}` — find unconfirmed output by box ID.
-/// `GET /transactions/unconfirmed/inputs/byBoxId/{id}` -- find which mempool tx spends a box.
-async fn get_unconfirmed_inputs_by_box_id_handler(
-    State(state): State<ApiState>,
-    Path(box_id_hex): Path<String>,
-) -> Result<Json<SpendingInputResponse>, (StatusCode, Json<ApiError>)> {
-    let id_bytes = hex::decode(&box_id_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
-    if id_bytes.len() != 32 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Box ID must be 32 bytes (64 hex chars)",
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&id_bytes);
-    let box_id = BoxId(arr);
-
-    let mp = state.mempool.read().unwrap();
-    let (tx_id, input) = mp
-        .find_spending_input(&box_id)
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "No spending input found for box ID"))?;
-
-    Ok(Json(SpendingInputResponse {
-        box_id: box_id_hex,
-        spending_tx_id: hex::encode(tx_id.0),
-        proof_bytes: hex::encode(&input.proof_bytes),
-    }))
-}
-
-async fn get_unconfirmed_output_by_box_id_handler(
-    State(state): State<ApiState>,
-    Path(box_id_hex): Path<String>,
-) -> Result<Json<UnconfirmedOutputResponse>, (StatusCode, Json<ApiError>)> {
-    let id_bytes = hex::decode(&box_id_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
-    if id_bytes.len() != 32 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Box ID must be 32 bytes (64 hex chars)",
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&id_bytes);
-    let box_id = BoxId(arr);
-
-    let mp = state.mempool.read().unwrap();
-    let output_ref = mp
-        .find_output_by_box_id(&box_id)
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Output not found for box ID"))?;
-
-    Ok(Json(UnconfirmedOutputResponse {
-        box_id: box_id_hex,
-        tx_id: hex::encode(output_ref.tx_id.0),
-        index: output_ref.index,
-        value: output_ref.candidate.value,
-        creation_height: output_ref.candidate.creation_height,
-        token_count: output_ref.candidate.tokens.len(),
-    }))
-}
-
-/// `GET /transactions/unconfirmed/outputs/byTokenId/{id}` — find unconfirmed outputs by token ID.
-async fn get_unconfirmed_outputs_by_token_id_handler(
-    State(state): State<ApiState>,
-    Path(token_id_hex): Path<String>,
-) -> Result<Json<Vec<UnconfirmedOutputResponse>>, (StatusCode, Json<ApiError>)> {
-    let id_bytes = hex::decode(&token_id_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
-    if id_bytes.len() != 32 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Token ID must be 32 bytes (64 hex chars)",
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&id_bytes);
-    let token_id = BoxId(arr);
-
-    let mp = state.mempool.read().unwrap();
-    let results = mp.find_outputs_by_token_id(&token_id);
-
-    let responses: Vec<UnconfirmedOutputResponse> = results
-        .iter()
-        .map(|output_ref| {
-            let box_id = compute_box_id(&output_ref.tx_id, output_ref.index);
-            UnconfirmedOutputResponse {
-                box_id: hex::encode(box_id.0),
-                tx_id: hex::encode(output_ref.tx_id.0),
-                index: output_ref.index,
-                value: output_ref.candidate.value,
-                creation_height: output_ref.candidate.creation_height,
-                token_count: output_ref.candidate.tokens.len(),
-            }
-        })
-        .collect();
-
-    Ok(Json(responses))
-}
-
-/// `POST /transactions/unconfirmed/byErgoTree` — find unconfirmed txs by ErgoTree hex.
-async fn post_unconfirmed_by_ergo_tree_handler(
-    State(state): State<ApiState>,
-    body: String,
-) -> Result<Json<Vec<TransactionResponse>>, (StatusCode, Json<ApiError>)> {
-    let hex_str = body.trim().trim_matches('"');
-    let tree_bytes = hex::decode(hex_str)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid hex ErgoTree"))?;
-    let tree_hash = blake2b256(&tree_bytes);
-    let pool = state.mempool.read().unwrap();
-    let txs = pool.find_txs_by_tree_hash(&tree_hash);
-    let result: Vec<TransactionResponse> =
-        txs.iter().map(|tx| ergo_tx_to_response(tx, 0)).collect();
-    Ok(Json(result))
-}
-
-/// `POST /transactions/unconfirmed/outputs/byErgoTree` — find unconfirmed outputs by ErgoTree hex.
-async fn post_unconfirmed_outputs_by_ergo_tree_handler(
-    State(state): State<ApiState>,
-    body: String,
-) -> Result<Json<Vec<UnconfirmedOutputResponse>>, (StatusCode, Json<ApiError>)> {
-    let hex_str = body.trim().trim_matches('"');
-    let tree_bytes = hex::decode(hex_str)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid hex ErgoTree"))?;
-    let tree_hash = blake2b256(&tree_bytes);
-    let pool = state.mempool.read().unwrap();
-    let outputs = pool.find_outputs_by_tree_hash(&tree_hash);
-    let result: Vec<UnconfirmedOutputResponse> = outputs
-        .iter()
-        .map(|o| {
-            let box_id = compute_box_id(&o.tx_id, o.index);
-            UnconfirmedOutputResponse {
-                box_id: hex::encode(box_id.0),
-                tx_id: hex::encode(o.tx_id.0),
-                index: o.index,
-                value: o.candidate.value,
-                creation_height: o.candidate.creation_height,
-                token_count: o.candidate.tokens.len(),
-            }
-        })
-        .collect();
-    Ok(Json(result))
-}
-
-/// `POST /transactions/unconfirmed/outputs/byRegisters` — find unconfirmed outputs by register values.
-async fn post_unconfirmed_outputs_by_registers_handler(
-    State(state): State<ApiState>,
-    Json(body): Json<std::collections::HashMap<String, String>>,
-) -> Result<Json<Vec<UnconfirmedOutputResponse>>, (StatusCode, Json<ApiError>)> {
-    let mut filter: Vec<(u8, Vec<u8>)> = Vec::new();
-    for (key, hex_val) in &body {
-        let reg_idx = key
-            .strip_prefix('R')
-            .and_then(|s| s.parse::<u8>().ok())
-            .ok_or_else(|| {
-                api_error(
-                    StatusCode::BAD_REQUEST,
-                    &format!("invalid register key: {key}"),
-                )
-            })?;
-        let val = hex::decode(hex_val)
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, &format!("invalid hex for {key}")))?;
-        filter.push((reg_idx, val));
-    }
-    let pool = state.mempool.read().unwrap();
-    let outputs = pool.find_outputs_by_registers(&filter);
-    let result: Vec<UnconfirmedOutputResponse> = outputs
-        .iter()
-        .map(|o| {
-            let box_id = compute_box_id(&o.tx_id, o.index);
-            UnconfirmedOutputResponse {
-                box_id: hex::encode(box_id.0),
-                tx_id: hex::encode(o.tx_id.0),
-                index: o.index,
-                value: o.candidate.value,
-                creation_height: o.candidate.creation_height,
-                token_count: o.candidate.tokens.len(),
-            }
-        })
-        .collect();
-    Ok(Json(result))
-}
-
-// ---------------------------------------------------------------------------
 // Extended Blocks API handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /blocks?offset=0&limit=50` — paginated header IDs, newest first.
-async fn get_paginated_blocks_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<PaginationParams>,
-) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
-    let best_height = state.history.best_header_height().map_err(|_| {
-        api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to read best header height",
-        )
-    })?;
-
-    if best_height == 0 {
-        // No headers stored yet — check if there really is a best header.
-        if state
-            .history
-            .best_header_id()
-            .map_err(|_| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to read best header ID",
-                )
-            })?
-            .is_none()
-        {
-            return Ok(Json(Vec::new()));
-        }
-    }
-
-    let limit = params.limit.min(100) as usize;
-    let offset = params.offset as usize;
-
-    // Jump directly to start_height to avoid O(chain_height) scan.
-    let start_height = (best_height as i64) - (offset as i64);
-    if start_height < 0 {
-        return Ok(Json(Vec::new()));
-    }
-
-    let mut result: Vec<String> = Vec::new();
-    let mut height = start_height;
-    while height >= 0 && result.len() < limit {
-        let ids = state
-            .history
-            .header_ids_at_height(height as u32)
-            .map_err(|_| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to read header IDs at height",
-                )
-            })?;
-        for id in &ids {
-            result.push(hex::encode(id.0));
-        }
-        height -= 1;
-    }
-
-    Ok(Json(result))
-}
-
-/// `GET /blocks/lastHeaders/{n}` — last N full headers, newest first.
-async fn get_last_headers_handler(
-    State(state): State<ApiState>,
-    Path(n): Path<usize>,
-) -> Result<Json<Vec<HeaderResponse>>, (StatusCode, Json<ApiError>)> {
-    let n = n.min(2048);
-    let headers = state
-        .history
-        .last_n_headers(n)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load headers"))?;
-
-    let responses: Vec<HeaderResponse> = headers.iter().map(header_to_response).collect();
-    Ok(Json(responses))
-}
-
-/// `GET /blocks/chainSlice?fromHeight=0&toHeight=100` — headers between heights.
-async fn get_chain_slice_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<ChainSliceParams>,
-) -> Result<Json<Vec<HeaderResponse>>, (StatusCode, Json<ApiError>)> {
-    let from = params.from_height;
-    let to = params.to_height;
-
-    if to < from {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "toHeight must be >= fromHeight",
-        ));
-    }
-
-    // Cap the range to prevent excessive queries.
-    let capped_to = to.min(from.saturating_add(2048));
-
-    let mut responses = Vec::new();
-    for height in from..=capped_to {
-        let ids = state.history.header_ids_at_height(height).map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to read header IDs at height",
-            )
-        })?;
-        for id in &ids {
-            let header = state.history.load_header(id).map_err(|_| {
-                api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header")
-            })?;
-            if let Some(header) = header {
-                responses.push(header_to_response_with_id(&header, &hex::encode(id.0)));
-            }
-        }
-    }
-    Ok(Json(responses))
-}
-
-/// `GET /blocks/{id}/header` — header only.
-async fn get_header_only_handler(
-    State(state): State<ApiState>,
-    Path(header_id_hex): Path<String>,
-) -> Result<Json<HeaderResponse>, (StatusCode, Json<ApiError>)> {
-    let id = parse_modifier_id(&header_id_hex)?;
-    let header = state
-        .history
-        .load_header(&id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header"))?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Header not found"))?;
-
-    Ok(Json(header_to_response_with_id(&header, &header_id_hex)))
-}
-
-/// `GET /blocks/{id}/transactions` — block transactions as hex.
-async fn get_block_transactions_handler(
-    State(state): State<ApiState>,
-    Path(header_id_hex): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let id = parse_modifier_id(&header_id_hex)?;
-    let data = state
-        .history
-        .get_modifier(102, &id)
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load block transactions",
-            )
-        })?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block transactions not found"))?;
-
-    Ok(Json(hex::encode(data)))
-}
-
-/// `POST /blocks/headerIds` — batch full blocks by header IDs.
-async fn post_header_ids_handler(
-    State(state): State<ApiState>,
-    Json(ids): Json<Vec<String>>,
-) -> Result<Json<Vec<BlockResponse>>, (StatusCode, Json<ApiError>)> {
-    if ids.len() > 100 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Too many IDs; maximum is 100",
-        ));
-    }
-    let mut blocks = Vec::new();
-    for id_hex in &ids {
-        let id = parse_modifier_id(id_hex)?;
-        if let Ok(Some(header)) = state.history.load_header(&id) {
-            blocks.push(build_block_response(&state, &header, id_hex));
-        }
-    }
-    Ok(Json(blocks))
-}
-
-/// `GET /blocks/modifier/{id}` — any block section by ID.
-async fn get_modifier_handler(
-    State(state): State<ApiState>,
-    Path(modifier_id_hex): Path<String>,
-) -> Result<Json<ModifierResponse>, (StatusCode, Json<ApiError>)> {
-    let id = parse_modifier_id(&modifier_id_hex)?;
-
-    // Try each known modifier type: header=101, block_transactions=102,
-    // ad_proofs=104, extension=108.
-    for type_id in [101u8, 102, 104, 108] {
-        if let Ok(Some(data)) = state.history.get_modifier(type_id, &id) {
-            return Ok(Json(ModifierResponse {
-                type_id,
-                bytes: hex::encode(data),
-            }));
-        }
-    }
-
-    Err(api_error(StatusCode::NOT_FOUND, "Modifier not found"))
-}
-
-// ---------------------------------------------------------------------------
 // Address utility handlers
 // ---------------------------------------------------------------------------
-
-/// `GET /utils/address/{addr}` — validate an Ergo address.
-async fn validate_address_handler(Path(addr): Path<String>) -> Json<AddressValidationResponse> {
-    match address::validate_address(&addr) {
-        Ok(_) => Json(AddressValidationResponse {
-            address: addr,
-            is_valid: true,
-            error: None,
-        }),
-        Err(e) => Json(AddressValidationResponse {
-            address: addr,
-            is_valid: false,
-            error: Some(e.to_string()),
-        }),
-    }
-}
-
-/// `POST /utils/address` — validate an Ergo address (body is a JSON string).
-async fn validate_address_post_handler(
-    Json(addr): Json<String>,
-) -> Json<AddressValidationResponse> {
-    match address::validate_address(&addr) {
-        Ok(_) => Json(AddressValidationResponse {
-            address: addr,
-            is_valid: true,
-            error: None,
-        }),
-        Err(e) => Json(AddressValidationResponse {
-            address: addr,
-            is_valid: false,
-            error: Some(e.to_string()),
-        }),
-    }
-}
-
-/// `GET /utils/rawToAddress/{pubkey_hex}` — create a P2PK address from a hex public key.
-async fn raw_to_address_handler(
-    State(state): State<ApiState>,
-    Path(pubkey_hex): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let prefix = network_prefix(&state.network);
-    let addr = address::raw_to_address(&pubkey_hex, prefix)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid public key hex"))?;
-    Ok(Json(addr))
-}
-
-/// `GET /utils/addressToRaw/{addr}` — decode an address and return hex content bytes.
-async fn address_to_raw_handler(
-    Path(addr): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let raw = address::address_to_raw(&addr)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid address"))?;
-    Ok(Json(raw))
-}
 
 /// Shared logic for converting an ErgoTree hex string to an address.
 fn ergo_tree_to_address_impl(
@@ -3427,338 +2463,14 @@ fn ergo_tree_to_address_impl(
     Ok(Json(addr))
 }
 
-/// `GET /utils/ergoTreeToAddress/{ergo_tree_hex}` — derive an address from an ErgoTree.
-async fn ergo_tree_to_address_handler(
-    State(state): State<ApiState>,
-    Path(ergo_tree_hex): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    ergo_tree_to_address_impl(&ergo_tree_hex, &state)
-}
-
-/// `POST /utils/ergoTreeToAddress` — derive an address from an ErgoTree hex in the request body.
-async fn ergo_tree_to_address_post_handler(
-    State(state): State<ApiState>,
-    body: String,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    let hex_str = body.trim().trim_matches('"');
-    ergo_tree_to_address_impl(hex_str, &state)
-}
-
-// ---------------------------------------------------------------------------
 // Utils + Emission handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /utils/seed` — random 32-byte hex string.
-async fn seed_handler() -> Json<String> {
-    use rand::RngCore;
-    let mut buf = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut buf);
-    Json(hex::encode(buf))
-}
-
-/// `GET /utils/seed/{length}` — random N-byte hex string (max 256).
-async fn seed_with_length_handler(
-    Path(length): Path<usize>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
-    use rand::RngCore;
-    if length > 256 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Length must be at most 256",
-        ));
-    }
-    let mut buf = vec![0u8; length];
-    rand::thread_rng().fill_bytes(&mut buf);
-    Ok(Json(hex::encode(buf)))
-}
-
-/// `POST /utils/hash/blake2b` — blake2b-256 hash of input JSON string.
-async fn blake2b_hash_handler(Json(input): Json<String>) -> Json<serde_json::Value> {
-    use blake2::digest::{Update, VariableOutput};
-    let mut hasher = blake2::Blake2bVar::new(32).expect("valid output size");
-    hasher.update(input.as_bytes());
-    let mut hash = [0u8; 32];
-    hasher
-        .finalize_variable(&mut hash)
-        .expect("valid output size");
-    Json(serde_json::json!({ "hash": hex::encode(hash) }))
-}
-
-/// `GET /emission/at/{height}` — emission info at block height.
-async fn emission_handler(Path(height): Path<u32>) -> Json<ergo_network::emission::EmissionInfo> {
-    Json(ergo_network::emission::emission_info(height))
-}
-
-/// `GET /emission/scripts` — emission contract addresses.
-async fn emission_scripts_handler(State(state): State<ApiState>) -> Json<EmissionScriptsResponse> {
-    let network = network_prefix(&state.network);
-
-    // Minimal placeholder ErgoTree bytes for emission contracts.
-    // A fully accurate implementation would extract the real consensus-constant
-    // ErgoTree bytes from the Scala reference.
-    let emission_tree = [0xd1, 0x01];
-    let reemission_tree = [0xd1, 0x02];
-    let pay2reemission_tree = [0xd1, 0x03];
-
-    Json(EmissionScriptsResponse {
-        emission: address::ergo_tree_to_address(&emission_tree, network),
-        reemission: address::ergo_tree_to_address(&reemission_tree, network),
-        pay2_reemission: address::ergo_tree_to_address(&pay2reemission_tree, network),
-    })
-}
-
-/// `GET /blocks/{header_id}/proofFor/{tx_id}` — Merkle inclusion proof for a tx in a block.
-async fn merkle_proof_handler(
-    State(state): State<ApiState>,
-    Path((header_id_hex, tx_id_hex)): Path<(String, String)>,
-) -> Result<Json<MerkleProofResponse>, (StatusCode, Json<ApiError>)> {
-    let header_id = parse_modifier_id(&header_id_hex)?;
-
-    let target_tx_id = hex::decode(&tx_id_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding for tx ID"))?;
-    if target_tx_id.len() != 32 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Transaction ID must be 32 bytes (64 hex chars)",
-        ));
-    }
-
-    let block_txs = state
-        .history
-        .load_block_transactions(&header_id)
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load block transactions",
-            )
-        })?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block transactions not found"))?;
-
-    // Compute tx IDs: blake2b256 of each serialized transaction.
-    use blake2::digest::{Update, VariableOutput};
-    let tx_ids: Vec<[u8; 32]> = block_txs
-        .tx_bytes
-        .iter()
-        .map(|tx_bytes| {
-            let mut hasher = blake2::Blake2bVar::new(32).expect("valid");
-            hasher.update(tx_bytes);
-            let mut hash = [0u8; 32];
-            hasher.finalize_variable(&mut hash).expect("valid");
-            hash
-        })
-        .collect();
-
-    let leaf_index = tx_ids
-        .iter()
-        .position(|id| id[..] == target_tx_id[..])
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Transaction not found in block"))?;
-
-    let tx_id_slices: Vec<&[u8]> = tx_ids.iter().map(|id| id.as_slice()).collect();
-    let proof_steps =
-        ergo_consensus::merkle::merkle_proof(&tx_id_slices, leaf_index).ok_or_else(|| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to compute Merkle proof",
-            )
-        })?;
-
-    // Format levels: each is hex(side_byte ++ 32-byte sibling hash).
-    let levels: Vec<String> = proof_steps
-        .iter()
-        .map(|step| {
-            let side_byte = match step.side {
-                ergo_consensus::merkle::MerkleSide::Left => 0x00u8,
-                ergo_consensus::merkle::MerkleSide::Right => 0x01u8,
-            };
-            let mut entry = Vec::with_capacity(33);
-            entry.push(side_byte);
-            entry.extend_from_slice(&step.hash);
-            hex::encode(entry)
-        })
-        .collect();
-
-    Ok(Json(MerkleProofResponse {
-        leaf: tx_id_hex,
-        levels,
-    }))
-}
-
-// ---------------------------------------------------------------------------
 // NiPoPoW API handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /nipopow/popowHeaderById/{id}` — PoPow header by header ID.
-async fn popow_header_by_id_handler(
-    State(state): State<ApiState>,
-    Path(header_id_hex): Path<String>,
-) -> Result<Json<PoPowHeaderResponse>, (StatusCode, Json<ApiError>)> {
-    let id = parse_modifier_id(&header_id_hex)?;
-    let header = state
-        .history
-        .load_header(&id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header"))?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Header not found"))?;
-    let ext = state
-        .history
-        .load_extension(&id)
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load extension",
-            )
-        })?
-        .unwrap_or(ergo_types::extension::Extension {
-            header_id: id,
-            fields: Vec::new(),
-        });
-    let popow = ergo_network::nipopow::popow_header_for(header, &ext);
-    Ok(Json(popow_header_to_response(&popow)))
-}
-
-/// `GET /nipopow/popowHeaderByHeight/{h}` — PoPow header by block height.
-async fn popow_header_by_height_handler(
-    State(state): State<ApiState>,
-    Path(height): Path<u32>,
-) -> Result<Json<PoPowHeaderResponse>, (StatusCode, Json<ApiError>)> {
-    let ids = state.history.header_ids_at_height(height).map_err(|_| {
-        api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to read header IDs at height",
-        )
-    })?;
-    let id = ids
-        .first()
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "No header found at height"))?;
-    let header = state
-        .history
-        .load_header(id)
-        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header"))?
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Header not found"))?;
-    let ext = state
-        .history
-        .load_extension(id)
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load extension",
-            )
-        })?
-        .unwrap_or(ergo_types::extension::Extension {
-            header_id: *id,
-            fields: Vec::new(),
-        });
-    let popow = ergo_network::nipopow::popow_header_for(header, &ext);
-    Ok(Json(popow_header_to_response(&popow)))
-}
-
-/// `GET /nipopow/proof/{m}/{k}` — NiPoPoW proof from the tip of the chain.
-async fn nipopow_proof_handler(
-    State(state): State<ApiState>,
-    Path((m, k)): Path<(u32, u32)>,
-) -> Result<Json<NipopowProofResponse>, (StatusCode, Json<ApiError>)> {
-    if m == 0 || k == 0 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Parameters m and k must be > 0",
-        ));
-    }
-    let proof = ergo_network::nipopow::prove(&state.history, m, k, None)
-        .map_err(|_| api_error(StatusCode::NOT_FOUND, "Failed to generate NiPoPoW proof"))?;
-    Ok(Json(proof_to_response(&proof)))
-}
-
-/// `GET /nipopow/proof/{m}/{k}/{id}` — NiPoPoW proof anchored at a specific header.
-async fn nipopow_proof_at_handler(
-    State(state): State<ApiState>,
-    Path((m, k, header_id_hex)): Path<(u32, u32, String)>,
-) -> Result<Json<NipopowProofResponse>, (StatusCode, Json<ApiError>)> {
-    if m == 0 || k == 0 {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Parameters m and k must be > 0",
-        ));
-    }
-    let id = parse_modifier_id(&header_id_hex)?;
-    let proof = ergo_network::nipopow::prove(&state.history, m, k, Some(id))
-        .map_err(|_| api_error(StatusCode::NOT_FOUND, "Failed to generate NiPoPoW proof"))?;
-    Ok(Json(proof_to_response(&proof)))
-}
-
-/// `POST /node/shutdown` — trigger graceful shutdown (localhost only).
-async fn node_shutdown_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    if let Some(ref tx) = state.shutdown_tx {
-        let _ = tx.send(true);
-    }
-    Ok(Json(serde_json::json!({ "status": "shutting_down" })))
-}
-
-// ---------------------------------------------------------------------------
 // Script utility handlers
 // ---------------------------------------------------------------------------
-
-/// `GET /script/addressToTree/{addr}` — convert address to hex ErgoTree.
-async fn script_address_to_tree_handler(
-    State(state): State<ApiState>,
-    Path(addr): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tree_bytes = address_to_ergo_tree(&addr, &state.network)?;
-    Ok(Json(serde_json::json!({
-        "tree": hex::encode(&tree_bytes)
-    })))
-}
-
-/// `GET /script/addressToBytes/{addr}` — convert address to hex sigma ByteArrayConstant.
-async fn script_address_to_bytes_handler(
-    State(state): State<ApiState>,
-    Path(addr): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tree_bytes = address_to_ergo_tree(&addr, &state.network)?;
-    let constant_bytes = encode_byte_array_constant(&tree_bytes);
-    Ok(Json(serde_json::json!({
-        "bytes": hex::encode(&constant_bytes)
-    })))
-}
-
-/// `POST /script/p2sAddress` — compile ErgoScript source to a P2S address.
-async fn script_p2s_address_handler(
-    State(state): State<ApiState>,
-    Json(req): Json<ScriptCompileRequest>,
-) -> Result<Json<ScriptCompileResponse>, (StatusCode, String)> {
-    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
-    let network_prefix = network_prefix_from_str(&state.network);
-    let addr = address::encode_address(network_prefix, address::AddressType::P2S, &tree_bytes);
-    Ok(Json(ScriptCompileResponse { address: addr }))
-}
-
-/// `POST /script/p2shAddress` — compile ErgoScript source to a P2SH address.
-async fn script_p2sh_address_handler(
-    State(state): State<ApiState>,
-    Json(req): Json<ScriptCompileRequest>,
-) -> Result<Json<ScriptCompileResponse>, (StatusCode, String)> {
-    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
-    let hash = blake2b256(&tree_bytes);
-    let network_prefix = network_prefix_from_str(&state.network);
-    let addr = address::encode_address(network_prefix, address::AddressType::P2SH, &hash[..24]);
-    Ok(Json(ScriptCompileResponse { address: addr }))
-}
-
-/// `POST /script/compile` — compile ErgoScript source to ErgoTree hex and P2S address.
-async fn script_compile_handler(
-    State(state): State<ApiState>,
-    Json(req): Json<ScriptCompileRequest>,
-) -> Result<Json<ScriptFullCompileResponse>, (StatusCode, String)> {
-    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
-    let network_prefix = network_prefix_from_str(&state.network);
-    let addr = address::encode_address(network_prefix, address::AddressType::P2S, &tree_bytes);
-    Ok(Json(ScriptFullCompileResponse {
-        ergo_tree: hex::encode(&tree_bytes),
-        address: addr,
-    }))
-}
 
 /// Compile ErgoScript source code to serialized ErgoTree bytes.
 fn compile_script_to_tree_bytes(source: &str) -> Result<Vec<u8>, (StatusCode, String)> {
@@ -3811,1158 +2523,26 @@ fn network_prefix_from_str(network: &str) -> address::NetworkPrefix {
 // Blockchain (indexed) API handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /blockchain/indexedHeight` — current indexed height vs full chain height.
-async fn indexed_height_handler(
-    State(state): State<ApiState>,
-) -> Result<Json<IndexedHeightResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let indexed = ergo_indexer::queries::indexed_height(db)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let shared = state.shared.read().await;
-    Ok(Json(IndexedHeightResponse {
-        indexed_height: indexed,
-        full_height: shared.full_height as u32,
-    }))
-}
-
-/// `GET /blockchain/transaction/byId/{id}` — look up an indexed transaction by ID.
-async fn blockchain_tx_by_id_handler(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Result<Json<IndexedErgoTransactionResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let tx_id = hex_to_32bytes(&id)?;
-    let tx = ergo_indexer::queries::get_tx(db, &tx_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Transaction not found".into()))?;
-    let shared = state.shared.read().await;
-    Ok(Json(tx_to_response(
-        &tx,
-        db,
-        shared.full_height as u32,
-        &state.network,
-    )))
-}
-
-/// `GET /blockchain/transaction/byIndex/{n}` — look up an indexed transaction by global index.
-async fn blockchain_tx_by_index_handler(
-    State(state): State<ApiState>,
-    Path(n): Path<u64>,
-) -> Result<Json<IndexedErgoTransactionResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let tx = ergo_indexer::queries::get_tx_by_index(db, n)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Transaction not found".into()))?;
-    let shared = state.shared.read().await;
-    Ok(Json(tx_to_response(
-        &tx,
-        db,
-        shared.full_height as u32,
-        &state.network,
-    )))
-}
-
-/// `POST /blockchain/transaction/byAddress` — transactions for an address (body = address string).
-async fn blockchain_txs_by_address_post_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<BlockchainPaginationParams>,
-    body: String,
-) -> Result<Json<PaginatedTxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = address_to_ergo_tree(body.trim(), &state.network)?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (txs, total) = ergo_indexer::queries::txs_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let shared = state.shared.read().await;
-    let height = shared.full_height as u32;
-    let items = txs
-        .iter()
-        .map(|tx| tx_to_response(tx, db, height, &state.network))
-        .collect();
-    Ok(Json(PaginatedTxResponse { items, total }))
-}
-
-/// `GET /blockchain/transaction/byAddress/{addr}` — transactions for an address (path param).
-async fn blockchain_txs_by_address_get_handler(
-    State(state): State<ApiState>,
-    Path(addr): Path<String>,
-    Query(params): Query<BlockchainPaginationParams>,
-) -> Result<Json<PaginatedTxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = address_to_ergo_tree(&addr, &state.network)?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (txs, total) = ergo_indexer::queries::txs_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let shared = state.shared.read().await;
-    let height = shared.full_height as u32;
-    let items = txs
-        .iter()
-        .map(|tx| tx_to_response(tx, db, height, &state.network))
-        .collect();
-    Ok(Json(PaginatedTxResponse { items, total }))
-}
-
-/// `GET /blockchain/transaction/range?offset=0&limit=5` — range of tx IDs by global index.
-async fn blockchain_tx_range_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<BlockchainPaginationParams>,
-) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ids = ergo_indexer::queries::tx_id_range(db, params.offset as u64, params.limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(ids.into_iter().map(hex::encode).collect()))
-}
-
-// ---------------------------------------------------------------------------
 // Blockchain (indexed) Box API handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /blockchain/box/byId/{id}` — single box lookup.
-async fn blockchain_box_by_id_handler(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Result<Json<IndexedErgoBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let box_id = hex_to_32bytes(&id)?;
-    let b = ergo_indexer::queries::get_box(db, &box_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Box not found".into()))?;
-    Ok(Json(box_to_response(&b, &state.network)))
-}
-
-/// `GET /blockchain/box/byIndex/{n}` — box by global index.
-async fn blockchain_box_by_index_handler(
-    State(state): State<ApiState>,
-    Path(n): Path<u64>,
-) -> Result<Json<IndexedErgoBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let b = ergo_indexer::queries::get_box_by_index(db, n)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Box not found".into()))?;
-    Ok(Json(box_to_response(&b, &state.network)))
-}
-
-/// `GET /blockchain/box/byTokenId/{id}` — boxes containing token (paginated).
-async fn blockchain_boxes_by_token_handler(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Query(params): Query<BlockchainPaginationParams>,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let token_id_arr = hex_to_32bytes(&id)?;
-    let token_id = ModifierId(token_id_arr);
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_token(
-        db,
-        &token_id,
-        params.offset,
-        params.limit,
-        false,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `GET /blockchain/box/unspent/byTokenId/{id}` — unspent boxes with token (paginated, mempool params).
-async fn blockchain_unspent_boxes_by_token_handler(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-    Query(params): Query<UnspentBoxParams>,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let token_id_arr = hex_to_32bytes(&id)?;
-    let token_id = ModifierId(token_id_arr);
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_token(
-        db,
-        &token_id,
-        params.offset,
-        params.limit,
-        true,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    let mut total = total;
-    let mp = state.mempool.read().unwrap();
-    apply_mempool_box_filters(&mut items, &mut total, &mp, &params, None, &state.network);
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `POST /blockchain/box/byAddress` — boxes for address (body: address string, paginated).
-async fn blockchain_boxes_by_address_post_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<BlockchainPaginationParams>,
-    body: String,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = address_to_ergo_tree(body.trim(), &state.network)?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        false,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `GET /blockchain/box/byAddress/{addr}` — boxes for address (path variant, paginated).
-async fn blockchain_boxes_by_address_get_handler(
-    State(state): State<ApiState>,
-    Path(addr): Path<String>,
-    Query(params): Query<BlockchainPaginationParams>,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = address_to_ergo_tree(&addr, &state.network)?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        false,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `POST /blockchain/box/unspent/byAddress` — unspent boxes for address (paginated, mempool params).
-async fn blockchain_unspent_boxes_by_address_post_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<UnspentBoxParams>,
-    body: String,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = address_to_ergo_tree(body.trim(), &state.network)?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        true,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    let mut total = total;
-    let mp = state.mempool.read().unwrap();
-    apply_mempool_box_filters(
-        &mut items,
-        &mut total,
-        &mp,
-        &params,
-        Some(&ergo_tree),
-        &state.network,
-    );
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `GET /blockchain/box/unspent/byAddress/{addr}` — unspent boxes for address (path variant, paginated, mempool params).
-async fn blockchain_unspent_boxes_by_address_get_handler(
-    State(state): State<ApiState>,
-    Path(addr): Path<String>,
-    Query(params): Query<UnspentBoxParams>,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = address_to_ergo_tree(&addr, &state.network)?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        true,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    let mut total = total;
-    let mp = state.mempool.read().unwrap();
-    apply_mempool_box_filters(
-        &mut items,
-        &mut total,
-        &mp,
-        &params,
-        Some(&ergo_tree),
-        &state.network,
-    );
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `GET /blockchain/box/byTemplateHash/{hash}` — boxes by contract template (paginated).
-async fn blockchain_boxes_by_template_handler(
-    State(state): State<ApiState>,
-    Path(hash): Path<String>,
-    Query(params): Query<BlockchainPaginationParams>,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let template_hash =
-        hex::decode(&hash).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_template(
-        db,
-        &template_hash,
-        params.offset,
-        params.limit,
-        false,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `GET /blockchain/box/unspent/byTemplateHash/{hash}` — unspent boxes by template (paginated, mempool params).
-async fn blockchain_unspent_boxes_by_template_handler(
-    State(state): State<ApiState>,
-    Path(hash): Path<String>,
-    Query(params): Query<UnspentBoxParams>,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let template_hash =
-        hex::decode(&hash).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex string".into()))?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_template(
-        db,
-        &template_hash,
-        params.offset,
-        params.limit,
-        true,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    let mut total = total;
-    let mp = state.mempool.read().unwrap();
-    apply_mempool_box_filters(&mut items, &mut total, &mp, &params, None, &state.network);
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `GET /blockchain/box/range` — box IDs by global index range.
-async fn blockchain_box_range_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<BlockchainPaginationParams>,
-) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ids = ergo_indexer::queries::box_id_range(db, params.offset as u64, params.limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(ids.into_iter().map(hex::encode).collect()))
-}
-
-/// `POST /blockchain/box/byErgoTree` — boxes by ErgoTree hex body (paginated).
-async fn blockchain_boxes_by_ergo_tree_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<BlockchainPaginationParams>,
-    body: String,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = hex::decode(body.trim())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex ErgoTree".into()))?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        false,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let items = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-/// `POST /blockchain/box/unspent/byErgoTree` — unspent by ErgoTree hex (paginated, mempool params).
-async fn blockchain_unspent_boxes_by_ergo_tree_handler(
-    State(state): State<ApiState>,
-    Query(params): Query<UnspentBoxParams>,
-    body: String,
-) -> Result<Json<PaginatedBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let ergo_tree = hex::decode(body.trim())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid hex ErgoTree".into()))?;
-    let sort_desc = params.sort_direction.as_deref() != Some("asc");
-    let (boxes, total) = ergo_indexer::queries::boxes_by_address(
-        db,
-        &ergo_tree,
-        params.offset,
-        params.limit,
-        true,
-        sort_desc,
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut items: Vec<IndexedErgoBoxResponse> = boxes
-        .iter()
-        .map(|b| box_to_response(b, &state.network))
-        .collect();
-    let mut total = total;
-    let mp = state.mempool.read().unwrap();
-    apply_mempool_box_filters(
-        &mut items,
-        &mut total,
-        &mp,
-        &params,
-        Some(&ergo_tree),
-        &state.network,
-    );
-    Ok(Json(PaginatedBoxResponse { items, total }))
-}
-
-// ---------------------------------------------------------------------------
 // Blockchain – Token handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /blockchain/token/byId/{id}` — single token metadata.
-async fn blockchain_token_by_id_handler(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Result<Json<IndexedTokenResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let token_id_bytes = hex_to_32bytes(&id)?;
-    let token_id = ModifierId(token_id_bytes);
-    let token = ergo_indexer::queries::get_token(db, &token_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Token not found".into()))?;
-    Ok(Json(token_to_response(&token)))
-}
-
-/// `POST /blockchain/tokens` — batch token lookup.
-async fn blockchain_tokens_handler(
-    State(state): State<ApiState>,
-    Json(ids): Json<Vec<String>>,
-) -> Result<Json<Vec<IndexedTokenResponse>>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let mut results = Vec::new();
-    for id_hex in &ids {
-        let token_id_bytes = hex_to_32bytes(id_hex)?;
-        let token_id = ModifierId(token_id_bytes);
-        if let Some(token) = ergo_indexer::queries::get_token(db, &token_id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
-            results.push(token_to_response(&token));
-        }
-    }
-    Ok(Json(results))
-}
-
-// ---------------------------------------------------------------------------
 // Blockchain – Balance handlers
 // ---------------------------------------------------------------------------
 
-/// Build a [`BalanceResponse`] for the given address string.
-async fn balance_for_address(
-    state: &ApiState,
-    addr: &str,
-) -> Result<Json<BalanceResponse>, (StatusCode, String)> {
-    let db = require_indexer(state)?;
-    let ergo_tree = address_to_ergo_tree(addr, &state.network)?;
-
-    // Confirmed balance from indexer
-    let confirmed_balance = ergo_indexer::queries::balance_for_address(db, &ergo_tree)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let confirmed = match confirmed_balance {
-        Some(b) => BalanceInfoResponse {
-            nano_ergs: b.nano_ergs,
-            tokens: b
-                .tokens
-                .iter()
-                .map(|(id, amt)| {
-                    let meta = ergo_indexer::queries::get_token(db, id).ok().flatten();
-                    TokenBalanceResponse {
-                        token_id: hex::encode(id.0),
-                        amount: *amt,
-                        decimals: meta.as_ref().and_then(|m| m.decimals),
-                        name: meta.as_ref().and_then(|m| m.name.clone()),
-                    }
-                })
-                .collect(),
-        },
-        None => BalanceInfoResponse {
-            nano_ergs: 0,
-            tokens: vec![],
-        },
-    };
-
-    // Unconfirmed balance from mempool
-    let unconfirmed = {
-        let mempool = state.mempool.read().unwrap();
-        let tree_hash = blake2b256(&ergo_tree);
-        let unconf_outputs = mempool.find_outputs_by_tree_hash(&tree_hash);
-        let mut nano_ergs: u64 = 0;
-        let mut token_map: std::collections::HashMap<[u8; 32], u64> =
-            std::collections::HashMap::new();
-        for output_ref in &unconf_outputs {
-            nano_ergs += output_ref.candidate.value;
-            for (tok_id, amt) in &output_ref.candidate.tokens {
-                *token_map.entry(tok_id.0).or_default() += amt;
-            }
-        }
-        BalanceInfoResponse {
-            nano_ergs,
-            tokens: token_map
-                .into_iter()
-                .map(|(id, amt)| TokenBalanceResponse {
-                    token_id: hex::encode(id),
-                    amount: amt,
-                    decimals: None,
-                    name: None,
-                })
-                .collect(),
-        }
-    };
-
-    Ok(Json(BalanceResponse {
-        confirmed,
-        unconfirmed,
-    }))
-}
-
-/// `POST /blockchain/balance` — balance for address (body = address string).
-async fn blockchain_balance_post_handler(
-    State(state): State<ApiState>,
-    body: String,
-) -> Result<Json<BalanceResponse>, (StatusCode, String)> {
-    balance_for_address(&state, body.trim()).await
-}
-
-/// `GET /blockchain/balanceForAddress/{addr}` — balance for address (path param).
-async fn blockchain_balance_get_handler(
-    State(state): State<ApiState>,
-    Path(addr): Path<String>,
-) -> Result<Json<BalanceResponse>, (StatusCode, String)> {
-    balance_for_address(&state, &addr).await
-}
-
-// ---------------------------------------------------------------------------
 // Blockchain – Block handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /blockchain/block/byHeaderId/{id}` — indexed block by header ID.
-async fn blockchain_block_by_header_id_handler(
-    State(state): State<ApiState>,
-    Path(id): Path<String>,
-) -> Result<Json<IndexedBlockResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let header_id_bytes = hex_to_32bytes(&id)?;
-    let header_id = ModifierId(header_id_bytes);
-
-    let header = state
-        .history
-        .load_header(&header_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Header not found".into()))?;
-
-    let block_txs = state
-        .history
-        .load_block_transactions(&header_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Block transactions not found".into()))?;
-
-    let shared = state.shared.read().await;
-    let current_height = shared.full_height as u32;
-    drop(shared);
-
-    Ok(Json(build_indexed_block_response(
-        &state,
-        db,
-        &header,
-        &block_txs,
-        current_height,
-    )))
-}
-
-/// `POST /blockchain/block/byHeaderIds` — batch block lookup by header IDs.
-async fn blockchain_block_by_header_ids_handler(
-    State(state): State<ApiState>,
-    Json(ids): Json<Vec<String>>,
-) -> Result<Json<Vec<IndexedBlockResponse>>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let shared = state.shared.read().await;
-    let current_height = shared.full_height as u32;
-    drop(shared);
-
-    let mut results = Vec::new();
-    for id_hex in &ids {
-        let header_id_bytes = hex_to_32bytes(id_hex)?;
-        let header_id = ModifierId(header_id_bytes);
-
-        let header = match state.history.load_header(&header_id) {
-            Ok(Some(h)) => h,
-            _ => continue,
-        };
-        let block_txs = match state.history.load_block_transactions(&header_id) {
-            Ok(Some(bt)) => bt,
-            _ => continue,
-        };
-
-        results.push(build_indexed_block_response(
-            &state,
-            db,
-            &header,
-            &block_txs,
-            current_height,
-        ));
-    }
-    Ok(Json(results))
-}
-
-// ---------------------------------------------------------------------------
 // UTXO handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /utxo/byId/{boxId}` -- look up a confirmed UTXO by box ID.
-async fn utxo_by_id_handler(
-    State(state): State<ApiState>,
-    Path(_box_id_hex): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    require_utxo_state(&state.state_type)?;
-    // UTXO tree lookup not yet wired
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": 501,
-            "reason": "UTXO state read not yet implemented"
-        })),
-    ))
-}
-
-/// `GET /utxo/byIdBinary/{boxId}` -- look up a confirmed UTXO (binary) by box ID.
-async fn utxo_by_id_binary_handler(
-    State(state): State<ApiState>,
-    Path(_box_id_hex): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    require_utxo_state(&state.state_type)?;
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": 501,
-            "reason": "UTXO state read not yet implemented"
-        })),
-    ))
-}
-
-/// `GET /utxo/withPool/byId/{boxId}` -- UTXO lookup + mempool overlay.
-async fn utxo_with_pool_by_id_handler(
-    State(state): State<ApiState>,
-    Path(box_id_hex): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let box_id_bytes = hex::decode(&box_id_hex).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": 400, "reason": "invalid hex"})),
-        )
-    })?;
-    if box_id_bytes.len() != 32 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": 400, "reason": "box ID must be 32 bytes"})),
-        ));
-    }
-    let box_id = BoxId(box_id_bytes.try_into().unwrap());
-
-    // Check mempool for unconfirmed outputs
-    let mp = state.mempool.read().unwrap();
-    if let Some(output_ref) = mp.find_output_by_box_id(&box_id) {
-        let candidate = output_ref.candidate;
-        return Ok(Json(serde_json::json!({
-            "boxId": box_id_hex,
-            "value": candidate.value,
-            "ergoTree": hex::encode(&candidate.ergo_tree_bytes),
-            "creationHeight": candidate.creation_height,
-            "assets": candidate.tokens.iter().map(|(tid, amt)| {
-                serde_json::json!({"tokenId": hex::encode(tid.0), "amount": amt})
-            }).collect::<Vec<_>>(),
-            "confirmed": false
-        })));
-    }
-    drop(mp);
-
-    // For confirmed lookup, need UTXO state
-    require_utxo_state(&state.state_type)?;
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": 501,
-            "reason": "UTXO state read not yet implemented"
-        })),
-    ))
-}
-
-/// `POST /utxo/withPool/byIds` -- batch lookup across UTXO set + mempool.
-async fn utxo_with_pool_by_ids_handler(
-    State(state): State<ApiState>,
-    Json(ids): Json<Vec<String>>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
-    let mut results = Vec::new();
-    let mp = state.mempool.read().unwrap();
-    for id_hex in &ids {
-        if let Ok(bytes) = hex::decode(id_hex) {
-            if bytes.len() == 32 {
-                let box_id = BoxId(bytes.try_into().unwrap());
-                if let Some(output_ref) = mp.find_output_by_box_id(&box_id) {
-                    let c = output_ref.candidate;
-                    results.push(serde_json::json!({
-                        "boxId": id_hex,
-                        "value": c.value,
-                        "ergoTree": hex::encode(&c.ergo_tree_bytes),
-                        "creationHeight": c.creation_height,
-                        "assets": c.tokens.iter().map(|(tid, amt)| {
-                            serde_json::json!({"tokenId": hex::encode(tid.0), "amount": amt})
-                        }).collect::<Vec<_>>(),
-                        "confirmed": false
-                    }));
-                }
-            }
-        }
-    }
-    drop(mp);
-    Ok(Json(results))
-}
-
-/// `GET /utxo/withPool/byIdBinary/{boxId}` -- binary UTXO + mempool overlay.
-async fn utxo_with_pool_by_id_binary_handler(
-    State(state): State<ApiState>,
-    Path(_box_id_hex): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    require_utxo_state(&state.state_type)?;
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": 501,
-            "reason": "UTXO binary state read not yet implemented"
-        })),
-    ))
-}
-
-/// `GET /utxo/genesis` -- genesis boxes (consensus constants).
-async fn utxo_genesis_handler(
-    State(_state): State<ApiState>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
-    // Genesis boxes are consensus constants -- return empty for now
-    Ok(Json(Vec::new()))
-}
-
-// ---------------------------------------------------------------------------
 // POST /blocks, UTXO snapshot, binary proof, and script execution handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /blocks` -- submit a full block for validation and inclusion.
-///
-/// Accepts a JSON body representing a full block. The body must contain a `header`
-/// field with hex-encoded serialized header bytes, plus optional `blockTransactions`,
-/// `extension`, and `adProofs` fields (also hex-encoded bytes). Validates the header's
-/// proof-of-work, then fire-and-forget sends each section to the event loop for full
-/// validation and application (matching Scala's pattern).
-async fn post_block_handler(
-    State(state): State<ApiState>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    // Extract the header bytes (hex-encoded serialized header).
-    let header_hex = body.get("header").and_then(|v| v.as_str()).ok_or_else(|| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "Missing 'header' field (hex string)",
-        )
-    })?;
-
-    let header_bytes = hex::decode(header_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding in header"))?;
-
-    // Parse the header to validate PoW.
-    let header = ergo_wire::header_ser::parse_header(&header_bytes).map_err(|e| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            &format!("Failed to parse header: {e}"),
-        )
-    })?;
-
-    // Validate proof-of-work (lightweight pre-check, matching Scala's `powScheme.validate`).
-    ergo_consensus::autolykos::validate_pow(&header)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("Invalid PoW: {e}")))?;
-
-    // Compute the header ID from the serialized bytes.
-    let header_id = compute_header_id(&header_bytes);
-    let header_id_hex = hex::encode(header_id.0);
-
-    // Build the list of modifiers to send to the event loop.
-    // type_id 101 = Header, 102 = BlockTransactions, 108 = Extension, 104 = ADProofs
-    let mut modifiers = Vec::new();
-    modifiers.push((101u8, header_id, header_bytes));
-
-    // Optional body sections: blockTransactions, extension, adProofs
-    if let Some(bt_hex) = body.get("blockTransactions").and_then(|v| v.as_str()) {
-        let bt_bytes = hex::decode(bt_hex)
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in blockTransactions"))?;
-        modifiers.push((102u8, header_id, bt_bytes));
-    }
-
-    if let Some(ext_hex) = body.get("extension").and_then(|v| v.as_str()) {
-        let ext_bytes = hex::decode(ext_hex)
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in extension"))?;
-        modifiers.push((108u8, header_id, ext_bytes));
-    }
-
-    if let Some(ap_hex) = body.get("adProofs").and_then(|v| v.as_str()) {
-        let ap_bytes = hex::decode(ap_hex)
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in adProofs"))?;
-        modifiers.push((104u8, header_id, ap_bytes));
-    }
-
-    // Fire-and-forget: send to the event loop.
-    let sender = state.block_submit.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Block submit channel not available",
-        )
-    })?;
-
-    let submission = crate::event_loop::BlockSubmission { modifiers };
-    sender.try_send(submission).map_err(|_| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Event loop busy, block submit channel full",
-        )
-    })?;
-
-    // Return OK immediately with the header ID (Scala pattern: fire-and-forget).
-    Ok(Json(serde_json::json!({ "headerId": header_id_hex })))
-}
-
-/// `GET /utxo/getSnapshotsInfo` -- return metadata about available UTXO snapshots.
-async fn utxo_snapshots_info_handler(
-    State(state): State<ApiState>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
-    if state.state_type != "utxo" {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "UTXO snapshots info not available in digest mode",
-        ));
-    }
-
-    if let Some(ref sdb) = state.snapshots_db {
-        match sdb.get_info() {
-            Ok(info) => {
-                let manifests: Vec<serde_json::Value> = info
-                    .manifests
-                    .iter()
-                    .map(|(height, manifest_id)| {
-                        serde_json::json!({
-                            "height": height,
-                            "manifestId": hex::encode(manifest_id),
-                        })
-                    })
-                    .collect();
-                Ok(Json(manifests))
-            }
-            Err(e) => Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to read snapshots info: {e}"),
-            )),
-        }
-    } else {
-        // No snapshots DB configured — return empty list
-        Ok(Json(Vec::new()))
-    }
-}
-
-/// `POST /utxo/getBoxesBinaryProof` -- return a batch Merkle proof for a set of box IDs.
-///
-/// Accepts a JSON array of box ID hex strings. Sends a proof request to the event
-/// loop which holds the live UTXO AVL+ tree, awaits the response, and returns the
-/// hex-encoded serialized AD proof bytes.
-async fn utxo_boxes_binary_proof_handler(
-    State(state): State<ApiState>,
-    Json(box_ids): Json<Vec<String>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    if state.state_type != "utxo" {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "UTXO binary proofs not available in digest mode",
-        ));
-    }
-
-    // Validate and parse the input box IDs.
-    let mut parsed_ids = Vec::with_capacity(box_ids.len());
-    for id_hex in &box_ids {
-        let bytes = hex::decode(id_hex).map_err(|_| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid hex encoding in box ID: {}", id_hex),
-            )
-        })?;
-        if bytes.len() != 32 {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("Box ID must be 32 bytes, got {}: {}", bytes.len(), id_hex),
-            ));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        parsed_ids.push(arr);
-    }
-
-    // Send a proof request to the event loop via the oneshot channel pattern.
-    let sender = state.utxo_proof.as_ref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "UTXO proof channel not available",
-        )
-    })?;
-
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let request = crate::event_loop::UtxoProofRequest {
-        box_ids: parsed_ids,
-        response_tx: resp_tx,
-    };
-
-    sender.try_send(request).map_err(|_| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Event loop busy, proof request channel full",
-        )
-    })?;
-
-    // Await the response with a timeout.
-    match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await {
-        Ok(Ok(Ok(proof_bytes))) => Ok(Json(serde_json::json!(hex::encode(proof_bytes)))),
-        Ok(Ok(Err(e))) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Proof generation failed: {e}"),
-        )),
-        Ok(Err(_)) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Event loop dropped proof response",
-        )),
-        Err(_) => Err(api_error(
-            StatusCode::GATEWAY_TIMEOUT,
-            "Proof generation timed out",
-        )),
-    }
-}
-
-/// `POST /script/executeWithContext` -- compile and evaluate an ErgoScript with a given context.
-///
-/// Accepts a JSON body with a `script` field (ErgoScript source code).
-/// Compiles the script and returns the resulting ErgoTree hex.
-/// Full execution with a transaction context is not yet supported.
-async fn script_execute_with_context_handler(
-    State(_state): State<ApiState>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let script = body
-        .get("script")
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Missing 'script' field"))?;
-
-    // Compile the script to an ErgoTree
-    let tree_bytes =
-        compile_script_to_tree_bytes(script).map_err(|(status, msg)| api_error(status, &msg))?;
-
-    // Full script execution with a transaction context (inputs, data inputs,
-    // self box, etc.) requires sigma-rust's Prover infrastructure and is
-    // significantly more complex than compilation alone.
-    // For now, return the compiled ErgoTree as hex and indicate that
-    // full evaluation is not yet supported.
-    Ok(Json(serde_json::json!({
-        "compiledErgoTree": hex::encode(&tree_bytes),
-        "note": "Full script evaluation with context is not yet supported. Only compilation is performed."
-    })))
-}
-
-// ---------------------------------------------------------------------------
 // Mining handlers
 // ---------------------------------------------------------------------------
-
-/// GET /mining/candidate — return the current mining candidate (work message).
-async fn mining_candidate_handler(
-    State(state): State<ApiState>,
-) -> Result<Json<MiningCandidateResponse>, (StatusCode, String)> {
-    let gen_lock = state.candidate_generator.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "mining is not enabled".to_string(),
-    ))?;
-
-    let gen = gen_lock.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("lock poisoned: {e}"),
-        )
-    })?;
-
-    let (_candidate, header_template) = gen.current().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "no mining candidate available yet".to_string(),
-    ))?;
-
-    // Recompute msg and target from header template.
-    let msg = ergo_consensus::autolykos::msg_by_header(header_template);
-    let b_big = ergo_consensus::autolykos::get_b(header_template.n_bits);
-    let b = biguint_to_u64_saturating(&b_big);
-
-    Ok(Json(MiningCandidateResponse {
-        msg: hex::encode(msg),
-        b,
-        h: header_template.height,
-        pk: hex::encode(gen.miner_pk),
-    }))
-}
-
-/// POST /mining/candidateWithTxs — return the current mining candidate including transactions.
-///
-/// Accepts a JSON body (which is currently ignored) and returns the work message
-/// fields plus the full list of transactions in the candidate block.
-async fn mining_candidate_with_txs_handler(
-    State(state): State<ApiState>,
-    _body: String,
-) -> Result<Json<CandidateWithTxsResponse>, (StatusCode, String)> {
-    let gen_lock = state.candidate_generator.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "mining is not enabled".to_string(),
-    ))?;
-
-    let gen = gen_lock.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("lock poisoned: {e}"),
-        )
-    })?;
-
-    let (candidate, header_template) = gen.current().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "no mining candidate available yet".to_string(),
-    ))?;
-
-    // Recompute msg and target from header template.
-    let msg = ergo_consensus::autolykos::msg_by_header(header_template);
-    let b_big = ergo_consensus::autolykos::get_b(header_template.n_bits);
-    let b = biguint_to_u64_saturating(&b_big);
-
-    // Serialize candidate transactions.
-    let transactions: Vec<TransactionResponse> = candidate
-        .transactions
-        .iter()
-        .map(|tx| {
-            let size = serialize_transaction(tx).len();
-            ergo_tx_to_response(tx, size)
-        })
-        .collect();
-
-    Ok(Json(CandidateWithTxsResponse {
-        msg: hex::encode(msg),
-        b,
-        h: header_template.height,
-        pk: hex::encode(gen.miner_pk),
-        transactions,
-    }))
-}
-
-/// POST /mining/solution — submit a mining solution from an external miner.
-async fn mining_solution_handler(
-    State(state): State<ApiState>,
-    Json(solution): Json<MiningSolution>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Validate nonce format.
-    if solution.nonce_bytes().is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "invalid nonce: expected 8 bytes hex-encoded (16 hex chars)".to_string(),
-        ));
-    }
-
-    let tx = state.mining_solution_tx.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "mining is not enabled".to_string(),
-    ))?;
-
-    tx.send(solution).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "solution channel closed".to_string(),
-        )
-    })?;
-
-    Ok(Json(serde_json::json!({"status": "ok"})))
-}
-
-/// GET /mining/rewardAddress — return the configured mining reward address.
-async fn mining_reward_address_handler(
-    State(state): State<ApiState>,
-) -> Result<Json<RewardAddressResponse>, (StatusCode, String)> {
-    if state.mining_pub_key_hex.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no mining public key configured".to_string(),
-        ));
-    }
-    Ok(Json(RewardAddressResponse {
-        reward_address: state.mining_pub_key_hex.clone(),
-    }))
-}
-
-/// GET /mining/rewardPublicKey — return the configured miner public key.
-async fn mining_reward_pubkey_handler(
-    State(state): State<ApiState>,
-) -> Result<Json<RewardPublicKeyResponse>, (StatusCode, String)> {
-    if state.mining_pub_key_hex.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no mining public key configured".to_string(),
-        ));
-    }
-    Ok(Json(RewardPublicKeyResponse {
-        reward_pub_key: state.mining_pub_key_hex.clone(),
-    }))
-}
 
 /// Convert a [`num_bigint::BigUint`] to `u64`, saturating at `u64::MAX`.
 fn biguint_to_u64_saturating(val: &num_bigint::BigUint) -> u64 {
@@ -4981,426 +2561,12 @@ fn biguint_to_u64_saturating(val: &num_bigint::BigUint) -> u64 {
 // Wallet handlers (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// `GET /wallet/status` — get wallet lifecycle status.
-#[cfg(feature = "wallet")]
-async fn wallet_status_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<WalletStatusResponse>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let status = w.status();
-    Ok(Json(WalletStatusResponse {
-        is_initialized: status.initialized,
-        is_unlocked: status.unlocked,
-        change_address: status.change_address,
-        wallet_height: status.wallet_height,
-        error: status.error,
-    }))
-}
-
-/// `POST /wallet/init` — create a new wallet (generates mnemonic).
-#[cfg(feature = "wallet")]
-async fn wallet_init_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletInitRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    let mnemonic = w
-        .init(&body.pass)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({ "mnemonic": mnemonic })))
-}
-
-/// `POST /wallet/restore` — restore wallet from an existing mnemonic.
-#[cfg(feature = "wallet")]
-async fn wallet_restore_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletRestoreRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    w.restore(&body.pass, &body.mnemonic, &body.mnemonic_pass)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({})))
-}
-
-/// `POST /wallet/unlock` — unlock the wallet with a password.
-#[cfg(feature = "wallet")]
-async fn wallet_unlock_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletUnlockRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    w.unlock(&body.pass)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({})))
-}
-
-/// `GET /wallet/lock` — lock the wallet (clear keys from memory).
-#[cfg(feature = "wallet")]
-async fn wallet_lock_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    w.lock();
-    Ok(Json(serde_json::json!({})))
-}
-
-// ---------------------------------------------------------------------------
 // Wallet address and balance handlers (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// `GET /wallet/addresses` — list all derived wallet addresses.
-#[cfg(feature = "wallet")]
-async fn wallet_addresses_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let addresses = w
-        .addresses()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(addresses))
-}
-
-/// `POST /wallet/deriveKey` — derive a key at a specific BIP-32 path.
-#[cfg(feature = "wallet")]
-async fn wallet_derive_key_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletDeriveKeyRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    let address = w
-        .derive_key(&body.derivation_path)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({ "address": address })))
-}
-
-/// `GET /wallet/deriveNextKey` — derive the next key (auto-increment index).
-#[cfg(feature = "wallet")]
-async fn wallet_derive_next_key_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    let (derivation_path, address) = w
-        .derive_next_key()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "derivationPath": derivation_path,
-        "address": address,
-    })))
-}
-
-/// `GET /wallet/balances` — get on-chain wallet balance.
-#[cfg(feature = "wallet")]
-async fn wallet_balances_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<WalletBalanceResponse>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let digest = w
-        .balances()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let tokens: std::collections::HashMap<String, u64> = digest
-        .token_balances
-        .iter()
-        .map(|(tid, amt)| (hex::encode(tid), *amt))
-        .collect();
-    Ok(Json(WalletBalanceResponse {
-        height: digest.height,
-        balance: digest.erg_balance,
-        tokens,
-    }))
-}
-
-/// `GET /wallet/balances/withUnconfirmed` — get balance including unconfirmed.
-///
-/// Currently returns the same result as `/wallet/balances` since mempool
-/// integration is deferred.
-#[cfg(feature = "wallet")]
-async fn wallet_balances_with_unconfirmed_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<WalletBalanceResponse>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let digest = w
-        .balances()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let tokens: std::collections::HashMap<String, u64> = digest
-        .token_balances
-        .iter()
-        .map(|(tid, amt)| (hex::encode(tid), *amt))
-        .collect();
-    Ok(Json(WalletBalanceResponse {
-        height: digest.height,
-        balance: digest.erg_balance,
-        tokens,
-    }))
-}
-
-/// `POST /wallet/updateChangeAddress` — update the wallet's change address.
-#[cfg(feature = "wallet")]
-async fn wallet_update_change_address_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletUpdateChangeAddressRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    w.update_change_address(&body.address)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({})))
-}
-
-// ---------------------------------------------------------------------------
 // Wallet box and transaction query handlers (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// `GET /wallet/boxes/unspent` — list unspent wallet boxes with optional filters.
-#[cfg(feature = "wallet")]
-async fn wallet_unspent_boxes_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Query(params): Query<WalletBoxQueryParams>,
-) -> Result<Json<Vec<WalletBoxWithMetaResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let boxes = w
-        .unspent_boxes()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let current_height = state.shared.read().await.full_height;
-    let min_conf = params.min_confirmations.unwrap_or(0);
-    let max_conf = params.max_confirmations.unwrap_or(-1);
-    let min_h = params.min_inclusion_height.unwrap_or(0);
-    let max_h = params.max_inclusion_height.unwrap_or(u32::MAX);
-
-    let result: Vec<WalletBoxWithMetaResponse> = boxes
-        .iter()
-        .filter(|b| {
-            let confirmations = if current_height >= b.inclusion_height as u64 {
-                (current_height - b.inclusion_height as u64) as i32
-            } else {
-                0
-            };
-            let conf_ok = confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf);
-            let height_ok = b.inclusion_height >= min_h && b.inclusion_height <= max_h;
-            conf_ok && height_ok
-        })
-        .map(|b| tracked_box_to_meta_response(b, current_height))
-        .collect();
-
-    Ok(Json(result))
-}
-
-/// `GET /wallet/boxes` — list all wallet boxes (spent + unspent) with optional filters.
-#[cfg(feature = "wallet")]
-async fn wallet_boxes_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Query(params): Query<WalletBoxQueryParams>,
-) -> Result<Json<Vec<WalletBoxWithMetaResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let boxes = w
-        .all_boxes()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let current_height = state.shared.read().await.full_height;
-    let min_conf = params.min_confirmations.unwrap_or(0);
-    let max_conf = params.max_confirmations.unwrap_or(-1);
-    let min_h = params.min_inclusion_height.unwrap_or(0);
-    let max_h = params.max_inclusion_height.unwrap_or(u32::MAX);
-
-    let result: Vec<WalletBoxWithMetaResponse> = boxes
-        .iter()
-        .filter(|b| {
-            let confirmations = if current_height >= b.inclusion_height as u64 {
-                (current_height - b.inclusion_height as u64) as i32
-            } else {
-                0
-            };
-            let conf_ok = confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf);
-            let height_ok = b.inclusion_height >= min_h && b.inclusion_height <= max_h;
-            conf_ok && height_ok
-        })
-        .map(|b| tracked_box_to_meta_response(b, current_height))
-        .collect();
-
-    Ok(Json(result))
-}
-
-/// `POST /wallet/boxes/collect` — collect boxes matching a target balance.
-#[cfg(feature = "wallet")]
-async fn wallet_collect_boxes_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletCollectBoxesRequest>,
-) -> Result<Json<Vec<WalletBoxResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let unspent = w
-        .unspent_boxes()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let target_tokens: Vec<(String, u64)> = body.target_assets.into_iter().collect();
-
-    let collected =
-        ergo_wallet::tx_ops::collect_boxes(&unspent, body.target_balance, &target_tokens)
-            .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let result: Vec<WalletBoxResponse> = collected.iter().map(tracked_box_to_response).collect();
-    Ok(Json(result))
-}
-
-/// `GET /wallet/transactions` — list wallet transactions with optional filters.
-#[cfg(feature = "wallet")]
-async fn wallet_transactions_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Query(params): Query<WalletTransactionQueryParams>,
-) -> Result<Json<Vec<WalletTransactionResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-
-    let min_h = params.min_inclusion_height.unwrap_or(0);
-    let max_h = params.max_inclusion_height.unwrap_or(u32::MAX);
-
-    let txs = w
-        .get_transactions(min_h, max_h)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let current_height = state.shared.read().await.full_height;
-    let min_conf = params.min_confirmations.unwrap_or(0);
-    let max_conf = params.max_confirmations.unwrap_or(-1);
-
-    let result: Vec<WalletTransactionResponse> = txs
-        .iter()
-        .filter(|tx| {
-            let confirmations = if current_height >= tx.inclusion_height as u64 {
-                (current_height - tx.inclusion_height as u64) as i32
-            } else {
-                0
-            };
-            confirmations >= min_conf && (max_conf < 0 || confirmations <= max_conf)
-        })
-        .map(|tx| {
-            let num_confirmations = if current_height >= tx.inclusion_height as u64 {
-                (current_height - tx.inclusion_height as u64) as u32
-            } else {
-                0
-            };
-            WalletTransactionResponse {
-                id: hex::encode(tx.tx_id),
-                inclusion_height: tx.inclusion_height,
-                num_confirmations,
-            }
-        })
-        .collect();
-
-    Ok(Json(result))
-}
-
-/// `GET /wallet/transactionById/{txId}` — get a wallet transaction by its ID.
-#[cfg(feature = "wallet")]
-async fn wallet_transaction_by_id_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Path(tx_id_hex): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-
-    let tx_id_bytes: [u8; 32] = hex::decode(&tx_id_hex)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid hex txId"))?
-        .try_into()
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "txId must be 32 bytes"))?;
-
-    match w.get_transaction_by_id(&tx_id_bytes) {
-        Ok(Some(tx)) => {
-            let current_height = state.shared.read().await.full_height;
-            let num_confirmations = if current_height >= tx.inclusion_height as u64 {
-                (current_height - tx.inclusion_height as u64) as u32
-            } else {
-                0
-            };
-            Ok(Json(serde_json::json!({
-                "id": hex::encode(tx.tx_id),
-                "inclusionHeight": tx.inclusion_height,
-                "numConfirmations": num_confirmations,
-            })))
-        }
-        Ok(None) => Err(api_error(StatusCode::NOT_FOUND, "transaction not found")),
-        Err(e) => Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
-    }
-}
-
-/// `POST /wallet/check` — check if a mnemonic matches the wallet's stored seed.
-#[cfg(feature = "wallet")]
-async fn wallet_check_seed_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(req): Json<WalletCheckSeedRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-
-    match w.check_seed(&req.pass, &req.mnemonic) {
-        Ok(matched) => Ok(Json(serde_json::json!({ "matched": matched }))),
-        Err(e) => Err(api_error(StatusCode::BAD_REQUEST, &e.to_string())),
-    }
-}
-
-/// `POST /wallet/rescan` — rescan the wallet from a given height.
-#[cfg(feature = "wallet")]
-async fn wallet_rescan_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(req): Json<WalletRescanRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-
-    w.rescan(req.from_height)
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    Ok(Json(serde_json::json!({ "status": "ok" })))
-}
-
-// ---------------------------------------------------------------------------
 // Wallet transaction generation and sending handlers (feature-gated)
 // ---------------------------------------------------------------------------
 
@@ -5485,612 +2651,17 @@ fn convert_payment_requests(
         .collect()
 }
 
-/// Build an unsigned transaction, sign it, and return the signed bytes.
-///
-/// Shared logic for `wallet_tx_generate_handler`, `wallet_payment_send_handler`,
-/// and `wallet_tx_send_handler`.
-#[cfg(feature = "wallet")]
-async fn build_and_sign_tx(
-    state: &ApiState,
-    payment_requests: &[ergo_wallet::tx_ops::PaymentRequest],
-    fee: u64,
-) -> Result<(Vec<u8>, [u8; 32]), (StatusCode, Json<ApiError>)> {
-    let wallet = require_wallet(state)?;
-    let w = wallet.read().await;
-
-    let change_address = w
-        .change_address()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let unspent = w
-        .unspent_boxes()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let keys = w
-        .keys()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let num_addresses = w
-        .addresses()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?
-        .len() as u32;
-
-    let current_height = state.shared.read().await.full_height as u32;
-
-    let (unsigned_tx, _input_ids) = ergo_wallet::tx_ops::build_unsigned_tx(
-        payment_requests,
-        fee,
-        &change_address,
-        &unspent,
-        current_height,
-    )
-    .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    // Build sigma state context from current blockchain state.
-    let sigma_ctx = {
-        let shared = state.shared.read().await;
-        build_sigma_state_context(&state.history, &shared)?
-    };
-
-    // Derive key indices 0..num_addresses for signing.
-    let key_indices: Vec<u32> = (0..num_addresses.max(1)).collect();
-
-    // Filter unspent boxes to only those matching the unsigned tx input IDs.
-    let input_box_ids: std::collections::HashSet<[u8; 32]> = unsigned_tx
-        .inputs
-        .as_vec()
-        .iter()
-        .map(|inp| {
-            let id_bytes: &[u8] = inp.box_id.as_ref();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(id_bytes);
-            arr
-        })
-        .collect();
-    let input_boxes: Vec<ergo_wallet::tracked_box::TrackedBox> = unspent
-        .into_iter()
-        .filter(|b| input_box_ids.contains(&b.box_id))
-        .collect();
-
-    let signed_bytes = ergo_wallet::tx_ops::sign_transaction(
-        unsigned_tx,
-        keys,
-        &key_indices,
-        &input_boxes,
-        &[],
-        &sigma_ctx,
-    )
-    .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    // Compute tx_id from the signed bytes.
-    let signed_tx = parse_transaction(&signed_bytes)
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let tx_id = signed_tx.tx_id.0;
-
-    Ok((signed_bytes, tx_id))
-}
-
-/// Insert a signed transaction into the mempool and submit to the event loop.
-#[cfg(feature = "wallet")]
-async fn submit_signed_tx(
-    state: &ApiState,
-    signed_bytes: &[u8],
-    tx_id: [u8; 32],
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let tx = parse_transaction(signed_bytes)
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    {
-        let mut mp = state.mempool.write().unwrap();
-        mp.put_with_size(tx, signed_bytes.len())
-            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "failed to insert into mempool"))?;
-    }
-
-    if let Some(sender) = state.tx_submit.clone() {
-        await_tx_submission(sender, tx_id).await?;
-    }
-
-    Ok(())
-}
-
-/// `POST /wallet/payment/send` — build, sign, and broadcast a payment transaction.
-#[cfg(feature = "wallet")]
-async fn wallet_payment_send_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<Vec<WalletPaymentRequest>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let _wallet = require_wallet(&state)?;
-
-    let payment_requests = convert_payment_requests(&body);
-    let (signed_bytes, tx_id) = build_and_sign_tx(&state, &payment_requests, default_fee()).await?;
-
-    submit_signed_tx(&state, &signed_bytes, tx_id).await?;
-
-    Ok(Json(serde_json::json!({
-        "txId": hex::encode(tx_id),
-    })))
-}
-
-/// `POST /wallet/transaction/generate` — generate a signed transaction (returned,
-/// not broadcast).
-#[cfg(feature = "wallet")]
-async fn wallet_tx_generate_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletGenerateRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let _wallet = require_wallet(&state)?;
-
-    let payment_requests = convert_payment_requests(&body.requests);
-    let (signed_bytes, _tx_id) = build_and_sign_tx(&state, &payment_requests, body.fee).await?;
-
-    Ok(Json(serde_json::json!({
-        "bytes": hex::encode(&signed_bytes),
-    })))
-}
-
-/// `POST /wallet/transaction/generateUnsigned` — build an unsigned transaction.
-#[cfg(feature = "wallet")]
-async fn wallet_tx_generate_unsigned_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletGenerateRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-
-    // Require unlocked wallet for change address and box selection.
-    let change_address = w
-        .change_address()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let unspent = w
-        .unspent_boxes()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let current_height = state.shared.read().await.full_height as u32;
-
-    // Convert WalletPaymentRequests to tx_ops::PaymentRequest.
-    let payment_requests: Vec<ergo_wallet::tx_ops::PaymentRequest> = body
-        .requests
-        .iter()
-        .map(|r| ergo_wallet::tx_ops::PaymentRequest {
-            address: r.address.clone(),
-            value: r.value,
-            tokens: r
-                .assets
-                .iter()
-                .map(|a| (a.token_id.clone(), a.amount))
-                .collect(),
-        })
-        .collect();
-
-    let (unsigned_tx, input_ids) = ergo_wallet::tx_ops::build_unsigned_tx(
-        &payment_requests,
-        body.fee,
-        &change_address,
-        &unspent,
-        current_height,
-    )
-    .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    let tx_bytes = ergo_wallet::tx_ops::serialize_unsigned_tx(&unsigned_tx)
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    let input_id_strs: Vec<String> = input_ids.iter().map(hex::encode).collect();
-
-    Ok(Json(serde_json::json!({
-        "bytes": hex::encode(&tx_bytes),
-        "inputIds": input_id_strs,
-    })))
-}
-
-/// `POST /wallet/transaction/sign` — sign an existing unsigned transaction.
-///
-/// Expects `WalletSignRequest` with a `tx` field containing hex-encoded
-/// unsigned transaction bytes. Signs using wallet keys and returns the
-/// signed transaction bytes.
-#[cfg(feature = "wallet")]
-async fn wallet_tx_sign_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletSignRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-
-    // Parse the hex-encoded unsigned transaction bytes.
-    //
-    // The "bytes to sign" format is a Transaction with empty proofs.
-    // We parse it as a Transaction, then reconstruct the UnsignedTransaction.
-    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
-
-    let tx_bytes = hex::decode(body.tx.trim())
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid hex: {e}")))?;
-
-    let signed_format = ergo_lib::chain::transaction::Transaction::sigma_parse_bytes(&tx_bytes)
-        .map_err(|e| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("failed to parse tx bytes: {e}"),
-            )
-        })?;
-
-    let unsigned_inputs: Vec<ergo_lib::chain::transaction::UnsignedInput> = signed_format
-        .inputs
-        .as_vec()
-        .iter()
-        .map(|inp| {
-            ergo_lib::chain::transaction::UnsignedInput::new(
-                inp.box_id,
-                inp.spending_proof.extension.clone(),
-            )
-        })
-        .collect();
-
-    let data_inputs: Vec<ergo_lib::chain::transaction::DataInput> = signed_format
-        .data_inputs
-        .map(|di| di.as_vec().clone())
-        .unwrap_or_default();
-
-    let output_candidates: Vec<ergo_lib::ergotree_ir::chain::ergo_box::ErgoBoxCandidate> =
-        signed_format.output_candidates.as_vec().clone();
-
-    let unsigned_tx = ergo_lib::chain::transaction::unsigned::UnsignedTransaction::new_from_vec(
-        unsigned_inputs,
-        data_inputs,
-        output_candidates,
-    )
-    .map_err(|e| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            &format!("failed to build unsigned tx: {e}"),
-        )
-    })?;
-
-    let keys = w
-        .keys()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let unspent = w
-        .unspent_boxes()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let num_addresses = w
-        .addresses()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?
-        .len() as u32;
-
-    // Build sigma state context.
-    let sigma_ctx = {
-        let shared = state.shared.read().await;
-        build_sigma_state_context(&state.history, &shared)?
-    };
-
-    // Derive key indices 0..num_addresses for signing.
-    let key_indices: Vec<u32> = (0..num_addresses.max(1)).collect();
-
-    // Filter unspent boxes to those matching the unsigned tx input IDs.
-    let input_box_ids: std::collections::HashSet<[u8; 32]> = unsigned_tx
-        .inputs
-        .as_vec()
-        .iter()
-        .map(|inp| {
-            let id_bytes: &[u8] = inp.box_id.as_ref();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(id_bytes);
-            arr
-        })
-        .collect();
-    let input_boxes: Vec<ergo_wallet::tracked_box::TrackedBox> = unspent
-        .into_iter()
-        .filter(|b| input_box_ids.contains(&b.box_id))
-        .collect();
-
-    let signed_bytes = ergo_wallet::tx_ops::sign_transaction(
-        unsigned_tx,
-        keys,
-        &key_indices,
-        &input_boxes,
-        &[],
-        &sigma_ctx,
-    )
-    .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "bytes": hex::encode(&signed_bytes),
-    })))
-}
-
-/// `POST /wallet/transaction/send` — generate, sign, and broadcast a transaction.
-#[cfg(feature = "wallet")]
-async fn wallet_tx_send_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletGenerateRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let _wallet = require_wallet(&state)?;
-
-    let payment_requests = convert_payment_requests(&body.requests);
-    let (signed_bytes, tx_id) = build_and_sign_tx(&state, &payment_requests, body.fee).await?;
-
-    submit_signed_tx(&state, &signed_bytes, tx_id).await?;
-
-    Ok(Json(serde_json::json!({
-        "txId": hex::encode(tx_id),
-    })))
-}
-
-// ---------------------------------------------------------------------------
 // Scan handlers (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// `POST /scan/register` — register a new user-defined scan.
-#[cfg(feature = "wallet")]
-async fn scan_register_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<ScanRegisterRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    let scan_id = w
-        .register_scan(
-            body.scan_name,
-            body.tracking_rule,
-            body.wallet_interaction,
-            body.remove_offchain,
-        )
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({ "scanId": scan_id })))
-}
-
-/// `POST /scan/deregister` — deregister a user-defined scan.
-#[cfg(feature = "wallet")]
-async fn scan_deregister_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<ScanDeregisterRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    w.deregister_scan(body.scan_id)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({ "scanId": body.scan_id })))
-}
-
-/// `GET /scan/listAll` — list all registered scans.
-#[cfg(feature = "wallet")]
-async fn scan_list_all_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let scans = w
-        .list_scans()
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let json_scans: Vec<serde_json::Value> = scans
-        .iter()
-        .map(|s| serde_json::to_value(s).unwrap_or_default())
-        .collect();
-    Ok(Json(serde_json::json!(json_scans)))
-}
-
-/// `GET /scan/unspentBoxes/{scanId}` — get unspent boxes for a scan.
-#[cfg(feature = "wallet")]
-async fn scan_unspent_boxes_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Path(scan_id): Path<u16>,
-) -> Result<Json<Vec<WalletBoxResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let boxes = w
-        .unspent_boxes_for_scan(scan_id)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let response: Vec<WalletBoxResponse> = boxes.iter().map(tracked_box_to_response).collect();
-    Ok(Json(response))
-}
-
-/// `GET /scan/spentBoxes/{scanId}` — get spent boxes for a scan.
-#[cfg(feature = "wallet")]
-async fn scan_spent_boxes_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Path(scan_id): Path<u16>,
-) -> Result<Json<Vec<WalletBoxResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let boxes = w
-        .spent_boxes_for_scan(scan_id)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let response: Vec<WalletBoxResponse> = boxes.iter().map(tracked_box_to_response).collect();
-    Ok(Json(response))
-}
-
-/// `POST /scan/stopTracking` — stop tracking a box for a scan.
-#[cfg(feature = "wallet")]
-async fn scan_stop_tracking_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<ScanStopTrackingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    let box_id = hex_to_32bytes(&body.box_id).map_err(|(code, msg)| api_error(code, &msg))?;
-    w.stop_tracking(body.scan_id, &box_id)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "scanId": body.scan_id,
-        "boxId": body.box_id,
-    })))
-}
-
-/// `POST /scan/addBox` — add a box to one or more scans.
-#[cfg(feature = "wallet")]
-async fn scan_add_box_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<ScanAddBoxRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let mut w = wallet.write().await;
-    let box_id = hex_to_32bytes(&body.box_id).map_err(|(code, msg)| api_error(code, &msg))?;
-    let ergo_tree_bytes = hex::decode(&body.ergo_tree)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex in ergoTree"))?;
-    let tracked_box = ergo_wallet::tracked_box::TrackedBox {
-        box_id,
-        ergo_tree_bytes,
-        value: body.value,
-        tokens: vec![],
-        creation_height: body.creation_height,
-        inclusion_height: body.inclusion_height,
-        tx_id: [0u8; 32],
-        output_index: 0,
-        serialized_box: vec![],
-        additional_registers: vec![],
-        spent: false,
-        spending_tx_id: None,
-        spending_height: None,
-        scan_ids: body.scan_ids.clone(),
-    };
-    w.add_box_to_scans(tracked_box, &body.scan_ids)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({
-        "boxId": body.box_id,
-        "scanIds": body.scan_ids,
-    })))
-}
-
-/// `POST /scan/p2sRule` — register a scan with an ErgoTree-equals predicate
-/// derived from a P2S/P2PK address.
-#[cfg(feature = "wallet")]
-async fn scan_p2s_rule_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<ScanP2sRuleRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let tree_bytes = address_to_ergo_tree(&body.address, &state.network)
-        .map_err(|(code, msg)| api_error(code, &msg))?;
-    let predicate = ergo_wallet::scan_types::ScanningPredicate::Equals {
-        register: "R1".to_owned(),
-        value: hex::encode(&tree_bytes),
-    };
-    let mut w = wallet.write().await;
-    let scan_id = w
-        .register_scan(
-            body.scan_name,
-            predicate,
-            ergo_wallet::scan_types::ScanWalletInteraction::Off,
-            false,
-        )
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!({ "scanId": scan_id })))
-}
-
-// ---------------------------------------------------------------------------
 // Additional wallet handlers (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// `POST /wallet/getPrivateKey` -- return the hex-encoded secret key for a wallet address.
-#[cfg(feature = "wallet")]
-async fn wallet_get_private_key_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(body): Json<WalletGetPrivateKeyRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let secret_hex = w
-        .get_private_key(&body.address)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    Ok(Json(serde_json::json!(secret_hex)))
-}
-
-/// `POST /wallet/generateCommitments` -- generate signing commitments for multi-party signing.
-///
-/// This is an advanced EIP-11 feature that requires `TransactionHintsBag` and related types
-/// from ergo-lib. These types are not publicly exposed in ergo-lib 0.28, so this endpoint
-/// returns 501 Not Implemented.
-#[cfg(feature = "wallet")]
-async fn wallet_generate_commitments_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(_body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let _wallet = require_wallet(&state)?;
-    Err(api_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "generateCommitments is not yet implemented (requires TransactionHintsBag from ergo-lib)",
-    ))
-}
-
-/// `POST /wallet/extractHints` -- extract signing hints from a signed transaction.
-///
-/// This is an advanced EIP-11 feature that requires `TransactionHintsBag` and hint extraction
-/// APIs from ergo-lib. These types are not publicly exposed in ergo-lib 0.28, so this endpoint
-/// returns 501 Not Implemented.
-#[cfg(feature = "wallet")]
-async fn wallet_extract_hints_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Json(_body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let _wallet = require_wallet(&state)?;
-    Err(api_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "extractHints is not yet implemented (requires TransactionHintsBag from ergo-lib)",
-    ))
-}
-
-/// `GET /wallet/transactionsByScanId/{scanId}` -- get wallet transactions for a scan.
-#[cfg(feature = "wallet")]
-async fn wallet_txs_by_scan_id_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<ApiState>,
-    Path(scan_id): Path<u16>,
-) -> Result<Json<Vec<WalletTransactionResponse>>, (StatusCode, Json<ApiError>)> {
-    check_auth(&headers, &state.api_key_hash)?;
-    let wallet = require_wallet(&state)?;
-    let w = wallet.read().await;
-    let txs = w
-        .get_txs_by_scan_id(scan_id)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    let current_height = state.shared.read().await.full_height;
-    let response: Vec<WalletTransactionResponse> = txs
-        .iter()
-        .map(|tx| {
-            let num_confirmations = if current_height >= tx.inclusion_height as u64 {
-                (current_height - tx.inclusion_height as u64) as u32
-            } else {
-                0
-            };
-            WalletTransactionResponse {
-                id: hex::encode(tx.tx_id),
-                inclusion_height: tx.inclusion_height,
-                num_confirmations,
-            }
-        })
-        .collect();
-    Ok(Json(response))
-}
-
 /// Start the API server on the given bind address.
 pub async fn start_api_server(bind_addr: &str, state: ApiState) -> std::io::Result<()> {
+    use tower_http::compression::CompressionLayer;
     use tower_http::cors::{Any, CorsLayer};
+    use tower_http::trace::TraceLayer;
 
     let cors_origin = state.cors_allowed_origin.clone();
     let router = build_router(state);
@@ -6107,6 +2678,9 @@ pub async fn start_api_server(bind_addr: &str, state: ApiState) -> std::io::Resu
     } else {
         router
     };
+    let router = router
+        .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new());
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!(%bind_addr, "HTTP API server started");
     axum::serve(listener, router.into_make_service()).await?;
@@ -6486,6 +3060,7 @@ mod tests {
                 ConnectedPeerInfo {
                     address: "192.168.1.1:9030".to_string(),
                     name: "peer-a".to_string(),
+                    node_name: "my-node-a".to_string(),
                     last_handshake: 1640000000000,
                     last_message: Some(1640000000500),
                     connection_type: None,
@@ -6498,6 +3073,7 @@ mod tests {
                 ConnectedPeerInfo {
                     address: "10.0.0.1:9030".to_string(),
                     name: "peer-b".to_string(),
+                    node_name: "my-node-b".to_string(),
                     last_handshake: 1640000001000,
                     last_message: Some(1640000001500),
                     connection_type: Some("Incoming".to_string()),
@@ -6552,6 +3128,7 @@ mod tests {
             shared.connected_peers = vec![ConnectedPeerInfo {
                 address: "8.8.8.8:9030".to_string(),
                 name: "peer-x".to_string(),
+                node_name: String::new(),
                 last_handshake: 1640000000000,
                 last_message: Some(1640000000100),
                 connection_type: Some("Outgoing".to_string()),
@@ -6588,6 +3165,7 @@ mod tests {
             shared.connected_peers = vec![ConnectedPeerInfo {
                 address: "8.8.8.8:9030".to_string(),
                 name: "peer-x".to_string(),
+                node_name: String::new(),
                 last_handshake: 1640000000000,
                 last_message: Some(1640000000100),
                 connection_type: Some("Outgoing".to_string()),

@@ -643,7 +643,7 @@ fn serialize_biguint_as_number<S: serde::Serializer>(
 }
 
 /// Solution submitted by an external miner.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct MiningSolution {
     /// Miner public key (hex, 33 bytes). For v2, can be omitted.
     #[serde(default)]
