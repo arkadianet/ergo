@@ -128,6 +128,79 @@ pub fn json_header_to_wire(
     Ok((mid, header, raw))
 }
 
+/// Divide a height range into chunks of `chunk_size`.
+/// Returns Vec<(from_height, to_height)> inclusive on both ends.
+pub fn compute_chunks(our_height: u32, best_height: u32, chunk_size: u32) -> Vec<(u32, u32)> {
+    if best_height <= our_height {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    let mut from = our_height + 1;
+    while from <= best_height {
+        let to = (from + chunk_size - 1).min(best_height);
+        chunks.push((from, to));
+        from = to + 1;
+    }
+    chunks
+}
+
+/// Fetch headers from a peer's chainSlice endpoint.
+/// Returns parsed ChainSliceHeader objects.
+pub async fn fetch_chain_slice(
+    client: &reqwest::Client,
+    base_url: &str,
+    from_height: u32,
+    to_height: u32,
+) -> Result<Vec<ChainSliceHeader>, FastSyncError> {
+    let url = format!(
+        "{}/blocks/chainSlice?fromHeight={}&toHeight={}",
+        base_url.trim_end_matches('/'),
+        from_height,
+        to_height,
+    );
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| FastSyncError::Http(e.to_string()))?;
+
+    if !resp.status().is_success() {
+        return Err(FastSyncError::Http(format!("HTTP {}", resp.status())));
+    }
+
+    let headers: Vec<ChainSliceHeader> = resp
+        .json()
+        .await
+        .map_err(|e| FastSyncError::Http(e.to_string()))?;
+    Ok(headers)
+}
+
+/// Fetch the best header height from a peer's /info endpoint.
+pub async fn fetch_peer_height(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<u32, FastSyncError> {
+    let url = format!("{}/info", base_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| FastSyncError::Http(e.to_string()))?;
+
+    let info: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| FastSyncError::Http(e.to_string()))?;
+
+    info.get("headersHeight")
+        .or_else(|| info.get("bestHeaderHeight"))
+        .and_then(|v| v.as_u64())
+        .map(|h| h as u32)
+        .ok_or_else(|| FastSyncError::InvalidField("missing headersHeight in /info".into()))
+}
+
 /// Errors from the fast sync subsystem.
 #[derive(Debug, thiserror::Error)]
 pub enum FastSyncError {
@@ -231,6 +304,38 @@ mod tests {
         let mut hash = [0u8; 32];
         hasher.finalize_variable(&mut hash).unwrap();
         assert_eq!(&hash, mid.0.as_slice());
+    }
+
+    #[test]
+    fn compute_chunks_splits_height_range() {
+        let chunks = compute_chunks(0, 20000, 8192);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], (1, 8192));
+        assert_eq!(chunks[1], (8193, 16384));
+        assert_eq!(chunks[2], (16385, 20000));
+    }
+
+    #[test]
+    fn compute_chunks_single_chunk() {
+        let chunks = compute_chunks(0, 100, 8192);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], (1, 100));
+    }
+
+    #[test]
+    fn compute_chunks_exact_boundary() {
+        let chunks = compute_chunks(0, 8192, 8192);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], (1, 8192));
+    }
+
+    #[test]
+    fn compute_chunks_nonzero_start() {
+        let chunks = compute_chunks(5000, 15000, 4096);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0], (5001, 9096));
+        assert_eq!(chunks[1], (9097, 13192));
+        assert_eq!(chunks[2], (13193, 15000));
     }
 
     #[test]
