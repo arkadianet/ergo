@@ -41,14 +41,14 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ergo Node Panel</title>
 
-  <!-- Leaflet CSS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9/dist/leaflet.css">
+  <!-- Leaflet CSS (pinned version) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
-  <!-- Chart.js (UMD) -->
-  <script src="https://unpkg.com/chart.js@4"></script>
+  <!-- Chart.js (UMD, pinned version) -->
+  <script src="https://unpkg.com/chart.js@4.4.7/dist/chart.umd.js"></script>
 
-  <!-- Leaflet JS -->
-  <script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
+  <!-- Leaflet JS (pinned version) -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <style>
     /* ================================================================
@@ -452,9 +452,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
   <div id="app"></div>
 
   <script type="module">
-    import { h, render, createContext } from 'https://unpkg.com/preact@10/dist/preact.module.js';
-    import { useState, useEffect, useCallback, useRef, useMemo, useContext } from 'https://unpkg.com/preact@10/hooks/dist/hooks.module.js';
-    import htm from 'https://unpkg.com/htm@3/dist/htm.module.js';
+    import { h, render, createContext } from 'https://unpkg.com/preact@10.25.4/dist/preact.module.js';
+    import { useState, useEffect, useCallback, useRef, useMemo, useContext } from 'https://unpkg.com/preact@10.25.4/hooks/dist/hooks.module.js';
+    import htm from 'https://unpkg.com/htm@3.1.1/dist/htm.module.js';
     const html = htm.bind(h);
 
     // ================================================================
@@ -492,15 +492,17 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     }
 
     // ================================================================
-    // ROUTER
+    // ROUTE CONTEXT (single hashchange listener shared by all consumers)
     // ================================================================
 
-    function useRoute() {
-      const getRoute = () => {
-        const hash = location.hash.replace(/^#/, '');
-        return hash || '/dashboard';
-      };
+    const RouteContext = createContext();
 
+    function getRoute() {
+      const hash = location.hash.replace(/^#/, '');
+      return hash || '/dashboard';
+    }
+
+    function RouteProvider({ children }) {
       const [route, setRoute] = useState(getRoute);
 
       useEffect(() => {
@@ -509,7 +511,11 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
         return () => window.removeEventListener('hashchange', handler);
       }, []);
 
-      return route;
+      return html`<${RouteContext.Provider} value=${route}>${children}<//>`;
+    }
+
+    function useRoute() {
+      return useContext(RouteContext);
     }
 
     // ================================================================
@@ -599,23 +605,20 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     function Sidebar({ open, close }) {
       const route = useRoute();
 
-      const navigate = useCallback((path) => {
-        location.hash = path;
-        close();
-      }, [close]);
-
       return html`
         <nav class="sidebar ${open ? 'sidebar-open' : ''}">
           <div class="sidebar-section-title">Pages</div>
           ${NAV_PAGES.map(item => html`
-            <div
+            <a
               class="sidebar-nav-item ${route === item.path ? 'active' : ''}"
-              onClick=${() => navigate(item.path)}
+              href="#${item.path}"
+              onClick=${close}
               key=${item.path}
+              aria-current=${route === item.path ? 'page' : undefined}
             >
               <span class="sidebar-nav-icon">${item.icon}</span>
               <span>${item.label}</span>
-            </div>
+            </a>
           `)}
 
           <div class="sidebar-section-title" style="margin-top:0.5rem">External</div>
@@ -699,13 +702,15 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
 
       return html`
         <${ThemeProvider}>
-          <${NetworkProvider}>
-            <${Header} sidebarToggle=${sidebar.toggle} />
-            <${Sidebar} open=${sidebar.open} close=${sidebar.close} />
-            <${SidebarOverlay} open=${sidebar.open} close=${sidebar.close} />
-            <main class="main-content">
-              <${Router} />
-            </main>
+          <${RouteProvider}>
+            <${NetworkProvider}>
+              <${Header} sidebarToggle=${sidebar.toggle} />
+              <${Sidebar} open=${sidebar.open} close=${sidebar.close} />
+              <${SidebarOverlay} open=${sidebar.open} close=${sidebar.close} />
+              <main class="main-content">
+                <${Router} />
+              </main>
+            <//>
           <//>
         <//>
       `;
