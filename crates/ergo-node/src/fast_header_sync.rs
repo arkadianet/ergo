@@ -201,6 +201,174 @@ pub async fn fetch_peer_height(
         .ok_or_else(|| FastSyncError::InvalidField("missing headersHeight in /info".into()))
 }
 
+/// Run the fast header sync pipeline.
+///
+/// Fetches headers via HTTP from `api_urls`, validates PoW, and sends them
+/// to the processor via `cmd_tx`. Stops when within `HANDOFF_DISTANCE` of
+/// the chain tip or when `shutdown` is signalled.
+pub async fn run_fast_sync(
+    api_urls: Vec<String>,
+    our_height: u32,
+    chunk_size: u32,
+    max_concurrent: u32,
+    cmd_tx: std::sync::mpsc::SyncSender<ergo_network::block_processor::ProcessorCommand>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    if api_urls.is_empty() {
+        tracing::info!("fast_header_sync: no peers with REST API URLs, skipping");
+        return;
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap();
+
+    // Discover best height from first available peer
+    let mut best_height = 0u32;
+    for url in &api_urls {
+        match fetch_peer_height(&client, url).await {
+            Ok(h) => {
+                best_height = h;
+                tracing::info!(height = h, url, "fast_header_sync: discovered chain height");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(url, error = %e, "fast_header_sync: failed to query /info");
+            }
+        }
+    }
+
+    if best_height <= our_height {
+        tracing::info!(our_height, best_height, "fast_header_sync: already synced");
+        return;
+    }
+
+    const HANDOFF_DISTANCE: u32 = 1000;
+    let target = best_height.saturating_sub(HANDOFF_DISTANCE);
+    if target <= our_height {
+        tracing::info!("fast_header_sync: within handoff distance, P2P will handle");
+        return;
+    }
+
+    let chunks = compute_chunks(our_height, target, chunk_size);
+    tracing::info!(
+        chunks = chunks.len(),
+        from = our_height + 1,
+        to = target,
+        peers = api_urls.len(),
+        "fast_header_sync: starting parallel fetch"
+    );
+
+    let semaphore = Arc::new(Semaphore::new(max_concurrent as usize));
+    let client = Arc::new(client);
+    let api_urls = Arc::new(api_urls);
+    let cmd_tx = Arc::new(cmd_tx);
+
+    let mut handles = Vec::new();
+
+    for (i, (from, to)) in chunks.into_iter().enumerate() {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let client = client.clone();
+        let url = api_urls[i % api_urls.len()].clone();
+        let cmd_tx = cmd_tx.clone();
+
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            let result = fetch_and_validate_chunk(&client, &url, from, to, &cmd_tx).await;
+            match &result {
+                Ok(count) => tracing::debug!(from, to, count, "fast_header_sync: chunk done"),
+                Err(e) => tracing::warn!(from, to, error = %e, "fast_header_sync: chunk failed"),
+            }
+            result
+        });
+        handles.push(handle);
+    }
+
+    let mut total = 0usize;
+    let mut errors = 0usize;
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(count)) => total += count,
+            Ok(Err(_)) => errors += 1,
+            Err(_) => errors += 1,
+        }
+    }
+
+    tracing::info!(
+        total_headers = total,
+        errors,
+        "fast_header_sync: parallel fetch complete"
+    );
+}
+
+/// Fetch one chunk of headers, validate PoW, and send to the processor.
+async fn fetch_and_validate_chunk(
+    client: &reqwest::Client,
+    base_url: &str,
+    from: u32,
+    to: u32,
+    cmd_tx: &std::sync::mpsc::SyncSender<ergo_network::block_processor::ProcessorCommand>,
+) -> Result<usize, FastSyncError> {
+    use ergo_network::block_processor::ProcessorCommand;
+
+    let json_headers = fetch_chain_slice(client, base_url, from, to).await?;
+
+    // Convert JSON to wire headers
+    let mut wire_headers = Vec::with_capacity(json_headers.len());
+    for jh in &json_headers {
+        match json_header_to_wire(jh) {
+            Ok(triple) => wire_headers.push(triple),
+            Err(e) => {
+                tracing::warn!(height = jh.height, error = %e, "fast_header_sync: bad header");
+            }
+        }
+    }
+
+    // Validate PoW for each header
+    let validated: Vec<_> = wire_headers
+        .into_iter()
+        .filter(|(_, header, _)| {
+            match ergo_consensus::header_validation::validate_pow(header) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        height = header.height,
+                        error = %e,
+                        "fast_header_sync: PoW invalid"
+                    );
+                    false
+                }
+            }
+        })
+        .collect();
+
+    let count = validated.len();
+
+    // Sort by height and send to processor
+    let mut validated = validated;
+    validated.sort_by_key(|(_, h, _)| h.height);
+
+    for (mid, header, raw) in validated {
+        let _ = cmd_tx.try_send(ProcessorCommand::StorePrevalidatedHeader {
+            modifier_id: mid,
+            header: Box::new(header),
+            raw_data: raw,
+            peer_hint: None,
+        });
+    }
+    let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
+
+    Ok(count)
+}
+
 /// Errors from the fast sync subsystem.
 #[derive(Debug, thiserror::Error)]
 pub enum FastSyncError {
