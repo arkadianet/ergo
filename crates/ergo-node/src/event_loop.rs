@@ -22,6 +22,7 @@ use ergo_wire::handshake::ConnectionDirection;
 use ergo_wire::handshake::{Handshake, PeerSpec, ProtocolVersion};
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::message::MessageCode;
+use ergo_wire::peer_feature::PeerFeature;
 
 use crate::mining::{CandidateGenerator, MiningSolution};
 
@@ -288,6 +289,10 @@ pub async fn run(
     // prevent re-applying the same header on subsequent sync messages.
     let mut last_sync_header_applied: Option<u32> = None;
 
+    // REST API URLs extracted from peer handshake features (PeerFeature::RestApiUrl).
+    // Used by the fast header sync subsystem to fetch headers via HTTP.
+    let mut api_peer_urls: HashMap<u64, String> = HashMap::new();
+
     // Transaction cost rate limiter: rejects txs when the cumulative
     // processing cost since the last block exceeds per-peer / global limits.
     let mut tx_cost_tracker = message_handler::TxCostTracker::new();
@@ -312,6 +317,32 @@ pub async fn run(
     {
         let mut s = shared.write().await;
         s.is_mining = candidate_gen.is_some();
+    }
+
+    // Spawn the fast header sync task if enabled.
+    // The task runs alongside normal P2P sync without interfering with it.
+    // A 5-second delay allows peers to connect and advertise REST API URLs.
+    if settings.ergo.node.fast_header_sync {
+        let urls: Vec<String> = api_peer_urls.values().cloned().collect();
+        let our_h = cached_headers_height;
+        let chunk_sz = settings.ergo.node.fast_sync_chunk_size;
+        let max_conc = settings.ergo.node.fast_sync_max_concurrent;
+        let fs_cmd_tx = cmd_tx.clone();
+        let fs_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            // Brief delay to allow more peers to connect and advertise API URLs.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            crate::fast_header_sync::run_fast_sync(
+                urls,
+                our_h,
+                chunk_sz,
+                max_conc,
+                fs_cmd_tx,
+                fs_shutdown,
+            )
+            .await;
+        });
+        tracing::info!("fast header sync task spawned (will start after 5s delay)");
     }
 
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
@@ -848,6 +879,14 @@ pub async fn run(
             Some(pending) = pending_conn_rx.recv() => {
                 let id = pool.add_outbound(pending.conn, pending.addr, &pending.handshake);
                 tracing::info!(peer_id = id, addr = %pending.addr, "connected (background)");
+                // Extract REST API URL from handshake features for fast header sync.
+                for feature in &pending.handshake.peer_spec.features {
+                    if let PeerFeature::RestApiUrl(url) = feature {
+                        tracing::debug!(peer_id = id, url, "peer advertises REST API");
+                        api_peer_urls.insert(id, url.clone());
+                        break;
+                    }
+                }
             }
 
             _ = discovery_tick.tick() => {
@@ -1028,6 +1067,9 @@ pub async fn run(
                 if !to_disconnect.is_empty() {
                     pool.cleanup_disconnected();
                 }
+                // Remove API URLs for peers no longer in the pool.
+                let connected_ids: HashSet<u64> = pool.connected_peers().iter().map(|p| p.id).collect();
+                api_peer_urls.retain(|id, _| connected_ids.contains(id));
             }
 
             _ = eviction_tick.tick() => {
@@ -1152,6 +1194,14 @@ pub async fn run(
                     version = %inbound.handshake.peer_spec.protocol_version,
                     "accepted inbound peer"
                 );
+                // Extract REST API URL from handshake features for fast header sync.
+                for feature in &inbound.handshake.peer_spec.features {
+                    if let PeerFeature::RestApiUrl(url) = feature {
+                        tracing::debug!(peer_id = id, url, "inbound peer advertises REST API");
+                        api_peer_urls.insert(id, url.clone());
+                        break;
+                    }
+                }
             }
 
             Some(addr) = peer_connect_rx.recv() => {

@@ -335,8 +335,8 @@ async fn fetch_and_validate_chunk(
     // Validate PoW for each header
     let validated: Vec<_> = wire_headers
         .into_iter()
-        .filter(|(_, header, _)| {
-            match ergo_consensus::header_validation::validate_pow(header) {
+        .filter(
+            |(_, header, _)| match ergo_consensus::header_validation::validate_pow(header) {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::warn!(
@@ -346,8 +346,8 @@ async fn fetch_and_validate_chunk(
                     );
                     false
                 }
-            }
-        })
+            },
+        )
         .collect();
 
     let count = validated.len();
