@@ -41,6 +41,17 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ergo Node Panel</title>
 
+  <!-- Import map for bare specifiers used by Preact internals -->
+  <script type="importmap">
+  {
+    "imports": {
+      "preact": "https://unpkg.com/preact@10.25.4/dist/preact.module.js",
+      "preact/hooks": "https://unpkg.com/preact@10.25.4/hooks/dist/hooks.module.js",
+      "htm": "https://unpkg.com/htm@3.1.1/dist/htm.module.js"
+    }
+  }
+  </script>
+
   <!-- Leaflet CSS (pinned version) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 
@@ -722,9 +733,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
   <div id="app"></div>
 
   <script type="module">
-    import { h, render, createContext } from 'https://unpkg.com/preact@10.25.4/dist/preact.module.js';
-    import { useState, useEffect, useCallback, useRef, useMemo, useContext } from 'https://unpkg.com/preact@10.25.4/hooks/dist/hooks.module.js';
-    import htm from 'https://unpkg.com/htm@3.1.1/dist/htm.module.js';
+    import { h, render, createContext } from 'preact';
+    import { useState, useEffect, useCallback, useRef, useMemo, useContext } from 'preact/hooks';
+    import htm from 'htm';
     const html = htm.bind(h);
 
     // ================================================================
