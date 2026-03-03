@@ -81,6 +81,12 @@ pub struct NodeSettings {
     pub p2p_utxo_snapshots: u32,
     #[serde(default = "default_make_snapshot_every")]
     pub make_snapshot_every: u32,
+    #[serde(default)]
+    pub fast_header_sync: bool,
+    #[serde(default = "default_fast_sync_chunk_size")]
+    pub fast_sync_chunk_size: u32,
+    #[serde(default = "default_fast_sync_max_concurrent")]
+    pub fast_sync_max_concurrent: u32,
 }
 
 fn default_keep_versions() -> u32 {
@@ -121,6 +127,12 @@ fn default_p2p_utxo_snapshots() -> u32 {
 }
 fn default_make_snapshot_every() -> u32 {
     52224
+}
+fn default_fast_sync_chunk_size() -> u32 {
+    8192
+}
+fn default_fast_sync_max_concurrent() -> u32 {
+    8
 }
 fn default_voting_targets() -> Vec<u8> {
     vec![0, 0, 0]
@@ -591,5 +603,25 @@ timeout_secs = 5
             .join("\n");
         let settings: ErgoSettings = toml::from_str(&config_no_sync_interval).unwrap();
         assert_eq!(settings.network.sync_interval_secs, 5);
+    }
+
+    #[test]
+    fn fast_sync_settings_defaults() {
+        let settings: ErgoSettings = toml::from_str(MINIMAL_CONFIG).unwrap();
+        assert!(!settings.ergo.node.fast_header_sync);
+        assert_eq!(settings.ergo.node.fast_sync_chunk_size, 8192);
+        assert_eq!(settings.ergo.node.fast_sync_max_concurrent, 8);
+    }
+
+    #[test]
+    fn fast_sync_settings_explicit() {
+        let config = MINIMAL_CONFIG.replace(
+            "extra_index = false",
+            "extra_index = false\nfast_header_sync = true\nfast_sync_chunk_size = 4096\nfast_sync_max_concurrent = 16",
+        );
+        let settings: ErgoSettings = toml::from_str(&config).unwrap();
+        assert!(settings.ergo.node.fast_header_sync);
+        assert_eq!(settings.ergo.node.fast_sync_chunk_size, 4096);
+        assert_eq!(settings.ergo.node.fast_sync_max_concurrent, 16);
     }
 }
