@@ -682,6 +682,30 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     @media (max-width: 768px) {
       .map-container { height: 200px; }
     }
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      margin-top: 1rem;
+      font-size: 0.88rem;
+    }
+    .pagination button {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.4rem 0.8rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .pagination button:hover:not(:disabled) {
+      background: var(--sidebar-active);
+    }
+    .pagination button:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
   </style>
 </head>
 <body>
@@ -1621,11 +1645,59 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     }
 
     function BlockchainPage() {
-      return html`<div class="card"><h2>Blockchain</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+      const { data: headers, loading, error } = useApi('/blocks/lastHeaders/20', 15000);
+
+      if (loading) return html`<${Skeleton} />`;
+      if (error) return html`<div class="card"><h2>Error</h2><p style="color:var(--text-secondary)">${error}</p></div>`;
+
+      const columns = [
+        { key: 'height', label: 'Height', sortable: true, align: 'right', render: (v) => fmt(v) },
+        { key: 'id', label: 'Header ID', render: (v) => html`<${CopyHash} hash=${v} chars=${16} />` },
+        { key: 'timestamp', label: 'Timestamp', sortable: true, render: (v) => html`<span title="${new Date(v).toLocaleString()}">${relativeTime(v)}</span>` },
+        { key: 'nBits', label: 'Difficulty', sortable: true, render: (v) => '0x' + v.toString(16) },
+        { key: 'votes', label: 'Votes', render: (v) => v },
+      ];
+
+      return html`
+        <div class="card">
+          <h2>Recent Blocks</h2>
+          <p style="color:var(--text-secondary)">Last 20 block headers</p>
+        </div>
+        <${DataTable} columns=${columns} data=${headers || []} emptyMessage="No blocks synced yet" />
+      `;
     }
 
     function MempoolPage() {
-      return html`<div class="card"><h2>Mempool</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+      const { data: txs, loading, error, page, nextPage, prevPage } = usePagedApi(
+        '/transactions/unconfirmed', 10, 5000
+      );
+
+      if (loading) return html`<${Skeleton} />`;
+      if (error) return html`<div class="card"><h2>Error</h2><p style="color:var(--text-secondary)">${error}</p></div>`;
+
+      const columns = [
+        { key: 'id', label: 'TX ID', render: (v) => html`<${CopyHash} hash=${v} chars=${16} />` },
+        { key: 'inputs', label: 'Inputs', render: (v) => v ? v.length : 0 },
+        { key: 'outputs', label: 'Outputs', render: (v) => v ? v.length : 0 },
+        { key: 'outputs', label: 'Tokens', render: (v, row) => {
+          const tokenIds = new Set();
+          if (row.outputs) row.outputs.forEach(o => { if (o.assets) o.assets.forEach(a => tokenIds.add(a.tokenId)); });
+          return tokenIds.size;
+        }},
+      ];
+
+      return html`
+        <div class="card">
+          <h2>Mempool</h2>
+          <p style="color:var(--text-secondary)">Page ${page + 1}</p>
+        </div>
+        <${DataTable} columns=${columns} data=${txs || []} emptyMessage="Mempool is empty" />
+        <div class="pagination">
+          <button disabled=${page === 0} onClick=${prevPage}>Prev</button>
+          <span>Page ${page + 1}</span>
+          <button disabled=${txs == null || txs.length < 10} onClick=${nextPage}>Next</button>
+        </div>
+      `;
     }
 
     function WalletPage() {
