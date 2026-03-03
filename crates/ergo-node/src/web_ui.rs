@@ -376,12 +376,203 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     .badge-syncing { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
     .badge-mainnet { background: rgba(37,99,235,0.15); color: var(--accent); }
     .badge-testnet { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+    .badge-info { background: rgba(37,99,235,0.15); color: var(--accent); }
+    .badge-warning { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
+    .badge-error { background: rgba(239,68,68,0.15); color: var(--accent-red); }
 
     /* --- Hash --- */
     .hash {
       font-family: var(--font-mono);
       font-size: 0.85em;
       color: var(--text-secondary);
+    }
+
+    /* --- Stat Card --- */
+    .stat-card {
+      position: relative;
+    }
+
+    .stat-card .stat-icon {
+      font-size: 1.2rem;
+      margin-bottom: 0.5rem;
+      color: var(--text-secondary);
+    }
+
+    .stat-card .stat-value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .stat-card .stat-value.status-good {
+      color: var(--accent-green);
+    }
+
+    .stat-card .stat-value.status-warning {
+      color: var(--accent-amber);
+    }
+
+    .stat-card .stat-sub {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      margin-left: 0.4rem;
+      font-weight: 400;
+    }
+
+    .stat-card .stat-label {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      margin-top: 0.25rem;
+    }
+
+    /* --- Data Table --- */
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .data-table th {
+      text-align: left;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      padding: 0.6rem 0.5rem;
+      border-bottom: 2px solid var(--border);
+      white-space: nowrap;
+      user-select: none;
+    }
+
+    .data-table th.align-right {
+      text-align: right;
+    }
+
+    .data-table th.sortable {
+      cursor: pointer;
+    }
+
+    .data-table th.sortable:hover {
+      color: var(--text);
+    }
+
+    .data-table td {
+      padding: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .data-table td.align-right {
+      text-align: right;
+    }
+
+    .data-table tr:hover {
+      background: var(--sidebar-active);
+      background: rgba(0,0,0,0.03);
+    }
+
+    [data-theme="dark"] .data-table tr:hover,
+    [data-theme="terminal"] .data-table tr:hover,
+    [data-theme="glass"] .data-table tr:hover {
+      background: rgba(255,255,255,0.03);
+    }
+
+    .data-table .empty-message {
+      padding: 1.5rem;
+      text-align: center;
+      color: var(--text-secondary);
+      font-style: italic;
+    }
+
+    /* --- Info Row --- */
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.4rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .info-row:last-child {
+      border-bottom: none;
+    }
+
+    .info-row .info-label {
+      color: var(--text-secondary);
+      font-size: 0.88em;
+    }
+
+    .info-row .info-value {
+      font-weight: 500;
+      font-size: 0.88em;
+    }
+
+    .info-row .info-value.mono {
+      font-family: var(--font-mono);
+    }
+
+    /* --- Progress Bar --- */
+    .progress-wrap .progress-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .progress-wrap .progress-label {
+      color: var(--text-secondary);
+    }
+
+    .progress-wrap .progress-stats {
+      font-weight: 500;
+    }
+
+    .progress-wrap .progress-track {
+      background: var(--border);
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-wrap .progress-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.5s ease;
+    }
+
+    .progress-wrap .progress-fill.variant-green {
+      background: linear-gradient(90deg, var(--accent-green), #6ee7b7);
+    }
+
+    .progress-wrap .progress-fill.variant-blue {
+      background: linear-gradient(90deg, var(--accent), #93c5fd);
+    }
+
+    .progress-wrap .progress-waiting {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      font-style: italic;
+      padding: 0.2rem 0;
+    }
+
+    /* --- Copy Hash --- */
+    .copy-hash {
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .copy-hash:hover {
+      color: var(--accent);
+    }
+
+    .copy-hash .copied-tip {
+      font-size: 0.75rem;
+      color: var(--accent-green);
+      font-family: var(--font-family);
     }
 
     /* --- Skeleton loading --- */
@@ -542,6 +733,315 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       const toggle = useCallback(() => setOpen(v => !v), []);
       const close = useCallback(() => setOpen(false), []);
       return { open, toggle, close };
+    }
+
+    // ================================================================
+    // HELPER FUNCTIONS
+    // ================================================================
+
+    function fmt(n) {
+      if (n === null || n === undefined) return '\u2014';
+      return Number(n).toLocaleString('en-US');
+    }
+
+    function truncHash(h, n) {
+      if (!h) return '\u2014';
+      if (h.length <= n) return h;
+      return h.substring(0, n) + '...';
+    }
+
+    function relativeTime(timestampMs) {
+      const diff = Date.now() - timestampMs;
+      if (diff < 60000) return 'just now';
+      const mins = Math.floor(diff / 60000);
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      const days = Math.floor(hrs / 24);
+      return days + 'd ago';
+    }
+
+    function formatUptime(launchTimeMs) {
+      const diff = Date.now() - launchTimeMs;
+      const totalMins = Math.floor(diff / 60000);
+      const d = Math.floor(totalMins / 1440);
+      const h = Math.floor((totalMins % 1440) / 60);
+      const m = totalMins % 60;
+      let parts = [];
+      if (d > 0) parts.push(d + 'd');
+      if (h > 0) parts.push(h + 'h');
+      parts.push(m + 'm');
+      return parts.join(' ');
+    }
+
+    // ================================================================
+    // useApi HOOK
+    // ================================================================
+
+    function useApi(url, intervalMs) {
+      const [data, setData] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+
+      useEffect(() => {
+        const controller = new AbortController();
+        let timer = null;
+        let hasData = false;
+
+        function doFetch() {
+          fetch(url, { signal: controller.signal })
+            .then(res => {
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              return res.json();
+            })
+            .then(json => {
+              setData(json);
+              setLoading(false);
+              setError(null);
+              hasData = true;
+            })
+            .catch(err => {
+              if (err.name === 'AbortError') return;
+              if (hasData) {
+                setError(err);
+              } else {
+                setError(err);
+                setLoading(false);
+              }
+            });
+        }
+
+        doFetch();
+        if (intervalMs) {
+          timer = setInterval(doFetch, intervalMs);
+        }
+
+        return () => {
+          controller.abort();
+          if (timer) clearInterval(timer);
+        };
+      }, [url, intervalMs]);
+
+      return { data, loading, error };
+    }
+
+    // ================================================================
+    // usePagedApi HOOK
+    // ================================================================
+
+    function usePagedApi(baseUrl, limit, intervalMs) {
+      const [page, setPage] = useState(0);
+      const offset = page * limit;
+      const url = baseUrl + '?limit=' + limit + '&offset=' + offset;
+      const { data, loading, error } = useApi(url, intervalMs);
+
+      const nextPage = useCallback(() => setPage(p => p + 1), []);
+      const prevPage = useCallback(() => setPage(p => (p > 0 ? p - 1 : 0)), []);
+
+      return { data, loading, error, page, nextPage, prevPage, setPage };
+    }
+
+    // ================================================================
+    // StatCard COMPONENT
+    // ================================================================
+
+    function StatCard({ icon, label, value, subValue, status }) {
+      const statusClass = status === 'good' ? ' status-good'
+        : status === 'warning' ? ' status-warning' : '';
+
+      return html`
+        <div class="stat-card card">
+          ${icon && html`<div class="stat-icon">${icon}</div>`}
+          <div style="display:flex;align-items:baseline">
+            <span class="stat-value glow-value${statusClass}">${value}</span>
+            ${subValue && html`<span class="stat-sub">${subValue}</span>`}
+          </div>
+          <div class="stat-label">${label}</div>
+        </div>
+      `;
+    }
+
+    // ================================================================
+    // DataTable COMPONENT
+    // ================================================================
+
+    function DataTable({ columns, data, emptyMessage }) {
+      const [sort, setSort] = useState({ key: null, dir: 'asc' });
+
+      const handleSort = useCallback((key) => {
+        setSort(prev => ({
+          key,
+          dir: prev.key === key && prev.dir === 'asc' ? 'desc' : 'asc',
+        }));
+      }, []);
+
+      const sorted = useMemo(() => {
+        if (!data || !sort.key) return data || [];
+        const arr = [...data];
+        arr.sort((a, b) => {
+          const va = a[sort.key];
+          const vb = b[sort.key];
+          if (va == null && vb == null) return 0;
+          if (va == null) return 1;
+          if (vb == null) return -1;
+          if (typeof va === 'number' && typeof vb === 'number') {
+            return sort.dir === 'asc' ? va - vb : vb - va;
+          }
+          const sa = String(va);
+          const sb = String(vb);
+          const cmp = sa.localeCompare(sb);
+          return sort.dir === 'asc' ? cmp : -cmp;
+        });
+        return arr;
+      }, [data, sort.key, sort.dir]);
+
+      if (!data || data.length === 0) {
+        return html`<div class="data-table empty-message">${emptyMessage || 'No data'}</div>`;
+      }
+
+      return html`
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                ${columns.map(col => {
+                  const alignCls = col.align === 'right' ? ' align-right' : '';
+                  const sortCls = col.sortable ? ' sortable' : '';
+                  const indicator = sort.key === col.key
+                    ? (sort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+                  return html`
+                    <th
+                      class="${alignCls}${sortCls}"
+                      onClick=${col.sortable ? () => handleSort(col.key) : undefined}
+                      key=${col.key}
+                    >
+                      ${col.label}${indicator}
+                    </th>
+                  `;
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              ${sorted.map((row, ri) => html`
+                <tr key=${ri}>
+                  ${columns.map(col => {
+                    const alignCls = col.align === 'right' ? ' align-right' : '';
+                    const cellVal = col.render
+                      ? col.render(row[col.key], row)
+                      : row[col.key];
+                    return html`<td class="${alignCls}" key=${col.key}>${cellVal}</td>`;
+                  })}
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    // ================================================================
+    // ProgressBar COMPONENT
+    // ================================================================
+
+    function ProgressBar({ label, current, max, variant }) {
+      const v = variant || 'green';
+
+      if (max === 0) {
+        return html`
+          <div class="progress-wrap">
+            <div class="progress-header">
+              <span class="progress-label">${label}</span>
+            </div>
+            <div class="progress-waiting">Waiting for peers...</div>
+          </div>
+        `;
+      }
+
+      const pct = Math.min(100, Math.round((current / max) * 100));
+
+      return html`
+        <div class="progress-wrap">
+          <div class="progress-header">
+            <span class="progress-label">${label}</span>
+            <span class="progress-stats">${fmt(current)} / ${fmt(max)} (${pct}%)</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill variant-${v}" style="width:${pct}%"></div>
+          </div>
+        </div>
+      `;
+    }
+
+    // ================================================================
+    // CopyHash COMPONENT
+    // ================================================================
+
+    function CopyHash({ hash, chars }) {
+      const n = chars || 16;
+      const [copied, setCopied] = useState(false);
+
+      const handleClick = useCallback(() => {
+        if (!hash) return;
+        navigator.clipboard.writeText(hash).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }, [hash]);
+
+      const display = hash
+        ? (hash.length <= n ? hash : hash.substring(0, n) + '...')
+        : '\u2014';
+
+      return html`
+        <span class="copy-hash hash" title=${hash || ''} onClick=${handleClick}>
+          ${display}
+          ${copied && html`<span class="copied-tip">Copied!</span>`}
+        </span>
+      `;
+    }
+
+    // ================================================================
+    // Badge COMPONENT
+    // ================================================================
+
+    function Badge({ text, variant }) {
+      const cls = variant ? 'badge badge-' + variant : 'badge';
+      return html`<span class=${cls}>${text}</span>`;
+    }
+
+    // ================================================================
+    // InfoRow COMPONENT
+    // ================================================================
+
+    function InfoRow({ label, value, mono }) {
+      const valueCls = 'info-value' + (mono ? ' mono' : '');
+      return html`
+        <div class="info-row">
+          <span class="info-label">${label}</span>
+          <span class=${valueCls}>${value}</span>
+        </div>
+      `;
+    }
+
+    // ================================================================
+    // Skeleton COMPONENT
+    // ================================================================
+
+    function Skeleton({ lines }) {
+      const count = lines || 4;
+      const widths = ['100%', '90%', '95%', '80%'];
+      const bars = [];
+      for (let i = 0; i < count; i++) {
+        const w = widths[i % widths.length];
+        bars.push(html`
+          <div
+            key=${i}
+            class="skeleton"
+            style="height:14px;margin-bottom:10px;border-radius:4px;width:${w}"
+          ></div>
+        `);
+      }
+      return html`<div>${bars}</div>`;
     }
 
     // ================================================================
