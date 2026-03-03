@@ -762,3 +762,60 @@ mod tests {
         assert_eq!(reader.len(), 0);
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_box_candidate() -> impl Strategy<Value = ErgoBoxCandidate> {
+        (1_000_000u64..=1_000_000_000u64, 0u32..=500_000u32).prop_map(|(value, creation_height)| {
+            // Valid P2PK ErgoTree: header 0x08 + VLQ(35) 0x23 + body 0x08 0xCD + 33-byte pubkey
+            let mut tree = vec![0x08, 0x23, 0x08, 0xCD];
+            tree.extend_from_slice(&[0x02; 33]);
+            ErgoBoxCandidate {
+                value,
+                ergo_tree_bytes: tree,
+                creation_height,
+                tokens: Vec::new(),
+                additional_registers: Vec::new(),
+            }
+        })
+    }
+
+    fn arb_transaction() -> impl Strategy<Value = ErgoTransaction> {
+        (
+            prop::collection::vec(any::<[u8; 32]>(), 1..=3),
+            prop::collection::vec(arb_box_candidate(), 1..=3),
+        )
+            .prop_map(|(box_ids, output_candidates)| {
+                let inputs = box_ids
+                    .into_iter()
+                    .map(|id| Input {
+                        box_id: BoxId(id),
+                        proof_bytes: Vec::new(),
+                        extension_bytes: vec![0x00],
+                    })
+                    .collect();
+                let mut tx = ErgoTransaction {
+                    inputs,
+                    data_inputs: Vec::new(),
+                    output_candidates,
+                    tx_id: TxId([0; 32]),
+                };
+                tx.tx_id = compute_tx_id(&tx);
+                tx
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrip_arbitrary_transaction(tx in arb_transaction()) {
+            let bytes = serialize_transaction(&tx);
+            let parsed = parse_transaction(&bytes).unwrap();
+            prop_assert_eq!(tx.tx_id.0, parsed.tx_id.0);
+            prop_assert_eq!(tx.inputs.len(), parsed.inputs.len());
+            prop_assert_eq!(tx.output_candidates.len(), parsed.output_candidates.len());
+        }
+    }
+}

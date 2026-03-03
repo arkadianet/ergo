@@ -624,6 +624,10 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       .stat-grid {
         grid-template-columns: repeat(2, 1fr);
       }
+
+      .panel-grid {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 480px) {
@@ -712,7 +716,7 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
   <noscript>
     <div style="padding:2rem;text-align:center;font-family:sans-serif;">
       <h2>JavaScript Required</h2>
-      <p>The Ergo Node Panel requires JavaScript to function. Please enable JavaScript and reload.</p>
+      <p>The Ergo Node Panel requires JavaScript to function. Access the API directly at <a href="/info">/info</a>.</p>
     </div>
   </noscript>
   <div id="app"></div>
@@ -1120,6 +1124,42 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     }
 
     // ================================================================
+    // KEYBOARD SHORTCUTS
+    // ================================================================
+
+    function KeyboardShortcuts() {
+      const { cycleTheme } = useContext(ThemeContext);
+
+      useEffect(() => {
+        const handler = (e) => {
+          if (e.key === 't' || e.key === 'T') {
+            const tag = e.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+            cycleTheme();
+          }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+      }, [cycleTheme]);
+
+      return null;
+    }
+
+    // ================================================================
+    // STALE WARNING COMPONENT
+    // ================================================================
+
+    function StaleWarning({ error }) {
+      if (!error) return null;
+      return html`
+        <div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;background:rgba(245,158,11,0.1);border-radius:6px;font-size:0.8rem;color:var(--accent-amber);margin-bottom:1rem;">
+          <span>\u26A0</span>
+          <span>Connection lost \u2014 showing cached data, retrying...</span>
+        </div>
+      `;
+    }
+
+    // ================================================================
     // HEADER COMPONENT
     // ================================================================
 
@@ -1371,6 +1411,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
         `;
       }
 
+      // Stale data warning (info exists but connection lost)
+      const staleWarning = (info && error) ? html`<${StaleWarning} error=${error} />` : null;
+
       // Compute statuses
       const headersCaughtUp = info.headersHeight >= (info.maxPeerHeight || 0) - 1;
       const blocksCaughtUp = info.fullHeight >= (info.headersHeight || 0) - 1;
@@ -1402,6 +1445,7 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
 
       return html`
         <div>
+          ${staleWarning}
           <div class="stat-grid" style="margin-bottom:1.5rem">
             <${StatCard}
               icon="\u2B06"
@@ -1567,6 +1611,8 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
         return html`<div class="card"><h2>Network</h2><p style="color:var(--text-secondary)">Failed to load peer data \u2014 retrying...</p></div>`;
       }
 
+      const networkStaleWarning = (peers && error) ? html`<${StaleWarning} error=${error} />` : null;
+
       const peerList = peers || [];
       const hasGeo = peerList.some(p => p.geo && p.geo.latitude != null && p.geo.longitude != null);
 
@@ -1606,6 +1652,7 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
 
       return html`
         <div>
+          ${networkStaleWarning}
           <div class="card">
             <h2>Peer Map</h2>
             <div style="position:relative">
@@ -1648,7 +1695,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       const { data: headers, loading, error } = useApi('/blocks/lastHeaders/20', 15000);
 
       if (loading) return html`<${Skeleton} />`;
-      if (error) return html`<div class="card"><h2>Error</h2><p style="color:var(--text-secondary)">${error}</p></div>`;
+      if (error && !headers) return html`<div class="card"><h2>Error</h2><p style="color:var(--text-secondary)">${error}</p></div>`;
+
+      const blockchainStaleWarning = (headers && error) ? html`<${StaleWarning} error=${error} />` : null;
 
       const columns = [
         { key: 'height', label: 'Height', sortable: true, align: 'right', render: (v) => fmt(v) },
@@ -1659,11 +1708,14 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       ];
 
       return html`
-        <div class="card">
-          <h2>Recent Blocks</h2>
-          <p style="color:var(--text-secondary)">Last 20 block headers</p>
+        <div>
+          ${blockchainStaleWarning}
+          <div class="card">
+            <h2>Recent Blocks</h2>
+            <p style="color:var(--text-secondary)">Last 20 block headers</p>
+          </div>
+          <${DataTable} columns=${columns} data=${headers || []} emptyMessage="No blocks synced yet" />
         </div>
-        <${DataTable} columns=${columns} data=${headers || []} emptyMessage="No blocks synced yet" />
       `;
     }
 
@@ -1673,7 +1725,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       );
 
       if (loading) return html`<${Skeleton} />`;
-      if (error) return html`<div class="card"><h2>Error</h2><p style="color:var(--text-secondary)">${error}</p></div>`;
+      if (error && !txs) return html`<div class="card"><h2>Error</h2><p style="color:var(--text-secondary)">${error}</p></div>`;
+
+      const mempoolStaleWarning = (txs && error) ? html`<${StaleWarning} error=${error} />` : null;
 
       const columns = [
         { key: 'id', label: 'TX ID', render: (v) => html`<${CopyHash} hash=${v} chars=${16} />` },
@@ -1687,15 +1741,18 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       ];
 
       return html`
-        <div class="card">
-          <h2>Mempool</h2>
-          <p style="color:var(--text-secondary)">Page ${page + 1}</p>
-        </div>
-        <${DataTable} columns=${columns} data=${txs || []} emptyMessage="Mempool is empty" />
-        <div class="pagination">
-          <button disabled=${page === 0} onClick=${prevPage}>Prev</button>
-          <span>Page ${page + 1}</span>
-          <button disabled=${txs == null || txs.length < 10} onClick=${nextPage}>Next</button>
+        <div>
+          ${mempoolStaleWarning}
+          <div class="card">
+            <h2>Mempool</h2>
+            <p style="color:var(--text-secondary)">Page ${page + 1}</p>
+          </div>
+          <${DataTable} columns=${columns} data=${txs || []} emptyMessage="Mempool is empty" />
+          <div class="pagination">
+            <button disabled=${page === 0} onClick=${prevPage}>Prev</button>
+            <span>Page ${page + 1}</span>
+            <button disabled=${txs == null || txs.length < 10} onClick=${nextPage}>Next</button>
+          </div>
         </div>
       `;
     }
@@ -1720,9 +1777,13 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       const { data: info, loading, error } = useApi('/info', 5000);
 
       if (loading) return html`<${Skeleton} />`;
-      if (error) return html`<div class="card"><h2>Error</h2><p style="color:var(--status-bad)">${error}</p></div>`;
+      if (error && !info) return html`<div class="card"><h2>Error</h2><p style="color:var(--accent-red)">${error}</p></div>`;
+
+      const systemStaleWarning = (info && error) ? html`<${StaleWarning} error=${error} />` : null;
 
       return html`
+        <div>
+        ${systemStaleWarning}
         <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
           <${StatCard} icon="⏱" label="Uptime" value=${formatUptime(info.launchTime)} />
           <${StatCard} icon="◫" label="State Type" value=${info.stateType.charAt(0).toUpperCase() + info.stateType.slice(1)} />
@@ -1749,6 +1810,7 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
           <p style="color:var(--text-secondary);font-size:0.85rem;">
             Database size, memory usage, and system resource monitoring will be available in a future release.
           </p>
+        </div>
         </div>
       `;
     }
@@ -1781,6 +1843,7 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
 
       return html`
         <${ThemeProvider}>
+          <${KeyboardShortcuts} />
           <${RouteProvider}>
             <${NetworkProvider}>
               <${Header} sidebarToggle=${sidebar.toggle} />
