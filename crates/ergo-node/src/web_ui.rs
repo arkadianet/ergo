@@ -631,6 +631,57 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
         grid-template-columns: 1fr;
       }
     }
+
+    /* ================================================================
+       MAP STYLES
+       ================================================================ */
+
+    .map-container {
+      height: 400px;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    .map-overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.4);
+      color: #fff;
+      font-size: 0.9rem;
+      z-index: 500;
+      pointer-events: none;
+    }
+    .map-legend {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.75rem;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .map-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .map-legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    @media (max-width: 768px) {
+      .map-container { height: 200px; }
+    }
   </style>
 </head>
 <body>
@@ -1406,7 +1457,167 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     }
 
     function NetworkPage() {
-      return html`<div class="card"><h2>Network</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+      const { data: peers, loading, error } = useApi('/peers/connected', 10000);
+      const { theme } = useContext(ThemeContext);
+      const mapRef = useRef(null);
+      const tileRef = useRef(null);
+      const markersRef = useRef(null);
+      const mapElRef = useRef(null);
+
+      // Initialize Leaflet map once the map div is in the DOM
+      // We depend on `loading` so this re-runs when loading finishes and the div appears
+      useEffect(() => {
+        if (loading) return;
+        const mapEl = document.getElementById('peer-map');
+        if (!mapEl || mapRef.current) return;
+        const map = L.map(mapEl, {
+          center: [20, 0],
+          zoom: 2,
+          zoomControl: true,
+          attributionControl: false
+        });
+        mapRef.current = map;
+        mapElRef.current = mapEl;
+
+        const isDark = theme === 'dark' || theme === 'terminal' || theme === 'glass';
+        const tileUrl = isDark
+          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+          : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+        tileRef.current = L.tileLayer(tileUrl).addTo(map);
+
+        markersRef.current = L.layerGroup().addTo(map);
+
+        return () => {
+          map.remove();
+          mapRef.current = null;
+          tileRef.current = null;
+          markersRef.current = null;
+        };
+      }, [loading]);
+
+      // Update tile layer on theme change
+      useEffect(() => {
+        if (!mapRef.current || !tileRef.current) return;
+        const isDark = theme === 'dark' || theme === 'terminal' || theme === 'glass';
+        const tileUrl = isDark
+          ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+          : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+        mapRef.current.removeLayer(tileRef.current);
+        tileRef.current = L.tileLayer(tileUrl).addTo(mapRef.current);
+      }, [theme]);
+
+      // Update markers when peers data changes
+      useEffect(() => {
+        if (!markersRef.current || !peers) return;
+        markersRef.current.clearLayers();
+        peers.forEach(peer => {
+          if (peer.geo && peer.geo.latitude != null && peer.geo.longitude != null) {
+            L.circleMarker([peer.geo.latitude, peer.geo.longitude], {
+              radius: 6,
+              fillColor: colorForStatus(peer.chainStatus),
+              fillOpacity: 0.8,
+              color: colorForStatus(peer.chainStatus),
+              weight: 1,
+              opacity: 0.9
+            }).bindTooltip(
+              (peer.address || 'Unknown') + '\n' +
+              (peer.name || 'Unknown') + '\n' +
+              'Height: ' + (peer.height || '?')
+            ).addTo(markersRef.current);
+          }
+        });
+      }, [peers]);
+
+      function colorForStatus(status) {
+        switch (status) {
+          case 'Younger': return '#10b981';
+          case 'Equal':   return '#3b82f6';
+          case 'Older':   return '#f59e0b';
+          default:        return '#6b7280';
+        }
+      }
+
+      if (loading) return html`<div class="card"><h2>Network</h2><${Skeleton} lines=${6} /></div>`;
+
+      if (error && !peers) {
+        return html`<div class="card"><h2>Network</h2><p style="color:var(--text-secondary)">Failed to load peer data \u2014 retrying...</p></div>`;
+      }
+
+      const peerList = peers || [];
+      const hasGeo = peerList.some(p => p.geo && p.geo.latitude != null && p.geo.longitude != null);
+
+      // Pre-process peers for table: flatten geo.countryCode
+      const tableData = peerList.map(p => ({
+        ...p,
+        country: (p.geo && p.geo.countryCode) || '\u2014'
+      }));
+
+      const columns = [
+        {
+          label: 'Address', key: 'address', sortable: true,
+          render: (v) => html`<span class="hash">${v || '\u2014'}</span>`
+        },
+        { label: 'Agent Name', key: 'name', sortable: true },
+        {
+          label: 'Direction', key: 'connectionType',
+          render: (v) => v === 'Incoming' ? '\u2193 In' : '\u2191 Out'
+        },
+        { label: 'Version', key: 'version', sortable: true },
+        { label: 'State Type', key: 'stateType' },
+        {
+          label: 'Height', key: 'height', sortable: true, align: 'right',
+          render: (v) => fmt(v)
+        },
+        {
+          label: 'Chain Status', key: 'chainStatus', sortable: true,
+          render: (v) => {
+            const variant = v === 'Younger' ? 'synced'
+              : v === 'Equal' ? 'info'
+              : v === 'Older' ? 'warning' : 'info';
+            return html`<${Badge} text=${v || 'Unknown'} variant=${variant} />`;
+          }
+        },
+        { label: 'Country', key: 'country', sortable: true }
+      ];
+
+      return html`
+        <div>
+          <div class="card">
+            <h2>Peer Map</h2>
+            <div style="position:relative">
+              <div id="peer-map" class="map-container"></div>
+              ${!hasGeo && html`<div class="map-overlay">GeoIP database not configured</div>`}
+              <div class="map-legend">
+                <div class="map-legend-item">
+                  <span class="map-legend-dot" style="background:#10b981"></span>
+                  <span>Younger</span>
+                </div>
+                <div class="map-legend-item">
+                  <span class="map-legend-dot" style="background:#3b82f6"></span>
+                  <span>Equal</span>
+                </div>
+                <div class="map-legend-item">
+                  <span class="map-legend-dot" style="background:#f59e0b"></span>
+                  <span>Older</span>
+                </div>
+                <div class="map-legend-item">
+                  <span class="map-legend-dot" style="background:#6b7280"></span>
+                  <span>Unknown</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:1.5rem">
+            <h2>Connected Peers <span style="font-weight:normal;font-size:0.9rem;color:var(--text-secondary)">\u2014 ${peerList.length} peers connected</span></h2>
+            <${DataTable}
+              columns=${columns}
+              data=${tableData}
+              emptyMessage="No peers connected"
+            />
+          </div>
+        </div>
+      `;
     }
 
     function BlockchainPage() {
