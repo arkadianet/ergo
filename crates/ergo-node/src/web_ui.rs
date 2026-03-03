@@ -1701,11 +1701,56 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
     }
 
     function WalletPage() {
-      return html`<div class="card"><h2>Wallet</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+      return html`
+        <div class="card" style="text-align:center;padding:3rem 2rem;">
+          <div style="font-size:3rem;margin-bottom:1rem;">⊡</div>
+          <h2 style="border:none;padding:0;margin-bottom:0.75rem;">Wallet</h2>
+          <p style="color:var(--text-secondary);max-width:400px;margin:0 auto 1rem;">
+            Wallet functionality is available when the node is compiled with the
+            <code style="background:var(--sidebar-active);padding:0.15rem 0.4rem;border-radius:3px;font-family:var(--font-mono);font-size:0.85em;">--features wallet</code> flag.
+          </p>
+          <p style="color:var(--text-secondary);font-size:0.85rem;max-width:400px;margin:0 auto;">
+            Planned capabilities: HD key management, balance tracking, transaction signing, and payment requests.
+          </p>
+        </div>
+      `;
     }
 
     function SystemPage() {
-      return html`<div class="card"><h2>System</h2><p style="color:var(--text-secondary)">Coming soon...</p></div>`;
+      const { data: info, loading, error } = useApi('/info', 5000);
+
+      if (loading) return html`<${Skeleton} />`;
+      if (error) return html`<div class="card"><h2>Error</h2><p style="color:var(--status-bad)">${error}</p></div>`;
+
+      return html`
+        <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
+          <${StatCard} icon="⏱" label="Uptime" value=${formatUptime(info.launchTime)} />
+          <${StatCard} icon="◫" label="State Type" value=${info.stateType.charAt(0).toUpperCase() + info.stateType.slice(1)} />
+          <${StatCard} icon="⛏" label="Mining" value=${info.isMining ? 'Active' : 'Inactive'} status=${info.isMining ? 'good' : 'normal'} />
+        </div>
+
+        <div class="card">
+          <h2>Chain Scores</h2>
+          <${InfoRow} label="Headers Score" value=${info.headersScore} mono=${true} />
+          <${InfoRow} label="Full Blocks Score" value=${info.fullBlocksScore} mono=${true} />
+        </div>
+
+        <div class="card">
+          <h2>Details</h2>
+          <${InfoRow} label="Sync State" value=${info.syncState} />
+          <${InfoRow} label="Current Time" value=${new Date(info.currentTime).toLocaleString()} />
+          <${InfoRow} label="EIP-27 (Re-emission)" value=${info.eip27Supported ? 'Supported' : 'Not supported'} />
+          <${InfoRow} label="EIP-37 (Difficulty)" value=${info.eip37Supported ? 'Supported' : 'Not supported'} />
+          <${InfoRow} label="Explorer Mode" value=${info.isExplorer ? 'Enabled' : 'Disabled'} />
+        </div>
+
+        <div class="card" style="border-left:3px solid var(--accent);opacity:0.8;">
+          <h2 style="font-size:0.9rem;">Extended Metrics</h2>
+          <p style="color:var(--text-secondary);font-size:0.85rem;">
+            Database size, memory usage, and system resource monitoring will be available in a future release.
+          </p>
+        </div>
+      `;
     }
 
     // ================================================================
