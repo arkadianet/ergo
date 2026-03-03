@@ -69,6 +69,8 @@ pub struct NodeSettings {
     pub blacklisted_transactions: Vec<String>,
     #[serde(default)]
     pub checkpoint_height: u32,
+    #[serde(default)]
+    pub geoip_db_path: Option<String>,
     #[serde(default = "default_voting_targets")]
     pub voting_targets: Vec<u8>,
     #[serde(default)]
@@ -248,7 +250,7 @@ fn default_handshake_timeout() -> u64 {
     30
 }
 fn default_max_connections() -> u32 {
-    30
+    100
 }
 fn default_connection_timeout() -> u64 {
     1

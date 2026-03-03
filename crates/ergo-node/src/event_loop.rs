@@ -53,12 +53,24 @@ pub type WalletArc = Option<Arc<tokio::sync::RwLock<()>>>;
 pub struct ConnectedPeerInfo {
     pub address: String,
     pub name: String,
+    /// User-configured node name from the handshake PeerSpec.
+    pub node_name: String,
     /// Epoch milliseconds when the handshake completed.
     pub last_handshake: u64,
     /// Epoch milliseconds of the last received message from this peer.
     pub last_message: Option<u64>,
     /// "Incoming" or "Outgoing", or None if unknown.
     pub connection_type: Option<String>,
+    /// Protocol version string, e.g. "6.0.1".
+    pub version: Option<String>,
+    /// "utxo" or "digest" from peer's ModeFeature.
+    pub state_type: Option<String>,
+    /// Whether the peer verifies transactions.
+    pub verifying_transactions: Option<bool>,
+    /// Number of blocks the peer keeps (-1 = all).
+    pub blocks_to_keep: Option<i32>,
+    /// Peer ID for cross-referencing with SyncTracker.
+    pub peer_id: u64,
 }
 
 /// An inbound peer that has completed the handshake, ready to be added to the pool.
@@ -1357,7 +1369,9 @@ async fn handle_check_modifiers(
     use ergo_network::delivery_tracker::ModifierStatus;
     use ergo_network::sync_manager::distribute_requests;
 
-    let missing = sync_history.next_modifiers_to_download(192);
+    let peer_count = pool.peer_count();
+    let batch_size = ergo_network::sync_manager::scaled_check_batch_size(peer_count);
+    let missing = sync_history.next_modifiers_to_download(batch_size);
     if missing.is_empty() {
         return;
     }
@@ -1429,7 +1443,15 @@ async fn handle_discovery_tick(
 
     if pool.peer_count() < settings.network.max_connections as usize {
         let hs_timeout = settings.network.handshake_timeout_secs;
-        for addr in discovery.peers_to_connect(&connected).into_iter().take(3) {
+        let connect_count = ergo_network::sync_manager::discovery_connect_count(
+            pool.peer_count(),
+            settings.network.max_connections as usize,
+        );
+        for addr in discovery
+            .peers_to_connect(&connected)
+            .into_iter()
+            .take(connect_count)
+        {
             if penalties.is_ip_banned(&addr.ip()) {
                 tracing::debug!(%addr, "skipping discovery connect to banned IP");
                 continue;
@@ -1745,15 +1767,37 @@ async fn update_shared_state(
     state.connected_peers = pool
         .connected_peers()
         .iter()
-        .map(|p| ConnectedPeerInfo {
-            address: p.addr.to_string(),
-            name: p.peer_name.clone(),
-            last_handshake: p.connected_at,
-            last_message: Some(p.last_activity),
-            connection_type: Some(match p.direction {
-                ConnectionDirection::Incoming => "Incoming".to_string(),
-                ConnectionDirection::Outgoing => "Outgoing".to_string(),
-            }),
+        .map(|p| {
+            let (state_type, verifying_transactions, blocks_to_keep) =
+                if let Some(ref mode) = p.mode_feature {
+                    let st = match mode.state_type {
+                        ergo_wire::peer_feature::StateTypeCode::Utxo => "utxo",
+                        ergo_wire::peer_feature::StateTypeCode::Digest => "digest",
+                    };
+                    (
+                        Some(st.to_string()),
+                        Some(mode.verifying_transactions),
+                        Some(mode.blocks_to_keep),
+                    )
+                } else {
+                    (None, None, None)
+                };
+            ConnectedPeerInfo {
+                address: p.addr.to_string(),
+                name: p.peer_name.clone(),
+                node_name: p.node_name.clone(),
+                last_handshake: p.connected_at,
+                last_message: Some(p.last_activity),
+                connection_type: Some(match p.direction {
+                    ConnectionDirection::Incoming => "Incoming".to_string(),
+                    ConnectionDirection::Outgoing => "Outgoing".to_string(),
+                }),
+                version: Some(p.version.to_string()),
+                state_type,
+                verifying_transactions,
+                blocks_to_keep,
+                peer_id: p.id,
+            }
         })
         .collect();
     state.known_peers = discovery
