@@ -338,13 +338,57 @@ fn api_error(status: StatusCode, detail: &str) -> (StatusCode, Json<ApiError>) {
     )
 }
 
-/// JSON response for P2P layer status.
+/// JSON response for P2P layer status (Scala-compatible schema).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerStatusResponse {
-    pub connected_count: usize,
-    pub uptime_secs: u64,
-    pub last_message_time: Option<u64>,
+    /// Unix epoch milliseconds of the last incoming message.
+    pub last_incoming_message: u64,
+    /// Current system time in Unix epoch milliseconds.
+    pub current_system_time: u64,
+}
+
+/// JSON response for `/peers/all` — a peer from the address book.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerInfoResponse {
+    /// Address with leading `/`, e.g. "/1.2.3.4:9030".
+    pub address: String,
+    /// Milliseconds since last message (0 if not currently connected).
+    pub last_message: u64,
+    /// Unix epoch milliseconds of the last handshake.
+    pub last_handshake: u64,
+    /// Peer agent name from handshake.
+    pub name: String,
+    /// "Incoming" or "Outgoing", or null if unknown.
+    pub connection_type: Option<String>,
+}
+
+/// JSON response for `/peers/blacklisted` — wrapped addresses list.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BlacklistedPeersResponse {
+    pub addresses: Vec<String>,
+}
+
+/// Mode sub-object for `/peers/syncInfo`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerModeResponse {
+    pub state: String,
+    pub verifying_transactions: bool,
+    pub full_blocks_suffix: i32,
+}
+
+/// Per-peer entry for `/peers/syncInfo`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerSyncInfoResponse {
+    /// Address with leading `/`, e.g. "/1.2.3.4:9030".
+    pub address: String,
+    pub version: String,
+    pub mode: PeerModeResponse,
+    pub status: String,
+    pub height: u32,
 }
 
 /// JSON response for an unconfirmed output in the mempool.
@@ -3156,7 +3200,8 @@ mod tests {
         let peers: Vec<PeerResponse> = serde_json::from_slice(&body).unwrap();
         assert_eq!(peers.len(), 2);
         // Original fields
-        assert_eq!(peers[0].address, "192.168.1.1:9030");
+        // Address now includes leading "/" to match Scala reference format.
+        assert_eq!(peers[0].address, "/192.168.1.1:9030");
         assert_eq!(peers[0].name, "peer-a");
         assert_eq!(peers[0].last_message, 1640000000500);
         assert_eq!(peers[0].last_handshake, 1640000000000);
@@ -3169,7 +3214,7 @@ mod tests {
         // No geoip configured → geo is None
         assert!(peers[0].geo.is_none());
 
-        assert_eq!(peers[1].address, "10.0.0.1:9030");
+        assert_eq!(peers[1].address, "/10.0.0.1:9030");
         assert_eq!(peers[1].name, "peer-b");
         assert_eq!(peers[1].last_handshake, 1640000001000);
         assert_eq!(peers[1].connection_type, Some("Incoming".to_string()));
@@ -3696,7 +3741,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(status["connectedCount"].is_number());
+        // Scala-compatible schema: lastIncomingMessage and currentSystemTime.
+        assert!(status["lastIncomingMessage"].is_number());
+        assert!(status["currentSystemTime"].is_number());
     }
 
     #[tokio::test]
