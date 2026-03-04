@@ -226,7 +226,7 @@ pub(crate) async fn get_header_only_handler(
     Ok(Json(header_to_response_with_id(&header, &header_id_hex)))
 }
 
-/// `GET /blocks/{id}/transactions` — block transactions as hex.
+/// `GET /blocks/{id}/transactions` — block transactions as JSON.
 #[utoipa::path(
     get,
     path = "/blocks/{header_id}/transactions",
@@ -235,27 +235,29 @@ pub(crate) async fn get_header_only_handler(
         ("header_id" = String, Path, description = "Block header ID (hex)")
     ),
     responses(
-        (status = 200, description = "Block transactions (hex-encoded)", body = String),
+        (status = 200, description = "Block transactions", body = BlockTransactionsResponse),
         (status = 404, description = "Block transactions not found")
     )
 )]
 pub(crate) async fn get_block_transactions_handler(
     State(state): State<ApiState>,
     Path(header_id_hex): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<BlockTransactionsResponse>, (StatusCode, Json<ApiError>)> {
     let id = parse_modifier_id(&header_id_hex)?;
-    let data = state
+
+    let header = state
         .history
-        .get_modifier(102, &id)
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load block transactions",
-            )
-        })?
+        .load_header(&id)
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load header"))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block not found"))?;
+
+    let block_resp = build_block_response(&state, &header, &header_id_hex);
+
+    let bt = block_resp
+        .block_transactions
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Block transactions not found"))?;
 
-    Ok(Json(hex::encode(data)))
+    Ok(Json(bt))
 }
 
 /// `POST /blocks/headerIds` — batch full blocks by header IDs.
@@ -483,6 +485,7 @@ pub(crate) async fn merkle_proof_handler(
         })?;
 
     // Format levels: each is hex(side_byte ++ 32-byte sibling hash).
+    // Empty nodes (hash = None) are serialized with 32 zero bytes.
     let levels: Vec<String> = proof_steps
         .iter()
         .map(|step| {
@@ -490,9 +493,10 @@ pub(crate) async fn merkle_proof_handler(
                 ergo_consensus::merkle::MerkleSide::Left => 0x00u8,
                 ergo_consensus::merkle::MerkleSide::Right => 0x01u8,
             };
+            let hash_bytes = step.hash.unwrap_or([0u8; 32]);
             let mut entry = Vec::with_capacity(33);
             entry.push(side_byte);
-            entry.extend_from_slice(&step.hash);
+            entry.extend_from_slice(&hash_bytes);
             hex::encode(entry)
         })
         .collect();

@@ -889,7 +889,7 @@ fn ergo_tx_to_response(tx: &ErgoTransaction, size: usize) -> TransactionResponse
 }
 
 /// Build a full [`BlockResponse`] by loading block sections from the history DB.
-fn build_block_response(
+pub(crate) fn build_block_response(
     state: &ApiState,
     header: &ergo_types::header::Header,
     header_id_hex: &str,
