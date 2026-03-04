@@ -259,6 +259,35 @@ impl NodeViewHolder {
             }
         };
 
+        // Reconstruct voting_epoch_info from the last epoch-boundary Extension in the DB.
+        // On restart, voting_epoch_info would otherwise start at genesis (block_version=1),
+        // causing Stage 2b to reject blocks whose version was raised by prior soft-fork votes.
+        // Loading the declared parameters from the most recent epoch-start Extension gives us
+        // the correct block_version, max_block_size, etc. without replaying all vote history.
+        let epoch_length_const = 1024u32;
+        let voting_epoch_info = {
+            let epoch_start = (recovered_height / epoch_length_const) * epoch_length_const;
+            let restored = if epoch_start > 0 {
+                history
+                    .header_ids_at_height(epoch_start)
+                    .ok()
+                    .and_then(|ids| ids.into_iter().next())
+                    .and_then(|id| history.load_extension(&id).ok().flatten())
+                    .and_then(|ext| Parameters::from_extension(epoch_start, &ext).ok())
+                    .map(|params| {
+                        tracing::info!(
+                            epoch_start,
+                            block_version = params.block_version(),
+                            "restored voting epoch info from DB epoch boundary"
+                        );
+                        VotingEpochInfo::new(params, epoch_start)
+                    })
+            } else {
+                None
+            };
+            restored.unwrap_or_else(|| VotingEpochInfo::new(Parameters::genesis(), 0))
+        };
+
         Self {
             history,
             mempool,
@@ -272,7 +301,7 @@ impl NodeViewHolder {
             best_full_height: recovered_height,
             blocks_to_keep: -1,
             epoch_length: 1024,
-            voting_epoch_info: VotingEpochInfo::new(Parameters::genesis(), 0),
+            voting_epoch_info,
             checkpoint_height: 0,
             v2_activation_height: 417_792,
             v2_activation_difficulty_hex: "6f98d5000000".to_string(),
@@ -1187,12 +1216,39 @@ impl NodeViewHolder {
         // then set the persisted parameters correctly.
         let expected_version = {
             let pv = self.voting_epoch_info.parameters.block_version();
-            if block.header.height >= self.v2_activation_height && pv < 2 {
+            // Hardcoded v2 activation (non-voted hard-fork at 417,792).
+            let pv = if block.header.height >= self.v2_activation_height && pv < 2 {
                 self.voting_epoch_info
                     .parameters
                     .table
                     .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, 2);
                 2u8
+            } else {
+                pv
+            };
+            // At epoch boundaries the new parameters are declared in this block's Extension.
+            // On restart, voting_epoch_info may not have replayed vote accumulation for the
+            // previous epoch, so the computed version can lag behind the declared one.
+            // Trust the declared block_version (max with what we computed) so that
+            // voted-in version upgrades (e.g. v2→v3) don't block validation.
+            if block.header.height % self.epoch_length == 0 && block.header.height > 0 {
+                if let Ok(declared) = Parameters::from_extension(
+                    block.header.height,
+                    &block.extension,
+                ) {
+                    let dv = declared.block_version();
+                    if dv > pv {
+                        self.voting_epoch_info
+                            .parameters
+                            .table
+                            .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, dv as i32);
+                        dv
+                    } else {
+                        pv
+                    }
+                } else {
+                    pv
+                }
             } else {
                 pv
             }
