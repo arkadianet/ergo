@@ -61,8 +61,9 @@ pub(crate) async fn script_address_to_bytes_handler(
 pub(crate) async fn script_p2s_address_handler(
     State(state): State<ApiState>,
     Json(req): Json<ScriptCompileRequest>,
-) -> Result<Json<ScriptCompileResponse>, (StatusCode, String)> {
-    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
+) -> Result<Json<ScriptCompileResponse>, (StatusCode, Json<ApiError>)> {
+    let tree_bytes =
+        compile_script_to_tree_bytes(&req.source).map_err(|(status, msg)| api_error(status, &msg))?;
     let network_prefix = network_prefix_from_str(&state.network);
     let addr = address::encode_address(network_prefix, address::AddressType::P2S, &tree_bytes);
     Ok(Json(ScriptCompileResponse { address: addr }))
@@ -82,8 +83,9 @@ pub(crate) async fn script_p2s_address_handler(
 pub(crate) async fn script_p2sh_address_handler(
     State(state): State<ApiState>,
     Json(req): Json<ScriptCompileRequest>,
-) -> Result<Json<ScriptCompileResponse>, (StatusCode, String)> {
-    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
+) -> Result<Json<ScriptCompileResponse>, (StatusCode, Json<ApiError>)> {
+    let tree_bytes =
+        compile_script_to_tree_bytes(&req.source).map_err(|(status, msg)| api_error(status, &msg))?;
     let hash = blake2b256(&tree_bytes);
     let network_prefix = network_prefix_from_str(&state.network);
     let addr = address::encode_address(network_prefix, address::AddressType::P2SH, &hash[..24]);
@@ -104,8 +106,9 @@ pub(crate) async fn script_p2sh_address_handler(
 pub(crate) async fn script_compile_handler(
     State(state): State<ApiState>,
     Json(req): Json<ScriptCompileRequest>,
-) -> Result<Json<ScriptFullCompileResponse>, (StatusCode, String)> {
-    let tree_bytes = compile_script_to_tree_bytes(&req.source)?;
+) -> Result<Json<ScriptFullCompileResponse>, (StatusCode, Json<ApiError>)> {
+    let tree_bytes =
+        compile_script_to_tree_bytes(&req.source).map_err(|(status, msg)| api_error(status, &msg))?;
     let network_prefix = network_prefix_from_str(&state.network);
     let addr = address::encode_address(network_prefix, address::AddressType::P2S, &tree_bytes);
     Ok(Json(ScriptFullCompileResponse {

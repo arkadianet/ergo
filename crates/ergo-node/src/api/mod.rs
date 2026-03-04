@@ -463,11 +463,15 @@ pub struct AddressResponse {
 }
 
 /// JSON response for a block Merkle proof.
+///
+/// Each entry in `levels` is a 2-element array `[data_hex, side_int]`
+/// where `side_int` 0 = left, 1 = right, matching the Scala reference node schema.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MerkleProofResponse {
-    pub leaf: String,
-    pub levels: Vec<String>,
+    pub leaf_data: String,
+    #[schema(value_type = Vec<Vec<serde_json::Value>>)]
+    pub levels: Vec<serde_json::Value>,
 }
 
 /// JSON response for emission contract script addresses.
@@ -525,7 +529,9 @@ pub struct TokenAmountResponse {
 #[serde(rename_all = "camelCase")]
 pub struct IndexedErgoTransactionResponse {
     pub id: String,
+    pub block_id: String,
     pub inclusion_height: u32,
+    pub timestamp: u64,
     pub index: u32,
     pub global_index: u64,
     pub num_confirmations: u32,
@@ -609,8 +615,7 @@ pub struct PoPowHeaderResponse {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NipopowProofResponse {
-    pub m: u32,
-    pub k: u32,
+    pub continuous: bool,
     pub prefix: Vec<PoPowHeaderResponse>,
     pub suffix_head: PoPowHeaderResponse,
     pub suffix_tail: Vec<HeaderResponse>,
@@ -1032,8 +1037,7 @@ fn popow_header_to_response(popow: &ergo_types::nipopow::PoPowHeader) -> PoPowHe
 /// Convert a [`NipopowProof`] to a [`NipopowProofResponse`].
 fn proof_to_response(proof: &ergo_types::nipopow::NipopowProof) -> NipopowProofResponse {
     NipopowProofResponse {
-        m: proof.m,
-        k: proof.k,
+        continuous: true,
         prefix: proof.prefix.iter().map(popow_header_to_response).collect(),
         suffix_head: popow_header_to_response(&proof.suffix_head),
         suffix_tail: proof.suffix_tail.iter().map(header_to_response).collect(),
@@ -1194,12 +1198,14 @@ fn box_to_response(
 }
 
 /// Convert an [`IndexedErgoTransaction`] to an API response, resolving
-/// input and output boxes by their global indexes.
+/// input and output boxes by their global indexes. Looks up the block header at
+/// `tx.height` to populate `block_id` and `timestamp`.
 fn tx_to_response(
     tx: &ergo_indexer::types::IndexedErgoTransaction,
     db: &ergo_indexer::db::ExtraIndexerDb,
     current_height: u32,
     network: &str,
+    history: &HistoryDb,
 ) -> IndexedErgoTransactionResponse {
     let inputs: Vec<IndexedErgoBoxResponse> = tx
         .input_indexes
@@ -1223,9 +1229,25 @@ fn tx_to_response(
         })
         .collect();
 
+    // Look up the block header at the inclusion height to get block_id and timestamp.
+    let (block_id, timestamp) = history
+        .header_ids_at_height(tx.height)
+        .ok()
+        .and_then(|ids| ids.into_iter().next())
+        .and_then(|id| {
+            history.load_header(&id).ok().flatten().map(|h| {
+                let serialized = serialize_header(&h);
+                let computed_id = compute_header_id(&serialized);
+                (hex::encode(computed_id.0), h.timestamp)
+            })
+        })
+        .unwrap_or_else(|| (String::new(), 0));
+
     IndexedErgoTransactionResponse {
         id: hex::encode(tx.tx_id.0),
+        block_id,
         inclusion_height: tx.height,
+        timestamp,
         index: tx.index,
         global_index: tx.global_index,
         num_confirmations: current_height.saturating_sub(tx.height) + 1,
@@ -1302,6 +1324,7 @@ fn build_indexed_block_response(
                     db,
                     current_height,
                     &state.network,
+                    &state.history,
                 ));
             }
         }
@@ -5043,7 +5066,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[tokio::test]
-    async fn mining_candidate_returns_503_when_not_enabled() {
+    async fn mining_candidate_returns_400_when_not_enabled() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
         let req = Request::builder()
@@ -5051,7 +5074,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -5069,7 +5092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mining_solution_returns_503_when_not_enabled() {
+    async fn mining_solution_returns_400_when_not_enabled() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
         let body = serde_json::json!({
@@ -5085,7 +5108,7 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -5133,7 +5156,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mining_reward_address_returns_503_when_not_configured() {
+    async fn mining_reward_address_returns_400_when_not_configured() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
         let req = Request::builder()
@@ -5141,7 +5164,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -5161,7 +5184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mining_reward_pubkey_returns_503_when_not_configured() {
+    async fn mining_reward_pubkey_returns_400_when_not_configured() {
         let (state, _dir) = test_api_state();
         let router = build_router(state);
         let req = Request::builder()
@@ -5169,7 +5192,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

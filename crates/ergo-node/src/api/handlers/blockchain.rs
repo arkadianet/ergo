@@ -50,6 +50,7 @@ pub(crate) async fn blockchain_tx_by_id_handler(
         db,
         shared.full_height as u32,
         &state.network,
+        &state.history,
     )))
 }
 
@@ -80,6 +81,7 @@ pub(crate) async fn blockchain_tx_by_index_handler(
         db,
         shared.full_height as u32,
         &state.network,
+        &state.history,
     )))
 }
 
@@ -118,7 +120,7 @@ pub(crate) async fn blockchain_txs_by_address_post_handler(
     let height = shared.full_height as u32;
     let items = txs
         .iter()
-        .map(|tx| tx_to_response(tx, db, height, &state.network))
+        .map(|tx| tx_to_response(tx, db, height, &state.network, &state.history))
         .collect();
     Ok(Json(PaginatedTxResponse { items, total }))
 }
@@ -158,7 +160,7 @@ pub(crate) async fn blockchain_txs_by_address_get_handler(
     let height = shared.full_height as u32;
     let items = txs
         .iter()
-        .map(|tx| tx_to_response(tx, db, height, &state.network))
+        .map(|tx| tx_to_response(tx, db, height, &state.network, &state.history))
         .collect();
     Ok(Json(PaginatedTxResponse { items, total }))
 }
@@ -202,12 +204,14 @@ pub(crate) async fn blockchain_tx_range_handler(
 pub(crate) async fn blockchain_box_by_id_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
-) -> Result<Json<IndexedErgoBoxResponse>, (StatusCode, String)> {
-    let db = require_indexer(&state)?;
-    let box_id = hex_to_32bytes(&id)?;
+) -> Result<Json<IndexedErgoBoxResponse>, (StatusCode, Json<ApiError>)> {
+    let db = require_indexer(&state)
+        .map_err(|(status, msg)| api_error(status, &msg))?;
+    let box_id = hex_to_32bytes(&id)
+        .map_err(|(status, msg)| api_error(status, &msg))?;
     let b = ergo_indexer::queries::get_box(db, &box_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Box not found".into()))?;
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Box not found"))?;
     Ok(Json(box_to_response(&b, &state.network)))
 }
 

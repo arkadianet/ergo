@@ -484,25 +484,25 @@ pub(crate) async fn merkle_proof_handler(
             )
         })?;
 
-    // Format levels: each is hex(side_byte ++ 32-byte sibling hash).
-    // Empty nodes (hash = None) are serialized with 32 zero bytes.
-    let levels: Vec<String> = proof_steps
+    // Format levels: each is a 2-element array [data_hex, side_int].
+    // side 0 = Left, 1 = Right. Empty nodes use an empty string for data_hex.
+    let levels: Vec<serde_json::Value> = proof_steps
         .iter()
         .map(|step| {
-            let side_byte = match step.side {
-                ergo_consensus::merkle::MerkleSide::Left => 0x00u8,
-                ergo_consensus::merkle::MerkleSide::Right => 0x01u8,
+            let side_int: u8 = match step.side {
+                ergo_consensus::merkle::MerkleSide::Left => 0,
+                ergo_consensus::merkle::MerkleSide::Right => 1,
             };
-            let hash_bytes = step.hash.unwrap_or([0u8; 32]);
-            let mut entry = Vec::with_capacity(33);
-            entry.push(side_byte);
-            entry.extend_from_slice(&hash_bytes);
-            hex::encode(entry)
+            let data_hex = match step.hash {
+                Some(hash_bytes) => hex::encode(hash_bytes),
+                None => String::new(),
+            };
+            serde_json::json!([data_hex, side_int])
         })
         .collect();
 
     Ok(Json(MerkleProofResponse {
-        leaf: tx_id_hex,
+        leaf_data: tx_id_hex,
         levels,
     }))
 }

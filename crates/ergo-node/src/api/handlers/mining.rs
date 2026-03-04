@@ -12,23 +12,19 @@ use super::super::*;
 )]
 pub(crate) async fn mining_candidate_handler(
     State(state): State<ApiState>,
-) -> Result<Json<MiningCandidateResponse>, (StatusCode, String)> {
-    let gen_lock = state.candidate_generator.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "mining is not enabled".to_string(),
-    ))?;
+) -> Result<Json<MiningCandidateResponse>, (StatusCode, Json<ApiError>)> {
+    let gen_lock = state
+        .candidate_generator
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"))?;
 
-    let gen = gen_lock.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("lock poisoned: {e}"),
-        )
-    })?;
+    let gen = gen_lock
+        .read()
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lock poisoned: {e}")))?;
 
-    let (_candidate, header_template) = gen.current().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "no mining candidate available yet".to_string(),
-    ))?;
+    let (_candidate, header_template) = gen
+        .current()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "No mining candidate available yet"))?;
 
     // Recompute msg and target from header template.
     let msg = ergo_consensus::autolykos::msg_by_header(header_template);
@@ -60,23 +56,19 @@ pub(crate) async fn mining_candidate_handler(
 pub(crate) async fn mining_candidate_with_txs_handler(
     State(state): State<ApiState>,
     _body: String,
-) -> Result<Json<CandidateWithTxsResponse>, (StatusCode, String)> {
-    let gen_lock = state.candidate_generator.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "mining is not enabled".to_string(),
-    ))?;
+) -> Result<Json<CandidateWithTxsResponse>, (StatusCode, Json<ApiError>)> {
+    let gen_lock = state
+        .candidate_generator
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"))?;
 
-    let gen = gen_lock.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("lock poisoned: {e}"),
-        )
-    })?;
+    let gen = gen_lock
+        .read()
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lock poisoned: {e}")))?;
 
-    let (candidate, header_template) = gen.current().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "no mining candidate available yet".to_string(),
-    ))?;
+    let (candidate, header_template) = gen
+        .current()
+        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "No mining candidate available yet"))?;
 
     // Recompute msg and target from header template.
     let msg = ergo_consensus::autolykos::msg_by_header(header_template);
@@ -117,25 +109,22 @@ pub(crate) async fn mining_candidate_with_txs_handler(
 pub(crate) async fn mining_solution_handler(
     State(state): State<ApiState>,
     Json(solution): Json<MiningSolution>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     // Validate nonce format.
     if solution.nonce_bytes().is_none() {
-        return Err((
+        return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "invalid nonce: expected 8 bytes hex-encoded (16 hex chars)".to_string(),
+            "invalid nonce: expected 8 bytes hex-encoded (16 hex chars)",
         ));
     }
 
-    let tx = state.mining_solution_tx.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "mining is not enabled".to_string(),
-    ))?;
+    let tx = state
+        .mining_solution_tx
+        .as_ref()
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"))?;
 
     tx.send(solution).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "solution channel closed".to_string(),
-        )
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, "solution channel closed")
     })?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
@@ -153,12 +142,9 @@ pub(crate) async fn mining_solution_handler(
 )]
 pub(crate) async fn mining_reward_address_handler(
     State(state): State<ApiState>,
-) -> Result<Json<RewardAddressResponse>, (StatusCode, String)> {
+) -> Result<Json<RewardAddressResponse>, (StatusCode, Json<ApiError>)> {
     if state.mining_pub_key_hex.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no mining public key configured".to_string(),
-        ));
+        return Err(api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"));
     }
     Ok(Json(RewardAddressResponse {
         reward_address: state.mining_pub_key_hex.clone(),
@@ -177,12 +163,9 @@ pub(crate) async fn mining_reward_address_handler(
 )]
 pub(crate) async fn mining_reward_pubkey_handler(
     State(state): State<ApiState>,
-) -> Result<Json<RewardPublicKeyResponse>, (StatusCode, String)> {
+) -> Result<Json<RewardPublicKeyResponse>, (StatusCode, Json<ApiError>)> {
     if state.mining_pub_key_hex.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no mining public key configured".to_string(),
-        ));
+        return Err(api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"));
     }
     Ok(Json(RewardPublicKeyResponse {
         reward_pub_key: state.mining_pub_key_hex.clone(),
