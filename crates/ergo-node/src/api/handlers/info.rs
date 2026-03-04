@@ -66,7 +66,7 @@ pub(crate) async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfo
         peers_count: shared.peer_count,
         sync_state: shared.sync_state.clone(),
         unconfirmed_count,
-        difficulty: shared.difficulty.to_string(),
+        difficulty: shared.difficulty.clone(),
         headers_score: shared.headers_score.clone(),
         full_blocks_score: shared.full_blocks_score.clone(),
         launch_time: shared.start_time * 1000,
@@ -80,5 +80,6 @@ pub(crate) async fn info_handler(State(state): State<ApiState>) -> Json<NodeInfo
         current_time: now_ms,
         parameters: shared.parameters.clone(),
         last_mempool_update_time: shared.last_mempool_update_time,
+        fast_sync_active: shared.fast_sync_active,
     })
 }

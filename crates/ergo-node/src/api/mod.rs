@@ -49,9 +49,15 @@ pub struct NodeInfoResponse {
     pub peers_count: usize,
     pub sync_state: String,
     pub unconfirmed_count: usize,
-    pub difficulty: String,
-    pub headers_score: String,
-    pub full_blocks_score: String,
+    /// Decoded difficulty as a JSON number (arbitrary precision).
+    #[schema(value_type = f64)]
+    pub difficulty: serde_json::Value,
+    /// Cumulative headers chain score as a JSON number.
+    #[schema(value_type = f64)]
+    pub headers_score: serde_json::Value,
+    /// Cumulative full-blocks chain score as a JSON number.
+    #[schema(value_type = f64)]
+    pub full_blocks_score: serde_json::Value,
     pub launch_time: u64,
     pub last_seen_message_time: u64,
     pub genesis_block_id: String,
@@ -2814,9 +2820,9 @@ mod tests {
             peers_count: 5,
             sync_state: "HeaderSync".to_string(),
             unconfirmed_count: 0,
-            difficulty: "100663296".to_string(),
-            headers_score: "12345".to_string(),
-            full_blocks_score: "12300".to_string(),
+            difficulty: serde_json::json!(100663296u64),
+            headers_score: serde_json::json!(12345u64),
+            full_blocks_score: serde_json::json!(12300u64),
             launch_time: 1700000000000,
             last_seen_message_time: 1700001000000,
             genesis_block_id: "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"
@@ -2836,7 +2842,7 @@ mod tests {
         assert_eq!(json["headersHeight"], 1000);
         assert_eq!(json["peersCount"], 5);
         assert_eq!(json["stateType"], "digest");
-        assert_eq!(json["difficulty"], "100663296");
+        assert_eq!(json["difficulty"], 100663296u64);
         assert_eq!(json["network"], "mainnet");
         assert!(
             json.get("bestFullHeaderId").is_some(),
@@ -2871,9 +2877,9 @@ mod tests {
             peers_count: 3,
             sync_state: "Syncing".to_string(),
             unconfirmed_count: 1,
-            difficulty: "100663296".to_string(),
-            headers_score: "0".to_string(),
-            full_blocks_score: "0".to_string(),
+            difficulty: serde_json::json!(100663296u64),
+            headers_score: serde_json::json!(0u64),
+            full_blocks_score: serde_json::json!(0u64),
             launch_time: 1700000000000,
             last_seen_message_time: 0,
             genesis_block_id: "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b"
@@ -2987,10 +2993,10 @@ mod tests {
             "missing eip37Supported"
         );
         assert!(json.get("restApiUrl").is_some(), "missing restApiUrl");
-        // difficulty should be a string
+        // difficulty should be a number (not a string)
         assert!(
-            json["difficulty"].is_string(),
-            "difficulty should be a string"
+            json["difficulty"].is_number(),
+            "difficulty should be a number"
         );
         // network should be lowercase
         let network = json["network"].as_str().unwrap();

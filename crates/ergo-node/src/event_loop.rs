@@ -105,9 +105,12 @@ pub struct SharedState {
     pub last_message_time: Option<u64>,
     pub start_time: u64,
     pub max_peer_height: u64,
-    pub difficulty: u64,
-    pub headers_score: String,
-    pub full_blocks_score: String,
+    /// Decoded difficulty as a JSON number (arbitrary precision).
+    pub difficulty: serde_json::Value,
+    /// Cumulative headers chain score as a JSON number.
+    pub headers_score: serde_json::Value,
+    /// Cumulative full-blocks chain score as a JSON number.
+    pub full_blocks_score: serde_json::Value,
     /// Live on-chain parameters from the voting system.
     pub parameters: serde_json::Value,
     /// Parent of the best full block header.
@@ -143,9 +146,9 @@ impl SharedState {
                 .unwrap()
                 .as_secs(),
             max_peer_height: 0,
-            difficulty: 0,
-            headers_score: "0".into(),
-            full_blocks_score: "0".into(),
+            difficulty: serde_json::json!(0),
+            headers_score: serde_json::json!(0),
+            full_blocks_score: serde_json::json!(0),
             parameters: serde_json::json!({}),
             previous_full_header_id: None,
             state_version: None,
@@ -337,6 +340,9 @@ pub async fn run(
     // Cached sync headers from the processor (newest first), used to build
     // SyncInfoV2 without reading from the secondary DB.
     let mut cached_sync_headers: Vec<ergo_types::header::Header> = Vec::new();
+    // Cached on-chain parameters from the processor's voting state machine.
+    let mut cached_parameters: ergo_consensus::parameters::Parameters =
+        ergo_consensus::parameters::Parameters::genesis();
     // Tracks the last peer that delivered headers, for targeted SyncInfo response.
     let mut last_header_peer: Option<u64> = None;
 
@@ -431,6 +437,7 @@ pub async fn run(
                     cached_state_version,
                     is_digest_mode,
                     &cached_sync_headers,
+                    &cached_parameters,
                 ).await;
                 update_fast_sync_flag(&shared, &shared_fast_sync_active).await;
 
@@ -923,6 +930,7 @@ pub async fn run(
                         state_root, applied_blocks: _,
                         rollback_height: _,
                         sync_headers,
+                        parameters,
                     } => {
                         cached_headers_height = headers_height;
                         shared_headers_height.store(headers_height, std::sync::atomic::Ordering::Relaxed);
@@ -933,6 +941,7 @@ pub async fn run(
                         // Derive state_version from best_full_id
                         cached_state_version = best_full_id.map(|id| id.0);
                         cached_sync_headers = sync_headers;
+                        cached_parameters = parameters;
                     }
                     ProcessorEvent::ModifierCached { .. } => {}
                 }
@@ -1377,6 +1386,7 @@ async fn handle_sync_tick(
     cached_state_version: Option<[u8; 32]>,
     is_digest_mode: bool,
     cached_sync_headers: &[ergo_types::header::Header],
+    cached_parameters: &ergo_consensus::parameters::Parameters,
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
@@ -1471,6 +1481,7 @@ async fn handle_sync_tick(
         cached_state_root,
         cached_state_version,
         is_digest_mode,
+        cached_parameters,
     )
     .await;
     pool.cleanup_disconnected();
@@ -1819,6 +1830,7 @@ async fn update_shared_state(
     cached_state_root: &[u8],
     cached_state_version: Option<[u8; 32]>,
     _is_digest_mode: bool,
+    cached_parameters: &ergo_consensus::parameters::Parameters,
 ) {
     // Read from sync_history as a fallback when processor hasn't sent updates yet.
     let (headers_height, best_header_id) = if cached_headers_height > 0 {
@@ -1843,43 +1855,40 @@ async fn update_shared_state(
         (height, best_id)
     };
 
-    // Difficulty from best full block header's nBits
+    // Difficulty: decode nBits to a BigUint and store as an arbitrary-precision JSON number.
     let best_full_header = best_full_block_id
         .as_ref()
         .and_then(|id| sync_history.load_header(id).ok().flatten());
-    let difficulty = best_full_header.as_ref().map_or(0, |h| h.n_bits);
+    let difficulty: serde_json::Value = best_full_header
+        .as_ref()
+        .map(|h| {
+            let decoded = ergo_consensus::difficulty::decode_compact_bits(h.n_bits);
+            let decimal_str = decoded.to_str_radix(10);
+            serde_json::from_str::<serde_json::Value>(&decimal_str).unwrap_or(serde_json::json!(0))
+        })
+        .unwrap_or(serde_json::json!(0));
     let previous_full_header_id = best_full_header.as_ref().map(|h| h.parent_id.0);
 
-    // Headers score: cumulative score of best header
-    let headers_score = best_header_id
+    // Headers score: cumulative score of best header, as a JSON number.
+    let headers_score: serde_json::Value = best_header_id
         .as_ref()
         .and_then(|id| {
             let key = header_score_key(id);
             sync_history.get_index(&key).ok().flatten()
         })
-        .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
+        .map_or(serde_json::json!(0), |bytes| score_bytes_to_json(&bytes));
 
-    // Full blocks score: cumulative score of best full block
-    let full_blocks_score = best_full_block_id
+    // Full blocks score: cumulative score of best full block, as a JSON number.
+    let full_blocks_score: serde_json::Value = best_full_block_id
         .as_ref()
         .and_then(|id| {
             let key = header_score_key(id);
             sync_history.get_index(&key).ok().flatten()
         })
-        .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
+        .map_or(serde_json::json!(0), |bytes| score_bytes_to_json(&bytes));
 
-    // Parameters: use defaults since live parameters are on the processor thread.
-    let parameters = serde_json::json!({
-        "storageFeeFactor": 1250000,
-        "minValuePerByte": 360,
-        "maxBlockSize": 524288,
-        "maxBlockCost": 1000000,
-        "tokenAccessCost": 100,
-        "inputCost": 2000,
-        "dataInputCost": 100,
-        "outputCost": 100,
-        "blockVersion": 1,
-    });
+    // Build parameters JSON from the live on-chain consensus parameters.
+    let parameters = parameters_to_json(cached_parameters);
 
     let state_version = cached_state_version;
 
@@ -1946,18 +1955,44 @@ async fn update_shared_state(
     state.state_version = state_version;
 }
 
-/// Convert big-endian score bytes to a decimal string.
-fn score_bytes_to_decimal(bytes: &[u8]) -> String {
+/// Convert big-endian score bytes to a JSON number (arbitrary precision via serde_json).
+fn score_bytes_to_json(bytes: &[u8]) -> serde_json::Value {
     if bytes.is_empty() {
-        return "0".to_string();
+        return serde_json::json!(0);
     }
+    // For values that fit in u128, convert via integer arithmetic.
     if bytes.len() <= 16 {
         let mut padded = [0u8; 16];
         let start = 16 - bytes.len();
         padded[start..].copy_from_slice(bytes);
         let value = u128::from_be_bytes(padded);
-        value.to_string()
+        // Use serde_json arbitrary_precision to keep the full integer.
+        let decimal_str = value.to_string();
+        serde_json::from_str::<serde_json::Value>(&decimal_str).unwrap_or(serde_json::json!(0))
     } else {
-        hex::encode(bytes)
+        // For very large values, use BigUint for decimal string conversion.
+        use num_bigint::BigUint;
+        let big = BigUint::from_bytes_be(bytes);
+        let decimal_str = big.to_str_radix(10);
+        serde_json::from_str::<serde_json::Value>(&decimal_str).unwrap_or(serde_json::json!(0))
     }
+}
+
+/// Build the parameters JSON object from the live on-chain `Parameters` struct.
+///
+/// Field names match the Scala reference node API.
+fn parameters_to_json(p: &ergo_consensus::parameters::Parameters) -> serde_json::Value {
+    use ergo_consensus::parameters::*;
+    serde_json::json!({
+        "storageFeeFactor": p.get(STORAGE_FEE_FACTOR_ID).unwrap_or(1_250_000),
+        "minValuePerByte": p.get(MIN_VALUE_PER_BYTE_ID).unwrap_or(360),
+        "maxBlockSize": p.get(MAX_BLOCK_SIZE_ID).unwrap_or(524_288),
+        "maxBlockCost": p.get(MAX_BLOCK_COST_ID).unwrap_or(1_000_000),
+        "tokenAccessCost": p.get(TOKEN_ACCESS_COST_ID).unwrap_or(100),
+        "inputCost": p.get(INPUT_COST_ID).unwrap_or(2_000),
+        "dataInputCost": p.get(DATA_INPUT_COST_ID).unwrap_or(100),
+        "outputCost": p.get(OUTPUT_COST_ID).unwrap_or(100),
+        "blockVersion": p.block_version(),
+        "height": p.height,
+    })
 }
