@@ -118,6 +118,8 @@ pub struct SharedState {
     pub is_mining: bool,
     /// Unix-epoch milliseconds of the last mempool mutation.
     pub last_mempool_update_time: u64,
+    /// Whether fast header sync via REST API is currently active.
+    pub fast_sync_active: bool,
 }
 
 impl SharedState {
@@ -149,6 +151,7 @@ impl SharedState {
             state_version: None,
             is_mining: false,
             last_mempool_update_time: 0,
+            fast_sync_active: false,
         }
     }
 }
@@ -289,9 +292,33 @@ pub async fn run(
     // prevent re-applying the same header on subsequent sync messages.
     let mut last_sync_header_applied: Option<u32> = None;
 
-    // REST API URLs extracted from peer handshake features (PeerFeature::RestApiUrl).
-    // Used by the fast header sync subsystem to fetch headers via HTTP.
-    let mut api_peer_urls: HashMap<u64, String> = HashMap::new();
+    // REST API URLs extracted from peer handshake features (PeerFeature::RestApiUrl)
+    // plus any configured seed peers. Used by the fast header sync subsystem.
+    // Shared with the fast sync task so it can read URLs as peers connect/disconnect.
+    let api_peer_urls: crate::fast_header_sync::ApiPeerUrls = {
+        let mut map = HashMap::new();
+        // Pre-populate with configured seed API peers (use high synthetic IDs
+        // that won't collide with real P2P peer IDs).
+        for (i, url) in settings.ergo.node.fast_sync_api_peers.iter().enumerate() {
+            map.insert(u64::MAX - i as u64, url.clone());
+        }
+        if !map.is_empty() {
+            tracing::info!(
+                count = map.len(),
+                "pre-populated fast sync API peers from config"
+            );
+        }
+        std::sync::Arc::new(std::sync::RwLock::new(map))
+    };
+
+    // Shared atomic header height — updated by the event loop whenever a
+    // StateUpdate arrives, read by the fast sync task to skip already-synced chunks.
+    let shared_headers_height: crate::fast_header_sync::SharedHeadersHeight =
+        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    // Shared flag indicating whether fast header sync is currently active.
+    let shared_fast_sync_active: crate::fast_header_sync::SharedFastSyncActive =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Transaction cost rate limiter: rejects txs when the cumulative
     // processing cost since the last block exceeds per-peer / global limits.
@@ -319,26 +346,60 @@ pub async fn run(
         s.is_mining = candidate_gen.is_some();
     }
 
+    // On restart, check if headers are already synced so we can transition
+    // to BlockDownload immediately instead of waiting for new headers.
+    if let Ok(Some(best_hdr_id)) = sync_history.best_header_id() {
+        if let Ok(Some(hdr)) = sync_history.load_header(&best_hdr_id) {
+            if sync_mgr.check_headers_chain_synced(hdr.timestamp) {
+                tracing::info!(
+                    tip_height = hdr.height,
+                    tip_timestamp = hdr.timestamp,
+                    "headers already synced on startup — block download can begin immediately"
+                );
+            }
+        }
+    }
+
+    // Re-populate blocks_to_download from the DB window above best_full_block.
+    // On restart, on_headers_received never fires for stored headers so the
+    // primary download queue is empty.  Scanning here makes blocks_remaining
+    // meaningful and restores the primary download path immediately.
+    {
+        let full_height = sync_history.best_full_block_height().unwrap_or(0);
+        sync_mgr.enqueue_startup_gap(sync_history, full_height, 2048);
+        if sync_mgr.blocks_remaining() > 0 {
+            tracing::info!(
+                full_height,
+                queued = sync_mgr.blocks_remaining(),
+                "startup: queued missing block sections for download"
+            );
+        }
+    }
+
     // Spawn the fast header sync task if enabled.
     // The task runs alongside normal P2P sync without interfering with it.
     // A 5-second delay allows peers to connect and advertise REST API URLs.
     if settings.ergo.node.fast_header_sync {
-        let urls: Vec<String> = api_peer_urls.values().cloned().collect();
+        let api_urls_shared = api_peer_urls.clone();
         let our_h = cached_headers_height;
         let chunk_sz = settings.ergo.node.fast_sync_chunk_size;
         let max_conc = settings.ergo.node.fast_sync_max_concurrent;
         let fs_cmd_tx = cmd_tx.clone();
         let fs_shutdown = shutdown_rx.clone();
+        let fs_headers_height = shared_headers_height.clone();
+        let fs_active = shared_fast_sync_active.clone();
         tokio::spawn(async move {
-            // Brief delay to allow more peers to connect and advertise API URLs.
+            // Brief delay to allow peers to connect and advertise REST API URLs.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             crate::fast_header_sync::run_fast_sync(
-                urls,
+                api_urls_shared,
                 our_h,
                 chunk_sz,
                 max_conc,
                 fs_cmd_tx,
                 fs_shutdown,
+                fs_headers_height,
+                fs_active,
             )
             .await;
         });
@@ -371,6 +432,7 @@ pub async fn run(
                     is_digest_mode,
                     &cached_sync_headers,
                 ).await;
+                update_fast_sync_flag(&shared, &shared_fast_sync_active).await;
 
                 // Recompute whether the node is synced enough for tx acceptance.
                 is_synced_for_txs = !is_digest_mode && {
@@ -863,6 +925,7 @@ pub async fn run(
                         sync_headers,
                     } => {
                         cached_headers_height = headers_height;
+                        shared_headers_height.store(headers_height, std::sync::atomic::Ordering::Relaxed);
                         cached_full_height = full_height;
                         cached_best_header_id = best_header_id;
                         cached_best_full_id = best_full_id;
@@ -883,7 +946,7 @@ pub async fn run(
                 for feature in &pending.handshake.peer_spec.features {
                     if let PeerFeature::RestApiUrl(url) = feature {
                         tracing::debug!(peer_id = id, url, "peer advertises REST API");
-                        api_peer_urls.insert(id, url.clone());
+                        api_peer_urls.write().unwrap().insert(id, url.clone());
                         break;
                     }
                 }
@@ -1067,9 +1130,13 @@ pub async fn run(
                 if !to_disconnect.is_empty() {
                     pool.cleanup_disconnected();
                 }
-                // Remove API URLs for peers no longer in the pool.
+                // Remove API URLs for disconnected P2P peers, but keep
+                // configured seed peers (which use synthetic IDs >= u64::MAX - 1000).
                 let connected_ids: HashSet<u64> = pool.connected_peers().iter().map(|p| p.id).collect();
-                api_peer_urls.retain(|id, _| connected_ids.contains(id));
+                const SEED_ID_THRESHOLD: u64 = u64::MAX - 1000;
+                api_peer_urls.write().unwrap().retain(|id, _| {
+                    *id >= SEED_ID_THRESHOLD || connected_ids.contains(id)
+                });
             }
 
             _ = eviction_tick.tick() => {
@@ -1198,7 +1265,7 @@ pub async fn run(
                 for feature in &inbound.handshake.peer_spec.features {
                     if let PeerFeature::RestApiUrl(url) = feature {
                         tracing::debug!(peer_id = id, url, "inbound peer advertises REST API");
-                        api_peer_urls.insert(id, url.clone());
+                        api_peer_urls.write().unwrap().insert(id, url.clone());
                         break;
                     }
                 }
@@ -1407,6 +1474,16 @@ async fn handle_sync_tick(
     )
     .await;
     pool.cleanup_disconnected();
+}
+
+/// Read the shared fast sync active flag and update SharedState.
+/// Called after `handle_sync_tick` in the main select loop.
+async fn update_fast_sync_flag(
+    shared: &Arc<RwLock<SharedState>>,
+    flag: &crate::fast_header_sync::SharedFastSyncActive,
+) {
+    let mut state = shared.write().await;
+    state.fast_sync_active = flag.load(std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Proactively find and request missing block body sections.

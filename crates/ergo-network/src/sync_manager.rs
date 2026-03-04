@@ -285,6 +285,29 @@ impl SyncManager {
         }
     }
 
+    /// On startup, populate `blocks_to_download` from the DB window above `full_height`.
+    ///
+    /// After a restart, `on_headers_received` never fires for already-stored headers,
+    /// leaving `blocks_to_download` empty. This method scans heights
+    /// `[full_height+1 .. full_height+window]` (capped at best_header_height) and
+    /// enqueues header IDs whose body sections (BlockTransactions + Extension) are
+    /// absent from the DB.
+    ///
+    /// This ensures `blocks_remaining()` reflects real pending work and the primary
+    /// download path (`request_block_sections`) fires immediately on restart.
+    pub fn enqueue_startup_gap(&mut self, history: &HistoryDb, full_height: u32, window: usize) {
+        let headers_height = history.best_header_height().unwrap_or(0);
+        let end = (full_height + window as u32).min(headers_height);
+        for h in (full_height + 1)..=end {
+            let ids = history.header_ids_at_height(h).unwrap_or_default();
+            for id in ids {
+                if matches!(history.has_all_sections(&id), Ok(false)) {
+                    self.blocks_to_download.push_back(id);
+                }
+            }
+        }
+    }
+
     /// Number of blocks remaining to download.
     pub fn blocks_remaining(&self) -> usize {
         self.blocks_to_download.len()
@@ -1088,5 +1111,28 @@ mod tests {
         assert!(actions
             .iter()
             .any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
+    }
+
+    #[test]
+    fn enqueue_startup_gap_fills_queue_from_db() {
+        // After restart with headers in DB but no body sections downloaded,
+        // enqueue_startup_gap should populate blocks_to_download.
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut mgr = SyncManager::new(10, 64);
+
+        // Store headers at heights 1..=3 in history without body sections.
+        let ids: Vec<ModifierId> = (1u8..=3).map(|b| make_id(b)).collect();
+        store_test_headers(&history, &ids);
+
+        assert_eq!(mgr.blocks_remaining(), 0);
+
+        mgr.enqueue_startup_gap(&history, 0, 10);
+
+        assert_eq!(
+            mgr.blocks_remaining(),
+            3,
+            "should queue 3 headers without body sections"
+        );
     }
 }
