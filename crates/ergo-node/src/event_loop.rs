@@ -1983,6 +1983,14 @@ fn score_bytes_to_json(bytes: &[u8]) -> serde_json::Value {
 /// Field names match the Scala reference node API.
 fn parameters_to_json(p: &ergo_consensus::parameters::Parameters) -> serde_json::Value {
     use ergo_consensus::parameters::*;
+    // SubblocksPerBlockIncrease has parameter ID 9 in the Scala reference.
+    // It is absent from the parameter table until block version 4 activates
+    // sub-block support, so we emit null when not present.
+    const SUBBLOCKS_PER_BLOCK_ID: u8 = 9;
+    let subblocks_per_block: serde_json::Value = match p.get(SUBBLOCKS_PER_BLOCK_ID) {
+        Some(v) => serde_json::Value::Number(v.into()),
+        None => serde_json::Value::Null,
+    };
     serde_json::json!({
         "storageFeeFactor": p.get(STORAGE_FEE_FACTOR_ID).unwrap_or(1_250_000),
         "minValuePerByte": p.get(MIN_VALUE_PER_BYTE_ID).unwrap_or(360),
@@ -1992,6 +2000,7 @@ fn parameters_to_json(p: &ergo_consensus::parameters::Parameters) -> serde_json:
         "inputCost": p.get(INPUT_COST_ID).unwrap_or(2_000),
         "dataInputCost": p.get(DATA_INPUT_COST_ID).unwrap_or(100),
         "outputCost": p.get(OUTPUT_COST_ID).unwrap_or(100),
+        "subblocksPerBlock": subblocks_per_block,
         "blockVersion": p.block_version(),
         "height": p.height,
     })
