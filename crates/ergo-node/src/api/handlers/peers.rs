@@ -287,16 +287,23 @@ pub(crate) async fn peers_track_info_handler(
     // Return the Scala-compatible schema:
     // { "invalidModifierApproxSize": 0, "requested": {type_id: {},...}, "received": {type_id: {},...} }
     // Type IDs: 101=Headers, 104=ADProofs, 108=Extension, 102=BlockTransactions, 2=Transaction
-    let empty_map = serde_json::json!({
+    // NOTE: "received" does NOT include type 2 (transactions); only "requested" does.
+    let requested_map = serde_json::json!({
         "101": {},
         "104": {},
         "2": {},
         "108": {},
         "102": {}
     });
+    let received_map = serde_json::json!({
+        "101": {},
+        "104": {},
+        "108": {},
+        "102": {}
+    });
     Json(serde_json::json!({
         "invalidModifierApproxSize": 0,
-        "requested": empty_map,
-        "received": empty_map
+        "requested": requested_map,
+        "received": received_map
     }))
 }
