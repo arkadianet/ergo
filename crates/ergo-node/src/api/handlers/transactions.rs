@@ -336,9 +336,7 @@ pub(crate) async fn pool_histogram_handler(
             .into_iter()
             .map(|bin| HistogramBinResponse {
                 n_txns: bin.n_txns,
-                total_size: bin.total_size,
-                from_millis: bin.from_millis,
-                to_millis: bin.to_millis,
+                total_fee: bin.total_fee,
             })
             .collect(),
     )
@@ -353,19 +351,19 @@ pub(crate) async fn pool_histogram_handler(
         ("waitTime" = Option<u64>, Query, description = "Expected wait time in ms")
     ),
     responses(
-        (status = 200, description = "Fee estimate", body = FeeEstimateResponse)
+        (status = 200, description = "Fee estimate in nanoErg", body = u64)
     )
 )]
 pub(crate) async fn get_fee_handler(
     State(state): State<ApiState>,
     Query(_params): Query<FeeEstimateParams>,
-) -> Json<FeeEstimateResponse> {
+) -> Json<u64> {
     let mp = state.mempool.read().unwrap();
     // Simple heuristic: base fee scaled by mempool occupancy
     let min_fee: u64 = 1_000_000; // 0.001 ERG minimum
     let pool_size = mp.size() as u64;
     let fee = min_fee + pool_size * 100_000; // increase by 0.0001 ERG per pooled tx
-    Json(FeeEstimateResponse { fee })
+    Json(fee)
 }
 
 /// `GET /transactions/waitTime?fee=1000000`
@@ -377,13 +375,13 @@ pub(crate) async fn get_fee_handler(
         ("fee" = Option<u64>, Query, description = "Transaction fee in nanoErg")
     ),
     responses(
-        (status = 200, description = "Wait time estimate", body = WaitTimeResponse)
+        (status = 200, description = "Wait time estimate in milliseconds", body = u64)
     )
 )]
 pub(crate) async fn wait_time_handler(
     State(state): State<ApiState>,
     Query(params): Query<WaitTimeParams>,
-) -> Json<WaitTimeResponse> {
+) -> Json<u64> {
     let mp = state.mempool.read().unwrap();
     // Simple heuristic: if fee >= min, expected wait is short
     let min_fee: u64 = 1_000_000;
@@ -396,9 +394,7 @@ pub(crate) async fn wait_time_handler(
         // Below minimum fee, long wait proportional to mempool size
         60_000 + mp.size() as u64 * 10_000
     };
-    Json(WaitTimeResponse {
-        wait_time_millis: wait,
-    })
+    Json(wait)
 }
 
 #[utoipa::path(

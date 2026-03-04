@@ -412,6 +412,12 @@ pub struct AddressValidationResponse {
     pub error: Option<String>,
 }
 
+/// JSON response wrapping a single address string (used by rawToAddress, ergoTreeToAddress).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddressResponse {
+    pub address: String,
+}
+
 /// JSON response for a block Merkle proof.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -434,24 +440,9 @@ pub struct EmissionScriptsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct HistogramBinResponse {
     pub n_txns: usize,
-    pub total_size: usize,
-    pub from_millis: u64,
-    pub to_millis: u64,
+    pub total_fee: u64,
 }
 
-/// JSON response for fee estimation.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct FeeEstimateResponse {
-    pub fee: u64,
-}
-
-/// JSON response for wait time estimation.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WaitTimeResponse {
-    pub wait_time_millis: u64,
-}
 
 /// JSON response for the `/blockchain/indexedHeight` endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
@@ -2520,12 +2511,12 @@ fn convert_json_tx_to_ergo_tx(json_tx: &TxJsonTransaction) -> Result<ErgoTransac
 fn ergo_tree_to_address_impl(
     hex_str: &str,
     state: &ApiState,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AddressResponse>, (StatusCode, Json<ApiError>)> {
     let bytes = hex::decode(hex_str)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid hex encoding"))?;
     let prefix = network_prefix(&state.network);
     let addr = address::ergo_tree_to_address(&bytes, prefix);
-    Ok(Json(addr))
+    Ok(Json(AddressResponse { address: addr }))
 }
 
 // Utils + Emission handlers
@@ -3807,9 +3798,8 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        let hash: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(hash["hash"].is_string());
-        assert_eq!(hash["hash"].as_str().unwrap().len(), 64);
+        let hash: String = serde_json::from_slice(&body).unwrap();
+        assert_eq!(hash.len(), 64);
     }
 
     #[tokio::test]
@@ -4069,9 +4059,10 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let addr: String = serde_json::from_slice(&body).unwrap();
+        let resp_obj: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let addr = resp_obj["address"].as_str().unwrap();
         // The returned address should decode successfully
-        let decoded = address::decode_address(&addr).unwrap();
+        let decoded = address::decode_address(addr).unwrap();
         assert_eq!(decoded.address_type, address::AddressType::P2PK);
     }
 
@@ -4123,8 +4114,9 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let addr: String = serde_json::from_slice(&body).unwrap();
-        let decoded = address::decode_address(&addr).unwrap();
+        let resp_obj: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let addr = resp_obj["address"].as_str().unwrap();
+        let decoded = address::decode_address(addr).unwrap();
         assert_eq!(decoded.address_type, address::AddressType::P2PK);
         assert_eq!(decoded.content_bytes, pk);
     }
@@ -4144,8 +4136,9 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let addr: String = serde_json::from_slice(&body).unwrap();
-        let decoded = address::decode_address(&addr).unwrap();
+        let resp_obj: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let addr = resp_obj["address"].as_str().unwrap();
+        let decoded = address::decode_address(addr).unwrap();
         assert_eq!(decoded.address_type, address::AddressType::P2S);
         assert_eq!(decoded.content_bytes, tree);
     }
@@ -4208,6 +4201,7 @@ mod tests {
         assert_eq!(bins.len(), 5);
         for bin in &bins {
             assert_eq!(bin["nTxns"], 0);
+            assert_eq!(bin["totalFee"], 0);
         }
     }
 
@@ -4237,8 +4231,8 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let fee: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(fee["fee"].as_u64().unwrap() >= 1_000_000);
+        let fee: u64 = serde_json::from_slice(&body).unwrap();
+        assert!(fee >= 1_000_000);
     }
 
     #[tokio::test]
@@ -4252,8 +4246,8 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let wait: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(wait["waitTimeMillis"].is_number());
+        let wait: u64 = serde_json::from_slice(&body).unwrap();
+        assert!(wait > 0);
     }
 
     // -----------------------------------------------------------------

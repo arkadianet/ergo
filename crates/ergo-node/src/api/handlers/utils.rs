@@ -65,18 +65,18 @@ pub(crate) async fn validate_address_post_handler(
         ("pubkey_hex" = String, Path, description = "Hex-encoded public key")
     ),
     responses(
-        (status = 200, description = "P2PK address", body = String),
+        (status = 200, description = "P2PK address", body = AddressResponse),
         (status = 400, description = "Invalid public key")
     )
 )]
 pub(crate) async fn raw_to_address_handler(
     State(state): State<ApiState>,
     Path(pubkey_hex): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AddressResponse>, (StatusCode, Json<ApiError>)> {
     let prefix = network_prefix(&state.network);
     let addr = address::raw_to_address(&pubkey_hex, prefix)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid public key hex"))?;
-    Ok(Json(addr))
+    Ok(Json(AddressResponse { address: addr }))
 }
 
 /// `GET /utils/addressToRaw/{addr}` — decode an address and return hex content bytes.
@@ -109,14 +109,14 @@ pub(crate) async fn address_to_raw_handler(
         ("ergo_tree_hex" = String, Path, description = "Hex-encoded ErgoTree")
     ),
     responses(
-        (status = 200, description = "Ergo address", body = String),
+        (status = 200, description = "Ergo address", body = AddressResponse),
         (status = 400, description = "Invalid ErgoTree")
     )
 )]
 pub(crate) async fn ergo_tree_to_address_handler(
     State(state): State<ApiState>,
     Path(ergo_tree_hex): Path<String>,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AddressResponse>, (StatusCode, Json<ApiError>)> {
     ergo_tree_to_address_impl(&ergo_tree_hex, &state)
 }
 
@@ -127,14 +127,14 @@ pub(crate) async fn ergo_tree_to_address_handler(
     tag = "utils",
     request_body = String,
     responses(
-        (status = 200, description = "Ergo address", body = String),
+        (status = 200, description = "Ergo address", body = AddressResponse),
         (status = 400, description = "Invalid ErgoTree")
     )
 )]
 pub(crate) async fn ergo_tree_to_address_post_handler(
     State(state): State<ApiState>,
     body: String,
-) -> Result<Json<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AddressResponse>, (StatusCode, Json<ApiError>)> {
     let hex_str = body.trim().trim_matches('"');
     ergo_tree_to_address_impl(hex_str, &state)
 }
@@ -193,7 +193,7 @@ pub(crate) async fn seed_with_length_handler(
         (status = 200, description = "Blake2b-256 hash", body = Object)
     )
 )]
-pub(crate) async fn blake2b_hash_handler(Json(input): Json<String>) -> Json<serde_json::Value> {
+pub(crate) async fn blake2b_hash_handler(Json(input): Json<String>) -> Json<String> {
     use blake2::digest::{Update, VariableOutput};
     let mut hasher = blake2::Blake2bVar::new(32).expect("valid output size");
     hasher.update(input.as_bytes());
@@ -201,5 +201,5 @@ pub(crate) async fn blake2b_hash_handler(Json(input): Json<String>) -> Json<serd
     hasher
         .finalize_variable(&mut hash)
         .expect("valid output size");
-    Json(serde_json::json!({ "hash": hex::encode(hash) }))
+    Json(hex::encode(hash))
 }

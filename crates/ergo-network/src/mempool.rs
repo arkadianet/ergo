@@ -155,6 +155,7 @@ pub struct ErgoMemPool {
 pub struct HistogramBin {
     pub n_txns: usize,
     pub total_size: usize,
+    pub total_fee: u64,
     pub from_millis: u64,
     pub to_millis: u64,
 }
@@ -682,6 +683,7 @@ impl ErgoMemPool {
             .map(|i| HistogramBin {
                 n_txns: 0,
                 total_size: 0,
+                total_fee: 0,
                 from_millis: i as u64 * interval,
                 to_millis: (i as u64 + 1) * interval,
             })
@@ -697,6 +699,7 @@ impl ErgoMemPool {
             let bin_idx = bin_idx.min(bins - 1);
             histogram[bin_idx].n_txns += 1;
             histogram[bin_idx].total_size += entry.tx_size;
+            histogram[bin_idx].total_fee += extract_fee(&entry.tx);
         }
 
         histogram
