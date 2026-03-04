@@ -397,6 +397,62 @@ impl NodeViewHolder {
         Ok(())
     }
 
+    /// Replay state changes for a block that has already been fully validated.
+    ///
+    /// Used by `restore_consistency` to advance UTXO/digest state for Valid
+    /// blocks without running the full validation pipeline.  The normal path
+    /// (`validate_and_apply_block`) would trigger Stage 0, which calls
+    /// `fast_forward_valid_blocks()` (which in UTXO mode no longer updates
+    /// `state_version` after the Task-2a fix) and returns `Ok(())` without
+    /// ever applying state, leaving `state_version` stuck in an infinite loop.
+    ///
+    /// This method runs only:
+    /// * Stage 6 — state application (mode-dependent, lenient: no proof
+    ///   re-verification since the block was already validated).
+    /// * Stage 7 — `state_version` / `best_full_height` update.
+    fn apply_block_state_only(&mut self, block_id: &ModifierId) -> Result<(), NodeViewError> {
+        let block = self.history.assemble_full_block(block_id)?.ok_or_else(|| {
+            NodeViewError::State(format!(
+                "apply_block_state_only: cannot assemble block {block_id:?}"
+            ))
+        })?;
+
+        if self.digest_mode {
+            // Digest mode: the block was already validated with ADProofs.
+            // Advance the in-memory digest state to match the header's
+            // committed state_root — identical to the fast-forward path.
+            let new_root = block.header.state_root.0.to_vec();
+            self.current_state_root = new_root.clone();
+            self.digest_state = DigestState::new(new_root, *block_id);
+        } else {
+            // UTXO mode: apply state changes leniently (no proof
+            // re-verification; trusted because block is already Valid).
+            let mut transactions = Vec::with_capacity(block.block_transactions.tx_bytes.len());
+            for (i, tx_bytes) in block.block_transactions.tx_bytes.iter().enumerate() {
+                let tx = parse_transaction(tx_bytes).map_err(|e| {
+                    NodeViewError::Codec(format!("apply_block_state_only: tx {} parse: {e}", i))
+                })?;
+                transactions.push(tx);
+            }
+            self.utxo_state
+                .apply_block_lenient(&transactions, block.header.height, block_id)
+                .map_err(|e| {
+                    NodeViewError::State(format!("apply_block_state_only: utxo lenient: {e}"))
+                })?;
+            self.current_state_root = self
+                .utxo_state
+                .state_root()
+                .map_err(|e| NodeViewError::State(format!("apply_block_state_only: root: {e}")))?;
+        }
+
+        // Advance state_version (Stage 7).
+        self.current_state_version = *block_id;
+        self.best_full_height = block.header.height;
+        self.history.set_state_version(block_id)?;
+
+        Ok(())
+    }
+
     /// Ensure state and history are consistent on startup.
     ///
     /// Compares `current_state_version` with `history.best_full_block_id()`.
@@ -441,13 +497,18 @@ impl NodeViewHolder {
                             Ok(Some(ModifierValidity::Valid))
                         );
                         if is_valid {
-                            match self.validate_and_apply_block(block_id) {
+                            // Block is already validated — replay state only.
+                            // validate_and_apply_block would trigger Stage 0
+                            // which calls fast_forward_valid_blocks() and
+                            // returns without applying state, leaving
+                            // state_version stuck.
+                            match self.apply_block_state_only(block_id) {
                                 Ok(()) => {}
                                 Err(e) => {
                                     tracing::error!(
                                         height = h,
                                         error = %e,
-                                        "failed to replay block during consistency restore"
+                                        "failed to replay state for valid block during consistency restore"
                                     );
                                     break;
                                 }
@@ -3562,6 +3623,87 @@ mod tests {
         assert_eq!(
             nv.current_state_version, id1,
             "in-memory current_state_version must also stay at id1"
+        );
+    }
+
+    // restore_consistency advances state_version for already-Valid blocks in digest mode.
+    //
+    // Regression test for the infinite-loop / no-progress bug:
+    // Previously, restore_consistency called validate_and_apply_block for each
+    // already-Valid block. Stage 0 intercepted valid blocks, called
+    // fast_forward_valid_blocks() (which in UTXO mode no longer updates
+    // state_version after Task 2a), and returned Ok without applying state.
+    // state_version never advanced, causing restore_consistency to loop over
+    // the same block endlessly.
+    //
+    // After the fix, restore_consistency uses apply_block_state_only which
+    // runs only Stage 6 (state application) and Stage 7 (state_version update)
+    // and correctly advances state_version.
+    #[test]
+    fn restore_consistency_advances_state_version_for_valid_blocks() {
+        let (db, _dir) = open_test_db();
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
+        // Use digest_mode=true so state application is lightweight (just header
+        // state_root update, no AVL tree operations). This lets the test work
+        // without real transactions.
+        let mut nv = NodeViewHolder::new(db, mempool, true, genesis_digest());
+        nv.set_checkpoint_height(u32::MAX);
+        nv.voting_epoch_info
+            .parameters
+            .table
+            .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, 2);
+
+        // Build two blocks. id0 is "genesis-equivalent" at height 0 (state
+        // already applied). id1 is at height 1 and is already marked Valid
+        // but state has not been advanced to it yet — simulating a gap that
+        // restore_consistency must bridge.
+        let id0 = make_id(0x10);
+        let id1 = make_id(0x11);
+
+        // Store block at height 0 (the current state version).
+        let h0 = make_header(0, 0x10);
+        nv.history.store_header(&id0, &h0).unwrap();
+        nv.history
+            .store_block_transactions(&id0, &sample_block_transactions(&id0))
+            .unwrap();
+        nv.history
+            .store_extension(&id0, &sample_extension(&id0))
+            .unwrap();
+        nv.history
+            .set_validity(&id0, ModifierValidity::Valid)
+            .unwrap();
+
+        // Store block at height 1 — already Valid, but state not yet applied.
+        let mut h1 = make_header(1, 0x11);
+        h1.parent_id = id0; // properly link to parent
+        nv.history.store_header(&id1, &h1).unwrap();
+        nv.history
+            .store_block_transactions(&id1, &sample_block_transactions(&id1))
+            .unwrap();
+        nv.history
+            .store_extension(&id1, &sample_extension(&id1))
+            .unwrap();
+        nv.history
+            .set_validity(&id1, ModifierValidity::Valid)
+            .unwrap();
+
+        // Set best_full_block to id1 but state_version to id0 — this is the gap.
+        nv.history.set_best_full_block_id(&id1).unwrap();
+        nv.history.set_state_version(&id0).unwrap();
+        nv.current_state_version = id0;
+        nv.best_full_height = 0;
+
+        // restore_consistency should advance state_version from id0 to id1.
+        nv.restore_consistency().unwrap();
+
+        assert_eq!(
+            nv.current_state_version, id1,
+            "restore_consistency must advance in-memory state_version to id1"
+        );
+        assert_eq!(
+            nv.history.get_state_version().unwrap(),
+            Some(id1),
+            "restore_consistency must persist state_version to id1 in DB"
         );
     }
 }
