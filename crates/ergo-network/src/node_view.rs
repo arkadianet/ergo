@@ -446,6 +446,12 @@ impl NodeViewHolder {
         }
 
         // Advance state_version (Stage 7).
+        // NOTE: best_full_block_id is intentionally NOT updated here.
+        // restore_consistency only calls this helper when best_full_block_id is
+        // already set to the target height; this helper only bridges the
+        // state_version gap.  Calling set_best_full_block_id here would be
+        // redundant at best and could corrupt the pointer if called outside that
+        // context.
         self.current_state_version = *block_id;
         self.best_full_height = block.header.height;
         self.history.set_state_version(block_id)?;
