@@ -906,24 +906,30 @@ fn build_block_response(
 
     let mut total_size = 0usize;
 
-    // Load block transactions
-    let block_transactions = match state.history.load_block_transactions(&id) {
-        Ok(Some(bt)) => {
-            let mut tx_responses = Vec::new();
-            let mut bt_size = 0usize;
-            for tx_bytes in &bt.tx_bytes {
-                total_size += tx_bytes.len();
-                bt_size += tx_bytes.len();
-                if let Ok(parsed_tx) = parse_transaction(tx_bytes) {
-                    tx_responses.push(ergo_tx_to_response(&parsed_tx, tx_bytes.len()));
+    // Load block transactions — use raw stored bytes to get the true section
+    // size (includes 32-byte headerId, optional VLQ version sentinel, and VLQ
+    // tx_count prefix, matching Scala's BlockTransactionsSerializer byte count).
+    let block_transactions = match state.history.get_modifier(102, &id) {
+        Ok(Some(raw_bytes)) => {
+            let bt_size = raw_bytes.len();
+            total_size += bt_size;
+            match ergo_wire::block_transactions_ser::parse_block_transactions(&raw_bytes) {
+                Ok(bt) => {
+                    let mut tx_responses = Vec::new();
+                    for tx_bytes in &bt.tx_bytes {
+                        if let Ok(parsed_tx) = parse_transaction(tx_bytes) {
+                            tx_responses.push(ergo_tx_to_response(&parsed_tx, tx_bytes.len()));
+                        }
+                    }
+                    Some(BlockTransactionsResponse {
+                        header_id: header_id_hex.to_string(),
+                        transactions: tx_responses,
+                        block_version: header.version,
+                        size: bt_size,
+                    })
                 }
+                Err(_) => None,
             }
-            Some(BlockTransactionsResponse {
-                header_id: header_id_hex.to_string(),
-                transactions: tx_responses,
-                block_version: header.version,
-                size: bt_size,
-            })
         }
         _ => None,
     };
@@ -1261,7 +1267,10 @@ fn build_indexed_block_response(
     }
 
     let header_response = header_to_response(header);
-    let total_size: u32 = block_txs.tx_bytes.iter().map(|b| b.len() as u32).sum();
+    // Compute the full serialized section size (includes 32-byte headerId, optional
+    // VLQ version sentinel, and VLQ tx_count prefix), matching Scala's byte count.
+    let total_size: u32 =
+        ergo_wire::block_transactions_ser::serialize_block_transactions(block_txs).len() as u32;
 
     IndexedBlockResponse {
         header: header_response,
