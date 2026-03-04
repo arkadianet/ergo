@@ -64,6 +64,7 @@ pub struct NodeInfoResponse {
     #[schema(value_type = Object)]
     pub parameters: serde_json::Value,
     pub last_mempool_update_time: u64,
+    pub fast_sync_active: bool,
 }
 
 /// JSON response for proof-of-work solution fields.
@@ -73,7 +74,9 @@ pub struct PowSolutionsResponse {
     pub pk: String,
     pub w: String,
     pub n: String,
-    pub d: String,
+    /// `d` is serialized as a JSON number (not a string), matching the Scala reference node.
+    #[schema(value_type = f64)]
+    pub d: serde_json::Value,
 }
 
 /// JSON response for a block header.
@@ -88,7 +91,8 @@ pub struct HeaderResponse {
     pub version: u8,
     pub state_root: String,
     pub transactions_root: String,
-    pub extension_root: String,
+    /// Serialized as `extensionHash` to match the Scala reference node JSON schema.
+    pub extension_hash: String,
     pub ad_proofs_root: String,
     pub pow_solutions: PowSolutionsResponse,
     pub votes: String,
@@ -97,6 +101,8 @@ pub struct HeaderResponse {
     pub extension_id: String,
     pub transactions_id: String,
     pub ad_proofs_id: String,
+    /// Always empty string for current protocol versions; present for Scala API compatibility.
+    pub unparsed_bytes: String,
 }
 
 /// JSON response for a full block.
@@ -718,13 +724,24 @@ fn compute_section_id(type_id: u8, header_id: &[u8; 32], root: &[u8; 32]) -> [u8
     blake2b256(&buf)
 }
 
+/// Generator point G in compressed form (33 bytes).
+/// Autolykos v2 headers use G as the placeholder `w` value (matching Scala's `wForV2`).
+const GENERATOR_POINT_HEX: &str =
+    "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
 /// Build the common extra fields for a [`HeaderResponse`] from a header,
 /// id bytes, and serialized size.
+///
+/// `serialized_len` is the length of the header bytes produced by `serialize_header`
+/// (excluding the 1-byte modifier-type prefix used in storage).  We add 1 to match
+/// the Scala reference node, which reports `size = r.consumed` after parsing through
+/// `HistoryModifierSerializer` (which reads the type byte before delegating to
+/// `HeaderSerializer`).
 fn build_header_response(
     header: &ergo_types::header::Header,
     id_hex: String,
     id_bytes: &[u8; 32],
-    size: usize,
+    serialized_len: usize,
 ) -> HeaderResponse {
     let difficulty = ergo_consensus::difficulty::decode_compact_bits(header.n_bits);
 
@@ -732,11 +749,27 @@ fn build_header_response(
     let transactions_id = compute_section_id(102, id_bytes, &header.transactions_root.0);
     let ad_proofs_id = compute_section_id(104, id_bytes, &header.ad_proofs_root.0);
 
-    let d_str = if header.pow_solution.d.is_empty() {
+    // `d` must be a JSON number (not a string) to match the Scala reference node output.
+    let d_decimal = if header.pow_solution.d.is_empty() {
         "0".to_string()
     } else {
         num_bigint::BigUint::from_bytes_be(&header.pow_solution.d).to_string()
     };
+    let d_json: serde_json::Value =
+        serde_json::from_str(&d_decimal).unwrap_or(serde_json::json!(0));
+
+    // For Autolykos v2 headers the wire format omits `w`; Rust stores 33 zero bytes as a
+    // placeholder.  Scala initialises `w` to the secp256k1 generator point G (`wForV2`),
+    // so we emit that constant here to match the reference API output.
+    let w_hex = if header.pow_solution.w == [0u8; 33] && header.version >= 2 {
+        GENERATOR_POINT_HEX.to_string()
+    } else {
+        hex::encode(header.pow_solution.w)
+    };
+
+    // Size: add 1 for the modifier-type byte that Scala's HistoryModifierSerializer
+    // prepends when serialising to storage (and therefore counts in `r.consumed`).
+    let size = serialized_len + 1;
 
     HeaderResponse {
         id: id_hex,
@@ -747,13 +780,13 @@ fn build_header_response(
         version: header.version,
         state_root: hex::encode(header.state_root.0),
         transactions_root: hex::encode(header.transactions_root.0),
-        extension_root: hex::encode(header.extension_root.0),
+        extension_hash: hex::encode(header.extension_root.0),
         ad_proofs_root: hex::encode(header.ad_proofs_root.0),
         pow_solutions: PowSolutionsResponse {
             pk: hex::encode(header.pow_solution.miner_pk),
-            w: hex::encode(header.pow_solution.w),
+            w: w_hex,
             n: hex::encode(header.pow_solution.nonce),
-            d: d_str,
+            d: d_json,
         },
         votes: hex::encode(header.votes),
         difficulty: difficulty.to_string(),
@@ -761,6 +794,7 @@ fn build_header_response(
         extension_id: hex::encode(extension_id),
         transactions_id: hex::encode(transactions_id),
         ad_proofs_id: hex::encode(ad_proofs_id),
+        unparsed_bytes: hex::encode(&header.unparsed_bytes),
     }
 }
 
@@ -2770,6 +2804,7 @@ mod tests {
             current_time: 1700001500000,
             parameters: serde_json::json!({"maxBlockSize": 524288}),
             last_mempool_update_time: 0,
+            fast_sync_active: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["name"], "ergo-rust");
@@ -2826,6 +2861,7 @@ mod tests {
             current_time: 1700001500000,
             parameters: serde_json::json!({}),
             last_mempool_update_time: 0,
+            fast_sync_active: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -5332,8 +5368,14 @@ mod tests {
         assert_eq!(resp.ad_proofs_id.len(), 64);
         // Difficulty should be "1" for nBits=0x01010000
         assert_eq!(resp.difficulty, "1");
-        // d field should be "0" for empty d
-        assert_eq!(resp.pow_solutions.d, "0");
+        // d field should be a JSON number 0 (not the string "0") for empty d
+        assert_eq!(resp.pow_solutions.d, serde_json::json!(0));
+        // extensionHash should be present (renamed from extensionRoot)
+        assert_eq!(resp.extension_hash.len(), 64); // 32 bytes → 64 hex chars
+                                                   // unparsedBytes should be present and empty for normal headers
+        assert_eq!(resp.unparsed_bytes, "");
+        // size should include the 1-byte type prefix (serialised_len + 1)
+        assert!(resp.size > 1);
     }
 
     #[tokio::test]
