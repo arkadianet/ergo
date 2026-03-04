@@ -125,6 +125,8 @@ impl ExtraIndexerDb {
                 .map(|n| n.get() as i32)
                 .unwrap_or(4),
         );
+        // Cap open file descriptors so multiple DB instances don't exceed OS limits.
+        opts.set_max_open_files(1000);
         let cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024);
         let mut bb = rocksdb::BlockBasedOptions::default();
         bb.set_block_cache(&cache);
