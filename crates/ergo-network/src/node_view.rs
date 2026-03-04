@@ -1177,7 +1177,26 @@ impl NodeViewHolder {
         // The expected version comes from the parameters system (BLOCK_VERSION_ID = 123).
         // Default is version 1 (genesis). After soft-fork activation (e.g. Autolykos v2
         // at height 417,792), the expected version is bumped to 2.
-        let expected_version = self.voting_epoch_info.parameters.block_version();
+        //
+        // On restart, voting_epoch_info starts at genesis (version 1) and is only
+        // updated via Stage 7b as blocks are applied.  If we restart mid-sync at
+        // height 417,791 and then try to apply 417,792, Stage 7b never ran for the
+        // epoch boundary so parameters still show version 1.  Apply the hardcoded
+        // v2 activation eagerly here — matching the logic in
+        // Parameters::update_at_epoch_start — so the check passes and Stage 7b can
+        // then set the persisted parameters correctly.
+        let expected_version = {
+            let pv = self.voting_epoch_info.parameters.block_version();
+            if block.header.height >= self.v2_activation_height && pv < 2 {
+                self.voting_epoch_info
+                    .parameters
+                    .table
+                    .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, 2);
+                2u8
+            } else {
+                pv
+            }
+        };
         validate_block_version(&block.header, expected_version).map_err(|e| {
             NodeViewError::Validation(format!(
                 "block version check failed at height {}: {e}",
