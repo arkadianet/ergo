@@ -158,6 +158,10 @@ pub struct OutputResponse {
     pub assets: Vec<AssetResponse>,
     #[schema(value_type = Object)]
     pub additional_registers: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
@@ -171,6 +175,8 @@ pub struct AssetResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionResponse {
     pub header_id: String,
+    /// Merkle root of the extension fields, matching `extensionHash` from the block header.
+    pub digest: String,
     pub fields: Vec<(String, String)>,
 }
 
@@ -179,6 +185,8 @@ pub struct ExtensionResponse {
 pub struct BlockTransactionsResponse {
     pub header_id: String,
     pub transactions: Vec<TransactionResponse>,
+    pub block_version: u8,
+    pub size: usize,
 }
 
 /// JSON response for a connected peer.
@@ -865,6 +873,8 @@ fn ergo_tx_to_response(tx: &ErgoTransaction, size: usize) -> TransactionResponse
                 creation_height: out.creation_height,
                 assets,
                 additional_registers: render_registers(&out.additional_registers, false),
+                transaction_id: Some(hex::encode(tx.tx_id.0)),
+                index: Some(idx as u16),
             }
         })
         .collect();
@@ -900,8 +910,10 @@ fn build_block_response(
     let block_transactions = match state.history.load_block_transactions(&id) {
         Ok(Some(bt)) => {
             let mut tx_responses = Vec::new();
+            let mut bt_size = 0usize;
             for tx_bytes in &bt.tx_bytes {
                 total_size += tx_bytes.len();
+                bt_size += tx_bytes.len();
                 if let Ok(parsed_tx) = parse_transaction(tx_bytes) {
                     tx_responses.push(ergo_tx_to_response(&parsed_tx, tx_bytes.len()));
                 }
@@ -909,12 +921,15 @@ fn build_block_response(
             Some(BlockTransactionsResponse {
                 header_id: header_id_hex.to_string(),
                 transactions: tx_responses,
+                block_version: header.version,
+                size: bt_size,
             })
         }
         _ => None,
     };
 
-    // Load extension
+    // Load extension — the digest is the Merkle root of the extension fields,
+    // which matches `extensionHash` (header.extension_root) in the block header.
     let extension = match state.history.load_extension(&id) {
         Ok(Some(ext)) => {
             let fields: Vec<(String, String)> = ext
@@ -924,6 +939,7 @@ fn build_block_response(
                 .collect();
             Some(ExtensionResponse {
                 header_id: hex::encode(ext.header_id.0),
+                digest: hex::encode(header.extension_root.0),
                 fields,
             })
         }
