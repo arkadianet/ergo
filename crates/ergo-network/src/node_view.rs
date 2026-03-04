@@ -96,6 +96,9 @@ pub struct NodeViewHolder {
     epoch_length: u32,
     /// Voting state machine: tracks accumulated votes and current parameters.
     pub voting_epoch_info: VotingEpochInfo,
+    /// Cached height of best_full_block — avoids repeated DB lookups when
+    /// skipping stale blocks in a batch after a fast-forward.
+    best_full_height: u32,
     /// Height below which sigma proof verification is skipped.
     checkpoint_height: u32,
     /// Autolykos v2 activation height (default 417_792 for mainnet).
@@ -210,6 +213,7 @@ impl NodeViewHolder {
             utxo_state: UtxoState::new(),
             applied_blocks: Vec::new(),
             last_rollback_height: None,
+            best_full_height: 0,
             blocks_to_keep: -1,
             epoch_length: 1024,
             voting_epoch_info: VotingEpochInfo::new(Parameters::genesis(), 0),
@@ -231,7 +235,7 @@ impl NodeViewHolder {
         digest_mode: bool,
         genesis_digest: Vec<u8>,
     ) -> Self {
-        let (state_root, state_version) = match history.get_state_version() {
+        let (state_root, state_version, recovered_height) = match history.get_state_version() {
             Ok(Some(version_id)) => match history.load_header(&version_id) {
                 Ok(Some(header)) => {
                     tracing::info!(
@@ -239,19 +243,19 @@ impl NodeViewHolder {
                         state_version = ?version_id,
                         "recovering state from persisted version"
                     );
-                    (header.state_root.0.to_vec(), version_id)
+                    (header.state_root.0.to_vec(), version_id, header.height)
                 }
                 _ => {
                     tracing::warn!(
                         state_version = ?version_id,
                         "state version header not found, starting from genesis"
                     );
-                    (genesis_digest.clone(), ModifierId([0u8; 32]))
+                    (genesis_digest.clone(), ModifierId([0u8; 32]), 0)
                 }
             },
             _ => {
                 tracing::info!("no persisted state version, starting from genesis");
-                (genesis_digest.clone(), ModifierId([0u8; 32]))
+                (genesis_digest.clone(), ModifierId([0u8; 32]), 0)
             }
         };
 
@@ -265,6 +269,7 @@ impl NodeViewHolder {
             utxo_state: UtxoState::new(),
             applied_blocks: Vec::new(),
             last_rollback_height: None,
+            best_full_height: recovered_height,
             blocks_to_keep: -1,
             epoch_length: 1024,
             voting_epoch_info: VotingEpochInfo::new(Parameters::genesis(), 0),
@@ -313,6 +318,83 @@ impl NodeViewHolder {
     /// (e.g. 120 for mainnet). MaxTimeDrift = 10 * block_interval.
     pub fn set_max_time_drift_from_interval(&mut self, block_interval_secs: u64) {
         self.max_time_drift_ms = block_interval_secs * 10 * 1000;
+    }
+
+    /// Fast-forward `best_full_block_id` past all consecutive already-Valid
+    /// blocks on startup.  This avoids replaying through potentially tens of
+    /// thousands of blocks one-by-one when body sections arrive later.
+    ///
+    /// Call this after `restore_consistency()`.
+    pub fn fast_forward_valid_blocks(&mut self) -> Result<(), NodeViewError> {
+        let best_id = match self.history.best_full_block_id()? {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let best_height = match self.history.load_header(&best_id)? {
+            Some(h) => h.height,
+            None => return Ok(()),
+        };
+
+        let mut last_valid_id = best_id;
+        let mut last_valid_height = best_height;
+        let mut expected_parent = best_id;
+
+        for height in (best_height + 1).. {
+            let ids = match self.history.header_ids_at_height(height) {
+                Ok(ids) if !ids.is_empty() => ids,
+                _ => break,
+            };
+            let mut found = false;
+            for id in &ids {
+                if let Some(hdr) = self.history.load_header(id)? {
+                    if hdr.parent_id == expected_parent {
+                        let is_valid = matches!(
+                            self.history.get_validity(id),
+                            Ok(Some(ModifierValidity::Valid))
+                        );
+                        if is_valid {
+                            last_valid_id = *id;
+                            last_valid_height = height;
+                            expected_parent = *id;
+                            found = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+
+        if last_valid_id != best_id {
+            let skipped = last_valid_height - best_height;
+            tracing::info!(
+                from_height = best_height,
+                to_height = last_valid_height,
+                skipped,
+                "fast-forwarded best_full_block past already-valid blocks"
+            );
+            self.history.set_best_full_block_id(&last_valid_id)?;
+            self.best_full_height = last_valid_height;
+
+            // In digest mode, state is just the state_root hash chain —
+            // advancing state_version here is correct.
+            // In UTXO mode, the AVL tree is NOT updated during fast-forward;
+            // state_version must only advance when UTXO is actually applied.
+            if self.digest_mode {
+                self.current_state_version = last_valid_id;
+                self.history.set_state_version(&last_valid_id)?;
+            }
+
+            // Always update the in-memory digest state root from the target header.
+            if let Some(hdr) = self.history.load_header(&last_valid_id)? {
+                self.current_state_root = hdr.state_root.0.to_vec();
+                self.digest_state = DigestState::new(hdr.state_root.0.to_vec(), last_valid_id);
+            }
+        }
+
+        Ok(())
     }
 
     /// Ensure state and history are consistent on startup.
@@ -674,6 +756,7 @@ impl NodeViewHolder {
                 // Record the branch point height for wallet rollback.
                 if let Ok(Some(bp_header)) = self.history.load_header(branch_point) {
                     self.last_rollback_height = Some(bp_header.height);
+                    self.best_full_height = bp_header.height;
                 }
 
                 // Unmark old chain blocks.
@@ -690,6 +773,18 @@ impl NodeViewHolder {
 
         // Apply new chain blocks.
         for block_id in &info.to_apply {
+            // Skip blocks whose sections haven't all arrived yet — during
+            // initial sync, `chain_from_ancestor` may include intermediate
+            // blocks that aren't complete.  These will be retried when their
+            // remaining sections arrive.
+            if !self.history.has_all_sections(block_id).unwrap_or(false) {
+                tracing::debug!(
+                    ?block_id,
+                    "skipping incomplete block in to_apply (sections not yet received)"
+                );
+                continue;
+            }
+
             match self.validate_and_apply_block(block_id) {
                 Ok(()) => {
                     // Collect tx IDs from this applied block.
@@ -910,19 +1005,33 @@ impl NodeViewHolder {
     /// 6. State application (mode-dependent: digest or UTXO).
     /// 7. Marks the block as Valid and updates the best full block pointer.
     fn validate_and_apply_block(&mut self, block_id: &ModifierId) -> Result<(), NodeViewError> {
-        // Stage 0: Reject already-applied blocks (rule 300).
-        if let Ok(Some(validity)) = self.history.get_validity(block_id) {
-            match validity {
-                ModifierValidity::Valid => {
-                    tracing::debug!(?block_id, "block already applied, skipping");
+        // Stage 0: Short-circuit already-valid blocks (rule 300).
+        // When we encounter an already-valid block, fast-forward past the
+        // entire consecutive valid range so subsequent body section arrivals
+        // don't re-discover the same blocks 128 at a time.
+        if let Ok(Some(ModifierValidity::Valid)) = self.history.get_validity(block_id) {
+            // If this block is at or below best_full_block, skip silently.
+            // This happens when a 128-block batch becomes stale after a
+            // fast-forward jumped past most of its members.
+            if let Ok(Some(hdr)) = self.history.load_header(block_id) {
+                if hdr.height <= self.best_full_height {
                     return Ok(());
                 }
-                ModifierValidity::Invalid => {
-                    return Err(NodeViewError::Validation(format!(
-                        "block {block_id:?} previously marked invalid"
-                    )));
+            }
+            tracing::debug!(?block_id, "block already applied, fast-forwarding");
+            if let Err(e) = self.fast_forward_valid_blocks() {
+                tracing::warn!(error = %e, "fast-forward in already-applied path failed, advancing one block");
+                if let Err(e) = self.history.set_best_full_block_id(block_id) {
+                    tracing::warn!(error = %e, "failed to advance best_full_block for already-applied block");
+                }
+                if self.digest_mode {
+                    self.current_state_version = *block_id;
+                    if let Err(e) = self.history.set_state_version(block_id) {
+                        tracing::warn!(error = %e, "failed to persist state version for already-applied block");
+                    }
                 }
             }
+            return Ok(());
         }
 
         // Stage 1: Assemble full block from stored sections.
@@ -931,11 +1040,21 @@ impl NodeViewHolder {
             .assemble_full_block(block_id)?
             .ok_or_else(|| NodeViewError::State(format!("cannot assemble block {block_id:?}")))?;
 
-        // Stage 1b: Reject if header is marked invalid (rule 303).
+        // Stage 0b: Reject previously-invalid blocks — but below checkpoint,
+        // clear stale Invalid markers from prior runs and proceed.
         if let Ok(Some(ModifierValidity::Invalid)) = self.history.get_validity(block_id) {
-            return Err(NodeViewError::Validation(format!(
-                "header {block_id:?} marked invalid"
-            )));
+            if block.header.height > self.checkpoint_height {
+                return Err(NodeViewError::Validation(format!(
+                    "block {block_id:?} previously marked invalid"
+                )));
+            }
+            // Below checkpoint: clear the stale Invalid marker so we can retry.
+            tracing::debug!(
+                height = block.header.height,
+                ?block_id,
+                "clearing stale Invalid marker (below checkpoint)"
+            );
+            let _ = self.history.clear_validity(block_id);
         }
 
         // Stage 1c: Reject block sections for pruned headers (rule 305).
@@ -950,7 +1069,8 @@ impl NodeViewHolder {
         }
 
         // Stage 1d: Reject headers whose parent is semantically invalid (rule 210).
-        {
+        // Below checkpoint, skip this check — parents may have stale Invalid markers.
+        if block.header.height > self.checkpoint_height {
             let parent_is_invalid = matches!(
                 self.history.get_validity(&block.header.parent_id),
                 Ok(Some(ModifierValidity::Invalid))
@@ -1100,9 +1220,14 @@ impl NodeViewHolder {
                 .map_err(|e| NodeViewError::TxValidation(format!("tx {} stateless: {e}", i)))?;
         }
 
-        // Stage 5b: Stateful validation (UTXO mode only).
+        // Stage 5b: Stateful validation (UTXO mode only, above checkpoint).
+        // Below checkpoint, skip input lookups and stateful validation —
+        // the Scala reference also skips via `execTransactions` returning Valid(0L).
         // Collect resolved input boxes per-tx for reuse in Stage 5c.
-        let all_input_boxes: Vec<Vec<ergo_types::transaction::ErgoBox>> = if !self.digest_mode {
+        let above_checkpoint = block.header.height > self.checkpoint_height;
+        let all_input_boxes: Vec<Vec<ergo_types::transaction::ErgoBox>> = if !self.digest_mode
+            && above_checkpoint
+        {
             let mut all = Vec::with_capacity(transactions.len());
             for (i, tx) in transactions.iter().enumerate() {
                 let mut input_boxes = Vec::with_capacity(tx.inputs.len());
@@ -1139,8 +1264,8 @@ impl NodeViewHolder {
             Vec::new()
         };
 
-        // Stage 5b2: EIP-27 re-emission validation (UTXO mode only).
-        if !self.digest_mode {
+        // Stage 5b2: EIP-27 re-emission validation (UTXO mode only, above checkpoint).
+        if !self.digest_mode && above_checkpoint {
             for (i, tx) in transactions.iter().enumerate() {
                 let input_boxes = &all_input_boxes[i];
                 ergo_consensus::reemission::verify_reemission_spending(
@@ -1292,13 +1417,15 @@ impl NodeViewHolder {
         }
 
         // Stage 6: State application (mode-dependent).
+        // Below checkpoint, skip internal tx validation and digest verification
+        // in UTXO mode — the chain is trusted below checkpoint.
         if self.digest_mode {
             let changes = compute_state_changes(&transactions);
             self.digest_state
                 .apply_full_block(&block, block_id, &changes)
                 .map_err(|e| NodeViewError::State(format!("digest state: {e}")))?;
             self.current_state_root = self.digest_state.state_root().to_vec();
-        } else {
+        } else if above_checkpoint {
             let expected_root = block.header.state_root.0.as_slice();
             self.utxo_state
                 .apply_block(
@@ -1310,6 +1437,17 @@ impl NodeViewHolder {
                     &vs,
                 )
                 .map_err(|e| NodeViewError::State(format!("utxo state: {e}")))?;
+            self.current_state_root = self
+                .utxo_state
+                .state_root()
+                .map_err(|e| NodeViewError::State(format!("{e}")))?;
+        } else {
+            // Below checkpoint: apply state changes without tx validation or
+            // digest verification. Removes for non-existent boxes (e.g. genesis
+            // boxes that were never seeded) are silently skipped.
+            self.utxo_state
+                .apply_block_lenient(&transactions, block.header.height, block_id)
+                .map_err(|e| NodeViewError::State(format!("utxo state (lenient): {e}")))?;
             self.current_state_root = self
                 .utxo_state
                 .state_root()
@@ -1326,6 +1464,7 @@ impl NodeViewHolder {
         self.history
             .set_validity(block_id, ModifierValidity::Valid)?;
         self.history.set_best_full_block_id(block_id)?;
+        self.best_full_height = block.header.height;
 
         // Track applied block for Inv broadcast.
         self.applied_blocks.push(*block_id);
@@ -1679,15 +1818,15 @@ mod tests {
 
     /// Compute the Merkle root that matches `sample_extension`.
     /// Uses Scala kvToLeaf format: [key_length_byte] ++ key ++ value.
+    /// Single-element tree: paired with empty node → root = blake2b256(0x01 || leaf_hash).
     fn sample_extension_root() -> [u8; 32] {
         let mut leaf = Vec::new();
         leaf.push(SAMPLE_EXT_FIELD.0.len() as u8); // key length prefix
         leaf.extend_from_slice(&SAMPLE_EXT_FIELD.0);
         leaf.extend_from_slice(SAMPLE_EXT_FIELD.1);
-        // leaf_hash = blake2b256(0x00 || leaf)
-        let mut prefixed = vec![0x00u8];
-        prefixed.extend_from_slice(&leaf);
-        test_blake2b256(&prefixed)
+        // Use ergo_consensus::merkle for correct root computation.
+        let slices: Vec<&[u8]> = vec![leaf.as_slice()];
+        ergo_consensus::merkle::merkle_root(&slices).unwrap()
     }
 
     fn sample_ad_proofs(header_id: &ModifierId) -> ADProofs {
@@ -1902,9 +2041,9 @@ mod tests {
         );
     }
 
-    // 10. apply_progress marks block Invalid on validation failure.
+    // 10. apply_progress skips incomplete blocks (sections not yet received).
     #[test]
-    fn apply_progress_marks_invalid_on_failure() {
+    fn apply_progress_skips_incomplete_block() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view(db);
 
@@ -1912,12 +2051,14 @@ mod tests {
         let missing_id = make_id(0xF1);
         let info = ProgressInfo::apply(vec![missing_id]);
 
+        // Should succeed — incomplete blocks are silently skipped during
+        // initial sync so they can be retried when sections arrive.
         let result = nv.apply_progress(&info);
-        assert!(result.is_err());
+        assert!(result.is_ok());
 
-        // The block should be marked Invalid.
+        // The block should have no validity set (not marked Invalid).
         let validity = nv.history.get_validity(&missing_id).unwrap();
-        assert_eq!(validity, Some(ModifierValidity::Invalid));
+        assert_eq!(validity, None);
     }
 
     // 11. Chain reorg rolls back state and applies new chain.
@@ -2153,13 +2294,9 @@ mod tests {
             ProgressInfo::chain_switch(branch_point, vec![old_id], vec![new_id_ok, new_id_bad]);
         let result = nv.apply_progress(&info_switch);
 
-        // Should fail because new_id_bad cannot be assembled.
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, NodeViewError::State(ref msg) if msg.contains("cannot assemble")),
-            "expected State error about assembly, got: {err}"
-        );
+        // Should succeed — incomplete blocks are skipped during apply so
+        // they can be retried when their sections arrive.
+        assert!(result.is_ok());
 
         // Old chain block should still be marked Invalid (rollback happened).
         assert_eq!(
@@ -2173,11 +2310,8 @@ mod tests {
             Some(ModifierValidity::Valid)
         );
 
-        // Second new block should be marked Invalid (it failed).
-        assert_eq!(
-            nv.history.get_validity(&new_id_bad).unwrap(),
-            Some(ModifierValidity::Invalid)
-        );
+        // Second new block should have no validity (skipped, not Invalid).
+        assert_eq!(nv.history.get_validity(&new_id_bad).unwrap(), None);
     }
 
     // 14. validate_and_apply_block rejects a block with a tampered transactions root.
@@ -2915,8 +3049,22 @@ mod tests {
     fn already_applied_invalid_block_is_rejected() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
+        // Set checkpoint to 0 so the block is "above checkpoint" and the
+        // Invalid rejection fires (below checkpoint, stale markers are cleared).
+        nv.set_checkpoint_height(0);
 
         let id = make_id(0x51);
+        let header = make_header(100, 0x51);
+
+        // Store block sections so assembly succeeds (Stage 0b runs after
+        // assembly since the restructure).
+        nv.history.store_header(&id, &header).unwrap();
+        nv.history
+            .store_block_transactions(&id, &sample_block_transactions(&id))
+            .unwrap();
+        nv.history
+            .store_extension(&id, &sample_extension(&id))
+            .unwrap();
 
         // Manually mark as invalid.
         nv.history
@@ -2933,13 +3081,25 @@ mod tests {
     }
 
     // Rule 303: Block with header marked invalid should be rejected.
-    // (Stage 0 catches this first since it checks for any prior validity.)
+    // (Stage 0b catches this after assembly.)
     #[test]
     fn block_with_invalid_header_is_rejected() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
+        // Above checkpoint so the Invalid marker is not cleared.
+        nv.set_checkpoint_height(0);
 
         let id = make_id(0x52);
+        let header = make_header(100, 0x52);
+
+        // Store block sections so assembly succeeds.
+        nv.history.store_header(&id, &header).unwrap();
+        nv.history
+            .store_block_transactions(&id, &sample_block_transactions(&id))
+            .unwrap();
+        nv.history
+            .store_extension(&id, &sample_extension(&id))
+            .unwrap();
 
         // Mark the block as invalid.
         nv.history
@@ -3045,6 +3205,8 @@ mod tests {
     fn block_with_invalid_parent_is_rejected() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
+        // Above checkpoint so Stage 1d parent-semantics check is active.
+        nv.set_checkpoint_height(0);
 
         let parent_id = make_id(0x60);
         let id = make_id(0x61);
@@ -3340,6 +3502,66 @@ mod tests {
         assert!(
             err_msg.contains("parent header not found"),
             "expected 'parent header not found' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_does_not_advance_state_version_in_utxo_mode() {
+        use ergo_storage::chain_scoring::ModifierValidity;
+        // Use make_node_view_skip_difficulty to avoid difficulty checks.
+        let (db, _dir) = open_test_db();
+
+        // We need fast_forward_valid_blocks to be able to load the header at
+        // best_full_block_id.  Use id1 as the starting point (height 1) and
+        // id2 as the already-Valid block to fast-forward to (height 2).
+        let id1 = make_id(1);
+        let id2 = make_id(2);
+
+        // h1 is the current best full block (height 1).
+        // h2 is already Valid and should be fast-forwarded to (height 2).
+        // store_header_with_score also populates the height → IDs index.
+        let h1 = {
+            let mut h = make_header(1, 1);
+            h.parent_id = ModifierId::GENESIS_PARENT;
+            h
+        };
+        let h2 = {
+            let mut h = make_header(2, 2);
+            h.parent_id = id1;
+            h
+        };
+        db.store_header_with_score(&id1, &h1).unwrap();
+        db.store_header_with_score(&id2, &h2).unwrap();
+
+        // Mark h2 as Valid (h1 is the current tip, only h2 needs fast-forward).
+        db.set_validity(&id2, ModifierValidity::Valid).unwrap();
+
+        // best_full_block = id1, state_version = id1 (as if h1 was applied in a
+        // previous run but h2 arrived already-valid without being applied in UTXO mode).
+        db.set_best_full_block_id(&id1).unwrap();
+        db.set_state_version(&id1).unwrap();
+
+        // Create UTXO-mode node view (digest_mode=false).
+        let mut nv = make_node_view_skip_difficulty(db);
+        nv.current_state_version = id1;
+        nv.best_full_height = 1;
+
+        // Run fast-forward.
+        nv.fast_forward_valid_blocks().unwrap();
+
+        // best_full_block must advance to id2.
+        assert_eq!(nv.history.best_full_block_id().unwrap(), Some(id2));
+
+        // In UTXO mode, state_version must NOT advance during fast-forward
+        // because the AVL tree was not updated.
+        assert_eq!(
+            nv.history.get_state_version().unwrap(),
+            Some(id1),
+            "state_version must stay at id1 in UTXO mode during fast-forward"
+        );
+        assert_eq!(
+            nv.current_state_version, id1,
+            "in-memory current_state_version must also stay at id1"
         );
     }
 }
