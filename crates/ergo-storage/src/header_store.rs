@@ -232,11 +232,12 @@ impl HistoryDb {
             }
 
             // Compute cumulative score (check in-batch parents first).
-            let parent_score: Vec<u8> = in_flight_scores
-                .get(&header.parent_id)
-                .cloned()
-                .or_else(|| self.get_header_score(&header.parent_id).ok()?)
-                .unwrap_or_else(|| vec![0u8]);
+            let parent_score: Vec<u8> = if let Some(s) = in_flight_scores.get(&header.parent_id) {
+                s.clone()
+            } else {
+                self.get_header_score(&header.parent_id)?
+                    .unwrap_or_else(|| vec![0u8])
+            };
             let our_score = add_scores(&parent_score, &difficulty_from_nbits(header.n_bits));
 
             // 1. Store raw header bytes.
