@@ -18,13 +18,19 @@ pub(crate) async fn mining_candidate_handler(
         .as_ref()
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"))?;
 
-    let gen = gen_lock
-        .read()
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lock poisoned: {e}")))?;
+    let gen = gen_lock.read().map_err(|e| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("lock poisoned: {e}"),
+        )
+    })?;
 
-    let (_candidate, header_template) = gen
-        .current()
-        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "No mining candidate available yet"))?;
+    let (_candidate, header_template) = gen.current().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No mining candidate available yet",
+        )
+    })?;
 
     // Recompute msg and target from header template.
     let msg = ergo_consensus::autolykos::msg_by_header(header_template);
@@ -62,13 +68,19 @@ pub(crate) async fn mining_candidate_with_txs_handler(
         .as_ref()
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"))?;
 
-    let gen = gen_lock
-        .read()
-        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("lock poisoned: {e}")))?;
+    let gen = gen_lock.read().map_err(|e| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("lock poisoned: {e}"),
+        )
+    })?;
 
-    let (candidate, header_template) = gen
-        .current()
-        .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "No mining candidate available yet"))?;
+    let (candidate, header_template) = gen.current().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No mining candidate available yet",
+        )
+    })?;
 
     // Recompute msg and target from header template.
     let msg = ergo_consensus::autolykos::msg_by_header(header_template);
@@ -123,9 +135,9 @@ pub(crate) async fn mining_solution_handler(
         .as_ref()
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Mining is not enabled"))?;
 
-    tx.send(solution).await.map_err(|_| {
-        api_error(StatusCode::INTERNAL_SERVER_ERROR, "solution channel closed")
-    })?;
+    tx.send(solution)
+        .await
+        .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "solution channel closed"))?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
