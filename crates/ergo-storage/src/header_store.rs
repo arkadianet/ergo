@@ -7,9 +7,11 @@ use ergo_types::header::Header;
 use ergo_types::modifier_id::ModifierId;
 use ergo_wire::header_ser::{parse_header, serialize_header};
 
+use std::collections::HashMap;
+
 use crate::chain_scoring::{add_scores, difficulty_from_nbits};
 use crate::history_db::{
-    best_header_key, header_height_key, height_ids_key, HistoryDb, StorageError,
+    best_header_key, header_height_key, header_score_key, height_ids_key, HistoryDb, StorageError,
 };
 
 /// Modifier type ID for headers in the `objects` column family.
@@ -186,6 +188,93 @@ impl HistoryDb {
         }
 
         Ok(is_best)
+    }
+
+    /// Store a batch of pre-validated, height-sorted headers in a single
+    /// `WriteBatch`, amortizing WAL flushes across the whole chunk.
+    ///
+    /// `headers` must be sorted by height ascending.  Parent score lookups
+    /// first check `in_flight_scores` (built up during this call) before
+    /// falling back to the DB, so headers within the same batch can reference
+    /// each other as parents.
+    ///
+    /// Returns the IDs of headers that were successfully stored (skips
+    /// duplicates already in the DB).
+    pub fn bulk_store_headers(
+        &self,
+        headers: &[(ModifierId, ergo_types::header::Header, Vec<u8>)],
+    ) -> Result<Vec<ModifierId>, StorageError> {
+        if headers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut in_flight_scores: HashMap<ModifierId, Vec<u8>> = HashMap::new();
+        let mut height_ids_cache: HashMap<u32, Vec<ModifierId>> = HashMap::new();
+
+        // If there is no existing best, we use a sentinel of None so that the
+        // first header processed always becomes the best candidate.
+        let existing_best_id = self.best_header_id()?;
+        let mut best_score: Option<Vec<u8>> = existing_best_id
+            .as_ref()
+            .and_then(|id| self.get_header_score(id).ok()?);
+        let mut best_id_candidate: Option<ModifierId> = None;
+
+        let mut batch = self.new_batch();
+        let mut applied: Vec<ModifierId> = Vec::with_capacity(headers.len());
+
+        for (id, header, raw) in headers {
+            // Skip duplicates.
+            if self.contains_modifier(HEADER_TYPE_ID, id)? {
+                continue;
+            }
+
+            // Compute cumulative score (check in-batch parents first).
+            let parent_score: Vec<u8> = in_flight_scores
+                .get(&header.parent_id)
+                .cloned()
+                .or_else(|| self.get_header_score(&header.parent_id).ok()?)
+                .unwrap_or_else(|| vec![0u8]);
+            let our_score = add_scores(&parent_score, &difficulty_from_nbits(header.n_bits));
+
+            // 1. Store raw header bytes.
+            batch.put_modifier(HEADER_TYPE_ID, id, raw);
+
+            // 2. Height -> IDs index.
+            let height_key = height_ids_key(header.height);
+            let ids_at_height = height_ids_cache
+                .entry(header.height)
+                .or_insert_with(|| self.header_ids_at_height(header.height).unwrap_or_default());
+            if !ids_at_height.contains(id) {
+                ids_at_height.push(*id);
+            }
+            batch.put_index(&height_key, &serialize_id_list(ids_at_height));
+
+            // 3. Header -> height index.
+            batch.put_index(&header_height_key(id), &header.height.to_be_bytes());
+
+            // 4. Cumulative score.
+            batch.put_index(&header_score_key(id), &our_score);
+
+            // Track best header: no existing best means this header always wins.
+            let is_new_best = match &best_score {
+                None => true,
+                Some(current) => Self::is_score_greater(&our_score, current),
+            };
+            if is_new_best {
+                best_score = Some(our_score.clone());
+                best_id_candidate = Some(*id);
+            }
+
+            in_flight_scores.insert(*id, our_score);
+            applied.push(*id);
+        }
+
+        if let Some(best_id) = best_id_candidate {
+            batch.put_index(&best_header_key(), &best_id.0);
+        }
+
+        batch.write()?;
+        Ok(applied)
     }
 
     // -----------------------------------------------------------------------
@@ -578,5 +667,46 @@ mod tests {
         assert_eq!(result[0], chain[2].1);
         assert_eq!(result[1], chain[1].1);
         assert_eq!(result[2], chain[0].1);
+    }
+
+    #[test]
+    fn bulk_store_headers_applies_five_sequential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = HistoryDb::open(tmp.path()).unwrap();
+
+        let ids: Vec<ModifierId> = (0u8..5).map(|i| ModifierId([i + 1; 32])).collect();
+
+        let headers: Vec<(ModifierId, ergo_types::header::Header, Vec<u8>)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let mut h = ergo_types::header::Header::default_for_test();
+                h.height = (i + 1) as u32;
+                // Valid compact nBits: size=1, mantissa=0x01 => difficulty 1
+                h.n_bits = 0x01010000;
+                h.parent_id = if i == 0 {
+                    ModifierId::GENESIS_PARENT
+                } else {
+                    ids[i - 1]
+                };
+                let raw = ergo_wire::header_ser::serialize_header(&h);
+                (*id, h, raw)
+            })
+            .collect();
+
+        let applied = db.bulk_store_headers(&headers).unwrap();
+        assert_eq!(applied.len(), 5);
+
+        for (id, header, _) in &headers {
+            let loaded = db.load_header(id).unwrap();
+            assert!(
+                loaded.is_some(),
+                "header at height {} not found",
+                header.height
+            );
+        }
+
+        let best_id = db.best_header_id().unwrap().unwrap();
+        assert_eq!(best_id, ids[4]);
     }
 }
