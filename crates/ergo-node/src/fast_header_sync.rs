@@ -165,7 +165,6 @@ pub async fn fetch_chain_slice(
     );
     let resp = client
         .get(&url)
-        .timeout(std::time::Duration::from_secs(120))
         .send()
         .await
         .map_err(|e| FastSyncError::Http(format!("{url}: {e}")))?;
@@ -255,6 +254,7 @@ pub async fn run_fast_sync(
     fast_sync_active: SharedFastSyncActive,
 ) {
     use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     let client = reqwest::Client::builder()
@@ -332,6 +332,7 @@ pub async fn run_fast_sync(
     let busy_peers: Arc<std::sync::Mutex<HashSet<String>>> =
         Arc::new(std::sync::Mutex::new(HashSet::new()));
     let peer_idle = Arc::new(tokio::sync::Notify::new());
+    let in_flight = Arc::new(AtomicUsize::new(0));
 
     let client = Arc::new(client);
     let cmd_tx = Arc::new(cmd_tx);
@@ -350,7 +351,16 @@ pub async fn run_fast_sync(
         // Pop the next chunk from the front of the work queue.
         let chunk = pending.lock().unwrap().pop_front();
         let Some((from, to)) = chunk else {
-            break; // all chunks dispatched (or pushed back and retried)
+            // Queue appears empty, but in-flight tasks may still push chunks back.
+            // Wait until all in-flight tasks finish, then recheck.
+            if in_flight.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::select! {
+                _ = peer_idle.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+            }
+            continue;
         };
 
         // Skip chunks that P2P sync has already covered.
@@ -386,6 +396,7 @@ pub async fn run_fast_sync(
         }
 
         // Wait for an idle, healthy peer under the concurrency cap.
+        let mut no_peer_polls = 0u32;
         let url = loop {
             if *shutdown.borrow() {
                 break None;
@@ -404,6 +415,14 @@ pub async fn run_fast_sync(
                 if busy_count < max_concurrent {
                     break Some(url);
                 }
+            } else {
+                no_peer_polls += 1;
+                if no_peer_polls > 30 {
+                    tracing::warn!(
+                        "fast_header_sync: no healthy peers available after 60s, stopping"
+                    );
+                    break None;
+                }
             }
             tokio::select! {
                 _ = peer_idle.notified() => {}
@@ -416,6 +435,9 @@ pub async fn run_fast_sync(
         };
 
         busy_peers.lock().unwrap().insert(url.clone());
+
+        in_flight.fetch_add(1, Ordering::Relaxed);
+        let in_flight_task = in_flight.clone();
 
         let client = client.clone();
         let cmd_tx = cmd_tx.clone();
@@ -460,6 +482,7 @@ pub async fn run_fast_sync(
             }
 
             busy_peers.lock().unwrap().remove(&url);
+            in_flight_task.fetch_sub(1, Ordering::Relaxed);
             peer_idle.notify_one();
 
             result
