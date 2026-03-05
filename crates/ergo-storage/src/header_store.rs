@@ -220,6 +220,17 @@ impl HistoryDb {
         };
         let mut best_id_candidate: Option<ModifierId> = None;
 
+        // Track whether this chunk is connected to the main chain.
+        //
+        // An orphan chunk is one whose first parent isn't in the DB yet.  For
+        // orphan chunks the cumulative score is computed starting from 0, which
+        // can accidentally exceed the real P2P chain score and corrupt the
+        // best-header pointer.  We only update best_header_key() for chunks
+        // where at least one header had its parent genuinely found (either in
+        // the DB, in the in-flight map from an earlier header in this same
+        // batch, or is the genesis header with parent == GENESIS_PARENT).
+        let mut chunk_connected = false;
+
         let mut batch = self.new_batch();
         let mut applied: Vec<ModifierId> = Vec::with_capacity(headers.len());
 
@@ -232,12 +243,29 @@ impl HistoryDb {
             }
 
             // Compute cumulative score (check in-batch parents first).
-            let parent_score: Vec<u8> = if let Some(s) = in_flight_scores.get(&header.parent_id) {
-                s.clone()
-            } else {
-                self.get_header_score(&header.parent_id)?
-                    .unwrap_or_else(|| vec![0u8])
-            };
+            let parent_score: Vec<u8> =
+                if header.parent_id == ModifierId::GENESIS_PARENT || header.height == 0 {
+                    // Genesis header — always connected.
+                    chunk_connected = true;
+                    vec![0u8]
+                } else if let Some(s) = in_flight_scores.get(&header.parent_id) {
+                    // Parent was applied earlier in this same bulk call — connected.
+                    chunk_connected = true;
+                    s.clone()
+                } else {
+                    match self.get_header_score(&header.parent_id)? {
+                        Some(s) => {
+                            // Parent genuinely found in DB — connected.
+                            chunk_connected = true;
+                            s
+                        }
+                        None => {
+                            // Parent not in DB yet — orphan chunk; use score 0
+                            // but do NOT set chunk_connected.
+                            vec![0u8]
+                        }
+                    }
+                };
             let our_score = add_scores(&parent_score, &difficulty_from_nbits(header.n_bits));
 
             // 1. Store raw header bytes.
@@ -259,7 +287,10 @@ impl HistoryDb {
             // 4. Cumulative score.
             batch.put_index(&header_score_key(id), &our_score);
 
-            // Track best header: no existing best means this header always wins.
+            // Track best header candidate (only meaningful when chunk_connected).
+            // We still track the candidate unconditionally here so the score
+            // comparison is monotone within the loop, but we only write it to
+            // the batch below if chunk_connected is true.
             let is_new_best = match &best_score {
                 None => true,
                 Some(current) => Self::is_score_greater(&our_score, current),
@@ -273,8 +304,14 @@ impl HistoryDb {
             applied.push(*id);
         }
 
-        if let Some(best_id) = best_id_candidate {
-            batch.put_index(&best_header_key(), &best_id.0);
+        // Only update the persisted best-header pointer when the chunk is
+        // connected to the main chain.  Orphan chunks start scoring from 0,
+        // which can accidentally exceed the real cumulative score and corrupt
+        // the best-header pointer, causing best_header_height() to regress.
+        if chunk_connected {
+            if let Some(best_id) = best_id_candidate {
+                batch.put_index(&best_header_key(), &best_id.0);
+            }
         }
 
         batch.write()?;

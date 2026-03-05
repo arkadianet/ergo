@@ -155,6 +155,15 @@ pub struct ProcessorState {
     /// Out-of-order modifier cache for buffering modifiers received
     /// before their dependencies are available.
     pub cache: ModifiersCache,
+    /// Highest header height written by fast-sync bulk writes.
+    ///
+    /// `best_header_height()` only advances along the connected P2P chain
+    /// tip, which lags far behind the bulk-write frontier during fast header
+    /// sync.  This field tracks the highest height actually written to DB by
+    /// any `BulkHeaders` batch so the throttle in `fast_header_sync.rs` can
+    /// compare against a realistic write frontier rather than the stale P2P
+    /// tip.
+    pub fast_sync_write_height: u32,
 }
 
 impl ProcessorState {
@@ -163,6 +172,7 @@ impl ProcessorState {
         Self {
             node_view,
             cache: ModifiersCache::with_default_capacities(),
+            fast_sync_write_height: 0,
         }
     }
 
@@ -490,6 +500,11 @@ fn process_bulk_headers(
     headers: Vec<(ModifierId, Box<Header>, Vec<u8>)>,
     accum: &mut BatchAccum<'_>,
 ) {
+    // Build a map of modifier_id -> height so we can determine the highest
+    // applied height without an extra DB round-trip.
+    let id_to_height: std::collections::HashMap<ModifierId, u32> =
+        headers.iter().map(|(id, h, _)| (*id, h.height)).collect();
+
     let flat: Vec<(ModifierId, Header, Vec<u8>)> = headers
         .into_iter()
         .map(|(id, h, raw)| (id, *h, raw))
@@ -498,10 +513,19 @@ fn process_bulk_headers(
     match state.node_view.history.bulk_store_headers(&flat) {
         Ok(applied_ids) => {
             let count = applied_ids.len();
+            let mut max_height = 0u32;
             for id in applied_ids {
+                if let Some(&h) = id_to_height.get(&id) {
+                    if h > max_height {
+                        max_height = h;
+                    }
+                }
                 accum.new_headers.push(id);
             }
-            tracing::debug!(count, "bulk_headers: batch written");
+            if max_height > state.fast_sync_write_height {
+                state.fast_sync_write_height = max_height;
+            }
+            tracing::debug!(count, max_height, "bulk_headers: batch written");
         }
         Err(e) => {
             tracing::error!(%e, "bulk_headers: batch write failed");
@@ -661,7 +685,16 @@ fn send_state_update(
     state: &mut ProcessorState,
     evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
 ) {
-    let headers_height = state.node_view.history.best_header_height().unwrap_or(0);
+    // Use the max of the P2P chain tip height and the fast-sync bulk-write
+    // frontier.  During fast header sync, bulk writes fill the DB far ahead
+    // of the connected P2P tip, so using only best_header_height() would make
+    // the throttle think the processor is behind.
+    let headers_height = state
+        .node_view
+        .history
+        .best_header_height()
+        .unwrap_or(0)
+        .max(state.fast_sync_write_height);
     let full_height = state
         .node_view
         .history
