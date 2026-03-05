@@ -220,6 +220,16 @@ async fn main() {
                     );
                 }
 
+                // Fast-forward best_full_block past any already-Valid blocks
+                // from a previous run.  Without this, each incoming body section
+                // would replay through the already-applied range one batch at a time.
+                if let Err(e) = node_view.fast_forward_valid_blocks() {
+                    tracing::error!(
+                        error = %e,
+                        "processor: fast-forward valid blocks failed, continuing anyway"
+                    );
+                }
+
                 ProcessorState::new(node_view)
             });
         })

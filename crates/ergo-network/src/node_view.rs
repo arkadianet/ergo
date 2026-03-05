@@ -1232,10 +1232,9 @@ impl NodeViewHolder {
             // Trust the declared block_version (max with what we computed) so that
             // voted-in version upgrades (e.g. v2→v3) don't block validation.
             if block.header.height % self.epoch_length == 0 && block.header.height > 0 {
-                if let Ok(declared) = Parameters::from_extension(
-                    block.header.height,
-                    &block.extension,
-                ) {
+                if let Ok(declared) =
+                    Parameters::from_extension(block.header.height, &block.extension)
+                {
                     let dv = declared.block_version();
                     if dv > pv {
                         self.voting_epoch_info

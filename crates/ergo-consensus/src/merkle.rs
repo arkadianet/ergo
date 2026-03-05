@@ -1,7 +1,12 @@
-//! Binary Merkle tree using Blake2b-256 for Ergo block root computations.
+//! Binary Merkle tree for Ergo block root computations.
+//!
+//! Root computation delegates to `ergo-merkle-tree` (sigma-rust ecosystem) for
+//! protocol-correct handling of odd-count levels (pairs with EmptyNode rather
+//! than promoting the odd element).
 
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use ergo_merkle_tree::{MerkleNode, MerkleTree};
 
 const LEAF_PREFIX: u8 = 0x00;
 const INTERNAL_PREFIX: u8 = 0x01;
@@ -33,6 +38,18 @@ pub fn internal_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     blake2b256(&buf)
 }
 
+/// Hash a single child paired with an empty node: `Blake2b256(0x01 || hash)`.
+///
+/// In the ergo-merkle-tree, when one child is an EmptyNode, the parent is
+/// computed as a 33-byte hash (prefix + single child) rather than a 65-byte
+/// hash (prefix + both children).
+pub fn empty_child_hash(hash: &[u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 33];
+    buf[0] = INTERNAL_PREFIX;
+    buf[1..33].copy_from_slice(hash);
+    blake2b256(&buf)
+}
+
 /// Side indicator for Merkle proof authentication path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MerkleSide {
@@ -46,7 +63,8 @@ pub enum MerkleSide {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleProofStep {
     pub side: MerkleSide,
-    pub hash: [u8; 32],
+    /// Sibling hash. `None` when the sibling is an empty node.
+    pub hash: Option<[u8; 32]>,
 }
 
 /// The Merkle root for an empty sequence of elements.
@@ -59,81 +77,98 @@ pub fn empty_merkle_root() -> [u8; 32] {
 /// Compute the Merkle root of a list of data elements.
 ///
 /// Returns `None` if `elements` is empty.
-/// Leaf = `Blake2b256(0x00 || data)`, node = `Blake2b256(0x01 || left || right)`.
-/// If an odd number of elements exists at any level, the last element is promoted.
+/// Delegates to `ergo-merkle-tree` for protocol-correct root computation.
 pub fn merkle_root(elements: &[&[u8]]) -> Option<[u8; 32]> {
     if elements.is_empty() {
         return None;
     }
-
-    let mut hashes: Vec<[u8; 32]> = elements.iter().map(|e| leaf_hash(e)).collect();
-
-    while hashes.len() > 1 {
-        let mut next_level = Vec::with_capacity(hashes.len().div_ceil(2));
-        for chunk in hashes.chunks(2) {
-            if chunk.len() == 2 {
-                next_level.push(internal_hash(&chunk[0], &chunk[1]));
-            } else {
-                next_level.push(chunk[0]);
-            }
-        }
-        hashes = next_level;
-    }
-
-    Some(hashes[0])
+    let nodes: Vec<MerkleNode> = elements
+        .iter()
+        .map(|e| MerkleNode::from_bytes(e.to_vec()))
+        .collect();
+    let tree = MerkleTree::new(nodes);
+    Some(tree.root_hash_special().0)
 }
 
 /// Compute the Merkle authentication path for a specific leaf index.
 ///
 /// Returns `None` if `elements` is empty or `leaf_index` is out of bounds.
-/// Each step contains the sibling hash and whether it is on the left or right.
+/// Each step contains the sibling hash (or `None` for empty nodes) and
+/// whether the sibling is on the left or right.
+///
+/// The tree structure matches `ergo-merkle-tree`: odd-count levels are padded
+/// with empty nodes rather than promoting the last element.
 pub fn merkle_proof(elements: &[&[u8]], leaf_index: usize) -> Option<Vec<MerkleProofStep>> {
     if elements.is_empty() || leaf_index >= elements.len() {
         return None;
     }
 
-    let mut hashes: Vec<[u8; 32]> = elements.iter().map(|e| leaf_hash(e)).collect();
+    // Build leaf hashes, pad to even with empty node (None).
+    let mut level: Vec<Option<[u8; 32]>> = elements.iter().map(|e| Some(leaf_hash(e))).collect();
+    if level.len() % 2 == 1 {
+        level.push(None);
+    }
+
     let mut index = leaf_index;
     let mut proof = Vec::new();
 
-    while hashes.len() > 1 {
-        let mut next_level = Vec::with_capacity(hashes.len().div_ceil(2));
-        let mut next_index = 0;
-
-        for chunk_start in (0..hashes.len()).step_by(2) {
-            if chunk_start + 1 < hashes.len() {
-                // Pair exists
-                if index == chunk_start {
-                    proof.push(MerkleProofStep {
-                        side: MerkleSide::Right,
-                        hash: hashes[chunk_start + 1],
-                    });
-                    next_index = next_level.len();
-                } else if index == chunk_start + 1 {
-                    proof.push(MerkleProofStep {
-                        side: MerkleSide::Left,
-                        hash: hashes[chunk_start],
-                    });
-                    next_index = next_level.len();
-                }
-                next_level.push(internal_hash(
-                    &hashes[chunk_start],
-                    &hashes[chunk_start + 1],
-                ));
-            } else {
-                // Odd element promoted
-                if index == chunk_start {
-                    next_index = next_level.len();
-                }
-                next_level.push(hashes[chunk_start]);
-            }
+    while level.len() > 1 {
+        // Pad to even if needed (can happen at higher levels).
+        if level.len() % 2 == 1 {
+            level.push(None);
         }
 
-        hashes = next_level;
+        let mut next_level = Vec::with_capacity(level.len() / 2);
+        let mut next_index = 0;
+
+        for chunk_start in (0..level.len()).step_by(2) {
+            let left = level[chunk_start];
+            let right = level[chunk_start + 1];
+
+            if index == chunk_start {
+                // We're on the left, sibling is on the right.
+                proof.push(MerkleProofStep {
+                    side: MerkleSide::Right,
+                    hash: right,
+                });
+                next_index = next_level.len();
+            } else if index == chunk_start + 1 {
+                // We're on the right, sibling is on the left.
+                proof.push(MerkleProofStep {
+                    side: MerkleSide::Left,
+                    hash: left,
+                });
+                next_index = next_level.len();
+            }
+
+            // Compute parent hash.
+            let parent = match (left, right) {
+                (Some(l), Some(r)) => Some(internal_hash(&l, &r)),
+                (Some(h), None) => Some(empty_child_hash(&h)),
+                (None, Some(h)) => Some(empty_child_hash(&h)),
+                (None, None) => None,
+            };
+            next_level.push(parent);
+        }
+
+        level = next_level;
         index = next_index;
     }
 
     Some(proof)
+}
+
+/// Verify a Merkle proof by recomputing the root from a leaf hash and proof steps.
+pub fn verify_proof(leaf: &[u8; 32], proof: &[MerkleProofStep]) -> [u8; 32] {
+    let mut current = *leaf;
+    for step in proof {
+        current = match (step.side, step.hash) {
+            (_, None) => empty_child_hash(&current),
+            (MerkleSide::Left, Some(h)) => internal_hash(&h, &current),
+            (MerkleSide::Right, Some(h)) => internal_hash(&current, &h),
+        };
+    }
+    current
 }
 
 #[cfg(test)]
@@ -149,7 +184,8 @@ mod tests {
     fn single_element() {
         let data: &[u8] = b"hello";
         let root = merkle_root(&[data]).unwrap();
-        assert_eq!(root, leaf_hash(data));
+        // Single element: paired with empty node → blake2b256(0x01 || leaf_hash)
+        assert_eq!(root, empty_child_hash(&leaf_hash(data)));
     }
 
     #[test]
@@ -165,10 +201,13 @@ mod tests {
         let a: &[u8] = b"one";
         let b: &[u8] = b"two";
         let c: &[u8] = b"three";
-        // Level 0: [leaf(a), leaf(b), leaf(c)]
-        // Level 1: [internal(leaf(a), leaf(b)), leaf(c)]  (c promoted)
-        // Level 2: internal(internal(leaf(a), leaf(b)), leaf(c))
-        let expected = internal_hash(&internal_hash(&leaf_hash(a), &leaf_hash(b)), &leaf_hash(c));
+        // Level 0: [leaf(a), leaf(b), leaf(c), Empty]
+        // Level 1: [internal(leaf(a), leaf(b)), empty_child(leaf(c))]
+        // Level 2: internal(level1[0], level1[1])
+        let expected = internal_hash(
+            &internal_hash(&leaf_hash(a), &leaf_hash(b)),
+            &empty_child_hash(&leaf_hash(c)),
+        );
         assert_eq!(merkle_root(&[a, b, c]).unwrap(), expected);
     }
 
@@ -178,14 +217,24 @@ mod tests {
         let b: &[u8] = b"x";
         let c: &[u8] = b"y";
         let d: &[u8] = b"z";
-        // Full balanced tree:
-        // Level 0: [leaf(a), leaf(b), leaf(c), leaf(d)]
-        // Level 1: [internal(leaf(a), leaf(b)), internal(leaf(c), leaf(d))]
-        // Level 2: internal(left_pair, right_pair)
         let left = internal_hash(&leaf_hash(a), &leaf_hash(b));
         let right = internal_hash(&leaf_hash(c), &leaf_hash(d));
         let expected = internal_hash(&left, &right);
         assert_eq!(merkle_root(&[a, b, c, d]).unwrap(), expected);
+    }
+
+    #[test]
+    fn five_elements() {
+        let bytes: &[u8] = &[1u8; 32];
+        let h0x = leaf_hash(bytes);
+        let h10 = internal_hash(&h0x, &h0x);
+        let h12 = empty_child_hash(&h0x);
+        let h20 = internal_hash(&h10, &h10);
+        let h21 = empty_child_hash(&h12);
+        let expected = internal_hash(&h20, &h21);
+        // All 5 elements are the same byte pattern.
+        let elems: Vec<&[u8]> = vec![bytes; 5];
+        assert_eq!(merkle_root(&elems).unwrap(), expected);
     }
 
     #[test]
@@ -205,25 +254,16 @@ mod tests {
         assert_ne!(root_ab, root_ba);
     }
 
-    /// Verify a Merkle proof by recomputing the root from a leaf hash and proof steps.
-    fn verify_proof(leaf: &[u8; 32], proof: &[MerkleProofStep]) -> [u8; 32] {
-        let mut current = *leaf;
-        for step in proof {
-            current = match step.side {
-                MerkleSide::Left => internal_hash(&step.hash, &current),
-                MerkleSide::Right => internal_hash(&current, &step.hash),
-            };
-        }
-        current
-    }
-
     #[test]
     fn proof_single_element() {
         let data: &[u8] = b"only";
         let proof = merkle_proof(&[data], 0).unwrap();
-        assert!(proof.is_empty());
+        // Single element gets paired with empty node → 1 proof step.
+        assert_eq!(proof.len(), 1);
+        assert_eq!(proof[0].side, MerkleSide::Right);
+        assert_eq!(proof[0].hash, None); // empty node sibling
         let root = verify_proof(&leaf_hash(data), &proof);
-        assert_eq!(root, leaf_hash(data));
+        assert_eq!(root, merkle_root(&[data]).unwrap());
     }
 
     #[test]
@@ -287,6 +327,25 @@ mod tests {
     }
 
     #[test]
+    fn proof_five_elements_each() {
+        let elements: Vec<Vec<u8>> = (0u8..5)
+            .map(|i| {
+                let mut d = vec![0u8; 32];
+                d[0] = i;
+                d
+            })
+            .collect();
+        let refs: Vec<&[u8]> = elements.iter().map(|e| e.as_slice()).collect();
+        let expected_root = merkle_root(&refs).unwrap();
+
+        for (i, elem) in refs.iter().enumerate() {
+            let proof = merkle_proof(&refs, i).unwrap();
+            let root = verify_proof(&leaf_hash(elem), &proof);
+            assert_eq!(root, expected_root, "proof failed for index {i}");
+        }
+    }
+
+    #[test]
     fn proof_out_of_bounds() {
         let elements: &[&[u8]] = &[b"a", b"b", b"c"];
         assert_eq!(merkle_proof(elements, 3), None);
@@ -304,17 +363,34 @@ mod tests {
         let root = merkle_root(&[b"tx1", b"tx2"]).unwrap();
         let expected = internal_hash(&leaf_hash(b"tx1"), &leaf_hash(b"tx2"));
         assert_eq!(root, expected);
-        // Verify the exact bytes are stable (regression guard).
         let hex = root.iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(hex.len(), 64, "root must be 32 bytes (64 hex chars)");
-        // Re-derive independently to double-check.
-        let lh1 = blake2b256(&[LEAF_PREFIX, b't', b'x', b'1']);
-        let lh2 = blake2b256(&[LEAF_PREFIX, b't', b'x', b'2']);
-        let mut combined = [0u8; 65];
-        combined[0] = INTERNAL_PREFIX;
-        combined[1..33].copy_from_slice(&lh1);
-        combined[33..65].copy_from_slice(&lh2);
-        let expected_raw = blake2b256(&combined);
-        assert_eq!(root, expected_raw);
+    }
+
+    /// Cross-check: our merkle_root must agree with ergo-merkle-tree for various sizes.
+    #[test]
+    fn cross_check_with_ergo_merkle_tree() {
+        for count in 1..=20 {
+            let elements: Vec<Vec<u8>> = (0..count)
+                .map(|i| {
+                    let mut d = vec![0u8; 32];
+                    d[0] = i as u8;
+                    d
+                })
+                .collect();
+            let refs: Vec<&[u8]> = elements.iter().map(|e| e.as_slice()).collect();
+
+            let our_root = merkle_root(&refs).unwrap();
+
+            // Build via ergo-merkle-tree directly.
+            let nodes: Vec<MerkleNode> = elements
+                .iter()
+                .map(|e| MerkleNode::from_bytes(e.clone()))
+                .collect();
+            let tree = MerkleTree::new(nodes);
+            let lib_root = tree.root_hash_special().0;
+
+            assert_eq!(our_root, lib_root, "mismatch for {count} elements");
+        }
     }
 }

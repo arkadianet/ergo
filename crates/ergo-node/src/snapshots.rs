@@ -232,6 +232,7 @@ impl SnapshotsDb {
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, SnapshotError> {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
+        opts.set_max_open_files(256);
         let db =
             rocksdb::DB::open(&opts, path).map_err(|e| SnapshotError::Storage(e.to_string()))?;
         Ok(Self { db })

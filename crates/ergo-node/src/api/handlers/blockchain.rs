@@ -205,10 +205,8 @@ pub(crate) async fn blockchain_box_by_id_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<IndexedErgoBoxResponse>, (StatusCode, Json<ApiError>)> {
-    let db = require_indexer(&state)
-        .map_err(|(status, msg)| api_error(status, &msg))?;
-    let box_id = hex_to_32bytes(&id)
-        .map_err(|(status, msg)| api_error(status, &msg))?;
+    let db = require_indexer(&state).map_err(|(status, msg)| api_error(status, &msg))?;
+    let box_id = hex_to_32bytes(&id).map_err(|(status, msg)| api_error(status, &msg))?;
     let b = ergo_indexer::queries::get_box(db, &box_id)
         .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Box not found"))?;

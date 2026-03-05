@@ -17,6 +17,9 @@ Thumbs.db
 .ergo/
 .ergo-testnet/
 
+# GeoIP database (binary, ~60MB)
+data/*.mmdb
+
 # Environment
 .env
 .env.*

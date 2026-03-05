@@ -87,6 +87,8 @@ pub struct NodeSettings {
     pub fast_sync_chunk_size: u32,
     #[serde(default = "default_fast_sync_max_concurrent")]
     pub fast_sync_max_concurrent: u32,
+    #[serde(default = "default_fast_sync_api_peers")]
+    pub fast_sync_api_peers: Vec<String>,
 }
 
 fn default_keep_versions() -> u32 {
@@ -129,10 +131,27 @@ fn default_make_snapshot_every() -> u32 {
     52224
 }
 fn default_fast_sync_chunk_size() -> u32 {
-    8192
+    2048
 }
 fn default_fast_sync_max_concurrent() -> u32 {
-    8
+    50
+}
+fn default_fast_sync_api_peers() -> Vec<String> {
+    vec![
+        "https://ergo-node.eutxo.de".into(),
+        "https://node.sigmaspace.io".into(),
+        "https://ergo1.oette.info".into(),
+        "https://ergo2.oette.info".into(),
+        "https://node.ergo.watch".into(),
+        "https://ergonode.blocpow.io".into(),
+        "http://213.239.193.208:9053".into(),
+        "http://api.ovh-ergo-node-mainnet.guapswap.org".into(),
+        "http://51.81.84.167:9053".into(),
+        "http://76.119.196.68:9053".into(),
+        "http://bp.lakecardano.com:9053".into(),
+        "http://80.209.232.82:9053".into(),
+        "http://207.172.128.57:9053".into(),
+    ]
 }
 fn default_voting_targets() -> Vec<u8> {
     vec![0, 0, 0]
@@ -609,8 +628,8 @@ timeout_secs = 5
     fn fast_sync_settings_defaults() {
         let settings: ErgoSettings = toml::from_str(MINIMAL_CONFIG).unwrap();
         assert!(!settings.ergo.node.fast_header_sync);
-        assert_eq!(settings.ergo.node.fast_sync_chunk_size, 8192);
-        assert_eq!(settings.ergo.node.fast_sync_max_concurrent, 8);
+        assert_eq!(settings.ergo.node.fast_sync_chunk_size, 2048);
+        assert_eq!(settings.ergo.node.fast_sync_max_concurrent, 50);
     }
 
     #[test]

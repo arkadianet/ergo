@@ -135,7 +135,10 @@ impl HistoryDb {
                 let sections = header.section_ids(&header_id);
                 for (type_id, section_id) in &sections {
                     // Check by header_id (internal DB key)
-                    if !self.contains_modifier(*type_id, &header_id).unwrap_or(false) {
+                    if !self
+                        .contains_modifier(*type_id, &header_id)
+                        .unwrap_or(false)
+                    {
                         // Return section_id for the wire
                         result.push((*type_id, *section_id));
                         if result.len() >= max {

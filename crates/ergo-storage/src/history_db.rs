@@ -87,7 +87,8 @@ impl HistoryDb {
     /// read access.  Useful for the HTTP API while the event loop holds the
     /// primary read-write handle.
     pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        let opts = Options::default();
+        let mut opts = Options::default();
+        opts.set_max_open_files(256);
         let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, Options::default());
         let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, Options::default());
         let db =

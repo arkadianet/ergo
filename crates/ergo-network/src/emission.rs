@@ -286,10 +286,7 @@ mod tests {
         // (height 1 < reemission activation, so no charge)
         assert_eq!(info.miner_reward, 67 * COINS_IN_ONE_ERG + 500_000_000);
         assert_eq!(info.total_coins_issued, 75 * COINS_IN_ONE_ERG);
-        assert_eq!(
-            info.total_remain_coins,
-            COINS_TOTAL - 75 * COINS_IN_ONE_ERG
-        );
+        assert_eq!(info.total_remain_coins, COINS_TOTAL - 75 * COINS_IN_ONE_ERG);
     }
 
     #[test]

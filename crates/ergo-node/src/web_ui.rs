@@ -1439,6 +1439,9 @@ pub const PANEL_HTML: &str = r##"<!DOCTYPE html>
       if (headersCaughtUp && blocksCaughtUp) {
         syncBadgeText = 'Synced';
         syncBadgeVariant = 'synced';
+      } else if (!headersCaughtUp && info.fastSyncActive) {
+        syncBadgeText = 'Fast Syncing Headers...';
+        syncBadgeVariant = 'syncing';
       } else if (!headersCaughtUp) {
         syncBadgeText = 'Syncing Headers...';
         syncBadgeVariant = 'syncing';

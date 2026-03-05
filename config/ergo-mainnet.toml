@@ -11,6 +11,8 @@ max_transaction_cost = 4900000
 max_transaction_size = 98304
 extra_index = true
 checkpoint_height = 1231454
+geoip_db_path = "data/GeoLite2-City.mmdb"
+fast_header_sync = true
 
 [ergo.chain]
 protocol_version = 4
