@@ -85,12 +85,25 @@ async fn main() {
         "starting ergo-node",
     );
 
-    let db_path = Path::new(&settings.ergo.directory).join("history");
+    let data_dir = Path::new(&settings.ergo.directory);
+
+    // Detect old DB format and refuse to start — user must re-sync.
+    let old_history_path = data_dir.join("history");
+    let node_db_path = data_dir.join("node");
+    if old_history_path.exists() && !node_db_path.exists() {
+        tracing::error!(
+            "Old database format detected. Storage layout has changed. \
+             Please delete your data directory ({}) and re-sync from the network.",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
 
     // Open a single shared NodeDb. All HistoryDb wrappers share the same
     // underlying RocksDB instance and see each other's writes immediately.
-    let node_db =
-        Arc::new(NodeDb::open(&db_path).unwrap_or_else(|e| panic!("cannot open database: {e}")));
+    let node_db = Arc::new(
+        NodeDb::open(&node_db_path).unwrap_or_else(|e| panic!("cannot open node database: {e}")),
+    );
 
     // Log current best chain tips.
     {
