@@ -27,6 +27,8 @@ struct PeerHandle {
     id: PeerId,
     addr: SocketAddr,
     peer_name: String,
+    /// User-configured node name from the handshake PeerSpec.
+    node_name: String,
     tx: mpsc::Sender<(u8, Vec<u8>)>,
     /// Epoch milliseconds when the peer connected (used for `lastHandshake`).
     connected_at: u64,
@@ -46,6 +48,8 @@ pub struct ConnectedPeerEntry {
     pub id: PeerId,
     pub addr: SocketAddr,
     pub peer_name: String,
+    /// User-configured node name from the handshake PeerSpec.
+    pub node_name: String,
     pub connected_at: u64,
     pub direction: ConnectionDirection,
     pub version: ProtocolVersion,
@@ -125,6 +129,7 @@ impl ConnectionPool {
         )
         .await?;
         let peer_name = peer_hs.peer_spec.agent_name.clone();
+        let node_name = peer_hs.peer_spec.node_name.clone();
 
         let id = self.next_id;
         self.next_id += 1;
@@ -154,6 +159,7 @@ impl ConnectionPool {
                 id,
                 addr,
                 peer_name,
+                node_name,
                 tx: outbox_tx,
                 connected_at,
                 task,
@@ -196,6 +202,7 @@ impl ConnectionPool {
         direction: ConnectionDirection,
     ) -> PeerId {
         let peer_name = peer_hs.peer_spec.agent_name.clone();
+        let node_name = peer_hs.peer_spec.node_name.clone();
         let version = peer_hs.peer_spec.protocol_version;
 
         let id = self.next_id;
@@ -225,6 +232,7 @@ impl ConnectionPool {
                 id,
                 addr,
                 peer_name,
+                node_name,
                 tx: outbox_tx,
                 connected_at,
                 task,
@@ -301,6 +309,7 @@ impl ConnectionPool {
                 id: h.id,
                 addr: h.addr,
                 peer_name: h.peer_name.clone(),
+                node_name: h.node_name.clone(),
                 connected_at: h.connected_at,
                 direction: h.direction,
                 version: h.version,

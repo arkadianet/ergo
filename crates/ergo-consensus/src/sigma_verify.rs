@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-use ergo_lib::chain::ergo_state_context::ErgoStateContext as SigmaErgoStateContext;
+/// Re-exported sigma-rust `ErgoStateContext` for use by callers of
+/// [`verify_transaction_with_sigma_ctx`].
+pub use ergo_lib::chain::ergo_state_context::ErgoStateContext as SigmaErgoStateContext;
 use ergo_lib::chain::parameters::Parameters as SigmaParameters;
 use ergo_lib::chain::transaction::input::prover_result::ProverResult as SigmaProverResult;
 use ergo_lib::chain::transaction::{DataInput as SigmaDataInput, Transaction as SigmaTransaction};
@@ -629,12 +631,67 @@ pub fn verify_transaction(
     Ok(cost)
 }
 
+/// Verify all inputs of a transaction using a **pre-converted** sigma-rust
+/// [`SigmaErgoStateContext`], avoiding the per-tx overhead of header EC-point
+/// parsing and parameter conversion.
+///
+/// This is the hot-path variant used during block validation where the same
+/// state context is shared across all transactions in a block. For one-off
+/// verification (e.g. mempool), use [`verify_transaction`] instead.
+///
+/// # Returns
+///
+/// * `Ok(0)` if `current_height <= checkpoint_height` (verification skipped).
+/// * `Ok(jit_cost)` — the real JIT execution cost from sigma-rust.
+/// * `Err(SigmaVerifyError)` on any failure.
+pub fn verify_transaction_with_sigma_ctx(
+    tx: &ErgoTransaction,
+    input_boxes: &[ErgoBox],
+    data_boxes: &[ErgoBox],
+    sigma_state_ctx: &SigmaErgoStateContext,
+    current_height: u32,
+    checkpoint_height: u32,
+) -> Result<u64, SigmaVerifyError> {
+    if current_height <= checkpoint_height {
+        return Ok(0);
+    }
+
+    let sigma_tx = convert_transaction(tx)?;
+
+    let sigma_input_boxes: Vec<SigmaErgoBox> = input_boxes
+        .iter()
+        .map(convert_ergo_box)
+        .collect::<Result<_, _>>()?;
+
+    let sigma_data_boxes: Vec<SigmaErgoBox> = data_boxes
+        .iter()
+        .map(convert_ergo_box)
+        .collect::<Result<_, _>>()?;
+
+    let tx_context = ergo_lib::wallet::tx_context::TransactionContext::new(
+        sigma_tx,
+        sigma_input_boxes,
+        sigma_data_boxes,
+    )
+    .map_err(|e| SigmaVerifyError::Verification(format!("TransactionContext: {e}")))?;
+
+    let cost = tx_context.validate(sigma_state_ctx).map_err(|e| match e {
+        ergo_lib::chain::transaction::ergo_transaction::TxValidationError::ReducedToFalse(
+            idx,
+            _,
+        ) => SigmaVerifyError::ScriptFalse(idx),
+        other => SigmaVerifyError::Verification(format!("{other}")),
+    })?;
+
+    Ok(cost)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_types::transaction::{BoxId, DataInput, ErgoBoxCandidate, Input, TxId};
+    use ergo_types::transaction::{BoxId, DataInput, ErgoBox, ErgoBoxCandidate, Input, TxId};
 
     /// Helper: create a minimal ErgoBox for testing.
     fn make_test_box(value: u64, tree_bytes: Vec<u8>, tx_id: TxId, index: u16) -> ErgoBox {
@@ -645,7 +702,7 @@ mod tests {
             tokens: Vec::new(),
             additional_registers: Vec::new(),
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, index);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, index);
         ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -790,7 +847,7 @@ mod tests {
             tokens: vec![(token_id, 100)],
             additional_registers: vec![],
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, 0);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, 0);
         let our_box = ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -819,7 +876,7 @@ mod tests {
             tokens: vec![],
             additional_registers: vec![(4, r4_bytes)],
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, 0);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, 0);
         let our_box = ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -995,10 +1052,24 @@ mod tests {
 
     #[test]
     fn test_convert_ergo_box_zero_value_rejected() {
-        // BoxValue(0) is invalid in sigma-rust, it should error.
+        // BoxValue(0) is invalid in sigma-rust; convert_ergo_box should return an error.
+        // We bypass make_test_box (which calls compute_box_id and would panic on value=0)
+        // by constructing the ErgoBox directly with a dummy box_id.
         let tree_bytes = p2pk_tree_bytes();
         let tx_id = TxId([0xA2; 32]);
-        let our_box = make_test_box(0, tree_bytes, tx_id, 0);
+        let candidate = ErgoBoxCandidate {
+            value: 0,
+            ergo_tree_bytes: tree_bytes,
+            creation_height: 0,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        };
+        let our_box = ErgoBox {
+            box_id: BoxId([0xA2; 32]), // dummy — not used by convert_ergo_box
+            candidate,
+            transaction_id: tx_id,
+            index: 0,
+        };
         let result = convert_ergo_box(&our_box);
         assert!(result.is_err(), "zero value box should be rejected");
         let err_msg = result.unwrap_err().to_string();
@@ -1031,7 +1102,7 @@ mod tests {
             tokens,
             additional_registers: vec![],
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, 0);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, 0);
         let our_box = ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -1635,5 +1706,88 @@ mod tests {
         // inAssetsNum=2, outAssetsNum=1, inAssetsSize=1 (1 unique), outAssetsSize=1 (1 unique)
         // (1 + 2) * 100 + (1 + 1) * 100 = 300 + 200 = 500
         assert_eq!(cost, (1 + 2) * token_cost + (1 + 1) * token_cost);
+    }
+
+    // ── verify_transaction_with_sigma_ctx tests ────────────────────
+
+    #[test]
+    fn test_verify_with_sigma_ctx_skips_below_checkpoint() {
+        let tx = ErgoTransaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+            tx_id: TxId([0xB0; 32]),
+        };
+        // Build a dummy SigmaErgoStateContext via convert_state_context
+        let gen_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let gen_bytes = base16::decode(gen_hex).unwrap();
+        let mut miner_pk = [0u8; 33];
+        miner_pk.copy_from_slice(&gen_bytes);
+
+        let ctx = SigmaStateContext {
+            last_headers: vec![],
+            current_height: 100,
+            current_timestamp: 1000,
+            current_n_bits: 100,
+            current_votes: [0; 3],
+            current_miner_pk: miner_pk,
+            state_digest: [0; 33],
+            parameters: crate::parameters::Parameters::genesis(),
+            current_version: 2,
+            current_parent_id: [0; 32],
+        };
+        let sigma_ctx = convert_state_context(&ctx).unwrap();
+
+        // current_height=100, checkpoint=100 => skip
+        let result = verify_transaction_with_sigma_ctx(&tx, &[], &[], &sigma_ctx, 100, 100);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+
+        // current_height=100, checkpoint=200 => skip
+        let result = verify_transaction_with_sigma_ctx(&tx, &[], &[], &sigma_ctx, 100, 200);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_verify_with_sigma_ctx_above_checkpoint_no_inputs() {
+        // Above checkpoint with no inputs should error (sigma-rust requires >= 1 input)
+        let tx = ErgoTransaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate {
+                value: 1_000_000_000,
+                ergo_tree_bytes: p2pk_tree_bytes(),
+                creation_height: 0,
+                tokens: vec![],
+                additional_registers: vec![],
+            }],
+            tx_id: TxId([0xB1; 32]),
+        };
+
+        let gen_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let gen_bytes = base16::decode(gen_hex).unwrap();
+        let mut miner_pk = [0u8; 33];
+        miner_pk.copy_from_slice(&gen_bytes);
+
+        let ctx = SigmaStateContext {
+            last_headers: vec![],
+            current_height: 1000,
+            current_timestamp: 1000,
+            current_n_bits: 100,
+            current_votes: [0; 3],
+            current_miner_pk: miner_pk,
+            state_digest: [0; 33],
+            parameters: crate::parameters::Parameters::genesis(),
+            current_version: 2,
+            current_parent_id: [0; 32],
+        };
+        let sigma_ctx = convert_state_context(&ctx).unwrap();
+
+        let result = verify_transaction_with_sigma_ctx(&tx, &[], &[], &sigma_ctx, 1000, 999);
+        assert!(
+            result.is_err(),
+            "tx with no inputs above checkpoint should fail"
+        );
     }
 }

@@ -3,9 +3,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
-use ergo_types::transaction::{
-    compute_box_id, BoxId, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
-};
+use ergo_types::transaction::{BoxId, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
+use ergo_wire::box_ser::compute_box_id;
 
 /// Compute the blake2b-256 hash of the given data.
 fn blake2b256(data: &[u8]) -> [u8; 32] {
@@ -155,6 +154,7 @@ pub struct ErgoMemPool {
 pub struct HistogramBin {
     pub n_txns: usize,
     pub total_size: usize,
+    pub total_fee: u64,
     pub from_millis: u64,
     pub to_millis: u64,
 }
@@ -516,7 +516,7 @@ impl ErgoMemPool {
     pub fn find_output_by_box_id(&self, target: &BoxId) -> Option<OutputRef<'_>> {
         for entry in self.pool.values() {
             for (idx, output) in entry.tx.output_candidates.iter().enumerate() {
-                let box_id = compute_box_id(&entry.tx.tx_id, idx as u16);
+                let box_id = compute_box_id(output, &entry.tx.tx_id, idx as u16);
                 if box_id == *target {
                     return Some(OutputRef {
                         tx_id: entry.tx.tx_id,
@@ -682,6 +682,7 @@ impl ErgoMemPool {
             .map(|i| HistogramBin {
                 n_txns: 0,
                 total_size: 0,
+                total_fee: 0,
                 from_millis: i as u64 * interval,
                 to_millis: (i as u64 + 1) * interval,
             })
@@ -697,6 +698,7 @@ impl ErgoMemPool {
             let bin_idx = bin_idx.min(bins - 1);
             histogram[bin_idx].n_txns += 1;
             histogram[bin_idx].total_size += entry.tx_size;
+            histogram[bin_idx].total_fee += extract_fee(&entry.tx);
         }
 
         histogram
@@ -707,6 +709,17 @@ impl ErgoMemPool {
 mod tests {
     use super::*;
     use ergo_types::transaction::{ErgoBoxCandidate, Input};
+
+    /// Valid P2PK ErgoTree bytes for the secp256k1 generator point G.
+    /// sigma-rust requires a fully valid ErgoTree for compute_box_id.
+    fn p2pk_tree() -> Vec<u8> {
+        let mut v = vec![0x00, 0x08, 0xCD];
+        v.extend_from_slice(
+            &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap(),
+        );
+        v
+    }
 
     /// Helper to build a minimal transaction with the given tx_id bytes and
     /// input box_id bytes.
@@ -725,7 +738,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: p2pk_tree(),
                 creation_height: 100_000,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -954,14 +967,13 @@ mod tests {
 
     #[test]
     fn find_output_by_box_id() {
-        use ergo_types::transaction::compute_box_id;
-
         let mut pool = ErgoMemPool::with_min_fee(100, 0);
         let tx = make_tx(0x01, &[0xAA]);
         let tx_id = tx.tx_id;
+        let output_candidate = tx.output_candidates[0].clone();
         pool.put(tx).unwrap();
 
-        let expected_box_id = compute_box_id(&tx_id, 0);
+        let expected_box_id = compute_box_id(&output_candidate, &tx_id, 0);
         let output_ref = pool
             .find_output_by_box_id(&expected_box_id)
             .expect("should find the output");
@@ -1088,11 +1100,11 @@ mod tests {
     #[test]
     fn find_outputs_by_tree_hash_matches() {
         let mut pool = ErgoMemPool::with_min_fee(100, 0);
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        // Use the same valid P2PK tree that make_tx produces.
+        let ergo_tree = p2pk_tree();
         let tree_hash = blake2b256(&ergo_tree);
 
         let tx = make_tx(0x01, &[0xAA]);
-        // make_tx creates an output with ergo_tree_bytes = [0x00, 0x08, 0xcd]
         pool.put(tx).unwrap();
 
         let results = pool.find_outputs_by_tree_hash(&tree_hash);
@@ -1116,10 +1128,10 @@ mod tests {
     #[test]
     fn find_txs_by_tree_hash_works() {
         let mut pool = ErgoMemPool::with_min_fee(100, 0);
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        // Use the same valid P2PK tree that make_tx produces.
+        let ergo_tree = p2pk_tree();
         let tree_hash = blake2b256(&ergo_tree);
 
-        // make_tx creates an output with ergo_tree_bytes = [0x00, 0x08, 0xcd]
         let tx = make_tx(0x01, &[0xAA]);
         pool.put(tx).unwrap();
 
@@ -1738,7 +1750,7 @@ mod tests {
             output_candidates: vec![
                 ErgoBoxCandidate {
                     value: 999_000_000,
-                    ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                    ergo_tree_bytes: p2pk_tree(),
                     creation_height: 100_000,
                     tokens: vec![],
                     additional_registers: vec![],

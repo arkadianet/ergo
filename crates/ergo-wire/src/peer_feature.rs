@@ -108,6 +108,7 @@ impl SessionFeature {
 pub enum PeerFeature {
     Mode(ModeFeature),
     Session(SessionFeature),
+    RestApiUrl(String),
     Unknown { id: u8, data: Vec<u8> },
 }
 
@@ -116,6 +117,7 @@ impl PeerFeature {
         match self {
             Self::Mode(_) => FEATURE_ID_MODE,
             Self::Session(_) => FEATURE_ID_SESSION,
+            Self::RestApiUrl(_) => FEATURE_ID_REST_API_URL,
             Self::Unknown { id, .. } => *id,
         }
     }
@@ -124,6 +126,12 @@ impl PeerFeature {
         match self {
             Self::Mode(m) => m.serialize(),
             Self::Session(s) => s.serialize(),
+            Self::RestApiUrl(url) => {
+                let url_bytes = url.as_bytes();
+                let mut buf = vec![url_bytes.len() as u8];
+                buf.extend_from_slice(url_bytes);
+                buf
+            }
             Self::Unknown { data, .. } => data.clone(),
         }
     }
@@ -132,6 +140,19 @@ impl PeerFeature {
         match id {
             FEATURE_ID_MODE => Ok(Self::Mode(ModeFeature::parse(data)?)),
             FEATURE_ID_SESSION => Ok(Self::Session(SessionFeature::parse(data)?)),
+            FEATURE_ID_REST_API_URL => {
+                if data.is_empty() {
+                    return Err(CodecError::UnexpectedEof);
+                }
+                let len = data[0] as usize;
+                if data.len() < 1 + len {
+                    return Err(CodecError::UnexpectedEof);
+                }
+                let url = std::str::from_utf8(&data[1..1 + len])
+                    .map_err(|_| CodecError::UnexpectedEof)?
+                    .to_string();
+                Ok(Self::RestApiUrl(url))
+            }
             _ => Ok(Self::Unknown {
                 id,
                 data: data.to_vec(),
@@ -218,5 +239,38 @@ mod tests {
         assert_eq!(bytes.len(), 6);
         let parsed = SessionFeature::parse(&bytes).unwrap();
         assert_eq!(parsed.session_id, 123);
+    }
+
+    #[test]
+    fn rest_api_url_feature_parse() {
+        // Wire format: 1-byte length + UTF-8 URL bytes
+        let url = b"http://1.2.3.4:9053";
+        let mut data = vec![url.len() as u8];
+        data.extend_from_slice(url);
+        let feature = PeerFeature::parse_feature(FEATURE_ID_REST_API_URL, &data).unwrap();
+        match feature {
+            PeerFeature::RestApiUrl(parsed_url) => {
+                assert_eq!(parsed_url, "http://1.2.3.4:9053");
+            }
+            _ => panic!("expected RestApiUrl variant"),
+        }
+    }
+
+    #[test]
+    fn rest_api_url_feature_roundtrip() {
+        let feature = PeerFeature::RestApiUrl("http://example.com:9053".to_string());
+        assert_eq!(feature.feature_id(), FEATURE_ID_REST_API_URL);
+        let bytes = feature.serialize_bytes();
+        let parsed = PeerFeature::parse_feature(FEATURE_ID_REST_API_URL, &bytes).unwrap();
+        match parsed {
+            PeerFeature::RestApiUrl(url) => assert_eq!(url, "http://example.com:9053"),
+            _ => panic!("expected RestApiUrl"),
+        }
+    }
+
+    #[test]
+    fn rest_api_url_feature_empty_data_returns_error() {
+        let result = PeerFeature::parse_feature(FEATURE_ID_REST_API_URL, &[]);
+        assert!(result.is_err());
     }
 }

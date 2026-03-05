@@ -21,6 +21,25 @@ use ergo_types::transaction::{BoxId, ErgoFullBlock};
 // Helper functions
 // ---------------------------------------------------------------------------
 
+/// Valid P2PK ErgoTree bytes for the secp256k1 generator point G.
+/// sigma-rust requires fully valid ErgoTree bytes in compute_box_id.
+fn p2pk_tree_a() -> Vec<u8> {
+    let mut v = vec![0x00, 0x08, 0xCD];
+    v.extend_from_slice(
+        &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap(),
+    );
+    v
+}
+
+/// Valid P2PK ErgoTree bytes for 2*G.
+fn p2pk_tree_b() -> Vec<u8> {
+    let mut v = vec![0x00, 0x08, 0xCD];
+    v.extend_from_slice(
+        &hex::decode("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5").unwrap(),
+    );
+    v
+}
+
 fn make_key(b: u8) -> ADKey {
     let mut v = vec![0u8; 32];
     v[31] = b;
@@ -49,9 +68,8 @@ fn sample_ext_root() -> [u8; 32] {
     // key = [0x01, 0x00] (2 bytes), value = [0x00] (1 byte)
     // kvToLeaf = [key_len=0x02] ++ key ++ value = [0x02, 0x01, 0x00, 0x00]
     let leaf: Vec<u8> = vec![0x02, 0x01, 0x00, 0x00];
-    let mut prefixed = vec![0x00u8]; // LEAF_PREFIX
-    prefixed.extend_from_slice(&leaf);
-    blake2b256(&prefixed)
+    let slices: Vec<&[u8]> = vec![leaf.as_slice()];
+    ergo_consensus::merkle::merkle_root(&slices).unwrap()
 }
 
 fn make_block(state_root: [u8; 33], ad_proof_bytes: Option<Vec<u8>>) -> ErgoFullBlock {
@@ -2182,9 +2200,17 @@ fn last_n_headers_chain_walk() {
 fn mempool_find_output_by_box_id() {
     use ergo_network::mempool::ErgoMemPool;
     use ergo_types::transaction::*;
+    use ergo_wire::box_ser::compute_box_id;
 
     let mut pool = ErgoMemPool::with_min_fee(100, 0);
     let tx_id = TxId([0x11; 32]);
+    let output_candidate = ErgoBoxCandidate {
+        value: 1_000_000_000,
+        ergo_tree_bytes: p2pk_tree_a(),
+        creation_height: 100_000,
+        tokens: vec![],
+        additional_registers: vec![],
+    };
     let tx = ErgoTransaction {
         inputs: vec![Input {
             box_id: BoxId([0xAA; 32]),
@@ -2192,16 +2218,10 @@ fn mempool_find_output_by_box_id() {
             extension_bytes: vec![0x00],
         }],
         data_inputs: vec![],
-        output_candidates: vec![ErgoBoxCandidate {
-            value: 1_000_000_000,
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
-            creation_height: 100_000,
-            tokens: vec![],
-            additional_registers: vec![],
-        }],
+        output_candidates: vec![output_candidate.clone()],
         tx_id,
     };
-    let expected_box_id = compute_box_id(&tx_id, 0);
+    let expected_box_id = compute_box_id(&output_candidate, &tx_id, 0);
     pool.put(tx).unwrap();
 
     let output = pool.find_output_by_box_id(&expected_box_id);
@@ -2475,7 +2495,9 @@ fn test_address_encode_decode_integration() {
 
 #[test]
 fn test_merkle_proof_verification() {
-    use ergo_consensus::merkle::{internal_hash, leaf_hash, merkle_proof, merkle_root, MerkleSide};
+    use ergo_consensus::merkle::{
+        empty_child_hash, internal_hash, leaf_hash, merkle_proof, merkle_root, MerkleSide,
+    };
 
     // Build 5 tx_id-like elements (32 bytes each, as if they were serialized tx data).
     let elements: Vec<Vec<u8>> = (0u8..5)
@@ -2499,9 +2521,10 @@ fn test_merkle_proof_verification() {
         // Walk the proof to recompute the root.
         let mut current = leaf_hash(elem);
         for step in &proof {
-            current = match step.side {
-                MerkleSide::Left => internal_hash(&step.hash, &current),
-                MerkleSide::Right => internal_hash(&current, &step.hash),
+            current = match (step.side, step.hash) {
+                (_, None) => empty_child_hash(&current),
+                (MerkleSide::Left, Some(h)) => internal_hash(&h, &current),
+                (MerkleSide::Right, Some(h)) => internal_hash(&current, &h),
             };
         }
 
@@ -2556,14 +2579,14 @@ fn test_indexer_indexes_block_and_queries() {
         output_candidates: vec![
             ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x01, 0x02, 0x03],
+                ergo_tree_bytes: p2pk_tree_a(),
                 creation_height: 1,
                 tokens: vec![],
                 additional_registers: vec![],
             },
             ErgoBoxCandidate {
                 value: 500_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x04, 0x05, 0x06],
+                ergo_tree_bytes: p2pk_tree_b(),
                 creation_height: 1,
                 tokens: vec![],
                 additional_registers: vec![],
@@ -2578,7 +2601,7 @@ fn test_indexer_indexes_block_and_queries() {
         data_inputs: vec![],
         output_candidates: vec![ErgoBoxCandidate {
             value: 200_000_000,
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd, 0x07, 0x08, 0x09],
+            ergo_tree_bytes: p2pk_tree_a(),
             creation_height: 1,
             tokens: vec![],
             additional_registers: vec![],
@@ -2664,7 +2687,7 @@ fn test_indexer_rollback() {
     };
     let mut buffer = IndexerBuffer::new();
 
-    let tree = vec![0x00, 0x08, 0xcd, 0x01, 0x02, 0x03];
+    let tree = p2pk_tree_a();
 
     // Index 3 blocks, each with 1 tx and 1 output.
     for height in 1..=3u32 {
@@ -2762,7 +2785,7 @@ fn test_indexer_address_balance() {
     };
     let mut buffer = IndexerBuffer::new();
 
-    let tree = vec![0x00, 0x08, 0xcd, 0x01, 0x02, 0x03];
+    let tree = p2pk_tree_a();
 
     // Create a tx with 2 outputs to the same ErgoTree.
     let tx = ErgoTransaction {
@@ -2806,7 +2829,7 @@ fn test_indexer_address_balance() {
     );
 
     // Verify a different tree returns None.
-    let other_tree = vec![0x00, 0x08, 0xcd, 0xFF, 0xFF, 0xFF];
+    let other_tree = p2pk_tree_b();
     let other_balance = queries::balance_for_address(&db, &other_tree).unwrap();
     assert!(
         other_balance.is_none(),

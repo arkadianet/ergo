@@ -1,13 +1,16 @@
 mod api;
 mod event_loop;
+pub mod fast_header_sync;
+pub mod geoip;
 pub mod mining;
 pub mod snapshot_bootstrap;
 pub mod snapshots;
 mod web_ui;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use clap::Parser;
 use tokio::sync::RwLock;
 
 use ergo_network::block_processor::{self, ProcessorCommand, ProcessorEvent, ProcessorState};
@@ -20,35 +23,35 @@ use ergo_storage::history_db::HistoryDb;
 use crate::api::ApiState;
 use crate::event_loop::SharedState;
 
+#[derive(Parser, Debug)]
+#[command(name = "ergo-node")]
+#[command(about = "Ergo blockchain node (Rust implementation)")]
+struct Args {
+    /// Path to configuration file
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
+    /// Network to connect to (mainnet or testnet)
+    #[arg(short, long)]
+    network: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into())
+                .add_directive("maxminddb=warn".parse().unwrap()),
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let mut config_path: Option<String> = None;
-    let mut network_flag: Option<String> = None;
+    let args = Args::parse();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--network" if i + 1 < args.len() => {
-                network_flag = Some(args[i + 1].clone());
-                i += 2;
-            }
-            _ => {
-                config_path = Some(args[i].clone());
-                i += 1;
-            }
-        }
-    }
-
-    let config_str = if let Some(ref path) = config_path {
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
-    } else if let Some(ref net) = network_flag {
+    let config_str = if let Some(ref path) = args.config {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    } else if let Some(ref net) = args.network {
         match net.as_str() {
             "mainnet" => include_str!("../../../config/ergo-mainnet.toml").to_string(),
             "testnet" => include_str!("../../../config/ergo-testnet.toml").to_string(),
@@ -217,6 +220,16 @@ async fn main() {
                     );
                 }
 
+                // Fast-forward best_full_block past any already-Valid blocks
+                // from a previous run.  Without this, each incoming body section
+                // would replay through the already-applied range one batch at a time.
+                if let Err(e) = node_view.fast_forward_valid_blocks() {
+                    tracing::error!(
+                        error = %e,
+                        "processor: fast-forward valid blocks failed, continuing anyway"
+                    );
+                }
+
                 ProcessorState::new(node_view)
             });
         })
@@ -337,6 +350,16 @@ async fn main() {
             None
         };
 
+    // Initialize GeoIP database if configured.
+    let geoip: geoip::SharedGeoIp = Arc::new(
+        settings
+            .ergo
+            .node
+            .geoip_db_path
+            .as_deref()
+            .and_then(geoip::GeoIp::open),
+    );
+
     // Clone mining_solution_tx before it's moved into ApiState.
     let mining_solution_tx_for_miners = mining_solution_tx.clone();
 
@@ -363,6 +386,7 @@ async fn main() {
         utxo_proof: Some(utxo_proof_tx),
         mining_pub_key_hex: settings.ergo.node.mining_pub_key_hex.clone(),
         snapshots_db: snapshots_db_arc.clone(),
+        geoip: geoip.clone(),
         #[cfg(feature = "wallet")]
         wallet: wallet_arc.clone(),
     };

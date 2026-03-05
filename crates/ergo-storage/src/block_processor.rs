@@ -26,6 +26,14 @@ const AD_PROOFS_TYPE_ID: u8 = 104;
 /// Extension modifier type ID.
 const EXTENSION_TYPE_ID: u8 = 108;
 
+/// Maximum height gap before switching from full ancestor search to forward-walk.
+///
+/// Below this threshold, `find_common_ancestor` + `chain_from_ancestor` is used,
+/// which correctly detects forks but is O(gap). Above this threshold (typical
+/// during initial sync where gap can be millions), a forward walk from
+/// `best_full_block + 1` avoids the catastrophic O(gap²) behavior.
+const LARGE_GAP_THRESHOLD: u32 = 128;
+
 // ---------------------------------------------------------------------------
 // ProgressInfo
 // ---------------------------------------------------------------------------
@@ -127,7 +135,10 @@ impl HistoryDb {
                 let sections = header.section_ids(&header_id);
                 for (type_id, section_id) in &sections {
                     // Check by header_id (internal DB key)
-                    if !self.contains_modifier(*type_id, &header_id).unwrap_or(true) {
+                    if !self
+                        .contains_modifier(*type_id, &header_id)
+                        .unwrap_or(false)
+                    {
                         // Return section_id for the wire
                         result.push((*type_id, *section_id));
                         if result.len() >= max {
@@ -250,21 +261,43 @@ impl HistoryDb {
                     .unwrap_or_else(|| vec![0u8]);
 
                 if Self::is_score_greater(&new_score, &best_score) {
-                    // New block is on a heavier chain — compute fork info.
-                    match self.find_common_ancestor(header_id, &best_id)? {
-                        Some(branch_point) => {
-                            let to_remove = self.chain_from_ancestor(&branch_point, &best_id)?;
-                            let to_apply = self.chain_from_ancestor(&branch_point, header_id)?;
-                            Ok(ProgressInfo::chain_switch(
-                                branch_point,
-                                to_remove,
-                                to_apply,
-                            ))
+                    // New block is on a heavier chain.
+                    // Check height gap to decide strategy: forward walk
+                    // (fast, for initial sync) vs full ancestor search
+                    // (correct for forks, bounded by small gap).
+                    let new_height = self.load_header(header_id)?.map(|h| h.height).unwrap_or(0);
+                    let best_height = self.load_header(&best_id)?.map(|h| h.height).unwrap_or(0);
+                    let gap = new_height.saturating_sub(best_height);
+
+                    if gap > LARGE_GAP_THRESHOLD {
+                        // Large gap (initial sync). Avoid O(gap) ancestor
+                        // search by walking forward from best_full_block,
+                        // collecting consecutive complete blocks.
+                        let to_apply = self.collect_applicable_suffix(&best_id, best_height)?;
+                        if to_apply.is_empty() {
+                            Ok(ProgressInfo::empty())
+                        } else {
+                            Ok(ProgressInfo::apply(to_apply))
                         }
-                        None => {
-                            // No common ancestor found (shouldn't happen
-                            // in practice) — just apply.
-                            Ok(ProgressInfo::apply(vec![*header_id]))
+                    } else {
+                        // Small gap — use full ancestor search (handles forks).
+                        match self.find_common_ancestor(header_id, &best_id)? {
+                            Some(branch_point) => {
+                                let to_remove =
+                                    self.chain_from_ancestor(&branch_point, &best_id)?;
+                                let to_apply =
+                                    self.chain_from_ancestor(&branch_point, header_id)?;
+                                Ok(ProgressInfo::chain_switch(
+                                    branch_point,
+                                    to_remove,
+                                    to_apply,
+                                ))
+                            }
+                            None => {
+                                // No common ancestor found (shouldn't happen
+                                // in practice) — just apply.
+                                Ok(ProgressInfo::apply(vec![*header_id]))
+                            }
                         }
                     }
                 } else {
@@ -346,6 +379,47 @@ impl HistoryDb {
         }
         chain.reverse();
         Ok(chain)
+    }
+
+    /// Walk forward from `best_height + 1`, collecting blocks that form a
+    /// consecutive chain of complete blocks (all sections present).
+    ///
+    /// Stops at the first height where no suitable block is found or after
+    /// collecting [`LARGE_GAP_THRESHOLD`] blocks (whichever comes first).
+    /// Used during initial sync to avoid O(chain_gap) backward traversals.
+    fn collect_applicable_suffix(
+        &self,
+        best_id: &ModifierId,
+        best_height: u32,
+    ) -> Result<Vec<ModifierId>, StorageError> {
+        let mut to_apply = Vec::new();
+        let mut expected_parent = *best_id;
+
+        for height in (best_height + 1).. {
+            if to_apply.len() >= LARGE_GAP_THRESHOLD as usize {
+                break;
+            }
+            let ids = match self.header_ids_at_height(height) {
+                Ok(ids) if !ids.is_empty() => ids,
+                _ => break,
+            };
+            let mut found = false;
+            for id in &ids {
+                if let Some(hdr) = self.load_header(id)? {
+                    if hdr.parent_id == expected_parent && self.has_all_sections(id)? {
+                        to_apply.push(*id);
+                        expected_parent = *id;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+
+        Ok(to_apply)
     }
 }
 

@@ -348,6 +348,83 @@ impl UtxoState {
         Ok(proof)
     }
 
+    /// Apply a block below checkpoint — no tx validation, no digest verification.
+    ///
+    /// Skips input lookups and stateful validation (trusted chain below checkpoint).
+    /// Removes for non-existent boxes (e.g. un-seeded genesis boxes) are silently
+    /// skipped. Lookups for non-existent data inputs are also skipped.
+    pub fn apply_block_lenient(
+        &mut self,
+        transactions: &[ErgoTransaction],
+        _block_height: u32,
+        header_id: &ModifierId,
+    ) -> Result<Vec<u8>, StateError> {
+        let mut changes = compute_state_changes(transactions);
+
+        // Filter out removes and lookups for boxes not in the tree.
+        // This handles un-seeded genesis boxes (emission, no-premine, founders)
+        // that the Scala node inserts at startup but we skip.
+        changes.to_remove.retain(|box_id| {
+            let key: ADKey = Bytes::copy_from_slice(&box_id.0);
+            self.tree.unauthenticated_lookup(&key).is_some()
+        });
+        changes.to_lookup.retain(|box_id| {
+            let key: ADKey = Bytes::copy_from_slice(&box_id.0);
+            self.tree.unauthenticated_lookup(&key).is_some()
+        });
+
+        // Build undo entry.
+        let digest_before = self.tree.digest().map_err(StateError::Avl)?.to_vec();
+
+        let mut removed_boxes = Vec::new();
+        for box_id in &changes.to_remove {
+            let key: ADKey = Bytes::copy_from_slice(&box_id.0);
+            if let Some(val) = self.tree.unauthenticated_lookup(&key) {
+                removed_boxes.push((*box_id, val.to_vec()));
+            }
+        }
+
+        let inserted_box_ids: Vec<BoxId> = changes.to_insert.iter().map(|(id, _)| *id).collect();
+
+        let undo = UndoEntry {
+            version: self.version,
+            digest: digest_before,
+            removed_boxes,
+            inserted_box_ids,
+        };
+
+        // Apply state changes without digest verification.
+        let proof = self.apply_changes(&changes, None)?;
+
+        // Persist to UTXO database if attached.
+        if let Some(ref db) = self.utxo_db {
+            let to_insert: Vec<([u8; 32], Vec<u8>)> = changes
+                .to_insert
+                .iter()
+                .map(|(box_id, data)| (box_id.0, data.clone()))
+                .collect();
+            let to_remove: Vec<[u8; 32]> =
+                changes.to_remove.iter().map(|box_id| box_id.0).collect();
+            let digest = self.tree.digest().map_err(StateError::Avl)?;
+            let meta = ergo_storage::utxo_db::UtxoMetadata {
+                digest: digest.as_ref().try_into().unwrap_or([0u8; 33]),
+                version: header_id.0,
+            };
+            db.apply_changes(&to_insert, &to_remove, &meta)
+                .map_err(|e| StateError::TxStateful(format!("utxo_db: {e}")))?;
+        }
+
+        // Record undo entry.
+        self.undo_log.push_back(undo);
+        if self.undo_log.len() > MAX_ROLLBACK_DEPTH {
+            self.undo_log.pop_front();
+        }
+
+        self.version = *header_id;
+
+        Ok(proof)
+    }
+
     /// Rollback to a previous version by replaying undo entries in reverse.
     ///
     /// Finds the undo entry matching `version`, then for each entry from
@@ -453,6 +530,17 @@ mod tests {
     /// Helper: build a BoxId filled with a single byte (must be non-zero).
     fn make_box_id(b: u8) -> BoxId {
         BoxId([b; 32])
+    }
+
+    /// Valid P2PK ErgoTree bytes (secp256k1 generator point G).
+    /// sigma-rust requires a fully valid ErgoTree in compute_box_id.
+    fn p2pk_tree() -> Vec<u8> {
+        let mut v = vec![0x00, 0x08, 0xCD];
+        v.extend_from_slice(
+            &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap(),
+        );
+        v
     }
 
     // ---------------------------------------------------------------
@@ -659,7 +747,7 @@ mod tests {
     #[test]
     fn deserialize_ergo_box_basic() {
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let data = serialize_box(value, &ergo_tree);
         let bid = make_box_id(0xAB);
 
@@ -704,7 +792,7 @@ mod tests {
         // Pre-populate the UTXO set with a box
         let input_box_id = make_box_id(0x10);
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let box_data = serialize_box(value, &ergo_tree);
 
         let insert_changes = StateChanges {
@@ -776,7 +864,7 @@ mod tests {
             data_inputs: Vec::new(),
             output_candidates: vec![ErgoBoxCandidate {
                 value: 1_000_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: p2pk_tree(),
                 creation_height: 100,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -814,7 +902,7 @@ mod tests {
         // Pre-populate the UTXO set
         let input_box_id = make_box_id(0x20);
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let box_data = serialize_box(value, &ergo_tree);
 
         let insert_changes = StateChanges {
@@ -902,9 +990,16 @@ mod tests {
         block_id_byte: u8,
         block_height: u32,
     ) -> BoxId {
-        use ergo_types::transaction::{compute_box_id, ErgoBoxCandidate, Input, TxId};
+        use ergo_types::transaction::{ErgoBoxCandidate, Input, TxId};
 
         let tx_id = TxId([block_id_byte; 32]);
+        let output = ErgoBoxCandidate {
+            value,
+            ergo_tree_bytes: ergo_tree.to_vec(),
+            creation_height: block_height,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        };
         let tx = ErgoTransaction {
             inputs: vec![Input {
                 box_id: input_box_id,
@@ -912,13 +1007,7 @@ mod tests {
                 extension_bytes: Vec::new(),
             }],
             data_inputs: Vec::new(),
-            output_candidates: vec![ErgoBoxCandidate {
-                value,
-                ergo_tree_bytes: ergo_tree.to_vec(),
-                creation_height: block_height,
-                tokens: Vec::new(),
-                additional_registers: Vec::new(),
-            }],
+            output_candidates: vec![output.clone()],
             tx_id,
         };
 
@@ -934,7 +1023,7 @@ mod tests {
             )
             .expect("apply_block should succeed");
 
-        compute_box_id(&tx_id, 0)
+        ergo_wire::box_ser::compute_box_id(&output, &tx_id, 0)
     }
 
     #[test]
@@ -944,7 +1033,7 @@ mod tests {
         // Insert a box directly.
         let box_id = make_box_id(0xA1);
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let box_data = serialize_box(value, &ergo_tree);
 
         let insert_changes = StateChanges {
@@ -981,14 +1070,14 @@ mod tests {
 
     #[test]
     fn utxo_rollback_removes_inserted_boxes() {
-        use ergo_types::transaction::{compute_box_id, ErgoBoxCandidate, Input, TxId};
+        use ergo_types::transaction::{ErgoBoxCandidate, Input, TxId};
 
         let mut state = UtxoState::new();
 
         // Insert a box directly to serve as the input for the next block.
         let input_box_id = make_box_id(0xC1);
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let box_data = serialize_box(value, &ergo_tree);
 
         let insert_changes = StateChanges {
@@ -1004,6 +1093,13 @@ mod tests {
 
         // Apply a block that spends the input and creates a new output.
         let tx_id = TxId([0xD1; 32]);
+        let output_candidate = ErgoBoxCandidate {
+            value,
+            ergo_tree_bytes: ergo_tree,
+            creation_height: 200,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        };
         let tx = ErgoTransaction {
             inputs: vec![Input {
                 box_id: input_box_id,
@@ -1011,13 +1107,7 @@ mod tests {
                 extension_bytes: Vec::new(),
             }],
             data_inputs: Vec::new(),
-            output_candidates: vec![ErgoBoxCandidate {
-                value,
-                ergo_tree_bytes: ergo_tree,
-                creation_height: 200,
-                tokens: Vec::new(),
-                additional_registers: Vec::new(),
-            }],
+            output_candidates: vec![output_candidate.clone()],
             tx_id,
         };
 
@@ -1034,7 +1124,7 @@ mod tests {
             .expect("apply_block should succeed");
 
         // Compute the output box ID using the real derivation.
-        let output_box_id = compute_box_id(&tx_id, 0);
+        let output_box_id = ergo_wire::box_ser::compute_box_id(&output_candidate, &tx_id, 0);
 
         // Verify the new box exists.
         assert!(
@@ -1078,7 +1168,7 @@ mod tests {
 
         let candidate = ErgoBoxCandidate {
             value: 2_000_000_000,
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+            ergo_tree_bytes: p2pk_tree(),
             creation_height: 600_000,
             tokens: vec![(BoxId([0xAA; 32]), 1_000), (BoxId([0xBB; 32]), 999_999)],
             additional_registers: Vec::new(),
@@ -1117,7 +1207,7 @@ mod tests {
 
         let candidate = ErgoBoxCandidate {
             value: 1_000_000_000,
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+            ergo_tree_bytes: p2pk_tree(),
             creation_height: 100_000,
             tokens: Vec::new(),
             additional_registers: vec![(4, reg_r4.clone()), (5, reg_r5.clone())],
@@ -1154,7 +1244,7 @@ mod tests {
         // Seed the AVL tree with a box (tree-only, no DB write).
         let box_id = make_box_id(0x10);
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let box_data = serialize_box(value, &ergo_tree);
         let insert_changes = StateChanges {
             to_remove: Vec::new(),
@@ -1214,7 +1304,7 @@ mod tests {
         // Seed the AVL tree with a box (tree-only, no DB write).
         let box_id = make_box_id(0xA1);
         let value = 1_000_000_000u64;
-        let ergo_tree = vec![0x00, 0x08, 0xcd];
+        let ergo_tree = p2pk_tree();
         let box_data = serialize_box(value, &ergo_tree);
         let insert_changes = StateChanges {
             to_remove: Vec::new(),
@@ -1290,7 +1380,7 @@ mod tests {
             // Insert a genesis box (tree-only, not persisted to DB).
             let box_id = make_box_id(0x10);
             let value = 1_000_000_000u64;
-            let ergo_tree = vec![0x00, 0x08, 0xcd];
+            let ergo_tree = p2pk_tree();
             let box_data = serialize_box(value, &ergo_tree);
             let insert_changes = StateChanges {
                 to_remove: Vec::new(),

@@ -60,7 +60,7 @@ pub fn ergo_transaction_to_tx_info(
     tx_id: &ergo_types::transaction::TxId,
     tx_bytes: &[u8],
 ) -> TxInfo {
-    use ergo_types::transaction::compute_box_id;
+    use ergo_wire::box_ser::compute_box_id;
 
     let input_box_ids = tx.inputs.iter().map(|input| input.box_id.0).collect();
 
@@ -69,7 +69,7 @@ pub fn ergo_transaction_to_tx_info(
         .iter()
         .enumerate()
         .map(|(i, candidate)| {
-            let box_id = compute_box_id(tx_id, i as u16);
+            let box_id = compute_box_id(candidate, tx_id, i as u16);
             let tokens = candidate
                 .tokens
                 .iter()

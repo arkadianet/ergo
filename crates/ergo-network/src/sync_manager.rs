@@ -285,9 +285,43 @@ impl SyncManager {
         }
     }
 
+    /// On startup, populate `blocks_to_download` from the DB window above `full_height`.
+    ///
+    /// After a restart, `on_headers_received` never fires for already-stored headers,
+    /// leaving `blocks_to_download` empty. This method scans heights
+    /// `[full_height+1 .. full_height+window]` (capped at best_header_height) and
+    /// enqueues header IDs whose body sections (BlockTransactions + Extension) are
+    /// absent from the DB.
+    ///
+    /// This ensures `blocks_remaining()` reflects real pending work and the primary
+    /// download path (`request_block_sections`) fires immediately on restart.
+    pub fn enqueue_startup_gap(&mut self, history: &HistoryDb, full_height: u32, window: usize) {
+        let headers_height = history.best_header_height().unwrap_or(0);
+        let end = (full_height + window as u32).min(headers_height);
+        for h in (full_height + 1)..=end {
+            let ids = history.header_ids_at_height(h).unwrap_or_default();
+            for id in ids {
+                if matches!(history.has_all_sections(&id), Ok(false)) {
+                    self.blocks_to_download.push_back(id);
+                }
+            }
+        }
+    }
+
     /// Number of blocks remaining to download.
     pub fn blocks_remaining(&self) -> usize {
         self.blocks_to_download.len()
+    }
+
+    /// Effective download window scaled by peer count.
+    ///
+    /// Returns `max(base_window, peer_count * BLOCKS_PER_PEER)` so adding more
+    /// peers actually increases throughput instead of leaving them idle.
+    pub fn effective_download_window(&self, peer_count: usize) -> usize {
+        if peer_count == 0 {
+            return self.download_window;
+        }
+        (peer_count * BLOCKS_PER_PEER).max(self.download_window)
     }
 
     /// Request the next batch of block sections from available peers.
@@ -313,10 +347,11 @@ impl SyncManager {
             return;
         }
 
+        let effective_window = self.effective_download_window(peers_with_blocks.len());
         let mut peer_idx = 0;
         let mut requested = 0;
 
-        while requested < self.download_window && !self.blocks_to_download.is_empty() {
+        while requested < effective_window && !self.blocks_to_download.is_empty() {
             let batch_size = self.max_per_request.min(self.blocks_to_download.len());
             let batch: Vec<ModifierId> = self.blocks_to_download.drain(..batch_size).collect();
             let peer_id = peers_with_blocks[peer_idx % peers_with_blocks.len()];
@@ -352,6 +387,37 @@ impl SyncManager {
             peer_idx += 1;
         }
     }
+}
+
+/// Number of blocks per peer used when scaling the download window.
+///
+/// With N peers, the effective download window is `max(base_window, N * BLOCKS_PER_PEER)`.
+const BLOCKS_PER_PEER: usize = 16;
+
+/// Number of block sections per peer used when scaling the check_modifiers batch.
+const SECTIONS_PER_PEER: usize = 32;
+
+/// Minimum batch size for proactive block section downloads.
+const MIN_CHECK_BATCH: usize = 192;
+
+/// Minimum outbound connection attempts per discovery tick.
+const MIN_DISCOVERY_CONNECTS: usize = 3;
+
+/// Compute the proactive check_modifiers batch size, scaled by peer count.
+///
+/// Returns `max(192, peer_count * 32)` so more peers means we scan for more
+/// missing sections per tick.
+pub fn scaled_check_batch_size(peer_count: usize) -> usize {
+    (peer_count * SECTIONS_PER_PEER).max(MIN_CHECK_BATCH)
+}
+
+/// Compute how many outbound connections to attempt per discovery tick.
+///
+/// Returns `max(3, (max_connections - current_connections) / 3)` so the node
+/// ramps more aggressively when far from capacity.
+pub fn discovery_connect_count(current: usize, max: usize) -> usize {
+    let gap = max.saturating_sub(current);
+    (gap / 3).max(MIN_DISCOVERY_CONNECTS)
 }
 
 /// Build and serialize sync info, returning `None` on error.
@@ -649,6 +715,43 @@ mod tests {
     }
 
     #[test]
+    fn discovery_connect_count_minimum_three() {
+        // Even when close to max, should attempt at least 3
+        assert_eq!(discovery_connect_count(28, 30), 3);
+        assert_eq!(discovery_connect_count(29, 30), 3);
+        assert_eq!(discovery_connect_count(30, 30), 3);
+    }
+
+    #[test]
+    fn discovery_connect_count_scales_with_capacity() {
+        // 0 of 30 connected: (30-0)/3 = 10
+        assert_eq!(discovery_connect_count(0, 30), 10);
+        // 15 of 30: (30-15)/3 = 5
+        assert_eq!(discovery_connect_count(15, 30), 5);
+        // 0 of 60: (60-0)/3 = 20
+        assert_eq!(discovery_connect_count(0, 60), 20);
+    }
+
+    #[test]
+    fn scaled_check_batch_size_base_minimum() {
+        // With 0 or few peers, should return at least the base of 192
+        assert_eq!(scaled_check_batch_size(0), 192);
+        assert_eq!(scaled_check_batch_size(1), 192);
+        assert_eq!(scaled_check_batch_size(5), 192);
+    }
+
+    #[test]
+    fn scaled_check_batch_size_scales_with_peers() {
+        // With enough peers, should scale: peer_count * 32
+        // 7 peers: 7 * 32 = 224 > 192
+        assert_eq!(scaled_check_batch_size(7), 224);
+        // 20 peers: 20 * 32 = 640
+        assert_eq!(scaled_check_batch_size(20), 640);
+        // 30 peers: 30 * 32 = 960
+        assert_eq!(scaled_check_batch_size(30), 960);
+    }
+
+    #[test]
     fn distribute_requests_empty_inputs() {
         let result = distribute_requests(&[], &[1, 2, 3]);
         assert!(result.is_empty());
@@ -911,6 +1014,83 @@ mod tests {
     }
 
     #[test]
+    fn effective_download_window_scales_with_peer_count() {
+        let mgr = SyncManager::new(10, 64);
+        // With 1 peer, should use at least the base window
+        assert!(mgr.effective_download_window(1) >= 64);
+        // With 10 peers, should scale up: 10 * BLOCKS_PER_PEER = 160
+        assert!(mgr.effective_download_window(10) >= 160);
+        // With 20 peers, should scale further
+        assert!(mgr.effective_download_window(20) >= 320);
+        // 0 peers should return the base window (no divide-by-zero)
+        assert_eq!(mgr.effective_download_window(0), 64);
+    }
+
+    #[test]
+    fn request_block_sections_drains_more_with_more_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut tracker = DeliveryTracker::new(30, 3);
+
+        // Create 200 headers
+        let ids: Vec<ModifierId> = (0..200u8).map(|b| make_id(b)).collect();
+        store_test_headers(&history, &ids);
+
+        // Use small max_per_request so the window is the actual constraint.
+        // With 1 peer: effective_window = max(64, 1*16) = 64, drains ~70 blocks
+        let peers_1 = vec![(1u64, true)];
+        let mut mgr1 = SyncManager::new(10, 64);
+        mgr1.state = SyncState::BlockDownload;
+        mgr1.enqueue_block_downloads(ids.clone());
+        let _actions1 = mgr1.on_tick(&history, &mut tracker, &peers_1, false, None, 10);
+        let remaining_1 = mgr1.blocks_remaining();
+
+        // With 10 peers: effective_window = max(64, 10*16) = 160, drains ~160 blocks
+        let peers_10: Vec<(u64, bool)> = (1..=10).map(|id| (id, true)).collect();
+        let mut tracker2 = DeliveryTracker::new(30, 3);
+        let mut mgr2 = SyncManager::new(10, 64);
+        mgr2.state = SyncState::BlockDownload;
+        mgr2.enqueue_block_downloads(ids.clone());
+        let _actions2 = mgr2.on_tick(&history, &mut tracker2, &peers_10, false, None, 10);
+        let remaining_10 = mgr2.blocks_remaining();
+
+        // More peers should drain more blocks from the queue
+        assert!(
+            remaining_10 < remaining_1,
+            "10 peers should drain more blocks: remaining_10={remaining_10}, remaining_1={remaining_1}"
+        );
+    }
+
+    #[test]
+    fn request_block_sections_distributes_across_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut tracker = DeliveryTracker::new(30, 3);
+
+        let ids: Vec<ModifierId> = (0..50u8).map(|b| make_id(b)).collect();
+        store_test_headers(&history, &ids);
+
+        let peers: Vec<(u64, bool)> = (1..=5).map(|id| (id, true)).collect();
+        let mut mgr = SyncManager::new(10, 64);
+        mgr.state = SyncState::BlockDownload;
+        mgr.enqueue_block_downloads(ids);
+
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+
+        // Verify that multiple peers received RequestModifiers
+        let mut peers_used: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for action in &actions {
+            if let SyncAction::RequestModifiers { peer_id, .. } = action {
+                peers_used.insert(*peer_id);
+            }
+        }
+        assert!(
+            peers_used.len() > 1,
+            "blocks should be distributed across multiple peers, got {peers_used:?}"
+        );
+    }
+
+    #[test]
     fn synced_services_enqueued_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
@@ -931,5 +1111,28 @@ mod tests {
         assert!(actions
             .iter()
             .any(|a| matches!(a, SyncAction::RequestModifiers { .. })));
+    }
+
+    #[test]
+    fn enqueue_startup_gap_fills_queue_from_db() {
+        // After restart with headers in DB but no body sections downloaded,
+        // enqueue_startup_gap should populate blocks_to_download.
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut mgr = SyncManager::new(10, 64);
+
+        // Store headers at heights 1..=3 in history without body sections.
+        let ids: Vec<ModifierId> = (1u8..=3).map(|b| make_id(b)).collect();
+        store_test_headers(&history, &ids);
+
+        assert_eq!(mgr.blocks_remaining(), 0);
+
+        mgr.enqueue_startup_gap(&history, 0, 10);
+
+        assert_eq!(
+            mgr.blocks_remaining(),
+            3,
+            "should queue 3 headers without body sections"
+        );
     }
 }

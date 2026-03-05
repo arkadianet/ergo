@@ -128,6 +128,8 @@ pub enum ProcessorEvent {
         /// Last N headers (newest first) for SyncInfoV2 construction.
         /// Loaded from the processor's own DB, bypassing the secondary DB.
         sync_headers: Vec<Header>,
+        /// Current on-chain consensus parameters from the voting state machine.
+        parameters: ergo_consensus::parameters::Parameters,
     },
 }
 
@@ -296,6 +298,19 @@ fn processor_loop_with_state(
             }
         }
 
+        // After processing the command batch, always try to drain cached
+        // headers that can now be applied (their parent may have been applied
+        // in this batch).  This is critical for fast header sync where
+        // out-of-order chunks put headers into the cache and only an explicit
+        // drain makes forward progress.
+        {
+            let mut accum = BatchAccum {
+                new_headers: &mut new_headers,
+                blocks_to_download: &mut blocks_to_download,
+            };
+            apply_from_cache_processor(state, evt_tx, &mut accum);
+        }
+
         // After each batch: emit accumulated events.
         // IMPORTANT: StateUpdate must be sent BEFORE HeadersApplied so the
         // event loop's cached_sync_headers are fresh when it broadcasts
@@ -394,6 +409,19 @@ fn process_prevalidated_header(
     peer_hint: Option<PeerId>,
     accum: &mut BatchAccum<'_>,
 ) {
+    let best_height = state.node_view.history.best_header_height().unwrap_or(0);
+
+    // Fast path: if the header is far above the current tip, its parent
+    // can't possibly be in the DB.  Skip the expensive DB lookup and go
+    // straight to cache.  The auto-drain after each batch will apply it
+    // once the chain catches up.
+    if header.height > best_height + 1 {
+        state
+            .cache
+            .put(modifier_id, HEADER_TYPE_ID, raw_data, Some(header));
+        return;
+    }
+
     tracing::trace!(
         height = header.height,
         genesis = header.is_genesis(),
@@ -602,6 +630,9 @@ fn send_state_update(
     // the latest applied headers — no secondary DB staleness issues.
     let sync_headers = load_sync_headers(&state.node_view.history, MAX_SYNC_HEADERS);
 
+    // Current on-chain consensus parameters from the voting state machine.
+    let parameters = state.node_view.current_parameters().clone();
+
     let _ = evt_tx.blocking_send(ProcessorEvent::StateUpdate {
         headers_height,
         full_height,
@@ -611,6 +642,7 @@ fn send_state_update(
         applied_blocks,
         rollback_height,
         sync_headers,
+        parameters,
     });
 }
 

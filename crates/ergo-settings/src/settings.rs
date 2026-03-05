@@ -69,6 +69,8 @@ pub struct NodeSettings {
     pub blacklisted_transactions: Vec<String>,
     #[serde(default)]
     pub checkpoint_height: u32,
+    #[serde(default)]
+    pub geoip_db_path: Option<String>,
     #[serde(default = "default_voting_targets")]
     pub voting_targets: Vec<u8>,
     #[serde(default)]
@@ -79,6 +81,14 @@ pub struct NodeSettings {
     pub p2p_utxo_snapshots: u32,
     #[serde(default = "default_make_snapshot_every")]
     pub make_snapshot_every: u32,
+    #[serde(default)]
+    pub fast_header_sync: bool,
+    #[serde(default = "default_fast_sync_chunk_size")]
+    pub fast_sync_chunk_size: u32,
+    #[serde(default = "default_fast_sync_max_concurrent")]
+    pub fast_sync_max_concurrent: u32,
+    #[serde(default = "default_fast_sync_api_peers")]
+    pub fast_sync_api_peers: Vec<String>,
 }
 
 fn default_keep_versions() -> u32 {
@@ -119,6 +129,29 @@ fn default_p2p_utxo_snapshots() -> u32 {
 }
 fn default_make_snapshot_every() -> u32 {
     52224
+}
+fn default_fast_sync_chunk_size() -> u32 {
+    2048
+}
+fn default_fast_sync_max_concurrent() -> u32 {
+    50
+}
+fn default_fast_sync_api_peers() -> Vec<String> {
+    vec![
+        "https://ergo-node.eutxo.de".into(),
+        "https://node.sigmaspace.io".into(),
+        "https://ergo1.oette.info".into(),
+        "https://ergo2.oette.info".into(),
+        "https://node.ergo.watch".into(),
+        "https://ergonode.blocpow.io".into(),
+        "http://213.239.193.208:9053".into(),
+        "http://api.ovh-ergo-node-mainnet.guapswap.org".into(),
+        "http://51.81.84.167:9053".into(),
+        "http://76.119.196.68:9053".into(),
+        "http://bp.lakecardano.com:9053".into(),
+        "http://80.209.232.82:9053".into(),
+        "http://207.172.128.57:9053".into(),
+    ]
 }
 fn default_voting_targets() -> Vec<u8> {
     vec![0, 0, 0]
@@ -248,7 +281,7 @@ fn default_handshake_timeout() -> u64 {
     30
 }
 fn default_max_connections() -> u32 {
-    30
+    100
 }
 fn default_connection_timeout() -> u64 {
     1
@@ -589,5 +622,25 @@ timeout_secs = 5
             .join("\n");
         let settings: ErgoSettings = toml::from_str(&config_no_sync_interval).unwrap();
         assert_eq!(settings.network.sync_interval_secs, 5);
+    }
+
+    #[test]
+    fn fast_sync_settings_defaults() {
+        let settings: ErgoSettings = toml::from_str(MINIMAL_CONFIG).unwrap();
+        assert!(!settings.ergo.node.fast_header_sync);
+        assert_eq!(settings.ergo.node.fast_sync_chunk_size, 2048);
+        assert_eq!(settings.ergo.node.fast_sync_max_concurrent, 50);
+    }
+
+    #[test]
+    fn fast_sync_settings_explicit() {
+        let config = MINIMAL_CONFIG.replace(
+            "extra_index = false",
+            "extra_index = false\nfast_header_sync = true\nfast_sync_chunk_size = 4096\nfast_sync_max_concurrent = 16",
+        );
+        let settings: ErgoSettings = toml::from_str(&config).unwrap();
+        assert!(settings.ergo.node.fast_header_sync);
+        assert_eq!(settings.ergo.node.fast_sync_chunk_size, 4096);
+        assert_eq!(settings.ergo.node.fast_sync_max_concurrent, 16);
     }
 }

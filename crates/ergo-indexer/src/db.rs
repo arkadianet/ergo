@@ -125,6 +125,8 @@ impl ExtraIndexerDb {
                 .map(|n| n.get() as i32)
                 .unwrap_or(4),
         );
+        // Cap open file descriptors so multiple DB instances don't exceed OS limits.
+        opts.set_max_open_files(1000);
         let cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024);
         let mut bb = rocksdb::BlockBasedOptions::default();
         bb.set_block_cache(&cache);
@@ -143,6 +145,7 @@ impl ExtraIndexerDb {
     pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self, IndexerDbError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
+        opts.set_max_open_files(256);
         std::fs::create_dir_all(path.as_ref()).ok();
         let db = DB::open_for_read_only(&opts, path, false)?;
         Ok(Self { db })

@@ -61,8 +61,10 @@ pub struct EmissionInfo {
     pub miner_reward: u64,
     /// Total coins issued through this height (cumulative).
     pub total_coins_issued: u64,
-    /// Coins remaining to be issued.
-    pub total_remaining_coins: u64,
+    /// Coins remaining to be issued (Scala: `totalRemainCoins`).
+    pub total_remain_coins: u64,
+    /// Reemitted coins at this height (EIP-27 reemission charge); 0 before activation.
+    pub reemitted: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -179,13 +181,14 @@ pub fn emission_info(h: u32) -> EmissionInfo {
     let reemission_charge = reemission_for_height(h);
     let miner_reward = miner_raw.saturating_sub(reemission_charge);
     let total_coins_issued = issued_coins_after_height(h);
-    let total_remaining_coins = COINS_TOTAL.saturating_sub(total_coins_issued);
+    let total_remain_coins = COINS_TOTAL.saturating_sub(total_coins_issued);
 
     EmissionInfo {
         height: h,
         miner_reward,
         total_coins_issued,
-        total_remaining_coins,
+        total_remain_coins,
+        reemitted: reemission_charge,
     }
 }
 
@@ -283,10 +286,7 @@ mod tests {
         // (height 1 < reemission activation, so no charge)
         assert_eq!(info.miner_reward, 67 * COINS_IN_ONE_ERG + 500_000_000);
         assert_eq!(info.total_coins_issued, 75 * COINS_IN_ONE_ERG);
-        assert_eq!(
-            info.total_remaining_coins,
-            COINS_TOTAL - 75 * COINS_IN_ONE_ERG
-        );
+        assert_eq!(info.total_remain_coins, COINS_TOTAL - 75 * COINS_IN_ONE_ERG);
     }
 
     #[test]
@@ -353,9 +353,10 @@ mod tests {
             "expected totalCoinsIssued"
         );
         assert!(
-            json.get("totalRemainingCoins").is_some(),
-            "expected totalRemainingCoins"
+            json.get("totalRemainCoins").is_some(),
+            "expected totalRemainCoins"
         );
+        assert!(json.get("reemitted").is_some(), "expected reemitted");
         assert!(json.get("miner_reward").is_none(), "unexpected snake_case");
     }
 }

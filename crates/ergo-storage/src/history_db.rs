@@ -53,6 +53,8 @@ impl HistoryDb {
                 .unwrap_or(4),
         );
         opts.set_max_background_jobs(4);
+        // Cap open file descriptors so multiple DB instances don't exceed OS limits.
+        opts.set_max_open_files(1000);
 
         // Shared block cache (256 MB).
         let cache = rocksdb::Cache::new_lru_cache(256 * 1024 * 1024);
@@ -85,7 +87,8 @@ impl HistoryDb {
     /// read access.  Useful for the HTTP API while the event loop holds the
     /// primary read-write handle.
     pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        let opts = Options::default();
+        let mut opts = Options::default();
+        opts.set_max_open_files(256);
         let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, Options::default());
         let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, Options::default());
         let db =
@@ -235,6 +238,13 @@ impl HistoryDb {
     pub fn get_index(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>, StorageError> {
         let cf = self.db.cf_handle(CF_INDEXES).unwrap();
         Ok(self.db.get_cf(&cf, key)?)
+    }
+
+    /// Deletes an index entry from the `indexes` column family.
+    pub fn delete_index(&self, key: &[u8; 32]) -> Result<(), StorageError> {
+        let cf = self.db.cf_handle(CF_INDEXES).unwrap();
+        self.db.delete_cf(&cf, key)?;
+        Ok(())
     }
 
     /// Get the minimum height at which full block data is available.

@@ -22,6 +22,7 @@ use ergo_wire::handshake::ConnectionDirection;
 use ergo_wire::handshake::{Handshake, PeerSpec, ProtocolVersion};
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::message::MessageCode;
+use ergo_wire::peer_feature::PeerFeature;
 
 use crate::mining::{CandidateGenerator, MiningSolution};
 
@@ -53,12 +54,24 @@ pub type WalletArc = Option<Arc<tokio::sync::RwLock<()>>>;
 pub struct ConnectedPeerInfo {
     pub address: String,
     pub name: String,
+    /// User-configured node name from the handshake PeerSpec.
+    pub node_name: String,
     /// Epoch milliseconds when the handshake completed.
     pub last_handshake: u64,
     /// Epoch milliseconds of the last received message from this peer.
     pub last_message: Option<u64>,
     /// "Incoming" or "Outgoing", or None if unknown.
     pub connection_type: Option<String>,
+    /// Protocol version string, e.g. "6.0.1".
+    pub version: Option<String>,
+    /// "utxo" or "digest" from peer's ModeFeature.
+    pub state_type: Option<String>,
+    /// Whether the peer verifies transactions.
+    pub verifying_transactions: Option<bool>,
+    /// Number of blocks the peer keeps (-1 = all).
+    pub blocks_to_keep: Option<i32>,
+    /// Peer ID for cross-referencing with SyncTracker.
+    pub peer_id: u64,
 }
 
 /// An inbound peer that has completed the handshake, ready to be added to the pool.
@@ -92,9 +105,12 @@ pub struct SharedState {
     pub last_message_time: Option<u64>,
     pub start_time: u64,
     pub max_peer_height: u64,
-    pub difficulty: u64,
-    pub headers_score: String,
-    pub full_blocks_score: String,
+    /// Decoded difficulty as a JSON number (arbitrary precision).
+    pub difficulty: serde_json::Value,
+    /// Cumulative headers chain score as a JSON number.
+    pub headers_score: serde_json::Value,
+    /// Cumulative full-blocks chain score as a JSON number.
+    pub full_blocks_score: serde_json::Value,
     /// Live on-chain parameters from the voting system.
     pub parameters: serde_json::Value,
     /// Parent of the best full block header.
@@ -105,6 +121,8 @@ pub struct SharedState {
     pub is_mining: bool,
     /// Unix-epoch milliseconds of the last mempool mutation.
     pub last_mempool_update_time: u64,
+    /// Whether fast header sync via REST API is currently active.
+    pub fast_sync_active: bool,
 }
 
 impl SharedState {
@@ -128,14 +146,15 @@ impl SharedState {
                 .unwrap()
                 .as_secs(),
             max_peer_height: 0,
-            difficulty: 0,
-            headers_score: "0".into(),
-            full_blocks_score: "0".into(),
+            difficulty: serde_json::json!(0),
+            headers_score: serde_json::json!(0),
+            full_blocks_score: serde_json::json!(0),
             parameters: serde_json::json!({}),
             previous_full_header_id: None,
             state_version: None,
             is_mining: false,
             last_mempool_update_time: 0,
+            fast_sync_active: false,
         }
     }
 }
@@ -276,6 +295,34 @@ pub async fn run(
     // prevent re-applying the same header on subsequent sync messages.
     let mut last_sync_header_applied: Option<u32> = None;
 
+    // REST API URLs extracted from peer handshake features (PeerFeature::RestApiUrl)
+    // plus any configured seed peers. Used by the fast header sync subsystem.
+    // Shared with the fast sync task so it can read URLs as peers connect/disconnect.
+    let api_peer_urls: crate::fast_header_sync::ApiPeerUrls = {
+        let mut map = HashMap::new();
+        // Pre-populate with configured seed API peers (use high synthetic IDs
+        // that won't collide with real P2P peer IDs).
+        for (i, url) in settings.ergo.node.fast_sync_api_peers.iter().enumerate() {
+            map.insert(u64::MAX - i as u64, url.clone());
+        }
+        if !map.is_empty() {
+            tracing::info!(
+                count = map.len(),
+                "pre-populated fast sync API peers from config"
+            );
+        }
+        std::sync::Arc::new(std::sync::RwLock::new(map))
+    };
+
+    // Shared atomic header height — updated by the event loop whenever a
+    // StateUpdate arrives, read by the fast sync task to skip already-synced chunks.
+    let shared_headers_height: crate::fast_header_sync::SharedHeadersHeight =
+        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    // Shared flag indicating whether fast header sync is currently active.
+    let shared_fast_sync_active: crate::fast_header_sync::SharedFastSyncActive =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Transaction cost rate limiter: rejects txs when the cumulative
     // processing cost since the last block exceeds per-peer / global limits.
     let mut tx_cost_tracker = message_handler::TxCostTracker::new();
@@ -293,6 +340,9 @@ pub async fn run(
     // Cached sync headers from the processor (newest first), used to build
     // SyncInfoV2 without reading from the secondary DB.
     let mut cached_sync_headers: Vec<ergo_types::header::Header> = Vec::new();
+    // Cached on-chain parameters from the processor's voting state machine.
+    let mut cached_parameters: ergo_consensus::parameters::Parameters =
+        ergo_consensus::parameters::Parameters::genesis();
     // Tracks the last peer that delivered headers, for targeted SyncInfo response.
     let mut last_header_peer: Option<u64> = None;
 
@@ -300,6 +350,66 @@ pub async fn run(
     {
         let mut s = shared.write().await;
         s.is_mining = candidate_gen.is_some();
+    }
+
+    // On restart, check if headers are already synced so we can transition
+    // to BlockDownload immediately instead of waiting for new headers.
+    if let Ok(Some(best_hdr_id)) = sync_history.best_header_id() {
+        if let Ok(Some(hdr)) = sync_history.load_header(&best_hdr_id) {
+            if sync_mgr.check_headers_chain_synced(hdr.timestamp) {
+                tracing::info!(
+                    tip_height = hdr.height,
+                    tip_timestamp = hdr.timestamp,
+                    "headers already synced on startup — block download can begin immediately"
+                );
+            }
+        }
+    }
+
+    // Re-populate blocks_to_download from the DB window above best_full_block.
+    // On restart, on_headers_received never fires for stored headers so the
+    // primary download queue is empty.  Scanning here makes blocks_remaining
+    // meaningful and restores the primary download path immediately.
+    {
+        let full_height = sync_history.best_full_block_height().unwrap_or(0);
+        sync_mgr.enqueue_startup_gap(sync_history, full_height, 2048);
+        if sync_mgr.blocks_remaining() > 0 {
+            tracing::info!(
+                full_height,
+                queued = sync_mgr.blocks_remaining(),
+                "startup: queued missing block sections for download"
+            );
+        }
+    }
+
+    // Spawn the fast header sync task if enabled.
+    // The task runs alongside normal P2P sync without interfering with it.
+    // A 5-second delay allows peers to connect and advertise REST API URLs.
+    if settings.ergo.node.fast_header_sync {
+        let api_urls_shared = api_peer_urls.clone();
+        let our_h = cached_headers_height;
+        let chunk_sz = settings.ergo.node.fast_sync_chunk_size;
+        let max_conc = settings.ergo.node.fast_sync_max_concurrent;
+        let fs_cmd_tx = cmd_tx.clone();
+        let fs_shutdown = shutdown_rx.clone();
+        let fs_headers_height = shared_headers_height.clone();
+        let fs_active = shared_fast_sync_active.clone();
+        tokio::spawn(async move {
+            // Brief delay to allow peers to connect and advertise REST API URLs.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            crate::fast_header_sync::run_fast_sync(
+                api_urls_shared,
+                our_h,
+                chunk_sz,
+                max_conc,
+                fs_cmd_tx,
+                fs_shutdown,
+                fs_headers_height,
+                fs_active,
+            )
+            .await;
+        });
+        tracing::info!("fast header sync task spawned (will start after 5s delay)");
     }
 
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
@@ -327,7 +437,9 @@ pub async fn run(
                     cached_state_version,
                     is_digest_mode,
                     &cached_sync_headers,
+                    &cached_parameters,
                 ).await;
+                update_fast_sync_flag(&shared, &shared_fast_sync_active).await;
 
                 // Recompute whether the node is synced enough for tx acceptance.
                 is_synced_for_txs = !is_digest_mode && {
@@ -818,8 +930,10 @@ pub async fn run(
                         state_root, applied_blocks: _,
                         rollback_height: _,
                         sync_headers,
+                        parameters,
                     } => {
                         cached_headers_height = headers_height;
+                        shared_headers_height.store(headers_height, std::sync::atomic::Ordering::Relaxed);
                         cached_full_height = full_height;
                         cached_best_header_id = best_header_id;
                         cached_best_full_id = best_full_id;
@@ -827,6 +941,7 @@ pub async fn run(
                         // Derive state_version from best_full_id
                         cached_state_version = best_full_id.map(|id| id.0);
                         cached_sync_headers = sync_headers;
+                        cached_parameters = parameters;
                     }
                     ProcessorEvent::ModifierCached { .. } => {}
                 }
@@ -836,6 +951,14 @@ pub async fn run(
             Some(pending) = pending_conn_rx.recv() => {
                 let id = pool.add_outbound(pending.conn, pending.addr, &pending.handshake);
                 tracing::info!(peer_id = id, addr = %pending.addr, "connected (background)");
+                // Extract REST API URL from handshake features for fast header sync.
+                for feature in &pending.handshake.peer_spec.features {
+                    if let PeerFeature::RestApiUrl(url) = feature {
+                        tracing::debug!(peer_id = id, url, "peer advertises REST API");
+                        api_peer_urls.write().unwrap().insert(id, url.clone());
+                        break;
+                    }
+                }
             }
 
             _ = discovery_tick.tick() => {
@@ -1016,6 +1139,13 @@ pub async fn run(
                 if !to_disconnect.is_empty() {
                     pool.cleanup_disconnected();
                 }
+                // Remove API URLs for disconnected P2P peers, but keep
+                // configured seed peers (which use synthetic IDs >= u64::MAX - 1000).
+                let connected_ids: HashSet<u64> = pool.connected_peers().iter().map(|p| p.id).collect();
+                const SEED_ID_THRESHOLD: u64 = u64::MAX - 1000;
+                api_peer_urls.write().unwrap().retain(|id, _| {
+                    *id >= SEED_ID_THRESHOLD || connected_ids.contains(id)
+                });
             }
 
             _ = eviction_tick.tick() => {
@@ -1140,6 +1270,14 @@ pub async fn run(
                     version = %inbound.handshake.peer_spec.protocol_version,
                     "accepted inbound peer"
                 );
+                // Extract REST API URL from handshake features for fast header sync.
+                for feature in &inbound.handshake.peer_spec.features {
+                    if let PeerFeature::RestApiUrl(url) = feature {
+                        tracing::debug!(peer_id = id, url, "inbound peer advertises REST API");
+                        api_peer_urls.write().unwrap().insert(id, url.clone());
+                        break;
+                    }
+                }
             }
 
             Some(addr) = peer_connect_rx.recv() => {
@@ -1248,6 +1386,7 @@ async fn handle_sync_tick(
     cached_state_version: Option<[u8; 32]>,
     is_digest_mode: bool,
     cached_sync_headers: &[ergo_types::header::Header],
+    cached_parameters: &ergo_consensus::parameters::Parameters,
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
@@ -1342,9 +1481,20 @@ async fn handle_sync_tick(
         cached_state_root,
         cached_state_version,
         is_digest_mode,
+        cached_parameters,
     )
     .await;
     pool.cleanup_disconnected();
+}
+
+/// Read the shared fast sync active flag and update SharedState.
+/// Called after `handle_sync_tick` in the main select loop.
+async fn update_fast_sync_flag(
+    shared: &Arc<RwLock<SharedState>>,
+    flag: &crate::fast_header_sync::SharedFastSyncActive,
+) {
+    let mut state = shared.write().await;
+    state.fast_sync_active = flag.load(std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Proactively find and request missing block body sections.
@@ -1357,7 +1507,9 @@ async fn handle_check_modifiers(
     use ergo_network::delivery_tracker::ModifierStatus;
     use ergo_network::sync_manager::distribute_requests;
 
-    let missing = sync_history.next_modifiers_to_download(192);
+    let peer_count = pool.peer_count();
+    let batch_size = ergo_network::sync_manager::scaled_check_batch_size(peer_count);
+    let missing = sync_history.next_modifiers_to_download(batch_size);
     if missing.is_empty() {
         return;
     }
@@ -1429,7 +1581,15 @@ async fn handle_discovery_tick(
 
     if pool.peer_count() < settings.network.max_connections as usize {
         let hs_timeout = settings.network.handshake_timeout_secs;
-        for addr in discovery.peers_to_connect(&connected).into_iter().take(3) {
+        let connect_count = ergo_network::sync_manager::discovery_connect_count(
+            pool.peer_count(),
+            settings.network.max_connections as usize,
+        );
+        for addr in discovery
+            .peers_to_connect(&connected)
+            .into_iter()
+            .take(connect_count)
+        {
             if penalties.is_ip_banned(&addr.ip()) {
                 tracing::debug!(%addr, "skipping discovery connect to banned IP");
                 continue;
@@ -1670,6 +1830,7 @@ async fn update_shared_state(
     cached_state_root: &[u8],
     cached_state_version: Option<[u8; 32]>,
     _is_digest_mode: bool,
+    cached_parameters: &ergo_consensus::parameters::Parameters,
 ) {
     // Read from sync_history as a fallback when processor hasn't sent updates yet.
     let (headers_height, best_header_id) = if cached_headers_height > 0 {
@@ -1694,43 +1855,40 @@ async fn update_shared_state(
         (height, best_id)
     };
 
-    // Difficulty from best full block header's nBits
+    // Difficulty: decode nBits to a BigUint and store as an arbitrary-precision JSON number.
     let best_full_header = best_full_block_id
         .as_ref()
         .and_then(|id| sync_history.load_header(id).ok().flatten());
-    let difficulty = best_full_header.as_ref().map_or(0, |h| h.n_bits);
+    let difficulty: serde_json::Value = best_full_header
+        .as_ref()
+        .map(|h| {
+            let decoded = ergo_consensus::difficulty::decode_compact_bits(h.n_bits);
+            let decimal_str = decoded.to_str_radix(10);
+            serde_json::from_str::<serde_json::Value>(&decimal_str).unwrap_or(serde_json::json!(0))
+        })
+        .unwrap_or(serde_json::json!(0));
     let previous_full_header_id = best_full_header.as_ref().map(|h| h.parent_id.0);
 
-    // Headers score: cumulative score of best header
-    let headers_score = best_header_id
+    // Headers score: cumulative score of best header, as a JSON number.
+    let headers_score: serde_json::Value = best_header_id
         .as_ref()
         .and_then(|id| {
             let key = header_score_key(id);
             sync_history.get_index(&key).ok().flatten()
         })
-        .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
+        .map_or(serde_json::json!(0), |bytes| score_bytes_to_json(&bytes));
 
-    // Full blocks score: cumulative score of best full block
-    let full_blocks_score = best_full_block_id
+    // Full blocks score: cumulative score of best full block, as a JSON number.
+    let full_blocks_score: serde_json::Value = best_full_block_id
         .as_ref()
         .and_then(|id| {
             let key = header_score_key(id);
             sync_history.get_index(&key).ok().flatten()
         })
-        .map_or_else(|| "0".to_string(), |bytes| score_bytes_to_decimal(&bytes));
+        .map_or(serde_json::json!(0), |bytes| score_bytes_to_json(&bytes));
 
-    // Parameters: use defaults since live parameters are on the processor thread.
-    let parameters = serde_json::json!({
-        "storageFeeFactor": 1250000,
-        "minValuePerByte": 360,
-        "maxBlockSize": 524288,
-        "maxBlockCost": 1000000,
-        "tokenAccessCost": 100,
-        "inputCost": 2000,
-        "dataInputCost": 100,
-        "outputCost": 100,
-        "blockVersion": 1,
-    });
+    // Build parameters JSON from the live on-chain consensus parameters.
+    let parameters = parameters_to_json(cached_parameters);
 
     let state_version = cached_state_version;
 
@@ -1745,15 +1903,37 @@ async fn update_shared_state(
     state.connected_peers = pool
         .connected_peers()
         .iter()
-        .map(|p| ConnectedPeerInfo {
-            address: p.addr.to_string(),
-            name: p.peer_name.clone(),
-            last_handshake: p.connected_at,
-            last_message: Some(p.last_activity),
-            connection_type: Some(match p.direction {
-                ConnectionDirection::Incoming => "Incoming".to_string(),
-                ConnectionDirection::Outgoing => "Outgoing".to_string(),
-            }),
+        .map(|p| {
+            let (state_type, verifying_transactions, blocks_to_keep) =
+                if let Some(ref mode) = p.mode_feature {
+                    let st = match mode.state_type {
+                        ergo_wire::peer_feature::StateTypeCode::Utxo => "utxo",
+                        ergo_wire::peer_feature::StateTypeCode::Digest => "digest",
+                    };
+                    (
+                        Some(st.to_string()),
+                        Some(mode.verifying_transactions),
+                        Some(mode.blocks_to_keep),
+                    )
+                } else {
+                    (None, None, None)
+                };
+            ConnectedPeerInfo {
+                address: p.addr.to_string(),
+                name: p.peer_name.clone(),
+                node_name: p.node_name.clone(),
+                last_handshake: p.connected_at,
+                last_message: Some(p.last_activity),
+                connection_type: Some(match p.direction {
+                    ConnectionDirection::Incoming => "Incoming".to_string(),
+                    ConnectionDirection::Outgoing => "Outgoing".to_string(),
+                }),
+                version: Some(p.version.to_string()),
+                state_type,
+                verifying_transactions,
+                blocks_to_keep,
+                peer_id: p.id,
+            }
         })
         .collect();
     state.known_peers = discovery
@@ -1775,18 +1955,53 @@ async fn update_shared_state(
     state.state_version = state_version;
 }
 
-/// Convert big-endian score bytes to a decimal string.
-fn score_bytes_to_decimal(bytes: &[u8]) -> String {
+/// Convert big-endian score bytes to a JSON number (arbitrary precision via serde_json).
+fn score_bytes_to_json(bytes: &[u8]) -> serde_json::Value {
     if bytes.is_empty() {
-        return "0".to_string();
+        return serde_json::json!(0);
     }
+    // For values that fit in u128, convert via integer arithmetic.
     if bytes.len() <= 16 {
         let mut padded = [0u8; 16];
         let start = 16 - bytes.len();
         padded[start..].copy_from_slice(bytes);
         let value = u128::from_be_bytes(padded);
-        value.to_string()
+        // Use serde_json arbitrary_precision to keep the full integer.
+        let decimal_str = value.to_string();
+        serde_json::from_str::<serde_json::Value>(&decimal_str).unwrap_or(serde_json::json!(0))
     } else {
-        hex::encode(bytes)
+        // For very large values, use BigUint for decimal string conversion.
+        use num_bigint::BigUint;
+        let big = BigUint::from_bytes_be(bytes);
+        let decimal_str = big.to_str_radix(10);
+        serde_json::from_str::<serde_json::Value>(&decimal_str).unwrap_or(serde_json::json!(0))
     }
+}
+
+/// Build the parameters JSON object from the live on-chain `Parameters` struct.
+///
+/// Field names match the Scala reference node API.
+fn parameters_to_json(p: &ergo_consensus::parameters::Parameters) -> serde_json::Value {
+    use ergo_consensus::parameters::*;
+    // SubblocksPerBlockIncrease has parameter ID 9 in the Scala reference.
+    // It is absent from the parameter table until block version 4 activates
+    // sub-block support, so we emit null when not present.
+    const SUBBLOCKS_PER_BLOCK_ID: u8 = 9;
+    let subblocks_per_block: serde_json::Value = match p.get(SUBBLOCKS_PER_BLOCK_ID) {
+        Some(v) => serde_json::Value::Number(v.into()),
+        None => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "storageFeeFactor": p.get(STORAGE_FEE_FACTOR_ID).unwrap_or(1_250_000),
+        "minValuePerByte": p.get(MIN_VALUE_PER_BYTE_ID).unwrap_or(360),
+        "maxBlockSize": p.get(MAX_BLOCK_SIZE_ID).unwrap_or(524_288),
+        "maxBlockCost": p.get(MAX_BLOCK_COST_ID).unwrap_or(1_000_000),
+        "tokenAccessCost": p.get(TOKEN_ACCESS_COST_ID).unwrap_or(100),
+        "inputCost": p.get(INPUT_COST_ID).unwrap_or(2_000),
+        "dataInputCost": p.get(DATA_INPUT_COST_ID).unwrap_or(100),
+        "outputCost": p.get(OUTPUT_COST_ID).unwrap_or(100),
+        "subblocksPerBlock": subblocks_per_block,
+        "blockVersion": p.block_version(),
+        "height": p.height,
+    })
 }

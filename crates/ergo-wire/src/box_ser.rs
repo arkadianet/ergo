@@ -1,12 +1,115 @@
-//! Standalone box serialization for AVL+ tree storage.
+//! Standalone box serialization for AVL+ tree storage, and box ID computation.
 //!
 //! Ergo stores boxes in the AVL+ tree using a "standalone" format where token
 //! IDs are written as full 32-byte values (unlike the transaction wire format
 //! which uses indexed references into a distinct-token-ID array).
+//!
+//! The canonical box ID is:
+//!   `blake2b256(sigma_serialize(ErgoBox { candidate, tx_id, index }))`
+//! which is computed via sigma-rust's `ErgoBox::from_box_candidate`.
 
 use crate::sigma_byte::skip_sigma_constant;
 use crate::vlq::{get_long, get_uint, put_long, put_uint, CodecError};
-use ergo_types::transaction::{BoxId, ErgoBoxCandidate};
+use ergo_types::transaction::{BoxId, ErgoBoxCandidate, TxId};
+
+/// Compute the canonical Ergo box ID for an output at the given index.
+///
+/// Ergo box ID = `blake2b256(sigma_serialize(ErgoBox { candidate, tx_id, index }))`.
+/// The serialized box includes: box-candidate bytes (value, ergoTree, height,
+/// tokens, registers) followed by the raw 32-byte tx_id and VLQ-encoded index.
+///
+/// This uses sigma-rust's `ErgoBox::from_box_candidate` to ensure byte-for-byte
+/// compatibility with the Scala reference implementation.
+///
+/// # Panics
+///
+/// Panics if the candidate contains an unparseable ErgoTree or invalid field
+/// values (e.g., value out of range), which should not occur for well-formed
+/// transactions received from the network.
+pub fn compute_box_id(candidate: &ErgoBoxCandidate, tx_id: &TxId, output_index: u16) -> BoxId {
+    use ergo_lib::ergo_chain_types::Digest32 as SigmaDigest32;
+    use ergo_lib::ergotree_ir::chain::ergo_box::box_value::BoxValue as SigmaBoxValue;
+    use ergo_lib::ergotree_ir::chain::ergo_box::{
+        ErgoBox as SigmaErgoBox, ErgoBoxCandidate as SigmaErgoBoxCandidate,
+        NonMandatoryRegisterId as SigmaNonMandatoryRegisterId,
+        NonMandatoryRegisters as SigmaNonMandatoryRegisters, RegisterValue as SigmaRegisterValue,
+    };
+    use ergo_lib::ergotree_ir::chain::token::{Token as SigmaToken, TokenAmount, TokenId};
+    use ergo_lib::ergotree_ir::chain::tx_id::TxId as SigmaTxId;
+    use ergo_lib::ergotree_ir::ergo_tree::ErgoTree as SigmaErgoTree;
+    use ergo_lib::ergotree_ir::serialization::SigmaSerializable;
+
+    // Convert value
+    let value =
+        SigmaBoxValue::try_from(candidate.value).expect("box value out of range in compute_box_id");
+
+    // Convert ErgoTree
+    let ergo_tree = SigmaErgoTree::sigma_parse_bytes(&candidate.ergo_tree_bytes)
+        .expect("invalid ErgoTree bytes in compute_box_id");
+
+    // Convert tokens
+    let tokens_vec: Vec<SigmaToken> = candidate
+        .tokens
+        .iter()
+        .map(|(token_id, amount)| {
+            let tid: TokenId = SigmaDigest32::from(token_id.0).into();
+            let ta = TokenAmount::try_from(*amount)
+                .expect("token amount out of range in compute_box_id");
+            SigmaToken {
+                token_id: tid,
+                amount: ta,
+            }
+        })
+        .collect();
+    let tokens = if tokens_vec.is_empty() {
+        None
+    } else {
+        use ergo_lib::ergotree_ir::chain::ergo_box::BoxTokens;
+        Some(BoxTokens::from_vec(tokens_vec).expect("token list too long in compute_box_id"))
+    };
+
+    // Convert registers
+    let additional_registers = if candidate.additional_registers.is_empty() {
+        SigmaNonMandatoryRegisters::empty()
+    } else {
+        let mut map = std::collections::HashMap::new();
+        for (idx, bytes) in &candidate.additional_registers {
+            let reg_id = match *idx {
+                4 => SigmaNonMandatoryRegisterId::R4,
+                5 => SigmaNonMandatoryRegisterId::R5,
+                6 => SigmaNonMandatoryRegisterId::R6,
+                7 => SigmaNonMandatoryRegisterId::R7,
+                8 => SigmaNonMandatoryRegisterId::R8,
+                9 => SigmaNonMandatoryRegisterId::R9,
+                other => panic!("invalid register index {other} in compute_box_id"),
+            };
+            let reg_value = SigmaRegisterValue::sigma_parse_bytes(bytes);
+            map.insert(reg_id, reg_value);
+        }
+        SigmaNonMandatoryRegisters::try_from(map)
+            .expect("register conversion failed in compute_box_id")
+    };
+
+    // Convert tx_id
+    let sigma_tx_id: SigmaTxId = SigmaDigest32::from(tx_id.0).into();
+
+    // Build sigma ErgoBoxCandidate
+    let sigma_candidate = SigmaErgoBoxCandidate {
+        value,
+        ergo_tree,
+        tokens,
+        additional_registers,
+        creation_height: candidate.creation_height,
+    };
+
+    // Compute box ID via sigma-rust (blake2b256(sigma_serialize(box)))
+    let sigma_box = SigmaErgoBox::from_box_candidate(&sigma_candidate, sigma_tx_id, output_index)
+        .expect("ErgoBox construction failed in compute_box_id");
+
+    let id_digest: SigmaDigest32 = sigma_box.box_id().into();
+    let id_bytes: [u8; 32] = id_digest.into();
+    BoxId(id_bytes)
+}
 
 /// Serialize an `ErgoBoxCandidate` in standalone format (full token IDs).
 ///
@@ -279,5 +382,52 @@ mod tests {
         let bytes = serialize_ergo_box(&candidate);
         let parsed = parse_ergo_box(&bytes).unwrap();
         assert_eq!(parsed, candidate);
+    }
+
+    // 9. Genesis block transaction output 0 — protocol correctness test vector.
+    //
+    //    Block 1, tx 4c6282be413c6e300a530618b37790be5f286ded758accc2aebd41554a1be308,
+    //    output index 0.
+    //    Expected box ID (from Scala reference / Ergo Explorer API):
+    //      71bc9534d4a4fe8ff67698a5d0f29782836970635de8418da39fee1cd964fcbe
+    //
+    //    This test verifies that `compute_box_id` matches the Scala implementation.
+    //    The old formula blake2b256(tx_id ++ vlq(index)) produced the WRONG result:
+    //      fcc4588acaf1c29625f7fbabe4fd7081bac915fd8a1af9f213f3defa8bb1c10a
+    #[test]
+    fn compute_box_id_genesis_tx_vector() {
+        use ergo_types::transaction::TxId;
+
+        // ergoTree bytes for the genesis emission contract
+        // Source: https://api.ergoplatform.com/api/v1/boxes/71bc9534d4a4fe8ff67698a5d0f29782836970635de8418da39fee1cd964fcbe
+        let ergo_tree_bytes = hex::decode(
+            "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f"
+        ).unwrap();
+
+        let candidate = ErgoBoxCandidate {
+            value: 93_409_065_000_000_000u64,
+            ergo_tree_bytes,
+            creation_height: 1,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        };
+
+        let tx_id_hex = "4c6282be413c6e300a530618b37790be5f286ded758accc2aebd41554a1be308";
+        let mut tx_id_bytes = [0u8; 32];
+        hex::decode_to_slice(tx_id_hex, &mut tx_id_bytes).unwrap();
+        let tx_id = TxId(tx_id_bytes);
+
+        let box_id = compute_box_id(&candidate, &tx_id, 0);
+
+        let expected_hex = "71bc9534d4a4fe8ff67698a5d0f29782836970635de8418da39fee1cd964fcbe";
+        let expected: [u8; 32] = hex::decode(expected_hex).unwrap().try_into().unwrap();
+
+        assert_eq!(
+            box_id.0,
+            expected,
+            "compute_box_id genesis vector mismatch: got {}, want {}",
+            hex::encode(box_id.0),
+            expected_hex
+        );
     }
 }

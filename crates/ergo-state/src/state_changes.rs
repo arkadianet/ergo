@@ -1,5 +1,5 @@
-use ergo_types::transaction::{compute_box_id, BoxId, ErgoTransaction};
-use ergo_wire::box_ser::serialize_ergo_box;
+use ergo_types::transaction::{BoxId, ErgoTransaction};
+use ergo_wire::box_ser::{compute_box_id, serialize_ergo_box};
 use std::collections::HashSet;
 
 /// State changes computed from a block's transactions.
@@ -17,10 +17,10 @@ pub struct StateChanges {
 /// Applies self-spending optimization: if a box is created and spent
 /// in the same block, both operations cancel out.
 ///
-/// Box IDs for newly created outputs are derived as
-/// `blake2b256(tx_id ++ vlq(output_index))` via [`compute_box_id`].
-/// Inserted box data uses standalone serialization via
-/// [`serialize_ergo_box`].
+/// Box IDs for newly created outputs are computed as
+/// `blake2b256(sigma_serialize(ErgoBox { candidate, tx_id, index }))` via
+/// [`ergo_wire::box_ser::compute_box_id`].
+/// Inserted box data uses standalone serialization via [`serialize_ergo_box`].
 pub fn compute_state_changes(txs: &[ErgoTransaction]) -> StateChanges {
     let mut to_remove = Vec::new();
     let mut to_insert: Vec<(BoxId, Vec<u8>)> = Vec::new();
@@ -30,7 +30,7 @@ pub fn compute_state_changes(txs: &[ErgoTransaction]) -> StateChanges {
     // First pass: collect all outputs (created boxes).
     for tx in txs {
         for (idx, candidate) in tx.output_candidates.iter().enumerate() {
-            let box_id = compute_box_id(&tx.tx_id, idx as u16);
+            let box_id = compute_box_id(candidate, &tx.tx_id, idx as u16);
             created_ids.insert(box_id);
             to_insert.push((box_id, serialize_ergo_box(candidate)));
         }
@@ -64,6 +64,18 @@ pub fn compute_state_changes(txs: &[ErgoTransaction]) -> StateChanges {
 mod tests {
     use super::*;
     use ergo_types::transaction::{DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
+    use ergo_wire::box_ser::compute_box_id as wire_compute_box_id;
+
+    /// Valid P2PK ErgoTree bytes (secp256k1 generator point G).
+    /// sigma-rust requires a fully valid ErgoTree in compute_box_id.
+    fn p2pk_tree() -> Vec<u8> {
+        let mut v = vec![0x00, 0x08, 0xCD];
+        v.extend_from_slice(
+            &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap(),
+        );
+        v
+    }
 
     /// Helper to build a minimal transaction.
     fn make_tx(
@@ -89,7 +101,7 @@ mod tests {
         let output_candidates = (0..num_outputs)
             .map(|_| ErgoBoxCandidate {
                 value: 1_000_000,
-                ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+                ergo_tree_bytes: p2pk_tree(),
                 creation_height: 1,
                 tokens: Vec::new(),
                 additional_registers: Vec::new(),
@@ -105,8 +117,16 @@ mod tests {
     }
 
     /// Compute the real box_id for a given tx_id and output index.
+    /// Uses the same minimal candidate that `make_tx` creates.
     fn expected_box_id(tx_id: [u8; 32], idx: u16) -> BoxId {
-        compute_box_id(&TxId(tx_id), idx)
+        let candidate = ErgoBoxCandidate {
+            value: 1_000_000,
+            ergo_tree_bytes: p2pk_tree(),
+            creation_height: 1,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        };
+        wire_compute_box_id(&candidate, &TxId(tx_id), idx)
     }
 
     #[test]
@@ -199,10 +219,10 @@ mod tests {
         let spent_box = [0xBB; 32];
         let tx = make_tx(tx_id, &[spent_box], &[], 1);
 
-        // The candidate we expect to recover.
+        // The candidate we expect to recover (matches what make_tx produces).
         let original_candidate = ErgoBoxCandidate {
             value: 1_000_000,
-            ergo_tree_bytes: vec![0x00, 0x08, 0xcd],
+            ergo_tree_bytes: p2pk_tree(),
             creation_height: 1,
             tokens: Vec::new(),
             additional_registers: Vec::new(),

@@ -96,6 +96,9 @@ pub struct NodeViewHolder {
     epoch_length: u32,
     /// Voting state machine: tracks accumulated votes and current parameters.
     pub voting_epoch_info: VotingEpochInfo,
+    /// Cached height of best_full_block — avoids repeated DB lookups when
+    /// skipping stale blocks in a batch after a fast-forward.
+    best_full_height: u32,
     /// Height below which sigma proof verification is skipped.
     checkpoint_height: u32,
     /// Autolykos v2 activation height (default 417_792 for mainnet).
@@ -210,6 +213,7 @@ impl NodeViewHolder {
             utxo_state: UtxoState::new(),
             applied_blocks: Vec::new(),
             last_rollback_height: None,
+            best_full_height: 0,
             blocks_to_keep: -1,
             epoch_length: 1024,
             voting_epoch_info: VotingEpochInfo::new(Parameters::genesis(), 0),
@@ -231,7 +235,7 @@ impl NodeViewHolder {
         digest_mode: bool,
         genesis_digest: Vec<u8>,
     ) -> Self {
-        let (state_root, state_version) = match history.get_state_version() {
+        let (state_root, state_version, recovered_height) = match history.get_state_version() {
             Ok(Some(version_id)) => match history.load_header(&version_id) {
                 Ok(Some(header)) => {
                     tracing::info!(
@@ -239,20 +243,49 @@ impl NodeViewHolder {
                         state_version = ?version_id,
                         "recovering state from persisted version"
                     );
-                    (header.state_root.0.to_vec(), version_id)
+                    (header.state_root.0.to_vec(), version_id, header.height)
                 }
                 _ => {
                     tracing::warn!(
                         state_version = ?version_id,
                         "state version header not found, starting from genesis"
                     );
-                    (genesis_digest.clone(), ModifierId([0u8; 32]))
+                    (genesis_digest.clone(), ModifierId([0u8; 32]), 0)
                 }
             },
             _ => {
                 tracing::info!("no persisted state version, starting from genesis");
-                (genesis_digest.clone(), ModifierId([0u8; 32]))
+                (genesis_digest.clone(), ModifierId([0u8; 32]), 0)
             }
+        };
+
+        // Reconstruct voting_epoch_info from the last epoch-boundary Extension in the DB.
+        // On restart, voting_epoch_info would otherwise start at genesis (block_version=1),
+        // causing Stage 2b to reject blocks whose version was raised by prior soft-fork votes.
+        // Loading the declared parameters from the most recent epoch-start Extension gives us
+        // the correct block_version, max_block_size, etc. without replaying all vote history.
+        let epoch_length_const = 1024u32;
+        let voting_epoch_info = {
+            let epoch_start = (recovered_height / epoch_length_const) * epoch_length_const;
+            let restored = if epoch_start > 0 {
+                history
+                    .header_ids_at_height(epoch_start)
+                    .ok()
+                    .and_then(|ids| ids.into_iter().next())
+                    .and_then(|id| history.load_extension(&id).ok().flatten())
+                    .and_then(|ext| Parameters::from_extension(epoch_start, &ext).ok())
+                    .map(|params| {
+                        tracing::info!(
+                            epoch_start,
+                            block_version = params.block_version(),
+                            "restored voting epoch info from DB epoch boundary"
+                        );
+                        VotingEpochInfo::new(params, epoch_start)
+                    })
+            } else {
+                None
+            };
+            restored.unwrap_or_else(|| VotingEpochInfo::new(Parameters::genesis(), 0))
         };
 
         Self {
@@ -265,9 +298,10 @@ impl NodeViewHolder {
             utxo_state: UtxoState::new(),
             applied_blocks: Vec::new(),
             last_rollback_height: None,
+            best_full_height: recovered_height,
             blocks_to_keep: -1,
             epoch_length: 1024,
-            voting_epoch_info: VotingEpochInfo::new(Parameters::genesis(), 0),
+            voting_epoch_info,
             checkpoint_height: 0,
             v2_activation_height: 417_792,
             v2_activation_difficulty_hex: "6f98d5000000".to_string(),
@@ -315,6 +349,145 @@ impl NodeViewHolder {
         self.max_time_drift_ms = block_interval_secs * 10 * 1000;
     }
 
+    /// Fast-forward `best_full_block_id` past all consecutive already-Valid
+    /// blocks on startup.  This avoids replaying through potentially tens of
+    /// thousands of blocks one-by-one when body sections arrive later.
+    ///
+    /// Call this after `restore_consistency()`.
+    pub fn fast_forward_valid_blocks(&mut self) -> Result<(), NodeViewError> {
+        let best_id = match self.history.best_full_block_id()? {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let best_height = match self.history.load_header(&best_id)? {
+            Some(h) => h.height,
+            None => return Ok(()),
+        };
+
+        let mut last_valid_id = best_id;
+        let mut last_valid_height = best_height;
+        let mut expected_parent = best_id;
+
+        for height in (best_height + 1).. {
+            let ids = match self.history.header_ids_at_height(height) {
+                Ok(ids) if !ids.is_empty() => ids,
+                _ => break,
+            };
+            let mut found = false;
+            for id in &ids {
+                if let Some(hdr) = self.history.load_header(id)? {
+                    if hdr.parent_id == expected_parent {
+                        let is_valid = matches!(
+                            self.history.get_validity(id),
+                            Ok(Some(ModifierValidity::Valid))
+                        );
+                        if is_valid {
+                            last_valid_id = *id;
+                            last_valid_height = height;
+                            expected_parent = *id;
+                            found = true;
+                        }
+                        break;
+                    }
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+
+        if last_valid_id != best_id {
+            let skipped = last_valid_height - best_height;
+            tracing::info!(
+                from_height = best_height,
+                to_height = last_valid_height,
+                skipped,
+                "fast-forwarded best_full_block past already-valid blocks"
+            );
+            self.history.set_best_full_block_id(&last_valid_id)?;
+            self.best_full_height = last_valid_height;
+
+            // In digest mode, state is just the state_root hash chain —
+            // advancing state_version here is correct.
+            // In UTXO mode, the AVL tree is NOT updated during fast-forward;
+            // state_version must only advance when UTXO is actually applied.
+            if self.digest_mode {
+                self.current_state_version = last_valid_id;
+                self.history.set_state_version(&last_valid_id)?;
+            }
+
+            // Always update the in-memory digest state root from the target header.
+            if let Some(hdr) = self.history.load_header(&last_valid_id)? {
+                self.current_state_root = hdr.state_root.0.to_vec();
+                self.digest_state = DigestState::new(hdr.state_root.0.to_vec(), last_valid_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Replay state changes for a block that has already been fully validated.
+    ///
+    /// Used by `restore_consistency` to advance UTXO/digest state for Valid
+    /// blocks without running the full validation pipeline.  The normal path
+    /// (`validate_and_apply_block`) would trigger Stage 0, which calls
+    /// `fast_forward_valid_blocks()` (which in UTXO mode no longer updates
+    /// `state_version` after the Task-2a fix) and returns `Ok(())` without
+    /// ever applying state, leaving `state_version` stuck in an infinite loop.
+    ///
+    /// This method runs only:
+    /// * Stage 6 — state application (mode-dependent, lenient: no proof
+    ///   re-verification since the block was already validated).
+    /// * Stage 7 — `state_version` / `best_full_height` update.
+    fn apply_block_state_only(&mut self, block_id: &ModifierId) -> Result<(), NodeViewError> {
+        let block = self.history.assemble_full_block(block_id)?.ok_or_else(|| {
+            NodeViewError::State(format!(
+                "apply_block_state_only: cannot assemble block {block_id:?}"
+            ))
+        })?;
+
+        if self.digest_mode {
+            // Digest mode: the block was already validated with ADProofs.
+            // Advance the in-memory digest state to match the header's
+            // committed state_root — identical to the fast-forward path.
+            let new_root = block.header.state_root.0.to_vec();
+            self.current_state_root = new_root.clone();
+            self.digest_state = DigestState::new(new_root, *block_id);
+        } else {
+            // UTXO mode: apply state changes leniently (no proof
+            // re-verification; trusted because block is already Valid).
+            let mut transactions = Vec::with_capacity(block.block_transactions.tx_bytes.len());
+            for (i, tx_bytes) in block.block_transactions.tx_bytes.iter().enumerate() {
+                let tx = parse_transaction(tx_bytes).map_err(|e| {
+                    NodeViewError::Codec(format!("apply_block_state_only: tx {} parse: {e}", i))
+                })?;
+                transactions.push(tx);
+            }
+            self.utxo_state
+                .apply_block_lenient(&transactions, block.header.height, block_id)
+                .map_err(|e| {
+                    NodeViewError::State(format!("apply_block_state_only: utxo lenient: {e}"))
+                })?;
+            self.current_state_root = self
+                .utxo_state
+                .state_root()
+                .map_err(|e| NodeViewError::State(format!("apply_block_state_only: root: {e}")))?;
+        }
+
+        // Advance state_version (Stage 7).
+        // NOTE: best_full_block_id is intentionally NOT updated here.
+        // restore_consistency only calls this helper when best_full_block_id is
+        // already set to the target height; this helper only bridges the
+        // state_version gap.  Calling set_best_full_block_id here would be
+        // redundant at best and could corrupt the pointer if called outside that
+        // context.
+        self.current_state_version = *block_id;
+        self.best_full_height = block.header.height;
+        self.history.set_state_version(block_id)?;
+
+        Ok(())
+    }
+
     /// Ensure state and history are consistent on startup.
     ///
     /// Compares `current_state_version` with `history.best_full_block_id()`.
@@ -359,13 +532,18 @@ impl NodeViewHolder {
                             Ok(Some(ModifierValidity::Valid))
                         );
                         if is_valid {
-                            match self.validate_and_apply_block(block_id) {
+                            // Block is already validated — replay state only.
+                            // validate_and_apply_block would trigger Stage 0
+                            // which calls fast_forward_valid_blocks() and
+                            // returns without applying state, leaving
+                            // state_version stuck.
+                            match self.apply_block_state_only(block_id) {
                                 Ok(()) => {}
                                 Err(e) => {
                                     tracing::error!(
                                         height = h,
                                         error = %e,
-                                        "failed to replay block during consistency restore"
+                                        "failed to replay state for valid block during consistency restore"
                                     );
                                     break;
                                 }
@@ -674,6 +852,7 @@ impl NodeViewHolder {
                 // Record the branch point height for wallet rollback.
                 if let Ok(Some(bp_header)) = self.history.load_header(branch_point) {
                     self.last_rollback_height = Some(bp_header.height);
+                    self.best_full_height = bp_header.height;
                 }
 
                 // Unmark old chain blocks.
@@ -690,6 +869,18 @@ impl NodeViewHolder {
 
         // Apply new chain blocks.
         for block_id in &info.to_apply {
+            // Skip blocks whose sections haven't all arrived yet — during
+            // initial sync, `chain_from_ancestor` may include intermediate
+            // blocks that aren't complete.  These will be retried when their
+            // remaining sections arrive.
+            if !self.history.has_all_sections(block_id).unwrap_or(false) {
+                tracing::debug!(
+                    ?block_id,
+                    "skipping incomplete block in to_apply (sections not yet received)"
+                );
+                continue;
+            }
+
             match self.validate_and_apply_block(block_id) {
                 Ok(()) => {
                     // Collect tx IDs from this applied block.
@@ -910,19 +1101,33 @@ impl NodeViewHolder {
     /// 6. State application (mode-dependent: digest or UTXO).
     /// 7. Marks the block as Valid and updates the best full block pointer.
     fn validate_and_apply_block(&mut self, block_id: &ModifierId) -> Result<(), NodeViewError> {
-        // Stage 0: Reject already-applied blocks (rule 300).
-        if let Ok(Some(validity)) = self.history.get_validity(block_id) {
-            match validity {
-                ModifierValidity::Valid => {
-                    tracing::debug!(?block_id, "block already applied, skipping");
+        // Stage 0: Short-circuit already-valid blocks (rule 300).
+        // When we encounter an already-valid block, fast-forward past the
+        // entire consecutive valid range so subsequent body section arrivals
+        // don't re-discover the same blocks 128 at a time.
+        if let Ok(Some(ModifierValidity::Valid)) = self.history.get_validity(block_id) {
+            // If this block is at or below best_full_block, skip silently.
+            // This happens when a 128-block batch becomes stale after a
+            // fast-forward jumped past most of its members.
+            if let Ok(Some(hdr)) = self.history.load_header(block_id) {
+                if hdr.height <= self.best_full_height {
                     return Ok(());
                 }
-                ModifierValidity::Invalid => {
-                    return Err(NodeViewError::Validation(format!(
-                        "block {block_id:?} previously marked invalid"
-                    )));
+            }
+            tracing::debug!(?block_id, "block already applied, fast-forwarding");
+            if let Err(e) = self.fast_forward_valid_blocks() {
+                tracing::warn!(error = %e, "fast-forward in already-applied path failed, advancing one block");
+                if let Err(e) = self.history.set_best_full_block_id(block_id) {
+                    tracing::warn!(error = %e, "failed to advance best_full_block for already-applied block");
+                }
+                if self.digest_mode {
+                    self.current_state_version = *block_id;
+                    if let Err(e) = self.history.set_state_version(block_id) {
+                        tracing::warn!(error = %e, "failed to persist state version for already-applied block");
+                    }
                 }
             }
+            return Ok(());
         }
 
         // Stage 1: Assemble full block from stored sections.
@@ -931,11 +1136,21 @@ impl NodeViewHolder {
             .assemble_full_block(block_id)?
             .ok_or_else(|| NodeViewError::State(format!("cannot assemble block {block_id:?}")))?;
 
-        // Stage 1b: Reject if header is marked invalid (rule 303).
+        // Stage 0b: Reject previously-invalid blocks — but below checkpoint,
+        // clear stale Invalid markers from prior runs and proceed.
         if let Ok(Some(ModifierValidity::Invalid)) = self.history.get_validity(block_id) {
-            return Err(NodeViewError::Validation(format!(
-                "header {block_id:?} marked invalid"
-            )));
+            if block.header.height > self.checkpoint_height {
+                return Err(NodeViewError::Validation(format!(
+                    "block {block_id:?} previously marked invalid"
+                )));
+            }
+            // Below checkpoint: clear the stale Invalid marker so we can retry.
+            tracing::debug!(
+                height = block.header.height,
+                ?block_id,
+                "clearing stale Invalid marker (below checkpoint)"
+            );
+            let _ = self.history.clear_validity(block_id);
         }
 
         // Stage 1c: Reject block sections for pruned headers (rule 305).
@@ -950,7 +1165,8 @@ impl NodeViewHolder {
         }
 
         // Stage 1d: Reject headers whose parent is semantically invalid (rule 210).
-        {
+        // Below checkpoint, skip this check — parents may have stale Invalid markers.
+        if block.header.height > self.checkpoint_height {
             let parent_is_invalid = matches!(
                 self.history.get_validity(&block.header.parent_id),
                 Ok(Some(ModifierValidity::Invalid))
@@ -990,7 +1206,52 @@ impl NodeViewHolder {
         // The expected version comes from the parameters system (BLOCK_VERSION_ID = 123).
         // Default is version 1 (genesis). After soft-fork activation (e.g. Autolykos v2
         // at height 417,792), the expected version is bumped to 2.
-        let expected_version = self.voting_epoch_info.parameters.block_version();
+        //
+        // On restart, voting_epoch_info starts at genesis (version 1) and is only
+        // updated via Stage 7b as blocks are applied.  If we restart mid-sync at
+        // height 417,791 and then try to apply 417,792, Stage 7b never ran for the
+        // epoch boundary so parameters still show version 1.  Apply the hardcoded
+        // v2 activation eagerly here — matching the logic in
+        // Parameters::update_at_epoch_start — so the check passes and Stage 7b can
+        // then set the persisted parameters correctly.
+        let expected_version = {
+            let pv = self.voting_epoch_info.parameters.block_version();
+            // Hardcoded v2 activation (non-voted hard-fork at 417,792).
+            let pv = if block.header.height >= self.v2_activation_height && pv < 2 {
+                self.voting_epoch_info
+                    .parameters
+                    .table
+                    .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, 2);
+                2u8
+            } else {
+                pv
+            };
+            // At epoch boundaries the new parameters are declared in this block's Extension.
+            // On restart, voting_epoch_info may not have replayed vote accumulation for the
+            // previous epoch, so the computed version can lag behind the declared one.
+            // Trust the declared block_version (max with what we computed) so that
+            // voted-in version upgrades (e.g. v2→v3) don't block validation.
+            if block.header.height % self.epoch_length == 0 && block.header.height > 0 {
+                if let Ok(declared) =
+                    Parameters::from_extension(block.header.height, &block.extension)
+                {
+                    let dv = declared.block_version();
+                    if dv > pv {
+                        self.voting_epoch_info
+                            .parameters
+                            .table
+                            .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, dv as i32);
+                        dv
+                    } else {
+                        pv
+                    }
+                } else {
+                    pv
+                }
+            } else {
+                pv
+            }
+        };
         validate_block_version(&block.header, expected_version).map_err(|e| {
             NodeViewError::Validation(format!(
                 "block version check failed at height {}: {e}",
@@ -1100,9 +1361,14 @@ impl NodeViewHolder {
                 .map_err(|e| NodeViewError::TxValidation(format!("tx {} stateless: {e}", i)))?;
         }
 
-        // Stage 5b: Stateful validation (UTXO mode only).
+        // Stage 5b: Stateful validation (UTXO mode only, above checkpoint).
+        // Below checkpoint, skip input lookups and stateful validation —
+        // the Scala reference also skips via `execTransactions` returning Valid(0L).
         // Collect resolved input boxes per-tx for reuse in Stage 5c.
-        let all_input_boxes: Vec<Vec<ergo_types::transaction::ErgoBox>> = if !self.digest_mode {
+        let above_checkpoint = block.header.height > self.checkpoint_height;
+        let all_input_boxes: Vec<Vec<ergo_types::transaction::ErgoBox>> = if !self.digest_mode
+            && above_checkpoint
+        {
             let mut all = Vec::with_capacity(transactions.len());
             for (i, tx) in transactions.iter().enumerate() {
                 let mut input_boxes = Vec::with_capacity(tx.inputs.len());
@@ -1139,8 +1405,8 @@ impl NodeViewHolder {
             Vec::new()
         };
 
-        // Stage 5b2: EIP-27 re-emission validation (UTXO mode only).
-        if !self.digest_mode {
+        // Stage 5b2: EIP-27 re-emission validation (UTXO mode only, above checkpoint).
+        if !self.digest_mode && above_checkpoint {
             for (i, tx) in transactions.iter().enumerate() {
                 let input_boxes = &all_input_boxes[i];
                 ergo_consensus::reemission::verify_reemission_spending(
@@ -1153,9 +1419,19 @@ impl NodeViewHolder {
         }
 
         // Stage 5c: Sigma proof verification (UTXO mode, above checkpoint).
+        //
+        // Three-phase pattern:
+        //   Phase 1 (sequential): convert context once, compute initial+token costs,
+        //           batch-resolve data input boxes, early-exit on cost budget.
+        //   Phase 2 (parallel via rayon): sigma verification across all txs.
+        //   Phase 3 (sequential): accumulate sigma costs in tx order, final budget check.
         if !self.digest_mode && block.header.height > self.checkpoint_height {
-            use ergo_consensus::sigma_verify::{verify_transaction, SigmaStateContext};
+            use ergo_consensus::sigma_verify::{
+                convert_state_context, verify_transaction_with_sigma_ctx, SigmaStateContext,
+            };
+            use rayon::prelude::*;
 
+            // ── Phase 1: Sequential prep ────────────────────────────
             let sigma_ctx = SigmaStateContext {
                 last_headers: self.get_last_headers(10),
                 current_height: block.header.height,
@@ -1169,21 +1445,58 @@ impl NodeViewHolder {
                 current_parent_id: block.header.parent_id.0,
             };
 
+            // Convert once and share across all txs (avoids per-tx EC-point
+            // parsing, parameter BTreeMap lookups, and PreHeader construction).
+            let sigma_state_ctx = convert_state_context(&sigma_ctx)
+                .map_err(|e| NodeViewError::TxValidation(format!("sigma context: {e}")))?;
+
             let max_block_cost = self.voting_epoch_info.parameters.max_block_cost() as u64;
             let mut accumulated_cost: u64 = 0;
 
+            // Deduplicate and batch-resolve all data input boxes into a cache.
+            let mut data_box_cache: std::collections::HashMap<
+                ergo_types::transaction::BoxId,
+                ergo_types::transaction::ErgoBox,
+            > = std::collections::HashMap::new();
             for (i, tx) in transactions.iter().enumerate() {
-                // Compute initial cost for this transaction.
+                for di in &tx.data_inputs {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        data_box_cache.entry(di.box_id)
+                    {
+                        let b = self
+                            .utxo_state
+                            .get_ergo_box(&di.box_id)
+                            .map_err(|e| {
+                                NodeViewError::TxValidation(format!(
+                                    "tx {} data input box lookup: {e}",
+                                    i
+                                ))
+                            })?
+                            .ok_or_else(|| {
+                                NodeViewError::TxValidation(format!(
+                                    "tx {} data input box {} not found in UTXO set",
+                                    i, di.box_id
+                                ))
+                            })?;
+                        entry.insert(b);
+                    }
+                }
+            }
+
+            // Per-tx prep: compute initial+token costs, build data_boxes vec.
+            struct TxPrep {
+                data_boxes: Vec<ergo_types::transaction::ErgoBox>,
+            }
+            let mut prepared: Vec<TxPrep> = Vec::with_capacity(transactions.len());
+
+            for (i, tx) in transactions.iter().enumerate() {
                 let initial_cost = ergo_consensus::sigma_verify::compute_initial_tx_cost(
                     tx,
                     &self.voting_epoch_info.parameters,
                 );
                 accumulated_cost = accumulated_cost.saturating_add(initial_cost);
 
-                // Use input_boxes from Stage 5b (needed for token access cost).
                 let input_boxes = &all_input_boxes[i];
-
-                // Add token access cost (Rule 501).
                 let token_cost = ergo_consensus::sigma_verify::compute_token_access_cost(
                     input_boxes,
                     &tx.output_candidates,
@@ -1199,32 +1512,43 @@ impl NodeViewHolder {
                     )));
                 }
 
-                // Resolve data input boxes (mandatory — Scala rule txDataBoxes).
-                let mut data_boxes = Vec::new();
-                for di in &tx.data_inputs {
-                    match self.utxo_state.get_ergo_box(&di.box_id) {
-                        Ok(Some(b)) => data_boxes.push(b),
-                        _ => {
-                            return Err(NodeViewError::TxValidation(format!(
-                                "tx {} data input box {} not found in UTXO set",
-                                i, di.box_id
-                            )));
-                        }
-                    }
-                }
+                // Build data_boxes from cache (HashMap lookup, not AVL traversal).
+                let data_boxes: Vec<ergo_types::transaction::ErgoBox> = tx
+                    .data_inputs
+                    .iter()
+                    .map(|di| data_box_cache[&di.box_id].clone())
+                    .collect();
 
-                let sigma_cost = verify_transaction(
-                    tx,
-                    input_boxes,
-                    &data_boxes,
-                    &sigma_ctx,
-                    self.checkpoint_height,
-                )
-                .map_err(|e| NodeViewError::TxValidation(format!("tx {} sigma: {e}", i)))?;
+                prepared.push(TxPrep { data_boxes });
+            }
+
+            // ── Phase 2: Parallel sigma verification via rayon ──────
+            let sigma_results: Vec<Result<u64, (usize, String)>> = transactions
+                .par_iter()
+                .zip(all_input_boxes.par_iter())
+                .zip(prepared.par_iter())
+                .enumerate()
+                .map(|(i, ((tx, input_boxes), prep))| {
+                    verify_transaction_with_sigma_ctx(
+                        tx,
+                        input_boxes,
+                        &prep.data_boxes,
+                        &sigma_state_ctx,
+                        block.header.height,
+                        self.checkpoint_height,
+                    )
+                    .map_err(|e| (i, format!("{e}")))
+                })
+                .collect();
+
+            // ── Phase 3: Sequential cost accumulation ───────────────
+            for result in sigma_results {
+                let sigma_cost = result.map_err(|(i, e)| {
+                    NodeViewError::TxValidation(format!("tx {} sigma: {e}", i))
+                })?;
                 accumulated_cost = accumulated_cost.saturating_add(sigma_cost);
             }
 
-            // Final check: the last tx's sigma cost may have pushed total over the limit.
             if accumulated_cost > max_block_cost {
                 return Err(NodeViewError::TxValidation(format!(
                     "total block cost {} exceeds max {}",
@@ -1234,13 +1558,15 @@ impl NodeViewHolder {
         }
 
         // Stage 6: State application (mode-dependent).
+        // Below checkpoint, skip internal tx validation and digest verification
+        // in UTXO mode — the chain is trusted below checkpoint.
         if self.digest_mode {
             let changes = compute_state_changes(&transactions);
             self.digest_state
                 .apply_full_block(&block, block_id, &changes)
                 .map_err(|e| NodeViewError::State(format!("digest state: {e}")))?;
             self.current_state_root = self.digest_state.state_root().to_vec();
-        } else {
+        } else if above_checkpoint {
             let expected_root = block.header.state_root.0.as_slice();
             self.utxo_state
                 .apply_block(
@@ -1252,6 +1578,17 @@ impl NodeViewHolder {
                     &vs,
                 )
                 .map_err(|e| NodeViewError::State(format!("utxo state: {e}")))?;
+            self.current_state_root = self
+                .utxo_state
+                .state_root()
+                .map_err(|e| NodeViewError::State(format!("{e}")))?;
+        } else {
+            // Below checkpoint: apply state changes without tx validation or
+            // digest verification. Removes for non-existent boxes (e.g. genesis
+            // boxes that were never seeded) are silently skipped.
+            self.utxo_state
+                .apply_block_lenient(&transactions, block.header.height, block_id)
+                .map_err(|e| NodeViewError::State(format!("utxo state (lenient): {e}")))?;
             self.current_state_root = self
                 .utxo_state
                 .state_root()
@@ -1268,6 +1605,7 @@ impl NodeViewHolder {
         self.history
             .set_validity(block_id, ModifierValidity::Valid)?;
         self.history.set_best_full_block_id(block_id)?;
+        self.best_full_height = block.header.height;
 
         // Track applied block for Inv broadcast.
         self.applied_blocks.push(*block_id);
@@ -1621,15 +1959,15 @@ mod tests {
 
     /// Compute the Merkle root that matches `sample_extension`.
     /// Uses Scala kvToLeaf format: [key_length_byte] ++ key ++ value.
+    /// Single-element tree: paired with empty node → root = blake2b256(0x01 || leaf_hash).
     fn sample_extension_root() -> [u8; 32] {
         let mut leaf = Vec::new();
         leaf.push(SAMPLE_EXT_FIELD.0.len() as u8); // key length prefix
         leaf.extend_from_slice(&SAMPLE_EXT_FIELD.0);
         leaf.extend_from_slice(SAMPLE_EXT_FIELD.1);
-        // leaf_hash = blake2b256(0x00 || leaf)
-        let mut prefixed = vec![0x00u8];
-        prefixed.extend_from_slice(&leaf);
-        test_blake2b256(&prefixed)
+        // Use ergo_consensus::merkle for correct root computation.
+        let slices: Vec<&[u8]> = vec![leaf.as_slice()];
+        ergo_consensus::merkle::merkle_root(&slices).unwrap()
     }
 
     fn sample_ad_proofs(header_id: &ModifierId) -> ADProofs {
@@ -1844,9 +2182,9 @@ mod tests {
         );
     }
 
-    // 10. apply_progress marks block Invalid on validation failure.
+    // 10. apply_progress skips incomplete blocks (sections not yet received).
     #[test]
-    fn apply_progress_marks_invalid_on_failure() {
+    fn apply_progress_skips_incomplete_block() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view(db);
 
@@ -1854,12 +2192,14 @@ mod tests {
         let missing_id = make_id(0xF1);
         let info = ProgressInfo::apply(vec![missing_id]);
 
+        // Should succeed — incomplete blocks are silently skipped during
+        // initial sync so they can be retried when sections arrive.
         let result = nv.apply_progress(&info);
-        assert!(result.is_err());
+        assert!(result.is_ok());
 
-        // The block should be marked Invalid.
+        // The block should have no validity set (not marked Invalid).
         let validity = nv.history.get_validity(&missing_id).unwrap();
-        assert_eq!(validity, Some(ModifierValidity::Invalid));
+        assert_eq!(validity, None);
     }
 
     // 11. Chain reorg rolls back state and applies new chain.
@@ -2095,13 +2435,9 @@ mod tests {
             ProgressInfo::chain_switch(branch_point, vec![old_id], vec![new_id_ok, new_id_bad]);
         let result = nv.apply_progress(&info_switch);
 
-        // Should fail because new_id_bad cannot be assembled.
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, NodeViewError::State(ref msg) if msg.contains("cannot assemble")),
-            "expected State error about assembly, got: {err}"
-        );
+        // Should succeed — incomplete blocks are skipped during apply so
+        // they can be retried when their sections arrive.
+        assert!(result.is_ok());
 
         // Old chain block should still be marked Invalid (rollback happened).
         assert_eq!(
@@ -2115,11 +2451,8 @@ mod tests {
             Some(ModifierValidity::Valid)
         );
 
-        // Second new block should be marked Invalid (it failed).
-        assert_eq!(
-            nv.history.get_validity(&new_id_bad).unwrap(),
-            Some(ModifierValidity::Invalid)
-        );
+        // Second new block should have no validity (skipped, not Invalid).
+        assert_eq!(nv.history.get_validity(&new_id_bad).unwrap(), None);
     }
 
     // 14. validate_and_apply_block rejects a block with a tampered transactions root.
@@ -2857,8 +3190,22 @@ mod tests {
     fn already_applied_invalid_block_is_rejected() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
+        // Set checkpoint to 0 so the block is "above checkpoint" and the
+        // Invalid rejection fires (below checkpoint, stale markers are cleared).
+        nv.set_checkpoint_height(0);
 
         let id = make_id(0x51);
+        let header = make_header(100, 0x51);
+
+        // Store block sections so assembly succeeds (Stage 0b runs after
+        // assembly since the restructure).
+        nv.history.store_header(&id, &header).unwrap();
+        nv.history
+            .store_block_transactions(&id, &sample_block_transactions(&id))
+            .unwrap();
+        nv.history
+            .store_extension(&id, &sample_extension(&id))
+            .unwrap();
 
         // Manually mark as invalid.
         nv.history
@@ -2875,13 +3222,25 @@ mod tests {
     }
 
     // Rule 303: Block with header marked invalid should be rejected.
-    // (Stage 0 catches this first since it checks for any prior validity.)
+    // (Stage 0b catches this after assembly.)
     #[test]
     fn block_with_invalid_header_is_rejected() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
+        // Above checkpoint so the Invalid marker is not cleared.
+        nv.set_checkpoint_height(0);
 
         let id = make_id(0x52);
+        let header = make_header(100, 0x52);
+
+        // Store block sections so assembly succeeds.
+        nv.history.store_header(&id, &header).unwrap();
+        nv.history
+            .store_block_transactions(&id, &sample_block_transactions(&id))
+            .unwrap();
+        nv.history
+            .store_extension(&id, &sample_extension(&id))
+            .unwrap();
 
         // Mark the block as invalid.
         nv.history
@@ -2987,6 +3346,8 @@ mod tests {
     fn block_with_invalid_parent_is_rejected() {
         let (db, _dir) = open_test_db();
         let mut nv = make_node_view_skip_difficulty(db);
+        // Above checkpoint so Stage 1d parent-semantics check is active.
+        nv.set_checkpoint_height(0);
 
         let parent_id = make_id(0x60);
         let id = make_id(0x61);
@@ -3282,6 +3643,147 @@ mod tests {
         assert!(
             err_msg.contains("parent header not found"),
             "expected 'parent header not found' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_does_not_advance_state_version_in_utxo_mode() {
+        use ergo_storage::chain_scoring::ModifierValidity;
+        // Use make_node_view_skip_difficulty to avoid difficulty checks.
+        let (db, _dir) = open_test_db();
+
+        // We need fast_forward_valid_blocks to be able to load the header at
+        // best_full_block_id.  Use id1 as the starting point (height 1) and
+        // id2 as the already-Valid block to fast-forward to (height 2).
+        let id1 = make_id(1);
+        let id2 = make_id(2);
+
+        // h1 is the current best full block (height 1).
+        // h2 is already Valid and should be fast-forwarded to (height 2).
+        // store_header_with_score also populates the height → IDs index.
+        let h1 = {
+            let mut h = make_header(1, 1);
+            h.parent_id = ModifierId::GENESIS_PARENT;
+            h
+        };
+        let h2 = {
+            let mut h = make_header(2, 2);
+            h.parent_id = id1;
+            h
+        };
+        db.store_header_with_score(&id1, &h1).unwrap();
+        db.store_header_with_score(&id2, &h2).unwrap();
+
+        // Mark h2 as Valid (h1 is the current tip, only h2 needs fast-forward).
+        db.set_validity(&id2, ModifierValidity::Valid).unwrap();
+
+        // best_full_block = id1, state_version = id1 (as if h1 was applied in a
+        // previous run but h2 arrived already-valid without being applied in UTXO mode).
+        db.set_best_full_block_id(&id1).unwrap();
+        db.set_state_version(&id1).unwrap();
+
+        // Create UTXO-mode node view (digest_mode=false).
+        let mut nv = make_node_view_skip_difficulty(db);
+        nv.current_state_version = id1;
+        nv.best_full_height = 1;
+
+        // Run fast-forward.
+        nv.fast_forward_valid_blocks().unwrap();
+
+        // best_full_block must advance to id2.
+        assert_eq!(nv.history.best_full_block_id().unwrap(), Some(id2));
+
+        // In UTXO mode, state_version must NOT advance during fast-forward
+        // because the AVL tree was not updated.
+        assert_eq!(
+            nv.history.get_state_version().unwrap(),
+            Some(id1),
+            "state_version must stay at id1 in UTXO mode during fast-forward"
+        );
+        assert_eq!(
+            nv.current_state_version, id1,
+            "in-memory current_state_version must also stay at id1"
+        );
+    }
+
+    // restore_consistency advances state_version for already-Valid blocks in digest mode.
+    //
+    // Regression test for the infinite-loop / no-progress bug:
+    // Previously, restore_consistency called validate_and_apply_block for each
+    // already-Valid block. Stage 0 intercepted valid blocks, called
+    // fast_forward_valid_blocks() (which in UTXO mode no longer updates
+    // state_version after Task 2a), and returned Ok without applying state.
+    // state_version never advanced, causing restore_consistency to loop over
+    // the same block endlessly.
+    //
+    // After the fix, restore_consistency uses apply_block_state_only which
+    // runs only Stage 6 (state application) and Stage 7 (state_version update)
+    // and correctly advances state_version.
+    #[test]
+    fn restore_consistency_advances_state_version_for_valid_blocks() {
+        let (db, _dir) = open_test_db();
+        let mempool = Arc::new(RwLock::new(ErgoMemPool::with_min_fee(1000, 0)));
+        // Use digest_mode=true so state application is lightweight (just header
+        // state_root update, no AVL tree operations). This lets the test work
+        // without real transactions.
+        let mut nv = NodeViewHolder::new(db, mempool, true, genesis_digest());
+        nv.set_checkpoint_height(u32::MAX);
+        nv.voting_epoch_info
+            .parameters
+            .table
+            .insert(ergo_consensus::parameters::BLOCK_VERSION_ID, 2);
+
+        // Build two blocks. id0 is "genesis-equivalent" at height 0 (state
+        // already applied). id1 is at height 1 and is already marked Valid
+        // but state has not been advanced to it yet — simulating a gap that
+        // restore_consistency must bridge.
+        let id0 = make_id(0x10);
+        let id1 = make_id(0x11);
+
+        // Store block at height 0 (the current state version).
+        let h0 = make_header(0, 0x10);
+        nv.history.store_header(&id0, &h0).unwrap();
+        nv.history
+            .store_block_transactions(&id0, &sample_block_transactions(&id0))
+            .unwrap();
+        nv.history
+            .store_extension(&id0, &sample_extension(&id0))
+            .unwrap();
+        nv.history
+            .set_validity(&id0, ModifierValidity::Valid)
+            .unwrap();
+
+        // Store block at height 1 — already Valid, but state not yet applied.
+        let mut h1 = make_header(1, 0x11);
+        h1.parent_id = id0; // properly link to parent
+        nv.history.store_header(&id1, &h1).unwrap();
+        nv.history
+            .store_block_transactions(&id1, &sample_block_transactions(&id1))
+            .unwrap();
+        nv.history
+            .store_extension(&id1, &sample_extension(&id1))
+            .unwrap();
+        nv.history
+            .set_validity(&id1, ModifierValidity::Valid)
+            .unwrap();
+
+        // Set best_full_block to id1 but state_version to id0 — this is the gap.
+        nv.history.set_best_full_block_id(&id1).unwrap();
+        nv.history.set_state_version(&id0).unwrap();
+        nv.current_state_version = id0;
+        nv.best_full_height = 0;
+
+        // restore_consistency should advance state_version from id0 to id1.
+        nv.restore_consistency().unwrap();
+
+        assert_eq!(
+            nv.current_state_version, id1,
+            "restore_consistency must advance in-memory state_version to id1"
+        );
+        assert_eq!(
+            nv.history.get_state_version().unwrap(),
+            Some(id1),
+            "restore_consistency must persist state_version to id1 in DB"
         );
     }
 }

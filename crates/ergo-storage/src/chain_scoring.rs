@@ -127,6 +127,11 @@ impl HistoryDb {
         }
     }
 
+    /// Remove the validity marker for a modifier, returning it to "unknown" state.
+    pub fn clear_validity(&self, id: &ModifierId) -> Result<(), StorageError> {
+        self.delete_index(&validity_key(id))
+    }
+
     /// Update the best header ID pointer.
     ///
     /// This writes directly to the same index key that [`best_header_id`](Self::best_header_id)

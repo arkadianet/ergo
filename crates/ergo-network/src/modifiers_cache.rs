@@ -5,6 +5,7 @@
 //! second, smaller cache.  Both tiers use `lru::LruCache` for automatic
 //! least-recently-used eviction.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use ergo_types::header::Header;
@@ -12,7 +13,12 @@ use ergo_types::modifier_id::ModifierId;
 use lru::LruCache;
 
 /// Default capacity for the headers cache (type 101).
-const DEFAULT_HEADERS_CAPACITY: usize = 8192;
+///
+/// Must be large enough to buffer the fast header sync window.  With up to
+/// 13 peers × 2048 chunk_size we can get ~26 k headers in flight; a cache
+/// smaller than that causes LRU eviction of the low-height headers the
+/// processor needs next, making fast sync useless.
+const DEFAULT_HEADERS_CAPACITY: usize = 100_000;
 
 /// Default capacity for the body-sections cache (types 102, 104, 108).
 const DEFAULT_BODY_CAPACITY: usize = 384;
@@ -39,6 +45,8 @@ pub struct CachedModifier {
 pub struct ModifiersCache {
     headers: LruCache<ModifierId, CachedModifier>,
     body_sections: LruCache<ModifierId, CachedModifier>,
+    /// Height → ModifierId index for O(1) `pop_header_candidate` lookups.
+    height_index: HashMap<u32, ModifierId>,
 }
 
 impl ModifiersCache {
@@ -51,6 +59,7 @@ impl ModifiersCache {
             body_sections: LruCache::new(
                 NonZeroUsize::new(body_capacity).expect("body_capacity must be > 0"),
             ),
+            height_index: HashMap::new(),
         }
     }
 
@@ -90,19 +99,37 @@ impl ModifiersCache {
             data,
             header,
         };
-        let cache = self.cache_for_mut(type_id);
+
+        // Select the correct cache tier directly (avoids borrowing all of
+        // `self` through `cache_for_mut` so we can also touch `height_index`).
+        let cache = if type_id == HEADER_TYPE_ID {
+            &mut self.headers
+        } else {
+            &mut self.body_sections
+        };
 
         // If at capacity and this key is not already present, the LRU entry
         // will be evicted.  We need to capture it manually because
         // `LruCache::push` only returns the *old value for the same key*.
         let evicted = if cache.len() == cache.cap().get() && cache.peek(&cache_key).is_none() {
             // Pop the least-recently-used entry before inserting.
-            cache
-                .pop_lru()
-                .map(|(eid, emod)| (eid, emod.type_id, emod.data))
+            let popped = cache.pop_lru();
+            if let Some((_, ref emod)) = popped {
+                if let Some(ref h) = emod.header {
+                    self.height_index.remove(&h.height);
+                }
+            }
+            popped.map(|(eid, emod)| (eid, emod.type_id, emod.data))
         } else {
             None
         };
+
+        // Maintain height index for headers with parsed height.
+        if type_id == HEADER_TYPE_ID {
+            if let Some(ref h) = entry.header {
+                self.height_index.insert(h.height, cache_key);
+            }
+        }
 
         cache.push(cache_key, entry);
         evicted
@@ -111,8 +138,18 @@ impl ModifiersCache {
     /// Removes and returns the modifier for `id` from the appropriate cache
     /// tier, or `None` if not present.
     pub fn remove(&mut self, id: &ModifierId, type_id: u8) -> Option<(ModifierId, u8, Vec<u8>)> {
-        let cache = self.cache_for_mut(type_id);
-        cache.pop(id).map(|cm| (*id, cm.type_id, cm.data))
+        let cache = if type_id == HEADER_TYPE_ID {
+            &mut self.headers
+        } else {
+            &mut self.body_sections
+        };
+        let popped = cache.pop(id);
+        if let Some(ref cm) = popped {
+            if let Some(ref h) = cm.header {
+                self.height_index.remove(&h.height);
+            }
+        }
+        popped.map(|cm| (*id, cm.type_id, cm.data))
     }
 
     /// Returns `true` if the modifier is present in the appropriate cache tier.
@@ -134,6 +171,7 @@ impl ModifiersCache {
     ///
     /// Headers are drained first, then body sections.
     pub fn drain_all(&mut self) -> Vec<(ModifierId, u8, Vec<u8>)> {
+        self.height_index.clear();
         let mut result = Vec::with_capacity(self.len());
         while let Some((id, cached)) = self.headers.pop_lru() {
             result.push((id, cached.type_id, cached.data));
@@ -146,6 +184,7 @@ impl ModifiersCache {
 
     /// Drains all headers from the cache, returning them as a `Vec`.
     pub fn drain_all_headers(&mut self) -> Vec<(ModifierId, u8, Vec<u8>)> {
+        self.height_index.clear();
         let mut out = Vec::with_capacity(self.headers.len());
         while let Some((id, cm)) = self.headers.pop_lru() {
             out.push((id, cm.type_id, cm.data));
@@ -180,24 +219,18 @@ impl ModifiersCache {
     }
 
     /// Find and remove the first cached header at `current_headers_height + 1`.
+    ///
+    /// Uses a height → ModifierId index for O(1) lookup instead of scanning
+    /// the entire LRU cache.
     pub fn pop_header_candidate(
         &mut self,
         current_headers_height: u32,
     ) -> Option<(ModifierId, u8, Vec<u8>, Option<Header>)> {
         let target_height = current_headers_height + 1;
-        let candidate_id = self.headers.iter().find_map(|(id, cm)| {
-            if let Some(ref h) = cm.header {
-                if h.height == target_height {
-                    return Some(*id);
-                }
-            }
-            None
-        });
-        candidate_id.and_then(|id| {
-            self.headers
-                .pop(&id)
-                .map(|cm| (id, cm.type_id, cm.data, cm.header))
-        })
+        let candidate_id = self.height_index.remove(&target_height)?;
+        self.headers
+            .pop(&candidate_id)
+            .map(|cm| (candidate_id, cm.type_id, cm.data, cm.header))
     }
 
     /// Find and remove a cached body section matching one of the given header IDs.

@@ -164,3 +164,22 @@ mod tests {
         assert!(diff > BigUint::from(1_000_000u64));
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn compact_bits_roundtrip(difficulty in 1u64..=u64::MAX) {
+            let big = num_bigint::BigUint::from(difficulty);
+            let encoded = encode_compact_bits(&big);
+            let decoded = decode_compact_bits(encoded);
+            // Compact encoding may lose precision for large values,
+            // so we verify the re-encode roundtrips
+            let re_encoded = encode_compact_bits(&decoded);
+            prop_assert_eq!(encoded, re_encoded);
+        }
+    }
+}
