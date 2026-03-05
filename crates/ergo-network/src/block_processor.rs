@@ -522,9 +522,7 @@ fn process_bulk_headers(
                 }
                 accum.new_headers.push(id);
             }
-            if max_height > state.fast_sync_write_height {
-                state.fast_sync_write_height = max_height;
-            }
+            state.fast_sync_write_height = state.fast_sync_write_height.max(max_height);
             tracing::debug!(count, max_height, "bulk_headers: batch written");
         }
         Err(e) => {

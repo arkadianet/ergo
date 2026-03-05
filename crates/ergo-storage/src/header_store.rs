@@ -764,4 +764,65 @@ mod tests {
         let best_id = db.best_header_id().unwrap().unwrap();
         assert_eq!(best_id, ids[4]);
     }
+
+    /// An orphan chunk (whose parent is not in the DB) must NOT overwrite the
+    /// established `best_header_key`.
+    ///
+    /// Regression test: before the `chunk_connected` guard was added, a bulk
+    /// write whose first parent was absent would score from 0 and could
+    /// accidentally exceed the real cumulative score, corrupting the best-header
+    /// pointer.
+    #[test]
+    fn bulk_store_orphan_does_not_corrupt_best_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = HistoryDb::open(tmp.path()).unwrap();
+
+        // 1. Store a real connected header at height 1.
+        let real_id = ModifierId([0x01; 32]);
+        let mut real_header = ergo_types::header::Header::default_for_test();
+        real_header.height = 1;
+        // Valid compact nBits: size=1, mantissa=0x01 => difficulty 1
+        real_header.n_bits = 0x01010000;
+        real_header.parent_id = ModifierId::GENESIS_PARENT;
+        let real_raw = ergo_wire::header_ser::serialize_header(&real_header);
+        let applied = db
+            .bulk_store_headers(&[(real_id, real_header, real_raw)])
+            .unwrap();
+        assert_eq!(applied.len(), 1, "real header must be stored");
+
+        // 2. Confirm the best header is our real header.
+        assert_eq!(
+            db.best_header_id().unwrap(),
+            Some(real_id),
+            "real header should be best before orphan chunk"
+        );
+
+        // 3. Build an orphan chunk: parent_id points to an unknown header.
+        let orphan_parent_id = ModifierId([0xFF; 32]); // not in DB
+        let orphan_id = ModifierId([0xAA; 32]);
+        let mut orphan_header = ergo_types::header::Header::default_for_test();
+        orphan_header.height = 2;
+        orphan_header.n_bits = 0x01010000;
+        orphan_header.parent_id = orphan_parent_id;
+        let orphan_raw = ergo_wire::header_ser::serialize_header(&orphan_header);
+
+        // 4. Call bulk_store_headers with the orphan chunk.
+        let orphan_applied = db
+            .bulk_store_headers(&[(orphan_id, orphan_header, orphan_raw)])
+            .unwrap();
+        // The orphan header itself is stored (raw bytes written), so it appears
+        // in the applied list — only the best-header pointer must not change.
+        assert_eq!(
+            orphan_applied.len(),
+            1,
+            "orphan header bytes should be stored"
+        );
+
+        // 5. Best header must still be the original real header.
+        assert_eq!(
+            db.best_header_id().unwrap(),
+            Some(real_id),
+            "orphan chunk must NOT overwrite best_header_key"
+        );
+    }
 }
