@@ -214,17 +214,20 @@ impl HistoryDb {
         // If there is no existing best, we use a sentinel of None so that the
         // first header processed always becomes the best candidate.
         let existing_best_id = self.best_header_id()?;
-        let mut best_score: Option<Vec<u8>> = existing_best_id
-            .as_ref()
-            .and_then(|id| self.get_header_score(id).ok()?);
+        let mut best_score: Option<Vec<u8>> = match &existing_best_id {
+            Some(id) => self.get_header_score(id)?,
+            None => None,
+        };
         let mut best_id_candidate: Option<ModifierId> = None;
 
         let mut batch = self.new_batch();
         let mut applied: Vec<ModifierId> = Vec::with_capacity(headers.len());
 
         for (id, header, raw) in headers {
-            // Skip duplicates.
-            if self.contains_modifier(HEADER_TYPE_ID, id)? {
+            // Skip duplicates — check both the DB and the current in-flight
+            // batch so that if the same ID appears twice in `headers` only the
+            // first occurrence is written.
+            if self.contains_modifier(HEADER_TYPE_ID, id)? || in_flight_scores.contains_key(id) {
                 continue;
             }
 
@@ -274,6 +277,20 @@ impl HistoryDb {
         }
 
         batch.write()?;
+
+        // Write section ID -> header ID mappings after the batch commits.
+        // These are needed by the P2P body download path (lookup_header_for_section).
+        // We use the same headers slice filtered to what was actually applied.
+        let applied_set: std::collections::HashSet<ModifierId> = applied.iter().copied().collect();
+        for (id, header, _) in headers {
+            if applied_set.contains(id) {
+                let section_ids = header.section_ids(id);
+                for (type_id, section_id) in &section_ids {
+                    self.store_section_mapping(*type_id, section_id, id)?;
+                }
+            }
+        }
+
         Ok(applied)
     }
 
