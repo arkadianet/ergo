@@ -19,6 +19,7 @@ use ergo_network::node_view::NodeViewHolder;
 use ergo_network::peer_conn::PeerConnection;
 use ergo_settings::settings::ErgoSettings;
 use ergo_storage::history_db::HistoryDb;
+use ergo_storage::node_db::NodeDb;
 
 use crate::api::ApiState;
 use crate::event_loop::SharedState;
@@ -84,32 +85,41 @@ async fn main() {
         "starting ergo-node",
     );
 
-    let db_path = Path::new(&settings.ergo.directory).join("history");
+    let data_dir = Path::new(&settings.ergo.directory);
 
-    // Open a temporary read-write HistoryDb just to log the current state.
+    // Detect old DB format and refuse to start — user must re-sync.
+    let old_history_path = data_dir.join("history");
+    let node_db_path = data_dir.join("node");
+    if old_history_path.exists() && !node_db_path.exists() {
+        tracing::error!(
+            "Old database format detected. Storage layout has changed. \
+             Please delete your data directory ({}) and re-sync from the network.",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Open a single shared NodeDb. All HistoryDb wrappers share the same
+    // underlying RocksDB instance and see each other's writes immediately.
+    let node_db = Arc::new(
+        NodeDb::open(&node_db_path).unwrap_or_else(|e| panic!("cannot open node database: {e}")),
+    );
+
+    // Log current best chain tips.
     {
-        let history =
-            HistoryDb::open(&db_path).unwrap_or_else(|e| panic!("cannot open database: {e}"));
+        let history = HistoryDb::from_shared(node_db.clone());
         let best_header = history.best_header_id().unwrap();
         let best_block = history.best_full_block_id().unwrap();
         tracing::info!(best_header = ?best_header, best_block = ?best_block, "database opened");
-        // history (rw) dropped here, freeing the primary lock
     }
 
-    // Open a read-only DB handle for the HTTP API.
-    let api_history = HistoryDb::open_read_only(&db_path)
-        .unwrap_or_else(|e| panic!("cannot open API database: {e}"));
+    // Shared handle for the HTTP API.
+    let api_history = HistoryDb::from_shared(node_db.clone());
 
-    // Open a secondary DB handle for the event loop (sync protocol).
-    // Secondary mode allows periodic refresh via try_catch_up_with_primary()
-    // so the sync protocol sees headers written by the processor thread.
-    // The secondary path must be OUTSIDE the primary path to avoid interfering
-    // with RocksDB's WAL and SST file management.
-    let sync_secondary_path = Path::new(&settings.ergo.directory).join("history_sync_secondary");
-    std::fs::create_dir_all(&sync_secondary_path)
-        .unwrap_or_else(|e| panic!("cannot create sync secondary dir: {e}"));
-    let sync_history = HistoryDb::open_as_secondary(&db_path, &sync_secondary_path)
-        .unwrap_or_else(|e| panic!("cannot open sync database: {e}"));
+    // Shared handle for the event loop (sync protocol).
+    // With Arc<NodeDb> all handles see writes immediately — no secondary
+    // instance or try_catch_up_with_primary needed.
+    let sync_history = HistoryDb::from_shared(node_db.clone());
 
     let mempool = Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(
         settings.ergo.node.mempool_capacity as usize,
@@ -127,7 +137,7 @@ async fn main() {
 
     // Clone settings for the processor thread.
     let proc_settings = settings.clone();
-    let proc_db_path = db_path.clone();
+    let proc_node_db = node_db.clone();
     let proc_mempool = mempool.clone();
 
     // Spawn the processor thread. The NodeViewHolder is constructed inside
@@ -136,8 +146,7 @@ async fn main() {
         .name("block-processor".into())
         .spawn(move || {
             block_processor::run_processor_with_state(cmd_rx, evt_tx, move || {
-                let history = HistoryDb::open(&proc_db_path)
-                    .unwrap_or_else(|e| panic!("processor: cannot open database: {e}"));
+                let history = HistoryDb::from_shared(proc_node_db.clone());
 
                 let genesis_digest = proc_settings.ergo.chain.genesis_state_digest();
                 let is_utxo = proc_settings.ergo.node.state_type == "utxo";
@@ -145,53 +154,43 @@ async fn main() {
                     NodeViewHolder::with_recovery(history, proc_mempool, !is_utxo, genesis_digest);
 
                 // Set up UTXO persistence if in UTXO mode.
+                // UtxoDb shares the same NodeDb (CF_UTXO column family).
                 if is_utxo {
-                    let utxo_path = Path::new(&proc_settings.ergo.directory).join("utxo");
-                    match ergo_storage::utxo_db::UtxoDb::open(&utxo_path) {
-                        Ok(utxo_db) => match utxo_db.metadata() {
-                            Ok(Some(meta)) => {
-                                tracing::info!(
-                                    version = hex::encode(meta.version),
-                                    "processor: found existing UTXO DB, restoring state"
-                                );
-                                match ergo_state::utxo_state::UtxoState::restore_from_db(utxo_db) {
-                                    Ok(utxo_state) => {
-                                        let entries = utxo_state
-                                            .utxo_db()
-                                            .map(|db| db.entry_count())
-                                            .unwrap_or(0);
-                                        tracing::info!(entries, "processor: UTXO state restored");
-                                        node_view.set_utxo_state(utxo_state);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "processor: UTXO restore failed, starting fresh"
-                                        );
-                                        let fresh_db =
-                                            ergo_storage::utxo_db::UtxoDb::open(&utxo_path)
-                                                .unwrap();
-                                        node_view.set_utxo_state(
-                                            ergo_state::utxo_state::UtxoState::with_persistence(
-                                                fresh_db,
-                                            ),
-                                        );
-                                    }
+                    let utxo_db = ergo_storage::utxo_db::UtxoDb::from_shared(proc_node_db.clone());
+                    match utxo_db.metadata() {
+                        Ok(Some(meta)) => {
+                            tracing::info!(
+                                version = hex::encode(meta.version),
+                                "processor: found existing UTXO DB, restoring state"
+                            );
+                            match ergo_state::utxo_state::UtxoState::restore_from_db(utxo_db) {
+                                Ok(utxo_state) => {
+                                    let entries = utxo_state
+                                        .utxo_db()
+                                        .map(|db| db.entry_count())
+                                        .unwrap_or(0);
+                                    tracing::info!(entries, "processor: UTXO state restored");
+                                    node_view.set_utxo_state(utxo_state);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "processor: UTXO restore failed, starting fresh"
+                                    );
+                                    let fresh_db =
+                                        ergo_storage::utxo_db::UtxoDb::from_shared(proc_node_db);
+                                    node_view.set_utxo_state(
+                                        ergo_state::utxo_state::UtxoState::with_persistence(
+                                            fresh_db,
+                                        ),
+                                    );
                                 }
                             }
-                            _ => {
-                                tracing::info!(
-                                    "processor: no existing UTXO DB data, starting fresh"
-                                );
-                                node_view.set_utxo_state(
-                                    ergo_state::utxo_state::UtxoState::with_persistence(utxo_db),
-                                );
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "processor: failed to open UTXO DB"
+                        }
+                        _ => {
+                            tracing::info!("processor: no existing UTXO DB data, starting fresh");
+                            node_view.set_utxo_state(
+                                ergo_state::utxo_state::UtxoState::with_persistence(utxo_db),
                             );
                         }
                     }
@@ -238,19 +237,11 @@ async fn main() {
     tracing::info!("block processor thread spawned");
 
     // Conditionally start the extra indexer.
-    let extra_path = Path::new(&settings.ergo.directory)
-        .join("history")
-        .join("extra");
-
     let indexer_tx = if settings.ergo.node.extra_index {
-        let extra_db = ergo_indexer::db::ExtraIndexerDb::open(&extra_path)
-            .unwrap_or_else(|e| panic!("cannot open extra indexer db: {e}"));
+        let extra_db = ergo_indexer::db::ExtraIndexerDb::from_shared(node_db.clone());
 
         let (idx_tx, idx_rx) = tokio::sync::mpsc::channel(1024);
-        let idx_history = Arc::new(
-            HistoryDb::open_read_only(&db_path)
-                .unwrap_or_else(|e| panic!("cannot open indexer history db: {e}")),
-        );
+        let idx_history = Arc::new(HistoryDb::from_shared(node_db.clone()));
 
         tokio::spawn(ergo_indexer::task::run_indexer(
             extra_db,
@@ -264,12 +255,12 @@ async fn main() {
         None
     };
 
-    // Open a read-only DB handle for the extra indexer API endpoints.
+    // Share the same NodeDb handle for the extra indexer API endpoints.
     let extra_db_api: Option<Arc<ergo_indexer::db::ExtraIndexerDb>> =
         if settings.ergo.node.extra_index {
-            let extra_db_api = ergo_indexer::db::ExtraIndexerDb::open_read_only(&extra_path)
-                .unwrap_or_else(|e| panic!("cannot open extra indexer API db: {e}"));
-            Some(Arc::new(extra_db_api))
+            Some(Arc::new(ergo_indexer::db::ExtraIndexerDb::from_shared(
+                node_db.clone(),
+            )))
         } else {
             None
         };
@@ -287,20 +278,11 @@ async fn main() {
     let (utxo_proof_tx, mut utxo_proof_rx) =
         tokio::sync::mpsc::channel::<event_loop::UtxoProofRequest>(16);
 
-    // Open SnapshotsDb if configured.
+    // Open SnapshotsDb if configured (shares the NodeDb instance).
     let snapshots_db_opt =
         if settings.ergo.node.storing_utxo_snapshots > 0 || settings.ergo.node.utxo_bootstrap {
-            let snap_path = Path::new(&settings.ergo.directory).join("snapshots");
-            match snapshots::SnapshotsDb::open(&snap_path) {
-                Ok(sdb) => {
-                    tracing::info!("snapshots DB opened");
-                    Some(sdb)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to open snapshots DB");
-                    None
-                }
-            }
+            tracing::info!("snapshots DB opened");
+            Some(snapshots::SnapshotsDb::from_shared(node_db.clone()))
         } else {
             None
         };

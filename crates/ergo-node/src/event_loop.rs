@@ -830,7 +830,7 @@ pub async fn run(
                             tracing::info!(new = new_header_ids.len(), headers_height = cached_headers_height, "received headers");
                             sync_metrics.add_headers_applied(new_header_ids.len() as u64);
 
-                            // Refresh secondary DB for has_all_sections check in on_headers_received.
+                            // No-op: Arc<NodeDb>-backed HistoryDb sees writes immediately.
                             let _ = sync_history.try_catch_up_with_primary();
                             sync_mgr.on_headers_received(&new_header_ids, sync_history);
 
@@ -1391,8 +1391,7 @@ async fn handle_sync_tick(
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
 
-    // Best-effort refresh of secondary DB for operations that still use it
-    // (has_all_sections, next_modifiers_to_download, etc.).
+    // No-op: Arc<NodeDb>-backed HistoryDb sees writes immediately.
     let _ = sync_history.try_catch_up_with_primary();
 
     let peers: Vec<_> = pool

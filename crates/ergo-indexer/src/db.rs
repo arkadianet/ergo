@@ -1,8 +1,12 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
-use rocksdb::{Options, WriteBatch, DB};
+use rocksdb::WriteBatch;
+
+use ergo_storage::history_db::StorageError;
+use ergo_storage::node_db::NodeDb;
 
 use ergo_types::modifier_id::ModifierId;
 
@@ -18,6 +22,15 @@ pub enum IndexerDbError {
 
     #[error("Codec error: {0}")]
     Codec(String),
+}
+
+impl From<StorageError> for IndexerDbError {
+    fn from(e: StorageError) -> Self {
+        match e {
+            StorageError::Rocks(r) => IndexerDbError::Rocks(r),
+            StorageError::Codec(s) => IndexerDbError::Codec(s),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -107,48 +120,29 @@ pub const SCHEMA_VERSION: u32 = 1;
 // ExtraIndexerDb
 // ---------------------------------------------------------------------------
 
-/// Thin RocksDB wrapper for the extra-indexer store (`history/extra/`).
+/// Thin wrapper around a shared `NodeDb` for the extra-indexer store.
 ///
-/// Uses a single default column family with 32-byte keys.  Stores indexer
+/// Uses the `CF_INDEXER` column family with 32-byte keys.  Stores indexer
 /// progress counters, segment-based box/tx indexes, and token metadata.
 pub struct ExtraIndexerDb {
-    db: DB,
+    db: Arc<NodeDb>,
 }
 
 impl ExtraIndexerDb {
-    /// Opens (or creates) the extra-indexer RocksDB at `path`.
+    /// Opens (or creates) a standalone `NodeDb` at `path` for the indexer.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, IndexerDbError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.increase_parallelism(
-            std::thread::available_parallelism()
-                .map(|n| n.get() as i32)
-                .unwrap_or(4),
-        );
-        // Cap open file descriptors so multiple DB instances don't exceed OS limits.
-        opts.set_max_open_files(1000);
-        let cache = rocksdb::Cache::new_lru_cache(64 * 1024 * 1024);
-        let mut bb = rocksdb::BlockBasedOptions::default();
-        bb.set_block_cache(&cache);
-        bb.set_bloom_filter(10.0, false);
-        opts.set_block_based_table_factory(&bb);
-        opts.set_write_buffer_size(32 * 1024 * 1024);
-        opts.set_max_write_buffer_number(3);
-        let db = DB::open(&opts, path)?;
-        Ok(Self { db })
+        let node_db = NodeDb::open(path).map_err(IndexerDbError::from)?;
+        Ok(Self {
+            db: Arc::new(node_db),
+        })
     }
 
-    /// Opens the extra-indexer RocksDB at `path` in read-only mode.
+    /// Wrap an already-open shared `NodeDb`.
     ///
-    /// Useful for the HTTP API while the indexer holds the primary
-    /// read-write handle.
-    pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self, IndexerDbError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.set_max_open_files(256);
-        std::fs::create_dir_all(path.as_ref()).ok();
-        let db = DB::open_for_read_only(&opts, path, false)?;
-        Ok(Self { db })
+    /// The caller is responsible for ensuring the DB was opened with the
+    /// `CF_INDEXER` column family (which `NodeDb::open` always does).
+    pub fn from_shared(db: Arc<NodeDb>) -> Self {
+        Self { db }
     }
 
     // -----------------------------------------------------------------------
@@ -157,30 +151,35 @@ impl ExtraIndexerDb {
 
     /// Get the value associated with a 32-byte key, or `None` if absent.
     pub fn get(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>, IndexerDbError> {
-        Ok(self.db.get(key)?)
+        Ok(self.db.raw().get_cf(&self.db.cf_indexer(), key)?)
     }
 
     /// Put a value under a 32-byte key.
     pub fn put(&self, key: &[u8; 32], value: &[u8]) -> Result<(), IndexerDbError> {
-        self.db.put(key, value)?;
+        self.db.raw().put_cf(&self.db.cf_indexer(), key, value)?;
         Ok(())
     }
 
     /// Delete the entry at a 32-byte key.
     pub fn delete(&self, key: &[u8; 32]) -> Result<(), IndexerDbError> {
-        self.db.delete(key)?;
+        self.db.raw().delete_cf(&self.db.cf_indexer(), key)?;
         Ok(())
     }
 
     /// Atomically write a batch of operations.
     pub fn write_batch(&self, batch: WriteBatch) -> Result<(), IndexerDbError> {
-        self.db.write(batch)?;
+        self.db.raw().write(batch)?;
         Ok(())
     }
 
     /// Create a new empty write batch.
     pub fn new_batch(&self) -> WriteBatch {
         WriteBatch::default()
+    }
+
+    /// Return the `CF_INDEXER` column family handle for use in batch `put_cf`/`delete_cf` calls.
+    pub fn cf(&self) -> std::sync::Arc<rocksdb::BoundColumnFamily<'_>> {
+        self.db.cf_indexer()
     }
 
     // -----------------------------------------------------------------------
@@ -277,6 +276,21 @@ mod tests {
         assert_eq!(db.get_progress_u64(&key).unwrap(), 1_000_000_000_000);
         db.set_progress_u64(&key, u64::MAX).unwrap();
         assert_eq!(db.get_progress_u64(&key).unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn from_shared_shares_data() {
+        use ergo_storage::node_db::NodeDb;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let node_db = Arc::new(NodeDb::open(tmp.path()).unwrap());
+        let db1 = ExtraIndexerDb::from_shared(node_db.clone());
+        let db2 = ExtraIndexerDb::from_shared(node_db.clone());
+
+        let key = [0xAAu8; 32];
+        db1.put(&key, b"hello").unwrap();
+        assert_eq!(db2.get(&key).unwrap().as_deref(), Some(b"hello".as_slice()));
     }
 
     #[test]

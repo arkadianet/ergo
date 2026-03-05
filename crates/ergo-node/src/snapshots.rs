@@ -5,8 +5,11 @@
 //!   blake2b256 IDs of each chunk.
 //! - **Chunks** (data) each containing a batch of key-value entries up to ~1 MB.
 
+use std::sync::Arc;
+
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
+use ergo_storage::node_db::NodeDb;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -224,18 +227,23 @@ const INFO_KEY: &[u8] = &[0x00];
 
 /// Persistent storage for UTXO set snapshots (manifests + chunks).
 pub struct SnapshotsDb {
-    db: rocksdb::DB,
+    db: Arc<NodeDb>,
 }
 
 impl SnapshotsDb {
     /// Open or create a SnapshotsDb at the given path.
+    ///
+    /// Creates its own `NodeDb`. Useful for standalone use or tests.
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, SnapshotError> {
-        let mut opts = rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.set_max_open_files(256);
-        let db =
-            rocksdb::DB::open(&opts, path).map_err(|e| SnapshotError::Storage(e.to_string()))?;
-        Ok(Self { db })
+        let node_db = NodeDb::open(path).map_err(|e| SnapshotError::Storage(e.to_string()))?;
+        Ok(Self {
+            db: Arc::new(node_db),
+        })
+    }
+
+    /// Wraps a shared `NodeDb`, using the `CF_SNAPSHOTS` column family.
+    pub fn from_shared(db: Arc<NodeDb>) -> Self {
+        Self { db }
     }
 
     /// Store a complete snapshot: manifest + all chunks.
@@ -249,27 +257,29 @@ impl SnapshotsDb {
         let manifest_id = manifest.manifest_id();
         let manifest_bytes = manifest.serialize();
 
-        let mut batch = rocksdb::WriteBatchWithTransaction::<false>::default();
+        let cf = self.db.cf_snapshots();
+        let mut batch = rocksdb::WriteBatch::default();
 
         // Store manifest keyed by PREFIX_MANIFEST ++ manifest_id.
         let mut manifest_key = vec![PREFIX_MANIFEST];
         manifest_key.extend_from_slice(&manifest_id);
-        batch.put(&manifest_key, &manifest_bytes);
+        batch.put_cf(&cf, &manifest_key, &manifest_bytes);
 
         // Store each chunk keyed by PREFIX_CHUNK ++ chunk_id.
         for (chunk_id, chunk_data) in chunks {
             let mut chunk_key = vec![PREFIX_CHUNK];
             chunk_key.extend_from_slice(chunk_id);
-            batch.put(&chunk_key, chunk_data);
+            batch.put_cf(&cf, &chunk_key, chunk_data);
         }
 
         // Update SnapshotsInfo to include this manifest.
         let mut info = self.get_info()?;
         info.manifests.push((manifest.height, manifest_id));
         let info_bytes = info.serialize_p2p();
-        batch.put(INFO_KEY, &info_bytes);
+        batch.put_cf(&cf, INFO_KEY, &info_bytes);
 
         self.db
+            .raw()
             .write(batch)
             .map_err(|e| SnapshotError::Storage(e.to_string()))?;
 
@@ -281,7 +291,8 @@ impl SnapshotsDb {
         let mut key = vec![PREFIX_MANIFEST];
         key.extend_from_slice(manifest_id);
         self.db
-            .get(&key)
+            .raw()
+            .get_cf(&self.db.cf_snapshots(), &key)
             .map_err(|e| SnapshotError::Storage(e.to_string()))
     }
 
@@ -290,7 +301,8 @@ impl SnapshotsDb {
         let mut key = vec![PREFIX_CHUNK];
         key.extend_from_slice(chunk_id);
         self.db
-            .get(&key)
+            .raw()
+            .get_cf(&self.db.cf_snapshots(), &key)
             .map_err(|e| SnapshotError::Storage(e.to_string()))
     }
 
@@ -298,7 +310,8 @@ impl SnapshotsDb {
     pub fn get_info(&self) -> Result<SnapshotsInfo, SnapshotError> {
         match self
             .db
-            .get(INFO_KEY)
+            .raw()
+            .get_cf(&self.db.cf_snapshots(), INFO_KEY)
             .map_err(|e| SnapshotError::Storage(e.to_string()))?
         {
             Some(data) => SnapshotsInfo::deserialize_p2p(&data)
@@ -324,7 +337,8 @@ impl SnapshotsDb {
         // Split off entries beyond `keep` -- these will be removed.
         let to_remove: Vec<(u32, [u8; 32])> = info.manifests.split_off(keep as usize);
 
-        let mut batch = rocksdb::WriteBatchWithTransaction::<false>::default();
+        let cf = self.db.cf_snapshots();
+        let mut batch = rocksdb::WriteBatch::default();
 
         for (_, manifest_id) in &to_remove {
             // Load the manifest to discover its chunk IDs.
@@ -332,25 +346,27 @@ impl SnapshotsDb {
             mkey.extend_from_slice(manifest_id);
             if let Some(manifest_bytes) = self
                 .db
-                .get(&mkey)
+                .raw()
+                .get_cf(&cf, &mkey)
                 .map_err(|e| SnapshotError::Storage(e.to_string()))?
             {
                 if let Ok(manifest) = SnapshotManifest::deserialize(&manifest_bytes) {
                     for chunk_id in &manifest.chunk_ids {
                         let mut ckey = vec![PREFIX_CHUNK];
                         ckey.extend_from_slice(chunk_id);
-                        batch.delete(&ckey);
+                        batch.delete_cf(&cf, &ckey);
                     }
                 }
             }
-            batch.delete(&mkey);
+            batch.delete_cf(&cf, &mkey);
         }
 
         // Persist the trimmed info.
         let info_bytes = info.serialize_p2p();
-        batch.put(INFO_KEY, &info_bytes);
+        batch.put_cf(&cf, INFO_KEY, &info_bytes);
 
         self.db
+            .raw()
             .write(batch)
             .map_err(|e| SnapshotError::Storage(e.to_string()))?;
 
@@ -534,6 +550,25 @@ pub fn parse_chunk(data: &[u8]) -> Result<Vec<SnapshotEntry>, SnapshotError> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod snapshot_db_tests {
+    use super::*;
+
+    #[test]
+    fn from_shared_snapshots_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_db = Arc::new(NodeDb::open(tmp.path()).unwrap());
+        let _db1 = SnapshotsDb::from_shared(node_db.clone());
+        let _db2 = SnapshotsDb::from_shared(node_db.clone());
+
+        // Write a raw key-value via the NodeDb, read it back.
+        let cf = node_db.cf_snapshots();
+        node_db.raw().put_cf(&cf, b"snap-key", b"snap-val").unwrap();
+        let val = node_db.raw().get_cf(&cf, b"snap-key").unwrap();
+        assert_eq!(val.as_deref(), Some(b"snap-val".as_slice()));
+    }
+}
 
 #[cfg(test)]
 mod tests {

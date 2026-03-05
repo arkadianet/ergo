@@ -5,8 +5,11 @@
 //! (33 bytes) and version block ID (32 bytes).
 
 use std::path::Path;
+use std::sync::Arc;
 
-use rocksdb::{Options, WriteBatchWithTransaction, DB};
+use rocksdb::{IteratorMode, WriteBatch};
+
+use crate::node_db::NodeDb;
 
 // ---------------------------------------------------------------------------
 // Metadata key
@@ -27,6 +30,9 @@ pub enum UtxoDbError {
 
     #[error("invalid metadata")]
     InvalidMetadata,
+
+    #[error("storage error: {0}")]
+    Storage(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -79,29 +85,25 @@ impl UtxoMetadata {
 ///
 /// Used for state recovery on restart and snapshot creation via iteration.
 pub struct UtxoDb {
-    db: DB,
+    db: Arc<NodeDb>,
 }
 
 impl UtxoDb {
     /// Opens (or creates) a UTXO RocksDB database at `path`.
+    ///
+    /// Creates a standalone `NodeDb` — suitable for tests and legacy callers.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, UtxoDbError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.increase_parallelism(
-            std::thread::available_parallelism()
-                .map(|n| n.get() as i32)
-                .unwrap_or(4),
-        );
-        let cache = rocksdb::Cache::new_lru_cache(128 * 1024 * 1024);
-        let mut bb = rocksdb::BlockBasedOptions::default();
-        bb.set_block_cache(&cache);
-        bb.set_bloom_filter(10.0, false);
-        opts.set_block_based_table_factory(&bb);
-        opts.set_max_open_files(1000);
-        opts.set_write_buffer_size(64 * 1024 * 1024);
-        opts.set_max_write_buffer_number(3);
-        let db = DB::open(&opts, path)?;
-        Ok(Self { db })
+        NodeDb::open(path)
+            .map(|db| Self { db: Arc::new(db) })
+            .map_err(|e| match e {
+                crate::history_db::StorageError::Rocks(r) => UtxoDbError::Rocks(r),
+                crate::history_db::StorageError::Codec(s) => UtxoDbError::Storage(s),
+            })
+    }
+
+    /// Wraps a shared `NodeDb`. Used in production to share a single DB instance.
+    pub fn from_shared(db: Arc<NodeDb>) -> Self {
+        Self { db }
     }
 
     /// Atomically applies a batch of inserts, removals, and metadata update.
@@ -115,23 +117,23 @@ impl UtxoDb {
         to_remove: &[[u8; 32]],
         metadata: &UtxoMetadata,
     ) -> Result<(), UtxoDbError> {
-        let mut batch = WriteBatchWithTransaction::<false>::default();
+        let mut batch = WriteBatch::default();
 
         for (key, value) in to_insert {
-            batch.put(key, value);
+            batch.put_cf(&self.db.cf_utxo(), key, value);
         }
         for key in to_remove {
-            batch.delete(key);
+            batch.delete_cf(&self.db.cf_utxo(), key);
         }
-        batch.put(METADATA_KEY, metadata.to_bytes());
+        batch.put_cf(&self.db.cf_utxo(), METADATA_KEY, metadata.to_bytes());
 
-        self.db.write(batch)?;
+        self.db.raw().write(batch)?;
         Ok(())
     }
 
     /// Returns the current metadata, or `None` if the DB has never been written to.
     pub fn metadata(&self) -> Result<Option<UtxoMetadata>, UtxoDbError> {
-        match self.db.get(METADATA_KEY)? {
+        match self.db.raw().get_cf(&self.db.cf_utxo(), METADATA_KEY)? {
             Some(data) => Ok(Some(UtxoMetadata::from_bytes(&data)?)),
             None => Ok(None),
         }
@@ -142,7 +144,8 @@ impl UtxoDb {
     /// Keys whose length is not 32 bytes are skipped (the metadata key is 1 byte).
     pub fn iter_entries(&self) -> impl Iterator<Item = ([u8; 32], Vec<u8>)> + '_ {
         self.db
-            .iterator(rocksdb::IteratorMode::Start)
+            .raw()
+            .iterator_cf(&self.db.cf_utxo(), IteratorMode::Start)
             .filter_map(|item| {
                 let (key, value) = item.ok()?;
                 if key.len() != 32 {
@@ -161,7 +164,7 @@ impl UtxoDb {
 
     /// Looks up a single UTXO entry by its 32-byte box ID.
     pub fn get(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>, UtxoDbError> {
-        Ok(self.db.get(key)?)
+        Ok(self.db.raw().get_cf(&self.db.cf_utxo(), key)?)
     }
 }
 
@@ -317,5 +320,28 @@ mod tests {
         // Non-existent key returns None.
         let missing = test_box_id(0xEE);
         assert!(db.get(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn from_shared_shares_data() {
+        use crate::node_db::NodeDb;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let node_db = Arc::new(NodeDb::open(tmp.path()).unwrap());
+        let db1 = UtxoDb::from_shared(node_db.clone());
+        let db2 = UtxoDb::from_shared(node_db.clone());
+
+        let id = [0xAAu8; 32];
+        let meta = UtxoMetadata {
+            digest: [0x11; 33],
+            version: [0x22; 32],
+        };
+        db1.apply_changes(&[(id, b"box-data".to_vec())], &[], &meta)
+            .unwrap();
+
+        // db2 sees the write immediately.
+        assert!(db2.get(&id).unwrap().is_some());
+        assert_eq!(db2.metadata().unwrap().unwrap(), meta);
     }
 }
