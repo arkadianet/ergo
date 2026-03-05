@@ -239,13 +239,7 @@ pub(crate) async fn utxo_genesis_handler(
                     })
                 })
                 .collect();
-            let mut additional_registers = serde_json::Map::new();
-            for (reg_idx, val) in &out.additional_registers {
-                additional_registers.insert(
-                    format!("R{}", reg_idx),
-                    serde_json::Value::String(hex::encode(val)),
-                );
-            }
+            let additional_registers = render_registers(&out.additional_registers, false);
             boxes.push(serde_json::json!({
                 "boxId": hex::encode(box_id.0),
                 "value": out.value,
