@@ -72,7 +72,7 @@ pub enum ProcessorCommand {
     /// issuing one `StorePrevalidatedHeader` command per header.
     BulkHeaders {
         /// Tuples of (modifier_id, parsed header, raw wire bytes).
-        headers: Vec<(ModifierId, Box<ergo_types::header::Header>, Vec<u8>)>,
+        headers: Vec<(ModifierId, Box<Header>, Vec<u8>)>,
     },
 
     /// Graceful shutdown request.
@@ -487,10 +487,10 @@ fn process_prevalidated_header(
 /// forwarded to the event loop via the accumulated IDs.
 fn process_bulk_headers(
     state: &mut ProcessorState,
-    headers: Vec<(ModifierId, Box<ergo_types::header::Header>, Vec<u8>)>,
+    headers: Vec<(ModifierId, Box<Header>, Vec<u8>)>,
     accum: &mut BatchAccum<'_>,
 ) {
-    let flat: Vec<(ModifierId, ergo_types::header::Header, Vec<u8>)> = headers
+    let flat: Vec<(ModifierId, Header, Vec<u8>)> = headers
         .into_iter()
         .map(|(id, h, raw)| (id, *h, raw))
         .collect();
