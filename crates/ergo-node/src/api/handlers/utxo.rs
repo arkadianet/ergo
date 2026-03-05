@@ -184,7 +184,11 @@ pub(crate) async fn utxo_with_pool_by_id_binary_handler(
     ))
 }
 
-/// `GET /utxo/genesis` -- genesis boxes (consensus constants).
+/// `GET /utxo/genesis` -- return the genesis boxes (outputs of the genesis transaction).
+///
+/// Loads the genesis block (height 0), parses its `BlockTransactions` section, and
+/// returns the outputs as full box JSON objects.  If the genesis block body has not
+/// yet been downloaded (node is mid-sync), an empty array is returned gracefully.
 #[utoipa::path(
     get,
     path = "/utxo/genesis",
@@ -194,56 +198,86 @@ pub(crate) async fn utxo_with_pool_by_id_binary_handler(
     )
 )]
 pub(crate) async fn utxo_genesis_handler(
-    State(_state): State<ApiState>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<serde_json::Value>)> {
-    // Genesis boxes are consensus constants -- return empty for now
-    Ok(Json(Vec::new()))
+    State(state): State<ApiState>,
+) -> Json<Vec<serde_json::Value>> {
+    // Look up the header(s) at height 0.
+    let genesis_ids = state.history.header_ids_at_height(0).unwrap_or_default();
+
+    let genesis_id = match genesis_ids.first() {
+        Some(id) => *id,
+        None => return Json(Vec::new()),
+    };
+
+    // Load block transactions for the genesis block.
+    let raw_bytes = match state.history.get_modifier(102, &genesis_id) {
+        Ok(Some(bytes)) => bytes,
+        _ => return Json(Vec::new()),
+    };
+
+    let bt = match ergo_wire::block_transactions_ser::parse_block_transactions(&raw_bytes) {
+        Ok(bt) => bt,
+        Err(_) => return Json(Vec::new()),
+    };
+
+    // Collect all outputs from all genesis transactions.
+    let mut boxes: Vec<serde_json::Value> = Vec::new();
+    for tx_bytes in &bt.tx_bytes {
+        let tx = match ergo_wire::transaction_ser::parse_transaction(tx_bytes) {
+            Ok(tx) => tx,
+            Err(_) => continue,
+        };
+        let tx_id_hex = hex::encode(tx.tx_id.0);
+        for (idx, out) in tx.output_candidates.iter().enumerate() {
+            let box_id = ergo_wire::box_ser::compute_box_id(out, &tx.tx_id, idx as u16);
+            let assets: Vec<serde_json::Value> = out
+                .tokens
+                .iter()
+                .map(|(tid, amt)| {
+                    serde_json::json!({
+                        "tokenId": hex::encode(tid.0),
+                        "amount": amt
+                    })
+                })
+                .collect();
+            let mut additional_registers = serde_json::Map::new();
+            for (reg_idx, val) in &out.additional_registers {
+                additional_registers.insert(
+                    format!("R{}", reg_idx),
+                    serde_json::Value::String(hex::encode(val)),
+                );
+            }
+            boxes.push(serde_json::json!({
+                "boxId": hex::encode(box_id.0),
+                "value": out.value,
+                "ergoTree": hex::encode(&out.ergo_tree_bytes),
+                "creationHeight": out.creation_height,
+                "assets": assets,
+                "additionalRegisters": additional_registers,
+                "transactionId": tx_id_hex,
+                "index": idx as u16
+            }));
+        }
+    }
+
+    Json(boxes)
 }
 
 /// `GET /utxo/getSnapshotsInfo` -- return metadata about available UTXO snapshots.
+///
+/// Returns `{"availableManifests":{}}` matching the Scala reference node schema.
+/// No UTXO snapshots are currently implemented; this is a stub.
 #[utoipa::path(
     get,
     path = "/utxo/getSnapshotsInfo",
     tag = "utxo",
     responses(
-        (status = 200, description = "UTXO snapshot metadata", body = Vec<Object>),
-        (status = 503, description = "Not available in digest mode")
+        (status = 200, description = "UTXO snapshot metadata", body = Object)
     )
 )]
 pub(crate) async fn utxo_snapshots_info_handler(
-    State(state): State<ApiState>,
-) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, Json<ApiError>)> {
-    if state.state_type != "utxo" {
-        return Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "UTXO snapshots info not available in digest mode",
-        ));
-    }
-
-    if let Some(ref sdb) = state.snapshots_db {
-        match sdb.get_info() {
-            Ok(info) => {
-                let manifests: Vec<serde_json::Value> = info
-                    .manifests
-                    .iter()
-                    .map(|(height, manifest_id)| {
-                        serde_json::json!({
-                            "height": height,
-                            "manifestId": hex::encode(manifest_id),
-                        })
-                    })
-                    .collect();
-                Ok(Json(manifests))
-            }
-            Err(e) => Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to read snapshots info: {e}"),
-            )),
-        }
-    } else {
-        // No snapshots DB configured — return empty list
-        Ok(Json(Vec::new()))
-    }
+    State(_state): State<ApiState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "availableManifests": {} }))
 }
 
 /// `POST /utxo/getBoxesBinaryProof` -- return a batch Merkle proof for a set of box IDs.

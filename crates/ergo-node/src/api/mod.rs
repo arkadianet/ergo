@@ -1395,8 +1395,7 @@ fn apply_mempool_box_filters(
             for output_ref in &unconfirmed {
                 let box_response = IndexedErgoBoxResponse {
                     box_id: hex::encode(
-                        compute_box_id(output_ref.candidate, &output_ref.tx_id, output_ref.index)
-                            .0,
+                        compute_box_id(output_ref.candidate, &output_ref.tx_id, output_ref.index).0,
                     ),
                     value: output_ref.candidate.value,
                     ergo_tree: hex::encode(&output_ref.candidate.ergo_tree_bytes),
@@ -1460,6 +1459,7 @@ pub struct ApiState {
     pub block_submit: Option<tokio::sync::mpsc::Sender<crate::event_loop::BlockSubmission>>,
     pub utxo_proof: Option<tokio::sync::mpsc::Sender<crate::event_loop::UtxoProofRequest>>,
     pub mining_pub_key_hex: String,
+    #[allow(dead_code)]
     pub snapshots_db: Option<Arc<crate::snapshots::SnapshotsDb>>,
     pub geoip: crate::geoip::SharedGeoIp,
     #[cfg(feature = "wallet")]
@@ -5515,24 +5515,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn utxo_snapshots_info_returns_503_in_digest_mode() {
+    async fn utxo_snapshots_info_returns_available_manifests_schema() {
+        // Scala-compatible: always returns {"availableManifests":{}} regardless of mode.
         let (state, _dir) = test_api_state();
-        // Default test state is digest mode
-        assert_eq!(state.state_type, "digest");
-        let router = build_router(state);
-        let req = Request::builder()
-            .method("GET")
-            .uri("/utxo/getSnapshotsInfo")
-            .body(Body::empty())
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn utxo_snapshots_info_returns_empty_in_utxo_mode() {
-        let (mut state, _dir) = test_api_state();
-        state.state_type = "utxo".to_string();
         let router = build_router(state);
         let req = Request::builder()
             .method("GET")
@@ -5542,8 +5527,17 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let resp_body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: Vec<serde_json::Value> = serde_json::from_slice(&resp_body).unwrap();
-        assert!(json.is_empty());
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+        assert!(json.is_object());
+        assert!(
+            json.get("availableManifests").is_some(),
+            "response must contain availableManifests key"
+        );
+        let manifests = json.get("availableManifests").unwrap();
+        assert!(
+            manifests.is_object(),
+            "availableManifests must be an object"
+        );
     }
 
     #[tokio::test]

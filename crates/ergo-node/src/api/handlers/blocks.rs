@@ -51,7 +51,7 @@ pub(crate) async fn get_blocks_at_height_handler(
     Json(ids.iter().map(|id| hex::encode(id.0)).collect())
 }
 
-/// `GET /blocks?offset=0&limit=50` — paginated header IDs, newest first.
+/// `GET /blocks?offset=0&limit=50` — paginated header IDs, oldest first.
 #[utoipa::path(
     get,
     path = "/blocks",
@@ -61,7 +61,7 @@ pub(crate) async fn get_blocks_at_height_handler(
         ("limit" = Option<u32>, Query, description = "Limit (max 100)")
     ),
     responses(
-        (status = 200, description = "Paginated header IDs (newest first)", body = Vec<String>)
+        (status = 200, description = "Paginated header IDs (oldest first)", body = Vec<String>)
     )
 )]
 pub(crate) async fn get_paginated_blocks_handler(
@@ -95,28 +95,25 @@ pub(crate) async fn get_paginated_blocks_handler(
     let limit = params.limit.min(100) as usize;
     let offset = params.offset as usize;
 
-    // Jump directly to start_height to avoid O(chain_height) scan.
-    let start_height = (best_height as i64) - (offset as i64);
-    if start_height < 0 {
+    // Ascending order (oldest first): start at height == offset, walk up to best_height.
+    let start_height = offset as u32;
+    if start_height > best_height {
         return Ok(Json(Vec::new()));
     }
 
     let mut result: Vec<String> = Vec::new();
     let mut height = start_height;
-    while height >= 0 && result.len() < limit {
-        let ids = state
-            .history
-            .header_ids_at_height(height as u32)
-            .map_err(|_| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to read header IDs at height",
-                )
-            })?;
+    while height <= best_height && result.len() < limit {
+        let ids = state.history.header_ids_at_height(height).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to read header IDs at height",
+            )
+        })?;
         for id in &ids {
             result.push(hex::encode(id.0));
         }
-        height -= 1;
+        height += 1;
     }
 
     Ok(Json(result))
