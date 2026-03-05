@@ -64,6 +64,17 @@ pub enum ProcessorCommand {
     /// Trigger a cache drain -- attempt to apply cached modifiers.
     ApplyFromCache,
 
+    /// A pre-sorted batch of PoW-validated headers from fast sync.
+    ///
+    /// Headers must be in ascending height order.  The processor stores all of
+    /// them in a single RocksDB WriteBatch via
+    /// `HistoryDb::bulk_store_headers`, which is substantially faster than
+    /// issuing one `StorePrevalidatedHeader` command per header.
+    BulkHeaders {
+        /// Tuples of (modifier_id, parsed header, raw wire bytes).
+        headers: Vec<(ModifierId, Box<ergo_types::header::Header>, Vec<u8>)>,
+    },
+
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -288,6 +299,13 @@ fn processor_loop_with_state(
                         &mut accum,
                     );
                 }
+                ProcessorCommand::BulkHeaders { headers } => {
+                    let mut accum = BatchAccum {
+                        new_headers: &mut new_headers,
+                        blocks_to_download: &mut blocks_to_download,
+                    };
+                    process_bulk_headers(state, headers, &mut accum);
+                }
                 ProcessorCommand::ApplyFromCache => {
                     let mut accum = BatchAccum {
                         new_headers: &mut new_headers,
@@ -457,6 +475,36 @@ fn process_prevalidated_header(
                     error: format!("prevalidated header failed: {e}"),
                 });
             }
+        }
+    }
+}
+
+/// Process a `BulkHeaders` command.
+///
+/// Calls [`HistoryDb::bulk_store_headers`] to write all headers in a single
+/// RocksDB WriteBatch, then records each applied header ID in `accum`.
+/// Errors are logged but do not propagate — a partial success is still
+/// forwarded to the event loop via the accumulated IDs.
+fn process_bulk_headers(
+    state: &mut ProcessorState,
+    headers: Vec<(ModifierId, Box<ergo_types::header::Header>, Vec<u8>)>,
+    accum: &mut BatchAccum<'_>,
+) {
+    let flat: Vec<(ModifierId, ergo_types::header::Header, Vec<u8>)> = headers
+        .into_iter()
+        .map(|(id, h, raw)| (id, *h, raw))
+        .collect();
+
+    match state.node_view.history.bulk_store_headers(&flat) {
+        Ok(applied_ids) => {
+            let count = applied_ids.len();
+            for id in applied_ids {
+                accum.new_headers.push(id);
+            }
+            tracing::debug!(count, "bulk_headers: batch written");
+        }
+        Err(e) => {
+            tracing::error!(%e, "bulk_headers: batch write failed");
         }
     }
 }
@@ -825,6 +873,63 @@ mod tests {
             has_expected,
             "expected ModifierCached, StateUpdate, or ValidationFailed event; got: {:?}",
             events
+        );
+    }
+
+    /// Spawn processor thread, send a `BulkHeaders` command containing one
+    /// height-1 header, then Shutdown.  Verify that a `HeadersApplied` event
+    /// is emitted with the header's ID.
+    #[test]
+    fn bulk_headers_command_emits_headers_applied() {
+        use ergo_types::modifier_id::ModifierId;
+
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<ProcessorCommand>(CHANNEL_CAPACITY);
+        let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel::<ProcessorEvent>(CHANNEL_CAPACITY);
+
+        let handle = std::thread::spawn(move || {
+            run_processor_with_state(cmd_rx, evt_tx, || {
+                let (state, _tmpdir) = ProcessorState::new_test();
+                // Leak the tempdir so it outlives the processor loop.
+                std::mem::forget(_tmpdir);
+                state
+            });
+        });
+
+        // Build one minimal header at height 1 whose parent is GENESIS_PARENT.
+        let header_id = ModifierId([0x11; 32]);
+        let mut header = ergo_types::header::Header::default_for_test();
+        header.height = 1;
+        header.n_bits = 0x01010000; // compact encoding: difficulty 1
+        header.parent_id = ModifierId::GENESIS_PARENT;
+        let raw = ergo_wire::header_ser::serialize_header(&header);
+
+        cmd_tx
+            .send(ProcessorCommand::BulkHeaders {
+                headers: vec![(header_id, Box::new(header), raw)],
+            })
+            .unwrap();
+        cmd_tx.send(ProcessorCommand::Shutdown).unwrap();
+
+        handle.join().expect("processor thread should not panic");
+
+        // Collect all events.
+        let mut events = Vec::new();
+        while let Ok(evt) = evt_rx.try_recv() {
+            events.push(evt);
+        }
+
+        // At least one HeadersApplied event must mention our header ID.
+        let found = events.iter().any(|evt| {
+            if let ProcessorEvent::HeadersApplied { new_header_ids, .. } = evt {
+                new_header_ids.contains(&header_id)
+            } else {
+                false
+            }
+        });
+        assert!(
+            found,
+            "expected HeadersApplied event containing header_id {:?}; got: {:?}",
+            header_id, events
         );
     }
 }
