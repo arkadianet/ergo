@@ -275,20 +275,11 @@ async fn main() {
     let (utxo_proof_tx, mut utxo_proof_rx) =
         tokio::sync::mpsc::channel::<event_loop::UtxoProofRequest>(16);
 
-    // Open SnapshotsDb if configured.
+    // Open SnapshotsDb if configured (shares the NodeDb instance).
     let snapshots_db_opt =
         if settings.ergo.node.storing_utxo_snapshots > 0 || settings.ergo.node.utxo_bootstrap {
-            let snap_path = Path::new(&settings.ergo.directory).join("snapshots");
-            match snapshots::SnapshotsDb::open(&snap_path) {
-                Ok(sdb) => {
-                    tracing::info!("snapshots DB opened");
-                    Some(sdb)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to open snapshots DB");
-                    None
-                }
-            }
+            tracing::info!("snapshots DB opened");
+            Some(snapshots::SnapshotsDb::from_shared(node_db.clone()))
         } else {
             None
         };
