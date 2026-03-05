@@ -555,25 +555,23 @@ async fn fetch_and_validate_chunk(
     let mut validated = validated;
     validated.sort_by_key(|(_, h, _)| h.height);
 
-    for (mid, header, raw) in validated {
-        let mut cmd = ProcessorCommand::StorePrevalidatedHeader {
-            modifier_id: mid,
-            header: Box::new(header),
-            raw_data: raw,
-            peer_hint: None,
-        };
-        // Retry loop: if the channel is full, yield briefly and retry.
-        // This applies backpressure so headers aren't silently dropped.
-        loop {
-            match cmd_tx.try_send(cmd) {
-                Ok(()) => break,
-                Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-                    // Channel full — yield and retry.
-                    tokio::task::yield_now().await;
-                    cmd = returned;
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Ok(count),
+    // Send the whole chunk as a single BulkHeaders command.
+    let bulk_headers = validated
+        .into_iter()
+        .map(|(mid, header, raw)| (mid, Box::new(header), raw))
+        .collect();
+
+    let mut cmd = ProcessorCommand::BulkHeaders {
+        headers: bulk_headers,
+    };
+    loop {
+        match cmd_tx.try_send(cmd) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                tokio::task::yield_now().await;
+                cmd = returned;
             }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Ok(count),
         }
     }
     loop {
