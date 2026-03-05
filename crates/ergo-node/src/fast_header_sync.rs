@@ -336,7 +336,7 @@ pub async fn run_fast_sync(
     // the processor.  Without this, 13 peers flood the 100k LRU cache faster
     // than the processor can drain, causing low-height headers to be evicted
     // before they're applied.
-    const MAX_LOOKAHEAD: u32 = 80_000;
+    const MAX_LOOKAHEAD: u32 = 200_000;
 
     for (from, to) in &chunks {
         if *shutdown.borrow() {
