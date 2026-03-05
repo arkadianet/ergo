@@ -225,6 +225,11 @@ pub type SharedFastSyncActive = std::sync::Arc<std::sync::atomic::AtomicBool>;
 /// Maximum consecutive failures before a peer URL is blacklisted.
 const PEER_MAX_FAILURES: u32 = 3;
 
+/// If a peer does not return a chunk within this many seconds, cancel the
+/// request, increment its failure count, and push the chunk back to the
+/// front of the work queue for immediate reassignment to another peer.
+const PEER_FETCH_TIMEOUT_SECS: u64 = 20;
+
 /// Run the fast header sync pipeline.
 ///
 /// Fetches headers via HTTP from peers discovered in `api_urls` (a live map
@@ -249,11 +254,11 @@ pub async fn run_fast_sync(
     current_headers_height: SharedHeadersHeight,
     fast_sync_active: SharedFastSyncActive,
 ) {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Arc;
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(30)) // hard ceiling; 20s timeout fires first
         .build()
         .unwrap();
 
@@ -272,7 +277,6 @@ pub async fn run_fast_sync(
             tracing::info!("fast_header_sync: no peers with REST API URLs after 60s, giving up");
             return;
         }
-        tracing::debug!("fast_header_sync: waiting for API peers...");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
@@ -318,34 +322,40 @@ pub async fn run_fast_sync(
 
     fast_sync_active.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // Peer health: consecutive failure counter.
+    // Work-stealing queue: failed chunks are pushed back to the front for
+    // immediate reassignment to the next idle peer.
+    let pending: Arc<std::sync::Mutex<VecDeque<(u32, u32)>>> =
+        Arc::new(std::sync::Mutex::new(chunks.into_iter().collect()));
+
     let peer_failures: Arc<std::sync::RwLock<HashMap<String, u32>>> =
         Arc::new(std::sync::RwLock::new(HashMap::new()));
-    // Peers currently handling a request — at most one chunk per peer.
     let busy_peers: Arc<std::sync::Mutex<HashSet<String>>> =
         Arc::new(std::sync::Mutex::new(HashSet::new()));
-    // Signalled whenever a peer finishes (becomes idle).
     let peer_idle = Arc::new(tokio::sync::Notify::new());
 
     let client = Arc::new(client);
     let cmd_tx = Arc::new(cmd_tx);
 
     let mut handles = Vec::new();
+    let mut total = 0usize;
 
-    // Lookahead throttle: don't dispatch a chunk if it's too far ahead of
-    // the processor.  Without this, 13 peers flood the 100k LRU cache faster
-    // than the processor can drain, causing low-height headers to be evicted
-    // before they're applied.
+    // Lookahead throttle constant (matches the value used in Task 1).
     const MAX_LOOKAHEAD: u32 = 200_000;
 
-    for (from, to) in &chunks {
+    loop {
         if *shutdown.borrow() {
             break;
         }
 
+        // Pop the next chunk from the front of the work queue.
+        let chunk = pending.lock().unwrap().pop_front();
+        let Some((from, to)) = chunk else {
+            break; // all chunks dispatched (or pushed back and retried)
+        };
+
         // Skip chunks that P2P sync has already covered.
         let p2p_height = current_headers_height.load(std::sync::atomic::Ordering::Relaxed);
-        if p2p_height >= *to {
+        if p2p_height >= to {
             tracing::debug!(
                 from,
                 to,
@@ -355,16 +365,15 @@ pub async fn run_fast_sync(
             continue;
         }
 
-        // Throttle: wait if this chunk is too far ahead of the processor.
-        // This prevents the LRU cache from overflowing and evicting headers
-        // the processor hasn't reached yet.
+        // Throttle: don't dispatch a chunk more than MAX_LOOKAHEAD headers
+        // ahead of the processor. Spin until the processor catches up.
         loop {
             if *shutdown.borrow() {
                 break;
             }
             let processor_height =
                 current_headers_height.load(std::sync::atomic::Ordering::Relaxed);
-            if *from <= processor_height + MAX_LOOKAHEAD {
+            if from <= processor_height + MAX_LOOKAHEAD {
                 break;
             }
             tracing::debug!(
@@ -376,13 +385,11 @@ pub async fn run_fast_sync(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        // Wait for an idle, healthy peer. Re-checks on every Notify wake or
-        // every 2s (to pick up newly connected peers from the event loop).
+        // Wait for an idle, healthy peer under the concurrency cap.
         let url = loop {
             if *shutdown.borrow() {
                 break None;
             }
-
             let candidate = {
                 let all_urls: Vec<String> = api_urls.read().unwrap().values().cloned().collect();
                 let busy = busy_peers.lock().unwrap();
@@ -392,17 +399,12 @@ pub async fn run_fast_sync(
                     .filter(|u| !busy.contains(u))
                     .find(|u| failures.get(u).copied().unwrap_or(0) < PEER_MAX_FAILURES)
             };
-
             if let Some(url) = candidate {
-                // Also enforce max_concurrent cap.
                 let busy_count = busy_peers.lock().unwrap().len() as u32;
                 if busy_count < max_concurrent {
                     break Some(url);
                 }
             }
-
-            // No idle peer or at cap — wait for one to finish or for new
-            // peers to appear (2s poll covers the new-peer case).
             tokio::select! {
                 _ = peer_idle.notified() => {}
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
@@ -413,7 +415,6 @@ pub async fn run_fast_sync(
             break; // shutdown
         };
 
-        // Mark this peer as busy.
         busy_peers.lock().unwrap().insert(url.clone());
 
         let client = client.clone();
@@ -421,21 +422,34 @@ pub async fn run_fast_sync(
         let peer_failures = peer_failures.clone();
         let busy_peers = busy_peers.clone();
         let peer_idle = peer_idle.clone();
-        let from = *from;
-        let to = *to;
+        let pending = pending.clone();
 
         handles.push(tokio::spawn(async move {
-            let result =
-                fetch_and_validate_chunk(client.as_ref(), &url, from, to, cmd_tx.as_ref()).await;
+            // Race the fetch against the per-peer timeout.  A timeout counts
+            // as a failure: the chunk is pushed back for reassignment.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(PEER_FETCH_TIMEOUT_SECS),
+                fetch_and_validate_chunk(client.as_ref(), &url, from, to, cmd_tx.as_ref()),
+            )
+            .await;
+
+            let result: Result<usize, FastSyncError> = match result {
+                Ok(r) => r,
+                Err(_elapsed) => Err(FastSyncError::Http(format!(
+                    "peer {url} timed out after {PEER_FETCH_TIMEOUT_SECS}s"
+                ))),
+            };
 
             match &result {
                 Ok(count) => {
                     tracing::debug!(from, to, count, peer = url, "fast_header_sync: chunk done");
-                    // Reset failure counter on success.
                     peer_failures.write().unwrap().remove(&url);
                 }
                 Err(e) => {
-                    tracing::debug!(from, to, peer = url, error = %e, "fast_header_sync: chunk failed");
+                    tracing::debug!(from, to, peer = url, error = %e, "fast_header_sync: chunk failed, requeueing");
+                    // Push the chunk back to the FRONT so the next idle peer
+                    // picks it up immediately.
+                    pending.lock().unwrap().push_front((from, to));
                     let mut failures = peer_failures.write().unwrap();
                     let count = failures.entry(url.clone()).or_insert(0);
                     *count += 1;
@@ -445,61 +459,20 @@ pub async fn run_fast_sync(
                 }
             }
 
-            // Mark peer idle and wake the dispatcher.
             busy_peers.lock().unwrap().remove(&url);
             peer_idle.notify_one();
 
-            // On failure, re-queue the chunk for retry on a different peer
-            // by returning the range so the collector can track it.
-            result.map_err(|e| (from, to, e))
+            result
         }));
     }
 
-    // Collect results.  Failed chunks get one more try with any available peer.
-    let mut total = 0usize;
+    // Wait for all in-flight tasks.
     let mut errors = 0usize;
-    let mut retry_chunks: Vec<(u32, u32)> = Vec::new();
-
     for handle in handles {
         match handle.await {
             Ok(Ok(count)) => total += count,
-            Ok(Err((from, to, _))) => retry_chunks.push((from, to)),
+            Ok(Err(_)) => errors += 1,
             Err(_) => errors += 1,
-        }
-    }
-
-    // Retry pass: serial, one attempt per failed chunk with a fresh peer.
-    if !retry_chunks.is_empty() {
-        tracing::info!(
-            count = retry_chunks.len(),
-            "fast_header_sync: retrying failed chunks"
-        );
-        for (from, to) in &retry_chunks {
-            let p2p_height = current_headers_height.load(std::sync::atomic::Ordering::Relaxed);
-            if p2p_height >= *to {
-                continue;
-            }
-            let url = {
-                let all_urls: Vec<String> = api_urls.read().unwrap().values().cloned().collect();
-                let failures = peer_failures.read().unwrap();
-                all_urls
-                    .into_iter()
-                    .find(|u| failures.get(u).copied().unwrap_or(0) < PEER_MAX_FAILURES)
-            };
-            if let Some(url) = url {
-                match fetch_and_validate_chunk(&client, &url, *from, *to, &cmd_tx).await {
-                    Ok(count) => {
-                        total += count;
-                        peer_failures.write().unwrap().remove(&url);
-                    }
-                    Err(e) => {
-                        tracing::warn!(from, to, error = %e, "fast_header_sync: retry failed");
-                        errors += 1;
-                    }
-                }
-            } else {
-                errors += 1;
-            }
         }
     }
 
@@ -841,6 +814,13 @@ mod tests {
         }"#;
         let jh: ChainSliceHeader = serde_json::from_str(json).unwrap();
         assert_eq!(jh.pow_solutions.d.to_string(), "0");
+    }
+
+    #[test]
+    fn timeout_constant_is_reasonable() {
+        // PEER_FETCH_TIMEOUT_SECS must exist and be between 10 and 60.
+        assert!(PEER_FETCH_TIMEOUT_SECS >= 10);
+        assert!(PEER_FETCH_TIMEOUT_SECS <= 60);
     }
 
     #[test]
