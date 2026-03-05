@@ -146,7 +146,7 @@ async fn main() {
         .name("block-processor".into())
         .spawn(move || {
             block_processor::run_processor_with_state(cmd_rx, evt_tx, move || {
-                let history = HistoryDb::from_shared(proc_node_db);
+                let history = HistoryDb::from_shared(proc_node_db.clone());
 
                 let genesis_digest = proc_settings.ergo.chain.genesis_state_digest();
                 let is_utxo = proc_settings.ergo.node.state_type == "utxo";
@@ -154,53 +154,43 @@ async fn main() {
                     NodeViewHolder::with_recovery(history, proc_mempool, !is_utxo, genesis_digest);
 
                 // Set up UTXO persistence if in UTXO mode.
+                // UtxoDb shares the same NodeDb (CF_UTXO column family).
                 if is_utxo {
-                    let utxo_path = Path::new(&proc_settings.ergo.directory).join("utxo");
-                    match ergo_storage::utxo_db::UtxoDb::open(&utxo_path) {
-                        Ok(utxo_db) => match utxo_db.metadata() {
-                            Ok(Some(meta)) => {
-                                tracing::info!(
-                                    version = hex::encode(meta.version),
-                                    "processor: found existing UTXO DB, restoring state"
-                                );
-                                match ergo_state::utxo_state::UtxoState::restore_from_db(utxo_db) {
-                                    Ok(utxo_state) => {
-                                        let entries = utxo_state
-                                            .utxo_db()
-                                            .map(|db| db.entry_count())
-                                            .unwrap_or(0);
-                                        tracing::info!(entries, "processor: UTXO state restored");
-                                        node_view.set_utxo_state(utxo_state);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "processor: UTXO restore failed, starting fresh"
-                                        );
-                                        let fresh_db =
-                                            ergo_storage::utxo_db::UtxoDb::open(&utxo_path)
-                                                .unwrap();
-                                        node_view.set_utxo_state(
-                                            ergo_state::utxo_state::UtxoState::with_persistence(
-                                                fresh_db,
-                                            ),
-                                        );
-                                    }
+                    let utxo_db = ergo_storage::utxo_db::UtxoDb::from_shared(proc_node_db.clone());
+                    match utxo_db.metadata() {
+                        Ok(Some(meta)) => {
+                            tracing::info!(
+                                version = hex::encode(meta.version),
+                                "processor: found existing UTXO DB, restoring state"
+                            );
+                            match ergo_state::utxo_state::UtxoState::restore_from_db(utxo_db) {
+                                Ok(utxo_state) => {
+                                    let entries = utxo_state
+                                        .utxo_db()
+                                        .map(|db| db.entry_count())
+                                        .unwrap_or(0);
+                                    tracing::info!(entries, "processor: UTXO state restored");
+                                    node_view.set_utxo_state(utxo_state);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "processor: UTXO restore failed, starting fresh"
+                                    );
+                                    let fresh_db =
+                                        ergo_storage::utxo_db::UtxoDb::from_shared(proc_node_db);
+                                    node_view.set_utxo_state(
+                                        ergo_state::utxo_state::UtxoState::with_persistence(
+                                            fresh_db,
+                                        ),
+                                    );
                                 }
                             }
-                            _ => {
-                                tracing::info!(
-                                    "processor: no existing UTXO DB data, starting fresh"
-                                );
-                                node_view.set_utxo_state(
-                                    ergo_state::utxo_state::UtxoState::with_persistence(utxo_db),
-                                );
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "processor: failed to open UTXO DB"
+                        }
+                        _ => {
+                            tracing::info!("processor: no existing UTXO DB data, starting fresh");
+                            node_view.set_utxo_state(
+                                ergo_state::utxo_state::UtxoState::with_persistence(utxo_db),
                             );
                         }
                     }
