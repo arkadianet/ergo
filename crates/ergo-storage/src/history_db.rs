@@ -1,10 +1,13 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
-use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatchWithTransaction, DB};
+use rocksdb::WriteBatch;
 
 use ergo_types::modifier_id::ModifierId;
+
+use crate::node_db::NodeDb;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -21,13 +24,6 @@ pub enum StorageError {
 }
 
 // ---------------------------------------------------------------------------
-// Column family names
-// ---------------------------------------------------------------------------
-
-const CF_OBJECTS: &str = "objects";
-const CF_INDEXES: &str = "indexes";
-
-// ---------------------------------------------------------------------------
 // HistoryDb
 // ---------------------------------------------------------------------------
 
@@ -37,89 +33,31 @@ const CF_INDEXES: &str = "indexes";
 /// - `objects`: Block section storage. Key = `[1-byte type_id][32-byte ModifierId]`.
 /// - `indexes`: Consensus metadata. Key = 32-byte hash. Value = variable.
 pub struct HistoryDb {
-    db: DB,
+    db: Arc<NodeDb>,
 }
 
 impl HistoryDb {
-    /// Opens (or creates) a RocksDB database at `path` with the `objects` and
-    /// `indexes` column families.
+    /// Opens (or creates) a standalone `HistoryDb` at `path`.
+    ///
+    /// Creates its own internal `NodeDb` with all 5 CFs. Used in unit tests.
+    /// In production, use `from_shared` instead.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        opts.increase_parallelism(
-            std::thread::available_parallelism()
-                .map(|n| n.get() as i32)
-                .unwrap_or(4),
-        );
-        opts.set_max_background_jobs(4);
-        // Cap open file descriptors so multiple DB instances don't exceed OS limits.
-        opts.set_max_open_files(1000);
-
-        // Shared block cache (256 MB).
-        let cache = rocksdb::Cache::new_lru_cache(256 * 1024 * 1024);
-
-        // CF_OBJECTS: block sections (write-heavy during sync).
-        let mut obj_bb = rocksdb::BlockBasedOptions::default();
-        obj_bb.set_block_cache(&cache);
-        obj_bb.set_bloom_filter(10.0, false);
-        let mut obj_opts = Options::default();
-        obj_opts.set_write_buffer_size(64 * 1024 * 1024);
-        obj_opts.set_max_write_buffer_number(3);
-        obj_opts.set_block_based_table_factory(&obj_bb);
-        let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, obj_opts);
-
-        // CF_INDEXES: consensus metadata (frequent point lookups).
-        let mut idx_bb = rocksdb::BlockBasedOptions::default();
-        idx_bb.set_block_cache(&cache);
-        idx_bb.set_bloom_filter(10.0, false);
-        let mut idx_opts = Options::default();
-        idx_opts.set_write_buffer_size(32 * 1024 * 1024);
-        idx_opts.set_max_write_buffer_number(3);
-        idx_opts.set_block_based_table_factory(&idx_bb);
-        let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, idx_opts);
-
-        let db = DB::open_cf_descriptors(&opts, path, vec![cf_objects, cf_indexes])?;
-        Ok(Self { db })
+        Ok(Self {
+            db: Arc::new(NodeDb::open(path)?),
+        })
     }
 
-    /// Opens a RocksDB database at `path` in read-only mode for concurrent
-    /// read access.  Useful for the HTTP API while the event loop holds the
-    /// primary read-write handle.
-    pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        let mut opts = Options::default();
-        opts.set_max_open_files(256);
-        let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, Options::default());
-        let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, Options::default());
-        let db =
-            DB::open_cf_descriptors_read_only(&opts, path, vec![cf_objects, cf_indexes], false)?;
-        Ok(Self { db })
+    /// Wraps a shared `NodeDb`. All instances sharing the same `Arc<NodeDb>`
+    /// see each other's writes immediately (no refresh needed).
+    pub fn from_shared(db: Arc<NodeDb>) -> Self {
+        Self { db }
     }
 
-    /// Opens a RocksDB database as a secondary instance that can be refreshed
-    /// to see writes from the primary via [`try_catch_up_with_primary`].
-    pub fn open_as_secondary<P: AsRef<Path>>(
-        primary_path: P,
-        secondary_path: P,
-    ) -> Result<Self, StorageError> {
-        let opts = Options::default();
-        let cf_objects = ColumnFamilyDescriptor::new(CF_OBJECTS, Options::default());
-        let cf_indexes = ColumnFamilyDescriptor::new(CF_INDEXES, Options::default());
-        let db = DB::open_cf_descriptors_as_secondary(
-            &opts,
-            primary_path,
-            secondary_path,
-            vec![cf_objects, cf_indexes],
-        )?;
-        Ok(Self { db })
-    }
-
-    /// Refreshes a secondary instance to see the latest writes from the
-    /// primary. No-op on read-write or read-only instances.
+    /// No-op. Kept for call-site compatibility.
+    /// Previously refreshed a secondary RocksDB instance; no longer needed
+    /// because `from_shared` wrappers see writes immediately.
     pub fn try_catch_up_with_primary(&self) -> Result<(), StorageError> {
-        self.db
-            .try_catch_up_with_primary()
-            .map_err(StorageError::Rocks)
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -141,9 +79,8 @@ impl HistoryDb {
         id: &ModifierId,
         data: &[u8],
     ) -> Result<(), StorageError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::modifier_key(type_id, id);
-        self.db.put_cf(&cf, key, data)?;
+        self.db.raw().put_cf(&self.db.cf_objects(), key, data)?;
         Ok(())
     }
 
@@ -153,24 +90,26 @@ impl HistoryDb {
         type_id: u8,
         id: &ModifierId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::modifier_key(type_id, id);
-        Ok(self.db.get_cf(&cf, key)?)
+        Ok(self.db.raw().get_cf(&self.db.cf_objects(), key)?)
     }
 
     /// Checks whether a block section exists in the `objects` column family.
     ///
     /// Uses `get_pinned_cf` to avoid allocating a full copy of the value bytes.
     pub fn contains_modifier(&self, type_id: u8, id: &ModifierId) -> Result<bool, StorageError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::modifier_key(type_id, id);
-        Ok(self.db.get_pinned_cf(&cf, key)?.is_some())
+        Ok(self
+            .db
+            .raw()
+            .get_pinned_cf(&self.db.cf_objects(), key)?
+            .is_some())
     }
+
     /// Deletes a block section from the `objects` column family.
     pub fn delete_modifier(&self, type_id: u8, id: &ModifierId) -> Result<(), StorageError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::modifier_key(type_id, id);
-        self.db.delete_cf(&cf, key)?;
+        self.db.raw().delete_cf(&self.db.cf_objects(), key)?;
         Ok(())
     }
 
@@ -199,9 +138,10 @@ impl HistoryDb {
         section_id: &ModifierId,
         header_id: &ModifierId,
     ) -> Result<(), StorageError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::section_map_key(type_id, section_id);
-        self.db.put_cf(&cf, key, header_id.0)?;
+        self.db
+            .raw()
+            .put_cf(&self.db.cf_objects(), key, header_id.0)?;
         Ok(())
     }
 
@@ -211,9 +151,8 @@ impl HistoryDb {
         type_id: u8,
         section_id: &ModifierId,
     ) -> Result<Option<ModifierId>, StorageError> {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = Self::section_map_key(type_id, section_id);
-        match self.db.get_cf(&cf, key)? {
+        match self.db.raw().get_cf(&self.db.cf_objects(), key)? {
             Some(bytes) if bytes.len() == 32 => {
                 let mut id = [0u8; 32];
                 id.copy_from_slice(&bytes);
@@ -229,21 +168,18 @@ impl HistoryDb {
 
     /// Stores an index entry in the `indexes` column family.
     pub fn put_index(&self, key: &[u8; 32], value: &[u8]) -> Result<(), StorageError> {
-        let cf = self.db.cf_handle(CF_INDEXES).unwrap();
-        self.db.put_cf(&cf, key, value)?;
+        self.db.raw().put_cf(&self.db.cf_indexes(), key, value)?;
         Ok(())
     }
 
     /// Retrieves an index entry from the `indexes` column family.
     pub fn get_index(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>, StorageError> {
-        let cf = self.db.cf_handle(CF_INDEXES).unwrap();
-        Ok(self.db.get_cf(&cf, key)?)
+        Ok(self.db.raw().get_cf(&self.db.cf_indexes(), key)?)
     }
 
     /// Deletes an index entry from the `indexes` column family.
     pub fn delete_index(&self, key: &[u8; 32]) -> Result<(), StorageError> {
-        let cf = self.db.cf_handle(CF_INDEXES).unwrap();
-        self.db.delete_cf(&cf, key)?;
+        self.db.raw().delete_cf(&self.db.cf_indexes(), key)?;
         Ok(())
     }
 
@@ -273,7 +209,7 @@ impl HistoryDb {
     pub fn new_batch(&self) -> HistoryBatch<'_> {
         HistoryBatch {
             db: &self.db,
-            batch: WriteBatchWithTransaction::<false>::default(),
+            batch: WriteBatch::default(),
         }
     }
 }
@@ -284,34 +220,31 @@ impl HistoryDb {
 
 /// A write batch that allows multiple puts to be committed atomically.
 pub struct HistoryBatch<'a> {
-    db: &'a DB,
-    batch: WriteBatchWithTransaction<false>,
+    db: &'a NodeDb,
+    batch: WriteBatch,
 }
 
 impl<'a> HistoryBatch<'a> {
     /// Queues a modifier put in the batch.
     pub fn put_modifier(&mut self, type_id: u8, id: &ModifierId, data: &[u8]) {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = HistoryDb::modifier_key(type_id, id);
-        self.batch.put_cf(&cf, key, data);
+        self.batch.put_cf(&self.db.cf_objects(), key, data);
     }
 
     /// Queues an index put in the batch.
     pub fn put_index(&mut self, key: &[u8; 32], value: &[u8]) {
-        let cf = self.db.cf_handle(CF_INDEXES).unwrap();
-        self.batch.put_cf(&cf, key, value);
+        self.batch.put_cf(&self.db.cf_indexes(), key, value);
     }
 
     /// Queues a modifier delete in the batch.
     pub fn delete_modifier(&mut self, type_id: u8, id: &ModifierId) {
-        let cf = self.db.cf_handle(CF_OBJECTS).unwrap();
         let key = HistoryDb::modifier_key(type_id, id);
-        self.batch.delete_cf(&cf, key);
+        self.batch.delete_cf(&self.db.cf_objects(), key);
     }
 
     /// Atomically writes all queued operations to the database.
     pub fn write(self) -> Result<(), StorageError> {
-        self.db.write(self.batch)?;
+        self.db.raw().write(self.batch)?;
         Ok(())
     }
 }
@@ -617,5 +550,23 @@ mod tests {
         batch.write().unwrap();
 
         assert!(!db.contains_modifier(102, &id).unwrap());
+    }
+
+    #[test]
+    fn from_shared_shares_data() {
+        use crate::node_db::NodeDb;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let node_db = Arc::new(NodeDb::open(tmp.path()).unwrap());
+        let db1 = HistoryDb::from_shared(node_db.clone());
+        let db2 = HistoryDb::from_shared(node_db.clone());
+
+        // Write via db1, read via db2 — they share the same underlying DB.
+        let key = best_header_key();
+        let val = b"test-header-id-32bytes__________";
+        db1.put_index(&key, val).unwrap();
+        let got = db2.get_index(&key).unwrap();
+        assert_eq!(got.as_deref(), Some(val.as_slice()));
     }
 }

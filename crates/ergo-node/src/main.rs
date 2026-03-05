@@ -19,6 +19,7 @@ use ergo_network::node_view::NodeViewHolder;
 use ergo_network::peer_conn::PeerConnection;
 use ergo_settings::settings::ErgoSettings;
 use ergo_storage::history_db::HistoryDb;
+use ergo_storage::node_db::NodeDb;
 
 use crate::api::ApiState;
 use crate::event_loop::SharedState;
@@ -86,30 +87,26 @@ async fn main() {
 
     let db_path = Path::new(&settings.ergo.directory).join("history");
 
-    // Open a temporary read-write HistoryDb just to log the current state.
+    // Open a single shared NodeDb. All HistoryDb wrappers share the same
+    // underlying RocksDB instance and see each other's writes immediately.
+    let node_db =
+        Arc::new(NodeDb::open(&db_path).unwrap_or_else(|e| panic!("cannot open database: {e}")));
+
+    // Log current best chain tips.
     {
-        let history =
-            HistoryDb::open(&db_path).unwrap_or_else(|e| panic!("cannot open database: {e}"));
+        let history = HistoryDb::from_shared(node_db.clone());
         let best_header = history.best_header_id().unwrap();
         let best_block = history.best_full_block_id().unwrap();
         tracing::info!(best_header = ?best_header, best_block = ?best_block, "database opened");
-        // history (rw) dropped here, freeing the primary lock
     }
 
-    // Open a read-only DB handle for the HTTP API.
-    let api_history = HistoryDb::open_read_only(&db_path)
-        .unwrap_or_else(|e| panic!("cannot open API database: {e}"));
+    // Shared handle for the HTTP API.
+    let api_history = HistoryDb::from_shared(node_db.clone());
 
-    // Open a secondary DB handle for the event loop (sync protocol).
-    // Secondary mode allows periodic refresh via try_catch_up_with_primary()
-    // so the sync protocol sees headers written by the processor thread.
-    // The secondary path must be OUTSIDE the primary path to avoid interfering
-    // with RocksDB's WAL and SST file management.
-    let sync_secondary_path = Path::new(&settings.ergo.directory).join("history_sync_secondary");
-    std::fs::create_dir_all(&sync_secondary_path)
-        .unwrap_or_else(|e| panic!("cannot create sync secondary dir: {e}"));
-    let sync_history = HistoryDb::open_as_secondary(&db_path, &sync_secondary_path)
-        .unwrap_or_else(|e| panic!("cannot open sync database: {e}"));
+    // Shared handle for the event loop (sync protocol).
+    // With Arc<NodeDb> all handles see writes immediately — no secondary
+    // instance or try_catch_up_with_primary needed.
+    let sync_history = HistoryDb::from_shared(node_db.clone());
 
     let mempool = Arc::new(std::sync::RwLock::new(ErgoMemPool::with_min_fee(
         settings.ergo.node.mempool_capacity as usize,
@@ -127,7 +124,7 @@ async fn main() {
 
     // Clone settings for the processor thread.
     let proc_settings = settings.clone();
-    let proc_db_path = db_path.clone();
+    let proc_node_db = node_db.clone();
     let proc_mempool = mempool.clone();
 
     // Spawn the processor thread. The NodeViewHolder is constructed inside
@@ -136,8 +133,7 @@ async fn main() {
         .name("block-processor".into())
         .spawn(move || {
             block_processor::run_processor_with_state(cmd_rx, evt_tx, move || {
-                let history = HistoryDb::open(&proc_db_path)
-                    .unwrap_or_else(|e| panic!("processor: cannot open database: {e}"));
+                let history = HistoryDb::from_shared(proc_node_db);
 
                 let genesis_digest = proc_settings.ergo.chain.genesis_state_digest();
                 let is_utxo = proc_settings.ergo.node.state_type == "utxo";
@@ -247,10 +243,7 @@ async fn main() {
             .unwrap_or_else(|e| panic!("cannot open extra indexer db: {e}"));
 
         let (idx_tx, idx_rx) = tokio::sync::mpsc::channel(1024);
-        let idx_history = Arc::new(
-            HistoryDb::open_read_only(&db_path)
-                .unwrap_or_else(|e| panic!("cannot open indexer history db: {e}")),
-        );
+        let idx_history = Arc::new(HistoryDb::from_shared(node_db.clone()));
 
         tokio::spawn(ergo_indexer::task::run_indexer(
             extra_db,
