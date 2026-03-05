@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use rocksdb::{
-    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor,
-    DBWithThreadMode, MultiThreaded, Options,
+    BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DBWithThreadMode,
+    MultiThreaded, Options,
 };
 use std::sync::Arc;
 
@@ -124,19 +124,27 @@ impl NodeDb {
     }
 
     pub fn cf_objects(&self) -> Arc<BoundColumnFamily<'_>> {
-        self.db.cf_handle(CF_OBJECTS).expect("CF_OBJECTS must exist")
+        self.db
+            .cf_handle(CF_OBJECTS)
+            .expect("CF_OBJECTS must exist")
     }
     pub fn cf_indexes(&self) -> Arc<BoundColumnFamily<'_>> {
-        self.db.cf_handle(CF_INDEXES).expect("CF_INDEXES must exist")
+        self.db
+            .cf_handle(CF_INDEXES)
+            .expect("CF_INDEXES must exist")
     }
     pub fn cf_utxo(&self) -> Arc<BoundColumnFamily<'_>> {
         self.db.cf_handle(CF_UTXO).expect("CF_UTXO must exist")
     }
     pub fn cf_indexer(&self) -> Arc<BoundColumnFamily<'_>> {
-        self.db.cf_handle(CF_INDEXER).expect("CF_INDEXER must exist")
+        self.db
+            .cf_handle(CF_INDEXER)
+            .expect("CF_INDEXER must exist")
     }
     pub fn cf_snapshots(&self) -> Arc<BoundColumnFamily<'_>> {
-        self.db.cf_handle(CF_SNAPSHOTS).expect("CF_SNAPSHOTS must exist")
+        self.db
+            .cf_handle(CF_SNAPSHOTS)
+            .expect("CF_SNAPSHOTS must exist")
     }
 }
 
@@ -160,14 +168,24 @@ mod tests {
         db.raw().write(batch).unwrap();
 
         assert_eq!(
-            db.raw().get_cf(&db.cf_objects(), b"obj-key").unwrap().as_deref(),
+            db.raw()
+                .get_cf(&db.cf_objects(), b"obj-key")
+                .unwrap()
+                .as_deref(),
             Some(b"obj-value".as_slice()),
         );
         assert_eq!(
-            db.raw().get_cf(&db.cf_indexes(), b"idx-key").unwrap().as_deref(),
+            db.raw()
+                .get_cf(&db.cf_indexes(), b"idx-key")
+                .unwrap()
+                .as_deref(),
             Some(b"idx-value".as_slice()),
         );
-        assert!(db.raw().get_cf(&db.cf_indexes(), b"obj-key").unwrap().is_none());
+        assert!(db
+            .raw()
+            .get_cf(&db.cf_indexes(), b"obj-key")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
