@@ -196,9 +196,19 @@ pub struct ErgoFullBlock {
     pub ad_proofs: Option<ADProofs>,
 }
 
-/// Compute the box ID for an output at the given index in a transaction.
-/// Ergo box ID = blake2b256(tx_id ++ vlq(output_index))
-pub fn compute_box_id(tx_id: &TxId, output_index: u16) -> BoxId {
+/// Compute a box ID using only tx_id and output_index (WITHOUT box candidate bytes).
+///
+/// **NOTE: This formula (`blake2b256(tx_id ++ vlq(index))`) is INCORRECT for
+/// protocol-level box IDs.** The canonical Ergo box ID is
+/// `blake2b256(sigma_serialize(full_ergo_box))`, which includes the serialized
+/// box candidate bytes (value, ergoTree, creation_height, tokens, registers)
+/// followed by tx_id and the VLQ-encoded index.
+///
+/// This function is retained only for internal tests that verify structural
+/// properties (determinism, uniqueness) without needing a real box ID.
+/// All production code must use `ergo_wire::box_ser::compute_box_id` instead.
+#[doc(hidden)]
+pub fn compute_box_id_raw(tx_id: &TxId, output_index: u16) -> BoxId {
     let mut hasher = Blake2bVar::new(32).unwrap();
     hasher.update(&tx_id.0);
     // VLQ encode the output index
@@ -409,42 +419,42 @@ mod tests {
     }
 
     #[test]
-    fn compute_box_id_deterministic() {
+    fn compute_box_id_raw_deterministic() {
         let tx_id = TxId([0xAA; 32]);
-        let id1 = compute_box_id(&tx_id, 0);
-        let id2 = compute_box_id(&tx_id, 0);
+        let id1 = compute_box_id_raw(&tx_id, 0);
+        let id2 = compute_box_id_raw(&tx_id, 0);
         assert_eq!(id1, id2);
     }
 
     #[test]
-    fn compute_box_id_different_index() {
+    fn compute_box_id_raw_different_index() {
         let tx_id = TxId([0xBB; 32]);
-        let id0 = compute_box_id(&tx_id, 0);
-        let id1 = compute_box_id(&tx_id, 1);
+        let id0 = compute_box_id_raw(&tx_id, 0);
+        let id1 = compute_box_id_raw(&tx_id, 1);
         assert_ne!(id0, id1);
     }
 
     #[test]
-    fn compute_box_id_different_tx() {
+    fn compute_box_id_raw_different_tx() {
         let tx1 = TxId([0xCC; 32]);
         let tx2 = TxId([0xDD; 32]);
-        let id1 = compute_box_id(&tx1, 0);
-        let id2 = compute_box_id(&tx2, 0);
+        let id1 = compute_box_id_raw(&tx1, 0);
+        let id2 = compute_box_id_raw(&tx2, 0);
         assert_ne!(id1, id2);
     }
 
     #[test]
-    fn compute_box_id_is_32_bytes() {
+    fn compute_box_id_raw_is_32_bytes() {
         let tx_id = TxId([0xEE; 32]);
-        let id = compute_box_id(&tx_id, 42);
+        let id = compute_box_id_raw(&tx_id, 42);
         assert_eq!(id.0.len(), 32);
     }
 
     #[test]
-    fn compute_box_id_large_index_vlq() {
+    fn compute_box_id_raw_large_index_vlq() {
         let tx_id = TxId([0xFF; 32]);
-        let id_127 = compute_box_id(&tx_id, 127);
-        let id_128 = compute_box_id(&tx_id, 128);
+        let id_127 = compute_box_id_raw(&tx_id, 127);
+        let id_128 = compute_box_id_raw(&tx_id, 128);
         assert_ne!(id_127, id_128);
     }
 

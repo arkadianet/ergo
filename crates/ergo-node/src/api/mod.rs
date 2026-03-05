@@ -14,9 +14,8 @@ use ergo_storage::continuation::compute_header_id;
 use ergo_storage::history_db::HistoryDb;
 use ergo_types::address;
 use ergo_types::modifier_id::ModifierId;
-use ergo_types::transaction::{
-    compute_box_id, BoxId, DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
-};
+use ergo_types::transaction::{BoxId, DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
+use ergo_wire::box_ser::compute_box_id;
 use ergo_wire::header_ser::serialize_header;
 use ergo_wire::transaction_ser::{compute_tx_id, parse_transaction, serialize_transaction};
 
@@ -491,7 +490,6 @@ pub struct HistogramBinResponse {
     pub total_fee: u64,
 }
 
-
 /// JSON response for the `/blockchain/indexedHeight` endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -908,7 +906,7 @@ fn ergo_tx_to_response(tx: &ErgoTransaction, size: usize) -> TransactionResponse
                 .collect();
 
             let box_id = {
-                let bid = compute_box_id(&tx.tx_id, idx as u16);
+                let bid = compute_box_id(out, &tx.tx_id, idx as u16);
                 Some(hex::encode(bid.0))
             };
 
@@ -1397,11 +1395,8 @@ fn apply_mempool_box_filters(
             for output_ref in &unconfirmed {
                 let box_response = IndexedErgoBoxResponse {
                     box_id: hex::encode(
-                        ergo_types::transaction::compute_box_id(
-                            &output_ref.tx_id,
-                            output_ref.index,
-                        )
-                        .0,
+                        compute_box_id(output_ref.candidate, &output_ref.tx_id, output_ref.index)
+                            .0,
                     ),
                     value: output_ref.candidate.value,
                     ergo_tree: hex::encode(&output_ref.candidate.ergo_tree_bytes),

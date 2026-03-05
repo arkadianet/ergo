@@ -271,7 +271,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -845,6 +845,7 @@ dependencies = [
  "blake2",
  "ergo-chain-types",
  "ergo-lib",
+ "ergo-merkle-tree",
  "ergo-types",
  "ergo-wire",
  "hex",
@@ -899,6 +900,18 @@ dependencies = [
  "sigma-util",
  "thiserror",
  "unicode-normalization",
+]
+
+[[package]]
+name = "ergo-merkle-tree"
+version = "0.15.0"
+source = "git+https://github.com/ergoplatform/sigma-rust.git?rev=3a5377d54233#3a5377d54233373ba1220eaa8d215ac27b97d3f0"
+dependencies = [
+ "blake2",
+ "ergo-chain-types",
+ "itertools 0.14.0",
+ "sigma-ser",
+ "sigma-util",
 ]
 
 [[package]]
@@ -1069,6 +1082,7 @@ dependencies = [
  "ergo-settings",
  "ergo-types",
  "ergotree-ir",
+ "hex",
  "proptest",
  "sigma-ser",
  "thiserror",
@@ -1724,6 +1738,15 @@ name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]

@@ -6,7 +6,8 @@
 //! [`IndexerBuffer`] that is flushed to the DB when it exceeds a threshold.
 
 use ergo_types::modifier_id::ModifierId;
-use ergo_types::transaction::{compute_box_id, ErgoTransaction};
+use ergo_types::transaction::ErgoTransaction;
+use ergo_wire::box_ser::compute_box_id;
 
 use crate::db::{
     global_box_index_key, global_tx_index_key, indexed_height_key, numeric_box_key, numeric_tx_key,
@@ -285,7 +286,7 @@ pub fn index_block(
         // Process outputs
         // -----------------------------------------------------------------
         for (output_idx, output) in tx.output_candidates.iter().enumerate() {
-            let box_id = compute_box_id(&tx.tx_id, output_idx as u16);
+            let box_id = compute_box_id(output, &tx.tx_id, output_idx as u16);
 
             // Create IndexedErgoBox.
             let indexed_box = IndexedErgoBox {
@@ -769,6 +770,35 @@ mod tests {
     use super::*;
     use ergo_types::transaction::{BoxId, ErgoBoxCandidate, Input, TxId};
 
+    // Valid P2PK ErgoTree bytes for distinct "addresses" used in tests.
+    //
+    // Format: [0x00, 0x08, 0xCD] + 33-byte compressed secp256k1 pubkey.
+    //
+    // TREE_A uses the generator point G of secp256k1.
+    // TREE_B uses 2*G.
+    // TREE_C uses another distinct known point.
+    // sigma-rust requires fully valid ErgoTree bytes; invalid bytes cause a panic in compute_box_id.
+
+    /// P2PK tree for generator point G.
+    fn tree_a() -> Vec<u8> {
+        let mut v = vec![0x00, 0x08, 0xCD];
+        v.extend_from_slice(
+            &hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap(),
+        );
+        v
+    }
+
+    /// P2PK tree for 2*G.
+    fn tree_b() -> Vec<u8> {
+        let mut v = vec![0x00, 0x08, 0xCD];
+        v.extend_from_slice(
+            &hex::decode("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+                .unwrap(),
+        );
+        v
+    }
+
     /// Create a simple transaction for testing with the given outputs and no
     /// inputs.
     fn make_test_tx(
@@ -841,14 +871,14 @@ mod tests {
         };
         let mut buffer = IndexerBuffer::new();
 
-        let tree_a = vec![0x00, 0x08, 0xCD, 0x01, 0x02, 0x03];
-        let tree_b = vec![0x00, 0x08, 0xCD, 0x04, 0x05, 0x06];
+        let ta = tree_a();
+        let tb = tree_b();
 
         let (tx_bytes, tx) = make_test_tx(
             [0xAA; 32],
             vec![
-                make_output(1_000_000_000, tree_a.clone(), vec![]),
-                make_output(500_000_000, tree_b.clone(), vec![]),
+                make_output(1_000_000_000, ta.clone(), vec![]),
+                make_output(500_000_000, tb.clone(), vec![]),
             ],
             vec![],
         );
@@ -870,7 +900,9 @@ mod tests {
         assert_eq!(indexed_tx.output_indexes, vec![0, 1]);
 
         // Verify boxes are in the buffer.
-        let box_id_0 = compute_box_id(&TxId([0xAA; 32]), 0);
+        let out0 = make_output(1_000_000_000, ta.clone(), vec![]);
+        let out1 = make_output(500_000_000, tb.clone(), vec![]);
+        let box_id_0 = compute_box_id(&out0, &TxId([0xAA; 32]), 0);
         let box_data = buffer.find(&box_id_0.0).unwrap();
         let indexed_box = IndexedErgoBox::deserialize(box_data).unwrap();
         assert_eq!(indexed_box.value, 1_000_000_000);
@@ -878,20 +910,20 @@ mod tests {
         assert_eq!(indexed_box.inclusion_height, 1);
         assert!(indexed_box.spending_tx_id.is_none());
 
-        let box_id_1 = compute_box_id(&TxId([0xAA; 32]), 1);
+        let box_id_1 = compute_box_id(&out1, &TxId([0xAA; 32]), 1);
         let box_data = buffer.find(&box_id_1.0).unwrap();
         let indexed_box = IndexedErgoBox::deserialize(box_data).unwrap();
         assert_eq!(indexed_box.value, 500_000_000);
         assert_eq!(indexed_box.global_index, 1);
 
         // Verify address entries exist.
-        let addr_key_a = tree_hash_key(&tree_a);
+        let addr_key_a = tree_hash_key(&ta);
         let addr_data = buffer.find(&addr_key_a).unwrap();
         let addr = IndexedErgoAddress::deserialize(addr_data).unwrap();
         assert_eq!(addr.balance.nano_ergs, 1_000_000_000);
         assert_eq!(addr.box_indexes, vec![0]);
 
-        let addr_key_b = tree_hash_key(&tree_b);
+        let addr_key_b = tree_hash_key(&tb);
         let addr_data = buffer.find(&addr_key_b).unwrap();
         let addr = IndexedErgoAddress::deserialize(addr_data).unwrap();
         assert_eq!(addr.balance.nano_ergs, 500_000_000);
@@ -912,9 +944,10 @@ mod tests {
         };
         let mut buffer = IndexerBuffer::new();
 
+        let ta = tree_a();
         let (tx_bytes, tx) = make_test_tx(
             [0xBB; 32],
-            vec![make_output(100_000, vec![0x00, 0x01], vec![])],
+            vec![make_output(100_000, ta.clone(), vec![])],
             vec![],
         );
 
@@ -925,7 +958,8 @@ mod tests {
         let nb_data = buffer.find(&nb_key).unwrap();
         let nb = NumericBoxIndex::deserialize(nb_data).unwrap();
         assert_eq!(nb.n, 10);
-        let expected_box_id = compute_box_id(&TxId([0xBB; 32]), 0);
+        let expected_box_id =
+            compute_box_id(&make_output(100_000, ta, vec![]), &TxId([0xBB; 32]), 0);
         assert_eq!(nb.box_id, ModifierId(expected_box_id.0));
 
         // Check NumericTxIndex at global_tx_index=5.
@@ -956,7 +990,7 @@ mod tests {
 
         let (tx_bytes, tx) = make_test_tx(
             [0xCC; 32],
-            vec![make_output(999_999, vec![0x00, 0x08, 0xCD], vec![])],
+            vec![make_output(999_999, tree_a(), vec![])],
             vec![],
         );
 
@@ -999,29 +1033,37 @@ mod tests {
         };
         let mut buffer = IndexerBuffer::new();
 
-        let tree_a = vec![0x00, 0x08, 0xCD, 0x01, 0x02, 0x03];
+        let ta = tree_a();
 
         // Block 1 (genesis): 1 tx with 1 output.
         let (tx1_bytes, tx1) = make_test_tx(
             [0x11; 32],
-            vec![make_output(1_000_000_000, tree_a.clone(), vec![])],
+            vec![make_output(1_000_000_000, ta.clone(), vec![])],
             vec![],
         );
         index_block(&db, &mut state, &mut buffer, &[(tx1_bytes, tx1)], 1).unwrap();
         flush_buffer(&db, &state, &mut buffer).unwrap();
 
-        let box1_id = compute_box_id(&TxId([0x11; 32]), 0);
+        let box1_id = compute_box_id(
+            &make_output(1_000_000_000, ta.clone(), vec![]),
+            &TxId([0x11; 32]),
+            0,
+        );
 
         // Block 2: 1 tx with 1 output.
         let (tx2_bytes, tx2) = make_test_tx(
             [0x22; 32],
-            vec![make_output(500_000_000, tree_a.clone(), vec![])],
+            vec![make_output(500_000_000, ta.clone(), vec![])],
             vec![],
         );
         index_block(&db, &mut state, &mut buffer, &[(tx2_bytes, tx2)], 2).unwrap();
         flush_buffer(&db, &state, &mut buffer).unwrap();
 
-        let box2_id = compute_box_id(&TxId([0x22; 32]), 0);
+        let box2_id = compute_box_id(
+            &make_output(500_000_000, ta.clone(), vec![]),
+            &TxId([0x22; 32]),
+            0,
+        );
 
         // Verify both are present before rollback.
         assert_eq!(state.indexed_height, 2);
@@ -1048,7 +1090,7 @@ mod tests {
         assert!(db.get(&numeric_box_key(1)).unwrap().is_none());
 
         // Address should only have block 1's box.
-        let addr_key = tree_hash_key(&tree_a);
+        let addr_key = tree_hash_key(&ta);
         let addr_data = db.get(&addr_key).unwrap().unwrap();
         let addr = IndexedErgoAddress::deserialize(&addr_data).unwrap();
         assert_eq!(addr.balance.nano_ergs, 1_000_000_000);
@@ -1069,18 +1111,22 @@ mod tests {
         };
         let mut buffer = IndexerBuffer::new();
 
-        let tree_a = vec![0x00, 0x08, 0xCD, 0x01, 0x02, 0x03];
+        let ta = tree_a();
 
         // Block 1 (genesis): tx creates a box.
         let (tx1_bytes, tx1) = make_test_tx(
             [0x11; 32],
-            vec![make_output(1_000_000_000, tree_a.clone(), vec![])],
+            vec![make_output(1_000_000_000, ta.clone(), vec![])],
             vec![],
         );
         index_block(&db, &mut state, &mut buffer, &[(tx1_bytes, tx1)], 1).unwrap();
         flush_buffer(&db, &state, &mut buffer).unwrap();
 
-        let box1_id = compute_box_id(&TxId([0x11; 32]), 0);
+        let box1_id = compute_box_id(
+            &make_output(1_000_000_000, ta.clone(), vec![]),
+            &TxId([0x11; 32]),
+            0,
+        );
 
         // Verify the box is unspent.
         let box_data = db.get(&box1_id.0).unwrap().unwrap();
@@ -1091,7 +1137,7 @@ mod tests {
         // Block 2: tx spends the box from block 1 and creates a new one.
         let (tx2_bytes, tx2) = make_test_tx(
             [0x22; 32],
-            vec![make_output(900_000_000, tree_a.clone(), vec![])],
+            vec![make_output(900_000_000, ta.clone(), vec![])],
             vec![Input {
                 box_id: BoxId(box1_id.0),
                 proof_bytes: vec![],
@@ -1108,7 +1154,7 @@ mod tests {
         assert_eq!(ibox.spending_height, Some(2));
 
         // Verify address balance was reduced (box spent, new box created).
-        let addr_key = tree_hash_key(&tree_a);
+        let addr_key = tree_hash_key(&ta);
         let addr_data = db.get(&addr_key).unwrap().unwrap();
         let addr = IndexedErgoAddress::deserialize(&addr_data).unwrap();
         // Balance should be 900M (box1 spent = -1B, box2 created = +900M).
@@ -1145,7 +1191,7 @@ mod tests {
         };
         let mut buffer = IndexerBuffer::new();
 
-        let tree = vec![0x00, 0x08, 0xCD, 0x07, 0x08, 0x09];
+        let tree = tree_b();
 
         // Index 3 blocks with 1 tx each, 1 output each.
         for height in 1..=3u32 {

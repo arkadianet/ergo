@@ -18,3 +18,4 @@ sigma-ser = "0.19"
 ergo-types = { path = "../ergo-types", features = ["test-utils"] }
 tokio = { workspace = true }
 proptest = { workspace = true }
+hex = { workspace = true }

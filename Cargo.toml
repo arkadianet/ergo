@@ -50,6 +50,8 @@ ergo-lib = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a53
 sigma-ser = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
 ergotree-ir = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
 ergo-chain-types = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
+ergo-merkle-tree = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
+sigma-util = { git = "https://github.com/ergoplatform/sigma-rust.git", rev = "3a5377d54233" }
 
 [profile.release]
 lto = true

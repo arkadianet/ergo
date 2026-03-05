@@ -691,7 +691,7 @@ pub fn verify_transaction_with_sigma_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_types::transaction::{BoxId, DataInput, ErgoBoxCandidate, Input, TxId};
+    use ergo_types::transaction::{BoxId, DataInput, ErgoBox, ErgoBoxCandidate, Input, TxId};
 
     /// Helper: create a minimal ErgoBox for testing.
     fn make_test_box(value: u64, tree_bytes: Vec<u8>, tx_id: TxId, index: u16) -> ErgoBox {
@@ -702,7 +702,7 @@ mod tests {
             tokens: Vec::new(),
             additional_registers: Vec::new(),
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, index);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, index);
         ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -847,7 +847,7 @@ mod tests {
             tokens: vec![(token_id, 100)],
             additional_registers: vec![],
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, 0);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, 0);
         let our_box = ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -876,7 +876,7 @@ mod tests {
             tokens: vec![],
             additional_registers: vec![(4, r4_bytes)],
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, 0);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, 0);
         let our_box = ErgoBox {
             candidate,
             transaction_id: tx_id,
@@ -1052,10 +1052,24 @@ mod tests {
 
     #[test]
     fn test_convert_ergo_box_zero_value_rejected() {
-        // BoxValue(0) is invalid in sigma-rust, it should error.
+        // BoxValue(0) is invalid in sigma-rust; convert_ergo_box should return an error.
+        // We bypass make_test_box (which calls compute_box_id and would panic on value=0)
+        // by constructing the ErgoBox directly with a dummy box_id.
         let tree_bytes = p2pk_tree_bytes();
         let tx_id = TxId([0xA2; 32]);
-        let our_box = make_test_box(0, tree_bytes, tx_id, 0);
+        let candidate = ErgoBoxCandidate {
+            value: 0,
+            ergo_tree_bytes: tree_bytes,
+            creation_height: 0,
+            tokens: Vec::new(),
+            additional_registers: Vec::new(),
+        };
+        let our_box = ErgoBox {
+            box_id: BoxId([0xA2; 32]), // dummy — not used by convert_ergo_box
+            candidate,
+            transaction_id: tx_id,
+            index: 0,
+        };
         let result = convert_ergo_box(&our_box);
         assert!(result.is_err(), "zero value box should be rejected");
         let err_msg = result.unwrap_err().to_string();
@@ -1088,7 +1102,7 @@ mod tests {
             tokens,
             additional_registers: vec![],
         };
-        let box_id = ergo_types::transaction::compute_box_id(&tx_id, 0);
+        let box_id = ergo_wire::box_ser::compute_box_id(&candidate, &tx_id, 0);
         let our_box = ErgoBox {
             candidate,
             transaction_id: tx_id,

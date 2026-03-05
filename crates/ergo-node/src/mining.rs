@@ -20,9 +20,8 @@ use ergo_storage::history_db::HistoryDb;
 use ergo_types::extension::Extension;
 use ergo_types::header::{AutolykosSolution, Header};
 use ergo_types::modifier_id::{ADDigest, Digest32, ModifierId};
-use ergo_types::transaction::{
-    compute_box_id, BoxId, ErgoBox, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
-};
+use ergo_types::transaction::{BoxId, ErgoBox, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
+use ergo_wire::box_ser::compute_box_id;
 use ergo_wire::transaction_ser::{compute_tx_id, serialize_transaction};
 use serde::{Deserialize, Serialize};
 
@@ -201,7 +200,7 @@ fn build_fee_collection_tx(
     for tx in block_txs {
         for (idx, output) in tx.output_candidates.iter().enumerate() {
             if output.ergo_tree_bytes == MINERS_FEE_ERGO_TREE {
-                let box_id = compute_box_id(&tx.tx_id, idx as u16);
+                let box_id = compute_box_id(output, &tx.tx_id, idx as u16);
                 fee_inputs.push(Input {
                     box_id,
                     proof_bytes: Vec::new(),
@@ -416,7 +415,7 @@ pub fn collect_txs(
 
         // Add emission tx outputs to overlay so mempool txs can spend them.
         for (idx, output) in etx.output_candidates.iter().enumerate() {
-            let bid = compute_box_id(&etx.tx_id, idx as u16);
+            let bid = compute_box_id(output, &etx.tx_id, idx as u16);
             utxo_overlay.insert(
                 bid.0,
                 ErgoBox {
@@ -542,7 +541,7 @@ pub fn collect_txs(
         // Add outputs to UTXO overlay so later txs can spend them (chained txs).
         let last_tx = selected.last().unwrap();
         for (idx, output) in last_tx.output_candidates.iter().enumerate() {
-            let bid = compute_box_id(&last_tx.tx_id, idx as u16);
+            let bid = compute_box_id(output, &last_tx.tx_id, idx as u16);
             utxo_overlay.insert(
                 bid.0,
                 ErgoBox {
@@ -1696,11 +1695,11 @@ mod tests {
     fn test_build_fee_collection_tx_caps_at_max_assets() {
         let pk = [0x02; 33];
 
-        // Build a fee output with more than MAX_ASSETS_PER_BOX (100) distinct tokens.
-        // We bypass compute_tx_id because sigma-rust caps BoxTokens at 122,
-        // but this test needs 150 tokens to verify our MAX_ASSETS_PER_BOX capping.
+        // Build a fee output with more than MAX_ASSETS_PER_BOX (100) distinct tokens
+        // but within sigma-rust's BoxTokens limit of 122.
+        // 110 tokens is above MAX_ASSETS_PER_BOX (100) and below sigma-rust limit (122).
         let mut tokens: Vec<(BoxId, u64)> = Vec::new();
-        for i in 0..150u8 {
+        for i in 0..110u8 {
             let mut id = [0u8; 32];
             id[0] = i;
             id[1] = 0xFF; // make unique
@@ -2205,7 +2204,7 @@ mod tests {
         tx_a.tx_id = compute_tx_id(&tx_a);
 
         // Compute the box ID of tx_a's first output — this is what tx_b will spend.
-        let chained_box_id = compute_box_id(&tx_a.tx_id, 0);
+        let chained_box_id = compute_box_id(&tx_a.output_candidates[0], &tx_a.tx_id, 0);
 
         // Tx B: spends the first output of Tx A.
         let mut tx_b = ErgoTransaction {
@@ -2297,7 +2296,7 @@ mod tests {
         };
         tx_a.tx_id = compute_tx_id(&tx_a);
 
-        let chained_box_id = compute_box_id(&tx_a.tx_id, 0);
+        let chained_box_id = compute_box_id(&tx_a.output_candidates[0], &tx_a.tx_id, 0);
 
         // tx_b spends tx_a's output.
         let mut tx_b = ErgoTransaction {

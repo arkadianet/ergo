@@ -612,7 +612,7 @@ pub(crate) async fn get_unconfirmed_outputs_by_token_id_handler(
     let responses: Vec<UnconfirmedOutputResponse> = results
         .iter()
         .map(|output_ref| {
-            let box_id = compute_box_id(&output_ref.tx_id, output_ref.index);
+            let box_id = compute_box_id(output_ref.candidate, &output_ref.tx_id, output_ref.index);
             UnconfirmedOutputResponse {
                 box_id: hex::encode(box_id.0),
                 tx_id: hex::encode(output_ref.tx_id.0),
@@ -675,7 +675,7 @@ pub(crate) async fn post_unconfirmed_outputs_by_ergo_tree_handler(
     let result: Vec<UnconfirmedOutputResponse> = outputs
         .iter()
         .map(|o| {
-            let box_id = compute_box_id(&o.tx_id, o.index);
+            let box_id = compute_box_id(o.candidate, &o.tx_id, o.index);
             UnconfirmedOutputResponse {
                 box_id: hex::encode(box_id.0),
                 tx_id: hex::encode(o.tx_id.0),
@@ -723,7 +723,7 @@ pub(crate) async fn post_unconfirmed_outputs_by_registers_handler(
     let result: Vec<UnconfirmedOutputResponse> = outputs
         .iter()
         .map(|o| {
-            let box_id = compute_box_id(&o.tx_id, o.index);
+            let box_id = compute_box_id(o.candidate, &o.tx_id, o.index);
             UnconfirmedOutputResponse {
                 box_id: hex::encode(box_id.0),
                 tx_id: hex::encode(o.tx_id.0),
