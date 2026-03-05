@@ -111,11 +111,12 @@ pub fn flush_buffer(
     buffer: &mut IndexerBuffer,
 ) -> Result<(), IndexerDbError> {
     let mut batch = db.new_batch();
+    let cf = db.cf();
     for (key, value) in buffer.entries.drain(..) {
-        batch.put(key, &value);
+        batch.put_cf(&cf, key, &value);
     }
     for key in buffer.deletes.drain(..) {
-        batch.delete(key);
+        batch.delete_cf(&cf, key);
     }
     db.write_batch(batch)?;
 

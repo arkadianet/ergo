@@ -234,13 +234,8 @@ async fn main() {
     tracing::info!("block processor thread spawned");
 
     // Conditionally start the extra indexer.
-    let extra_path = Path::new(&settings.ergo.directory)
-        .join("history")
-        .join("extra");
-
     let indexer_tx = if settings.ergo.node.extra_index {
-        let extra_db = ergo_indexer::db::ExtraIndexerDb::open(&extra_path)
-            .unwrap_or_else(|e| panic!("cannot open extra indexer db: {e}"));
+        let extra_db = ergo_indexer::db::ExtraIndexerDb::from_shared(node_db.clone());
 
         let (idx_tx, idx_rx) = tokio::sync::mpsc::channel(1024);
         let idx_history = Arc::new(HistoryDb::from_shared(node_db.clone()));
@@ -257,12 +252,12 @@ async fn main() {
         None
     };
 
-    // Open a read-only DB handle for the extra indexer API endpoints.
+    // Share the same NodeDb handle for the extra indexer API endpoints.
     let extra_db_api: Option<Arc<ergo_indexer::db::ExtraIndexerDb>> =
         if settings.ergo.node.extra_index {
-            let extra_db_api = ergo_indexer::db::ExtraIndexerDb::open_read_only(&extra_path)
-                .unwrap_or_else(|e| panic!("cannot open extra indexer API db: {e}"));
-            Some(Arc::new(extra_db_api))
+            Some(Arc::new(ergo_indexer::db::ExtraIndexerDb::from_shared(
+                node_db.clone(),
+            )))
         } else {
             None
         };
