@@ -9,9 +9,7 @@
 use serde::Deserialize;
 
 use ergo_types::block_transactions::MAX_TRANSACTIONS_IN_BLOCK;
-use ergo_types::transaction::{
-    BoxId, DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId,
-};
+use ergo_types::transaction::{BoxId, DataInput, ErgoBoxCandidate, ErgoTransaction, Input, TxId};
 use ergo_wire::vlq::{put_uint, put_ushort};
 
 // ── Error type ──────────────────────────────────────────────────────
@@ -194,7 +192,10 @@ pub fn block_transactions_json_to_wire(
 
     // version sentinel: only for block_version > 1
     if bt.block_version > 1 {
-        put_uint(&mut buf, MAX_TRANSACTIONS_IN_BLOCK + bt.block_version as u32);
+        put_uint(
+            &mut buf,
+            MAX_TRANSACTIONS_IN_BLOCK + bt.block_version as u32,
+        );
     }
 
     // tx_count: VLQ UInt
@@ -287,9 +288,7 @@ fn json_tx_to_ergo_transaction(
 /// - For each entry (sorted by key): u8(key) + raw_constant_bytes
 ///
 /// Returns `vec![0x00]` (VLQ encoding of 0) for empty extensions.
-fn parse_context_extension(
-    val: &serde_json::Value,
-) -> Result<Vec<u8>, FastBlockSyncError> {
+fn parse_context_extension(val: &serde_json::Value) -> Result<Vec<u8>, FastBlockSyncError> {
     let obj = match val.as_object() {
         Some(obj) => obj,
         None => {
@@ -364,9 +363,7 @@ fn parse_additional_registers(
             )));
         }
         let hex_str = val_json.as_str().ok_or_else(|| {
-            FastBlockSyncError::Json(format!(
-                "register value for '{key_str}' is not a string"
-            ))
+            FastBlockSyncError::Json(format!("register value for '{key_str}' is not a string"))
         })?;
         let bytes = hex::decode(hex_str)?;
         regs.push((idx, bytes));
@@ -548,7 +545,10 @@ pub async fn run_fast_block_sync(
             }
             Ok(_) => {
                 // No header at this height yet; stop here and let P2P catch up.
-                tracing::debug!(height = h, "fast_block_sync: no header at height, stopping scan");
+                tracing::debug!(
+                    height = h,
+                    "fast_block_sync: no header at height, stopping scan"
+                );
                 break;
             }
             Err(e) => {
@@ -947,8 +947,7 @@ mod tests {
         let wire = block_transactions_json_to_wire(&header_id_hex, &bt).unwrap();
 
         // Verify we can round-trip parse it
-        let parsed =
-            ergo_wire::block_transactions_ser::parse_block_transactions(&wire).unwrap();
+        let parsed = ergo_wire::block_transactions_ser::parse_block_transactions(&wire).unwrap();
         assert_eq!(parsed.header_id.0, [0xCC; 32]);
         assert_eq!(parsed.block_version, 2);
         assert_eq!(parsed.tx_bytes.len(), 1);
@@ -990,8 +989,7 @@ mod tests {
         };
 
         let wire = block_transactions_json_to_wire(&header_id_hex, &bt).unwrap();
-        let parsed =
-            ergo_wire::block_transactions_ser::parse_block_transactions(&wire).unwrap();
+        let parsed = ergo_wire::block_transactions_ser::parse_block_transactions(&wire).unwrap();
         assert_eq!(parsed.block_version, 1);
         assert_eq!(parsed.tx_bytes.len(), 1);
     }

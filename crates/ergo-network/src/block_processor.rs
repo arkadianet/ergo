@@ -328,11 +328,7 @@ fn processor_loop_with_state(
                     process_bulk_headers(state, headers, &mut accum);
                 }
                 ProcessorCommand::BulkBlockSections { sections } => {
-                    process_bulk_block_sections(
-                        state,
-                        evt_tx,
-                        sections,
-                    );
+                    process_bulk_block_sections(state, evt_tx, sections);
                 }
                 ProcessorCommand::ApplyFromCache => {
                     let mut accum = BatchAccum {
