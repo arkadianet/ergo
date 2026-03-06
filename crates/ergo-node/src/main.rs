@@ -1,5 +1,6 @@
 mod api;
 mod event_loop;
+pub mod fast_block_sync;
 pub mod fast_header_sync;
 pub mod geoip;
 pub mod mining;
