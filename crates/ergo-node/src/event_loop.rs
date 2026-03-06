@@ -395,7 +395,7 @@ pub async fn run(
     // Spawn the fast header sync task if enabled.
     // The task runs alongside normal P2P sync without interfering with it.
     // A 5-second delay allows peers to connect and advertise REST API URLs.
-    if settings.ergo.node.fast_header_sync {
+    if settings.ergo.node.fast_sync {
         let api_urls_shared = api_peer_urls.clone();
         let our_h = cached_headers_height;
         let chunk_sz = settings.ergo.node.fast_sync_chunk_size;
@@ -423,7 +423,7 @@ pub async fn run(
     }
 
     // Spawn fast block sync task if enabled (reuses the same gate as fast header sync).
-    if settings.ergo.node.fast_header_sync {
+    if settings.ergo.node.fast_sync {
         let fbs_api_urls = api_peer_urls.clone();
         let fbs_history =
             ergo_storage::history_db::HistoryDb::from_shared(sync_history.shared_db());
