@@ -323,6 +323,10 @@ pub async fn run(
     let shared_fast_sync_active: crate::fast_header_sync::SharedFastSyncActive =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    // Shared atomic for fast block sync: tracks the highest applied full block height.
+    let shared_full_height: crate::fast_block_sync::SharedFullHeight =
+        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
     // Transaction cost rate limiter: rejects txs when the cumulative
     // processing cost since the last block exceeds per-peer / global limits.
     let mut tx_cost_tracker = message_handler::TxCostTracker::new();
@@ -416,6 +420,31 @@ pub async fn run(
             .await;
         });
         tracing::info!("fast header sync task spawned (will start after 5s delay)");
+    }
+
+    // Spawn fast block sync task if enabled (reuses the same gate as fast header sync).
+    if settings.ergo.node.fast_header_sync {
+        let fbs_api_urls = api_peer_urls.clone();
+        let fbs_history =
+            ergo_storage::history_db::HistoryDb::from_shared(sync_history.shared_db());
+        let fbs_cmd_tx = cmd_tx.clone();
+        let fbs_shutdown = shutdown_rx.clone();
+        let fbs_full_height = shared_full_height.clone();
+        let fbs_headers_height = shared_headers_height.clone();
+        tokio::spawn(async move {
+            // Wait 30s for fast header sync to populate headers first.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            crate::fast_block_sync::run_fast_block_sync(
+                fbs_api_urls,
+                fbs_history,
+                fbs_cmd_tx,
+                fbs_shutdown,
+                fbs_full_height,
+                fbs_headers_height,
+            )
+            .await;
+        });
+        tracing::info!("fast block sync task spawned (will start after 30s delay)");
     }
 
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
@@ -875,6 +904,7 @@ pub async fn run(
                     }
                     ProcessorEvent::BlockApplied { header_id, height } => {
                         pending_body_sections = pending_body_sections.saturating_sub(2);
+                        shared_full_height.store(height, std::sync::atomic::Ordering::Relaxed);
                         tracing::info!(height, pending_body_sections, header_id = hex::encode(header_id.0), "block applied");
                         // Notify the indexer.
                         if let Some(ref idx_tx) = indexer_tx {
@@ -945,6 +975,7 @@ pub async fn run(
                         cached_headers_height = headers_height;
                         shared_headers_height.store(headers_height, std::sync::atomic::Ordering::Relaxed);
                         cached_full_height = full_height;
+                        shared_full_height.store(full_height, std::sync::atomic::Ordering::Relaxed);
                         cached_best_header_id = best_header_id;
                         cached_best_full_id = best_full_id;
                         cached_state_root = state_root;
