@@ -382,7 +382,6 @@ fn parse_additional_registers(
 /// Fetch a chunk of blocks from a peer and convert to wire-format sections.
 ///
 /// Returns `Vec<(type_id, header_id, wire_bytes)>` for `BulkBlockSections`.
-#[allow(dead_code)] // called by the pipeline function added in a later task
 pub(crate) async fn fetch_and_convert_chunk(
     client: &reqwest::Client,
     peer_url: &str,
@@ -448,6 +447,339 @@ fn hex_to_32(hex_str: &str) -> Result<[u8; 32], FastBlockSyncError> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(arr)
+}
+
+// ── Shared types ────────────────────────────────────────────────────
+
+/// Shared atomic that the event loop writes on each BlockApplied event.
+/// Fast block sync reads this to throttle (don't get too far ahead of applied height).
+pub type SharedFullHeight = std::sync::Arc<std::sync::atomic::AtomicU32>;
+
+// ── Pipeline constants ──────────────────────────────────────────────
+
+const CHUNK_SIZE: usize = 16;
+const HANDOFF_DISTANCE: u32 = 1000;
+const PEER_MAX_FAILURES: u32 = 3;
+const PEER_FETCH_TIMEOUT_SECS: u64 = 20;
+const THROTTLE_LOOKAHEAD: u32 = 50_000;
+
+// ── Main pipeline ───────────────────────────────────────────────────
+
+/// Run the fast block sync pipeline.
+///
+/// Fetches block body sections (BlockTransactions + Extension) via the
+/// `POST /blocks/headerIds` REST API from peers discovered in `api_urls`.
+/// Sends `BulkBlockSections` commands to the processor for storage and
+/// application.
+///
+/// The pipeline:
+/// 1. Waits for API peers (up to 60s).
+/// 2. Reads current full_height and headers_height from shared atomics.
+/// 3. Computes the download range: full_height+1 .. headers_height - HANDOFF_DISTANCE.
+/// 4. Walks the height index to collect header IDs, grouping into chunks of CHUNK_SIZE.
+/// 5. For each chunk: picks a healthy peer, fetches with timeout, sends to processor.
+/// 6. Throttles: won't get more than THROTTLE_LOOKAHEAD blocks ahead of applied height.
+/// 7. Handles failures: re-queues failed chunks, tracks per-peer failure counts.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_fast_block_sync(
+    api_urls: crate::fast_header_sync::ApiPeerUrls,
+    history: ergo_storage::history_db::HistoryDb,
+    cmd_tx: std::sync::mpsc::SyncSender<ergo_network::block_processor::ProcessorCommand>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    shared_full_height: SharedFullHeight,
+    shared_headers_height: crate::fast_header_sync::SharedHeadersHeight,
+) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap();
+
+    // ── 1. Wait for at least one peer (up to 60s) ───────────────────
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        let urls: Vec<String> = api_urls.read().unwrap().values().cloned().collect();
+        if !urls.is_empty() {
+            tracing::info!(peers = urls.len(), "fast_block_sync: found API peers");
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::info!("fast_block_sync: no peers with REST API URLs after 60s, giving up");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    // ── 2. Get current heights ──────────────────────────────────────
+    let full_height = shared_full_height.load(Ordering::Relaxed);
+    let headers_height = shared_headers_height.load(Ordering::Relaxed);
+
+    if headers_height <= full_height + HANDOFF_DISTANCE {
+        tracing::info!(
+            full_height,
+            headers_height,
+            "fast_block_sync: within handoff distance or already synced"
+        );
+        return;
+    }
+
+    let target = headers_height - HANDOFF_DISTANCE;
+    let start = full_height + 1;
+
+    tracing::info!(
+        start,
+        target,
+        "fast_block_sync: building chunk queue from height index"
+    );
+
+    // ── 3. Walk height index to build chunk queue ───────────────────
+    let mut all_ids: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
+    for h in start..=target {
+        match history.header_ids_at_height(h) {
+            Ok(ids) if !ids.is_empty() => {
+                // First ID in the vec is the best header at that height.
+                all_ids.push(ids[0]);
+            }
+            Ok(_) => {
+                // No header at this height yet; stop here and let P2P catch up.
+                tracing::debug!(height = h, "fast_block_sync: no header at height, stopping scan");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(height = h, error = %e, "fast_block_sync: DB error reading height index");
+                break;
+            }
+        }
+    }
+
+    if all_ids.is_empty() {
+        tracing::info!("fast_block_sync: no header IDs found in range, exiting");
+        return;
+    }
+
+    // Chunk the IDs into batches of CHUNK_SIZE.
+    let chunks: Vec<Vec<ergo_types::modifier_id::ModifierId>> =
+        all_ids.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
+
+    tracing::info!(
+        chunks = chunks.len(),
+        total_ids = all_ids.len(),
+        "fast_block_sync: starting parallel fetch"
+    );
+
+    // ── 4. Work-stealing queue + peer tracking ──────────────────────
+    let pending: Arc<std::sync::Mutex<VecDeque<Vec<ergo_types::modifier_id::ModifierId>>>> =
+        Arc::new(std::sync::Mutex::new(chunks.into_iter().collect()));
+
+    let peer_failures: Arc<std::sync::RwLock<HashMap<String, u32>>> =
+        Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let busy_peers: Arc<std::sync::Mutex<HashSet<String>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let peer_idle = Arc::new(tokio::sync::Notify::new());
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let client = Arc::new(client);
+    let cmd_tx = Arc::new(cmd_tx);
+
+    let mut handles = Vec::new();
+    let mut total_sections = 0usize;
+    let mut chunks_dispatched = 0usize;
+
+    // ── 5. Main dispatch loop ───────────────────────────────────────
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        // Pop next chunk.
+        let chunk = pending.lock().unwrap().pop_front();
+        let Some(chunk_ids) = chunk else {
+            // Queue appears empty; wait for in-flight tasks.
+            if in_flight.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::select! {
+                _ = peer_idle.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+            }
+            continue;
+        };
+
+        // ── 6. Throttle ────────────────────────────────────────────
+        // Don't get more than THROTTLE_LOOKAHEAD blocks ahead of applied height.
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            let applied = shared_full_height.load(Ordering::Relaxed);
+            let chunk_start = start + (chunks_dispatched as u32) * (CHUNK_SIZE as u32);
+            if chunk_start <= applied + THROTTLE_LOOKAHEAD {
+                break;
+            }
+            tracing::debug!(
+                chunk_start,
+                applied,
+                gap = chunk_start - applied,
+                "fast_block_sync: throttling (too far ahead)"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // ── 7. Pick a healthy idle peer ─────────────────────────────
+        let mut no_peer_polls = 0u32;
+        let url = loop {
+            if *shutdown.borrow() {
+                break None;
+            }
+            let candidate = {
+                let all_urls: Vec<String> = api_urls.read().unwrap().values().cloned().collect();
+                let busy = busy_peers.lock().unwrap();
+                let failures = peer_failures.read().unwrap();
+                all_urls
+                    .into_iter()
+                    .filter(|u| !busy.contains(u))
+                    .find(|u| failures.get(u).copied().unwrap_or(0) < PEER_MAX_FAILURES)
+            };
+            if let Some(url) = candidate {
+                break Some(url);
+            }
+            no_peer_polls += 1;
+            if no_peer_polls > 30 {
+                tracing::warn!("fast_block_sync: no healthy peers available after 60s, stopping");
+                break None;
+            }
+            tokio::select! {
+                _ = peer_idle.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
+        };
+
+        let Some(url) = url else {
+            break;
+        };
+
+        busy_peers.lock().unwrap().insert(url.clone());
+        in_flight.fetch_add(1, Ordering::Relaxed);
+        chunks_dispatched += 1;
+
+        // Log progress every 100 chunks.
+        if chunks_dispatched.is_multiple_of(100) {
+            tracing::info!(
+                chunks_dispatched,
+                in_flight = in_flight.load(Ordering::Relaxed),
+                "fast_block_sync: progress"
+            );
+        }
+
+        let client = client.clone();
+        let cmd_tx = cmd_tx.clone();
+        let peer_failures = peer_failures.clone();
+        let busy_peers_clone = busy_peers.clone();
+        let peer_idle_clone = peer_idle.clone();
+        let pending_clone = pending.clone();
+        let in_flight_clone = in_flight.clone();
+
+        handles.push(tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(PEER_FETCH_TIMEOUT_SECS),
+                fetch_chunk_and_send(&client, &url, &chunk_ids, &cmd_tx),
+            )
+            .await;
+
+            let result: Result<usize, FastBlockSyncError> = match result {
+                Ok(r) => r,
+                Err(_elapsed) => Err(FastBlockSyncError::Http(format!(
+                    "peer {url} timed out after {PEER_FETCH_TIMEOUT_SECS}s"
+                ))),
+            };
+
+            let count = match &result {
+                Ok(count) => {
+                    tracing::debug!(count, peer = url, "fast_block_sync: chunk done");
+                    peer_failures.write().unwrap().remove(&url);
+                    *count
+                }
+                Err(e) => {
+                    tracing::debug!(peer = url, error = %e, "fast_block_sync: chunk failed, requeueing");
+                    pending_clone.lock().unwrap().push_front(chunk_ids);
+                    let mut failures = peer_failures.write().unwrap();
+                    let cnt = failures.entry(url.clone()).or_insert(0);
+                    *cnt += 1;
+                    if *cnt >= PEER_MAX_FAILURES {
+                        tracing::warn!(peer = url, "fast_block_sync: peer blacklisted");
+                    }
+                    0
+                }
+            };
+
+            busy_peers_clone.lock().unwrap().remove(&url);
+            in_flight_clone.fetch_sub(1, Ordering::Relaxed);
+            peer_idle_clone.notify_one();
+
+            count
+        }));
+    }
+
+    // Wait for all in-flight tasks.
+    let mut errors = 0usize;
+    for handle in handles {
+        match handle.await {
+            Ok(count) => total_sections += count,
+            Err(_) => errors += 1,
+        }
+    }
+
+    tracing::info!(
+        total_sections,
+        chunks_dispatched,
+        errors,
+        "fast_block_sync: parallel fetch complete"
+    );
+}
+
+/// Fetch one chunk of blocks and send the sections to the processor.
+async fn fetch_chunk_and_send(
+    client: &reqwest::Client,
+    peer_url: &str,
+    header_ids: &[ergo_types::modifier_id::ModifierId],
+    cmd_tx: &std::sync::mpsc::SyncSender<ergo_network::block_processor::ProcessorCommand>,
+) -> Result<usize, FastBlockSyncError> {
+    use ergo_network::block_processor::ProcessorCommand;
+
+    let sections = fetch_and_convert_chunk(client, peer_url, header_ids).await?;
+    let count = sections.len();
+
+    // Send BulkBlockSections to the processor.
+    let mut cmd = ProcessorCommand::BulkBlockSections { sections };
+    loop {
+        match cmd_tx.try_send(cmd) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                tokio::task::yield_now().await;
+                cmd = returned;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Ok(count),
+        }
+    }
+
+    // Trigger apply_from_cache so the processor attempts to assemble complete blocks.
+    loop {
+        match cmd_tx.try_send(ProcessorCommand::ApplyFromCache) {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                tokio::task::yield_now().await;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+        }
+    }
+
+    Ok(count)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

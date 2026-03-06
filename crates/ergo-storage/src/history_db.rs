@@ -53,6 +53,13 @@ impl HistoryDb {
         Self { db }
     }
 
+    /// Returns a clone of the shared `NodeDb` handle.
+    ///
+    /// Used by the fast block sync task to create its own `HistoryDb` view.
+    pub fn shared_db(&self) -> Arc<NodeDb> {
+        Arc::clone(&self.db)
+    }
+
     /// No-op. Kept for call-site compatibility.
     /// Previously refreshed a secondary RocksDB instance; no longer needed
     /// because `from_shared` wrappers see writes immediately.
