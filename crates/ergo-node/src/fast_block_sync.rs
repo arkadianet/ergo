@@ -454,7 +454,7 @@ pub type SharedFullHeight = std::sync::Arc<std::sync::atomic::AtomicU32>;
 
 // ── Pipeline constants ──────────────────────────────────────────────
 
-const CHUNK_SIZE: usize = 16;
+const CHUNK_SIZE: usize = 256;
 const HANDOFF_DISTANCE: u32 = 1000;
 const PEER_MAX_FAILURES: u32 = 3;
 const PEER_FETCH_TIMEOUT_SECS: u64 = 20;
@@ -564,6 +564,10 @@ pub async fn run_fast_block_sync(
     // walk the header chain via parent_id links instead.  This is O(n)
     // but each RocksDB point-read takes microseconds — ~5-10s for 1.7M
     // headers on SSD.
+    //
+    // While walking, we also repair any missing height→ID index entries.
+    // The block application code (`collect_applicable_suffix`) relies on
+    // this index to walk forward and find the next block to apply.
     let best_id = match history.best_header_id() {
         Ok(Some(id)) => id,
         _ => {
@@ -572,17 +576,15 @@ pub async fn run_fast_block_sync(
         }
     };
 
-    let mut chain: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
+    let mut chain: Vec<(u32, ergo_types::modifier_id::ModifierId)> = Vec::new();
     let mut current_id = best_id;
     let walk_start = std::time::Instant::now();
 
     loop {
         match history.load_header(&current_id) {
             Ok(Some(h)) => {
-                if h.height >= start && h.height <= target {
-                    chain.push(current_id);
-                }
-                if h.height <= start
+                chain.push((h.height, current_id));
+                if h.height <= 1
                     || h.parent_id == ergo_types::modifier_id::ModifierId::GENESIS_PARENT
                 {
                     break;
@@ -613,8 +615,67 @@ pub async fn run_fast_block_sync(
         "fast_block_sync: chain walk complete"
     );
 
+    // ── 3b. Repair missing height→ID index entries in bulk ───────────
+    //
+    // The block application code (`collect_applicable_suffix`) relies on
+    // the height index.  After unclean shutdown, bulk-synced headers may
+    // be missing their height→ID mappings.  We batch-write them using
+    // WriteBatch for efficiency.
+    {
+        let repair_start = std::time::Instant::now();
+        let mut batch = history.new_batch();
+        let mut repairs = 0u64;
+        let batch_size = 10_000;
+
+        for &(height, ref id) in &chain {
+            let existing = history.header_ids_at_height(height).unwrap_or_default();
+            if !existing.contains(id) {
+                // Build serialized ID list: existing + new ID.
+                let mut buf = Vec::with_capacity((existing.len() + 1) * 32);
+                for eid in &existing {
+                    buf.extend_from_slice(&eid.0);
+                }
+                buf.extend_from_slice(&id.0);
+                let key = ergo_storage::history_db::height_ids_key(height);
+                batch.put_index(&key, &buf);
+                repairs += 1;
+            }
+
+            // Flush periodically to avoid huge memory usage.
+            if repairs > 0 && repairs.is_multiple_of(batch_size as u64) {
+                if let Err(e) = batch.write() {
+                    tracing::warn!(error = %e, "fast_block_sync: height index repair batch failed");
+                }
+                batch = history.new_batch();
+            }
+        }
+
+        // Final flush.
+        if !repairs.is_multiple_of(batch_size as u64) {
+            if let Err(e) = batch.write() {
+                tracing::warn!(error = %e, "fast_block_sync: height index repair batch failed");
+            }
+        }
+
+        let repair_elapsed = repair_start.elapsed();
+        if repairs > 0 {
+            tracing::info!(
+                repairs,
+                repair_ms = repair_elapsed.as_millis() as u64,
+                "fast_block_sync: height index repaired"
+            );
+        }
+    }
+
+    // Filter to download range and extract just the IDs.
+    let chain_ids: Vec<ergo_types::modifier_id::ModifierId> = chain
+        .iter()
+        .filter(|(h, _)| *h >= start && *h <= target)
+        .map(|(_, id)| *id)
+        .collect();
+
     // Filter out headers that already have body sections.
-    let all_ids: Vec<ergo_types::modifier_id::ModifierId> = chain
+    let all_ids: Vec<ergo_types::modifier_id::ModifierId> = chain_ids
         .into_iter()
         .filter(|id| !history.has_all_sections(id).unwrap_or(true))
         .collect();

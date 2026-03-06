@@ -1100,7 +1100,7 @@ impl NodeViewHolder {
     /// 5. Stateless validation for each transaction.
     /// 6. State application (mode-dependent: digest or UTXO).
     /// 7. Marks the block as Valid and updates the best full block pointer.
-    fn validate_and_apply_block(&mut self, block_id: &ModifierId) -> Result<(), NodeViewError> {
+    pub fn validate_and_apply_block(&mut self, block_id: &ModifierId) -> Result<(), NodeViewError> {
         // Stage 0: Short-circuit already-valid blocks (rule 300).
         // When we encounter an already-valid block, fast-forward past the
         // entire consecutive valid range so subsequent body section arrivals

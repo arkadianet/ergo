@@ -595,17 +595,66 @@ fn process_bulk_block_sections(
 
     tracing::debug!(count, "bulk_block_sections: batch written");
 
-    // Trigger apply_from_cache to process any newly-complete blocks.
-    // This walks the cache and applies blocks whose sections are all present.
-    let mut new_headers = Vec::new();
-    let mut blocks_to_download = Vec::new();
-    let mut accum = BatchAccum {
-        new_headers: &mut new_headers,
-        blocks_to_download: &mut blocks_to_download,
-    };
-    apply_from_cache_processor(state, evt_tx, &mut accum);
+    // Walk forward from best_full_block_height, applying complete blocks
+    // directly from DB.  Unlike apply_from_cache_processor (which only
+    // checks the in-memory cache), this finds body sections that were
+    // stored directly to DB by the fast block sync pipeline.
+    let mut applied = 0u32;
+    loop {
+        let full_height = state
+            .node_view
+            .history
+            .best_full_block_height()
+            .unwrap_or(0);
+        let next_height = full_height + 1;
 
-    // Emit applied blocks if any were applied.
+        // Find the header at next_height.
+        let header_ids = state
+            .node_view
+            .history
+            .header_ids_at_height(next_height)
+            .unwrap_or_default();
+        if header_ids.is_empty() {
+            break;
+        }
+
+        // Check if the block at this height has all sections.
+        let header_id = header_ids[0];
+        let has_all = state
+            .node_view
+            .history
+            .has_all_sections(&header_id)
+            .unwrap_or(false);
+        if !has_all {
+            break;
+        }
+
+        // Apply the block via validate_and_apply_block.
+        match state.node_view.validate_and_apply_block(&header_id) {
+            Ok(()) => {
+                applied += 1;
+                emit_applied_blocks(state, evt_tx);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    height = next_height,
+                    error = %e,
+                    "bulk_block_sections: block apply failed"
+                );
+                break;
+            }
+        }
+
+        // Cap per-batch to avoid blocking the processor too long.
+        if applied >= 128 {
+            break;
+        }
+    }
+
+    if applied > 0 {
+        tracing::debug!(applied, "bulk_block_sections: blocks applied from DB");
+    }
+
     emit_applied_blocks(state, evt_tx);
 }
 

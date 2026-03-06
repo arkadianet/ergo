@@ -184,6 +184,38 @@ impl HistoryDb {
         Ok(self.db.raw().get_cf(&self.db.cf_indexes(), key)?)
     }
 
+    /// Append a header ID to the height→IDs index for the given height.
+    ///
+    /// If the ID is already present at that height, this is a no-op.
+    /// Used to repair missing height index entries after unclean shutdown.
+    pub fn put_height_id(
+        &self,
+        height: u32,
+        id: &ergo_types::modifier_id::ModifierId,
+    ) -> Result<(), StorageError> {
+        let key = height_ids_key(height);
+        let mut ids: Vec<ergo_types::modifier_id::ModifierId> = match self.get_index(&key)? {
+            Some(data) => data
+                .chunks_exact(32)
+                .map(|chunk| {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(chunk);
+                    ergo_types::modifier_id::ModifierId(arr)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        if !ids.contains(id) {
+            ids.push(*id);
+            let mut buf = Vec::with_capacity(ids.len() * 32);
+            for mid in &ids {
+                buf.extend_from_slice(&mid.0);
+            }
+            self.put_index(&key, &buf)?;
+        }
+        Ok(())
+    }
+
     /// Deletes an index entry from the `indexes` column family.
     pub fn delete_index(&self, key: &[u8; 32]) -> Result<(), StorageError> {
         self.db.raw().delete_cf(&self.db.cf_indexes(), key)?;
