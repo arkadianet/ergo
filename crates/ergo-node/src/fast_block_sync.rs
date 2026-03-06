@@ -377,6 +377,62 @@ fn parse_additional_registers(
     Ok(regs)
 }
 
+// ── Fetch + convert pipeline ────────────────────────────────────────
+
+/// Fetch a chunk of blocks from a peer and convert to wire-format sections.
+///
+/// Returns `Vec<(type_id, header_id, wire_bytes)>` for `BulkBlockSections`.
+#[allow(dead_code)] // called by the pipeline function added in a later task
+pub(crate) async fn fetch_and_convert_chunk(
+    client: &reqwest::Client,
+    peer_url: &str,
+    header_ids: &[ergo_types::modifier_id::ModifierId],
+) -> Result<Vec<(u8, ergo_types::modifier_id::ModifierId, Vec<u8>)>, FastBlockSyncError> {
+    // Build the request body: array of header ID hex strings
+    let id_strs: Vec<String> = header_ids.iter().map(|id| hex::encode(id.0)).collect();
+
+    let url = format!("{}/blocks/headerIds", peer_url.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .json(&id_strs)
+        .send()
+        .await
+        .map_err(|e| FastBlockSyncError::Http(e.to_string()))?;
+
+    if !resp.status().is_success() {
+        return Err(FastBlockSyncError::Http(format!(
+            "POST /blocks/headerIds returned {}",
+            resp.status()
+        )));
+    }
+
+    let blocks: Vec<JsonFullBlock> = resp
+        .json()
+        .await
+        .map_err(|e| FastBlockSyncError::Json(e.to_string()))?;
+
+    let mut sections = Vec::with_capacity(blocks.len() * 2);
+
+    for block in &blocks {
+        let header_id_hex = &block.header.id;
+        let header_id = ergo_types::modifier_id::ModifierId(hex_to_32(header_id_hex)?);
+
+        // BlockTransactions → wire bytes
+        if let Some(bt) = &block.block_transactions {
+            let wire = block_transactions_json_to_wire(header_id_hex, bt)?;
+            sections.push((102u8, header_id, wire));
+        }
+
+        // Extension → wire bytes
+        if let Some(ext) = &block.extension {
+            let wire = extension_json_to_wire(header_id_hex, ext)?;
+            sections.push((108u8, header_id, wire));
+        }
+    }
+
+    Ok(sections)
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /// Decode a hex string into a fixed 32-byte array.
