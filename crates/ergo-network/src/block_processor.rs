@@ -25,7 +25,7 @@ pub const CHANNEL_CAPACITY: usize = 2048;
 /// broadcast that generates a flood of useless Inv responses and delays the
 /// final broadcast that carries the correct chain tip — stalling header sync
 /// for up to one `sync_tick` interval (5 s).
-const MAX_BATCH_SIZE: usize = 512;
+pub const MAX_BATCH_SIZE: usize = 512;
 
 /// Header modifier type ID.
 const HEADER_TYPE_ID: u8 = 101;
@@ -322,6 +322,32 @@ fn processor_loop_with_state(
                         blocks_to_download: &mut blocks_to_download,
                     };
                     apply_from_cache_processor(state, evt_tx, &mut accum);
+                }
+            }
+        }
+
+        // Heal orphan-chunk scores from fast-sync before draining the cache.
+        // During fast header sync, bulk_store_headers receives out-of-order
+        // chunks; orphan chunks are stored with scores starting from 0 and
+        // the best-header pointer lags behind.  This one-time walk fixes
+        // scores and advances the best-header pointer to the true tip.
+        if state.fast_sync_write_height > 0 {
+            let best_h = state.node_view.history.best_header_height().unwrap_or(0);
+            if best_h < state.fast_sync_write_height {
+                match state.node_view.history.heal_orphan_scores() {
+                    Ok(healed) if healed > 0 => {
+                        let new_best = state.node_view.history.best_header_height().unwrap_or(0);
+                        tracing::info!(
+                            healed,
+                            old_best = best_h,
+                            new_best,
+                            "healed orphan-chunk scores from fast-sync"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "heal_orphan_scores failed");
+                    }
+                    _ => {}
                 }
             }
         }

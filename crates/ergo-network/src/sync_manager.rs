@@ -172,6 +172,7 @@ impl SyncManager {
     ///
     /// `is_caught_up` should be true when our headers height >= max peer height,
     /// preventing premature transition to `Synced` during initial sync.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_tick(
         &mut self,
         history: &HistoryDb,
@@ -180,6 +181,7 @@ impl SyncManager {
         is_caught_up: bool,
         prebuilt_sync_data: Option<Vec<u8>>,
         max_headers: u32,
+        download_allowed: bool,
     ) -> Vec<SyncAction> {
         let mut actions = Vec::new();
 
@@ -211,12 +213,27 @@ impl SyncManager {
                 // Scala's `isHeadersChainSynced` trigger.  This allows body
                 // downloads to begin while the last ~100 headers still sync.
                 if self.is_headers_chain_synced && !self.blocks_to_download.is_empty() {
+                    // Rebuild queue in height order before first block download.
+                    // After fast-sync, the queue may contain blocks in chunk-arrival
+                    // order rather than height order, which prevents sequential
+                    // block application.
+                    let full_height = history.best_full_block_height().unwrap_or(0);
+                    self.rebuild_download_queue_by_height(history, full_height);
                     self.state = SyncState::BlockDownload;
-                    self.request_block_sections(&mut actions, tracker, available_peers, history);
+                    if download_allowed {
+                        self.request_block_sections(
+                            &mut actions,
+                            tracker,
+                            available_peers,
+                            history,
+                        );
+                    }
                 }
             }
             SyncState::BlockDownload => {
-                self.request_block_sections(&mut actions, tracker, available_peers, history);
+                if download_allowed {
+                    self.request_block_sections(&mut actions, tracker, available_peers, history);
+                }
 
                 if self.blocks_to_download.is_empty()
                     && tracker.pending_count() == 0
@@ -230,7 +247,14 @@ impl SyncManager {
                 // (e.g., via on_headers_received from a newly-Older peer).
                 if !self.blocks_to_download.is_empty() {
                     self.state = SyncState::BlockDownload;
-                    self.request_block_sections(&mut actions, tracker, available_peers, history);
+                    if download_allowed {
+                        self.request_block_sections(
+                            &mut actions,
+                            tracker,
+                            available_peers,
+                            history,
+                        );
+                    }
                 }
             }
         }
@@ -288,17 +312,21 @@ impl SyncManager {
     /// On startup, populate `blocks_to_download` from the DB window above `full_height`.
     ///
     /// After a restart, `on_headers_received` never fires for already-stored headers,
-    /// leaving `blocks_to_download` empty. This method scans heights
-    /// `[full_height+1 .. full_height+window]` (capped at best_header_height) and
-    /// enqueues header IDs whose body sections (BlockTransactions + Extension) are
+    /// leaving `blocks_to_download` empty. This method scans the FULL range
+    /// `[full_height+1 .. best_header_height]` in height order, enqueuing
+    /// header IDs whose body sections (BlockTransactions + Extension) are
     /// absent from the DB.
     ///
-    /// This ensures `blocks_remaining()` reflects real pending work and the primary
-    /// download path (`request_block_sections`) fires immediately on restart.
-    pub fn enqueue_startup_gap(&mut self, history: &HistoryDb, full_height: u32, window: usize) {
+    /// Scanning the full range is essential after fast-sync, where all headers
+    /// are stored but most blocks lack body sections. A small window would
+    /// miss the vast majority of needed downloads and the node would never
+    /// transition to BlockDownload.
+    pub fn enqueue_startup_gap(&mut self, history: &HistoryDb, full_height: u32, _window: usize) {
         let headers_height = history.best_header_height().unwrap_or(0);
-        let end = (full_height + window as u32).min(headers_height);
-        for h in (full_height + 1)..=end {
+        if headers_height <= full_height {
+            return;
+        }
+        for h in (full_height + 1)..=headers_height {
             let ids = history.header_ids_at_height(h).unwrap_or_default();
             for id in ids {
                 if matches!(history.has_all_sections(&id), Ok(false)) {
@@ -306,6 +334,41 @@ impl SyncManager {
                 }
             }
         }
+    }
+
+    /// Rebuild the download queue in strict height order.
+    ///
+    /// After fast-sync, headers are stored in chunk-arrival order, so the
+    /// download queue may contain blocks scattered across the full chain
+    /// range.  This prevents sequential block application because
+    /// `collect_applicable_suffix` requires consecutive complete blocks
+    /// starting from `best_full_block_height + 1`.
+    ///
+    /// This method clears the queue and repopulates it by walking the
+    /// height index from `full_height + 1` to `best_header_height`,
+    /// enqueuing only blocks that still need body sections.
+    pub fn rebuild_download_queue_by_height(&mut self, history: &HistoryDb, full_height: u32) {
+        let headers_height = history.best_header_height().unwrap_or(0);
+        if headers_height <= full_height {
+            return;
+        }
+        let old_len = self.blocks_to_download.len();
+        self.blocks_to_download.clear();
+        for h in (full_height + 1)..=headers_height {
+            let ids = history.header_ids_at_height(h).unwrap_or_default();
+            for id in ids {
+                if matches!(history.has_all_sections(&id), Ok(false)) {
+                    self.blocks_to_download.push_back(id);
+                }
+            }
+        }
+        tracing::info!(
+            old_len,
+            new_len = self.blocks_to_download.len(),
+            full_height,
+            headers_height,
+            "rebuilt download queue in height order"
+        );
     }
 
     /// Number of blocks remaining to download.
@@ -464,6 +527,52 @@ pub fn distribute_requests(
         .collect()
 }
 
+/// Maximum block sections to assign to a single peer per request cycle.
+pub const MAX_SECTIONS_PER_PEER: usize = 12;
+
+/// Distribute download requests across peers with a per-peer cap.
+///
+/// Like `distribute_requests` but limits each peer to `max_per_peer` sections
+/// total across all type_ids. Matches Scala's `maxModifiersPerBucket`.
+pub fn distribute_requests_capped(
+    requests: &[(u8, ModifierId)],
+    peers: &[PeerId],
+    max_per_peer: usize,
+) -> Vec<(PeerId, u8, Vec<ModifierId>)> {
+    if peers.is_empty() || requests.is_empty() {
+        return Vec::new();
+    }
+
+    use std::collections::HashMap;
+
+    let mut per_peer_count: HashMap<PeerId, usize> = HashMap::new();
+    let mut result: HashMap<(PeerId, u8), Vec<ModifierId>> = HashMap::new();
+    let mut peer_idx = 0;
+
+    for &(type_id, id) in requests {
+        let mut assigned = false;
+        for offset in 0..peers.len() {
+            let pid = peers[(peer_idx + offset) % peers.len()];
+            let count = per_peer_count.entry(pid).or_insert(0);
+            if *count < max_per_peer {
+                *count += 1;
+                result.entry((pid, type_id)).or_default().push(id);
+                assigned = true;
+                peer_idx = (peer_idx + offset + 1) % peers.len();
+                break;
+            }
+        }
+        if !assigned {
+            break;
+        }
+    }
+
+    result
+        .into_iter()
+        .map(|((pid, tid), ids)| (pid, tid, ids))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,7 +612,7 @@ mod tests {
         let peers = vec![(1u64, true), (2u64, true), (3u64, false)];
 
         let mut mgr = SyncManager::new(10, 64);
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert!(!actions.is_empty());
@@ -562,7 +671,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(vec![id1, id2]);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         // Should have 3 RequestModifiers actions (one per body section type)
         let request_count = actions
@@ -615,7 +724,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::Synced;
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10, true);
 
         assert!(!actions.is_empty());
         assert!(matches!(
@@ -812,7 +921,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(ids);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         // In UTXO mode, only BlockTransactions (102) and Extension (108) are requested.
         let request_actions: Vec<_> = actions
@@ -842,7 +951,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(ids);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         let request_actions: Vec<_> = actions
             .iter()
@@ -895,7 +1004,7 @@ mod tests {
             - 60_000; // 1 minute ago — well within threshold
         assert!(mgr.check_headers_chain_synced(recent_ts));
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         assert!(actions
@@ -915,7 +1024,7 @@ mod tests {
         mgr.enqueue_block_downloads(vec![make_id(1), make_id(2)]);
 
         // is_headers_chain_synced is false → should stay in HeaderSync.
-        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         assert_eq!(mgr.state(), SyncState::HeaderSync);
         assert_eq!(mgr.blocks_remaining(), 2); // blocks still queued
@@ -964,7 +1073,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
         // Empty queue but NOT caught up — should stay in BlockDownload.
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         assert_eq!(mgr.state(), SyncState::BlockDownload);
         // Should still send SyncInfo even in BlockDownload.
@@ -983,7 +1092,7 @@ mod tests {
         let mut mgr = SyncManager::new(10, 64);
         mgr.state = SyncState::BlockDownload;
         // Empty queue AND caught up — should transition to Synced.
-        let _actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
+        let _actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10, true);
 
         assert_eq!(mgr.state(), SyncState::Synced);
     }
@@ -1002,7 +1111,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(ids);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         // Should include both SyncInfo (for parallel header download) and RequestModifiers.
         assert!(actions
@@ -1042,7 +1151,7 @@ mod tests {
         let mut mgr1 = SyncManager::new(10, 64);
         mgr1.state = SyncState::BlockDownload;
         mgr1.enqueue_block_downloads(ids.clone());
-        let _actions1 = mgr1.on_tick(&history, &mut tracker, &peers_1, false, None, 10);
+        let _actions1 = mgr1.on_tick(&history, &mut tracker, &peers_1, false, None, 10, true);
         let remaining_1 = mgr1.blocks_remaining();
 
         // With 10 peers: effective_window = max(64, 10*16) = 160, drains ~160 blocks
@@ -1051,7 +1160,7 @@ mod tests {
         let mut mgr2 = SyncManager::new(10, 64);
         mgr2.state = SyncState::BlockDownload;
         mgr2.enqueue_block_downloads(ids.clone());
-        let _actions2 = mgr2.on_tick(&history, &mut tracker2, &peers_10, false, None, 10);
+        let _actions2 = mgr2.on_tick(&history, &mut tracker2, &peers_10, false, None, 10, true);
         let remaining_10 = mgr2.blocks_remaining();
 
         // More peers should drain more blocks from the queue
@@ -1075,7 +1184,7 @@ mod tests {
         mgr.state = SyncState::BlockDownload;
         mgr.enqueue_block_downloads(ids);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, false, None, 10, true);
 
         // Verify that multiple peers received RequestModifiers
         let mut peers_used: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -1104,7 +1213,7 @@ mod tests {
         mgr.state = SyncState::Synced;
         mgr.enqueue_block_downloads(ids);
 
-        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10);
+        let actions = mgr.on_tick(&history, &mut tracker, &peers, true, None, 10, true);
 
         // Should transition to BlockDownload and request sections.
         assert_eq!(mgr.state(), SyncState::BlockDownload);
@@ -1134,5 +1243,124 @@ mod tests {
             3,
             "should queue 3 headers without body sections"
         );
+    }
+
+    #[test]
+    fn rebuild_download_queue_sorts_by_height() {
+        // Simulate fast-sync scenario: headers stored at heights 1..=5 but
+        // enqueued in chunk-arrival order (3, 4, 5, 1, 2) instead of height
+        // order. rebuild_download_queue_by_height should re-order them.
+        let dir = tempfile::tempdir().unwrap();
+        let history = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut mgr = SyncManager::new(10, 64);
+
+        // Store 5 headers at heights 1..=5.
+        let ids: Vec<ModifierId> = (1u8..=5).map(|b| make_id(b)).collect();
+        store_test_headers(&history, &ids);
+
+        // Enqueue in wrong order (simulating chunk-arrival order).
+        mgr.enqueue_block_downloads(vec![ids[2], ids[3], ids[4], ids[0], ids[1]]);
+        assert_eq!(mgr.blocks_remaining(), 5);
+
+        // Front of queue should be id[2] (height 3), NOT id[0] (height 1).
+        assert_eq!(mgr.blocks_to_download[0], ids[2]);
+
+        // Rebuild in height order.
+        mgr.rebuild_download_queue_by_height(&history, 0);
+
+        assert_eq!(mgr.blocks_remaining(), 5);
+        // Now front of queue should be id[0] (height 1).
+        assert_eq!(mgr.blocks_to_download[0], ids[0]);
+        assert_eq!(mgr.blocks_to_download[1], ids[1]);
+        assert_eq!(mgr.blocks_to_download[2], ids[2]);
+        assert_eq!(mgr.blocks_to_download[3], ids[3]);
+        assert_eq!(mgr.blocks_to_download[4], ids[4]);
+    }
+
+    #[test]
+    fn on_tick_skips_block_requests_when_download_not_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ergo_storage::history_db::HistoryDb::open(dir.path()).unwrap();
+        let mut tracker = DeliveryTracker::new(30, 3);
+
+        let mut mgr = SyncManager::with_utxo_mode(10, 64, true);
+        // Force headers chain synced
+        mgr.check_headers_chain_synced(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        );
+
+        // Enqueue some blocks and store headers so request_block_sections can work
+        let ids: Vec<ModifierId> = (0..10u8)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[0] = i;
+                ModifierId(id)
+            })
+            .collect();
+        store_test_headers(&db, &ids);
+        mgr.enqueue_block_downloads(ids);
+
+        let peers = vec![(1u64, true)];
+
+        // First tick transitions to BlockDownload but with download_allowed=false, no requests
+        let actions = mgr.on_tick(&db, &mut tracker, &peers, false, None, 10, false);
+        let request_count = actions
+            .iter()
+            .filter(|a| matches!(a, SyncAction::RequestModifiers { .. }))
+            .count();
+        assert_eq!(
+            request_count, 0,
+            "should not request modifiers when download_not_allowed"
+        );
+        // State should have transitioned to BlockDownload
+        assert_eq!(mgr.state(), SyncState::BlockDownload);
+    }
+
+    #[test]
+    fn distribute_requests_capped_limits_per_peer() {
+        let peers = vec![1u64, 2u64];
+        let requests: Vec<(u8, ModifierId)> = (0..50)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[0] = i as u8;
+                (102, ModifierId(id))
+            })
+            .collect();
+        let batches = distribute_requests_capped(&requests, &peers, 12);
+        let total: usize = batches.iter().map(|(_, _, ids)| ids.len()).sum();
+        assert!(total <= 24, "total {} should be <= 24", total);
+        for &pid in &peers {
+            let peer_total: usize = batches
+                .iter()
+                .filter(|(p, _, _)| *p == pid)
+                .map(|(_, _, ids)| ids.len())
+                .sum();
+            assert!(peer_total <= 12, "peer {} got {} sections", pid, peer_total);
+        }
+    }
+
+    #[test]
+    fn distribute_requests_capped_empty_inputs() {
+        let batches = distribute_requests_capped(&[], &[1, 2], 12);
+        assert!(batches.is_empty());
+        let batches = distribute_requests_capped(&[(102, ModifierId([0; 32]))], &[], 12);
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn distribute_requests_capped_single_peer() {
+        let requests: Vec<(u8, ModifierId)> = (0..20)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[0] = i as u8;
+                (102, ModifierId(id))
+            })
+            .collect();
+        let batches = distribute_requests_capped(&requests, &[1u64], 12);
+        let total: usize = batches.iter().map(|(_, _, ids)| ids.len()).sum();
+        assert_eq!(total, 12, "single peer should get exactly 12");
     }
 }

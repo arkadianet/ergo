@@ -254,39 +254,48 @@ impl ConnectionPool {
     }
 
     /// Send a message to a specific peer.
-    pub async fn send_to(
-        &self,
-        peer_id: PeerId,
-        code: u8,
-        body: Vec<u8>,
-    ) -> Result<(), PeerConnError> {
+    ///
+    /// Uses `try_send` to avoid blocking the event loop when a peer's outbox
+    /// is full. Returns an error if the peer is unknown, disconnected, or if
+    /// the outbox is at capacity (the message is dropped).
+    pub fn send_to(&self, peer_id: PeerId, code: u8, body: Vec<u8>) -> Result<(), PeerConnError> {
         let handle = self.peers.get(&peer_id).ok_or_else(|| {
             PeerConnError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
                 "unknown peer",
             ))
         })?;
-        handle.tx.send((code, body)).await.map_err(|_| {
-            PeerConnError::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "peer task gone",
-            ))
-        })?;
-        Ok(())
+        match handle.tx.try_send((code, body)) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::debug!(peer_id, code, "peer outbox full, message dropped");
+                Err(PeerConnError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "peer outbox full",
+                )))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(PeerConnError::Io(
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "peer task gone"),
+            )),
+        }
     }
 
     /// Send a message to all connected peers.
-    pub async fn broadcast(&self, code: u8, body: &[u8]) {
+    ///
+    /// Non-blocking: drops messages for peers whose outbox is full.
+    pub fn broadcast(&self, code: u8, body: &[u8]) {
         for handle in self.peers.values() {
-            let _ = handle.tx.send((code, body.to_vec())).await;
+            let _ = handle.tx.try_send((code, body.to_vec()));
         }
     }
 
     /// Send a message to all connected peers except the specified one.
-    pub async fn broadcast_except(&self, exclude: PeerId, code: u8, body: &[u8]) {
+    ///
+    /// Non-blocking: drops messages for peers whose outbox is full.
+    pub fn broadcast_except(&self, exclude: PeerId, code: u8, body: &[u8]) {
         for (id, handle) in &self.peers {
             if *id != exclude {
-                let _ = handle.tx.send((code, body.to_vec())).await;
+                let _ = handle.tx.try_send((code, body.to_vec()));
             }
         }
     }
@@ -444,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn send_to_unknown_peer_returns_error() {
         let pool = ConnectionPool::new([1, 0, 2, 4], test_handshake());
-        let result = pool.send_to(999, 1, vec![0xAB]).await;
+        let result = pool.send_to(999, 1, vec![0xAB]);
         assert!(result.is_err());
     }
 

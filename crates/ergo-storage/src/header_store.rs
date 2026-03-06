@@ -360,6 +360,73 @@ impl HistoryDb {
         }
     }
 
+    /// Heal cumulative scores for orphan-chunk headers written by fast-sync.
+    ///
+    /// During fast header sync, `bulk_store_headers` receives chunks from
+    /// multiple peers out of order.  "Orphan" chunks — whose first parent
+    /// hasn't been written yet — are stored with cumulative scores starting
+    /// from 0 and do NOT update the best-header pointer.  After all chunks
+    /// are written the DB contains a contiguous chain of headers, but the
+    /// best-header pointer lags at the tip of the last *connected* chunk.
+    ///
+    /// This method walks forward from `best_header_height()` through the
+    /// height index, recalculates the correct cumulative score from each
+    /// header's parent, updates the score in the DB, and advances the
+    /// best-header pointer.  It stops when no header at `height + 1` can
+    /// be found whose parent is the current best.
+    ///
+    /// Returns the number of heights healed (0 if already correct).
+    pub fn heal_orphan_scores(&self) -> Result<u32, StorageError> {
+        let mut current_height = self.best_header_height()?;
+        let mut current_best_id = match self.best_header_id()? {
+            Some(id) => id,
+            None => return Ok(0),
+        };
+        let mut healed = 0u32;
+
+        loop {
+            let next_height = current_height + 1;
+            let ids = self.header_ids_at_height(next_height)?;
+            if ids.is_empty() {
+                break;
+            }
+
+            // Find the header at next_height whose parent is the current best.
+            let mut found = false;
+            for id in &ids {
+                let header = match self.load_header(id)? {
+                    Some(h) => h,
+                    None => continue,
+                };
+                if header.parent_id != current_best_id {
+                    continue;
+                }
+
+                // Recalculate correct score from the parent.
+                let parent_score = self
+                    .get_header_score(&current_best_id)?
+                    .unwrap_or_else(|| vec![0u8]);
+                let difficulty = difficulty_from_nbits(header.n_bits);
+                let correct_score = add_scores(&parent_score, &difficulty);
+
+                self.put_header_score(id, &correct_score)?;
+                self.set_best_header_id(id)?;
+
+                current_best_id = *id;
+                current_height = next_height;
+                healed += 1;
+                found = true;
+                break;
+            }
+
+            if !found {
+                break;
+            }
+        }
+
+        Ok(healed)
+    }
+
     /// Walk backward from the best header, collecting up to `n` headers in
     /// descending height order (newest first).
     ///
@@ -824,5 +891,89 @@ mod tests {
             Some(real_id),
             "orphan chunk must NOT overwrite best_header_key"
         );
+    }
+
+    /// After fast-sync writes orphan chunks, `heal_orphan_scores` must walk
+    /// forward and fix the best-header pointer to the true tip.
+    ///
+    /// Models the real scenario: an orphan chunk (heights 3-5) is written
+    /// first with scores starting from 0.  Its internal parent links set
+    /// `chunk_connected = true`, so the best header points to height 5 with
+    /// a low orphan-based score.  Then a connected chunk (heights 1-2) is
+    /// written with correct cumulative scores from genesis.  Because the
+    /// correct score at height 2 exceeds the orphan score at height 5, the
+    /// best header regresses to height 2.  `heal_orphan_scores` must then
+    /// walk forward from 2 to 5, fixing scores and restoring the best header.
+    #[test]
+    fn heal_orphan_scores_fixes_best_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = HistoryDb::open(tmp.path()).unwrap();
+
+        // Build a 5-header chain: heights 1..=5, all difficulty 1.
+        let ids: Vec<ModifierId> = (0u8..5).map(|i| ModifierId([i + 1; 32])).collect();
+        let headers: Vec<(ModifierId, ergo_types::header::Header, Vec<u8>)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let mut h = ergo_types::header::Header::default_for_test();
+                h.height = (i + 1) as u32;
+                h.n_bits = 0x01010000; // difficulty 1
+                h.parent_id = if i == 0 {
+                    ModifierId::GENESIS_PARENT
+                } else {
+                    ids[i - 1]
+                };
+                let raw = ergo_wire::header_ser::serialize_header(&h);
+                (*id, h, raw)
+            })
+            .collect();
+
+        // Step 1: Write orphan chunk (heights 3-5).
+        // Parent of height 3 (ids[1]) is NOT in the DB.  But heights 4 and 5
+        // chain to 3 and 4 within the batch, so chunk_connected = true via
+        // in_flight_scores.  The orphan chunk's scores start from 0.
+        let orphan_chunk: Vec<_> = headers[2..5].to_vec();
+        let applied = db.bulk_store_headers(&orphan_chunk).unwrap();
+        assert_eq!(applied.len(), 3, "orphan headers should be stored");
+        // The orphan chunk sets best to height 5 (with low orphan score).
+        assert_eq!(db.best_header_height().unwrap(), 5);
+
+        // Step 2: Write connected chunk (heights 1-2).
+        // This chunk is connected to genesis, so its scores are correct.
+        // The correct cumulative score at height 2 (= difficulty*2 from genesis)
+        // exceeds the orphan score at height 5 (= difficulty*3 from base 0, but
+        // the orphan chunk's first header started from 0 so its score is lower
+        // than a properly connected chain).  Actually with difficulty=1 for all,
+        // orphan score at 5 = 0+1+1+1 = 3, connected score at 2 = 0+1+1 = 2.
+        // orphan score 3 > connected score 2, so best stays at height 5.
+        //
+        // To model the real regression, we need the connected chunk to have a
+        // HIGHER cumulative score.  Use higher difficulty for connected headers.
+        let mut connected_chunk: Vec<_> = headers[0..2].to_vec();
+        // Give heights 1-2 a high difficulty so their cumulative score exceeds
+        // the orphan score at height 5.
+        connected_chunk[0].1.n_bits = 0x04010000; // difficulty ~16M
+        connected_chunk[0].2 = ergo_wire::header_ser::serialize_header(&connected_chunk[0].1);
+        connected_chunk[1].1.n_bits = 0x04010000;
+        connected_chunk[1].2 = ergo_wire::header_ser::serialize_header(&connected_chunk[1].1);
+        let applied = db.bulk_store_headers(&connected_chunk).unwrap();
+        assert_eq!(applied.len(), 2);
+        // Connected chunk's score at height 2 now exceeds orphan score at 5,
+        // so best header regresses to height 2.
+        assert_eq!(
+            db.best_header_height().unwrap(),
+            2,
+            "connected chunk with higher difficulty must become best"
+        );
+
+        // Step 3: Heal — should walk from height 2 to height 5.
+        let healed = db.heal_orphan_scores().unwrap();
+        assert_eq!(healed, 3, "should heal heights 3, 4, 5");
+        assert_eq!(db.best_header_height().unwrap(), 5);
+        assert_eq!(db.best_header_id().unwrap(), Some(ids[4]));
+
+        // Step 4: Healing again should be a no-op.
+        let healed_again = db.heal_orphan_scores().unwrap();
+        assert_eq!(healed_again, 0);
     }
 }

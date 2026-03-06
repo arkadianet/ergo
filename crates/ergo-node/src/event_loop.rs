@@ -346,6 +346,12 @@ pub async fn run(
     // Tracks the last peer that delivered headers, for targeted SyncInfo response.
     let mut last_header_peer: Option<u64> = None;
 
+    // Backpressure: count of body sections sent to the processor that have not
+    // yet been consumed by a BlockApplied event.  Each applied block consumes
+    // 2 sections (BlockTransactions + Extension in UTXO mode).  When this
+    // exceeds the threshold (96), aggressive block downloads are paused.
+    let mut pending_body_sections: u32 = 0;
+
     // Propagate mining status into shared state once at startup.
     {
         let mut s = shared.write().await;
@@ -438,6 +444,7 @@ pub async fn run(
                     is_digest_mode,
                     &cached_sync_headers,
                     &cached_parameters,
+                    pending_body_sections,
                 ).await;
                 update_fast_sync_flag(&shared, &shared_fast_sync_active).await;
 
@@ -465,7 +472,7 @@ pub async fn run(
                                 if let Ok(info) = sdb.get_info() {
                                     if !info.manifests.is_empty() {
                                         let payload = info.serialize_p2p();
-                                        let _ = pool.send_to(incoming.peer_id, 77, payload).await;
+                                        let _ = pool.send_to(incoming.peer_id, 77, payload);
                                     }
                                 }
                             }
@@ -478,7 +485,7 @@ pub async fn run(
                                     let mut manifest_id = [0u8; 32];
                                     manifest_id.copy_from_slice(&incoming.message.body);
                                     if let Ok(Some(manifest_bytes)) = sdb.load_manifest(&manifest_id) {
-                                        let _ = pool.send_to(incoming.peer_id, 79, manifest_bytes).await;
+                                        let _ = pool.send_to(incoming.peer_id, 79, manifest_bytes);
                                     }
                                 }
                             }
@@ -491,7 +498,7 @@ pub async fn run(
                                     let mut chunk_id = [0u8; 32];
                                     chunk_id.copy_from_slice(&incoming.message.body);
                                     if let Ok(Some(chunk_bytes)) = sdb.load_chunk(&chunk_id) {
-                                        let _ = pool.send_to(incoming.peer_id, 81, chunk_bytes).await;
+                                        let _ = pool.send_to(incoming.peer_id, 81, chunk_bytes);
                                     }
                                 }
                             }
@@ -529,7 +536,7 @@ pub async fn run(
                                     );
                                     if let Some((_, _, peers)) = disc.ready_to_download() {
                                         disc.start_download(&manifest, manifest_id, peers);
-                                        request_next_chunks(disc, &pool).await;
+                                        request_next_chunks(disc, &pool);
                                     }
                                 }
                             }
@@ -560,7 +567,7 @@ pub async fn run(
                                     downloaded_chunks.clear();
                                     snapshot_discovery = None;
                                 } else {
-                                    request_next_chunks(disc, &pool).await;
+                                    request_next_chunks(disc, &pool);
                                 }
                             }
                             continue;
@@ -586,7 +593,7 @@ pub async fn run(
                                     &mut tracker,
                                     &mut tx_cost_tracker,
                                 );
-                                execute_actions(&mut pool, &result.actions, &mut discovery, &mut peer_db, &mut sync_tracker).await;
+                                execute_actions(&mut pool, &result.actions, &mut discovery, &mut peer_db, &mut sync_tracker);
                             }
                             continue;
                         }
@@ -688,6 +695,7 @@ pub async fn run(
                                 Ok(()) => {
                                     // Only mark as received AFTER the processor accepted it.
                                     sync_mgr.on_section_received(type_id, id, &mut tracker);
+                                    pending_body_sections = pending_body_sections.saturating_add(1);
                                 }
                                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                                     body_disconnected = true;
@@ -748,7 +756,7 @@ pub async fn run(
                         &mut tracker,
                     );
 
-                    execute_actions(&mut pool, &result.actions, &mut discovery, &mut peer_db, &mut sync_tracker).await;
+                    execute_actions(&mut pool, &result.actions, &mut discovery, &mut peer_db, &mut sync_tracker);
 
                     // Process any penalties reported by the message handler.
                     for (penalty_type, peer_id) in &result.penalties {
@@ -857,7 +865,7 @@ pub async fn run(
                                     let sync_tip = v2.last_headers.first().map(|h| h.height).unwrap_or(0);
                                     let sync_bytes = v2.serialize();
                                     tracing::debug!(sync_tip, peer, "targeted SyncInfoV2 to delivering peer");
-                                    let _ = pool.send_to(peer, MessageCode::SyncInfo as u8, sync_bytes).await;
+                                    let _ = pool.send_to(peer, MessageCode::SyncInfo as u8, sync_bytes);
                                 }
                             }
                         }
@@ -866,6 +874,8 @@ pub async fn run(
                         }
                     }
                     ProcessorEvent::BlockApplied { header_id, height } => {
+                        pending_body_sections = pending_body_sections.saturating_sub(2);
+                        tracing::info!(height, pending_body_sections, header_id = hex::encode(header_id.0), "block applied");
                         // Notify the indexer.
                         if let Some(ref idx_tx) = indexer_tx {
                             let _ = idx_tx.try_send(ergo_indexer::task::IndexerEvent::BlockApplied {
@@ -904,13 +914,13 @@ pub async fn run(
                                     type_id: 101i8,
                                     ids: vec![header_id],
                                 };
-                                pool.broadcast(MessageCode::Inv as u8, &header_inv.serialize()).await;
+                                pool.broadcast(MessageCode::Inv as u8, &header_inv.serialize());
                                 for section_type_id in [102i8, 104i8, 108i8] {
                                     let section_inv = ergo_wire::inv::InvData {
                                         type_id: section_type_id,
                                         ids: vec![header_id],
                                     };
-                                    pool.broadcast(MessageCode::Inv as u8, &section_inv.serialize()).await;
+                                    pool.broadcast(MessageCode::Inv as u8, &section_inv.serialize());
                                 }
                             }
                         }
@@ -962,7 +972,7 @@ pub async fn run(
             }
 
             _ = discovery_tick.tick() => {
-                handle_discovery_tick(&mut pool, &mut discovery, &settings, &penalties, &pending_conn_tx, magic, &our_handshake_for_discovery, session_id).await;
+                handle_discovery_tick(&mut pool, &mut discovery, &settings, &penalties, &pending_conn_tx, magic, &our_handshake_for_discovery, session_id);
             }
 
             Some(submission) = tx_submit_rx.recv() => {
@@ -970,7 +980,7 @@ pub async fn run(
                     type_id: 2i8,
                     ids: vec![ergo_types::modifier_id::ModifierId(submission.tx_id)],
                 };
-                pool.broadcast(MessageCode::Inv as u8, &inv.serialize()).await;
+                pool.broadcast(MessageCode::Inv as u8, &inv.serialize());
                 let _ = submission.response.send(Ok(()));
                 // Record mempool mutation timestamp.
                 if let Ok(mut s) = shared.try_write() {
@@ -1016,16 +1026,18 @@ pub async fn run(
                     peers = pool.peer_count(),
                     blocks_remaining = sync_mgr.blocks_remaining(),
                     headers_height = %state.headers_height,
+                    pending_body_sections,
                     "sync status",
                 );
             }
 
             _ = check_modifiers_tick.tick() => {
-                // Only proactively download block sections once the header
-                // chain tip is recent, matching Scala's isHeadersChainSynced
-                // gate on `nextModifiersToDownload`.
+                // Gap-fill: find blocks with headers but missing body sections
+                // and re-request them.  This must NOT be gated on backpressure
+                // because it is the recovery mechanism for incomplete blocks —
+                // blocking it under backpressure would deadlock the pipeline.
                 if sync_mgr.is_headers_chain_synced() {
-                    handle_check_modifiers(&mut pool, sync_history, &mut tracker, &sync_tracker).await;
+                    handle_check_modifiers(&mut pool, sync_history, &mut tracker, &sync_tracker);
                 }
             }
 
@@ -1067,7 +1079,7 @@ pub async fn run(
                         type_id: 101,
                         ids: ids.clone(),
                     };
-                    let _ = pool.send_to(*alt, MessageCode::RequestModifier as u8, inv.serialize()).await;
+                    let _ = pool.send_to(*alt, MessageCode::RequestModifier as u8, inv.serialize());
                 }
 
                 if reassigned > 0 || deferred > 0 {
@@ -1115,7 +1127,7 @@ pub async fn run(
                         type_id: 2i8,
                         ids: to_rebroadcast.clone(),
                     };
-                    pool.broadcast(MessageCode::Inv as u8, &inv.serialize()).await;
+                    pool.broadcast(MessageCode::Inv as u8, &inv.serialize());
                     tracing::debug!(count = to_rebroadcast.len(), "mempool audit: rebroadcast transactions");
                 }
             }
@@ -1188,10 +1200,10 @@ pub async fn run(
                         if let Some((manifest_id, _, _)) = disc.ready_to_download() {
                             if let Some(p) = pool.connected_peers().first() {
                                 tracing::info!("requesting snapshot manifest");
-                                let _ = pool.send_to(p.id, 78, manifest_id.to_vec()).await;
+                                let _ = pool.send_to(p.id, 78, manifest_id.to_vec());
                             }
                         } else {
-                            pool.broadcast(76, &[]).await;
+                            pool.broadcast(76, &[]);
                             tracing::debug!("sent GetSnapshotsInfo to all peers");
                         }
                     }
@@ -1244,8 +1256,7 @@ pub async fn run(
                                 type_id: 101i8,
                                 ids: vec![header_id],
                             };
-                            pool.broadcast(MessageCode::Inv as u8, &inv.serialize())
-                                .await;
+                            pool.broadcast(MessageCode::Inv as u8, &inv.serialize());
                         }
                         Err(e) => {
                             tracing::warn!(?e, "mining solution rejected");
@@ -1387,6 +1398,7 @@ async fn handle_sync_tick(
     is_digest_mode: bool,
     cached_sync_headers: &[ergo_types::header::Header],
     cached_parameters: &ergo_consensus::parameters::Parameters,
+    pending_body_sections: u32,
 ) {
     // Reset stale peer statuses (no sync exchange within 3 minutes).
     sync_tracker.clear_stale_statuses(std::time::Duration::from_secs(180));
@@ -1417,6 +1429,9 @@ async fn handle_sync_tick(
         None
     };
 
+    const BODY_SECTIONS_DOWNLOAD_THRESHOLD: u32 = 96;
+    let download_allowed = pending_body_sections < BODY_SECTIONS_DOWNLOAD_THRESHOLD;
+
     let actions = sync_mgr.on_tick(
         sync_history,
         tracker,
@@ -1424,9 +1439,10 @@ async fn handle_sync_tick(
         is_caught_up,
         prebuilt_sync,
         settings.network.sync_info_max_headers,
+        download_allowed,
     );
 
-    execute_actions(pool, &actions, discovery, peer_db, sync_tracker).await;
+    execute_actions(pool, &actions, discovery, peer_db, sync_tracker);
 
     let timed_out = tracker.collect_timed_out();
 
@@ -1444,13 +1460,11 @@ async fn handle_sync_tick(
                 type_id: type_id as i8,
                 ids: vec![id],
             };
-            let _ = pool
-                .send_to(
-                    alt_peer,
-                    MessageCode::RequestModifier as u8,
-                    inv.serialize(),
-                )
-                .await;
+            let _ = pool.send_to(
+                alt_peer,
+                MessageCode::RequestModifier as u8,
+                inv.serialize(),
+            );
         } else {
             tracker.set_unknown(type_id, &id);
         }
@@ -1497,14 +1511,14 @@ async fn update_fast_sync_flag(
 }
 
 /// Proactively find and request missing block body sections.
-async fn handle_check_modifiers(
+fn handle_check_modifiers(
     pool: &mut ConnectionPool,
     sync_history: &HistoryDb,
     tracker: &mut DeliveryTracker,
     sync_tracker: &SyncTracker,
 ) {
     use ergo_network::delivery_tracker::ModifierStatus;
-    use ergo_network::sync_manager::distribute_requests;
+    use ergo_network::sync_manager::{distribute_requests_capped, MAX_SECTIONS_PER_PEER};
 
     let peer_count = pool.peer_count();
     let batch_size = ergo_network::sync_manager::scaled_check_batch_size(peer_count);
@@ -1532,7 +1546,7 @@ async fn handle_check_modifiers(
         return;
     }
 
-    let batches = distribute_requests(&to_request, &peers);
+    let batches = distribute_requests_capped(&to_request, &peers, MAX_SECTIONS_PER_PEER);
     for (peer_id, type_id, ids) in batches {
         for id in &ids {
             tracker.set_requested(type_id, *id, peer_id);
@@ -1541,9 +1555,7 @@ async fn handle_check_modifiers(
             type_id: type_id as i8,
             ids: ids.clone(),
         };
-        let _ = pool
-            .send_to(peer_id, MessageCode::RequestModifier as u8, inv.serialize())
-            .await;
+        let _ = pool.send_to(peer_id, MessageCode::RequestModifier as u8, inv.serialize());
     }
 
     tracing::debug!(
@@ -1558,7 +1570,7 @@ async fn handle_check_modifiers(
 /// connections back via `pending_conn_tx`. This prevents unreachable peers
 /// from blocking the event loop.
 #[allow(clippy::too_many_arguments)]
-async fn handle_discovery_tick(
+fn handle_discovery_tick(
     pool: &mut ConnectionPool,
     discovery: &mut PeerDiscovery,
     settings: &ErgoSettings,
@@ -1571,9 +1583,7 @@ async fn handle_discovery_tick(
     let peers = pool.connected_peers();
     if !peers.is_empty() {
         let idx = rand::random::<usize>() % peers.len();
-        let _ = pool
-            .send_to(peers[idx].id, MessageCode::GetPeers as u8, vec![])
-            .await;
+        let _ = pool.send_to(peers[idx].id, MessageCode::GetPeers as u8, vec![]);
     }
 
     let connected: HashSet<_> = pool.connected_peers().iter().map(|p| p.addr).collect();
@@ -1618,7 +1628,7 @@ async fn handle_discovery_tick(
 }
 
 /// Request the next batch of snapshot chunks from connected peers.
-async fn request_next_chunks(
+fn request_next_chunks(
     disc: &mut crate::snapshot_bootstrap::SnapshotDiscovery,
     pool: &ConnectionPool,
 ) {
@@ -1629,7 +1639,7 @@ async fn request_next_chunks(
     }
     for (i, (_, chunk_id)) in chunks_to_get.iter().enumerate() {
         let p = &connected[i % connected.len()];
-        let _ = pool.send_to(p.id, 80, chunk_id.to_vec()).await;
+        let _ = pool.send_to(p.id, 80, chunk_id.to_vec());
     }
 }
 
@@ -1666,7 +1676,7 @@ fn apply_continuation_headers(
 }
 
 /// Execute a batch of sync actions by sending messages through the connection pool.
-async fn execute_actions(
+fn execute_actions(
     pool: &mut ConnectionPool,
     actions: &[SyncAction],
     discovery: &mut PeerDiscovery,
@@ -1678,14 +1688,12 @@ async fn execute_actions(
             SyncAction::SendSyncInfo { peer_id, data } => {
                 if let Some(pid) = peer_id {
                     tracing::debug!(peer = pid, data_len = data.len(), "SendSyncInfo → targeted");
-                    let _ = pool
-                        .send_to(*pid, MessageCode::SyncInfo as u8, data.clone())
-                        .await;
+                    let _ = pool.send_to(*pid, MessageCode::SyncInfo as u8, data.clone());
                     sync_tracker.record_sync_sent(*pid);
                 } else {
                     let n = pool.peer_count();
                     tracing::info!(peers = n, data_len = data.len(), "SendSyncInfo → broadcast");
-                    pool.broadcast(MessageCode::SyncInfo as u8, data).await;
+                    pool.broadcast(MessageCode::SyncInfo as u8, data);
                     for p in pool.connected_peers() {
                         sync_tracker.record_sync_sent(p.id);
                     }
@@ -1701,27 +1709,20 @@ async fn execute_actions(
                     ids: ids.clone(),
                 };
                 let body = inv.serialize();
-                let _ = pool
-                    .send_to(*peer_id, MessageCode::RequestModifier as u8, body)
-                    .await;
+                let _ = pool.send_to(*peer_id, MessageCode::RequestModifier as u8, body);
             }
             SyncAction::SendPeers { peer_id, data } => {
-                let _ = pool
-                    .send_to(*peer_id, MessageCode::Peers as u8, data.clone())
-                    .await;
+                let _ = pool.send_to(*peer_id, MessageCode::Peers as u8, data.clone());
             }
             SyncAction::SendModifiers { peer_id, data } => {
-                let _ = pool
-                    .send_to(*peer_id, MessageCode::Modifier as u8, data.clone())
-                    .await;
+                let _ = pool.send_to(*peer_id, MessageCode::Modifier as u8, data.clone());
             }
             SyncAction::BroadcastInv { type_id, ids } => {
                 let inv = ergo_wire::inv::InvData {
                     type_id: *type_id as i8,
                     ids: ids.clone(),
                 };
-                pool.broadcast(MessageCode::Inv as u8, &inv.serialize())
-                    .await;
+                pool.broadcast(MessageCode::Inv as u8, &inv.serialize());
             }
             SyncAction::BroadcastInvExcept {
                 type_id,
@@ -1732,8 +1733,7 @@ async fn execute_actions(
                     type_id: *type_id as i8,
                     ids: ids.clone(),
                 };
-                pool.broadcast_except(*exclude, MessageCode::Inv as u8, &inv.serialize())
-                    .await;
+                pool.broadcast_except(*exclude, MessageCode::Inv as u8, &inv.serialize());
             }
             SyncAction::SendInv {
                 peer_id,
@@ -1744,9 +1744,7 @@ async fn execute_actions(
                     type_id: *type_id as i8,
                     ids: ids.clone(),
                 };
-                let _ = pool
-                    .send_to(*peer_id, MessageCode::Inv as u8, inv.serialize())
-                    .await;
+                let _ = pool.send_to(*peer_id, MessageCode::Inv as u8, inv.serialize());
             }
             SyncAction::AddPeers { addresses } => {
                 for addr in addresses {
