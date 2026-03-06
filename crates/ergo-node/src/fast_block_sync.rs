@@ -485,10 +485,33 @@ pub async fn run_fast_block_sync(
     shutdown: tokio::sync::watch::Receiver<bool>,
     shared_full_height: SharedFullHeight,
     shared_headers_height: crate::fast_header_sync::SharedHeadersHeight,
+    fast_sync_active: crate::fast_header_sync::SharedFastSyncActive,
 ) {
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    // ── 0. Wait for fast header sync to finish ──────────────────────
+    // Block downloads only make sense once the header chain is populated.
+    tracing::info!("fast_block_sync: waiting for fast header sync to complete");
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        // fast_sync_active is set true when header sync starts, false when it ends.
+        if !fast_sync_active.load(Ordering::Relaxed) {
+            // Check that headers have actually been written (not just "never started").
+            let hh = shared_headers_height.load(Ordering::Relaxed);
+            if hh > 0 {
+                tracing::info!(
+                    headers_height = hh,
+                    "fast_block_sync: header sync complete, starting block download"
+                );
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -532,34 +555,77 @@ pub async fn run_fast_block_sync(
     tracing::info!(
         start,
         target,
-        "fast_block_sync: building chunk queue from height index"
+        "fast_block_sync: walking header chain to build chunk queue"
     );
 
-    // ── 3. Walk height index to build chunk queue ───────────────────
-    let mut all_ids: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
-    for h in start..=target {
-        match history.header_ids_at_height(h) {
-            Ok(ids) if !ids.is_empty() => {
-                // First ID in the vec is the best header at that height.
-                all_ids.push(ids[0]);
+    // ── 3. Walk best-header chain backwards to build chunk queue ─────
+    //
+    // The height→ID index may be missing after unclean shutdown, so we
+    // walk the header chain via parent_id links instead.  This is O(n)
+    // but each RocksDB point-read takes microseconds — ~5-10s for 1.7M
+    // headers on SSD.
+    let best_id = match history.best_header_id() {
+        Ok(Some(id)) => id,
+        _ => {
+            tracing::info!("fast_block_sync: no best header in DB, exiting");
+            return;
+        }
+    };
+
+    let mut chain: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
+    let mut current_id = best_id;
+    let walk_start = std::time::Instant::now();
+
+    loop {
+        match history.load_header(&current_id) {
+            Ok(Some(h)) => {
+                if h.height >= start && h.height <= target {
+                    chain.push(current_id);
+                }
+                if h.height <= start
+                    || h.parent_id == ergo_types::modifier_id::ModifierId::GENESIS_PARENT
+                {
+                    break;
+                }
+                current_id = h.parent_id;
             }
-            Ok(_) => {
-                // No header at this height yet; stop here and let P2P catch up.
-                tracing::debug!(
-                    height = h,
-                    "fast_block_sync: no header at height, stopping scan"
+            Ok(None) => {
+                tracing::warn!(
+                    id = %hex::encode(current_id.0),
+                    "fast_block_sync: header not found during chain walk"
                 );
                 break;
             }
             Err(e) => {
-                tracing::warn!(height = h, error = %e, "fast_block_sync: DB error reading height index");
+                tracing::warn!(error = %e, "fast_block_sync: DB error during chain walk");
                 break;
             }
         }
     }
 
+    // Chain was built in descending order; reverse to ascending.
+    chain.reverse();
+
+    let walk_elapsed = walk_start.elapsed();
+    tracing::info!(
+        headers = chain.len(),
+        walk_ms = walk_elapsed.as_millis() as u64,
+        "fast_block_sync: chain walk complete"
+    );
+
+    // Filter out headers that already have body sections.
+    let all_ids: Vec<ergo_types::modifier_id::ModifierId> = chain
+        .into_iter()
+        .filter(|id| !history.has_all_sections(id).unwrap_or(true))
+        .collect();
+
+    tracing::info!(
+        need_bodies = all_ids.len(),
+        "fast_block_sync: filtered to headers missing body sections"
+    );
+
     if all_ids.is_empty() {
-        tracing::info!("fast_block_sync: no header IDs found in range, exiting");
+        tracing::info!("fast_block_sync: all headers already have body sections, exiting");
         return;
     }
 

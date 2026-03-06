@@ -431,9 +431,8 @@ pub async fn run(
         let fbs_shutdown = shutdown_rx.clone();
         let fbs_full_height = shared_full_height.clone();
         let fbs_headers_height = shared_headers_height.clone();
+        let fbs_active = shared_fast_sync_active.clone();
         tokio::spawn(async move {
-            // Wait 30s for fast header sync to populate headers first.
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             crate::fast_block_sync::run_fast_block_sync(
                 fbs_api_urls,
                 fbs_history,
@@ -441,10 +440,11 @@ pub async fn run(
                 fbs_shutdown,
                 fbs_full_height,
                 fbs_headers_height,
+                fbs_active,
             )
             .await;
         });
-        tracing::info!("fast block sync task spawned (will start after 30s delay)");
+        tracing::info!("fast block sync task spawned (waits for header sync completion)");
     }
 
     let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
