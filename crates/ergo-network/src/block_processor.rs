@@ -75,6 +75,17 @@ pub enum ProcessorCommand {
         headers: Vec<(ModifierId, Box<Header>, Vec<u8>)>,
     },
 
+    /// A batch of pre-serialized block body sections from fast block sync.
+    ///
+    /// Each section is stored via put_modifier in a single WriteBatch.
+    /// After the batch is written, apply_from_cache is triggered to process
+    /// any blocks that are now complete.
+    BulkBlockSections {
+        /// Tuples of (type_id, header_id, wire_bytes).
+        /// header_id is used as the DB key (matching normal section storage).
+        sections: Vec<(u8, ModifierId, Vec<u8>)>,
+    },
+
     /// Graceful shutdown request.
     Shutdown,
 }
@@ -316,6 +327,13 @@ fn processor_loop_with_state(
                     };
                     process_bulk_headers(state, headers, &mut accum);
                 }
+                ProcessorCommand::BulkBlockSections { sections } => {
+                    process_bulk_block_sections(
+                        state,
+                        evt_tx,
+                        sections,
+                    );
+                }
                 ProcessorCommand::ApplyFromCache => {
                     let mut accum = BatchAccum {
                         new_headers: &mut new_headers,
@@ -555,6 +573,44 @@ fn process_bulk_headers(
             tracing::error!(%e, "bulk_headers: batch write failed");
         }
     }
+}
+
+/// Process a `BulkBlockSections` command from fast block sync.
+///
+/// Stores all body sections in a single RocksDB WriteBatch for fast I/O.
+/// After the batch is written, triggers `apply_from_cache_processor` to
+/// process any blocks that are now complete (have header + all body sections).
+fn process_bulk_block_sections(
+    state: &mut ProcessorState,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
+    sections: Vec<(u8, ModifierId, Vec<u8>)>,
+) {
+    let count = sections.len();
+
+    // Write all sections in a single WriteBatch for fast I/O.
+    let mut batch = state.node_view.history.new_batch();
+    for (type_id, header_id, wire_bytes) in &sections {
+        batch.put_modifier(*type_id, header_id, wire_bytes);
+    }
+    if let Err(e) = batch.write() {
+        tracing::error!(%e, "bulk_block_sections: batch write failed");
+        return;
+    }
+
+    tracing::debug!(count, "bulk_block_sections: batch written");
+
+    // Trigger apply_from_cache to process any newly-complete blocks.
+    // This walks the cache and applies blocks whose sections are all present.
+    let mut new_headers = Vec::new();
+    let mut blocks_to_download = Vec::new();
+    let mut accum = BatchAccum {
+        new_headers: &mut new_headers,
+        blocks_to_download: &mut blocks_to_download,
+    };
+    apply_from_cache_processor(state, evt_tx, &mut accum);
+
+    // Emit applied blocks if any were applied.
+    emit_applied_blocks(state, evt_tx);
 }
 
 /// Apply cached modifiers using the `popCandidate` pattern.
