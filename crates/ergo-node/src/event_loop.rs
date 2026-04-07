@@ -323,7 +323,9 @@ pub async fn run(
     // Start as `true` when fast_sync is enabled so that fast block sync waits
     // for the header sync task to finish (it sets this to `false` when done).
     let shared_fast_sync_active: crate::fast_header_sync::SharedFastSyncActive =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(settings.ergo.node.fast_sync));
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            settings.ergo.node.fast_sync,
+        ));
 
     // Shared atomic for fast block sync: tracks the highest applied full block height.
     let shared_full_height: crate::fast_block_sync::SharedFullHeight =

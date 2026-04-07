@@ -454,12 +454,17 @@ pub type SharedFullHeight = std::sync::Arc<std::sync::atomic::AtomicU32>;
 
 // ── Pipeline constants ──────────────────────────────────────────────
 
-const CHUNK_SIZE: usize = 256;
+const CHUNK_SIZE: usize = 512;
 const HANDOFF_DISTANCE: u32 = 1000;
 const PEER_MAX_FAILURES: u32 = 20;
 const PEER_FETCH_TIMEOUT_SECS: u64 = 30;
 const THROTTLE_LOOKAHEAD: u32 = 50_000;
-const MAX_CONCURRENT_PER_PEER: usize = 3;
+const MAX_CONCURRENT_PER_PEER: usize = 6;
+
+/// Minimum number of headers ahead of full_height before block sync starts.
+/// This allows block downloads to begin while headers are still syncing,
+/// instead of waiting for the entire header chain to complete.
+const MIN_HEADER_LEAD: u32 = 5_000;
 
 // ── Main pipeline ───────────────────────────────────────────────────
 
@@ -492,24 +497,28 @@ pub async fn run_fast_block_sync(
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
-    // ── 0. Wait for fast header sync to finish ──────────────────────
-    // Block downloads only make sense once the header chain is populated.
-    tracing::info!("fast_block_sync: waiting for fast header sync to complete");
+    // ── 0. Wait for enough headers to be available ───────────────────
+    // Instead of waiting for all headers to finish, start block downloads
+    // as soon as we have a sufficient lead of headers over full_height.
+    // This pipelines header and block downloads for much faster sync.
+    tracing::info!("fast_block_sync: waiting for enough headers to start block download");
     loop {
         if *shutdown.borrow() {
             return;
         }
-        // fast_sync_active is set true when header sync starts, false when it ends.
-        if !fast_sync_active.load(Ordering::Relaxed) {
-            // Check that headers have actually been written (not just "never started").
-            let hh = shared_headers_height.load(Ordering::Relaxed);
-            if hh > 0 {
-                tracing::info!(
-                    headers_height = hh,
-                    "fast_block_sync: header sync complete, starting block download"
-                );
-                break;
-            }
+        let hh = shared_headers_height.load(Ordering::Relaxed);
+        let fh = shared_full_height.load(Ordering::Relaxed);
+        let header_sync_done = !fast_sync_active.load(Ordering::Relaxed) && hh > 0;
+        let enough_lead = hh > fh + MIN_HEADER_LEAD;
+        if header_sync_done || enough_lead {
+            tracing::info!(
+                headers_height = hh,
+                full_height = fh,
+                header_sync_done,
+                "fast_block_sync: starting block download (lead = {})",
+                hh.saturating_sub(fh)
+            );
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -550,160 +559,98 @@ pub async fn run_fast_block_sync(
         return;
     }
 
-    let target = headers_height - HANDOFF_DISTANCE;
     let start = full_height + 1;
+
+    // ── 3. Build chunk queue using height index (fast path) ─────────
+    //
+    // Walk forward through the height index instead of doing an O(N)
+    // backwards chain walk. The height index is populated by fast header
+    // sync as headers are stored. If an entry is missing we fall back to
+    // loading the header directly (slower but handles edge cases).
+    //
+    // Since headers may still be syncing, we compute the target from the
+    // *current* headers_height. The dispatch loop will re-check and
+    // extend the queue as more headers become available.
+    let initial_target = headers_height.saturating_sub(HANDOFF_DISTANCE);
 
     tracing::info!(
         start,
-        target,
-        "fast_block_sync: walking header chain to build chunk queue"
+        initial_target,
+        "fast_block_sync: building chunk queue from height index"
     );
 
-    // ── 3. Walk best-header chain backwards to build chunk queue ─────
-    //
-    // The height→ID index may be missing after unclean shutdown, so we
-    // walk the header chain via parent_id links instead.  This is O(n)
-    // but each RocksDB point-read takes microseconds — ~5-10s for 1.7M
-    // headers on SSD.
-    //
-    // While walking, we also repair any missing height→ID index entries.
-    // The block application code (`collect_applicable_suffix`) relies on
-    // this index to walk forward and find the next block to apply.
-    let best_id = match history.best_header_id() {
-        Ok(Some(id)) => id,
-        _ => {
-            tracing::info!("fast_block_sync: no best header in DB, exiting");
-            return;
-        }
-    };
-
-    let mut chain: Vec<(u32, ergo_types::modifier_id::ModifierId)> = Vec::new();
-    let mut current_id = best_id;
-    let walk_start = std::time::Instant::now();
-
-    loop {
-        match history.load_header(&current_id) {
-            Ok(Some(h)) => {
-                chain.push((h.height, current_id));
-                if h.height <= 1
-                    || h.parent_id == ergo_types::modifier_id::ModifierId::GENESIS_PARENT
-                {
-                    break;
-                }
-                current_id = h.parent_id;
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    id = %hex::encode(current_id.0),
-                    "fast_block_sync: header not found during chain walk"
-                );
-                break;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "fast_block_sync: DB error during chain walk");
-                break;
-            }
-        }
-    }
-
-    // Chain was built in descending order; reverse to ascending.
-    chain.reverse();
-
-    let walk_elapsed = walk_start.elapsed();
-    tracing::info!(
-        headers = chain.len(),
-        walk_ms = walk_elapsed.as_millis() as u64,
-        "fast_block_sync: chain walk complete"
-    );
-
-    // ── 3b. Repair missing height→ID index entries in bulk ───────────
-    //
-    // The block application code (`collect_applicable_suffix`) relies on
-    // the height index.  After unclean shutdown, bulk-synced headers may
-    // be missing their height→ID mappings.  We batch-write them using
-    // WriteBatch for efficiency.
+    let build_start = std::time::Instant::now();
+    let mut all_ids: Vec<ergo_types::modifier_id::ModifierId> = Vec::new();
+    let mut height_repairs = 0u64;
     {
-        let repair_start = std::time::Instant::now();
         let mut batch = history.new_batch();
-        let mut repairs = 0u64;
-        let batch_size = 10_000;
-
-        for &(height, ref id) in &chain {
-            let existing = history.header_ids_at_height(height).unwrap_or_default();
-            if !existing.contains(id) {
-                // Build serialized ID list: existing + new ID.
-                let mut buf = Vec::with_capacity((existing.len() + 1) * 32);
-                for eid in &existing {
-                    buf.extend_from_slice(&eid.0);
+        for h in start..=initial_target {
+            let ids = history.header_ids_at_height(h).unwrap_or_default();
+            if let Some(id) = ids.first() {
+                if !history.has_all_sections(id).unwrap_or(true) {
+                    all_ids.push(*id);
                 }
-                buf.extend_from_slice(&id.0);
-                let key = ergo_storage::history_db::height_ids_key(height);
-                batch.put_index(&key, &buf);
-                repairs += 1;
-            }
-
-            // Flush periodically to avoid huge memory usage.
-            if repairs > 0 && repairs.is_multiple_of(batch_size as u64) {
-                if let Err(e) = batch.write() {
-                    tracing::warn!(error = %e, "fast_block_sync: height index repair batch failed");
+            } else {
+                // Height index missing — fall back to chain walk from best header.
+                // This handles unclean shutdown where height→ID mappings were lost.
+                // We only repair the missing entry and continue forward.
+                if let Ok(Some(best_id)) = history.best_header_id() {
+                    if let Ok(Some(hdr)) = history.load_header(&best_id) {
+                        // Walk backwards to find the header at this height.
+                        let mut cur = best_id;
+                        let mut cur_h = hdr.height;
+                        while cur_h > h {
+                            if let Ok(Some(ph)) = history.load_header(&cur) {
+                                cur = ph.parent_id;
+                                cur_h -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if cur_h == h {
+                            // Repair the height index entry.
+                            let mut buf = Vec::with_capacity(32);
+                            buf.extend_from_slice(&cur.0);
+                            let key = ergo_storage::history_db::height_ids_key(h);
+                            batch.put_index(&key, &buf);
+                            height_repairs += 1;
+                            if !history.has_all_sections(&cur).unwrap_or(true) {
+                                all_ids.push(cur);
+                            }
+                        }
+                    }
                 }
-                batch = history.new_batch();
             }
         }
-
-        // Final flush.
-        if !repairs.is_multiple_of(batch_size as u64) {
-            if let Err(e) = batch.write() {
-                tracing::warn!(error = %e, "fast_block_sync: height index repair batch failed");
-            }
-        }
-
-        let repair_elapsed = repair_start.elapsed();
-        if repairs > 0 {
-            tracing::info!(
-                repairs,
-                repair_ms = repair_elapsed.as_millis() as u64,
-                "fast_block_sync: height index repaired"
-            );
+        if height_repairs > 0 {
+            let _ = batch.write();
         }
     }
-
-    // Filter to download range and extract just the IDs.
-    let chain_ids: Vec<ergo_types::modifier_id::ModifierId> = chain
-        .iter()
-        .filter(|(h, _)| *h >= start && *h <= target)
-        .map(|(_, id)| *id)
-        .collect();
-
-    // Filter out headers that already have body sections.
-    let all_ids: Vec<ergo_types::modifier_id::ModifierId> = chain_ids
-        .into_iter()
-        .filter(|id| !history.has_all_sections(id).unwrap_or(true))
-        .collect();
-
+    let build_elapsed = build_start.elapsed();
     tracing::info!(
-        need_bodies = all_ids.len(),
-        "fast_block_sync: filtered to headers missing body sections"
+        total_ids = all_ids.len(),
+        height_repairs,
+        build_ms = build_elapsed.as_millis() as u64,
+        "fast_block_sync: chunk queue built"
     );
 
-    if all_ids.is_empty() {
+    if all_ids.is_empty() && !fast_sync_active.load(Ordering::Relaxed) {
         tracing::info!("fast_block_sync: all headers already have body sections, exiting");
         return;
     }
 
     // Chunk the IDs into batches of CHUNK_SIZE.
-    let chunks: Vec<Vec<ergo_types::modifier_id::ModifierId>> =
+    let initial_chunks: Vec<Vec<ergo_types::modifier_id::ModifierId>> =
         all_ids.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
 
     tracing::info!(
-        chunks = chunks.len(),
-        total_ids = all_ids.len(),
+        chunks = initial_chunks.len(),
         "fast_block_sync: starting parallel fetch"
     );
 
     // ── 4. Work-stealing queue + peer tracking ──────────────────────
     let pending: Arc<std::sync::Mutex<VecDeque<Vec<ergo_types::modifier_id::ModifierId>>>> =
-        Arc::new(std::sync::Mutex::new(chunks.into_iter().collect()));
+        Arc::new(std::sync::Mutex::new(initial_chunks.into_iter().collect()));
 
     let peer_failures: Arc<std::sync::RwLock<HashMap<String, u32>>> =
         Arc::new(std::sync::RwLock::new(HashMap::new()));
@@ -711,6 +658,9 @@ pub async fn run_fast_block_sync(
         Arc::new(std::sync::Mutex::new(HashMap::new()));
     let peer_idle = Arc::new(tokio::sync::Notify::new());
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Track how far we've scanned the height index for incremental extension.
+    let scanned_up_to = Arc::new(std::sync::atomic::AtomicU32::new(initial_target));
 
     let client = Arc::new(client);
     let cmd_tx = Arc::new(cmd_tx);
@@ -725,16 +675,51 @@ pub async fn run_fast_block_sync(
             break;
         }
 
+        // ── 5a. Extend chunk queue if headers have advanced ────────
+        // If headers are still syncing, periodically scan newly available
+        // heights and add their IDs to the download queue.
+        {
+            let current_headers = shared_headers_height.load(Ordering::Relaxed);
+            let current_target = current_headers.saturating_sub(HANDOFF_DISTANCE);
+            let prev_scanned = scanned_up_to.load(Ordering::Relaxed);
+            if current_target > prev_scanned {
+                let mut new_ids = Vec::new();
+                for h in (prev_scanned + 1)..=current_target {
+                    let ids = history.header_ids_at_height(h).unwrap_or_default();
+                    if let Some(id) = ids.first() {
+                        if !history.has_all_sections(id).unwrap_or(true) {
+                            new_ids.push(*id);
+                        }
+                    }
+                }
+                if !new_ids.is_empty() {
+                    let new_chunks: Vec<Vec<ergo_types::modifier_id::ModifierId>> =
+                        new_ids.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
+                    let added = new_chunks.len();
+                    pending.lock().unwrap().extend(new_chunks);
+                    tracing::info!(
+                        added_chunks = added,
+                        scanned_to = current_target,
+                        "fast_block_sync: extended queue with new headers"
+                    );
+                }
+                scanned_up_to.store(current_target, Ordering::Relaxed);
+            }
+        }
+
         // Pop next chunk.
         let chunk = pending.lock().unwrap().pop_front();
         let Some(chunk_ids) = chunk else {
-            // Queue appears empty; wait for in-flight tasks.
-            if in_flight.load(Ordering::Relaxed) == 0 {
+            // Queue appears empty.
+            let headers_still_syncing = fast_sync_active.load(Ordering::Relaxed);
+            if in_flight.load(Ordering::Relaxed) == 0 && !headers_still_syncing {
                 break;
             }
+            // Either in-flight tasks remain or headers are still syncing
+            // (more chunks will be added by the queue extension logic above).
             tokio::select! {
                 _ = peer_idle.notified() => {}
-                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             }
             continue;
         };
@@ -756,7 +741,7 @@ pub async fn run_fast_block_sync(
                 gap = chunk_start - applied,
                 "fast_block_sync: throttling (too far ahead)"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
         // ── 7. Pick a healthy peer with available concurrency slots ──
@@ -794,7 +779,11 @@ pub async fn run_fast_block_sync(
             break;
         };
 
-        *peer_concurrency.lock().unwrap().entry(url.clone()).or_insert(0) += 1;
+        *peer_concurrency
+            .lock()
+            .unwrap()
+            .entry(url.clone())
+            .or_insert(0) += 1;
         in_flight.fetch_add(1, Ordering::Relaxed);
         chunks_dispatched += 1;
 
@@ -902,7 +891,9 @@ async fn fetch_chunk_and_send(
             Ok(()) => break,
             Err(std::sync::mpsc::TrySendError::Full(returned)) => {
                 if tokio::time::Instant::now() >= send_deadline {
-                    tracing::warn!("fast_block_sync: processor channel full for 60s, dropping chunk");
+                    tracing::warn!(
+                        "fast_block_sync: processor channel full for 60s, dropping chunk"
+                    );
                     return Ok(count);
                 }
                 cmd = returned;

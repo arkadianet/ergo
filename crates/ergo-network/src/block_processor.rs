@@ -336,6 +336,9 @@ fn processor_loop_with_state(
                         blocks_to_download: &mut blocks_to_download,
                     };
                     apply_from_cache_processor(state, evt_tx, &mut accum);
+                    // Also try applying blocks from DB (stored by fast block
+                    // sync but not yet applied).
+                    apply_blocks_from_db(state, evt_tx, BULK_APPLY_CAP);
                 }
             }
         }
@@ -571,11 +574,18 @@ fn process_bulk_headers(
     }
 }
 
+/// Maximum number of blocks to apply per `process_bulk_block_sections` call.
+/// Capped to avoid blocking the processor from ingesting new chunks.
+/// After reaching this limit the processor returns to drain more commands;
+/// block application resumes on the next BulkBlockSections or ApplyFromCache.
+const BULK_APPLY_CAP: u32 = 512;
+
 /// Process a `BulkBlockSections` command from fast block sync.
 ///
 /// Stores all body sections in a single RocksDB WriteBatch for fast I/O.
-/// After the batch is written, triggers `apply_from_cache_processor` to
-/// process any blocks that are now complete (have header + all body sections).
+/// After the batch is written, applies a limited number of complete blocks
+/// to avoid blocking the processor for too long. The remaining blocks will
+/// be applied by subsequent BulkBlockSections or ApplyFromCache commands.
 fn process_bulk_block_sections(
     state: &mut ProcessorState,
     evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
@@ -595,10 +605,18 @@ fn process_bulk_block_sections(
 
     tracing::debug!(count, "bulk_block_sections: batch written");
 
-    // Walk forward from best_full_block_height, applying complete blocks
-    // directly from DB.  Unlike apply_from_cache_processor (which only
-    // checks the in-memory cache), this finds body sections that were
-    // stored directly to DB by the fast block sync pipeline.
+    // Walk forward from best_full_block_height, applying complete blocks.
+    // Apply a limited batch to keep the processor responsive to new chunks.
+    apply_blocks_from_db(state, evt_tx, BULK_APPLY_CAP);
+}
+
+/// Walk forward from best_full_block_height and apply complete blocks from DB.
+/// Returns after applying `cap` blocks or when the next block is incomplete.
+fn apply_blocks_from_db(
+    state: &mut ProcessorState,
+    evt_tx: &tokio::sync::mpsc::Sender<ProcessorEvent>,
+    cap: u32,
+) {
     let mut applied = 0u32;
     loop {
         let full_height = state
@@ -608,7 +626,6 @@ fn process_bulk_block_sections(
             .unwrap_or(0);
         let next_height = full_height + 1;
 
-        // Find the header at next_height.
         let header_ids = state
             .node_view
             .history
@@ -618,7 +635,6 @@ fn process_bulk_block_sections(
             break;
         }
 
-        // Check if the block at this height has all sections.
         let header_id = header_ids[0];
         let has_all = state
             .node_view
@@ -629,14 +645,21 @@ fn process_bulk_block_sections(
             break;
         }
 
-        // Apply the block via validate_and_apply_block.
         match state.node_view.validate_and_apply_block(&header_id) {
             Ok(()) => {
                 applied += 1;
                 if applied.is_multiple_of(256) {
-                    tracing::info!(applied, height = next_height, "bulk_block_sections: applying");
+                    tracing::info!(
+                        applied,
+                        height = next_height,
+                        "bulk_block_sections: applying"
+                    );
                 }
-                emit_applied_blocks(state, evt_tx);
+                // Emit events periodically so the event loop can update
+                // shared_full_height, unblocking the throttle in fast_block_sync.
+                if applied.is_multiple_of(64) {
+                    emit_applied_blocks(state, evt_tx);
+                }
             }
             Err(e) => {
                 tracing::debug!(
@@ -648,8 +671,7 @@ fn process_bulk_block_sections(
             }
         }
 
-        // Cap per-batch to avoid blocking the processor too long.
-        if applied >= 4096 {
+        if applied >= cap {
             break;
         }
     }
