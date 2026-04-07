@@ -20,6 +20,16 @@ Thumbs.db
 # GeoIP database (binary, ~60MB)
 data/*.mmdb
 
+# Profiling
+perf.data
+perf.data.old
+perf-*.data
+flamegraph.svg
+
+# Dev logs/docs
+docs/sync-log.txt
+docs/audit-report.md
+
 # Environment
 .env
 .env.*
