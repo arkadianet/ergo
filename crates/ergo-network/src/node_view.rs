@@ -398,7 +398,7 @@ impl NodeViewHolder {
 
         if last_valid_id != best_id {
             let skipped = last_valid_height - best_height;
-            tracing::info!(
+            tracing::debug!(
                 from_height = best_height,
                 to_height = last_valid_height,
                 skipped,
@@ -703,13 +703,10 @@ impl NodeViewHolder {
             ));
         };
 
-        // Diagnostic: log body section reception details
-        tracing::info!(
+        tracing::debug!(
             type_id,
             data_len = data.len(),
             header_id_hex = hex::encode(header_id.0),
-            section_id_hex = hex::encode(modifier_id.0),
-            first_64_hex = hex::encode(&data[..data.len().min(64)]),
             "body section received"
         );
 
@@ -874,7 +871,7 @@ impl NodeViewHolder {
             // blocks that aren't complete.  These will be retried when their
             // remaining sections arrive.
             if !self.history.has_all_sections(block_id).unwrap_or(false) {
-                tracing::debug!(
+                tracing::trace!(
                     ?block_id,
                     "skipping incomplete block in to_apply (sections not yet received)"
                 );
@@ -1114,7 +1111,7 @@ impl NodeViewHolder {
                     return Ok(());
                 }
             }
-            tracing::debug!(?block_id, "block already applied, fast-forwarding");
+            tracing::trace!(?block_id, "block already applied, fast-forwarding");
             if let Err(e) = self.fast_forward_valid_blocks() {
                 tracing::warn!(error = %e, "fast-forward in already-applied path failed, advancing one block");
                 if let Err(e) = self.history.set_best_full_block_id(block_id) {

@@ -93,7 +93,7 @@ impl HistoryDb {
                     );
                     StorageError::Codec(e.to_string())
                 })?;
-                tracing::info!(
+                tracing::debug!(
                     header_id_hex = hex::encode(id.0),
                     tx_count = bt.tx_bytes.len(),
                     block_version = bt.block_version,

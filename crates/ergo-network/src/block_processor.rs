@@ -633,6 +633,9 @@ fn process_bulk_block_sections(
         match state.node_view.validate_and_apply_block(&header_id) {
             Ok(()) => {
                 applied += 1;
+                if applied.is_multiple_of(256) {
+                    tracing::info!(applied, height = next_height, "bulk_block_sections: applying");
+                }
                 emit_applied_blocks(state, evt_tx);
             }
             Err(e) => {
@@ -646,7 +649,7 @@ fn process_bulk_block_sections(
         }
 
         // Cap per-batch to avoid blocking the processor too long.
-        if applied >= 128 {
+        if applied >= 4096 {
             break;
         }
     }

@@ -320,8 +320,10 @@ pub async fn run(
         std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     // Shared flag indicating whether fast header sync is currently active.
+    // Start as `true` when fast_sync is enabled so that fast block sync waits
+    // for the header sync task to finish (it sets this to `false` when done).
     let shared_fast_sync_active: crate::fast_header_sync::SharedFastSyncActive =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(settings.ergo.node.fast_sync));
 
     // Shared atomic for fast block sync: tracks the highest applied full block height.
     let shared_full_height: crate::fast_block_sync::SharedFullHeight =
@@ -485,7 +487,7 @@ pub async fn run(
 
             msg = pool.recv() => {
                 if let Some(incoming) = msg {
-                    tracing::info!(peer_id = incoming.peer_id, code = incoming.message.code, body_len = incoming.message.body.len(), "recv msg");
+                    tracing::debug!(peer_id = incoming.peer_id, code = incoming.message.code, body_len = incoming.message.body.len(), "recv msg");
                     last_msg_time = Some(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -905,7 +907,11 @@ pub async fn run(
                     ProcessorEvent::BlockApplied { header_id, height } => {
                         pending_body_sections = pending_body_sections.saturating_sub(2);
                         shared_full_height.store(height, std::sync::atomic::Ordering::Relaxed);
-                        tracing::info!(height, pending_body_sections, header_id = hex::encode(header_id.0), "block applied");
+                        if height.is_multiple_of(1000) {
+                            tracing::info!(height, pending_body_sections, "block applied (milestone)");
+                        } else {
+                            tracing::debug!(height, pending_body_sections, header_id = hex::encode(header_id.0), "block applied");
+                        }
                         // Notify the indexer.
                         if let Some(ref idx_tx) = indexer_tx {
                             let _ = idx_tx.try_send(ergo_indexer::task::IndexerEvent::BlockApplied {

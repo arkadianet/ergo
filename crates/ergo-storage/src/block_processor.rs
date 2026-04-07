@@ -32,7 +32,7 @@ const EXTENSION_TYPE_ID: u8 = 108;
 /// which correctly detects forks but is O(gap). Above this threshold (typical
 /// during initial sync where gap can be millions), a forward walk from
 /// `best_full_block + 1` avoids the catastrophic O(gap²) behavior.
-const LARGE_GAP_THRESHOLD: u32 = 128;
+const LARGE_GAP_THRESHOLD: u32 = 4096;
 
 // ---------------------------------------------------------------------------
 // ProgressInfo

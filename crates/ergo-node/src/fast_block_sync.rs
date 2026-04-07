@@ -456,9 +456,10 @@ pub type SharedFullHeight = std::sync::Arc<std::sync::atomic::AtomicU32>;
 
 const CHUNK_SIZE: usize = 256;
 const HANDOFF_DISTANCE: u32 = 1000;
-const PEER_MAX_FAILURES: u32 = 3;
-const PEER_FETCH_TIMEOUT_SECS: u64 = 20;
+const PEER_MAX_FAILURES: u32 = 20;
+const PEER_FETCH_TIMEOUT_SECS: u64 = 30;
 const THROTTLE_LOOKAHEAD: u32 = 50_000;
+const MAX_CONCURRENT_PER_PEER: usize = 3;
 
 // ── Main pipeline ───────────────────────────────────────────────────
 
@@ -487,7 +488,7 @@ pub async fn run_fast_block_sync(
     shared_headers_height: crate::fast_header_sync::SharedHeadersHeight,
     fast_sync_active: crate::fast_header_sync::SharedFastSyncActive,
 ) {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
@@ -706,8 +707,8 @@ pub async fn run_fast_block_sync(
 
     let peer_failures: Arc<std::sync::RwLock<HashMap<String, u32>>> =
         Arc::new(std::sync::RwLock::new(HashMap::new()));
-    let busy_peers: Arc<std::sync::Mutex<HashSet<String>>> =
-        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let peer_concurrency: Arc<std::sync::Mutex<HashMap<String, usize>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
     let peer_idle = Arc::new(tokio::sync::Notify::new());
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -758,7 +759,7 @@ pub async fn run_fast_block_sync(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        // ── 7. Pick a healthy idle peer ─────────────────────────────
+        // ── 7. Pick a healthy peer with available concurrency slots ──
         let mut no_peer_polls = 0u32;
         let url = loop {
             if *shutdown.borrow() {
@@ -766,12 +767,14 @@ pub async fn run_fast_block_sync(
             }
             let candidate = {
                 let all_urls: Vec<String> = api_urls.read().unwrap().values().cloned().collect();
-                let busy = busy_peers.lock().unwrap();
+                let conc = peer_concurrency.lock().unwrap();
                 let failures = peer_failures.read().unwrap();
+                // Pick the peer with fewest in-flight requests (least loaded).
                 all_urls
                     .into_iter()
-                    .filter(|u| !busy.contains(u))
-                    .find(|u| failures.get(u).copied().unwrap_or(0) < PEER_MAX_FAILURES)
+                    .filter(|u| failures.get(u).copied().unwrap_or(0) < PEER_MAX_FAILURES)
+                    .filter(|u| conc.get(u).copied().unwrap_or(0) < MAX_CONCURRENT_PER_PEER)
+                    .min_by_key(|u| conc.get(u).copied().unwrap_or(0))
             };
             if let Some(url) = candidate {
                 break Some(url);
@@ -791,7 +794,7 @@ pub async fn run_fast_block_sync(
             break;
         };
 
-        busy_peers.lock().unwrap().insert(url.clone());
+        *peer_concurrency.lock().unwrap().entry(url.clone()).or_insert(0) += 1;
         in_flight.fetch_add(1, Ordering::Relaxed);
         chunks_dispatched += 1;
 
@@ -807,7 +810,7 @@ pub async fn run_fast_block_sync(
         let client = client.clone();
         let cmd_tx = cmd_tx.clone();
         let peer_failures = peer_failures.clone();
-        let busy_peers_clone = busy_peers.clone();
+        let peer_conc_clone = peer_concurrency.clone();
         let peer_idle_clone = peer_idle.clone();
         let pending_clone = pending.clone();
         let in_flight_clone = in_flight.clone();
@@ -829,6 +832,7 @@ pub async fn run_fast_block_sync(
             let count = match &result {
                 Ok(count) => {
                     tracing::debug!(count, peer = url, "fast_block_sync: chunk done");
+                    // Successful request: reset failure count for this peer.
                     peer_failures.write().unwrap().remove(&url);
                     *count
                 }
@@ -839,13 +843,19 @@ pub async fn run_fast_block_sync(
                     let cnt = failures.entry(url.clone()).or_insert(0);
                     *cnt += 1;
                     if *cnt >= PEER_MAX_FAILURES {
-                        tracing::warn!(peer = url, "fast_block_sync: peer blacklisted");
+                        tracing::warn!(peer = url, failures = *cnt, "fast_block_sync: peer blacklisted");
                     }
                     0
                 }
             };
 
-            busy_peers_clone.lock().unwrap().remove(&url);
+            // Decrement concurrency counter for this peer.
+            {
+                let mut conc = peer_conc_clone.lock().unwrap();
+                if let Some(c) = conc.get_mut(&url) {
+                    *c = c.saturating_sub(1);
+                }
+            }
             in_flight_clone.fetch_sub(1, Ordering::Relaxed);
             peer_idle_clone.notify_one();
 
@@ -883,28 +893,27 @@ async fn fetch_chunk_and_send(
     let count = sections.len();
 
     // Send BulkBlockSections to the processor.
+    // Use a bounded retry with sleep to avoid spinning indefinitely when
+    // the channel is full (processor busy applying blocks from prior chunks).
     let mut cmd = ProcessorCommand::BulkBlockSections { sections };
+    let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match cmd_tx.try_send(cmd) {
             Ok(()) => break,
             Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-                tokio::task::yield_now().await;
+                if tokio::time::Instant::now() >= send_deadline {
+                    tracing::warn!("fast_block_sync: processor channel full for 60s, dropping chunk");
+                    return Ok(count);
+                }
                 cmd = returned;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Ok(count),
         }
     }
 
-    // Trigger apply_from_cache so the processor attempts to assemble complete blocks.
-    loop {
-        match cmd_tx.try_send(ProcessorCommand::ApplyFromCache) {
-            Ok(()) => break,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                tokio::task::yield_now().await;
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
-        }
-    }
+    // Best-effort: trigger apply_from_cache (non-blocking, single attempt).
+    let _ = cmd_tx.try_send(ProcessorCommand::ApplyFromCache);
 
     Ok(count)
 }
