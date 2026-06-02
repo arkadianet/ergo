@@ -1,9 +1,11 @@
 name: Release binaries
 
-# Triggered by pushing a tag of the form `v*` (e.g. `v0.1.0`).
-# Builds ergo-node for Linux / macOS / Windows on x86_64, attaches
-# SHA256 checksums, and uploads to the GitHub Release (created
-# automatically if it doesn't already exist).
+# Triggered by pushing a tag of the form `v*` (e.g. `v0.3.0`), or manually via
+# workflow_dispatch with a `tag` input. Builds ergo-node + ergo-wallet for
+# Linux (glibc + static musl), macOS, and Windows on x86_64. For each platform
+# it publishes the bare binary, a `.tar.gz` / `.zip` archive (binary + README +
+# licenses + CHANGELOG + SECURITY), and a `.sha256` for each, all uploaded to
+# the GitHub Release (created if it does not already exist).
 on:
   push:
     tags:
@@ -11,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (e.g. v0.1.0-alpha.1)'
+        description: 'Tag to build + publish (e.g. v0.3.0)'
         required: true
         type: string
 
@@ -25,61 +27,76 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: ergo-node
-            archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact: ergo-node
-            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: ergo-node.exe
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
 
-      - name: Build release binary
-        run: cargo build --release --bin ergo-node --target ${{ matrix.target }}
+      - name: Build release binaries
+        run: cargo build --release --bin ergo-node --bin ergo-wallet --target ${{ matrix.target }}
 
-      - name: Stage artifact (Unix)
+      - name: Stage artifacts (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p stage
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} stage/
-          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md SECURITY.md stage/
-          cd stage
-          tar -czf ../ergo-node-${{ matrix.target }}.tar.gz *
-          cd ..
-          shasum -a 256 ergo-node-${{ matrix.target }}.tar.gz > ergo-node-${{ matrix.target }}.tar.gz.sha256
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release"
+          for b in ergo-node ergo-wallet; do
+            # Bare binary, renamed with the target suffix.
+            cp "$bin/$b" "$b-${{ matrix.target }}"
+            # Archive: binary + docs + licenses.
+            rm -rf "stage/$b" && mkdir -p "stage/$b"
+            cp "$bin/$b" README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md SECURITY.md "stage/$b/"
+            tar -czf "$b-${{ matrix.target }}.tar.gz" -C "stage/$b" .
+            # Checksums for both the bare binary and the archive.
+            shasum -a 256 "$b-${{ matrix.target }}"        > "$b-${{ matrix.target }}.sha256"
+            shasum -a 256 "$b-${{ matrix.target }}.tar.gz" > "$b-${{ matrix.target }}.tar.gz.sha256"
+          done
 
-      - name: Stage artifact (Windows)
+      - name: Stage artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path stage | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact }} stage/
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md, SECURITY.md stage/
-          Compress-Archive -Path stage/* -DestinationPath ergo-node-${{ matrix.target }}.zip
-          $hash = (Get-FileHash -Algorithm SHA256 ergo-node-${{ matrix.target }}.zip).Hash.ToLower()
-          "$hash  ergo-node-${{ matrix.target }}.zip" | Out-File -Encoding ascii ergo-node-${{ matrix.target }}.zip.sha256
+          $bin = "target/${{ matrix.target }}/release"
+          foreach ($b in "ergo-node", "ergo-wallet") {
+            Copy-Item "$bin/$b.exe" "$b-${{ matrix.target }}.exe"
+            Remove-Item -Recurse -Force "stage/$b" -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force "stage/$b" | Out-Null
+            Copy-Item "$bin/$b.exe" "stage/$b/"
+            Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md, SECURITY.md "stage/$b/"
+            Compress-Archive -Path "stage/$b/*" -DestinationPath "$b-${{ matrix.target }}.zip" -Force
+            foreach ($f in "$b-${{ matrix.target }}.exe", "$b-${{ matrix.target }}.zip") {
+              $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+              "$h  $f" | Out-File -Encoding ascii "$f.sha256"
+            }
+          }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ergo-node-${{ matrix.target }}
+          name: release-${{ matrix.target }}
           path: |
-            ergo-node-${{ matrix.target }}.${{ matrix.archive }}
-            ergo-node-${{ matrix.target }}.${{ matrix.archive }}.sha256
+            ergo-node-${{ matrix.target }}*
+            ergo-wallet-${{ matrix.target }}*
 
   publish:
     name: Publish GitHub Release
@@ -88,8 +105,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -109,28 +124,8 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
-          # Pre-1.0 releases are published as pre-release until the
-          # tag drops the `-alpha`/`-beta`/`-rc` suffix.
+          # Pre-1.0 releases are pre-release only when the tag carries an
+          # -alpha / -beta / -rc suffix. The release body is managed manually
+          # (not overwritten here) so curated notes survive a re-run.
           prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
-          files: |
-            artifacts/**/ergo-node-*.tar.gz
-            artifacts/**/ergo-node-*.tar.gz.sha256
-            artifacts/**/ergo-node-*.zip
-            artifacts/**/ergo-node-*.zip.sha256
-          body: |
-            ## ergo-node ${{ steps.tag.outputs.name }}
-
-            Pre-1.0 alpha. See [CHANGELOG.md](./CHANGELOG.md) for details.
-
-            **Verify a download** by computing its SHA-256 and matching
-            the published `.sha256` file:
-
-            ```
-            shasum -a 256 ergo-node-x86_64-unknown-linux-gnu.tar.gz
-            ```
-
-            **Run** (Linux):
-            ```
-            tar -xzf ergo-node-x86_64-unknown-linux-gnu.tar.gz
-            ./ergo-node --help
-            ```
+          files: artifacts/**/*
