@@ -21,10 +21,10 @@ members = [
 ]
 
 [workspace.package]
-version    = "0.2.1"
+version    = "0.3.0"
 edition    = "2021"
 license    = "MIT OR Apache-2.0"
-repository = "https://github.com/arkadianet/opus-ferruginis"
+repository = "https://github.com/arkadianet/ergo"
 
 [workspace.dependencies]
 # Internal crates — keep paths here so a single edit moves every member.

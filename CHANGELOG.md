@@ -16,6 +16,14 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-03
+
+First public release of the independent Rust Ergo full node. Rolls up all
+development since 0.2.1: the browser wallet UI, the off-loop mining-candidate
+engine and zero-fee storage-rent self-claim, digest/headers-only modes (5/6),
+EIP-50 / Sigma 6.0 consensus work, the extra-index parity surface, and the full
+documentation set (README, ARCHITECTURE, per-crate codebase map).
+
 ### Added
 
 - **Browser Wallet UI at `/wallet/ui`** — a static-asset wallet front end
