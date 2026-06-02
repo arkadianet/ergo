@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check, clippy, test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain is pinned via rust-toolchain.toml at the repo root.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --all
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all
+
+      # `cargo test --all` above does not build with --features cost-trace,
+      # so the feature-gated recording sites in `ergo-sigma` do not get
+      # exercised. This step compiles and runs the two integration tests
+      # that DO exercise the feature (`cost_trace_smoke` covers OP/Method
+      # recording sites and the trace-shape contract; `traced_untraced_parity`
+      # guards that enabling the feature does not perturb result or cost).
+      # Coverage is narrow but enough to catch the common regression class
+      # — a feature-gated `cost_trace::record(...)` site referencing the
+      # wrong identifier and breaking the build under the feature.
+      - name: cargo test (cost-trace feature)
+        run: cargo test -p ergo-sigma --features cost-trace --test cost_trace_smoke --test traced_untraced_parity
+
+  audit:
+    name: cargo-audit (security advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit --deny warnings
+
+  deny:
+    name: cargo-deny (licenses + duplicates + advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: deny
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: cargo deny check
+        run: cargo deny check
+
+  machete:
+    name: cargo-machete (unused dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: machete
+      - name: install cargo-machete
+        run: cargo install cargo-machete --locked
+      - name: cargo machete
+        run: cargo machete
+
+  diagnostics:
+    name: cargo build (diagnostics feature compile-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: diagnostics
+      # The diagnostic-only integration tests (`diagnose_block_*`,
+      # `trace_*`, `parity_triage`, `eval_error_triage`, `cost_parity`,
+      # `m7_scala_oracle`, `roundtrip_triage`) are gated behind the
+      # `diagnostics` feature in their respective crates. Compile-only
+      # because most need external state (gitignored mainnet vectors,
+      # captured `/tmp/block_*.json` files, a running Scala node) that
+      # CI doesn't have. The compile guarantees the feature-gated
+      # bodies stay valid — runtime execution stays operator-driven.
+      - name: cargo test --features diagnostics --no-run (ergo-validation)
+        run: cargo test --no-run -p ergo-validation --features diagnostics
+      - name: cargo test --features diagnostics --no-run (ergo-mempool)
+        run: cargo test --no-run -p ergo-mempool --features diagnostics
+      - name: cargo test --features diagnostics --no-run (ergo-ser)
+        run: cargo test --no-run -p ergo-ser --features diagnostics

@@ -1,0 +1,27 @@
+{
+  "format_version": 1,
+  "description": "Blake2b-256 oracle vectors for ergo-primitives. Each vector asserts blake2b256(hex_decode(header_bytes_hex)) == hex_decode(header_id) — the canonical mainnet header_id derivation. Header bytes copied from test-vectors/mainnet/headers_1_10.json (originally extracted from a Scala mainnet node).",
+  "source": {
+    "origin": "test-vectors/mainnet/headers_1_10.json",
+    "scala_node_url_at_time_of_extract": "127.0.0.1:9053 (operator local Scala node)",
+    "copied_at": "2026-05-06",
+    "regen_note": "These are pure copies of mainnet headers; no specific regen script needed. To refresh from a Scala node, see test-vectors/scripts/extract_headers.sh."
+  },
+  "vectors": [
+    {
+      "height": 1,
+      "header_id": "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+      "header_bytes_hex": "010000000000000000000000000000000000000000000000000000000000000000766ab7a313cd2fb66d135b0be6662aa02dfa8e5b17342c05a04396268df0bfbb93fb06aa44413ff57ac878fda9377207d5db0e78833556b331b4d9727b3153ba18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303f1f6cee9ba2d0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8060117650100000003be7ad70c74f691345cbedba19f4844e7fc514e1188a7929f5ae261d5bb00bb6602da9385ac99014ddcffe88d2ac5f28ce817cd615f270a0a5eae58acfb9fd9f6a0000000030151dc631b7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b"
+    },
+    {
+      "height": 5,
+      "header_id": "875aaa0886c229607b3da2440f9cdb12f61ed2a0e56c6a9dd9536ac11079ff03",
+      "header_bytes_hex": "01d46df95124a711724990f40299bb166babc56d86de624db48776e2afb80e0302073cd5a1bff88021bfb51d13ecdac28387e6d1afe96d6871f1af20d53c93ff86ccccd693bd6461f094fe0bdf15b8284e4e65183c1a0ef596dfb1c56dfe0c61201803847b5e2d8a4fa6377c4ef47b51bda27b1ba8dda853f9b4f64cd5dc7367aa04ebbed1e9ba2ddf4ff3b77824042f5c16a5da006c992258bd8574e8429b59cd02fc59ff0d22ce0601176505000000027de3a01d95abec7ca4a110a45ca7e22193df9b51229e0fdfeaa19ebebf3f53e6031c96172660c9f068adb6e74e10b4afe17be3ce50837d0d670aadd988e79d2e1e00000015000f94951b87b6f29b3b5c86ee003baa22e10b490045b8046b14c9281d25fd6c"
+    },
+    {
+      "height": 10,
+      "header_id": "8e01e0d797757c4298a5aa33d9703822a002b58345e436e57545706b228cb545",
+      "header_bytes_hex": "010efbb14a05cc131affed931a5c0af34b14dd545a2253f934a88c001ee3e3e712052d4df42951692733651088881f80266bc9a6fb68d98747168cf13372f2268f101e6b0950518f092fbbf90021879d44f6ed862e1ad23fd30d571e773d0817412e8dbac4fa3534e44ab2dc6e4ada663d17788c5c9dbce16059e637f3de77c44b05a8c3d4e9ba2da08b33945a758152368ad5b6e2172bf4e669d04c4c951df483da39079908d107060117650a00000003702754d379807141afea21eccc3efed251392f863b0470ed7ee7e794cf0fcb280202c8f0d0a79aba1658897c950bdd170ffe969589861fd828b3ac5cc83f0d99fd00000043005ea3111b571c0b1ba4670ddf4a907eaf6bcbd978c1ee26118bb55f2901c258"
+    }
+  ]
+}

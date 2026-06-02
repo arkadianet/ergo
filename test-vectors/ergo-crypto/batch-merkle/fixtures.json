@@ -1,0 +1,72 @@
+[
+  {
+    "label": "single_leaf_prove_all",
+    "leaves": ["aa"],
+    "indices": [0],
+    "expected_root": "53cb52160803afaa9d91f8821db601718169c3e482127ba5c30b6310c38ce0ff",
+    "expected_bytes": "0000000100000001000000009ac5675a258aa771901c3a6c3d346c0da35de0ca2b5188ab13970b263d505b28000000000000000000000000000000000000000000000000000000000000000001",
+    "expected_proof_indices": [0],
+    "expected_proof_count": 1,
+    "note": "1-leaf tree -- exercises the always-reduce-at-least-once invariant (single-leaf tree root is Blake2b256(0x01 ++ leaf_hash), the odd-trailing wrap)."
+  },
+  {
+    "label": "adjacent_pair_4leaf",
+    "leaves": ["00", "01", "02", "03"],
+    "indices": [0, 1],
+    "expected_root": "4c2bb58c2e2afa14f7058e9fe94fba620f8e485288350e7bcc42337a8c18cf90",
+    "expected_bytes": "0000000200000001000000009ee6dfb61a2fb903df487c401663825643bb825d41695e63df8af6162ab145a60000000101cf79da4945c370c68b265ef70641aaa65eaa8f5953e3900d97724c2c5aa095cdc264081888865e9802c8e9b8991f4b7032d3c15d2b687993de042f8aaf537f01",
+    "expected_proof_indices": [0, 1],
+    "expected_proof_count": 1,
+    "note": "4-leaf tree, prove adjacent pair (shares one parent). Tests the in_set dedup path where both siblings of a pair are in the proven set."
+  },
+  {
+    "label": "sparse_3_of_8",
+    "leaves": ["00", "01", "02", "03", "04", "05", "06", "07"],
+    "indices": [0, 3, 5],
+    "expected_root": "4ba07b279e4b38ac43030e643df2838f441574aaa3fe3d33187d240df776424b",
+    "expected_bytes": "0000000300000004000000009ee6dfb61a2fb903df487c401663825643bb825d41695e63df8af6162ab145a600000003da71b5a250e13516be21e61457038fe23ba276e5dc9f36bf96430f174f8a460500000005cc159e9032fea6fe7e0bef5373fdb171b021be13004b2854f8c7c24732f5764301cf79da4945c370c68b265ef70641aaa65eaa8f5953e3900d97724c2c5aa095018f1f9fd0816a310a79d0e0c4bf605a544c260c561740bcdeb175ea46f5312890007324cf9181f377b38e2edeca7a080796554246690656566def41afedef911d0d00a35c6e62fc80979830ade15e558abf12c01f719e72300e8e08ba5e785fb1c99e01",
+    "expected_proof_indices": [0, 3, 5],
+    "expected_proof_count": 4,
+    "note": "8-leaf tree, prove indices 0, 3, 5. Yields both Side=Left and Side=Right non-empty siblings -- catches a left/right inversion."
+  },
+  {
+    "label": "full_4leaf_all_indices",
+    "leaves": ["00", "01", "02", "03"],
+    "indices": [0, 1, 2, 3],
+    "expected_root": "4c2bb58c2e2afa14f7058e9fe94fba620f8e485288350e7bcc42337a8c18cf90",
+    "expected_bytes": "0000000400000000000000009ee6dfb61a2fb903df487c401663825643bb825d41695e63df8af6162ab145a60000000101cf79da4945c370c68b265ef70641aaa65eaa8f5953e3900d97724c2c5aa095000000028f1f9fd0816a310a79d0e0c4bf605a544c260c561740bcdeb175ea46f531289000000003da71b5a250e13516be21e61457038fe23ba276e5dc9f36bf96430f174f8a4605",
+    "expected_proof_indices": [0, 1, 2, 3],
+    "expected_proof_count": 0,
+    "note": "Full-tree proof: every leaf in the proven set, so proofs.len() == 0. Pins the empty-proofs-section codec path."
+  },
+  {
+    "label": "odd_count_5leaf_prove_last",
+    "leaves": ["00", "01", "02", "03", "04"],
+    "indices": [4],
+    "expected_root": "88a2f6cb2e5e0c2ff2d1f11e3e6933b4bff6e763834dc7819a31b752d15e3141",
+    "expected_bytes": "0000000100000003000000047324cf9181f377b38e2edeca7a080796554246690656566def41afedef911d0d0000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000014c2bb58c2e2afa14f7058e9fe94fba620f8e485288350e7bcc42337a8c18cf9000",
+    "expected_proof_indices": [4],
+    "expected_proof_count": 3,
+    "note": "5-leaf tree, prove the trailing single leaf. Forces an empty-sibling (EmptyByteArray / 32-zero-byte) entry above the leaf level -- exercises the None-digest decode ambiguity."
+  },
+  {
+    "label": "deep_32leaf_sparse_proof",
+    "leaves": ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "0a", "0b", "0c", "0d", "0e", "0f", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "1a", "1b", "1c", "1d", "1e", "1f"],
+    "indices": [2, 7, 15, 30],
+    "expected_root": "d6bd08c70c1aa18a5b6dd90e24a5a4988728864a3b710c338fc7c6b1fc112c38",
+    "expected_bytes": "000000040000000b000000028f1f9fd0816a310a79d0e0c4bf605a544c260c561740bcdeb175ea46f53128900000000730bf49766fab57e5cbe948b333c49b742767ee733162e217908d6bca53bb2d360000000fc099102093ddc256106c375b96f85d4b9eb4f6804801ed0c035903d11e0868140000001eb87200926f21d6a90f1fd998f98d6ef41acb98f7fff318302a63420fde9cc154da71b5a250e13516be21e61457038fe23ba276e5dc9f36bf96430f174f8a46050142cd30b31f9f99c642d94cae5cba9dbb8ead01564e1d5fc116025d9ab276aceb007b9bf6fae4481ce40f81012ee6e8dcae328ef3d928df69a57083425349b6d25400ccfdb767c07bba1a9d2222f9f059186a63a63430f2f81deaa33d0b5c5ce299410147f61e4f4620e9946a8831b8c717a76f36982b82d88e005bc4635a1b21c73eff004d2c8433e0325c52b255af559aa6ff4fdf5749abd76aa8697644819aefa1293e00335a2f4bb49539f3c9b33b076cf7bc8e221615cd2fac751f4147f1a9459d2376003fc0e9c06970da57f916c62216cee5e09dcaba1770e4130a067dd81b02c140190070cef94c0ecc0c95be4c8bc9f787d12686799d878b41808a5eaa018fee90dcc200a42edd3673d0ef4145521341fa777439e2df05521fc639f410e16584cf95826a007f2ac28e1d9337ddf5780b9e496c7796652c251b8b02fee6d4a31612b29cbc2b00",
+    "expected_proof_indices": [2, 7, 15, 30],
+    "expected_proof_count": 11,
+    "note": "32-leaf tree, sparse 4-leaf proof. Exercises multi-level reduction depth beyond the toy shapes -- catches a level-counter bug that surfaces only on trees with more than 3 internal levels."
+  },
+  {
+    "label": "unsorted_dup_indices_4_of_8",
+    "leaves": ["00", "01", "02", "03", "04", "05", "06", "07"],
+    "indices": [5, 0, 3, 0, 5],
+    "expected_root": "4ba07b279e4b38ac43030e643df2838f441574aaa3fe3d33187d240df776424b",
+    "expected_bytes": "0000000300000004000000009ee6dfb61a2fb903df487c401663825643bb825d41695e63df8af6162ab145a600000003da71b5a250e13516be21e61457038fe23ba276e5dc9f36bf96430f174f8a460500000005cc159e9032fea6fe7e0bef5373fdb171b021be13004b2854f8c7c24732f5764301cf79da4945c370c68b265ef70641aaa65eaa8f5953e3900d97724c2c5aa095018f1f9fd0816a310a79d0e0c4bf605a544c260c561740bcdeb175ea46f5312890007324cf9181f377b38e2edeca7a080796554246690656566def41afedef911d0d00a35c6e62fc80979830ade15e558abf12c01f719e72300e8e08ba5e785fb1c99e01",
+    "expected_proof_indices": [0, 3, 5],
+    "expected_proof_count": 4,
+    "note": "Unsorted + duplicate-index input. Both Scala and Rust normalize (sort + dedup); fixture pins byte-identity after normalization."
+  }
+]

@@ -1,0 +1,61 @@
+{
+  "height": 777217,
+  "header_id": "c16599b77e47bd81aabaf35efad2aac5af4f99a759bf3237fe4acb12e037e4b4",
+  "emission_tx": {
+    "id": "1f2ced69c7a9b9f3a8aa47490c611549c085552a07f890ea56438ff557c0b123",
+    "inputs": [
+      {
+        "boxId": "135edf68a3417bcae3d4a6986d77b08ee3b3b802fae56feca3c62e30a02af18e",
+        "spendingProof": {
+          "proofBytes": "",
+          "extension": {}
+        }
+      },
+      {
+        "boxId": "997369af025fa60dab11d11f94bd5492dbb8731ea3a31154a0388e329f7edf4a",
+        "spendingProof": {
+          "proofBytes": "",
+          "extension": {}
+        }
+      }
+    ],
+    "dataInputs": [],
+    "outputs": [
+      {
+        "boxId": "b1c94baeeee945a9c2771215d3262215a76d339baa3971f1887821af635698bf",
+        "value": 41302122000000000,
+        "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+        "assets": [
+          {
+            "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+            "amount": 1
+          },
+          {
+            "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+            "amount": 19999988000000000
+          }
+        ],
+        "creationHeight": 777217,
+        "additionalRegisters": {},
+        "transactionId": "1f2ced69c7a9b9f3a8aa47490c611549c085552a07f890ea56438ff557c0b123",
+        "index": 0
+      },
+      {
+        "boxId": "f409c75087b7be5bac1535e4f6e9bc5fa44926eca515b50d8ddf4cee5f8a7e62",
+        "value": 65000000000,
+        "ergoTree": "100204a00b08cd02eeec374f4e660e117fccbfec79e6fe5cdf44ac508fa228bfc654d2973f9bdc9aea02d192a39a8cc7a70173007301",
+        "assets": [
+          {
+            "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+            "amount": 12000000000
+          }
+        ],
+        "creationHeight": 777217,
+        "additionalRegisters": {},
+        "transactionId": "1f2ced69c7a9b9f3a8aa47490c611549c085552a07f890ea56438ff557c0b123",
+        "index": 1
+      }
+    ],
+    "size": 459
+  }
+}

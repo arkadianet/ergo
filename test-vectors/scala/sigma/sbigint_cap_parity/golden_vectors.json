@@ -1,0 +1,53 @@
+{
+  "_source": "Derived from Scala CoreDataSerializer wire format spec (putUShort VLQ length || signed two's-complement payload). See README.md in this directory for the full derivation table and oracle provenance.",
+  "_audit": "audit-2.md M12 / line 283",
+  "_format": "Each entry: { value: human-readable description, signed_bytes_hex: hex of BigInteger.toByteArray signed payload, wire_hex: full wire bytes (VLQ length prefix || payload), should_round_trip: bool }",
+  "vectors": [
+    {
+      "value": "0",
+      "signed_bytes_hex": "00",
+      "wire_hex": "0100",
+      "should_round_trip": true,
+      "note": "BigInteger.ZERO.toByteArray() = [0x00] (one byte); wire = VLQ len(1) || 0x00 = [0x01, 0x00]. The reader also accepts an alternate len=0 encoding defensively, but Scala emits the 1-byte form for SBigInt"
+    },
+    {
+      "value": "-1",
+      "signed_bytes_hex": "ff",
+      "wire_hex": "01ff",
+      "should_round_trip": true
+    },
+    {
+      "value": "minus_two_pow_255",
+      "signed_bytes_hex": "8000000000000000000000000000000000000000000000000000000000000000",
+      "wire_hex": "208000000000000000000000000000000000000000000000000000000000000000",
+      "should_round_trip": true,
+      "note": "Largest negative value (-2^255). Fits in 32 signed bytes; sign bit is set in the top byte"
+    },
+    {
+      "value": "two_pow_255_minus_one",
+      "signed_bytes_hex": "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "wire_hex": "207fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "should_round_trip": true,
+      "note": "Largest positive value (+2^255 - 1). Top byte 0x7F keeps the sign bit clear"
+    }
+  ],
+  "write_rejections": [
+    {
+      "value": "two_pow_255",
+      "reason": "33-byte signed encoding (leading 0x00 to keep sign bit clear); exceeds MaxBigIntSizeInBytes = 32",
+      "expected_error_substring": "SBigInt value too long"
+    }
+  ],
+  "read_rejections": [
+    {
+      "wire_hex_prefix": "21",
+      "description": "len=33 (one byte over cap)",
+      "expected_error_substring": "SBigInt value too long"
+    },
+    {
+      "wire_hex_prefix": "ffff03",
+      "description": "len=65535 VLQ-encoded; the cap MUST fire before payload is read",
+      "expected_error_substring": "SBigInt value too long"
+    }
+  ]
+}

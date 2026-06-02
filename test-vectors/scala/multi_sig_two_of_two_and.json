@@ -1,0 +1,44 @@
+{
+  "case": "two_of_two_and",
+  "extracted_hints": [
+    {
+      "image": {
+        "pk": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+        "type": "ProveDlog"
+      },
+      "kind": "RealCommitment",
+      "position": "NodePosition { positions: [0, 0] }"
+    },
+    {
+      "challenge": "88942913cfe112f8fdec0e52713404fa02caeb26a9150c97",
+      "image": {
+        "pk": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+        "type": "ProveDlog"
+      },
+      "kind": "RealSecretProof",
+      "position": "NodePosition { positions: [0, 0] }"
+    }
+  ],
+  "message_hex": "6572676f2d77616c6c657420442e35206f7261636c65207061726974792074657374206d657373616765",
+  "proof_hex": "88942913cfe112f8fdec0e52713404fa02caeb26a9150c9753a554af41fa68ba133e16f10a373362269b8c8c9dec9f68fd5546fad223e2b87db4c65abe1ecb4becd58285a2e11d9c4260d651fcea4eeddb08c3260deec85c",
+  "proposition": {
+    "children": [
+      {
+        "pk": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+        "type": "ProveDlog"
+      },
+      {
+        "pk": "03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb",
+        "type": "ProveDlog"
+      }
+    ],
+    "type": "Cand"
+  },
+  "real_propositions": [
+    {
+      "pk": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+      "type": "ProveDlog"
+    }
+  ],
+  "simulated_propositions": []
+}

@@ -1,0 +1,13 @@
+[package]
+name        = "ergo-chain-spec"
+description = "Network identity and chain parameters for Ergo: types, constants, and constructors only. No validation logic, no runtime services, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish     = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+hex             = { workspace = true }

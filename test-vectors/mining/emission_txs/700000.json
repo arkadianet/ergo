@@ -1,0 +1,40 @@
+{
+  "height": 700000,
+  "header_id": "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a",
+  "emission_tx": {
+    "id": "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+    "inputs": [
+      {
+        "boxId": "c1abce29c69b66e13650ef33c21c392369b6f930f5913ec9b363a5cc7e93d10d",
+        "spendingProof": {
+          "proofBytes": "",
+          "extension": {}
+        }
+      }
+    ],
+    "dataInputs": [],
+    "outputs": [
+      {
+        "boxId": "e411327bca6691f535a0ecab10b22b501fe40ac14e7267acb431795d8748dc14",
+        "value": 46226664000000000,
+        "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+        "assets": [],
+        "creationHeight": 700000,
+        "additionalRegisters": {},
+        "transactionId": "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+        "index": 0
+      },
+      {
+        "boxId": "124071b9b2e50a078852a50d9540d89eddd15862bff8cc1be2d7beba7a3bcb4d",
+        "value": 66000000000,
+        "ergoTree": "100204a00b08cd02eeec374f4e660e117fccbfec79e6fe5cdf44ac508fa228bfc654d2973f9bdc9aea02d192a39a8cc7a70173007301",
+        "assets": [],
+        "creationHeight": 700000,
+        "additionalRegisters": {},
+        "transactionId": "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+        "index": 1
+      }
+    ],
+    "size": 344
+  }
+}

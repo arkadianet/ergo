@@ -1,0 +1,1297 @@
+openapi: 3.1.0
+info:
+  title: Ergo Rust Node — Native API
+  description: 'Rust-native operator API for the Ergo node (`/api/v1/*`). This document describes the production-superset route set: the conditional routes (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, `/api/v1/difficulty/history`) are mounted only when the node is wired with the matching submit / admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
+  license:
+    name: MIT OR Apache-2.0
+    identifier: MIT OR Apache-2.0
+  version: 0.2.1
+paths:
+  /api/v1/blocks/recent:
+    get:
+      tags:
+      - chain
+      description: 'Most-recent full blocks for the dashboard, newest first. Reflects the *committed* full-block chain: it reads durably-stored section bytes, whereas `/api/v1/tip` reads the in-memory tip. During the async-persist window this list may therefore trail `/tip` by a block or two — it never advertises a block whose sections are not yet committed. Self-heals as the sections commit.'
+      operationId: recent_blocks_handler
+      parameters:
+      - name: n
+        in: query
+        description: Number of most-recent full blocks, newest first. Defaults to 10. Out-of-range values are clamped to [1, 32] (the snapshot-precomputed tail), not rejected.
+        required: false
+        schema:
+          type: integer
+          format: int32
+          maximum: 32
+          minimum: 1
+      responses:
+        '200':
+          description: Most-recent full blocks, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiRecentBlock'
+  /api/v1/difficulty/history:
+    get:
+      tags:
+      - chain
+      operationId: difficulty_history_handler
+      parameters:
+      - name: blocks
+        in: query
+        description: Most-recent blocks to return, ascending by height. Defaults to 720 (~one day at 120s blocks); clamped to [2, 16384].
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: 'Per-block network difficulty across the recent chain, oldest first. Conditional: mounted only when the node is wired with a chain reader (the same handle the Scala-compat routes use).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiDifficultySeries'
+  /api/v1/health:
+    get:
+      tags:
+      - health
+      operationId: health_handler
+      responses:
+        '200':
+          description: Node is healthy (synced and connected)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiHealth'
+        '503':
+          description: Node is stalled or disconnected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiHealth'
+  /api/v1/host:
+    get:
+      tags:
+      - node
+      operationId: host_handler
+      responses:
+        '200':
+          description: Host-process metrics (memory, disk, CPU, network)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiHost'
+  /api/v1/identity:
+    get:
+      tags:
+      - node
+      operationId: identity_handler
+      responses:
+        '200':
+          description: Node mode and protocol-visible flags
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiIdentity'
+  /api/v1/info:
+    get:
+      tags:
+      - node
+      operationId: info_handler
+      responses:
+        '200':
+          description: Static node identity snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiInfo'
+  /api/v1/mempool/check:
+    post:
+      tags:
+      - mempool
+      operationId: check_handler
+      requestBody:
+        description: Serialized transaction bytes — validated against the pool without admission
+        content:
+          application/octet-stream:
+            schema:
+              $ref: '#/components/schemas/RawTransactionBytes'
+        required: true
+      responses:
+        '200':
+          description: Transaction would be accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSubmitResponse'
+        '400':
+          description: Transaction rejected by validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiNativeSubmitError'
+  /api/v1/mempool/submit:
+    post:
+      tags:
+      - mempool
+      operationId: submit_handler
+      requestBody:
+        description: Serialized transaction bytes — forwarded verbatim to the admission pipeline
+        content:
+          application/octet-stream:
+            schema:
+              $ref: '#/components/schemas/RawTransactionBytes'
+        required: true
+      responses:
+        '200':
+          description: Transaction accepted into the pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSubmitResponse'
+        '400':
+          description: Transaction rejected by admission
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiNativeSubmitError'
+  /api/v1/mempool/summary:
+    get:
+      tags:
+      - mempool
+      operationId: mempool_handler
+      responses:
+        '200':
+          description: Mempool size and capacity counters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiMempoolSummary'
+  /api/v1/mempool/transactions:
+    get:
+      tags:
+      - mempool
+      operationId: mempool_transactions_handler
+      responses:
+        '200':
+          description: Pooled transactions with priority weights
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiMempoolTransactions'
+  /api/v1/mempool/transactions/{tx_id}:
+    get:
+      tags:
+      - mempool
+      operationId: mempool_transaction_by_id_handler
+      parameters:
+      - name: tx_id
+        in: path
+        description: Hex-encoded transaction id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Pooled transaction detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiMempoolTransaction'
+        '404':
+          description: No such transaction in the pool
+  /api/v1/node/shutdown:
+    post:
+      tags:
+      - admin
+      summary: |-
+        `POST /node/shutdown` (Scala-compat) and `POST /api/v1/node/shutdown`.
+        Fires the action loop's shutdown signal and returns 202 immediately.
+        The actual drain (UTXO commit, redb close) happens asynchronously in
+        the action loop's existing shutdown path. Operators that need to
+        confirm completion should poll `GET /api/v1/health` until the
+        connection refuses.
+      operationId: shutdown_handler
+      responses:
+        '202':
+          description: Shutdown accepted; body is the literal text `shutdown_requested`. Drain proceeds asynchronously.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '403':
+          description: Missing or invalid api_key (when API security is configured)
+  /api/v1/peers:
+    get:
+      tags:
+      - peers
+      operationId: peers_handler
+      responses:
+        '200':
+          description: Connected and known peer view
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiPeer'
+  /api/v1/status:
+    get:
+      tags:
+      - node
+      operationId: status_handler
+      responses:
+        '200':
+          description: Collapsed sync + tip + peer-count dashboard view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiStatus'
+  /api/v1/sync:
+    get:
+      tags:
+      - chain
+      operationId: sync_handler
+      responses:
+        '200':
+          description: Sync-pipeline state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSyncStatus'
+  /api/v1/tip:
+    get:
+      tags:
+      - chain
+      operationId: tip_handler
+      responses:
+        '200':
+          description: Best-header and best-full-block tip pointers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiTip'
+components:
+  schemas:
+    ApiBootstrapPhase:
+      type: string
+      description: |-
+        UTXO snapshot bootstrap reducer phase, as surfaced on
+        [`ApiBootstrapStatus`]. UI maps each variant to a human label and
+        phase indicator.
+      enum:
+      - discovery
+      - manifest_requested
+      - manifest_verified
+      - downloading_chunks
+      - reconstructing
+      - installing
+      - post_install_catchup
+    ApiBootstrapStatus:
+      type: object
+      description: |-
+        Bootstrap progress for the Mode 2 (UTXO snapshot) consume side.
+        Surfaced to operators so the ~30–60 minute boot window doesn't
+        look like a stuck node (fullHeight=0, indexer=0%, etc.). Each
+        field maps directly to a dashboard cell or progress bar.
+      required:
+      - phase
+      - snapshot_height
+      - voters
+      - chunks_received
+      - chunks_total
+      - trust_check_passed
+      - started_unix_ms
+      properties:
+        chunks_received:
+          type: integer
+          format: int32
+          description: |-
+            Chunks received and committed to assembly. `0` until the
+            `downloading_chunks` phase starts.
+          minimum: 0
+        chunks_total:
+          type: integer
+          format: int32
+          description: |-
+            Total chunks expected per the verified manifest. `0` before
+            `manifest_verified`.
+          minimum: 0
+        header_availability:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiHeaderAvailability'
+            description: |-
+              Header-chain availability mode as reported by the store —
+              `dense` for a full-node-sync history, `sparse` for a NiPoPoW-
+              bootstrapped history. Absent when the store reports the
+              default (Dense) and no NiPoPoW bootstrap is in progress.
+
+              Distinct from [`ApiIdentity::history_mode`] — that field is the
+              operator-configured chain-retention policy (archive / pruned /
+              utxo-bootstrapped / headers-only), this field is the on-disk
+              header-section shape (dense from genesis vs sparse with a
+              NiPoPoW dense-suffix anchor).
+        manifest_id:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Hex-encoded manifest_id when known (post-discovery), else `None`.
+            32 bytes / 64 hex chars.
+        phase:
+          $ref: '#/components/schemas/ApiBootstrapPhase'
+          description: |-
+            Current bootstrap phase. UI maps each variant to its human
+            label and phase indicator.
+        popow_dense_from_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            In `HeaderAvailability::PoPowSparse` mode, the lowest height
+            for which a `HEADER_CHAIN_INDEX` row exists locally. Heights
+            below this are sparse-prefix witnesses (not chain-indexed).
+            `None` when mode is Dense.
+          minimum: 0
+        popow_phase:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPopowPhase'
+            description: |-
+              NiPoPoW bootstrap phase, when enabled. Absent when NiPoPoW
+              bootstrap is disabled (legacy Mode 2-only flow) or hasn't
+              started.
+        popow_providers:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            Number of distinct peers that have responded with a NiPoPoW
+            proof so far. `0` when popow_phase is absent or before any
+            inbound proof.
+          minimum: 0
+        snapshot_height:
+          type: integer
+          format: int32
+          description: |-
+            Snapshot height as selected by the discovery quorum.
+            `0` when still in `discovery` and no manifest has been picked.
+          minimum: 0
+        started_unix_ms:
+          type: integer
+          format: int64
+          description: |-
+            Unix-ms timestamp when the bootstrap reducer first transitioned
+            out of `Idle`. Lets the UI compute an "elapsed" clock without
+            holding state of its own.
+          minimum: 0
+        trust_check_passed:
+          type: boolean
+          description: |-
+            `true` once the manifest's root label has been compared
+            against the canonical header.state_root at `snapshot_height`
+            and matched. False until the trust check fires.
+        voters:
+          type: integer
+          format: int32
+          description: |-
+            Number of peers in the quorum that voted for the selected
+            manifest. `0` during the `discovery` phase before quorum.
+          minimum: 0
+    ApiDifficultyPoint:
+      type: object
+      description: |-
+        One sample in the difficulty time series returned by
+        `GET /api/v1/difficulty/history`: the network difficulty observed at a
+        block height, alongside that block's timestamp.
+
+        `difficulty` is the decoded decimal value as a string — at mainnet
+        scale it exceeds `u64`, so a JSON number would silently lose precision
+        in javascript consumers. `n_bits` is deliberately omitted: it is the
+        compact encoding of this same value, so it would be a lossy duplicate.
+        Consumers read `difficulty` directly.
+      required:
+      - height
+      - timestamp_unix_ms
+      - difficulty
+      properties:
+        difficulty:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        timestamp_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+    ApiDifficultySeries:
+      type: object
+      description: |-
+        Ascending-by-height difficulty series for `GET
+        /api/v1/difficulty/history`. Oldest point first so a consumer can plot
+        it left-to-right without re-sorting.
+      required:
+      - points
+      properties:
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiDifficultyPoint'
+    ApiFullBlockRef:
+      type: object
+      required:
+      - height
+      - header_id
+      - parent_id
+      - timestamp_unix_ms
+      - state_root_avl
+      - n_bits
+      - difficulty
+      properties:
+        difficulty:
+          type: string
+          description: Network difficulty decoded from `n_bits`, as a decimal string.
+        header_id:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        n_bits:
+          type: integer
+          format: int32
+          description: Compact difficulty target (`nBits`) committed in this header.
+          minimum: 0
+        parent_id:
+          type: string
+        state_root_avl:
+          type: string
+          description: |-
+            AVL+ authenticated UTXO-tree root digest committed in this full
+            block's header — 33 bytes (`Digest32 || balance-byte`), hex-encoded
+            (66 chars). Mirrors the on-chain `Header.stateRoot` field;
+            distinct from the chain's cumulative-PoW score or any header hash.
+        timestamp_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+    ApiHeaderAvailability:
+      type: string
+      description: Header-chain density reported by the chain store.
+      enum:
+      - dense
+      - sparse
+    ApiHeaderRef:
+      type: object
+      required:
+      - height
+      - header_id
+      - parent_id
+      - timestamp_unix_ms
+      - n_bits
+      - difficulty
+      properties:
+        difficulty:
+          type: string
+          description: |-
+            Network difficulty decoded from `n_bits`, as a decimal string —
+            full precision, since difficulty exceeds `u64` at high mainnet
+            difficulty. Hashrate is a client derivation (`difficulty /
+            target_block_interval`), not a field here.
+        header_id:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        n_bits:
+          type: integer
+          format: int32
+          description: Compact difficulty target (`nBits`) committed in this header.
+          minimum: 0
+        parent_id:
+          type: string
+        timestamp_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+    ApiHealth:
+      type: object
+      required:
+      - status
+      - behind
+      - last_progress_age_ms
+      - peer_count
+      properties:
+        behind:
+          type: integer
+          format: int32
+          minimum: 0
+        last_progress_age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        peer_count:
+          type: integer
+          format: int32
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/HealthStatus'
+    ApiHistoryMode:
+      oneOf:
+      - type: object
+        description: |-
+          `blocks_to_keep = -1` and `utxo_bootstrap = false` and not the
+          canonical Mode 6 combo. Full archive — the most common live
+          runtime mode and the `Default` variant.
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - archive
+      - type: object
+        description: |-
+          `utxo_bootstrap = true`. Operator opted into the Mode 2 UTXO
+          snapshot bootstrap path. The `kind` wires regardless of whether
+          the snapshot has been applied — observe `fullHeight > 0` on
+          `/info` or `/api/v1/tip` for that.
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - utxo_bootstrapped
+      - type: object
+        description: |-
+          Canonical Mode 6 combo: `state_type = Digest`,
+          `verify_transactions = false`, `blocks_to_keep = 0`. Boots
+          successfully via the `is_canonical_mode_6` short-circuit in
+          `validate_runtime_mode_support`.
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - headers_only
+      - type: object
+        description: |-
+          `blocks_to_keep = N` for `N >= 1`. Forward-compat with the
+          Mode 3 eviction roadmap; currently rejected by the runtime
+          gate.
+        required:
+        - suffix_len
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - pruned
+          suffix_len:
+            type: integer
+            format: int32
+            minimum: 0
+      description: |-
+        Chain-history retention policy as configured at boot. Tagged
+        union; clients switch on `kind`.
+    ApiHost:
+      type: object
+      description: |-
+        Host-process metrics: memory, on-disk databases, free space on the
+        data-directory volume. `None` on any field means "could not
+        determine" — sysinfo refresh failure, permissions, missing file,
+        or platform gap. `Some(0)` means a legitimately zero measurement.
+      properties:
+        cpu_pct:
+          type:
+          - number
+          - 'null'
+          format: float
+          description: CPU usage of the node process as a percent of one core.
+        disk_free_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Free bytes on the volume containing the data directory.
+          minimum: 0
+        disk_total_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Total bytes on that volume.
+          minimum: 0
+        index_db_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Size of `indexer.redb`. `None` when the indexer is disabled or
+            the file is missing.
+          minimum: 0
+        load_1m:
+          type:
+          - number
+          - 'null'
+          format: float
+          description: 1-minute load average.
+        net_in_bps:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Receive bytes-per-second across all interfaces.
+          minimum: 0
+        net_out_bps:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Transmit bps.
+          minimum: 0
+        rss_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Resident set size of the node process.
+          minimum: 0
+        state_db_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Size of `state.redb` on disk.
+          minimum: 0
+    ApiIdentity:
+      type: object
+      description: |-
+        What kind of node this is, beyond the boot-time `ApiInfo` shape.
+
+        Captures the protocol-visible mode flags advertised on the P2P
+        handshake plus operator-config toggles (extra-index, API submission,
+        declared / bind addr). Set at boot from `NodeConfig` + the hardcoded
+        `Mode` peer-feature; doesn't change at runtime today.
+
+        `mining` is reserved for the future mining crate — always `false`
+        until candidate generation lands.
+
+        Backs `GET /api/v1/identity`; consumed by the operator dashboard's
+        identity strip. Rust-native — Scala's `/info` has no equivalent.
+
+        Field contract:
+        - `state_type`, `verify_transactions`, `history_mode`, `mining`,
+          `extra_index_enabled`, `declared_addr`, `bind_addr` are
+          config-intent: what `NodeConfig` asked for at boot. Scala parity
+          for the wire-visible fields lives here.
+        - `utxo_bootstrap` and `nipopow_bootstrap` are effective-state:
+          true when either the operator's config flag is set OR a
+          matching provenance marker on disk confirms the bootstrap
+          actually ran. An operator who cleared the bootstrap flag in
+          config after a successful install therefore still sees `true`
+          on the surface that survived the install. Refreshed by the
+          action loop on bootstrap transitions; live for the process
+          lifetime via `Arc<ArcSwap<ApiIdentity>>` in `api_bridge.rs`.
+        - `mode` is a compact human-readable label composed from both
+          classes, including the Mode 4 `"mode-4 · …"` variants.
+
+        To observe actual runtime progress (e.g. current chain height,
+        peer count), read `fullHeight` / `bestFullHeaderId` on adjacent
+        endpoints.
+      required:
+      - mode
+      - state_type
+      - verify_transactions
+      - history_mode
+      - utxo_bootstrap
+      - nipopow_bootstrap
+      - mining
+      - extra_index_enabled
+      properties:
+        bind_addr:
+          type:
+          - string
+          - 'null'
+          description: |-
+            `[peers] bind_addr` — local TCP listen address. `None` =
+            outbound-only.
+        declared_addr:
+          type:
+          - string
+          - 'null'
+          description: |-
+            `[peers] declared_addr` from the TOML config — what we advertise
+            to peers in the handshake. `None` = anonymous, not gossipable.
+        extra_index_enabled:
+          type: boolean
+        history_mode:
+          $ref: '#/components/schemas/ApiHistoryMode'
+          description: |-
+            How the operator configured chain-history retention. Tagged
+            union — clients switch on `kind`. See [`ApiHistoryMode`].
+        mining:
+          type: boolean
+        mode:
+          type: string
+          description: |-
+            Compact human-readable summary (e.g. "archive · utxo"). Derived
+            from `state_type` + `history_mode` + `utxo_bootstrap` so the
+            dashboard hero strip can render a single string.
+        nipopow_bootstrap:
+          type: boolean
+        state_type:
+          $ref: '#/components/schemas/ApiStateType'
+          description: |-
+            Wire byte = 0 / 1 in the `Mode` peer-feature; mirrored here as
+            a typed enum so consumers don't have to guess the string set.
+        utxo_bootstrap:
+          type: boolean
+        verify_transactions:
+          type: boolean
+    ApiInfo:
+      type: object
+      description: Static node identity. Cheap to compute; doesn't change after boot.
+      required:
+      - agent_name
+      - node_name
+      - network
+      - version
+      - started_at_unix_ms
+      - uptime_seconds
+      properties:
+        agent_name:
+          type: string
+        network:
+          type: string
+        node_name:
+          type: string
+        started_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        target_block_interval_ms:
+          type: integer
+          format: int64
+          description: |-
+            Target block interval for this network, in milliseconds.
+            Mainnet = 120_000 (2 min). Testnet = 45_000 (45 s). Read from
+            the chain spec's `DifficultyParams::desired_interval_ms` at
+            boot so the operator dashboard can label "avg block time"
+            against the *actual* network's target instead of hardcoding
+            the mainnet value (which was wrong on testnet).
+          minimum: 0
+        uptime_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        version:
+          type: string
+    ApiMempoolSummary:
+      type: object
+      required:
+      - size
+      - total_bytes
+      - capacity_count
+      - capacity_bytes
+      - revalidation_pending
+      properties:
+        capacity_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        capacity_count:
+          type: integer
+          format: int32
+          minimum: 0
+        revalidation_pending:
+          type: integer
+          format: int32
+          minimum: 0
+        size:
+          type: integer
+          format: int32
+          minimum: 0
+        total_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+    ApiMempoolTransaction:
+      type: object
+      required:
+      - tx_id
+      - fee_nano_erg
+      - fee_per_byte_nano_erg
+      - size_bytes
+      - validation_cost_units
+      - priority_weight
+      - source
+      - input_count
+      - output_count
+      - parents_in_pool
+      - first_seen_unix_ms
+      - first_seen_age_ms
+      - last_checked_age_ms
+      properties:
+        fee_nano_erg:
+          type: integer
+          format: int64
+          minimum: 0
+        fee_per_byte_nano_erg:
+          type: integer
+          format: int64
+          minimum: 0
+        first_seen_age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        first_seen_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        input_count:
+          type: integer
+          format: int32
+          minimum: 0
+        last_checked_age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        output_count:
+          type: integer
+          format: int32
+          minimum: 0
+        parents_in_pool:
+          type: integer
+          format: int32
+          minimum: 0
+        priority_weight:
+          type: integer
+          format: int64
+          description: |-
+            Mempool priority weight = `(fee × 1024) / denom`, where `denom`
+            is set by `weight_function` on the envelope.
+          minimum: 0
+        size_bytes:
+          type: integer
+          format: int32
+          minimum: 0
+        source:
+          $ref: '#/components/schemas/ApiTxSource'
+        tx_id:
+          type: string
+        validation_cost_units:
+          type: integer
+          format: int64
+          description: |-
+            Sigma-interpreter execution cost in block-budget units. Compare
+            against the active epoch's `maxBlockCost`.
+          minimum: 0
+    ApiMempoolTransactions:
+      type: object
+      required:
+      - transactions
+      - weight_function
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiMempoolTransaction'
+        weight_function:
+          $ref: '#/components/schemas/ApiWeightFunction'
+          description: |-
+            Active priority-weight function for the running node — one of
+            `"cost"`, `"size"`, `"min"`. Clients dividing `priority_weight`
+            by 1024 and the matching denominator recover raw fee-per-resource.
+    ApiNativeSubmitError:
+      type: object
+      description: |-
+        4xx/5xx body for `POST /api/v1/mempool/{submit,check}`. Identical to
+        [`ApiSubmitError`] minus the `error` field — Rust-native clients have
+        the HTTP status from the response line, so duplicating it in the body
+        is just bytes on the wire.
+      required:
+      - reason
+      properties:
+        detail:
+          type:
+          - string
+          - 'null'
+        reason:
+          type: string
+    ApiPeer:
+      type: object
+      required:
+      - addr
+      - direction
+      - state
+      - score
+      - sync_version
+      - connected_seconds
+      - last_seen_seconds
+      properties:
+        addr:
+          type: string
+        agent:
+          type:
+          - string
+          - 'null'
+        bytes_in:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Cumulative post-handshake framed-message bytes received from this
+            peer (per-frame header+checksum+payload), counted at the per-peer
+            I/O task's transport boundary. Excludes the handshake exchange,
+            which precedes that task. Read-only telemetry, never fed into peer
+            scoring/throttle. `None` only on snapshots that predate the peer's
+            connection.
+          minimum: 0
+        bytes_out:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Cumulative post-handshake framed-message bytes sent to this peer.
+            Same accounting as [`Self::bytes_in`].
+          minimum: 0
+        connected_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        direction:
+          $ref: '#/components/schemas/ApiPeerDirection'
+        last_seen_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        node_name:
+          type:
+          - string
+          - 'null'
+        peer_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            Peer's own best-block height as advertised in the most recent
+            `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+          minimum: 0
+        score:
+          type: integer
+          format: int32
+        state:
+          $ref: '#/components/schemas/ApiPeerState'
+        sync_version:
+          type: string
+        version:
+          type:
+          - string
+          - 'null'
+    ApiPeerDirection:
+      type: string
+      description: Which side initiated the peer connection.
+      enum:
+      - inbound
+      - outbound
+    ApiPeerState:
+      type: string
+      description: Connection lifecycle state observed by the peer manager.
+      enum:
+      - connecting
+      - handshaking
+      - active
+      - degraded
+      - disconnected
+    ApiPopowPhase:
+      type: string
+      description: |-
+        NiPoPoW bootstrap reducer phase, as surfaced on
+        [`ApiBootstrapStatus::popow_phase`]. UI mirrors the UTXO bootstrap
+        progression but for the NiPoPoW chain-prefix path.
+      enum:
+      - requesting
+      - quorum_met
+      - applied
+      - catchup
+    ApiRecentBlock:
+      type: object
+      description: |-
+        One recent full block for the dashboard cockpit's "recent blocks" list,
+        backing `GET /api/v1/blocks/recent` (newest-first). The list reflects the
+        committed full-block chain and may briefly trail `/api/v1/tip` during the
+        async-persist window (see the endpoint description). `size_bytes` sums the
+        on-disk section byte lengths — header + blockTransactions + extension,
+        plus adProofs when the node retains it (adProofs is optional in UTXO
+        mode). A block whose required sections are missing, or whose any section
+        read errors, is omitted from the list rather than reported with a
+        silently undercounted size.
+      required:
+      - height
+      - header_id
+      - ts_unix_ms
+      - txs
+      - size_bytes
+      properties:
+        header_id:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        ts_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        txs:
+          type: integer
+          format: int32
+          minimum: 0
+    ApiStateType:
+      type: string
+      description: |-
+        State-store backend kind, mirroring the protocol-visible `Mode`
+        peer-feature byte (`utxo` = 0, `digest` = 1).
+      enum:
+      - utxo
+      - digest
+    ApiStatus:
+      type: object
+      description: |-
+        Single-call dashboard view: collapses sync + tip + peer count.
+        Polled at 1 Hz by the UI header strip.
+      required:
+      - sync_state
+      - peer_count
+      - best_header_height
+      - best_full_block_height
+      - headers_ahead_of_full_blocks
+      - mempool_size
+      - snapshot_age_ms
+      properties:
+        best_full_block_height:
+          type: integer
+          format: int32
+          minimum: 0
+        best_header_height:
+          type: integer
+          format: int32
+          minimum: 0
+        bootstrap:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiBootstrapStatus'
+            description: |-
+              Mode 2 bootstrap progress. Populated while a UTXO snapshot
+              bootstrap is in flight — i.e. operator config has
+              `utxo_bootstrap = true` AND `best_full_block_height == 0`.
+              Cleared (`None`) once the snapshot installs and the node
+              transitions to normal block sync. Operators rendering the
+              dashboard panel should treat `Some(_)` as "show the
+              bootstrap card, hide the normal block-sync pipeline row".
+        headers_ahead_of_full_blocks:
+          type: integer
+          format: int32
+          minimum: 0
+        mempool_size:
+          type: integer
+          format: int32
+          minimum: 0
+        peer_count:
+          type: integer
+          format: int32
+          minimum: 0
+        snapshot_age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        sync_state:
+          $ref: '#/components/schemas/SyncStateLabel'
+    ApiSubmitError:
+      type: object
+      description: |-
+        4xx/5xx body for the Scala-compat submit endpoints
+        (`POST /transactions`, `/transactions/bytes`, `/transactions/checkBytes`).
+        Shape matches Scala's `ApiError` (`{error, reason, detail}`) where
+        `error` is the HTTP status code repeated as an integer for
+        Scala-client parity. Kept on the compat surface only.
+      required:
+      - error
+      - reason
+      properties:
+        detail:
+          type:
+          - string
+          - 'null'
+        error:
+          type: integer
+          format: int32
+          minimum: 0
+        reason:
+          type: string
+    ApiSubmitResponse:
+      type: object
+      description: 200 body for `POST /api/v1/mempool/{submit,check}`.
+      required:
+      - tx_id
+      properties:
+        tx_id:
+          type: string
+    ApiSyncStatus:
+      type: object
+      description: Sync pipeline state.
+      required:
+      - headers_chain_synced
+      - best_header_height
+      - best_full_block_height
+      - gap
+      - download_window
+      - pending_blocks
+      - recovery_done
+      properties:
+        best_full_block_height:
+          type: integer
+          format: int32
+          minimum: 0
+        best_header_height:
+          type: integer
+          format: int32
+          minimum: 0
+        download_window:
+          type: integer
+          format: int32
+          minimum: 0
+        gap:
+          type: integer
+          format: int32
+          minimum: 0
+        headers_chain_synced:
+          type: boolean
+        pending_blocks:
+          type: integer
+          format: int32
+          minimum: 0
+        recovery_done:
+          type: boolean
+    ApiTip:
+      type: object
+      description: |-
+        Tip pointers. During IBD `best_header` and `best_full_block` can
+        diverge by tens of thousands of blocks — they are reported separately
+        and the gap is precomputed for clients.
+      required:
+      - best_header
+      - best_full_block
+      - headers_ahead_of_full_blocks
+      properties:
+        best_full_block:
+          $ref: '#/components/schemas/ApiFullBlockRef'
+        best_header:
+          $ref: '#/components/schemas/ApiHeaderRef'
+        headers_ahead_of_full_blocks:
+          type: integer
+          format: int32
+          minimum: 0
+    ApiTxSource:
+      oneOf:
+      - type: object
+        required:
+        - addr
+        - kind
+        properties:
+          addr:
+            type: string
+          kind:
+            type: string
+            enum:
+            - peer
+      - type: object
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - api
+      - type: object
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - wallet
+      - type: object
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - demoted_from_block
+      description: |-
+        Where a mempool transaction entered our pool. Tagged union — clients
+        switch on `kind` and read `addr` only for `peer`.
+    ApiWeightFunction:
+      type: string
+      description: |-
+        Active mempool priority-weight function. Wire strings match
+        `ergo_mempool::WeightFunction::name()` exactly: `"cost"`, `"size"`,
+        `"min"`. Boot-time `TryFrom<&str>` rejects unknown names.
+      enum:
+      - cost
+      - size
+      - min
+    HealthStatus:
+      type: string
+      enum:
+      - ok
+      - stalled
+      - disconnected
+    RawTransactionBytes:
+      type: string
+      format: binary
+      description: |-
+        OpenAPI request-body schema for the raw transaction bytes accepted by
+        `POST /api/v1/mempool/{submit,check}`. The handlers take an opaque
+        `axum::body::Bytes` and forward it verbatim; this renders that body as
+        `application/octet-stream` binary (`type: string, format: binary`) in
+        the generated spec. Documentation only — never constructed at runtime.
+    SyncStateLabel:
+      type: string
+      enum:
+      - disconnected
+      - syncing
+      - at_tip
+      - stalled
+tags:
+- name: node
+  description: Node identity, host, status
+- name: chain
+  description: Tip, sync progress
+- name: peers
+  description: Peer manager view
+- name: mempool
+  description: Mempool overlay + submission
+- name: admin
+  description: API-key-gated operator routes
+- name: health
+  description: Liveness + readiness

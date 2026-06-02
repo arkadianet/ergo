@@ -1,0 +1,35 @@
+[package]
+name        = "ergo-sigma"
+description = "Sigma-protocol verifier and ErgoTree evaluator for the Ergo Rust node: AST-walking interpreter, JIT cost accounting, AVL+ proof verification (via ergo_avltree_rust), Schnorr/DHTuple/CAND/COR/Cthreshold verification, and the spending-proof entry points used by mempool admission and block validation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives   = { workspace = true }
+ergo-ser          = { workspace = true }
+ergo-crypto       = { workspace = true }
+sha2              = { workspace = true }
+k256              = { workspace = true, features = ["arithmetic"] }
+num-bigint        = { workspace = true }
+num-integer       = { workspace = true }
+num-traits        = { workspace = true }
+gf2_192           = { workspace = true }
+indexmap          = { workspace = true }
+thiserror         = { workspace = true }
+ergo_avltree_rust = { workspace = true }
+bytes             = { workspace = true }
+
+[features]
+# Per-evaluator-step JIT-cost trace. Adds a thread-local recorder behind the
+# `cost_trace` module that emits human-readable cost breakdowns to stderr —
+# useful for diagnosing cost-divergence bugs against the Scala oracle. No
+# runtime overhead when the feature is off.
+cost-trace = []
+
+[dev-dependencies]
+hex        = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

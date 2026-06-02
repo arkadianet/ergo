@@ -1,0 +1,219 @@
+[
+  {
+    "label": "erg_inflation",
+    "expectedCategory": "MONETARY",
+    "txHex": "01911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37000000000180ccebf8efa485050008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: Amount of Ergs in inputs should be equal to amount of Erg in outputs. 929c4c891600b894c9bd643ce53b2b47332189499582128c9bd37809656b0b34: Success(2838006000000000) == Success(2838007000000000)",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  },
+  {
+    "label": "duplicate_inputs",
+    "expectedCategory": "STRUCTURAL",
+    "txHex": "02911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df370000911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df370000000001c0b3c39beca485050008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: There should be no duplicate inputs. 0a0fc9035baaa96c5a9f37ee3e1b7a1714551cc1f936a88af9cd604d902bf0e9: 1 == 2",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  },
+  {
+    "label": "invalid_proof",
+    "expectedCategory": "PROOF",
+    "txHex": "01911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df3720abababababababababababababababababababababababababababababababab00000001c0b3c39beca485050008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: Scripts of all transaction inputs should pass verification. 6360d65254923120bb516cfd507b6dd446054cd2067a7f01e050ec7a830919f3: #0 => Failure(java.lang.ArrayIndexOutOfBoundsException)",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  },
+  {
+    "label": "empty_proof_nontrivial",
+    "expectedCategory": "SCRIPT",
+    "txHex": "01911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df370000000001c0b3c39beca485050008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: Scripts of all transaction inputs should pass verification. 6360d65254923120bb516cfd507b6dd446054cd2067a7f01e050ec7a830919f3: #0 => Failure(java.lang.ArrayIndexOutOfBoundsException)",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  },
+  {
+    "label": "missing_input_box",
+    "expectedCategory": "STRUCTURAL",
+    "txHex": "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000001c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: Every input of the transaction should be in UTXO. d43b7a88cb43f9a795b927e17945b6b526f1302d205464ae47ffe369a8cabd6b: 0 == 1. Missing inputs: 0",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  },
+  {
+    "label": "output_value_too_low",
+    "expectedCategory": "MONETARY",
+    "txHex": "01911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df370000000001010008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: Every output of the transaction should contain at least <minValuePerByte * outputSize> nanoErgs. fcca4746ba8f7e6dd77d5e208cf665f1b1c21e78f887222e6c1d6a6c31b25616, output 38f81b5cb1926a26d0d0a2607b22a11bf416a48885f0d44a5c6b6c73ae15be6c, 1 >= 27000",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  },
+  {
+    "label": "no_inputs",
+    "expectedCategory": "STRUCTURAL",
+    "txHex": "00000001c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
+    "scalaError": "Malformed transaction: A transaction should have at least one input. Tx 1908d3c6bc9861f7be532b12307366874471e761a0db3de4491607c1ba5bfaf7 has no inputs",
+    "height": 1762060,
+    "sourceBox": {
+      "globalIndex": 54675773,
+      "inclusionHeight": 1762060,
+      "address": "2Z4YBkDsDvQj8BX7xiySFewjitqp2ge9c99jfes2whbtKitZTxdBYqbrVZUvZvKv6aqn9by4kp3LE1c26LCyosFnVnm6b6U1JYvWpYmL2ZnixJbXLjWAWuBThV1D6dLpqZJYQHYDznJCk49g5TUiS4q8khpag2aNmHwREV7JSsypHdHLgJT7MGaw51aJfNubyzSKxZ4AJXFS27EfXwyCLzW1K6GVqwkJtCoPvrcLqmqwacAWJPkmh78nke9H4oT88XmSbRt2n9aWZjosiZCafZ4osUDxmZcc5QVEeTWn8drSraY3eFKe8Mu9MSCcVU",
+      "spentTransactionId": null,
+      "spendingProof": null,
+      "boxId": "911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df37",
+      "value": 2838006000000000,
+      "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+      "assets": [
+        {
+          "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+          "amount": 1
+        },
+        {
+          "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+          "amount": 8182028000000000
+        }
+      ],
+      "creationHeight": 1762060,
+      "additionalRegisters": {},
+      "transactionId": "3a4b2eb571f93e4d579ba691636f561849b7634a90497c24003afb845d775392",
+      "index": 0
+    }
+  }
+]

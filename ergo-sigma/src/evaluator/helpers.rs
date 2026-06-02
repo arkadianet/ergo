@@ -1,0 +1,1267 @@
+use ergo_primitives::group_element::GroupElement;
+use ergo_ser::opcode::{Expr, IrNode, Payload};
+use ergo_ser::sigma_type::SigmaType;
+use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
+
+use super::types::*;
+
+/// Truncated `Debug` projection used by trace entries. Keeps the first
+/// 150 bytes of the formatted value so trace lines stay grep-friendly.
+pub(crate) fn trace_val(v: &Value) -> String {
+    let s = format!("{v:?}");
+    if s.len() > 150 {
+        format!("{}...", &s[..150])
+    } else {
+        s
+    }
+}
+
+pub(crate) enum CollKind {
+    Byte,
+    Short,
+    Int,
+    Long,
+    Bool,
+    SigmaProp,
+    Box,
+    Header,
+    Tuple,
+    Token,
+}
+
+/// Decompose a collection Value into (element_kind, items).
+pub(crate) fn collection_to_values(
+    coll: Value,
+    ctx: &ReductionContext,
+) -> Result<(CollKind, Vec<Value>), EvalError> {
+    match coll {
+        // Coll[Byte] stays as Vec<u8> in storage; elements surface
+        // as Value::Byte at the element boundary (typed carrier).
+        Value::CollBytes(bytes) => Ok((
+            CollKind::Byte,
+            bytes.into_iter().map(|b| Value::Byte(b as i8)).collect(),
+        )),
+        Value::CollShort(shorts) => Ok((
+            CollKind::Short,
+            shorts.into_iter().map(Value::Short).collect(),
+        )),
+        Value::CollInt(ints) => Ok((CollKind::Int, ints.into_iter().map(Value::Int).collect())),
+        Value::CollLong(longs) => {
+            Ok((CollKind::Long, longs.into_iter().map(Value::Long).collect()))
+        }
+        Value::CollBool(bools) => {
+            Ok((CollKind::Bool, bools.into_iter().map(Value::Bool).collect()))
+        }
+        Value::CollSigmaProp(props) => Ok((
+            CollKind::SigmaProp,
+            props.into_iter().map(Value::SigmaProp).collect(),
+        )),
+        Value::Tokens(tokens) => Ok((
+            CollKind::Token,
+            tokens
+                .into_iter()
+                .map(|(id, amt)| {
+                    Value::Tuple(vec![Value::CollBytes(id.to_vec()), Value::Long(amt as i64)])
+                })
+                .collect(),
+        )),
+        // CollGeneric is the boxed-element collection carrier. A
+        // real `Value::Tuple` (STuple) is NOT a collection and is
+        // intentionally not accepted here — accepting it would let
+        // `Coll.updated` etc. mutate tuples. The tagged `elem_type`
+        // is discarded here; downstream callers that need it should
+        // capture via `coll_elem_type` on the input value.
+        Value::CollGeneric(items, _) => Ok((CollKind::Tuple, items)),
+        Value::CollBox(items) => Ok((CollKind::Box, items)),
+        Value::CollHeader(headers) => Ok((
+            CollKind::Header,
+            headers
+                .into_iter()
+                .map(|h| Value::Header(Box::new(h)))
+                .collect(),
+        )),
+        Value::BoxCollection(src) => {
+            let len = match src {
+                BoxSource::Outputs => ctx.outputs.len(),
+                BoxSource::Inputs => ctx.inputs.len(),
+                BoxSource::DataInputs => ctx.data_inputs.len(),
+            };
+            Ok((
+                CollKind::Box,
+                (0..len)
+                    .map(|i| Value::BoxRef {
+                        source: src,
+                        index: i,
+                    })
+                    .collect(),
+            ))
+        }
+        _ => Err(EvalError::TypeError {
+            expected: "collection for lambda operation",
+            got: format!("{coll:?}"),
+        }),
+    }
+}
+
+/// One-directional subtype check on `SigmaType` for the
+/// serialize-back / `Coll.updated` type gate.
+///
+/// `SAny` is accepted ONLY on the `observed` side — it is the marker
+/// the recovery path (`value_to_sigma_type`) emits when the runtime
+/// value can't surface its precise inner type (the canonical case is
+/// `Value::Opt(None)` → `SOption(SAny)`). Carriers must never declare
+/// `SAny` in their `elem_type` tag; tightening the gate this way
+/// rejects malformed carriers that lost type information at
+/// construction time.
+///
+/// Recurses through `SOption`, `SColl`, and `STuple` so a nested
+/// `None` inside a tuple inside a Coll still threads the wildcard
+/// through.
+pub(crate) fn sigma_type_compatible(declared: &SigmaType, observed: &SigmaType) -> bool {
+    match (declared, observed) {
+        (_, SigmaType::SAny) => true,
+        (SigmaType::SOption(a), SigmaType::SOption(b)) => sigma_type_compatible(a, b),
+        (SigmaType::SColl(a), SigmaType::SColl(b)) => sigma_type_compatible(a, b),
+        (SigmaType::STuple(a), SigmaType::STuple(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| sigma_type_compatible(x, y))
+        }
+        (x, y) => x == y,
+    }
+}
+
+/// Recover the static element `SigmaType` of a collection-shaped
+/// `Value`. Used by callers of `values_to_collection` and
+/// `Value::CollGeneric` constructors that need to preserve or derive
+/// the element type from an input collection (Filter / Slice /
+/// Append / Reverse / flatMap / zip element-shape).
+/// Returns `None` for non-collection values.
+pub(crate) fn coll_elem_type(v: &Value) -> Option<SigmaType> {
+    match v {
+        Value::CollBytes(_) => Some(SigmaType::SByte),
+        Value::CollShort(_) => Some(SigmaType::SShort),
+        Value::CollInt(_) => Some(SigmaType::SInt),
+        Value::CollLong(_) => Some(SigmaType::SLong),
+        Value::CollBool(_) => Some(SigmaType::SBoolean),
+        Value::CollSigmaProp(_) => Some(SigmaType::SSigmaProp),
+        Value::CollBox(_) | Value::BoxCollection(_) => Some(SigmaType::SBox),
+        Value::CollHeader(_) => Some(SigmaType::SHeader),
+        // Tokens are `Coll[(Coll[Byte], Long)]` in Scala.
+        Value::Tokens(_) => Some(SigmaType::STuple(vec![
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaType::SLong,
+        ])),
+        Value::CollGeneric(_, elem_type) => Some((**elem_type).clone()),
+        _ => None,
+    }
+}
+
+/// Reassemble filtered items into the same collection type as the source.
+/// Used by Filter (output elements are same type as input).
+/// Fails if any element doesn't match the expected kind.
+///
+/// `elem_type` is required to construct the `CollGeneric` fallback —
+/// callers usually derive it from the input collection via
+/// `coll_elem_type`. Typed primitive kinds ignore the parameter.
+pub(crate) fn values_to_collection(
+    kind: CollKind,
+    items: Vec<Value>,
+    elem_type: SigmaType,
+) -> Result<Value, EvalError> {
+    match kind {
+        CollKind::Int => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Int(n) => v.push(n),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollInt(v))
+        }
+        CollKind::Long => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Long(n) => v.push(n),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Long in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollLong(v))
+        }
+        CollKind::Bool => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Bool(b) => v.push(b),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Bool in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollBool(v))
+        }
+        CollKind::SigmaProp => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::SigmaProp(sb) => v.push(sb),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "SigmaProp in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollSigmaProp(v))
+        }
+        CollKind::Byte => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Byte(n) => v.push(n as u8),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Byte in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollBytes(v))
+        }
+        CollKind::Short => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Short(n) => v.push(n),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Short in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollShort(v))
+        }
+        // Box: typed CollBox (preserves element type even when empty)
+        CollKind::Box => Ok(Value::CollBox(items)),
+        // Header: typed CollHeader
+        CollKind::Header => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Header(h) => v.push(*h),
+                    _ => {
+                        return Err(EvalError::TypeError {
+                            expected: "Header in collection",
+                            got: format!("{item:?}"),
+                        })
+                    }
+                }
+            }
+            Ok(Value::CollHeader(v))
+        }
+        // Token: reconstruct Value::Tokens from Tuple(CollBytes, Long) pairs.
+        // Slice/Filter on Tokens decomposes into Tuple pairs via
+        // collection_to_values; reconstruct back to preserve type
+        // parity with SBox.tokens (Value::Tokens). Non-canonical
+        // shapes fall back to `Value::CollGeneric` (the boxed-
+        // element collection carrier) tagged with the Token element
+        // type `(Coll[Byte], Long)`.
+        CollKind::Token => {
+            let token_elem_type = SigmaType::STuple(vec![
+                SigmaType::SColl(Box::new(SigmaType::SByte)),
+                SigmaType::SLong,
+            ]);
+            let mut tokens = Vec::with_capacity(items.len());
+            for item in &items {
+                match item {
+                    Value::Tuple(inner) if inner.len() == 2 => {
+                        if let (Value::CollBytes(id), Value::Long(amt)) = (&inner[0], &inner[1]) {
+                            if id.len() == 32 {
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(id);
+                                tokens.push((arr, *amt as u64));
+                                continue;
+                            }
+                        }
+                        return Ok(Value::CollGeneric(items, Box::new(token_elem_type)));
+                    }
+                    _ => return Ok(Value::CollGeneric(items, Box::new(token_elem_type))),
+                }
+            }
+            Ok(Value::Tokens(tokens))
+        }
+        // Fallback: boxed-element collection. The `elem_type` carried
+        // here flows from the caller's static type knowledge (input
+        // collection's elem type, IR-inferred type, etc.) so an
+        // empty result preserves the original `Coll[T]` shape.
+        _ => Ok(Value::CollGeneric(items, Box::new(elem_type))),
+    }
+}
+
+/// Infer collection type from mapper output elements (used by MapCollection).
+/// Unlike values_to_collection, this doesn't have a predetermined kind —
+/// it infers from the first element. When empty, derives the output type from
+/// the mapper body using structural type inference on the IR.
+pub(crate) fn infer_collection(
+    items: Vec<Value>,
+    mapper_body: &Expr,
+    param_bindings: &std::collections::HashMap<u32, SigmaType>,
+    constants: &[(SigmaType, SigmaValue)],
+) -> Result<Value, EvalError> {
+    if items.is_empty() {
+        let inferred = infer_expr_type(mapper_body, param_bindings, constants);
+        let kind = inferred.as_ref().and_then(sigma_type_to_coll_kind);
+        return match kind {
+            Some(CollKind::Byte) => Ok(Value::CollBytes(vec![])),
+            Some(CollKind::Short) => Ok(Value::CollShort(vec![])),
+            Some(CollKind::Int) => Ok(Value::CollInt(vec![])),
+            Some(CollKind::Long) => Ok(Value::CollLong(vec![])),
+            Some(CollKind::Bool) => Ok(Value::CollBool(vec![])),
+            Some(CollKind::SigmaProp) => Ok(Value::CollSigmaProp(vec![])),
+            Some(CollKind::Box) => Ok(Value::CollBox(vec![])),
+            Some(CollKind::Header) => Ok(Value::CollHeader(vec![])),
+            // Empty boxed-element coll — tag with the inferred elem
+            // type when available; fall back to `SAny` so serialize-
+            // back paths still reject loudly rather than emit wrong
+            // bytes.
+            _ => Ok(Value::CollGeneric(
+                vec![],
+                Box::new(inferred.unwrap_or(SigmaType::SAny)),
+            )),
+        };
+    }
+    // Prefer the mapper-body's IR-inferred element type when it's
+    // available. Falling back only to `value_to_sigma_type(&items[0])`
+    // degrades for `[None, Some(x)]` (first item recovers as
+    // `SOption(SAny)`) — IR inference recovers `SOption(T)` from the
+    // mapper body and threads `T` through. If IR inference fails,
+    // scan items for the first concrete recovery before defaulting
+    // to `SAny`.
+    let ir_elem_type = infer_expr_type(mapper_body, param_bindings, constants);
+    let kind = match &items[0] {
+        Value::Byte(_) => CollKind::Byte,
+        Value::Short(_) => CollKind::Short,
+        Value::Int(_) => CollKind::Int,
+        Value::Long(_) => CollKind::Long,
+        Value::Bool(_) => CollKind::Bool,
+        Value::SigmaProp(_) => CollKind::SigmaProp,
+        Value::SelfBox | Value::BoxRef { .. } => return Ok(Value::CollBox(items)),
+        _ => {
+            let elem_type = ir_elem_type
+                .clone()
+                .or_else(|| items.iter().find_map(strict_value_sigma_type))
+                .unwrap_or(SigmaType::SAny);
+            return Ok(Value::CollGeneric(items, Box::new(elem_type)));
+        }
+    };
+    let elem_type = ir_elem_type
+        .or_else(|| items.iter().find_map(strict_value_sigma_type))
+        .unwrap_or(SigmaType::SAny);
+    values_to_collection(kind, items, elem_type)
+}
+
+/// `value_to_sigma_type` variant that never returns `SAny`-degraded
+/// types — used when scanning a collection for a concrete elem-type
+/// witness. Returns `None` for `Value::Opt(None)` so callers skip
+/// past it to the next item rather than tagging the carrier with
+/// `SOption(SAny)`.
+fn strict_value_sigma_type(v: &Value) -> Option<SigmaType> {
+    let t = value_to_sigma_type(v)?;
+    if contains_sany(&t) {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+fn contains_sany(t: &SigmaType) -> bool {
+    match t {
+        SigmaType::SAny => true,
+        SigmaType::SOption(inner) | SigmaType::SColl(inner) => contains_sany(inner),
+        SigmaType::STuple(elems) => elems.iter().any(contains_sany),
+        _ => false,
+    }
+}
+
+/// Derive the result SigmaType of an expression given a type environment.
+///
+/// This is lightweight structural type inference — not a full type checker,
+/// but sound for the expressions it handles. Walks the IR recursively using
+/// actual type rules (not opcode heuristics). Returns None when it can't
+/// determine the type, which causes empty map results to fall back to
+/// untyped Tuple.
+pub(crate) fn infer_expr_type(
+    expr: &Expr,
+    bindings: &std::collections::HashMap<u32, SigmaType>,
+    constants: &[(SigmaType, SigmaValue)],
+) -> Option<SigmaType> {
+    match expr {
+        Expr::Const { tpe, .. } => Some(tpe.clone()),
+        Expr::Op(node) => infer_op_type(node, bindings, constants),
+    }
+}
+
+pub(crate) fn infer_op_type(
+    node: &IrNode,
+    bindings: &std::collections::HashMap<u32, SigmaType>,
+    constants: &[(SigmaType, SigmaValue)],
+) -> Option<SigmaType> {
+    match (node.opcode, &node.payload) {
+        // Variable lookup — type from bindings
+        (0x72, Payload::ValUse { id }) => bindings.get(id).cloned(),
+        // Constant placeholder — type from constants array
+        (0x73, Payload::ConstPlaceholder { index }) => {
+            constants.get(*index as usize).map(|(t, _)| t.clone())
+        }
+        // BlockValue — type of result expression (with ValDef bindings)
+        (0xD8, Payload::BlockValue { items, result }) => {
+            let mut inner_bindings = bindings.clone();
+            for item in items {
+                if let Expr::Op(def) = item {
+                    if let (0xD6, Payload::ValDef { id, rhs, .. }) = (def.opcode, &def.payload) {
+                        if let Some(t) = infer_expr_type(rhs, &inner_bindings, constants) {
+                            inner_bindings.insert(*id, t);
+                        }
+                    }
+                }
+            }
+            infer_expr_type(result, &inner_bindings, constants)
+        }
+        // If — type of then branch (both branches must have same type)
+        (0x95, Payload::Three(_, then_br, _)) => infer_expr_type(then_br, bindings, constants),
+        // Comparisons → Bool
+        (0x8F..=0x94, _) => Some(SigmaType::SBoolean),
+        // Boolean ops → Bool
+        (0x96 | 0x97 | 0xEC | 0xED, _) => Some(SigmaType::SBoolean),
+        (0xE6, _) => Some(SigmaType::SBoolean), // OptionIsDefined
+        // Box extractors
+        (0xC1, _) => Some(SigmaType::SLong), // ExtractAmount
+        (0xC2, _) => Some(SigmaType::SColl(Box::new(SigmaType::SByte))), // ExtractScriptBytes
+        (0xC3, _) => Some(SigmaType::SColl(Box::new(SigmaType::SByte))), // ExtractBytes
+        (0xC4, _) => Some(SigmaType::SColl(Box::new(SigmaType::SByte))), // ExtractBytesNoRef
+        (0xC5, _) => Some(SigmaType::SColl(Box::new(SigmaType::SByte))), // ExtractId
+        (0xC6, Payload::ExtractRegisterAs { tpe, .. }) => {
+            Some(SigmaType::SOption(Box::new(tpe.clone())))
+        }
+        (0xC7, _) => Some(SigmaType::STuple(vec![
+            SigmaType::SInt,
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+        ])), // CreationInfo
+        // SizeOf → Int
+        (0xB1, _) => Some(SigmaType::SInt),
+        // Context/box
+        (0xA3, _) => Some(SigmaType::SInt), // Height
+        (0xA7, _) => Some(SigmaType::SBox), // Self
+        (0xA4 | 0xA5, _) => Some(SigmaType::SColl(Box::new(SigmaType::SBox))), // Inputs, Outputs
+        // Arithmetic — type of operand (recurse on first arg)
+        (0x9A | 0x99 | 0x9C | 0x9D | 0x9E | 0xA1 | 0xA2, Payload::Two(left, _)) => {
+            infer_expr_type(left, bindings, constants)
+        }
+        // Negation — type of operand
+        (0xF0, Payload::One(inner)) => infer_expr_type(inner, bindings, constants),
+        // Sigma constructors
+        (0xD1 | 0xCD | 0xCE, _) => Some(SigmaType::SSigmaProp),
+        (0xEA | 0xEB, _) => Some(SigmaType::SSigmaProp), // SigmaAnd, SigmaOr
+        // SelectField — can't determine without tuple type info
+        // OptionGet — unwrap the option type
+        (0xE4, Payload::One(inner)) => match infer_expr_type(inner, bindings, constants) {
+            Some(SigmaType::SOption(t)) => Some(*t),
+            _ => None,
+        },
+        // Downcast / Upcast — target type is on the node payload directly.
+        (0x7D, Payload::NumericCast { tpe, .. }) => Some(tpe.clone()),
+        (0x7E, Payload::NumericCast { tpe, .. }) => Some(tpe.clone()),
+        // PropertyCall / MethodCall — limited table for return types that affect
+        // empty-collection inference (e.g. headers.map(_.version) on empty coll).
+        // This is NOT a complete method registry; only the entries that feed
+        // back-to-back map-over-empty-coll sites with Byte/Short outputs.
+        // Broader static-method-type inference is tracked as follow-up.
+        (
+            0xDB | 0xDC,
+            Payload::MethodCall {
+                type_id, method_id, ..
+            },
+        ) => {
+            match (*type_id, *method_id) {
+                // SHeader.version (type_id=104, method 2) → Byte
+                (104, 2) => Some(SigmaType::SByte),
+                // SPreHeader.version (type_id=105, method 1) → Byte.
+                // Fixed from (105, 2) which is parentId (Coll[Byte]) — the
+                // evaluator dispatch at lines 1396-1399 and Scala
+                // methods.scala:1841 both agree version is method 1.
+                (105, 1) => Some(SigmaType::SByte),
+                // SAvlTree.enabledOperations (type_id=100, method 2) → Byte
+                (100, 2) => Some(SigmaType::SByte),
+                // SHeader.height (104, 9) → Int
+                (104, 9) => Some(SigmaType::SInt),
+                // SHeader.timestamp (104, 7) → Long
+                (104, 7) => Some(SigmaType::SLong),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Derive a SigmaType from a runtime Value (for type environment construction).
+pub(crate) fn value_to_sigma_type(val: &Value) -> Option<SigmaType> {
+    match val {
+        Value::Unit => Some(SigmaType::SUnit),
+        Value::Byte(_) => Some(SigmaType::SByte),
+        Value::Short(_) => Some(SigmaType::SShort),
+        Value::Int(_) => Some(SigmaType::SInt),
+        Value::Long(_) => Some(SigmaType::SLong),
+        Value::BigInt(_) => Some(SigmaType::SBigInt),
+        Value::UnsignedBigInt(_) => Some(SigmaType::SUnsignedBigInt),
+        Value::Bool(_) => Some(SigmaType::SBoolean),
+        Value::Str(_) => Some(SigmaType::SString),
+        Value::GroupElement(_) => Some(SigmaType::SGroupElement),
+        Value::SigmaProp(_) => Some(SigmaType::SSigmaProp),
+        Value::CollBytes(_) => Some(SigmaType::SColl(Box::new(SigmaType::SByte))),
+        Value::CollInt(_) => Some(SigmaType::SColl(Box::new(SigmaType::SInt))),
+        Value::CollLong(_) => Some(SigmaType::SColl(Box::new(SigmaType::SLong))),
+        Value::CollShort(_) => Some(SigmaType::SColl(Box::new(SigmaType::SShort))),
+        Value::CollBool(_) => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
+        Value::CollSigmaProp(_) => Some(SigmaType::SColl(Box::new(SigmaType::SSigmaProp))),
+        Value::CollBox(_) => Some(SigmaType::SColl(Box::new(SigmaType::SBox))),
+        Value::SelfBox | Value::BoxRef { .. } | Value::InlineBox(_) => Some(SigmaType::SBox),
+        Value::BoxCollection(_) => Some(SigmaType::SColl(Box::new(SigmaType::SBox))),
+        Value::PreHeader => Some(SigmaType::SPreHeader),
+        Value::Header(_) => Some(SigmaType::SHeader),
+        Value::CollHeader(_) => Some(SigmaType::SColl(Box::new(SigmaType::SHeader))),
+        Value::AvlTree(_) => Some(SigmaType::SAvlTree),
+        Value::Global | Value::Func { .. } => None,
+        // Tokens are `Coll[(Coll[Byte], Long)]`.
+        Value::Tokens(_) => Some(SigmaType::SColl(Box::new(SigmaType::STuple(vec![
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaType::SLong,
+        ])))),
+        // Option: recurse on inner when present; `None` has no
+        // recoverable inner type, so surface `SOption(SAny)` as the
+        // best available approximation.
+        Value::Opt(Some(inner)) => Some(SigmaType::SOption(Box::new(
+            value_to_sigma_type(inner).unwrap_or(SigmaType::SAny),
+        ))),
+        Value::Opt(None) => Some(SigmaType::SOption(Box::new(SigmaType::SAny))),
+        // Real STuple: heterogeneous element types — recurse each.
+        Value::Tuple(items) => Some(SigmaType::STuple(
+            items
+                .iter()
+                .map(|v| value_to_sigma_type(v).unwrap_or(SigmaType::SAny))
+                .collect(),
+        )),
+        // Boxed-element coll carrier already carries its T.
+        Value::CollGeneric(_, elem_type) => Some(SigmaType::SColl(Box::new((**elem_type).clone()))),
+    }
+}
+
+pub(crate) fn sigma_type_to_coll_kind(tpe: &SigmaType) -> Option<CollKind> {
+    match tpe {
+        SigmaType::SInt => Some(CollKind::Int),
+        SigmaType::SLong => Some(CollKind::Long),
+        SigmaType::SShort => Some(CollKind::Short),
+        SigmaType::SBoolean => Some(CollKind::Bool),
+        SigmaType::SByte => Some(CollKind::Byte),
+        SigmaType::SSigmaProp => Some(CollKind::SigmaProp),
+        SigmaType::SBox => Some(CollKind::Box),
+        SigmaType::SHeader => Some(CollKind::Header),
+        _ => None,
+    }
+}
+
+/// Verify a value contains only concrete comparable types, recursively.
+/// Carrier types (SelfBox, BoxRef, BoxCollection, Opt) do not have
+/// meaningful Ergo equality — comparing them via Rust PartialEq would
+/// produce results based on evaluator representation, not semantic identity.
+pub(crate) fn require_comparable(l: &Value, r: &Value) -> Result<(), EvalError> {
+    check_comparable(l)?;
+    check_comparable(r)
+}
+
+pub(crate) fn check_comparable(v: &Value) -> Result<(), EvalError> {
+    match v {
+        Value::Unit
+        | Value::Byte(_)
+        | Value::Short(_)
+        | Value::Int(_)
+        | Value::Long(_)
+        | Value::BigInt(_)
+        | Value::UnsignedBigInt(_)
+        | Value::Bool(_)
+        | Value::Str(_)
+        | Value::CollBytes(_)
+        | Value::CollShort(_)
+        | Value::CollInt(_)
+        | Value::CollLong(_)
+        | Value::CollBool(_)
+        | Value::GroupElement(_)
+        | Value::SigmaProp(_) => Ok(()),
+        Value::Tokens(items) => {
+            // Token pairs are ([u8;32], u64) — always concrete
+            let _ = items;
+            Ok(())
+        }
+        Value::Tuple(items) | Value::CollGeneric(items, _) => {
+            for item in items {
+                check_comparable(item)?;
+            }
+            Ok(())
+        }
+        Value::CollSigmaProp(_) => Ok(()),
+        Value::CollBox(_) => Ok(()),
+        Value::Opt(Some(inner)) => check_comparable(inner),
+        Value::Opt(None) => Ok(()),
+        // Box, PreHeader, and BoxCollection are comparable in Scala consensus
+        // (DataValueComparer cases 7, 8, 9, 10 and Coll[Box]).
+        Value::SelfBox
+        | Value::BoxRef { .. }
+        | Value::InlineBox(_)
+        | Value::BoxCollection(_)
+        | Value::PreHeader
+        | Value::AvlTree(_)
+        | Value::Header(_)
+        | Value::CollHeader(_) => Ok(()),
+        // Global is a singleton — structural identity is fine
+        Value::Global => Ok(()),
+        // Functions are never comparable in Ergo
+        Value::Func { .. } => Err(EvalError::TypeError {
+            expected: "comparable value (not function)",
+            got: format!("{v:?}"),
+        }),
+    }
+}
+
+/// Compare two Values for equality, recursively resolving box references
+/// through the context at every level.
+///
+/// Matches Scala's DataValueComparer.equalDataValues which recurses through
+/// tuples, options, and collections, comparing Box values (not carrier
+/// representations) at every depth.
+pub(crate) fn values_equal(
+    l: &Value,
+    r: &Value,
+    ctx: &ReductionContext<'_>,
+) -> Result<bool, EvalError> {
+    match (l, r) {
+        // Box values — resolve and compare by box ID
+        (
+            Value::SelfBox | Value::BoxRef { .. } | Value::InlineBox(_),
+            Value::SelfBox | Value::BoxRef { .. } | Value::InlineBox(_),
+        ) => {
+            let lb = resolve_box(l, ctx)?;
+            let rb = resolve_box(r, ctx)?;
+            Ok(lb.id == rb.id)
+        }
+        // PreHeader is a singleton per block
+        (Value::PreHeader, Value::PreHeader) => Ok(true),
+        // BoxCollection vs BoxCollection — expand and compare element-wise
+        (Value::BoxCollection(a), Value::BoxCollection(b)) => {
+            if a == b {
+                return Ok(true); // same source, definitely equal
+            }
+            // Different sources — expand both and compare element-wise
+            let la = expand_box_collection(*a, ctx);
+            let lb = expand_box_collection(*b, ctx);
+            seq_equal(&la, &lb, ctx)
+        }
+        // CollBox vs CollBox — element-wise
+        (Value::CollBox(a), Value::CollBox(b)) => seq_equal(a, b, ctx),
+        // Cross-representation Coll[Box]: BoxCollection ↔ CollBox ↔
+        // CollGeneric. CollGeneric is the boxed-element collection
+        // carrier (post Coll[Tuple] disambiguation); a real
+        // `Value::Tuple` here would be a type error, not a Coll[Box]
+        // alias.
+        (Value::BoxCollection(src), Value::CollBox(items)) => {
+            let expanded = expand_box_collection(*src, ctx);
+            seq_equal(&expanded, items, ctx)
+        }
+        (Value::CollBox(items), Value::BoxCollection(src)) => {
+            let expanded = expand_box_collection(*src, ctx);
+            seq_equal(items, &expanded, ctx)
+        }
+        (Value::BoxCollection(src), Value::CollGeneric(items, _)) => {
+            let expanded = expand_box_collection(*src, ctx);
+            seq_equal(&expanded, items, ctx)
+        }
+        (Value::CollGeneric(items, _), Value::BoxCollection(src)) => {
+            let expanded = expand_box_collection(*src, ctx);
+            seq_equal(items, &expanded, ctx)
+        }
+        (Value::CollBox(a), Value::CollGeneric(b, _)) => seq_equal(a, b, ctx),
+        (Value::CollGeneric(a, _), Value::CollBox(b)) => seq_equal(a, b, ctx),
+        // CollGeneric — boxed-element coll, recurse element-wise.
+        // Element-type tag is intentionally not compared (semantic
+        // equality is element-wise).
+        (Value::CollGeneric(a, _), Value::CollGeneric(b, _)) => seq_equal(a, b, ctx),
+        // Tuple — recurse element-wise (may contain box refs at any depth)
+        (Value::Tuple(a), Value::Tuple(b)) => seq_equal(a, b, ctx),
+        // Option — recurse into inner value
+        (Value::Opt(a), Value::Opt(b)) => match (a.as_deref(), b.as_deref()) {
+            (None, None) => Ok(true),
+            (Some(ai), Some(bi)) => values_equal(ai, bi, ctx),
+            _ => Ok(false),
+        },
+        // Cross-type CollBytes ↔ CollInt is intentionally not bridged here —
+        // see the PartialEq impl above for the type-strictness rationale.
+        // Primitive types and collections of primitives — Value::PartialEq is correct
+        // (no box references can hide inside CollBytes, CollInt, CollLong, CollBool,
+        // CollSigmaProp, Tokens, Int, Long, BigInt, Bool, GroupElement, SigmaProp)
+        _ => Ok(l == r),
+    }
+}
+
+/// Compare two sequences element-wise using values_equal.
+pub(crate) fn seq_equal(
+    a: &[Value],
+    b: &[Value],
+    ctx: &ReductionContext<'_>,
+) -> Result<bool, EvalError> {
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        if !values_equal(ai, bi, ctx)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Expand a BoxCollection carrier into a Vec of BoxRef values.
+pub(crate) fn expand_box_collection(source: BoxSource, ctx: &ReductionContext<'_>) -> Vec<Value> {
+    let collection = match source {
+        BoxSource::Outputs => ctx.outputs,
+        BoxSource::Inputs => ctx.inputs,
+        BoxSource::DataInputs => ctx.data_inputs,
+    };
+    (0..collection.len())
+        .map(|i| Value::BoxRef { source, index: i })
+        .collect()
+}
+
+/// Resolve a Value to a reference to an EvalBox.
+pub(crate) fn resolve_box<'a>(
+    val: &'a Value,
+    ctx: &'a ReductionContext<'_>,
+) -> Result<&'a EvalBox, EvalError> {
+    match val {
+        Value::SelfBox => ctx.self_box.ok_or(EvalError::TypeError {
+            expected: "SELF box in context",
+            got: "no self_box".into(),
+        }),
+        Value::BoxRef { source, index } => {
+            let collection = match source {
+                BoxSource::Outputs => ctx.outputs,
+                BoxSource::Inputs => ctx.inputs,
+                BoxSource::DataInputs => ctx.data_inputs,
+            };
+            collection.get(*index).ok_or(EvalError::TypeError {
+                expected: "valid box index",
+                got: format!("{source:?}[{index}]"),
+            })
+        }
+        Value::InlineBox(b) => Ok(b.as_ref()),
+        _ => Err(EvalError::TypeError {
+            expected: "Box",
+            got: format!("{val:?}"),
+        }),
+    }
+}
+
+/// Unpack a collection Value into its individual elements (SubstConstants path).
+/// Byte/Short/CollShort surface as typed carriers (no erasure to Int).
+pub(crate) fn unpack_collection(val: Value) -> Result<Vec<Value>, EvalError> {
+    match val {
+        Value::CollSigmaProp(v) => Ok(v.into_iter().map(Value::SigmaProp).collect()),
+        Value::CollBytes(v) => Ok(v.into_iter().map(|b| Value::Byte(b as i8)).collect()),
+        Value::CollShort(v) => Ok(v.into_iter().map(Value::Short).collect()),
+        Value::CollInt(v) => Ok(v.into_iter().map(Value::Int).collect()),
+        Value::CollLong(v) => Ok(v.into_iter().map(Value::Long).collect()),
+        Value::CollBool(v) => Ok(v.into_iter().map(Value::Bool).collect()),
+        // SubstConstants takes a Coll[T] of replacement values; a
+        // real STuple is not a collection, so accept only the
+        // boxed-element coll carrier here.
+        Value::CollGeneric(items, _) => Ok(items),
+        other => Err(EvalError::TypeError {
+            expected: "collection for SubstConstants values",
+            got: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Convert a runtime Value to (SigmaType, SigmaValue) for serialization.
+pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue), EvalError> {
+    use ergo_ser::sigma_value::CollValue;
+    match val {
+        Value::Bool(b) => Ok((SigmaType::SBoolean, SigmaValue::Boolean(*b))),
+        Value::Int(n) => Ok((SigmaType::SInt, SigmaValue::Int(*n))),
+        Value::Long(n) => Ok((SigmaType::SLong, SigmaValue::Long(*n))),
+        Value::BigInt(n) => Ok((SigmaType::SBigInt, SigmaValue::BigInt(n.clone()))),
+        // SigmaValue carries unsigned bigints in the same BigInt
+        // variant as signed; the SigmaType is what distinguishes them
+        // on the wire. ergo-ser's write_unsigned_bigint_value
+        // (sigma_value.rs) refuses negative input, so the SigmaType
+        // tag here is load-bearing — it routes to the unsigned
+        // writer that emits canonical magnitude bytes without a sign
+        // byte. Without this arm, any v6 method that produces an
+        // UnsignedBigInt (e.g. `SBigInt.toUnsigned`, `SUnsignedBigInt.
+        // plusMod`) would fall through to the catch-all and break
+        // `SGlobal.serialize` for scripts that compose v6 methods.
+        Value::UnsignedBigInt(n) => Ok((SigmaType::SUnsignedBigInt, SigmaValue::BigInt(n.clone()))),
+        Value::GroupElement(ge) => Ok((
+            SigmaType::SGroupElement,
+            SigmaValue::GroupElement(GroupElement::from_bytes(*ge)),
+        )),
+        Value::SigmaProp(sb) => Ok((SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb.clone()))),
+        Value::Str(s) => Ok((SigmaType::SString, SigmaValue::Str(s.clone()))),
+        // Unit, Byte, Short surface as their own typed carriers
+        // (no erasure to Int) on the wire boundary.
+        Value::Unit => Ok((SigmaType::SUnit, SigmaValue::Unit)),
+        Value::Byte(n) => Ok((SigmaType::SByte, SigmaValue::Byte(*n))),
+        Value::Short(n) => Ok((SigmaType::SShort, SigmaValue::Short(*n))),
+        Value::CollBytes(b) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaValue::Coll(CollValue::Bytes(b.clone())),
+        )),
+        // Coll[Short] — generic CollValue::Values: ergo-ser only
+        // special-cases Coll[Boolean] and Coll[Byte], so there is no
+        // packed byte encoding for Short.
+        Value::CollShort(v) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SShort)),
+            SigmaValue::Coll(CollValue::Values(
+                v.iter().map(|n| SigmaValue::Short(*n)).collect(),
+            )),
+        )),
+        Value::CollBool(b) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SBoolean)),
+            SigmaValue::Coll(CollValue::BoolBits(b.clone())),
+        )),
+        Value::CollInt(v) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SInt)),
+            SigmaValue::Coll(CollValue::Values(
+                v.iter().map(|n| SigmaValue::Int(*n)).collect(),
+            )),
+        )),
+        Value::CollLong(v) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SLong)),
+            SigmaValue::Coll(CollValue::Values(
+                v.iter().map(|n| SigmaValue::Long(*n)).collect(),
+            )),
+        )),
+        Value::CollSigmaProp(v) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+            SigmaValue::Coll(CollValue::Values(
+                v.iter()
+                    .map(|sb| SigmaValue::SigmaProp(sb.clone()))
+                    .collect(),
+            )),
+        )),
+        // `Option[T]` — inverse of the `SOption(_)` arm of
+        // `sigma_to_value`. Some(inner) recurses on `inner`;
+        // None surfaces with `SOption(SAny)` and the caller's
+        // type-compatibility check (`sigma_type_compatible`) bridges
+        // the wildcard back to the concrete `T` when needed.
+        Value::Opt(Some(inner)) => {
+            let (inner_ty, inner_val) = value_to_typed_sigma(inner)?;
+            Ok((
+                SigmaType::SOption(Box::new(inner_ty)),
+                SigmaValue::Opt(Some(Box::new(inner_val))),
+            ))
+        }
+        Value::Opt(None) => Ok((
+            SigmaType::SOption(Box::new(SigmaType::SAny)),
+            SigmaValue::Opt(None),
+        )),
+        // Real `STuple` — fixed-arity heterogeneous tuple. Inverse
+        // of the `(SigmaType::STuple, SigmaValue::Tuple)` arm of
+        // `sigma_to_value`. Each element is serialized via the same
+        // recursion, so byte-parity to Scala follows from the parse
+        // path being Scala-anchored.
+        Value::Tuple(items) => {
+            let mut types: Vec<SigmaType> = Vec::with_capacity(items.len());
+            let mut vals: Vec<SigmaValue> = Vec::with_capacity(items.len());
+            for item in items {
+                let (t, v) = value_to_typed_sigma(item)?;
+                types.push(t);
+                vals.push(v);
+            }
+            Ok((SigmaType::STuple(types), SigmaValue::Tuple(vals)))
+        }
+        // Boxed-element `Coll[X]` — inverse of `sigma_to_value`'s
+        // `SColl(non-primitive)` fallback that emits `CollGeneric`.
+        // The carrier's `elem_type` is the static `SigmaType` the IR
+        // pinned at script-load (or that the producer operation
+        // guarantees), so empty `Coll[T]` survives serialize-back
+        // for any T — no element-probe needed.
+        //
+        // For non-empty collections we still cross-check each
+        // element's recovered `SigmaType` against `elem_type`; a
+        // mismatch surfaces `TypeError` rather than emitting bytes
+        // a Scala decoder would reject.
+        Value::CollGeneric(items, elem_type) => {
+            let mut sigma_vals: Vec<SigmaValue> = Vec::with_capacity(items.len());
+            for item in items {
+                let (t, v) = value_to_typed_sigma(item)?;
+                // `sigma_type_compatible` bridges the `SAny`
+                // wildcard `Value::Opt(None)` surfaces back to the
+                // carrier's concrete `T`, so a mixed
+                // `[Some(_), None]` collection still serializes
+                // under the right `SOption(T)` tag.
+                if !sigma_type_compatible(elem_type, &t) {
+                    return Err(EvalError::TypeError {
+                        expected: "element matches CollGeneric elem_type",
+                        got: format!("declared {elem_type:?}, found {t:?}"),
+                    });
+                }
+                sigma_vals.push(v);
+            }
+            Ok((
+                SigmaType::SColl(Box::new((**elem_type).clone())),
+                SigmaValue::Coll(CollValue::Values(sigma_vals)),
+            ))
+        }
+        // Catch-all rejects non-serializable runtime carriers
+        // (BoxCollection / SelfBox / BoxRef / InlineBox / Func /
+        // Global / Opt / Tokens / Header / AvlTree / PreHeader /
+        // CollBox / CollHeader). These either lack a public
+        // SigmaValue counterpart or have no Scala-anchored bytes
+        // for the SubstConstants/SGlobal.serialize boundary.
+        other => Err(EvalError::TypeError {
+            expected: "serializable value for SubstConstants",
+            got: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Count total nodes in a SigmaBoolean tree (for SigmaPropBytes PerItem cost).
+pub(crate) fn count_sigma_nodes(sb: &SigmaBoolean) -> usize {
+    match sb {
+        SigmaBoolean::TrivialProp(_)
+        | SigmaBoolean::ProveDlog(_)
+        | SigmaBoolean::ProveDHTuple { .. } => 1,
+        SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
+            1 + children.iter().map(count_sigma_nodes).sum::<usize>()
+        }
+        SigmaBoolean::Cthreshold { children, .. } => {
+            1 + children.iter().map(count_sigma_nodes).sum::<usize>()
+        }
+    }
+}
+
+/// Replace constants in a serialized ErgoTree at given positions. Handles
+/// any constant type (SSigmaProp, SGroupElement, SColl[Byte], …). Returns
+/// `(result_bytes, n_template_constants)` matching Scala's
+/// `ErgoTreeSerializer.substituteConstants` return type.
+pub(crate) fn subst_constants(
+    script_bytes: &[u8],
+    positions: &[i32],
+    new_values: &[Value],
+) -> Result<(Vec<u8>, usize), EvalError> {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::ergo_tree::read_ergo_tree;
+    // Parse the template ErgoTree
+    let mut reader = VlqReader::new(script_bytes);
+    let tree = read_ergo_tree(&mut reader).map_err(|_| EvalError::UnsupportedOpcode(0x74))?;
+
+    // Clone constants and replace at specified positions. The
+    // template's declared SigmaType at each position is authoritative
+    // for the rewritten constant's wire type — using
+    // `value_to_typed_sigma`'s recovered type would degrade for
+    // `Value::Opt(None)` → `SOption(SAny)` and write back an
+    // `Option[Any]` descriptor where the template said
+    // `Option[T]`, changing the ErgoTree bytes (and downstream
+    // script id). Scala's `ErgoTreeSerializer.substituteConstants`
+    // keeps the template's typed constant slot intact; mirror that.
+    let mut new_constants = tree.constants.clone();
+    for (i, &pos) in positions.iter().enumerate() {
+        let pos = pos as usize;
+        if pos >= new_constants.len() || i >= new_values.len() {
+            return Err(EvalError::ConstantOutOfBounds(pos as u32));
+        }
+        let template_type = new_constants[pos].0.clone();
+        let (_, sv) = value_to_typed_sigma(&new_values[i])?;
+        new_constants[pos] = (template_type, sv);
+    }
+
+    // Re-serialize the ErgoTree with modified constants
+    let mut w = VlqWriter::new();
+    // Write header
+    let header = (tree.version & 0x07)
+        | if tree.has_size { 0x08 } else { 0 }
+        | if tree.constant_segregation { 0x10 } else { 0 };
+    w.put_u8(header);
+
+    if tree.constant_segregation {
+        if tree.has_size {
+            // Write inner with size prefix
+            let mut inner = VlqWriter::new();
+            inner.put_u32(new_constants.len() as u32);
+            for (tpe, val) in &new_constants {
+                ergo_ser::sigma_value::write_constant(&mut inner, tpe, val)
+                    .map_err(|_| EvalError::UnsupportedOpcode(0x74))?;
+            }
+            ergo_ser::opcode::write_body(&mut inner, &tree.body, true)
+                .map_err(|_| EvalError::UnsupportedOpcode(0x74))?;
+            let inner_bytes = inner.result();
+            w.put_u32(inner_bytes.len() as u32);
+            w.put_bytes(&inner_bytes);
+        } else {
+            w.put_u32(new_constants.len() as u32);
+            for (tpe, val) in &new_constants {
+                ergo_ser::sigma_value::write_constant(&mut w, tpe, val)
+                    .map_err(|_| EvalError::UnsupportedOpcode(0x74))?;
+            }
+            ergo_ser::opcode::write_body(&mut w, &tree.body, true)
+                .map_err(|_| EvalError::UnsupportedOpcode(0x74))?;
+        }
+    } else {
+        ergo_ser::opcode::write_body(&mut w, &tree.body, false)
+            .map_err(|_| EvalError::UnsupportedOpcode(0x74))?;
+    }
+
+    let n_constants = new_constants.len();
+    Ok((w.result(), n_constants))
+}
+
+/// Convert a typed SigmaValue to a runtime Value.
+///
+/// Shared lowering path for constants (ConstPlaceholder), register values
+/// (ExtractRegisterAs), and any other typed sigma data entering the evaluator.
+pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalError> {
+    use ergo_ser::sigma_value::CollValue;
+    match (tpe, val) {
+        // Unit, Byte, Short no longer erase to Int — typed-carrier
+        // invariant on the sigma-value → evaluator boundary.
+        (SigmaType::SUnit, SigmaValue::Unit) => Ok(Value::Unit),
+        (SigmaType::SByte, SigmaValue::Byte(n)) => Ok(Value::Byte(*n)),
+        (SigmaType::SShort, SigmaValue::Short(n)) => Ok(Value::Short(*n)),
+        (SigmaType::SInt, SigmaValue::Int(n)) => Ok(Value::Int(*n)),
+        (SigmaType::SLong, SigmaValue::Long(n)) => Ok(Value::Long(*n)),
+        (SigmaType::SBigInt, SigmaValue::BigInt(n)) => Ok(Value::BigInt(n.clone())),
+        (SigmaType::SUnsignedBigInt, SigmaValue::BigInt(n)) => {
+            // Wire-layer (sigma_value.rs::read_unsigned_bigint_value)
+            // already enforces the 32-byte unsigned magnitude bound, so
+            // by the time we reach this case the value satisfies
+            // `0 <= n < 2^256`. A negative `n` here is a deserializer
+            // bug, not a script-author bug — surface it loudly as the
+            // dedicated `UnsupportedConstant` rather than papering over
+            // it by silently lifting the sign.
+            if n.sign() == num_bigint::Sign::Minus {
+                return Err(EvalError::UnsupportedConstant(SigmaType::SUnsignedBigInt));
+            }
+            Ok(Value::UnsignedBigInt(n.clone()))
+        }
+        (SigmaType::SBoolean, SigmaValue::Boolean(b)) => Ok(Value::Bool(*b)),
+        (SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb)) => Ok(Value::SigmaProp(sb.clone())),
+        (SigmaType::SGroupElement, SigmaValue::GroupElement(ge)) => {
+            Ok(Value::GroupElement(*ge.as_bytes()))
+        }
+        (SigmaType::SColl(inner), SigmaValue::Coll(coll)) => {
+            match (inner.as_ref(), coll) {
+                (SigmaType::SByte, CollValue::Bytes(b)) => Ok(Value::CollBytes(b.clone())),
+                (SigmaType::SBoolean, CollValue::BoolBits(bits)) => {
+                    Ok(Value::CollBool(bits.clone()))
+                }
+                (elem_type, CollValue::Values(vs)) => {
+                    let items: Result<Vec<Value>, EvalError> =
+                        vs.iter().map(|v| sigma_to_value(elem_type, v)).collect();
+                    let items = items?;
+                    match elem_type {
+                        SigmaType::SByte => {
+                            // Rare: Coll[Byte] arriving as generic Values — canonicalize to CollBytes.
+                            let v: Vec<u8> = items
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Byte(n) = v {
+                                        Some(*n as u8)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::CollBytes(v))
+                        }
+                        SigmaType::SShort => {
+                            let v: Vec<i16> = items
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Short(n) = v {
+                                        Some(*n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::CollShort(v))
+                        }
+                        SigmaType::SInt => {
+                            let v: Vec<i32> = items
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Int(n) = v {
+                                        Some(*n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::CollInt(v))
+                        }
+                        SigmaType::SLong => {
+                            let v: Vec<i64> = items
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Long(n) = v {
+                                        Some(*n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::CollLong(v))
+                        }
+                        SigmaType::SBoolean => {
+                            let v: Vec<bool> = items
+                                .iter()
+                                .filter_map(|v| {
+                                    if let Value::Bool(b) = v {
+                                        Some(*b)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::CollBool(v))
+                        }
+                        SigmaType::SSigmaProp => {
+                            let v: Vec<SigmaBoolean> = items
+                                .into_iter()
+                                .filter_map(|v| {
+                                    if let Value::SigmaProp(sb) = v {
+                                        Some(sb)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Ok(Value::CollSigmaProp(v))
+                        }
+                        // SColl(non-primitive) → boxed-element coll
+                        // carrier (Coll[Tuple], Coll[Header], etc.).
+                        // `elem_type` is the inner T from the wire
+                        // type tag; carry it on the value so empty
+                        // round-trips work and downstream
+                        // `Coll.updated` knows the element shape.
+                        _ => Ok(Value::CollGeneric(items, Box::new(elem_type.clone()))),
+                    }
+                }
+                (_, CollValue::Bytes(b)) => Ok(Value::CollBytes(b.clone())),
+                _ => Err(EvalError::UnsupportedConstant(tpe.clone())),
+            }
+        }
+        (SigmaType::STuple(elem_types), SigmaValue::Tuple(vals)) => {
+            let items: Result<Vec<Value>, EvalError> = elem_types
+                .iter()
+                .zip(vals.iter())
+                .map(|(t, v)| sigma_to_value(t, v))
+                .collect();
+            Ok(Value::Tuple(items?))
+        }
+        (SigmaType::SOption(inner), SigmaValue::Opt(opt_val)) => match opt_val {
+            Some(v) => Ok(Value::Opt(Some(Box::new(sigma_to_value(inner, v)?)))),
+            None => Ok(Value::Opt(None)),
+        },
+        // SBox constant — parse full ErgoBox (candidate + txId + index) with real identity
+        (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
+            use ergo_ser::register::RegisterId;
+            let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+            let ergo_box =
+                ergo_ser::ergo_box::read_ergo_box(&mut r).map_err(|e| EvalError::TypeError {
+                    expected: "valid SBox constant",
+                    got: format!("box deser error: {e}"),
+                })?;
+            let box_id = ergo_box.box_id().map_err(|e| EvalError::TypeError {
+                expected: "box_id computation",
+                got: format!("{e}"),
+            })?;
+            let registers = [
+                ergo_box
+                    .candidate
+                    .additional_registers
+                    .get(RegisterId::R4)
+                    .cloned(),
+                ergo_box
+                    .candidate
+                    .additional_registers
+                    .get(RegisterId::R5)
+                    .cloned(),
+                ergo_box
+                    .candidate
+                    .additional_registers
+                    .get(RegisterId::R6)
+                    .cloned(),
+                ergo_box
+                    .candidate
+                    .additional_registers
+                    .get(RegisterId::R7)
+                    .cloned(),
+                ergo_box
+                    .candidate
+                    .additional_registers
+                    .get(RegisterId::R8)
+                    .cloned(),
+                ergo_box
+                    .candidate
+                    .additional_registers
+                    .get(RegisterId::R9)
+                    .cloned(),
+            ];
+            let tokens: Vec<([u8; 32], u64)> = ergo_box
+                .candidate
+                .tokens
+                .iter()
+                .map(|t| (*t.token_id.as_bytes(), t.amount))
+                .collect();
+            let raw_bytes = {
+                let mut w = ergo_primitives::writer::VlqWriter::new();
+                ergo_ser::ergo_box::write_ergo_box(&mut w, &ergo_box).unwrap_or_default();
+                w.result()
+            };
+            Ok(Value::InlineBox(Box::new(EvalBox {
+                creation_height: ergo_box.candidate.creation_height,
+                script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
+                value: ergo_box.candidate.value as i64,
+                id: *box_id.as_bytes(),
+                transaction_id: [0u8; 32],
+                output_index: 0,
+                registers,
+                tokens,
+                raw_bytes,
+            })))
+        }
+        (SigmaType::SAvlTree, SigmaValue::AvlTree(data)) => Ok(Value::AvlTree(data.clone())),
+        (SigmaType::SString, SigmaValue::Str(s)) => Ok(Value::Str(s.clone())),
+        _ => Err(EvalError::UnsupportedConstant(tpe.clone())),
+    }
+}

@@ -1,0 +1,76 @@
+[package]
+name        = "ergo-wallet"
+description = "Ergo HD wallet — BIP39 mnemonic, post-1627 BIP32 HD derivation, P2PK addresses, secret storage, sigma-proof production for transaction signing, and CLI tooling."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+# `ergo-sigma` provides SigmaBoolean types + proof verification; `gf2_192`
+# is Lagrange interpolation over GF(2^192) for threshold proofs.
+# P2PK address encoding goes through `encode_p2pk_from_pubkey`, not through
+# `ergo-sigma::build_prove_dlog_ergo_tree`.
+aes-gcm          = { workspace = true }
+ergo-primitives  = { workspace = true }
+indexmap         = { workspace = true }
+ergo-sigma       = { workspace = true }
+gf2_192          = { workspace = true }
+ergo-ser         = { workspace = true }
+ergo-validation  = { workspace = true }
+ergo-state       = { workspace = true }
+k256        = { workspace = true, features = ["arithmetic"] }
+md5         = { workspace = true }
+pbkdf2      = { workspace = true }
+sha2        = { workspace = true }
+uuid        = { workspace = true }
+hmac        = { workspace = true }
+bip39       = { workspace = true }
+zeroize     = { workspace = true }
+hex         = { workspace = true }
+thiserror   = { workspace = true }
+serde       = { workspace = true, features = ["derive"] }
+serde_json  = { workspace = true }
+rand        = { workspace = true }
+clap        = { workspace = true, features = ["derive"] }
+
+[features]
+# Exposes deterministic test-only RNG types (Sha256DerivedRng) for
+# integration tests in tests/*.  Never enable in production builds.
+test-utils = []
+
+[dev-dependencies]
+ergo-primitives = { workspace = true }
+ergo-sigma      = { workspace = true }
+hex             = { workspace = true }
+k256            = { workspace = true, features = ["arithmetic"] }
+num-bigint      = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true }
+sha2            = { workspace = true }
+tempfile        = { workspace = true }
+assert_cmd      = "2"
+predicates      = "3"
+
+[[bin]]
+name = "ergo-wallet"
+path = "src/bin/ergo-wallet.rs"
+
+[[test]]
+name              = "proving_internal_consistency"
+path              = "tests/proving_internal_consistency.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name              = "multi_sig_inline"
+path              = "tests/multi_sig_inline.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "proving_scala_oracle"
+path = "tests/proving_scala_oracle.rs"
+
+[[test]]
+name = "multi_sig_oracle"
+path = "tests/multi_sig_oracle.rs"

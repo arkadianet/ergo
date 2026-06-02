@@ -1,0 +1,6 @@
+# The native-OpenAPI snapshot test (ergo-api/tests/openapi_native_snapshot.rs)
+# byte-compares this fixture against the generated spec, which is always
+# LF. Without this, Windows autocrlf rewrites the fixture to CRLF on
+# checkout and the comparison fails locally even though the committed
+# bytes are correct. Pin it to LF so the snapshot is platform-stable.
+ergo-api/tests/fixtures/openapi_native.yaml text eol=lf

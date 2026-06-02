@@ -1,0 +1,54 @@
+{
+  "height": 1700001,
+  "header_id": "e9ec27e9d5e737346fc10f07ab230a57e7829ab8a051a25d7a4342f3ca2ae19e",
+  "emission_tx": {
+    "id": "cc02545c4f233c4fdfd851337d79afb8b5b9155aef6fedb6af6b740221745a5f",
+    "inputs": [
+      {
+        "boxId": "28cf83c29df59cc239dacb25cdbcb2a63be757a5944d162fd1fae1553e5d1a0c",
+        "spendingProof": {
+          "proofBytes": "",
+          "extension": {}
+        }
+      }
+    ],
+    "dataInputs": [],
+    "outputs": [
+      {
+        "boxId": "4502520699d259b89c36d0d835bd489371b52d6f9d8c4e69e02999529f204f78",
+        "value": 3939249000000000,
+        "ergoTree": "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+        "assets": [
+          {
+            "tokenId": "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+            "amount": 1
+          },
+          {
+            "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+            "amount": 8926712000000000
+          }
+        ],
+        "creationHeight": 1700001,
+        "additionalRegisters": {},
+        "transactionId": "cc02545c4f233c4fdfd851337d79afb8b5b9155aef6fedb6af6b740221745a5f",
+        "index": 0
+      },
+      {
+        "boxId": "10d7d94c8eec926f2eeaceb3a018e4d9134b5bc6d49a764b344363b38071728e",
+        "value": 18000000000,
+        "ergoTree": "100204a00b08cd0295facb78290ac2b55f1453204d49df37be5bae9f185ed6704c1ba3ee372280c1ea02d192a39a8cc7a70173007301",
+        "assets": [
+          {
+            "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+            "amount": 12000000000
+          }
+        ],
+        "creationHeight": 1700001,
+        "additionalRegisters": {},
+        "transactionId": "cc02545c4f233c4fdfd851337d79afb8b5b9155aef6fedb6af6b740221745a5f",
+        "index": 1
+      }
+    ],
+    "size": 424
+  }
+}

@@ -1,0 +1,24 @@
+[package]
+name        = "ergo-indexer"
+description = "Opt-in extra-index parity for the Ergo Rust node: address / template / token / global-index segment apply, balance bookkeeping, polling task that follows the chain tip, and the redb-backed store. Read-side trait + DTOs live in ergo-indexer-types; this crate is the writer half."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives    = { workspace = true }
+ergo-ser           = { workspace = true }
+ergo-state         = { workspace = true }
+ergo-indexer-types = { workspace = true }
+hex                = { workspace = true }
+redb               = { workspace = true, features = ["logging", "cache_metrics"] }
+serde              = { workspace = true, features = ["derive"] }
+thiserror          = { workspace = true }
+tokio              = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile   = { workspace = true }

@@ -1,0 +1,119 @@
+{
+  "$schema_version": 2,
+  "purpose": "Input fixture for the Mode 3 prune formula oracle. The harness at oracle-harness/run.sh feeds these input tuples into the upstream Scala FullBlockPruningProcessor and emits runtime-vectors.json, which is the ground truth the Rust parity test asserts against. This file also indexes intentional Rust-vs-Scala divergences (see intentional_rust_divergences + divergent_vectors).",
+  "source": "ergoplatform/ergo @ src/main/scala/org/ergoplatform/nodeView/history/storage/modifierprocessors/FullBlockPruningProcessor.scala",
+  "scala_source_kept_at": "test-vectors/mode3-pruning/FullBlockPruningProcessor.scala",
+  "constants": {
+    "mainnet_voting_length": 1024,
+    "testnet_voting_length": 128,
+    "genesis_height": 1
+  },
+  "intentional_rust_divergences": [
+    {
+      "name": "archive_arm_no_reset",
+      "scala_behavior": "blocks_to_keep<0 AND utxo_bootstrap=false writes GenesisHeight (=1), resetting any prior sentinel",
+      "rust_behavior": "blocks_to_keep<0 keeps current_min unchanged, never walking backward",
+      "rationale": "Scala's reset would allow post-eviction resurrection on a previously-bootstrapped store toggled back to archive. Rust's never-walk-backward is a monotonicity invariant the storage / receive / serve / rollback gates depend on."
+    },
+    {
+      "name": "suffix_snap_no_walk_back",
+      "scala_behavior": "blocks_to_keep>0 + candidate>VL: writes min(candidate, candidate-(candidate%VL)) = snapped_value, even when snapped < current_min",
+      "rust_behavior": "writes snapped.max(current_min), preserving the sentinel when an aggressive epoch snap would walk it backward",
+      "rationale": "Scala can move the prune sentinel backward across the voting-epoch boundary. That would unprune blocks mid-sync. Rust's monotonicity floor blocks the regression."
+    },
+    {
+      "name": "headers_only_does_not_advance_sentinel",
+      "scala_behavior": "blocks_to_keep == 0 falls through to the suffix-window math (the gate is `< 0`, not `<= 0`); for header_height=200 the formula returns 201 even though Mode 6 nodes never apply full blocks",
+      "rust_behavior": "blocks_to_keep == 0 returns current_min unchanged",
+      "rationale": "Mode 6 (canonical headers-only) is the only legal blocks_to_keep=0 configuration in our runtime. Mode 6 nodes never apply full blocks, so the only callers of this formula with blocks_to_keep=0 are defensive paths. Advancing the sentinel for a non-existent full-block apply would silently arm storage gates against headers-only state."
+    }
+  ],
+  "convergent_vectors": [
+    {
+      "id": "archive_unchanged_at_one",
+      "inputs": { "current_min": 1, "header_height": 100, "blocks_to_keep": -1, "voting_length": 1024 }
+    },
+    {
+      "id": "archive_with_utxo_bootstrap_keeps_current_min",
+      "description": "Scala's archive arm splits on utxo_bootstrap: when true, returns readMinimalFullBlockHeight() (pinned). Rust collapses both archive sub-arms to current_min, so this case converges.",
+      "inputs": { "current_min": 5000, "header_height": 10000, "blocks_to_keep": -1, "voting_length": 1024, "utxo_bootstrap": true }
+    },
+    {
+      "id": "suffix_below_voting_epoch_no_snap",
+      "inputs": { "current_min": 1, "header_height": 500, "blocks_to_keep": 100, "voting_length": 1024 }
+    },
+    {
+      "id": "suffix_just_below_first_epoch",
+      "inputs": { "current_min": 1, "header_height": 1024, "blocks_to_keep": 1, "voting_length": 1024 }
+    },
+    {
+      "id": "suffix_at_first_post_epoch_block_snaps",
+      "inputs": { "current_min": 1, "header_height": 1025, "blocks_to_keep": 1, "voting_length": 1024 }
+    },
+    {
+      "id": "suffix_mid_epoch_snaps_down",
+      "inputs": { "current_min": 1, "header_height": 2200, "blocks_to_keep": 300, "voting_length": 1024 }
+    },
+    {
+      "id": "suffix_exact_epoch_boundary_no_movement",
+      "inputs": { "current_min": 1024, "header_height": 3072, "blocks_to_keep": 1024, "voting_length": 1024 }
+    },
+    {
+      "id": "testnet_voting_length_128",
+      "inputs": { "current_min": 1, "header_height": 500, "blocks_to_keep": 50, "voting_length": 128 }
+    },
+    {
+      "id": "saturating_sub_at_small_height",
+      "inputs": { "current_min": 1, "header_height": 10, "blocks_to_keep": 100, "voting_length": 1024 }
+    },
+    {
+      "id": "candidate_just_above_voting_length",
+      "inputs": { "current_min": 1, "header_height": 1500, "blocks_to_keep": 475, "voting_length": 1024 }
+    },
+    {
+      "id": "two_epochs_in_window",
+      "inputs": { "current_min": 1, "header_height": 3000, "blocks_to_keep": 1500, "voting_length": 1024 }
+    }
+  ],
+  "divergent_vectors": [
+    {
+      "id": "archive_walks_back_to_one_in_scala_not_rust",
+      "description": "Scala resets archive sentinel to 1; Rust keeps current_min",
+      "inputs": {
+        "current_min": 1024,
+        "header_height": 2000,
+        "blocks_to_keep": -1,
+        "voting_length": 1024
+      },
+      "rust_expected": 1024,
+      "scala_expected": 1,
+      "divergence_ref": "archive_arm_no_reset"
+    },
+    {
+      "id": "suffix_snap_walks_back_in_scala_not_rust",
+      "description": "Scala snaps below current_min; Rust monotonicity guard keeps current_min. Math: candidate = max(5000, 5100-999) = 5000; snap = 5000 - (5000 % 1024) = 5000 - 904 = 4096.",
+      "inputs": {
+        "current_min": 5000,
+        "header_height": 5100,
+        "blocks_to_keep": 1000,
+        "voting_length": 1024
+      },
+      "rust_expected": 5000,
+      "scala_expected": 4096,
+      "divergence_ref": "suffix_snap_no_walk_back"
+    },
+    {
+      "id": "headers_only_unchanged_at_one",
+      "description": "Scala's suffix-window math fires for blocks_to_keep=0 and emits 201; Rust's explicit early return keeps current_min",
+      "inputs": {
+        "current_min": 1,
+        "header_height": 200,
+        "blocks_to_keep": 0,
+        "voting_length": 1024
+      },
+      "rust_expected": 1,
+      "scala_expected": 201,
+      "divergence_ref": "headers_only_does_not_advance_sentinel"
+    }
+  ]
+}

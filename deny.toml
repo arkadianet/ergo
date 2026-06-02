@@ -1,0 +1,46 @@
+# cargo-deny configuration.
+#
+# Run locally with: cargo install cargo-deny --locked && cargo deny check
+# CI runs the same in .github/workflows/ci.yml.
+
+[licenses]
+# Confidence threshold for license-text matching. 0.8 is the default
+# and accepts permissive licenses with minor formatting variation.
+confidence-threshold = 0.8
+
+# Permissive licenses we accept across the dep tree. Anything outside
+# this list fails the check — bumping the list is a deliberate
+# decision per dep, not a default-allow.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+
+[bans]
+# Reject multiple major-version copies of the same crate where it's
+# avoidable. `warn` rather than `deny` so transitive duplicates
+# (common in alpha) surface in the report without blocking CI.
+multiple-versions = "warn"
+wildcards         = "deny"
+
+[advisories]
+# Yanked + unsound + vulnerability classes are hard fails; informational
+# advisories (notice, unmaintained) report-only.
+yanked       = "deny"
+ignore       = []
+
+[sources]
+# Only crates.io. If we ever pull from a git URL, the URL must be
+# explicitly allow-listed here.
+unknown-git      = "deny"
+unknown-registry = "deny"
+allow-git        = []

@@ -1,0 +1,39 @@
+[package]
+name        = "ergo-api"
+description = "Operator-facing read-mostly HTTP API for the Ergo Rust node. Hosts the axum router that serves the Scala-compatible surface (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/blockchain/*`, `/mining/*`, `/wallet/*`) plus the node-native `/api/v1/*` dashboard, including mutating routes (transaction + block submission, `/node/shutdown`, and wallet lifecycle/sending). Traits-only contract: the node implements the reader / submit / admin / chain-query traits against its runtime state and hands them in as trait objects — no concrete-type coupling."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+axum               = { workspace = true }
+tower-http         = { workspace = true, features = ["trace"] }
+tokio              = { workspace = true, features = ["rt", "macros", "net", "sync"] }
+serde              = { workspace = true, features = ["derive"] }
+serde_json         = { workspace = true }
+hex                = { workspace = true }
+blake2             = { workspace = true }
+subtle             = { workspace = true }
+async-trait        = { workspace = true }
+tracing            = { workspace = true }
+utoipa             = { workspace = true }
+ergo-indexer-types = { workspace = true }
+ergo-ser           = { workspace = true }
+ergo-primitives    = { workspace = true }
+ergo-rest-json     = { workspace = true }
+thiserror          = { workspace = true }
+rand               = { workspace = true }
+
+[dev-dependencies]
+tower           = { workspace = true, features = ["util"] }
+http-body-util  = { workspace = true }
+bs58            = { workspace = true }
+# Tests need IndexerHandle to fixture the trait surface — kept dev-only
+# so the production build of ergo-api never pulls in redb or ergo-state.
+ergo-indexer    = { workspace = true }
+# Differential parity tests need scratch DBs to backfill mainnet block
+# bytes through the indexer apply path before replaying captured Scala
+# responses through the router.
+tempfile        = { workspace = true }

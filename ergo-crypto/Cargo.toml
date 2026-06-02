@@ -1,0 +1,23 @@
+[package]
+name        = "ergo-crypto"
+description = "Cryptographic primitives for the Ergo Rust node: Blake2b-based Merkle trees, Autolykos v1/v2 proof-of-work verification, secp256k1 EC arithmetic helpers, and difficulty-adjustment math (pre-EIP-37, EIP-37, and v2-activation special cases)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-chain-spec = { workspace = true }
+blake2          = { workspace = true }
+k256            = { workspace = true, features = ["arithmetic"] }
+num-bigint      = { workspace = true }
+thiserror       = { workspace = true }
+
+[dev-dependencies]
+hex        = { workspace = true }
+proptest   = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

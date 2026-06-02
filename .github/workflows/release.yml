@@ -1,0 +1,136 @@
+name: Release binaries
+
+# Triggered by pushing a tag of the form `v*` (e.g. `v0.1.0`).
+# Builds ergo-node for Linux / macOS / Windows on x86_64, attaches
+# SHA256 checksums, and uploads to the GitHub Release (created
+# automatically if it doesn't already exist).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.1.0-alpha.1)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: ergo-node
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: ergo-node
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: ergo-node.exe
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --bin ergo-node --target ${{ matrix.target }}
+
+      - name: Stage artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} stage/
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md SECURITY.md stage/
+          cd stage
+          tar -czf ../ergo-node-${{ matrix.target }}.tar.gz *
+          cd ..
+          shasum -a 256 ergo-node-${{ matrix.target }}.tar.gz > ergo-node-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact }} stage/
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md, SECURITY.md stage/
+          Compress-Archive -Path stage/* -DestinationPath ergo-node-${{ matrix.target }}.zip
+          $hash = (Get-FileHash -Algorithm SHA256 ergo-node-${{ matrix.target }}.zip).Hash.ToLower()
+          "$hash  ergo-node-${{ matrix.target }}.zip" | Out-File -Encoding ascii ergo-node-${{ matrix.target }}.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ergo-node-${{ matrix.target }}
+          path: |
+            ergo-node-${{ matrix.target }}.${{ matrix.archive }}
+            ergo-node-${{ matrix.target }}.${{ matrix.archive }}.sha256
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          # Pre-1.0 releases are published as pre-release until the
+          # tag drops the `-alpha`/`-beta`/`-rc` suffix.
+          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
+          files: |
+            artifacts/**/ergo-node-*.tar.gz
+            artifacts/**/ergo-node-*.tar.gz.sha256
+            artifacts/**/ergo-node-*.zip
+            artifacts/**/ergo-node-*.zip.sha256
+          body: |
+            ## ergo-node ${{ steps.tag.outputs.name }}
+
+            Pre-1.0 alpha. See [CHANGELOG.md](./CHANGELOG.md) for details.
+
+            **Verify a download** by computing its SHA-256 and matching
+            the published `.sha256` file:
+
+            ```
+            shasum -a 256 ergo-node-x86_64-unknown-linux-gnu.tar.gz
+            ```
+
+            **Run** (Linux):
+            ```
+            tar -xzf ergo-node-x86_64-unknown-linux-gnu.tar.gz
+            ./ergo-node --help
+            ```

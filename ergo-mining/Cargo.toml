@@ -1,0 +1,30 @@
+[package]
+name        = "ergo-mining"
+description = "Mining-side candidate assembly, solution acceptance, and external-miner integration for the Ergo Rust node. Builds consensus-correct block candidates against the committed UTXO tip; submits Autolykos v2 solutions through the existing block-apply path. External-miner-only; no internal CPU miner, no wallet."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-chain-spec = { workspace = true }
+ergo-crypto     = { workspace = true }
+ergo-validation = { workspace = true }
+ergo-state      = { workspace = true }
+ergo-mempool    = { workspace = true }
+tokio           = { workspace = true, features = ["sync"] }
+hex             = { workspace = true }
+num-bigint      = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+
+[dev-dependencies]
+ergo-mempool    = { workspace = true, features = ["test-support"] }
+ergo-state      = { workspace = true, features = ["test-helpers"] }
+serde_json      = { workspace = true }
+tempfile        = { workspace = true }
+toml            = { workspace = true }

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" class="theme-dark">
+<head>
+<meta charset="utf-8">
+<title>Ergo Node</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/components.css">
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<div class="app">
+  <nav class="side" aria-label="primary">
+    <div class="side__brand">◆ <b>ergo node</b><span id="side-net" class="side__net"></span></div>
+    <a class="side__link" href="#overview" data-section="overview">Overview</a>
+    <a class="side__link" href="#peers" data-section="peers">Peers</a>
+    <a class="side__link" href="#mempool" data-section="mempool">Mempool</a>
+    <a class="side__link" href="/wallet/ui">Wallet ↗</a>
+    <div class="side__foot">
+      <a class="side__link side__link--mini" href="/swagger">Swagger (Scala) ↗</a>
+      <a class="side__link side__link--mini" href="/swagger/native">Swagger (Native) ↗</a>
+      <button class="side__link side__link--mini" id="open-settings" type="button">⚙ Settings</button>
+      <div class="side__status"><span id="conn-dot" aria-hidden="true">●</span> <span id="conn-state">connecting</span></div>
+      <div class="side__clock" id="clock"></div>
+    </div>
+  </nav>
+  <main class="main">
+    <section id="section-overview" class="section" aria-label="Overview"></section>
+    <section id="section-peers" class="section" aria-label="Peers" hidden></section>
+    <section id="section-mempool" class="section" aria-label="Mempool" hidden></section>
+  </main>
+</div>
+<dialog id="settings-dialog" class="dialog"></dialog>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

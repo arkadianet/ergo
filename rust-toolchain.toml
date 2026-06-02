@@ -1,0 +1,7 @@
+# Pin the Rust toolchain so contributors and CI build the workspace
+# against the exact same rustc + std + clippy. Bumping `channel` here is
+# the single edit needed to roll the whole repo.
+[toolchain]
+channel    = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile    = "minimal"

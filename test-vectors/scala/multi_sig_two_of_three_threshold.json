@@ -1,0 +1,71 @@
+{
+  "case": "two_of_three_threshold",
+  "extracted_hints": [
+    {
+      "image": {
+        "pk": "03f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8",
+        "type": "ProveDlog"
+      },
+      "kind": "RealCommitment",
+      "position": "NodePosition { positions: [0, 0] }"
+    },
+    {
+      "challenge": "9c120203ee1ec0d0745c556b086ae161b7e8737608b8a461",
+      "image": {
+        "pk": "03f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8",
+        "type": "ProveDlog"
+      },
+      "kind": "RealSecretProof",
+      "position": "NodePosition { positions: [0, 0] }"
+    },
+    {
+      "image": {
+        "pk": "022b4ea0a797a443d293ef5cff444f4979f06acfebd7e86d277475656138385b6c",
+        "type": "ProveDlog"
+      },
+      "kind": "SimulatedCommitment",
+      "position": "NodePosition { positions: [0, 2] }"
+    },
+    {
+      "challenge": "15ebd16883b30742963ac309a6bc9508573ddcf8fb1fd50d",
+      "image": {
+        "pk": "022b4ea0a797a443d293ef5cff444f4979f06acfebd7e86d277475656138385b6c",
+        "type": "ProveDlog"
+      },
+      "kind": "SimulatedSecretProof",
+      "position": "NodePosition { positions: [0, 2] }"
+    }
+  ],
+  "message_hex": "6572676f2d77616c6c657420442e35206f7261636c65207061726974792074657374206d657373616765",
+  "proof_hex": "1beeebb658c8a399056f1e5a5f015b55470224b1f16b9cd787fce9b5b6d6634971334b31576bba34f0ea57c7f9d338b6029e91ae0a5caca528c3c65e2d9facaf4b86a231d6912a5ddcf9f016d244e5e11500ab43ed278ad9657b51bd984d4f6eaa8d323b395f522373851f7d179af673bec6a2addeeaa62730981a4958b04cf7304f1e4c8eff91d865abe57ca8db5907",
+  "proposition": {
+    "children": [
+      {
+        "pk": "03f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8",
+        "type": "ProveDlog"
+      },
+      {
+        "pk": "03defdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+        "type": "ProveDlog"
+      },
+      {
+        "pk": "022b4ea0a797a443d293ef5cff444f4979f06acfebd7e86d277475656138385b6c",
+        "type": "ProveDlog"
+      }
+    ],
+    "k": 2,
+    "type": "Cthreshold"
+  },
+  "real_propositions": [
+    {
+      "pk": "03f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8",
+      "type": "ProveDlog"
+    }
+  ],
+  "simulated_propositions": [
+    {
+      "pk": "022b4ea0a797a443d293ef5cff444f4979f06acfebd7e86d277475656138385b6c",
+      "type": "ProveDlog"
+    }
+  ]
+}

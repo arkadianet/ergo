@@ -1,0 +1,46 @@
+[package]
+name        = "ergo-validation"
+description = "Stateless and state-dependent validation for Ergo blocks, headers, and transactions: structural / monetary / script / cost checks; voted-protocol-parameter recomputation, validation-rule status updates, and miner-vote tallies; canonical-form enforcement and Scala-parity error mapping."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-chain-spec = { workspace = true }
+ergo-crypto     = { workspace = true }
+ergo-sigma      = { workspace = true }
+hex             = { workspace = true }
+num-bigint      = { workspace = true }
+num-traits      = { workspace = true }
+rayon           = { workspace = true }
+indexmap        = { workspace = true }
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+
+[features]
+# Re-export crate-internal helpers (`ergo_box_to_eval_box`,
+# `candidate_to_eval_box`) to integration tests through the
+# `test_helpers` module. Production code never sets this.
+test-helpers = []
+# Forward the `cost-trace` feature into the sigma evaluator — enables
+# per-step JIT-cost recording for diagnostic dumps.
+cost-trace = ["ergo-sigma/cost-trace"]
+# Gates the workspace's diagnostic-only integration tests
+# (`diagnose_block_*`, `trace_*`, `parity_triage`, `eval_error_triage`,
+# `cost_parity`) so they only compile under `--features diagnostics`.
+# These tests previously carried `#[ignore]` so a default `cargo test`
+# would skip them; the feature gate makes the same intent explicit at
+# the build-graph level, and the dedicated CI lane runs them by
+# passing the feature flag.
+diagnostics = []
+
+[dev-dependencies]
+ergo-validation = { path = ".", features = ["test-helpers"] }
+ergo-rest-json  = { workspace = true }
+hex             = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true }

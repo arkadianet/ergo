@@ -1,0 +1,17 @@
+[package]
+name        = "ergo-rest-json"
+description = "Shared JSON ↔ canonical-wire-bytes layer for Scala-compatible Ergo REST. Hosts the JSON DTOs that mirror the Scala node's encoders plus the canonicalizing decoders that turn parsed JSON back into wire bytes the indexer / validator / persistence layer expect. Anchored by the b4_* byte-parity oracle in ergo-node."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+indexmap        = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true, features = ["arbitrary_precision"] }
+hex             = { workspace = true }
+num-bigint      = { workspace = true }

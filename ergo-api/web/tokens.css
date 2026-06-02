@@ -1,0 +1,122 @@
+/* Design tokens — the single source for color, space, radius, type. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono.woff2') format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+  font-style: normal;
+}
+
+:root,
+.theme-dark {
+  --bg: #0d1117;
+  --s1: #0f141b;
+  --s2: #161b22;
+  --s3: #1c2128;
+  --s4: #22272e;
+  --bd: #30363d;
+  --bd2: #21262d;
+  --tx: #e6edf3;
+  --tx2: #8b949e;
+  --tx3: #484f58;
+  --tx4: #2d333b;
+  --green: #3fb950;
+  --orange: #f0883e;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+  --yellow: #d29922;
+  --accent: var(--orange);
+  --grid-line: rgba(139, 148, 158, 0.08);
+}
+
+.theme-light {
+  --bg: #ffffff;
+  --s1: #f6f8fa;
+  --s2: #eaeef2;
+  --s3: #dde3ea;
+  --s4: #d0d7de;
+  --bd: #d0d7de;
+  --bd2: #e1e6eb;
+  --tx: #1f2328;
+  --tx2: #636c76;
+  --tx3: #8c959f;
+  --tx4: #d0d7de;
+  --green: #1a7f37;
+  --orange: #bc4c00;
+  --red: #cf222e;
+  --blue: #0969da;
+  --purple: #8250df;
+  --yellow: #9a6700;
+  --accent: var(--orange);
+  --grid-line: rgba(31, 35, 40, 0.06);
+}
+
+.theme-hc {
+  --bg: #000000;
+  --s1: #0a0c10;
+  --s2: #10141a;
+  --s3: #161b22;
+  --s4: #1c2128;
+  --bd: #7d8590;
+  --bd2: #3d444d;
+  --tx: #ffffff;
+  --tx2: #c9d1d9;
+  --tx3: #9aa3ad;
+  --tx4: #3d444d;
+  --green: #56d364;
+  --orange: #ffa657;
+  --red: #ff7b72;
+  --blue: #79c0ff;
+  --purple: #d2a8ff;
+  --yellow: #e3b341;
+  --accent: var(--orange);
+  --grid-line: rgba(255, 255, 255, 0.12);
+}
+
+:root {
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+  --space-7: 24px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --fs-micro: 8.5px;
+  --fs-small: 9.5px;
+  --fs-body: 11px;
+  --fs-value: 14px;
+  --fs-hero: 26px;
+  --topbar-h: 40px;
+  --sidebar-w: 148px;
+  --footer-h: 24px;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+  --dur: 0.12s;
+}
+
+html {
+  font-size: var(--fs-body);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--tx);
+  font-family: var(--mono);
+  font-feature-settings: 'tnum' 1, 'cv11' 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.density-compact {
+  --space-5: 8px;
+  --space-6: 10px;
+  --space-7: 14px;
+  --fs-hero: 20px;
+}

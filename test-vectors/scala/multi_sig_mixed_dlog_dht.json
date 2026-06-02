@@ -1,0 +1,47 @@
+{
+  "case": "mixed_dlog_dht",
+  "extracted_hints": [
+    {
+      "image": {
+        "pk": "032fa2104d6b38d11b0230010559879124e42ab8dfeff5ff29dc9cdadd4ecacc3f",
+        "type": "ProveDlog"
+      },
+      "kind": "RealCommitment",
+      "position": "NodePosition { positions: [0, 0] }"
+    },
+    {
+      "challenge": "5894a343da20d17f328a91c9787ba3ddb9fbf020cc36fcf8",
+      "image": {
+        "pk": "032fa2104d6b38d11b0230010559879124e42ab8dfeff5ff29dc9cdadd4ecacc3f",
+        "type": "ProveDlog"
+      },
+      "kind": "RealSecretProof",
+      "position": "NodePosition { positions: [0, 0] }"
+    }
+  ],
+  "message_hex": "6572676f2d77616c6c657420442e35206f7261636c65207061726974792074657374206d657373616765",
+  "proof_hex": "5894a343da20d17f328a91c9787ba3ddb9fbf020cc36fcf8d09e29acd276c53b1dd154c12c196c53ab89bdb73bbc3e3fb3c5487969ee9935fa35a371d7a4e229228e1dce796f5e435cb31b7f852487717168629931a0bab1",
+  "proposition": {
+    "children": [
+      {
+        "pk": "032fa2104d6b38d11b0230010559879124e42ab8dfeff5ff29dc9cdadd4ecacc3f",
+        "type": "ProveDlog"
+      },
+      {
+        "g": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "h": "026a245bf6dc698504c89a20cfded60853152b695336c28063b61c65cbd269e6b4",
+        "type": "ProveDhTuple",
+        "u": "02c44d12c7065d812e8acf28d7cbb19f9011ecd9e9fdf281b0e6a3b5e87d22e7db",
+        "v": "023df2461e739cd98472cf10cdf663e651351e826d7afdcffce17602aec0370be6"
+      }
+    ],
+    "type": "Cand"
+  },
+  "real_propositions": [
+    {
+      "pk": "032fa2104d6b38d11b0230010559879124e42ab8dfeff5ff29dc9cdadd4ecacc3f",
+      "type": "ProveDlog"
+    }
+  ],
+  "simulated_propositions": []
+}

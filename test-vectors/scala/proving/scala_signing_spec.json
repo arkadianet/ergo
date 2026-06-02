@@ -1,0 +1,182 @@
+{
+  "_source": "reference/sigmastate-interpreter/interpreter/shared/src/test/scala/sigmastate/crypto/SigningSpecification.scala",
+  "_audit": "audit-2.md C6 (Scala signing oracle)",
+  "_scope": "VERIFY-SIDE PARITY ONLY. Our verifier MUST accept Scala-produced signatures bit-for-bit. This is the consensus-relevant property: a Scala-signed transaction must verify under our node. Prove-side byte parity (audit's original ask) requires Scala test-harness instrumentation with deterministic RNG and is DEFERRED — see README.md.",
+  "_pubkey_provenance": "pk_hex for sk[0] is pinned from Scala source line 22 (`Base16.encode(sk.publicImage.pkBytes)` literal). pk_hex for sk[1..3] is derived at test time via k256::ProjectivePoint::GENERATOR * Scalar(sk_dec) (RustCrypto primitive, NOT our prover code). The sk[0] cross-check anchors that derivation against Scala. ProveDhTuple `raw_hex` values are Scala-pinned and parsed via our own SigmaSerialize codec — that codec is the only thing being trusted to interpret 132-byte 4×SEC1 layouts.",
+  "_corpus_count": 11,
+  "_what_is_not_covered": "Prove-side byte parity (r-capture and Scala-RNG reproduction); per Codex's strict-supervisor review this is prover-implementation-equivalence testing, not consensus-relevant. Exhaustive byte-position tampering. See README.md.",
+  "_phase_8d_additions": "Vectors 9–11 capture Scala-produced proofs for the three residuals Codex flagged in 8c: OR(2) real-first single-leaf, OR(2) real-last single-leaf, and Threshold(2-of-5). Captured via `extract-tools/scala-signing-harness/SigningResidualsSpec.scala` against `reference/sigmastate-interpreter/`. See README.md for the extraction recipe.",
+
+  "secrets": {
+    "sk_a_dec": "109749205800194830127901595352600384558037183218698112947062497909408298157746",
+    "sk_a_pk_hex_scala_pinned": "03cb0d49e4eae7e57059a3da8ac52626d26fc11330af8fb093fa597d8b93deb7b1",
+    "sk_a_pk_source": "SigningSpecification.scala:22 (`Base16.encode(sk.publicImage.pkBytes) shouldBe ...`)",
+    "sk_b_dec": "50415569076448343263191022044468203756975150511337537963383000142821297891310",
+    "sk_c_dec": "34648336872573478681093104997365775365807654884817677358848426648354905397359",
+    "sk_d_dec": "416167686186183758173232992934554728075978573242452195968805863126437865059",
+    "sk_d_byte_note": "sk_d encodes to 31 big-endian bytes; left-pad with one 0x00 to fit the 32-byte secp256k1 scalar repr",
+    "sk_e_dec": "28855671467128947293874857103847123895712389471823649182374619827463912834756",
+    "sk_e_byte_note": "Phase 8d addition for the threshold(2-of-5) vector"
+  },
+
+  "msg_hex_shared": "1dc01772ee0171f5f614c673e3c7fa1107a8cf727bdf5a6dadb379e93c0d1d00",
+
+  "vectors": [
+    {
+      "name": "simple_schnorr",
+      "scala_property": "simple signature test vector",
+      "scala_line": 15,
+      "proposition": {
+        "kind": "ProveDlog",
+        "sk_idx": "a"
+      },
+      "signature_hex": "bcb866ba434d5c77869ddcbc3f09ddd62dd2d2539bf99076674d1ae0c32338ea95581fdc18a3b66789904938ac641eba1a66d234070207a2"
+    },
+    {
+      "name": "prove_dht",
+      "scala_property": "ProveDHT signature test vector",
+      "scala_line": 35,
+      "proposition": {
+        "kind": "ProveDhTuple",
+        "raw_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980280c66feee88d56e47bf3f47c4109d9218c60c373a472a0d9537507c7ee828c4802a96f19e97df31606183c1719400682d1d40b1ce50c9a1ed1b19845e2b1b551bf0255ac02191cb229891fb1b674ea9df7fc8426350131d821fc4a53f29c3b1cb21a"
+      },
+      "signature_hex": "eba93a69b28cfdea261e9ea8914fca9a0b3868d50ce68c94f32e875730f8ca361bd3783c5d3e25802e54f49bd4fb9fafe51f4e8aafbf9815"
+    },
+    {
+      "name": "and_2",
+      "scala_property": "AND signature test vector",
+      "scala_line": 55,
+      "proposition": {
+        "kind": "Cand",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          { "kind": "ProveDlog", "sk_idx": "b" }
+        ]
+      },
+      "signature_hex": "9b2ebb226be42df67817e9c56541de061997c3ea84e7e72dbb69edb7318d7bb525f9c16ccb1adc0ede4700a046d0a4ab1e239245460c1ba45e5637f7a2d4cc4cc460e5895125be73a2ca16091db2dcf51d3028043c2b9340"
+    },
+    {
+      "name": "or_2",
+      "scala_property": "OR signature test vector",
+      "scala_line": 67,
+      "proposition": {
+        "kind": "Cor",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          { "kind": "ProveDlog", "sk_idx": "b" }
+        ]
+      },
+      "signature_hex": "ec94d2d5ef0e1e638237f53fd883c339f9771941f70020742a7dc85130aaee535c61321aa1e1367befb500256567b3e6f9c7a3720baa75ba6056305d7595748a93f23f9fc0eb9c1aaabc24acc4197030834d76d3c95ede60c5b59b4b306cd787d010e8217f34677d046646778877c669",
+      "_or_note": "sigma-state's prover holds both sk_a and sk_b; this proof does not isolate which branch index was real. The two-secret-held case complements vectors `or_2_real_first_only` and `or_2_real_last_only` (Phase 8d), which DO isolate the branch position."
+    },
+    {
+      "name": "or_dlog_dht",
+      "scala_property": "OR with ProveDHT signature test vector",
+      "scala_line": 81,
+      "proposition": {
+        "kind": "Cor",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          { "kind": "ProveDhTuple",
+            "raw_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980214487635ebffa60b13a166bd0721c5f0ab603fc74168d7764d7ec5ef2107f5d40334c5b7efa5a4a22b83d102d2e6521eaa660fa911c5a213af63c8460f2327513b026a0be2a277291d42daad3830cb16a4ef20e4f1f7c36384f3fee065f0f143a355"
+          }
+        ]
+      },
+      "signature_hex": "a80daebdcd57874296f49fd9910ddaefbf517ca076b6e16b97678e96a20239978836e7ec5b795cf3a55616d394f07c004f85e0d3e71880d4734b57ea874c7eba724e8887280f1affadaad962ee916b39207af2d2ab2a69a2e6f4d652f7389cc4f582bbe6d7937c59aa64cf2965a8b36a"
+    },
+    {
+      "name": "and_dlog_or_dlog_dlog",
+      "scala_property": "AND with OR signature test vector",
+      "scala_line": 96,
+      "proposition": {
+        "kind": "Cand",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          {
+            "kind": "Cor",
+            "children": [
+              { "kind": "ProveDlog", "sk_idx": "b" },
+              { "kind": "ProveDlog", "sk_idx": "c" }
+            ]
+          }
+        ]
+      },
+      "signature_hex": "397e005d85c161990d0e44853fbf14951ff76e393fe1939bb48f68e852cd5af028f6c7eaaed587f6d5435891a564d8f9a77288773ce5b526a670ab0278aa4278891db53a9842df6fba69f95f6d55cfe77dd7b4bdccc1a3378ac4524b51598cb813258f64c94e98c3ef891a6eb8cbfd2e527a9038ca50b5bb50058de55a859a169628e6ae5ba4cb0332c694e450782d6f"
+    },
+    {
+      "name": "or_dlog_and_dlog_dlog",
+      "scala_property": "OR with AND signature test vector",
+      "scala_line": 111,
+      "proposition": {
+        "kind": "Cor",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          {
+            "kind": "Cand",
+            "children": [
+              { "kind": "ProveDlog", "sk_idx": "b" },
+              { "kind": "ProveDlog", "sk_idx": "c" }
+            ]
+          }
+        ]
+      },
+      "signature_hex": "a58b251be319a9656c21876b1136a59f42b18835dec6076c92f7a925ba28d2030218c177ab07563003eff5250cfafeb631ef610f4d710ab8e821bf632203adf23f4376580eaa17ddb36c0138f73a88551f45d92cde2b66dfbb5906c02e4d48106ff08be4a2fc29ec242f495468692f9ddeeb029dc5d8f38e2649cf09c44b67cbcfb3de4202026fb84d23ce2b4ff0f69b"
+    },
+    {
+      "name": "threshold_2_of_3",
+      "scala_property": "threshold signature test vector",
+      "scala_line": 126,
+      "proposition": {
+        "kind": "Cthreshold",
+        "k": 2,
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "d" },
+          { "kind": "ProveDlog", "sk_idx": "c" },
+          { "kind": "ProveDlog", "sk_idx": "b" }
+        ]
+      },
+      "_threshold_note": "Scala pins sk1=sk_d (31-byte BE encoding), sk2=sk_c, sk3=sk_b in the order AtLeast(2, sk1.publicImage, sk2.publicImage, sk3.publicImage). Children order preserved here.",
+      "signature_hex": "0b6bf9bc42c7b509ab56c76318c0891b2c8d44ef5fafb1379cc6b72b89c53cd43f8ef10158ce08646301d09b450ea83a1cdbbfc3dc7438ece4bbe934919069c50ec5857209b0dbf120b325c88667bc84580720ff4b3c371ec752bc6874c933f7fa53fae411e65ae07b647d365caac8c6744276c04c0240dd55e1f62c0e17a093dd91493c68104b1e01a4069017668d3f"
+    },
+    {
+      "name": "or_2_real_first_only",
+      "_provenance": "Phase 8d: captured via extract-tools/scala-signing-harness/SigningResidualsSpec.scala against reference/sigmastate-interpreter/ — prover holds ONLY sk_a, signs OR(sk_a, sk_b)",
+      "proposition": {
+        "kind": "Cor",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          { "kind": "ProveDlog", "sk_idx": "b" }
+        ]
+      },
+      "signature_hex": "904ff74e7ec581e90856212baa863b3ad01dfcc71912c12789a8a74a8aa48e4df073898ad08e6f4aa3dd309f92e43a3f2063eda9ddc3fb3c13d33a84f1dfba478e0fe49e50efe0b431d88a1861235f86adcf062e72baf92618a60d6dae9298a1df799cc0818a41cf3d14442a6452945a"
+    },
+    {
+      "name": "or_2_real_last_only",
+      "_provenance": "Phase 8d: captured via extract-tools/scala-signing-harness/SigningResidualsSpec.scala against reference/sigmastate-interpreter/ — prover holds ONLY sk_b, signs OR(sk_a, sk_b)",
+      "proposition": {
+        "kind": "Cor",
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          { "kind": "ProveDlog", "sk_idx": "b" }
+        ]
+      },
+      "signature_hex": "8abf7fd0b97937f2296ff73e56265017631fc0900c3ef8bae4fa79f30a9423a817e06d0cc425883ae332ebcec6788aecbd58ace8b4cbdaba61cb4d0d0ca318ff0ef5a68f8aa62160b35871263d5d1290581523b9ccf6ef78584ac5a35331ad41f1d5bee74ae9d0657542c8d84207750b"
+    },
+    {
+      "name": "threshold_2_of_5",
+      "_provenance": "Phase 8d: captured via extract-tools/scala-signing-harness/SigningResidualsSpec.scala — prover holds sk_a + sk_e (positions 0 and 4 in a 5-leaf AtLeast(2,...))",
+      "proposition": {
+        "kind": "Cthreshold",
+        "k": 2,
+        "children": [
+          { "kind": "ProveDlog", "sk_idx": "a" },
+          { "kind": "ProveDlog", "sk_idx": "b" },
+          { "kind": "ProveDlog", "sk_idx": "c" },
+          { "kind": "ProveDlog", "sk_idx": "d" },
+          { "kind": "ProveDlog", "sk_idx": "e" }
+        ]
+      },
+      "signature_hex": "5511303b07264186e19a3003b33ad1663d20e6687fef03228b732e16845a51b0e04e7991ed6e5c30c3c7c3e2e9217b66ac5ac58dfc0d895e2903d2a8431964505118500e60f91318adde651588f2cf94c560e313a6a1b53f24d3c6d63035bcf78f4df581a1946a862c1e96f7d6b9c4c10faa33caf5e037d9f60b0d57c108cab35f78ab70e14668ec894595dd8fb03c940b38a45d3c15197cd61350f050914962268b78b5cf8a87d40ce6bbb37bf8008c6ab3001c7617b063f84dce8a69a2a56a22014b5d772d316287bad8399b5e5ec0ddbb7493922f9cf394b1a0ec3ac24c528b769f74dc8bcf1d4d841c891667dd2210565df794db4574172112573f8783bb"
+    }
+  ]
+}

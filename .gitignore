@@ -1,0 +1,76 @@
+/target/
+/logs/
+.worktrees/
+
+# Local node runtime state (redb DBs, logs, backups). Defaults to ./ergo-data
+# per ergo-node/src/config.rs; never belongs in the tree. Also matches
+# alternate roots used for capture sessions (cow snapshots, ibd workdirs,
+# dated backups).
+/ergo-data/
+/ergo-data-*/
+/ergo-data.backup-*/
+/ergo-node.log
+/ergo-node.log.*
+/.serena/
+/.claude/scheduled_tasks.lock
+
+# Large test vector range extractions (regenerable via extract_all_cost_vectors.sh).
+# Pattern: 6-digit endpoints are range extractions; short endpoints are hand-curated.
+test-vectors/mainnet/transactions_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/mainnet/headers_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/mainnet/tx_costs_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/mainnet/input_boxes_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/testnet/transactions_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/testnet/headers_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/testnet/tx_costs_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/testnet/input_boxes_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+
+# Python bytecode cache from local helper scripts
+__pycache__/
+
+# Research docs (generated, not source-controlled)
+docs/research/
+
+# Per-session agent / harness scratch (not source-controlled).
+/.agents/
+
+# Audit session working files: phase results, summaries, group reports,
+# raw cargo / codex logs. Tracked followup punch lists like
+# audit/ergo-crypto-PHASE2-FOLLOWUPS.md use a different suffix
+# (`FOLLOWUPS`) and are not matched here.
+/audit/PHASE*-RESULT.md
+/audit/PHASE*-SUMMARY.md
+/audit/group-*.md
+/audit/*.log
+
+# Codex review / iteration scratch files. Never committed. Patterns
+# cover both .tmp_codex_rN.txt (per-iteration scratch) and the
+# .codex-final-review.txt aggregate dumps. The Codex config itself
+# (`.codex/config.toml`) is tracked and not matched here.
+/.tmp_codex_*.txt
+/.codex-final-review*.txt
+
+# Shell-redirect mishaps that left zero-byte files at the repo root.
+# Named literally so they can't sneak back in via `cmd > =` or a
+# heredoc landing on a stray identifier.
+/=
+/our_fee_per_byte
+
+# Not part of the public release. AGENTS.md / CLAUDE.md / gotchas.md hold
+# internal contributor-tooling notes; dev-docs/ holds development working
+# files (audits, checklists, archived investigations, planning specs);
+# .claude/ + .codex/ are agent/Codex tooling; audit/ + extract-tools/ are
+# dev-side audit reports and oracle-vector generation harnesses. These stay
+# in the local working tree but are never committed to the public repo.
+# Shipped docs are README / ARCHITECTURE / CONTRIBUTING / SECURITY /
+# CHANGELOG / CODE_OF_CONDUCT at the root plus the docs/ tree.
+/AGENTS.md
+/CLAUDE.md
+/gotchas.md
+/README.md.backup-*
+/.superpowers/
+/dev-docs/
+/.claude/
+/.codex/
+/audit/
+/extract-tools/

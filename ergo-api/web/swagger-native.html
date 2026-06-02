@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ergo-rust-node — Native API Swagger</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css" integrity="sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn" crossorigin="anonymous">
+<style>
+  body { margin: 0; }
+  .ergo-banner {
+    background: #f0883e;
+    color: #1a1a1a;
+    padding: 10px 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    border-bottom: 2px solid #d96f1f;
+  }
+  .ergo-banner strong { font-weight: 600; }
+  .ergo-banner a { color: #1a1a1a; text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="ergo-banner">
+  <strong>Native API:</strong> the Rust-native <code>/api/v1/*</code> surface —
+  independent of Scala parity. This spec is the production superset; the
+  conditional routes (mempool submit/check, node shutdown) may not be mounted
+  in a given process — query <code>/api/v1/health</code> for live state. See
+  <a href="/swagger">/swagger</a> for the Scala-parity spec, or
+  <a href="/">/</a> for the live dashboard.
+</div>
+<div id="swagger-ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" integrity="sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep" crossorigin="anonymous"></script>
+<script>
+window.onload = () => {
+  window.ui = SwaggerUIBundle({
+    url: "/api-docs/openapi-native.yaml",
+    dom_id: "#swagger-ui",
+    deepLinking: true,
+    presets: [SwaggerUIBundle.presets.apis],
+    layout: "BaseLayout",
+  });
+};
+</script>
+</body>
+</html>

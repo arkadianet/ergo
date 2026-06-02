@@ -1,0 +1,140 @@
+[workspace]
+resolver = "2"
+members = [
+    "ergo-primitives",
+    "ergo-ser",
+    "ergo-chain-spec",
+    "ergo-crypto",
+    "ergo-sigma",
+    "ergo-validation",
+    "ergo-wallet",
+    "ergo-state",
+    "ergo-p2p",
+    "ergo-sync",
+    "ergo-node",
+    "ergo-mempool",
+    "ergo-mining",
+    "ergo-indexer-types",
+    "ergo-indexer",
+    "ergo-api",
+    "ergo-rest-json",
+]
+
+[workspace.package]
+version    = "0.2.1"
+edition    = "2021"
+license    = "MIT OR Apache-2.0"
+repository = "https://github.com/arkadianet/opus-ferruginis"
+
+[workspace.dependencies]
+# Internal crates — keep paths here so a single edit moves every member.
+ergo-primitives    = { path = "ergo-primitives" }
+ergo-ser           = { path = "ergo-ser" }
+ergo-chain-spec    = { path = "ergo-chain-spec" }
+ergo-crypto        = { path = "ergo-crypto" }
+ergo-sigma         = { path = "ergo-sigma" }
+ergo-validation    = { path = "ergo-validation" }
+ergo-wallet        = { path = "ergo-wallet" }
+ergo-state         = { path = "ergo-state" }
+ergo-p2p           = { path = "ergo-p2p" }
+ergo-sync          = { path = "ergo-sync" }
+ergo-mempool       = { path = "ergo-mempool" }
+ergo-mining        = { path = "ergo-mining" }
+ergo-indexer-types = { path = "ergo-indexer-types" }
+ergo-indexer       = { path = "ergo-indexer" }
+ergo-api           = { path = "ergo-api" }
+ergo-rest-json     = { path = "ergo-rest-json" }
+
+# Cryptography
+aes-gcm  = "0.10"
+blake2   = "0.10"
+k256     = "0.13"
+md5      = "0.7"
+pbkdf2   = "0.12"
+sha2     = "0.10"
+gf2_192  = "0.28"
+bip39    = "2"
+hmac     = "0.12"
+
+# Numerics
+num-bigint  = "0.4"
+num-integer = "0.1"
+num-traits  = "0.2"
+
+# Encoding / parsing
+bincode    = "1.3"
+hex        = "0.4"
+subtle     = "2"
+indexmap   = { version = "2", features = ["serde"] }
+serde      = "1"
+serde_json = "1"
+toml       = "0.8"
+uuid       = "1"
+bs58       = "0.5"
+bytes      = "1"
+
+# Errors / async runtime
+thiserror   = "2"
+tokio       = "1"
+async-trait = "0.1"
+zeroize    = { version = "1", features = ["derive"] }
+
+# Storage / data structures
+redb              = "2"
+ergo_avltree_rust = "0.1.1"
+lru               = "0.12"
+crossbeam-channel = "0.5"
+arc-swap          = "1"
+parking_lot       = "0.12"
+
+# Parallelism
+rayon = "1.11"
+
+# HTTP
+axum            = "0.7"
+tower           = "0.5"
+tower-http      = "0.5"
+http-body-util  = "0.1"
+
+# OpenAPI — derive-based spec generation for the Rust-native /api/v1/* surface.
+utoipa          = { version = "5", features = ["axum_extras", "yaml"] }
+
+# CLI / config
+clap = "4"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-log        = "0.2"
+tracing-appender   = "0.2"
+
+# OS / host metrics — read-only system info for the operator dashboard's
+# `/api/v1/host` endpoint (RSS, DB sizes, disk space). Pinned at a stable
+# minor; default features only.
+sysinfo = { version = "0.32", default-features = false, features = ["system", "disk"] }
+
+# Test infrastructure
+tempfile = "3"
+proptest = "1"
+rand     = "0.8"
+
+# Default test profile: opt-level 1 cuts crypto-heavy oracle tests
+# from ~4min to ~30s while keeping debug info for backtraces.
+[profile.test]
+opt-level = 1
+
+# Full-optimization profile for oracle/CI runs.
+# Usage: cargo test --profile oracle
+[profile.oracle]
+inherits = "test"
+opt-level = 2
+
+# Profiling profile: release-equivalent with frame pointers + line-number
+# debuginfo so perf/flamegraph can attribute samples to functions.
+# Usage:
+#   RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" \
+#     cargo build --profile release-prof -p ergo-node
+[profile.release-prof]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

@@ -1,0 +1,33 @@
+[package]
+name        = "ergo-sync"
+description = "Sync coordinator for the Ergo Rust node: header-first chain sync, parallel block validation, peer-aware modifier delivery, and the executor that drives ergo-p2p / ergo-validation / ergo-state in lockstep through IBD and steady-state."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-crypto     = { workspace = true }
+ergo-validation = { workspace = true }
+ergo-state      = { workspace = true }
+ergo-p2p        = { workspace = true }
+hex             = { workspace = true }
+num-bigint      = { workspace = true }
+rayon           = { workspace = true }
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+
+[dev-dependencies]
+ergo-state      = { workspace = true, features = ["test-helpers"] }
+ergo-p2p        = { workspace = true, features = ["test-helpers"] }
+ergo-validation = { workspace = true, features = ["test-helpers"] }
+ergo-chain-spec = { workspace = true }
+hex        = { workspace = true }
+num-bigint = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile   = { workspace = true }
+redb       = { workspace = true }

@@ -1,0 +1,28 @@
+[package]
+name        = "ergo-ser"
+description = "Consensus-typed wire-format serializers for Ergo: headers, block transactions, ergo boxes, ErgoTree (with sigma type/value codecs), addresses, AD proofs, autolykos solutions, and difficulty encoding. Built on top of ergo-primitives' VlqReader/VlqWriter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+num-bigint      = { workspace = true }
+thiserror       = { workspace = true }
+bs58            = { workspace = true }
+indexmap        = { workspace = true }
+
+[features]
+# Gates `tests/roundtrip_triage.rs`, a diagnostic harness for
+# investigating individual mainnet box bytes that fail round-trip.
+# Default `cargo test` does not compile it; the diagnostics CI lane
+# runs it for ad-hoc triage.
+diagnostics = []
+
+[dev-dependencies]
+hex        = { workspace = true }
+proptest   = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

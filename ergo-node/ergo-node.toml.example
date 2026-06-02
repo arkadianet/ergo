@@ -1,0 +1,126 @@
+# Ergo Rust Node Configuration
+# Copy to your data directory as ergo-node.toml
+
+network = "mainnet"
+# data_dir = "./ergo-data"  # default
+
+[node]
+agent_name = "opus"
+node_name = "my-ergo-node"
+
+# Pruning suffix length (Mode 3 of the node mode-coverage roadmap).
+# -1 = full archive (default). N >= 0 = pruned: retain at least
+# max(N, 200) blocks below the tip. The eviction path is gated; the
+# default keeps every block.
+# Cannot coexist with [indexer] enabled = true (R2 rule from Scala
+# ErgoSettingsReader.consistentSettings) — extra-index needs the
+# full archive.
+# blocks_to_keep = -1
+
+# State backend (Modes 5/6 of the roadmap). "utxo" (default) keeps
+# the full UTXO set on disk; "digest" keeps only the AD root and
+# header window. The digest backend itself is gated until the
+# Mode 5/6 sync paths ship.
+# state_type = "utxo"
+
+# Headers-only mode (Mode 6). When false, the node syncs only
+# headers, never downloads block sections or validates transactions.
+# Requires state_type = "digest" (R1 rule). The canonical Mode 6
+# combo per Scala application.conf:15 is:
+#   state_type = "digest"
+#   verify_transactions = false
+#   blocks_to_keep = 0
+# Any other Digest+vT=false combo is not a Scala-supported mode.
+# verify_transactions = true
+
+# [node.utxo] — UTXO snapshot bootstrap settings (Mode 2). Mirrors
+# Scala `ergo.node.utxo`. When utxo_bootstrap = true, the node
+# downloads a UTXO set snapshot at a fixed-cadence height instead
+# of replaying the chain from genesis. Gated until Mode 2 part 2
+# ships (snapshot codec + p2p messages + bootstrap orchestration).
+# Cannot coexist with [indexer] enabled = true (R2 rule).
+# [node.utxo]
+# utxo_bootstrap = false
+
+# [node.nipopow] — NiPoPoW bootstrap settings. Mirrors Scala
+# `ergo.node.nipopow`. When nipopow_bootstrap = true, the node
+# downloads a PoPoW proof at startup and jumps to the suffix tip
+# without full header sync. Per R3 rule, this requires EITHER
+# utxo_bootstrap = true OR blocks_to_keep >= 0 — a full archive
+# node cannot also PoPoW-bootstrap. Gated until nipopow part 2
+# ships (proof verification + p2p messages).
+# [node.nipopow]
+# nipopow_bootstrap = false
+
+[peers]
+# Current defaults: target 60 outbound peers, max 80 total connections,
+# with up to 20 inbound slots reserved.
+target_outbound = 60
+max_connections = 80
+per_ip_limit = 1
+per_subnet_limit = 3
+
+# Inbound TCP listener. Omit / leave empty to run outbound-only.
+# Mirrors Scala `scorex.network.bindAddress`.
+# bind_addr = "0.0.0.0:9030"
+
+# Address advertised to peers in our handshake / Peers gossip so others
+# can dial us. Independent of bind_addr — a NAT'd host typically binds
+# to a private LAN IP and declares the public IP forwarded to it.
+# Mirrors Scala `scorex.network.declaredAddress`.
+# declared_addr = "203.0.113.10:9030"
+
+# Mainnet seed peers
+known = [
+    "213.239.193.208:9030",
+    "159.65.11.55:9030",
+    "165.227.26.175:9030",
+    "159.89.116.15:9030",
+    "136.244.110.145:9030",
+    "94.130.108.35:9030",
+    "51.75.147.1:9030",
+]
+
+[sync]
+# Blocks ahead of best_full_block to keep section downloads pending.
+download_window = 384
+
+[store]
+# redb + AVL arena page cache in bytes. Omit to use the binary default.
+# cache_bytes = 1073741824
+
+[chain]
+# Mainnet default script-validation checkpoint is embedded. Set height = 0
+# to fully validate scripts from genesis.
+# script_validation_checkpoint_height = 1231454
+# script_validation_checkpoint_block_id = "ca5aa96a2d560f49cd5652eae4b9e16bbf410ee32365313dc16544ee5fda1e6d"
+
+[api]
+# Operator API is loopback-only by default.
+bind = "127.0.0.1:9099"
+disabled = false
+public_bind = false
+
+[mempool]
+# disabled = false           # set true to skip tx relay (e.g. archival or sync-test runs)
+# sort_policy = "cost"       # cost (default) | size | min
+# max_pool_size = 1000       # matches Scala mempoolCapacity
+# max_pool_bytes = 67108864  # 64 MiB — node-side guard; no Scala equivalent
+# min_relay_fee_nano_erg = 1000000   # 1 mERG — matches Scala minimalFeeAmount
+# max_tx_size_bytes = 98304  # matches Scala maxTransactionSize
+# max_tx_cost = 4900000      # matches Scala mainnet.conf maxTransactionCost
+# ibd_gate_block_lag = 10   # auto-pause mempool when > N blocks behind tip
+
+[api]
+# Submission routes (POST /api/v1/mempool/{submit,check},
+# POST /transactions[/bytes][/check[Bytes]], POST /blocks) are always
+# mounted, matching Scala. Use [mempool] disabled = true to actively
+# reject tx admissions for archival or sync-test postures.
+
+[indexer]
+# Extra-index (/blockchain/*) — opt-in.
+# On first start with enabled = true, creates indexer.redb under data_dir
+# and backfills from h=1. Requires all full-block sections on disk;
+# pruned installs halt with IndexerError::SectionMissing.
+# Monitor via GET /blockchain/indexedHeight.
+# enabled = false

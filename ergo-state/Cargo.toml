@@ -1,0 +1,51 @@
+[package]
+name        = "ergo-state"
+description = "Authenticated UTXO state for the Ergo Rust node: AVL+ tree with arena-backed storage and incremental label maintenance, redb-persisted state store with atomic apply / undo / reorg, header chain index, voted-protocol-parameter persistence, and pruning. Provides the StateStore that block validation applies to."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[features]
+# Re-export crate-internal helpers (`apply_block_unchecked_for_test`,
+# `apply_block_checked_for_test`) to integration tests. Production
+# code never sets this.
+test-helpers = []
+# Exposes `forced_full_recompute_digest` — a test-only oracle that
+# rebuilds the root digest from structure, ignoring stored child
+# labels. Used by the `avl_labels_oracle` integration tests to prove
+# stored labels aren't stale.
+recompute-oracle = []
+
+[dependencies]
+ergo-primitives   = { workspace = true }
+ergo-ser          = { workspace = true }
+ergo-chain-spec   = { workspace = true }
+ergo-crypto       = { workspace = true }
+ergo-validation   = { workspace = true }
+ergo-sigma        = { workspace = true }
+ergo_avltree_rust = { workspace = true }
+bincode           = { workspace = true }
+blake2            = { workspace = true }
+bytes             = { workspace = true }
+crossbeam-channel = { workspace = true }
+hex               = { workspace = true }
+k256              = { workspace = true, features = ["arithmetic"] }
+lru               = { workspace = true }
+num-bigint        = { workspace = true }
+redb              = { workspace = true, features = ["logging"] }
+serde             = { workspace = true, features = ["derive"] }
+thiserror         = { workspace = true }
+tracing           = { workspace = true }
+
+[dev-dependencies]
+ergo-state        = { path = ".", features = ["test-helpers", "recompute-oracle"] }
+ergo-validation   = { workspace = true, features = ["test-helpers"] }
+ergo-wallet       = { workspace = true }
+hex               = { workspace = true }
+proptest          = { workspace = true }
+rand              = { workspace = true }
+serde             = { workspace = true, features = ["derive"] }
+serde_json        = { workspace = true }
+tempfile          = { workspace = true }

@@ -1,0 +1,26 @@
+[package]
+name        = "ergo-p2p"
+description = "Ergo P2P protocol stack for the Rust node: framed-message TCP connections, handshake, peer manager with throughput-aware partitioning, address book persistence, modifier inventory + delivery tracking, and the per-peer sync state."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+redb            = { workspace = true, features = ["logging"] }
+thiserror       = { workspace = true }
+tokio           = { workspace = true, features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }
+tracing         = { workspace = true }
+
+[features]
+# Re-export crate-internal helpers to integration tests. Production
+# code never sets this.
+test-helpers = []
+
+[dev-dependencies]
+hex      = { workspace = true }
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }

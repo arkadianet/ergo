@@ -1,0 +1,63 @@
+[package]
+name        = "ergo-node"
+description = "Operator binary and runtime crate for the Ergo Rust full node. Wires the workspace's component crates (state, p2p, sync, mempool, indexer, API) into a single async runtime, owns process-level lifecycle (config, data-dir layout, graceful shutdown, peer loop, submission action loop), and exposes the API trait surface to ergo-api over an Arc<NodeSnapshot>."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[lib]
+name = "ergo_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ergo-node"
+path = "src/main.rs"
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-chain-spec = { workspace = true }
+ergo-crypto     = { workspace = true }
+ergo-validation = { workspace = true }
+ergo-wallet     = { workspace = true }
+ergo-state      = { workspace = true }
+ergo-p2p        = { workspace = true }
+ergo-sync       = { workspace = true }
+ergo-mempool    = { workspace = true }
+ergo-mining     = { workspace = true }
+ergo-indexer    = { workspace = true }
+ergo-api        = { workspace = true }
+ergo-rest-json  = { workspace = true }
+redb            = { workspace = true, features = ["logging"] }
+bincode         = { workspace = true }
+arc-swap        = { workspace = true }
+parking_lot     = { workspace = true }
+clap            = { workspace = true, features = ["derive"] }
+hex             = { workspace = true }
+indexmap        = { workspace = true }
+num-bigint      = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true }
+tokio           = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+toml            = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender   = { workspace = true }
+async-trait        = { workspace = true }
+thiserror          = { workspace = true }
+sysinfo            = { workspace = true }
+k256               = { workspace = true }
+zeroize            = { workspace = true }
+ergo-sigma         = { workspace = true }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+ergo-api           = { workspace = true }
+ergo-mempool       = { workspace = true }
+ergo-p2p           = { workspace = true }
+ergo-primitives    = { workspace = true }
+ergo-state         = { workspace = true, features = ["test-helpers"] }
+arc-swap           = { workspace = true }
+tracing-subscriber = { workspace = true }

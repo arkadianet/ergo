@@ -1,0 +1,16 @@
+network = "mainnet"
+
+[node]
+agent_name = "opus-cap"
+node_name = "arkadia-cap-noindex"
+
+[peers]
+target_outbound = 75
+max_connections = 100
+known = ["127.0.0.1:9030"]
+
+[api]
+bind = "127.0.0.1:9098"
+
+[indexer]
+enabled = false
