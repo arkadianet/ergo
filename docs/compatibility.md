@@ -169,7 +169,7 @@ rejects, or rejecting one the reference accepts, or diverging on UTXO/AVL+
 state — is the highest-severity class of bug for this project. Report it
 **privately**, before any public disclosure or PR, via a GitHub Security
 Advisory draft:
-<https://github.com/arkadianet/opus-ferruginis/security/advisories/new>.
+<https://github.com/arkadianet/ergo/security/advisories/new>.
 
 Include the affected version (commit hash), reproduction steps, expected
 versus observed behavior, and — for anything that could split the network —

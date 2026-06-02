@@ -7,7 +7,7 @@ inheriting its architecture: every component is built in idiomatic Rust,
 checked against externally-produced test vectors, and laid out so the boundary
 between consensus-critical and non-consensus code is visible.
 
-Repository: <https://github.com/arkadianet/opus-ferruginis>
+Repository: <https://github.com/arkadianet/ergo>
 
 ## Documentation
 

@@ -25,7 +25,7 @@ ship in a release that also contains breaking changes.
 | `master` / unreleased | Best-effort; report against the commit hash |
 
 Releases are published at
-<https://github.com/arkadianet/opus-ferruginis/releases>. Always state the
+<https://github.com/arkadianet/ergo/releases>. Always state the
 exact tag or commit hash you reproduced against when reporting.
 
 ## Scope
@@ -153,11 +153,11 @@ consensus-critical against the Scala reference node.
 Please report privately, before any public disclosure or PR.
 
 - **Preferred:** open a private report through GitHub's
-  [Report a vulnerability](https://github.com/arkadianet/opus-ferruginis/security/advisories/new)
+  [Report a vulnerability](https://github.com/arkadianet/ergo/security/advisories/new)
   flow on the repository's **Security** tab. The advisory draft is visible
   only to the maintainers, who respond there. This uses GitHub's private
   vulnerability reporting — no email address is exposed.
-- Title: `opus-ferruginis security: <one-line summary>`.
+- Title: `ergo security: <one-line summary>`.
 - Include: affected version (tag or commit hash), reproduction steps,
   expected vs observed behavior, and your suggested severity. A PoC or
   failing test case is appreciated.
@@ -184,5 +184,5 @@ Critical-severity fixes ship as a tagged patch release with a release
 note and a CHANGELOG entry. Operators should subscribe to both channels
 to be notified of patch availability:
 
-- Releases: <https://github.com/arkadianet/opus-ferruginis/releases>
-- Security Advisories: <https://github.com/arkadianet/opus-ferruginis/security/advisories>
+- Releases: <https://github.com/arkadianet/ergo/releases>
+- Security Advisories: <https://github.com/arkadianet/ergo/security/advisories>

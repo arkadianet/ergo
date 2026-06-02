@@ -37,7 +37,7 @@ spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported privately to the project maintainers through GitHub's
-[Report a vulnerability](https://github.com/arkadianet/opus-ferruginis/security/advisories/new)
+[Report a vulnerability](https://github.com/arkadianet/ergo/security/advisories/new)
 flow on the repository's **Security** tab — a private channel that does not
 expose an email address. All complaints will be reviewed and investigated
 promptly and fairly. Project maintainers are obligated to respect the
