@@ -277,6 +277,24 @@ impl StateBackendKind {
             Self::Digest(d) => d.db_arc(),
         }
     }
+
+    /// The 33-byte authenticated state-root digest at the node's CURRENT tip,
+    /// regardless of backend: the UTXO arena's AVL+ root, or the digest
+    /// verifier's ADProof-derived root. Both equal the tip header's
+    /// `state_root` for their mode, so this is the real value the operator
+    /// dashboard reports as the tip state digest — not synthetic data.
+    ///
+    /// Observability read, NOT a durability claim: on the UTXO pipeline path
+    /// the in-memory root can lead the durable commit, so do not consume this
+    /// in persistence- or reorg-sensitive code (use the committed
+    /// `chain_state_meta` for that). `&mut self` because the UTXO
+    /// [`StateStore::root_digest`] accessor takes `&mut self`.
+    pub fn state_root_digest(&mut self) -> [u8; 33] {
+        match self {
+            Self::Utxo(s) => *s.root_digest().as_bytes(),
+            Self::Digest(d) => d.root_digest(),
+        }
+    }
 }
 
 impl ChainStateRead for StateBackendKind {
@@ -520,5 +538,21 @@ mod tests {
 
         assert!(utxo.as_utxo_mut().is_some());
         assert!(digest.as_utxo_mut().is_none());
+    }
+
+    #[test]
+    fn state_root_digest_matches_each_backend_root() {
+        let (mut utxo, _u) = utxo_backend();
+        let (mut digest, _d) = digest_backend();
+
+        // UTXO: the backend-agnostic accessor returns the same AVL+ root
+        // as reading it directly through the concrete store.
+        let direct = *utxo.as_utxo_mut().expect("utxo").root_digest().as_bytes();
+        assert_eq!(utxo.state_root_digest(), direct);
+
+        // Digest: a fresh store's verified root is the network genesis
+        // digest the backend was seeded with (NOT a UTXO assumption / panic).
+        let genesis = ergo_chain_spec::GenesisParams::mainnet().state_digest;
+        assert_eq!(digest.state_root_digest(), genesis);
     }
 }

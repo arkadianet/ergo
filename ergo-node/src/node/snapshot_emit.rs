@@ -118,12 +118,11 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         .flatten()
         .unwrap_or([0u8; 32]);
 
-    let state_digest = *state
-        .store
-        .as_utxo_mut()
-        .expect("utxo-only: AVL state-root digest is gated off in digest mode")
-        .root_digest()
-        .as_bytes();
+    // Backend-agnostic tip state-root digest (UTXO arena root or digest
+    // verifier's ADProof-derived root); both equal the tip header's
+    // `state_root`. A digest-backend (Mode 5) node publishes a real value
+    // here rather than panicking on a UTXO-only assumption.
+    let state_digest = state.store.state_root_digest();
     // Recent-blocks tail for the dashboard, cached by the full-block tip
     // id (rebuilt only when the tip advances — see `recent_blocks_for_tip`).
     //
@@ -397,12 +396,14 @@ fn recent_blocks_for_tip(
 /// only, which is exactly what the draining path saw anyway (sections aren't
 /// readable until their persist job commits); it just never steals the fault.
 ///
-/// UTXO-only: [`try_recent_block`] treats an absent `adProofs` section as the
-/// benign 0-byte case, which holds for UTXO mode but not for digest backends,
-/// where a missing `adProofs` section is a fault (`DigestAdProofsSectionMissing`).
-/// `publish_snapshot` is itself UTXO-only today (its state-root read asserts
-/// that), but gate here too so a digest backend never adopts the wrong size
-/// rule — it gets an empty tail instead.
+/// UTXO-only tail: [`try_recent_block`] treats an absent `adProofs` section as
+/// the benign 0-byte case, which holds for UTXO mode but not for digest
+/// backends, where a missing `adProofs` section is a fault
+/// (`DigestAdProofsSectionMissing`). `publish_snapshot` itself now runs for
+/// both backends (its state-root read goes through the backend-agnostic
+/// [`StateBackendKind::state_root_digest`]), so the backend gate lives HERE:
+/// a digest backend gets an empty recent-blocks tail rather than adopting the
+/// wrong size rule.
 fn build_recent_blocks(
     store: &StateBackendKind,
     tip_id: [u8; 32],
