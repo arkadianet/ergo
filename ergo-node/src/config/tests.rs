@@ -25,27 +25,33 @@ fn parse(toml_str: &str) -> TomlConfig {
 const TEST_DEFAULT_API_KEY_HASH: &str =
     "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf";
 
-fn minimal_cli(tmp_toml: Option<&std::path::Path>) -> Cli {
-    let toml_path = tmp_toml.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        // Default test TOML carries only the required hash. Lets
-        // tests that don't care about TOML structure call
-        // `minimal_cli(None)` and still satisfy `load()`'s
-        // mandatory-hash invariant. Per-call unique path so the
-        // parallel test scheduler can't race on a shared file.
-        let path = std::env::temp_dir().join(format!(
-            "ergo-default-test-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let body = format!("[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n");
-        std::fs::write(&path, body).expect("write default test TOML");
-        path
-    });
+/// Writes `body` to a freshly created, uniquely named temp file and
+/// returns its guard. `tempfile` creates the file with `O_EXCL`, so
+/// parallel test threads never collide on a name regardless of the
+/// platform clock resolution, and the file is removed when the guard
+/// drops — including when a failing assertion unwinds the test.
+fn temp_toml(body: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::Builder::new()
+        .prefix("ergo-cfg-test-")
+        .suffix(".toml")
+        .tempfile()
+        .expect("create temp toml");
+    std::fs::write(file.path(), body).expect("write temp toml");
+    file
+}
+
+/// Default per-test TOML carrying only the mandatory api_key_hash, so
+/// tests that don't care about TOML structure still satisfy `load()`'s
+/// hash gate. Bind the returned guard for the test's lifetime.
+fn default_toml() -> tempfile::NamedTempFile {
+    temp_toml(&format!(
+        "[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n"
+    ))
+}
+
+fn minimal_cli<P: AsRef<std::path::Path>>(tmp_toml: Option<P>) -> Cli {
     Cli {
-        config: Some(toml_path),
+        config: tmp_toml.map(|p| p.as_ref().to_path_buf()),
         network: Some("mainnet".into()),
         peers: vec!["127.0.0.1:9030".parse().unwrap()],
         data_dir: Some(
@@ -62,28 +68,17 @@ fn minimal_cli(tmp_toml: Option<&std::path::Path>) -> Cli {
     }
 }
 
-fn write_toml(contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "ergo-s3-{}-{}.toml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-    ));
-    // Auto-append the default api_key_hash unless the caller's
-    // TOML already pins one. Tests that disable the API still get
-    // the appended section but `load()` ignores it when api_bind
-    // is None, so this is safe. Tests that explicitly set
-    // api_key_hash (to assert on validation errors) take
-    // precedence.
+/// Auto-appends the mandatory api_key_hash unless the caller's TOML
+/// already pins one (tests that assert on hash-validation errors set
+/// their own). Returns the temp-file guard; bind it for the test's
+/// lifetime — the file is removed on drop.
+fn write_toml(contents: &str) -> tempfile::NamedTempFile {
     let body = if contents.contains("api_key_hash") {
         contents.to_string()
     } else {
         format!("{contents}\n[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n")
     };
-    std::fs::write(&path, body).expect("write toml");
-    path
+    temp_toml(&body)
 }
 
 #[test]
@@ -122,14 +117,16 @@ fn default_download_window_matches_p2p_constant() {
 
 #[test]
 fn load_default_download_window_is_p2p_default() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.download_window, ergo_p2p::sync::DOWNLOAD_WINDOW);
 }
 
 #[test]
 fn load_default_peer_limits_target_sixty_outbound() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(
         cfg.peer_limits,
@@ -161,7 +158,6 @@ fn load_toml_peer_limit_override() {
             per_subnet_limit: 5,
         },
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -175,12 +171,12 @@ fn load_rejects_outbound_target_above_max_connections() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("should reject invalid peer limits");
     assert!(err.contains("target_outbound"));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn load_default_node_identity_uses_ergo_rust() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.agent_name, "ergo-rust");
     assert_eq!(cfg.node_name, "ergo-rust-node");
@@ -193,7 +189,6 @@ fn load_toml_download_window_override() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.download_window, 128);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -202,7 +197,6 @@ fn load_rejects_zero_download_window() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("should reject 0");
     assert!(err.contains("download_window = 0"));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -212,7 +206,6 @@ fn load_rejects_oversize_download_window() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("should reject huge");
     assert!(err.contains("MAX_DOWNLOAD_WINDOW"));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -232,7 +225,8 @@ fn mainnet_seeds_all_parse() {
 
 #[test]
 fn load_merges_user_peer_with_mainnet_seeds() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     // User-supplied 127.0.0.1 is preserved and ordered first.
     assert_eq!(cfg.known_peers[0].to_string(), "127.0.0.1:9030");
@@ -244,7 +238,8 @@ fn load_merges_user_peer_with_mainnet_seeds() {
 fn load_dedupes_user_peer_matching_seed() {
     // If the user supplies an address that also appears in seeds,
     // we must not list it twice.
-    let mut cli = minimal_cli(None);
+    let toml = default_toml();
+    let mut cli = minimal_cli(Some(&toml));
     cli.peers = vec!["213.239.193.208:9030".parse().unwrap()];
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.known_peers.len(), 13);
@@ -252,7 +247,8 @@ fn load_dedupes_user_peer_matching_seed() {
 
 #[test]
 fn default_api_bind_is_loopback() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     let addr = cfg.api_bind.expect("default bind set");
     assert!(
@@ -268,7 +264,6 @@ fn api_disabled_yields_none() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(cfg.api_bind.is_none());
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -281,7 +276,6 @@ fn api_non_loopback_bind_rejected_without_public_bind() {
         err.contains("loopback"),
         "error should mention loopback: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -293,7 +287,6 @@ fn wallet_expose_private_keys_defaults_false() {
         !cfg.wallet_expose_private_keys,
         "absent [wallet] expose_private_keys must default to false"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -308,7 +301,6 @@ fn wallet_expose_private_keys_explicit_true_threaded() {
         cfg.wallet_expose_private_keys,
         "explicit [wallet] expose_private_keys = true must thread to NodeConfig"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -325,7 +317,6 @@ fn wallet_section_unknown_field_rejected() {
         err.contains("expose_privite_keys") || err.contains("unknown field"),
         "error must cite the unknown field: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -335,15 +326,13 @@ fn api_enabled_requires_api_key_hash() {
     // mounting `/wallet/*` ungated. Note: minimal_cli's default
     // TOML provides the hash, so this test writes its own TOML
     // *without* the hash to exercise the rejection path.
-    let path = std::env::temp_dir().join(format!("ergo-no-hash-{}.toml", std::process::id()));
-    std::fs::write(&path, "[peers]\nknown = [\"127.0.0.1:9030\"]\n").unwrap();
+    let path = temp_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("must refuse missing hash");
     assert!(
         err.contains("api_key_hash is required"),
         "error must cite the missing hash: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -357,7 +346,6 @@ fn api_key_hash_wrong_length_rejected() {
         err.contains("64 lowercase hex chars"),
         "error must cite length: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -374,7 +362,6 @@ fn api_key_hash_uppercase_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("uppercase hash must reject");
     assert!(err.contains("lowercase"), "error must cite case: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -386,7 +373,6 @@ fn api_key_hash_non_hex_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("non-hex must reject");
     assert!(err.contains("hex"), "error must cite hex: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -394,17 +380,11 @@ fn api_disabled_does_not_require_api_key_hash() {
     // Counterpart to `api_enabled_requires_api_key_hash`: when the
     // operator turns off the API server entirely, there's no
     // surface to gate so the hash isn't required.
-    let path = std::env::temp_dir().join(format!("ergo-disabled-{}.toml", std::process::id()));
-    std::fs::write(
-        &path,
-        "[api]\ndisabled = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
-    )
-    .unwrap();
+    let path = temp_toml("[api]\ndisabled = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("api disabled should load without hash");
     assert!(cfg.api_bind.is_none());
     assert!(cfg.api_key_hash.is_none());
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -416,7 +396,6 @@ fn api_non_loopback_bind_allowed_with_public_bind() {
     let cfg = NodeConfig::load(cli).expect("load");
     let addr = cfg.api_bind.expect("bind set");
     assert!(!addr.ip().is_loopback());
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -427,7 +406,6 @@ fn api_ipv6_loopback_accepted_without_public_bind() {
     let cfg = NodeConfig::load(cli).expect("load");
     let addr = cfg.api_bind.expect("bind set");
     assert!(addr.ip().is_loopback());
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -435,7 +413,8 @@ fn load_with_no_user_peers_still_succeeds_on_mainnet() {
     // Seeds alone are enough to bootstrap mainnet — no CLI/TOML
     // peers required. Regresses the earlier "no peers configured"
     // error path for the seed-only case.
-    let mut cli = minimal_cli(None);
+    let toml = default_toml();
+    let mut cli = minimal_cli(Some(&toml));
     cli.peers = Vec::new();
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.known_peers.len(), 13);
@@ -443,7 +422,8 @@ fn load_with_no_user_peers_still_succeeds_on_mainnet() {
 
 #[test]
 fn mempool_section_missing_uses_defaults() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     let def = MempoolConfig::default();
     assert!(cfg.mempool_config.enabled);
@@ -461,12 +441,12 @@ fn mempool_disabled_via_toml() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(!cfg.mempool_config.enabled);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn mempool_disabled_via_cli_flag() {
-    let mut cli = minimal_cli(None);
+    let toml = default_toml();
+    let mut cli = minimal_cli(Some(&toml));
     cli.mempool_disabled = true;
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(!cfg.mempool_config.enabled);
@@ -479,7 +459,6 @@ fn mempool_sort_policy_override() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.mempool_sort_policy, "size");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -490,7 +469,6 @@ fn mempool_cli_sort_overrides_toml() {
     cli.mempool_sort = Some("min".into());
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.mempool_sort_policy, "min");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -503,7 +481,6 @@ fn invalid_sort_policy_rejected() {
         err.contains("sort_policy"),
         "error should mention sort_policy: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -525,7 +502,6 @@ fn mempool_knobs_from_toml() {
         cfg.mempool_config.max_pool_bytes,
         MempoolConfig::default().max_pool_bytes
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -540,7 +516,6 @@ fn mempool_unknown_field_rejected() {
         err.contains("enabled") || err.contains("unknown"),
         "error should identify the unknown field: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -554,7 +529,6 @@ fn mempool_internal_knob_rejected() {
         err.contains("notifier_poll_ms") || err.contains("unknown"),
         "error should identify the unknown field: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -585,7 +559,8 @@ fn mempool_zero_tx_cost_rejected() {
 
 #[test]
 fn peers_bind_addr_default_outbound_only() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(
         cfg.bind_addr.is_none(),
@@ -603,7 +578,6 @@ fn peers_bind_addr_empty_string_treated_as_unset() {
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(cfg.bind_addr.is_none());
     assert!(cfg.declared_addr.is_none());
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -612,7 +586,6 @@ fn peers_bind_addr_parses_ipv4() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.bind_addr.unwrap().to_string(), "0.0.0.0:9030");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -623,7 +596,6 @@ fn peers_declared_addr_parses_ipv4() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.declared_addr.unwrap().to_string(), "203.0.113.10:9030",);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -633,7 +605,6 @@ fn peers_bind_addr_invalid_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("should reject malformed bind_addr");
     assert!(err.contains("bind_addr"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -643,14 +614,14 @@ fn peers_declared_addr_invalid_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("should reject hostname declared_addr");
     assert!(err.contains("declared_addr"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- logging -----
 
 #[test]
 fn logging_section_missing_uses_defaults() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.logging.default_level, "info");
     assert_eq!(cfg.logging.format, LoggingFormat::Text);
@@ -666,7 +637,6 @@ fn logging_format_json_parses() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.logging.format, LoggingFormat::Json);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -678,7 +648,6 @@ fn logging_format_unknown_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("unknown format should reject");
     assert!(err.contains("format"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -690,7 +659,6 @@ fn logging_default_level_override() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.logging.default_level, "info");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -702,7 +670,6 @@ fn logging_invalid_default_level_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("invalid filter should reject");
     assert!(err.contains("default_level"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -720,7 +687,6 @@ fn logging_file_defaults_resolve_under_data_dir() {
     assert_eq!(file.prefix, "ergo-node");
     assert_eq!(file.rotation, "daily");
     assert_eq!(file.max_files, 14);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -735,7 +701,6 @@ fn logging_file_relative_dir_resolves_against_data_dir() {
     let cfg = NodeConfig::load(cli).expect("load");
     let file = cfg.logging.file.expect("file enabled");
     assert_eq!(file.dir, data_dir.join("my-logs"));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -753,7 +718,6 @@ fn logging_file_absolute_dir_preserved() {
     let cfg = NodeConfig::load(cli).expect("load");
     let file = cfg.logging.file.expect("file enabled");
     assert_eq!(file.dir, std::path::PathBuf::from(abs));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -765,7 +729,6 @@ fn logging_file_unknown_rotation_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("unknown rotation should reject");
     assert!(err.contains("rotation"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -777,7 +740,6 @@ fn logging_file_zero_max_files_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("zero retention should reject");
     assert!(err.contains("max_files"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -789,7 +751,6 @@ fn logging_file_prefix_with_path_separator_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("prefix with separator should reject");
     assert!(err.contains("prefix"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -801,14 +762,14 @@ fn logging_unknown_field_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("unknown field should reject");
     assert!(err.contains("typo_field"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- Mode 3 (pruning) -----
 
 #[test]
 fn blocks_to_keep_default_is_archive() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(
         cfg.blocks_to_keep, -1,
@@ -825,7 +786,6 @@ fn blocks_to_keep_archive_minus_one_accepted() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.blocks_to_keep, -1);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -847,7 +807,6 @@ fn blocks_to_keep_zero_requires_canonical_mode_6() {
         err.contains("blocks_to_keep = 0") && err.contains("canonical Mode 6"),
         "error: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -864,7 +823,6 @@ fn blocks_to_keep_below_rollback_floor_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("below-floor pruning");
     assert!(err.contains("rollback-window floor"), "error: {err}",);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -877,7 +835,6 @@ fn blocks_to_keep_above_rollback_floor_accepted() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("Mode 3 with adequate window must load");
     assert_eq!(cfg.blocks_to_keep, 1024);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -895,7 +852,6 @@ fn blocks_to_keep_minus_two_rejected() {
         err.contains("blocks_to_keep"),
         "error should mention key: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -907,7 +863,6 @@ fn blocks_to_keep_minus_three_rejected() {
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("must reject < -1");
     assert!(err.contains("blocks_to_keep"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -928,7 +883,6 @@ fn pruned_with_extra_index_rejected() {
         err.contains("indexer") || err.contains("extra-index"),
         "error: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -944,7 +898,6 @@ fn archive_with_extra_index_accepted() {
     let cfg = NodeConfig::load(cli).expect("Mode 1 + extraIndex must work");
     assert_eq!(cfg.blocks_to_keep, -1);
     assert!(cfg.indexer_config.enabled);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -959,14 +912,14 @@ fn pruned_without_extra_index_loads_after_phase4() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("Mode 3 standard setup must load");
     assert_eq!(cfg.blocks_to_keep, 1024);
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- Mode 6 (Headers-only) part 1: schema + R1 + activation gate -----
 
 #[test]
 fn state_type_default_is_utxo() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.state_type, StateType::Utxo);
     assert!(cfg.verify_transactions, "default vT must be true");
@@ -981,7 +934,6 @@ fn state_type_explicit_utxo_accepted() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.state_type, StateType::Utxo);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1006,7 +958,6 @@ fn state_type_digest_loads_as_canonical_mode_5() {
         !cfg.mempool_config.enabled,
         "Mode 5 force-disables the mempool (no box store to validate inputs)",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1022,12 +973,12 @@ fn state_type_unknown_value_rejected() {
     assert!(err.contains("flux-capacitor"), "error: {err}");
     assert!(err.contains("utxo"), "error: {err}");
     assert!(err.contains("digest"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn verify_transactions_default_is_true() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(cfg.verify_transactions);
 }
@@ -1045,7 +996,6 @@ fn verify_transactions_false_with_utxo_rejected_by_r1() {
     let err = NodeConfig::load(cli).expect_err("R1 must reject");
     assert!(err.contains("verify_transactions"), "error: {err}");
     assert!(err.contains("state_type"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1067,7 +1017,6 @@ fn non_canonical_mode_6_combo_rejected_before_activation_gate() {
         !err.contains("not yet supported"),
         "canonical-combo check must fire before activation gate; got: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1083,7 +1032,6 @@ fn non_canonical_mode_6_combo_archive_btk_rejected() {
     let err = NodeConfig::load(cli).expect_err("must reject");
     assert!(err.contains("blocks_to_keep"), "error: {err}");
     assert!(err.contains("canonical"), "error: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1107,7 +1055,6 @@ fn canonical_mode_6_combo_accepted() {
         !cfg.mempool_config.enabled,
         "mempool must be force-disabled in Mode 6 (no UTXO for tx validation)",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1128,7 +1075,6 @@ fn mode_6_combined_with_utxo_bootstrap_rejected() {
         err.contains("utxo_bootstrap") && err.contains("headers-only"),
         "rejection must reference both utxo_bootstrap and headers-only: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- Mode 5 (digest verifier) unsupported-subsystem gates -----
@@ -1152,7 +1098,6 @@ fn mode_5_mining_enabled_rejected_by_digest_combo_gate() {
     let err = NodeConfig::load(cli).expect_err("mining + digest must reject");
     assert!(err.contains("[mining]"), "must name mining: {err}");
     assert!(err.contains("digest"), "must name digest: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1170,7 +1115,6 @@ fn mode_5_indexer_enabled_rejected_by_digest_combo_gate() {
     let err = NodeConfig::load(cli).expect_err("indexer + digest must reject");
     assert!(err.contains("[indexer]"), "must name indexer: {err}");
     assert!(err.contains("digest"), "must name digest: {err}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1194,7 +1138,6 @@ fn claim_storage_rent_without_indexer_rejected() {
         err.contains("[indexer]"),
         "must point at the indexer: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1213,7 +1156,6 @@ fn claim_storage_rent_with_indexer_loads() {
         NodeConfig::load(cli).expect("mining + claim_storage_rent + indexer (Mode 1) must load");
     assert!(cfg.mining_config.claim_storage_rent);
     assert!(cfg.indexer_config.enabled);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1282,7 +1224,6 @@ fn mode_6_mempool_force_disabled_in_full_node_config_load() {
         !cfg.mempool_config.enabled,
         "Mode 6 mempool must be force-disabled through the load path",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- mining -----
@@ -1295,9 +1236,10 @@ fn load_mining_enabled_via_cli_without_toml_section_uses_serde_defaults() {
     // Default/serde-split fix this path produced `use_external_miner =
     // false` and failed `validate()` at load — this is the regression
     // guard for that.
+    let toml = default_toml();
     let cli = Cli {
         mining_enabled: true,
-        ..minimal_cli(None)
+        ..minimal_cli(Some(&toml))
     };
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(cfg.mining_config.enabled);
@@ -1315,22 +1257,19 @@ fn load_mining_enabled_via_toml_without_pubkey_succeeds() {
     // `miner_public_key_hex == None` and the serde field defaults filled
     // in (notably `use_external_miner = true`).
     let path = write_toml("[mining]\nenabled = true\n");
-    let cli = Cli {
-        config: Some(path.clone()),
-        ..minimal_cli(None)
-    };
+    let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(cfg.mining_config.enabled);
     assert!(cfg.mining_config.miner_public_key_hex.is_none());
     assert!(cfg.mining_config.use_external_miner);
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- Mode 2 (UTXO snapshot bootstrap) part 1 -----
 
 #[test]
 fn utxo_bootstrap_default_is_false() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(
         !cfg.utxo_bootstrap,
@@ -1347,7 +1286,6 @@ fn utxo_bootstrap_explicit_false_accepted() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(!cfg.utxo_bootstrap);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1363,7 +1301,6 @@ fn utxo_bootstrap_true_accepted_after_part_2j_gate_lift() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("Mode 2 config now loads");
     assert!(cfg.utxo_bootstrap, "utxo_bootstrap = true threaded through");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1391,7 +1328,6 @@ fn utxo_bootstrap_with_extra_index_rejected_by_r2() {
         !err.contains("not yet supported"),
         "R2 must fire BEFORE activation gate; got: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1409,14 +1345,14 @@ fn utxo_section_unknown_field_rejected() {
         err.contains("utxoBootstrap") || err.contains("unknown"),
         "error: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 // ----- Nipopow bootstrap part 1 -----
 
 #[test]
 fn nipopow_bootstrap_default_is_false() {
-    let cli = minimal_cli(None);
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(!cfg.nipopow_bootstrap);
 }
@@ -1430,7 +1366,6 @@ fn nipopow_bootstrap_explicit_false_accepted() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("load");
     assert!(!cfg.nipopow_bootstrap);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1455,7 +1390,6 @@ fn nipopow_bootstrap_true_with_archive_rejected_by_r3() {
         !err.contains("not yet supported"),
         "R3 must fire BEFORE activation gate; got: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1479,7 +1413,6 @@ fn nipopow_bootstrap_with_disabled_genesis_id_rejected_by_r5() {
         err.contains("genesis id") || err.contains("genesis_id"),
         "error: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1497,7 +1430,6 @@ fn nipopow_bootstrap_with_default_genesis_id_accepted() {
     let cli = minimal_cli(Some(&path));
     let cfg = NodeConfig::load(cli).expect("R5 must not reject default genesis");
     assert!(cfg.nipopow_bootstrap);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1521,7 +1453,6 @@ fn nipopow_bootstrap_with_explicit_genesis_id_accepted_and_preserved() {
     let cfg = NodeConfig::load(cli).expect("R5 must accept explicit genesis_id");
     assert!(cfg.nipopow_bootstrap);
     assert_eq!(cfg.genesis_id, Some(expected));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1541,7 +1472,6 @@ fn nipopow_bootstrap_true_with_pruning_accepted_post_phase4() {
     let cfg = NodeConfig::load(cli).expect("Mode 3 + NiPoPoW combo must load post-Phase 4");
     assert_eq!(cfg.blocks_to_keep, 1024);
     assert!(cfg.nipopow_bootstrap);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1559,7 +1489,6 @@ fn nipopow_section_unknown_field_rejected() {
         err.contains("nipopowBootstrap") || err.contains("unknown"),
         "error: {err}",
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1591,5 +1520,4 @@ fn node_section_unknown_field_rejected() {
         err.contains("block_to_keep") || err.contains("unknown"),
         "error: {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
