@@ -116,17 +116,16 @@ fn to_input(tx: &ScalaTransaction) -> ScalaTransactionInput {
 /// True Scala-captured JSON (Scala node → JSON → our decoder)
 /// is verified separately by
 /// `b4_scala_captured_json_decodes_to_canonical_bytes`. This test
-/// supplies breadth (1478 vectors, diverse contract shapes); the
-/// captured-JSON test supplies the external-oracle anchor.
-///
-/// 200 vectors from genesis-era + 1278 from height 700K =
-/// 1478 txs, broad enough to cover diverse contract shapes (token
-/// mints, ergoTree versions, multi-input/data-input/output txs).
-#[test]
-fn b4_byte_parity_via_json_round_trip_mainnet_vectors() {
+/// supplies breadth — the default suite runs committed corpora spanning
+/// genesis (1-200), modern (205000-205200), and a 700K-era block, covering
+/// diverse contract shapes (token mints, ergoTree versions,
+/// multi-input/data-input/output). The larger gitignored 700K *range* corpus
+/// (1278 txs) runs in the `#[ignore]`'d companion. The captured-JSON test
+/// supplies the external-oracle anchor.
+fn run_byte_parity(files: &[&str], min_total: usize) {
     let mut total = 0;
     let mut failures: Vec<String> = Vec::new();
-    for file in &["transactions_1_200.json", "transactions_700000_700200.json"] {
+    for file in files {
         let vectors = load_vectors(file);
         assert!(!vectors.is_empty(), "{file} must have vectors");
         for v in &vectors {
@@ -180,9 +179,30 @@ fn b4_byte_parity_via_json_round_trip_mainnet_vectors() {
         failures.join("\n  - ")
     );
     assert!(
-        total >= 100,
-        "need 100+ vectors for breadth coverage; got {total}"
+        total >= min_total,
+        "need {min_total}+ vectors for breadth coverage; got {total}"
     );
+}
+
+#[test]
+fn b4_byte_parity_via_json_round_trip_mainnet_vectors() {
+    // All committed fixtures so the default suite runs in CI, spanning genesis,
+    // modern (height 205K), and a 700K-era block for diverse contract shapes.
+    // The larger gitignored 700K-range corpus runs via b4_byte_parity_broad_700k_corpus.
+    run_byte_parity(
+        &[
+            "transactions_1_200.json",
+            "transactions_205000_205200.json",
+            "transactions_700000.json",
+        ],
+        300,
+    );
+}
+
+#[test]
+#[ignore = "needs gitignored transactions_700000_700200.json — extract via test-vectors/scripts then run with --include-ignored"]
+fn b4_byte_parity_broad_700k_corpus() {
+    run_byte_parity(&["transactions_700000_700200.json"], 1000);
 }
 
 /// **Scala-captured byte oracle.** Loads JSON

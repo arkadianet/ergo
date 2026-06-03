@@ -30,7 +30,12 @@ allow = [
 # avoidable. `warn` rather than `deny` so transitive duplicates
 # (common in alpha) surface in the report without blocking CI.
 multiple-versions = "warn"
-wildcards         = "deny"
+# Deny external wildcard (`*`) version requirements, but allow the implicit
+# wildcard that path-only / workspace-member deps resolve to — otherwise every
+# internal `ergo-*` crate (declared `{ workspace = true }` / by path, with no
+# version) trips this check.
+wildcards            = "deny"
+allow-wildcard-paths = true
 
 [advisories]
 # Yanked + unsound + vulnerability classes are hard fails; informational
