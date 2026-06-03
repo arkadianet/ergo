@@ -253,4 +253,186 @@ mod tests {
     // corpus or a synthetic witness builder outside the
     // upstream prover API. The arm is correct by inspection
     // against the upstream return type.
+
+    #[test]
+    fn corrupted_proof_never_panics_during_operations() {
+        // Investigation pin for the digest-mode AVL op path. The upstream
+        // `BatchAVLVerifier` rebuilds the entire proof graph in `new()` — the
+        // panic site the `digest_apply` construction guard already wraps in
+        // `catch_unwind`. The per-op `perform_one_operation` then walks that
+        // in-memory graph and returns `Err` on a bad access path (see
+        // `remove_with_presence_uncovered_key_returns_err`).
+        //
+        // This pins the panic boundary empirically: across many corruptions of
+        // a valid proof, a malformed proof either fails (or panics) AT
+        // CONSTRUCTION, or yields a verifier whose subsequent operations return
+        // `Ok`/`Err` — never an operation-time panic. If this ever fails, the
+        // op path in `digest_apply` needs its own `catch_unwind`; while it
+        // holds, the construction guard is the sufficient boundary and wrapping
+        // the ops too would be dead defensive code.
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut prover = new_prover();
+        let key_a = [0x11u8; 32];
+        let key_b = [0x22u8; 32];
+        let key_c = [0x33u8; 32];
+        for k in [key_a, key_b, key_c] {
+            prover
+                .perform_one_operation(&ProverOp::Insert(pk(k, vec![0xAB])))
+                .expect("seed insert");
+        }
+        let _ = prover.generate_proof();
+        let parent = prover_digest(&mut prover);
+        prover
+            .perform_one_operation(&ProverOp::Remove(bytes::Bytes::from(key_b.to_vec())))
+            .expect("prover remove");
+        let good_proof = prover.generate_proof().to_vec();
+
+        // Truncations at eighth-steps plus single-byte flips at several offsets.
+        let mut corruptions: Vec<Vec<u8>> = Vec::new();
+        for div in 1..8usize {
+            corruptions.push(good_proof[..good_proof.len() * div / 8].to_vec());
+        }
+        for off in [
+            0usize,
+            1,
+            good_proof.len() / 3,
+            good_proof.len() / 2,
+            good_proof.len().saturating_sub(1),
+        ] {
+            if off < good_proof.len() {
+                let mut c = good_proof.clone();
+                c[off] ^= 0xFF;
+                corruptions.push(c);
+            }
+        }
+
+        let mut survived_construction = 0usize;
+        for (i, bad) in corruptions.iter().enumerate() {
+            // Construction may panic (caught upstream by digest_apply) or Err.
+            let constructed = catch_unwind(AssertUnwindSafe(|| {
+                AvlVerifier::new(&parent, bad, 32, None)
+            }));
+            if let Ok(Ok(mut verifier)) = constructed {
+                survived_construction += 1;
+                // A verifier that constructed from a corrupted proof must
+                // still never panic at operation time — only Ok/Err.
+                let op_panicked = catch_unwind(AssertUnwindSafe(|| {
+                    let _ = verifier.remove_returning_value(&key_b);
+                    let _ = verifier.lookup(&key_a);
+                    let _ = verifier.insert(&[0x44u8; 32], &[0x01]);
+                    let _ = verifier.digest();
+                }))
+                .is_err();
+                assert!(
+                    !op_panicked,
+                    "corruption #{i} produced an operation-time panic — \
+                     the digest_apply op path needs its own catch_unwind guard",
+                );
+            }
+        }
+        // Crude byte corruptions almost always fail IN `new()` (graph rebuild),
+        // so the op-check arm above is frequently empty — which is exactly why
+        // the NON-VACUOUS companion test below carries the load-bearing evidence
+        // that a constructed verifier's ops are panic-free. (Printed, not
+        // asserted: we can't guarantee a crude corruption survives construction.)
+        eprintln!("corruptions surviving construction: {survived_construction}");
+    }
+
+    #[test]
+    fn constructed_verifier_adversarial_ops_return_err_not_panic() {
+        // Non-vacuous companion to `corrupted_proof_never_panics_during_operations`.
+        // Construction from a VALID proof is guaranteed to succeed, so the op
+        // path below is always exercised. Each adversarial op is the FIRST op on
+        // a freshly-constructed verifier — representative of `digest_apply`,
+        // which returns on the first `Err` and never operates past a failure.
+        // Keys the proof does not witness (uncovered, zero/ff, a pseudo-random
+        // sweep) across lookup/remove/remove_with_presence/insert must all
+        // return `Ok`/`Err`, never panic. This is the realistic Mode-5 threat (a
+        // proof that constructs, then an op falls off its witnessed access path)
+        // and is the load-bearing evidence that the `digest_apply` op loop needs
+        // no `catch_unwind`.
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut prover = new_prover();
+        let key_a = [0x11u8; 32];
+        let key_b = [0x22u8; 32];
+        let key_c = [0x33u8; 32];
+        for k in [key_a, key_b, key_c] {
+            prover
+                .perform_one_operation(&ProverOp::Insert(pk(k, vec![0xAB])))
+                .expect("seed insert");
+        }
+        let _ = prover.generate_proof();
+        let parent = prover_digest(&mut prover);
+        prover
+            .perform_one_operation(&ProverOp::Remove(bytes::Bytes::from(key_b.to_vec())))
+            .expect("prover remove");
+        let good_proof = prover.generate_proof().to_vec();
+
+        let mut adversarial: Vec<[u8; 32]> = vec![
+            key_a,
+            key_b,
+            key_c,
+            [0x00u8; 32],
+            [0xFFu8; 32],
+            [0x99u8; 32],
+        ];
+        for i in 0u8..32 {
+            adversarial.push([i.wrapping_mul(7).wrapping_add(3); 32]);
+        }
+
+        for (i, k) in adversarial.iter().enumerate() {
+            // Fresh verifier per op: construction is guaranteed (valid proof),
+            // and the single op below is the "first op" digest_apply would run.
+            let mut v =
+                AvlVerifier::new(&parent, &good_proof, 32, None).expect("valid proof constructs");
+            let panicked = catch_unwind(AssertUnwindSafe(|| match i % 4 {
+                0 => {
+                    let _ = v.lookup(k);
+                }
+                1 => {
+                    let _ = v.remove_returning_value(k);
+                }
+                2 => {
+                    let _ = v.remove_with_presence(k);
+                }
+                _ => {
+                    let _ = v.insert(k, &[0x01]);
+                }
+            }))
+            .is_err();
+            assert!(
+                !panicked,
+                "adversarial op {} on key #{i} panicked at operation time — \
+                 the digest_apply op path would need a catch_unwind guard",
+                i % 4,
+            );
+        }
+
+        // Phase 2 — after PARTIAL stream consumption (not just first-op): drive
+        // the real Mode-5 op order (lookups, then the witnessed remove, then an
+        // insert) on one verifier, legitimately consuming proof stream, THEN
+        // fall off the witnessed access paths with adversarial ops. None may
+        // panic. Guaranteed non-vacuous: the valid proof always constructs.
+        let mut v =
+            AvlVerifier::new(&parent, &good_proof, 32, None).expect("valid proof constructs");
+        let post_consumption_panicked = catch_unwind(AssertUnwindSafe(|| {
+            let _ = v.lookup(&key_a); // uncovered lookup → Err
+            let _ = v.remove_returning_value(&key_b); // witnessed remove → Ok (consumes stream)
+            let _ = v.insert(&[0x44u8; 32], &[0x05]); // unwitnessed insert
+            for k in &adversarial {
+                let _ = v.lookup(k);
+                let _ = v.remove_returning_value(k);
+                let _ = v.remove_with_presence(k);
+                let _ = v.insert(k, &[0x07]);
+            }
+            let _ = v.digest();
+        }))
+        .is_err();
+        assert!(
+            !post_consumption_panicked,
+            "ops after partial proof-stream consumption must return Ok/Err, never panic",
+        );
+    }
 }
