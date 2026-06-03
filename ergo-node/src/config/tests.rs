@@ -25,21 +25,30 @@ fn parse(toml_str: &str) -> TomlConfig {
 const TEST_DEFAULT_API_KEY_HASH: &str =
     "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf";
 
+/// Unique temp-file path for a per-test TOML fixture. Uniqueness comes
+/// from a monotonic counter rather than the wall clock: `cargo test`
+/// runs cases as parallel threads in one process, so two of them can
+/// reach a path builder within the same clock tick, and a microsecond-
+/// grained `SystemTime` (as on macOS) then hands both the same name —
+/// the racing `fs::write`s would interleave into corrupt TOML. The
+/// counter is collision-free regardless of clock resolution.
+fn unique_temp_toml(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "ergo-{tag}-{}-{}.toml",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
 fn minimal_cli(tmp_toml: Option<&std::path::Path>) -> Cli {
     let toml_path = tmp_toml.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         // Default test TOML carries only the required hash. Lets
         // tests that don't care about TOML structure call
         // `minimal_cli(None)` and still satisfy `load()`'s
-        // mandatory-hash invariant. Per-call unique path so the
-        // parallel test scheduler can't race on a shared file.
-        let path = std::env::temp_dir().join(format!(
-            "ergo-default-test-{}-{}.toml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
+        // mandatory-hash invariant.
+        let path = unique_temp_toml("default-test");
         let body = format!("[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n");
         std::fs::write(&path, body).expect("write default test TOML");
         path
@@ -63,14 +72,7 @@ fn minimal_cli(tmp_toml: Option<&std::path::Path>) -> Cli {
 }
 
 fn write_toml(contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "ergo-s3-{}-{}.toml",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-    ));
+    let path = unique_temp_toml("s3");
     // Auto-append the default api_key_hash unless the caller's
     // TOML already pins one. Tests that disable the API still get
     // the appended section but `load()` ignores it when api_bind
@@ -335,7 +337,7 @@ fn api_enabled_requires_api_key_hash() {
     // mounting `/wallet/*` ungated. Note: minimal_cli's default
     // TOML provides the hash, so this test writes its own TOML
     // *without* the hash to exercise the rejection path.
-    let path = std::env::temp_dir().join(format!("ergo-no-hash-{}.toml", std::process::id()));
+    let path = unique_temp_toml("no-hash");
     std::fs::write(&path, "[peers]\nknown = [\"127.0.0.1:9030\"]\n").unwrap();
     let cli = minimal_cli(Some(&path));
     let err = NodeConfig::load(cli).expect_err("must refuse missing hash");
@@ -394,7 +396,7 @@ fn api_disabled_does_not_require_api_key_hash() {
     // Counterpart to `api_enabled_requires_api_key_hash`: when the
     // operator turns off the API server entirely, there's no
     // surface to gate so the hash isn't required.
-    let path = std::env::temp_dir().join(format!("ergo-disabled-{}.toml", std::process::id()));
+    let path = unique_temp_toml("disabled");
     std::fs::write(
         &path,
         "[api]\ndisabled = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
