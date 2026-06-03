@@ -863,6 +863,14 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
 /// blocking cost since snapshot heights are 52,224 blocks apart
 /// (~5-7 days at mainnet block times).
 fn maybe_rebuild_serve_snapshot(state: &mut NodeState) {
+    // Mode-2 snapshot serving is UTXO-only: the digest backend has no AVL+
+    // box arena to build a manifest from. Gate on the backend KIND (not the
+    // `state_type` config) and BEFORE the tip checks, so a digest-backend node
+    // returns here on every tick — covered by `mode_5_survives_a_sync_tick` —
+    // rather than ever reaching the UTXO-only `build_snapshot_at_tip` below.
+    if state.store.as_utxo().is_none() {
+        return;
+    }
     let tip = state.store.chain_state_meta().best_full_block_height;
     if tip == 0 {
         return;
@@ -876,7 +884,7 @@ fn maybe_rebuild_serve_snapshot(state: &mut NodeState) {
     match state
         .store
         .as_utxo()
-        .expect("utxo-only: Mode 2 snapshot serve build is gated off in digest mode")
+        .expect("utxo-only: gated by the as_utxo().is_none() early-return at fn top")
         .build_snapshot_at_tip(ergo_state::avl::snapshot_codec::MAINNET_MANIFEST_DEPTH)
     {
         Ok(server) => {

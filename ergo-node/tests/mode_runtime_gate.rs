@@ -127,6 +127,62 @@ async fn run_inner_accepts_canonical_mode_5() {
 }
 
 #[tokio::test]
+async fn mode_5_survives_a_sync_tick() {
+    // Regression for the digest-backend tick-1 panic. `emit_heartbeat`,
+    // `publish_snapshot`, and `maybe_rebuild_serve_snapshot` used to call
+    // `store.as_utxo_mut().expect("...gated off in digest mode").root_digest()`,
+    // which aborts the action loop on the FIRST `sync_tick` of a Mode-5
+    // (Digest backend) node — `as_utxo_mut()` is `None` for a digest store.
+    // `run_inner_accepts_canonical_mode_5` only boots and drops the handle, so
+    // it never drives a tick and never caught this.
+    //
+    // Here we let the node run past at least one `sync_tick` (1 s cadence;
+    // `publish_snapshot` is not behind the heartbeat throttle, so it runs every
+    // tick) and assert the action loop is still alive: `shutdown()` awaits the
+    // loop's `JoinHandle` and surfaces a panic as `Err`. The same ticks also
+    // drive `maybe_rebuild_serve_snapshot`, whose backend-kind early-return now
+    // sits ahead of the `tip == 0` check, so a fresh digest node exercises it.
+    //
+    // Scope: this is a no-panic robustness guard for the digest backend. It does
+    // NOT assert Mode 5 is consensus- or Scala-parity-complete — only that the
+    // action loop must never abort on a UTXO-only assumption.
+    let mut cfg = common::make_test_config(std::env::temp_dir().join("ergo-mode5-sync-tick"));
+    cfg.state_type = ergo_node::config::StateType::Digest;
+    // Digest backend has no box store, so the loader/runtime disable the mempool.
+    cfg.mempool_config.enabled = false;
+    let handle = run_inner(cfg).await.expect("canonical Mode 5 must boot");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    handle
+        .shutdown()
+        .await
+        .expect("Mode-5 action loop must survive a sync_tick (no UTXO-only panic)");
+}
+
+#[tokio::test]
+async fn mode_6_survives_a_sync_tick() {
+    // Companion to `mode_5_survives_a_sync_tick`. Canonical Mode 6
+    // (headers-only) is accepted by the runtime gate, but — unlike Mode 5 — it
+    // boots on the UTXO backend: `boot.rs` routes ONLY canonical Mode 5 to
+    // `StateBackendKind::Digest`; Mode 6 falls through to `StateStore` and just
+    // sets `headers_only` in the coordinator. So Mode 6 never reaches the
+    // UTXO-only `as_utxo_mut()` path that crashed Mode 5 (a common point of
+    // confusion — it is NOT a digest-backend mode today). This test pins that
+    // the canonical headers-only config boots and survives steady-state ticks;
+    // backend routing itself is enforced by the accept/reject gate tests above.
+    let mut cfg = common::make_test_config(std::env::temp_dir().join("ergo-mode6-sync-tick"));
+    cfg.state_type = ergo_node::config::StateType::Digest;
+    cfg.verify_transactions = false;
+    cfg.blocks_to_keep = 0;
+    cfg.mempool_config.enabled = false;
+    let handle = run_inner(cfg).await.expect("canonical Mode 6 must boot");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    handle
+        .shutdown()
+        .await
+        .expect("Mode-6 (headers-only) action loop must survive a sync_tick");
+}
+
+#[tokio::test]
 async fn run_inner_rejects_partial_headers_only_combo() {
     // Partial digest combo: state_type=Digest and
     // verify_transactions=false, but `blocks_to_keep` stays at the

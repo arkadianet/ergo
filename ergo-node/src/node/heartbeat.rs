@@ -63,17 +63,13 @@ pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
         let drecv = state
             .sections_received_total
             .saturating_sub(state.last_beat_sections_received);
-        // Tip state digest — the AVL root_digest at the current best_full_block.
-        // Prefixed with `tip_state=` so a fresh-sync run can grep this against
-        // the Scala node's `/info` endpoint stateRoot for parity verification.
-        let tip_state = hex::encode(
-            state
-                .store
-                .as_utxo_mut()
-                .expect("utxo-only: AVL tip-state digest heartbeat is gated off in digest mode")
-                .root_digest()
-                .as_bytes(),
-        );
+        // Tip state-root digest at the current best_full_block. Backend-
+        // agnostic: the UTXO arena root or the digest verifier's ADProof-
+        // derived root — both equal the tip header's `state_root`, so a
+        // digest-backend (Mode 5) node reports a real value here instead of
+        // panicking. Prefixed with `tip_state=` so a fresh-sync run can grep
+        // this against the Scala node's `/info` stateRoot for parity.
+        let tip_state = hex::encode(state.store.state_root_digest());
         let peer_count = state.peer_manager.connected_peers().count();
         let reg_count = state.registry.peers.len();
         let mgr_count = state.peer_manager.peer_count();
