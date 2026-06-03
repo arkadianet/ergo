@@ -36,7 +36,15 @@ wildcards         = "deny"
 # Yanked + unsound + vulnerability classes are hard fails; informational
 # advisories (notice, unmaintained) report-only.
 yanked       = "deny"
-ignore       = []
+# RUSTSEC-2025-0141 (bincode 1.x unmaintained): no patched version exists —
+# the bincode team permanently ceased development and consider 1.3.3
+# feature-complete. We use bincode ONLY for LOCAL wallet-state persistence in
+# redb (WalletBox / key metadata); it never touches consensus wire bytes, IDs,
+# or AVL proofs (those go through ergo-ser). Unmaintained != vulnerable, and
+# migrating off bincode would break the on-disk format of existing operator
+# wallet DBs. Mirrored in the cargo-audit step (.github/workflows/ci.yml).
+# Revisit if a CVE is ever filed against bincode 1.3.3.
+ignore       = ["RUSTSEC-2025-0141"]
 
 [sources]
 # Only crates.io. If we ever pull from a git URL, the URL must be
