@@ -1,9 +1,10 @@
+use ergo_crypto::autolykos::common::blake2b256;
 use ergo_crypto::difficulty::{
     epoch_length_for_height, previous_heights_for_recalculation, DifficultyParams,
 };
 use ergo_crypto::pow::{verify_header_difficulty, verify_pow_solution};
 use ergo_primitives::reader::VlqReader;
-use ergo_ser::header::{read_header, Header};
+use ergo_ser::header::{read_header, serialize_header, Header};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -13,6 +14,13 @@ struct HeaderVector {
     #[allow(dead_code)]
     id: String,
     bytes: String,
+    /// Provenance (present on curated fixtures; absent on raw range dumps).
+    #[serde(rename = "sourceFile", default)]
+    source_file: Option<String>,
+    #[serde(rename = "sourceHeight", default)]
+    source_height: Option<u32>,
+    #[serde(rename = "selectionReason", default)]
+    selection_reason: Option<String>,
 }
 
 fn load_corpus(path: &str) -> BTreeMap<u32, Header> {
@@ -128,6 +136,233 @@ fn difficulty_curated_window_v2_fork() {
         (checked, skipped),
         (1, 3),
         "expected exactly 1 transition checked (417791→417792); other 3 v2 rows skip for missing parents",
+    );
+}
+
+/// The EIP-37 difficulty-retarget oracle window, pinned to EXTERNAL protocol
+/// facts (NOT derived from `previous_heights_for_recalculation`, the code
+/// under test, so a window-selection regression is caught here rather than
+/// baked into both the fixture and the assertion):
+///
+/// EIP-37 activates at mainnet height 844_673, switching the difficulty
+/// epoch length 1024 -> 128. 844_673 is itself the first post-activation
+/// epoch boundary (parent 844_672 is a multiple of 128). The Autolykos
+/// difficulty rule looks back 8 epochs, so the recalculation at 844_673
+/// consumes the 9 headers 844_672, 844_544, ..., 843_648 (step 128). The
+/// committed fixture is those 9 lookback headers plus the 844_673 boundary.
+const EIP37_BOUNDARY: u32 = 844_673;
+const EIP37_CURATED_HEIGHTS: [u32; 10] = [
+    843_648, 843_776, 843_904, 844_032, 844_160, 844_288, 844_416, 844_544, 844_672, 844_673,
+];
+
+/// Default difficulty witness exercising the **EIP-37 difficulty retarget**
+/// at its activation boundary against real mainnet `nBits`. Two independent
+/// external anchors:
+///
+/// 1. Fixture integrity — every row's `id` is `blake2b256` of its full
+///    serialized bytes and the parse round-trips byte-for-byte, so the
+///    corpus is provably the real mainnet headers (not substituted data).
+/// 2. Retarget oracle — `verify_header_difficulty` is called directly with the
+///    EXTERNALLY pinned 8-epoch lookback window (the `EIP37_CURATED_HEIGHTS`
+///    const, NOT `previous_heights_for_recalculation`, the code under test), so
+///    a window-selection regression cannot hide here. It recomputes the
+///    required nBits via the EIP-37 path and compares it to the header's real
+///    mainnet nBits at 844_673.
+///
+/// Previously the only EIP-37 boundary coverage lived in `#[ignore]`'d tests
+/// behind gitignored multi-thousand-header corpora, so a retarget regression
+/// passed the default suite. `difficulty_eip37_boundary_rejects_wrong_nbits`
+/// proves this corpus is load-bearing. Regenerate via `regenerate_eip37_curated`.
+#[test]
+fn difficulty_curated_window_eip37() {
+    let path = "../test-vectors/mainnet/headers_eip37_curated.json";
+    let corpus = load_corpus(path);
+
+    // (1) Fixture integrity: anchor each row to mainnet truth independently
+    // of the difficulty math — id == blake2b256(bytes) and an exact byte
+    // round-trip (full, no-trailing-byte consumption on parse + re-emit).
+    let raw = std::fs::read_to_string(path).unwrap();
+    let vectors: Vec<HeaderVector> = serde_json::from_str(&raw).unwrap();
+    for v in &vectors {
+        let bytes = hex::decode(&v.bytes).unwrap();
+        assert_eq!(
+            hex::encode(blake2b256(&bytes)),
+            v.id,
+            "fixture row at height {} is not a real mainnet header (id != blake2b256(bytes))",
+            v.height,
+        );
+        // `serialize_header` returns the canonical (bytes, header_id) pair.
+        let (reserialized, id) = serialize_header(&corpus[&v.height]).expect("re-serialize header");
+        assert_eq!(
+            reserialized, bytes,
+            "fixture header at height {} does not round-trip byte-for-byte",
+            v.height,
+        );
+        assert_eq!(
+            hex::encode(id.as_bytes()),
+            v.id,
+            "serialize_header id disagrees with the fixture id at height {}",
+            v.height,
+        );
+        // Unfabricatable mainnet anchor: each fixture header must carry a valid
+        // Autolykos PoW solution. `id == blake2b256(bytes)` alone only proves a
+        // self-consistent {id, bytes} pair; valid PoW proves a real mined
+        // mainnet header, not synthesized data.
+        verify_pow_solution(&corpus[&v.height])
+            .unwrap_or_else(|e| panic!("fixture header at height {} fails PoW: {e}", v.height));
+        // Provenance, matching the curated v2 fixture's discipline: source
+        // file present, sourceHeight self-consistent, and a selection reason.
+        assert!(
+            v.source_file.is_some(),
+            "fixture row at height {} lacks `sourceFile` provenance",
+            v.height,
+        );
+        assert_eq!(
+            v.source_height,
+            Some(v.height),
+            "fixture row at height {} has a mismatched `sourceHeight`",
+            v.height,
+        );
+        assert!(
+            v.selection_reason.is_some(),
+            "fixture row at height {} lacks `selectionReason` provenance",
+            v.height,
+        );
+    }
+    // No duplicate rows: a `BTreeMap` silently collapses them, which would hide
+    // drift behind the heights-equality check below.
+    assert_eq!(
+        vectors.len(),
+        EIP37_CURATED_HEIGHTS.len(),
+        "headers_eip37_curated.json must have exactly {} rows (no duplicates)",
+        EIP37_CURATED_HEIGHTS.len(),
+    );
+
+    // Corpus is exactly the spec-pinned EIP-37 boundary + 8-epoch lookback.
+    let heights: Vec<u32> = corpus.keys().copied().collect();
+    assert_eq!(
+        heights,
+        EIP37_CURATED_HEIGHTS.to_vec(),
+        "headers_eip37_curated.json must hold exactly the EIP-37 boundary + lookback window",
+    );
+
+    // (2) Retarget oracle against real mainnet nBits — using the EXTERNALLY
+    // pinned 8-epoch lookback window (the const, NOT
+    // `previous_heights_for_recalculation`, which is the code under test).
+    // `verify_header_difficulty` recomputes the required nBits via the EIP-37
+    // path (`eip37_calculate`/`interpolate`/`cap_change`) and compares it to the
+    // header's real mainnet nBits at 844_673.
+    let cfg = DifficultyParams::mainnet();
+    let lookback: Vec<Header> = EIP37_CURATED_HEIGHTS
+        .iter()
+        .filter(|&&h| h != EIP37_BOUNDARY)
+        .map(|h| corpus[h].clone())
+        .collect();
+    verify_header_difficulty(&corpus[&EIP37_BOUNDARY], &lookback, &cfg)
+        .expect("EIP-37 boundary 844673 must verify against its externally-pinned lookback window");
+}
+
+/// Negative witness proving the EIP-37 curated corpus is LOAD-BEARING:
+/// perturbing the boundary header's nBits must make `verify_header_difficulty`
+/// reject (the recomputed required difficulty no longer matches the header's),
+/// so the positive test genuinely exercises the comparison rather than merely
+/// loading a fixture.
+#[test]
+fn difficulty_eip37_boundary_rejects_wrong_nbits() {
+    let corpus = load_corpus("../test-vectors/mainnet/headers_eip37_curated.json");
+    let cfg = DifficultyParams::mainnet();
+    let lookback: Vec<Header> = EIP37_CURATED_HEIGHTS
+        .iter()
+        .filter(|&&h| h != EIP37_BOUNDARY)
+        .map(|h| corpus[h].clone())
+        .collect();
+
+    // Control: the unmodified mainnet header verifies.
+    assert!(
+        verify_header_difficulty(&corpus[&EIP37_BOUNDARY], &lookback, &cfg).is_ok(),
+        "the unmodified EIP-37 boundary header must verify",
+    );
+
+    // A clearly-different compact target must be rejected.
+    let mut bad = corpus[&EIP37_BOUNDARY].clone();
+    bad.n_bits = 0x1d00_ffff;
+    assert!(
+        verify_header_difficulty(&bad, &lookback, &cfg).is_err(),
+        "a wrong nBits at the EIP-37 boundary must be rejected",
+    );
+
+    // The lookback window is load-bearing: perturb the most-recent lookback
+    // header (the boundary's direct parent, 844_672), whose nBits AND timestamp
+    // both feed the retarget. (The oldest header is only a window endpoint, so
+    // its nBits alone is not consumed — perturbing it would be a weak witness.)
+    // The recomputed difficulty then changes and the real boundary nBits is
+    // rejected, proving the verifier actually consumes the window.
+    let mut lookback_mut = lookback.clone();
+    let parent = lookback_mut.last_mut().expect("lookback is non-empty");
+    parent.n_bits = 0x1d00_ffff;
+    parent.timestamp = parent.timestamp.wrapping_add(600_000);
+    assert!(
+        verify_header_difficulty(&corpus[&EIP37_BOUNDARY], &lookback_mut, &cfg).is_err(),
+        "perturbing the parent lookback header must change the retarget and reject the real boundary nBits",
+    );
+}
+
+/// Regenerate-only helper for `headers_eip37_curated.json`. Run with:
+///   cargo test -p ergo-crypto --test difficulty_mainnet \
+///     regenerate_eip37_curated -- --ignored --nocapture
+/// Reads the gitignored full corpora and writes the `EIP37_CURATED_HEIGHTS`
+/// rows verbatim (each `{height,id,bytes,...}` entry copied as-is, so the
+/// committed bytes are byte-identical to the extracted mainnet headers). The
+/// height set is the spec-pinned constant, NOT a value computed from the code
+/// under test.
+#[test]
+#[ignore = "regenerate-only: rebuilds headers_eip37_curated.json from the gitignored headers_843000_844672.json + headers_844673_846000.json"]
+fn regenerate_eip37_curated() {
+    use serde_json::Value;
+    let mut by_height: BTreeMap<u32, Value> = BTreeMap::new();
+    for src in [
+        "../test-vectors/mainnet/headers_843000_844672.json",
+        "../test-vectors/mainnet/headers_844673_846000.json",
+    ] {
+        let data = std::fs::read_to_string(src)
+            .unwrap_or_else(|e| panic!("regenerate needs the gitignored {src}: {e}"));
+        let arr: Vec<Value> = serde_json::from_str(&data).unwrap();
+        for v in arr {
+            if let Some(h) = v.get("height").and_then(Value::as_u64) {
+                by_height.insert(h as u32, v);
+            }
+        }
+    }
+    let curated: Vec<Value> = EIP37_CURATED_HEIGHTS
+        .iter()
+        .map(|h| {
+            let mut entry = by_height
+                .get(h)
+                .unwrap_or_else(|| panic!("source corpora missing height {h}"))
+                .clone();
+            let source_file = if *h <= 844_672 {
+                "headers_843000_844672.json"
+            } else {
+                "headers_844673_846000.json"
+            };
+            let reason = if *h == EIP37_BOUNDARY {
+                "EIP-37 activation boundary (844673): epoch length 1024->128, first post-activation difficulty recalculation"
+            } else {
+                "EIP-37 8-epoch difficulty-lookback header (step 128)"
+            };
+            if let Value::Object(m) = &mut entry {
+                m.insert("sourceFile".into(), Value::from(source_file));
+                m.insert("sourceHeight".into(), Value::from(*h));
+                m.insert("selectionReason".into(), Value::from(reason));
+            }
+            entry
+        })
+        .collect();
+    let out = "../test-vectors/mainnet/headers_eip37_curated.json";
+    std::fs::write(out, serde_json::to_string_pretty(&curated).unwrap()).unwrap();
+    eprintln!(
+        "wrote {} headers to {out}: {EIP37_CURATED_HEIGHTS:?}",
+        curated.len()
     );
 }
 
