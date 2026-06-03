@@ -82,7 +82,7 @@ zeroize    = { version = "1", features = ["derive"] }
 # Storage / data structures
 redb              = "2"
 ergo_avltree_rust = "0.1.1"
-lru               = "0.12"
+lru               = "0.16"
 crossbeam-channel = "0.5"
 arc-swap          = "1"
 parking_lot       = "0.12"
