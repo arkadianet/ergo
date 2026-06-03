@@ -749,3 +749,165 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
         (s, p) => panic!("rule 306 cross-path symmetry broken: sequential={s:?}, parallel={p:?}",),
     }
 }
+
+/// Always-on counterpart to the `#[ignore]`'d
+/// `parallel_equivalent_to_sequential_on_mainnet_700k`: drives committed
+/// multi-tx mainnet blocks (heights 417785..=417800, spanning the v1->v2
+/// activation, up to 7 txs per block) through BOTH `validate_full_block`
+/// (sequential) and `validate_full_block_parallel` (production) and
+/// asserts identical outcomes.
+///
+/// The two paths share a block-validation prologue that is duplicated by
+/// design — the sequential path exists to cross-check the parallel one,
+/// and the parallel path is kept structurally decoupled on purpose.
+/// Comments alone don't stop the two from silently diverging; this test
+/// is what enforces it in the default suite. The 700k version covers a
+/// broader corpus but lives behind an ignore gate (gitignored headers),
+/// so without an always-on equivalent an accepting-path drift would ship
+/// unnoticed.
+///
+/// `EmptyUtxo` makes input-spending txs fail with `InputBoxNotFound`, but
+/// header linkage, section IDs, tx/extension roots and tx-layering all run
+/// on real mainnet bytes first — the same depth the 700k oracle reaches.
+/// The assertion is pure agreement: both `Ok` with identical tx ordering,
+/// or both the same `Err`.
+#[test]
+fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
+    let blocks = load_blocks("../test-vectors/mainnet/blocks_417785_417800.json");
+    let headers = load_headers_map("../test-vectors/mainnet/headers_v1v2_parity_curated.json");
+    let params = ProtocolParams::mainnet_default();
+
+    let mut compared = 0;
+    let (mut saw_v1, mut saw_v2) = (false, false);
+    for block in &blocks {
+        // Need both the block's header and its parent's header in the
+        // curated slice to build the validation context; skip otherwise.
+        let (Some((header, header_id)), Some((parent, parent_id))) =
+            (headers.get(&block.height), headers.get(&(block.height - 1)))
+        else {
+            continue;
+        };
+        if header.version >= 2 {
+            saw_v2 = true;
+        } else {
+            saw_v1 = true;
+        }
+        let bt = build_block_transactions(block);
+        let ext = build_extension(block);
+        let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
+
+        let ctx_seq = BlockValidationContext {
+            parent: &checked_parent,
+            utxo: &EmptyUtxo,
+            params: &params,
+            voting_length: 1024,
+            parent_extension: None,
+            soft_fork_state: None,
+            last_headers: &[],
+            script_validation_checkpoint: None,
+        };
+        let ctx_par = BlockValidationContext {
+            parent: &checked_parent,
+            utxo: &EmptyUtxo,
+            params: &params,
+            voting_length: 1024,
+            parent_extension: None,
+            soft_fork_state: None,
+            last_headers: &[],
+            script_validation_checkpoint: None,
+        };
+        let h_seq = CheckedHeader::trust_me(header.clone(), *header_id);
+        let h_par = CheckedHeader::trust_me(header.clone(), *header_id);
+
+        let seq_result = validate_full_block(h_seq, &bt, &ext, &ctx_seq);
+        let par_result = validate_full_block_parallel(h_par, &bt, &ext, &ctx_par);
+
+        assert_eq!(
+            seq_result.is_ok(),
+            par_result.is_ok(),
+            "accept/reject diverges at h={}: seq={seq_result:?} par={par_result:?}",
+            block.height
+        );
+        match (seq_result, par_result) {
+            (Ok(a), Ok(b)) => {
+                let a_ids: Vec<_> = a.transactions().iter().map(|t| t.tx_id()).collect();
+                let b_ids: Vec<_> = b.transactions().iter().map(|t| t.tx_id()).collect();
+                assert_eq!(a_ids, b_ids, "tx ordering diverges at h={}", block.height);
+            }
+            (Err(a), Err(b)) => {
+                // Debug-string compare captures variant + fields without
+                // requiring PartialEq on the whole error tree.
+                assert_eq!(
+                    format!("{a:?}"),
+                    format!("{b:?}"),
+                    "rejection reason diverges at h={}",
+                    block.height
+                );
+            }
+            _ => unreachable!("is_ok() equality asserted just above"),
+        }
+        compared += 1;
+    }
+    // Pin the corpus shape so the oracle can't silently shrink: the
+    // committed fixture is heights 417785..=417800 (16 headers); every
+    // block except the first (whose parent 417784 is absent) is comparable.
+    assert_eq!(
+        compared, 15,
+        "curated parity corpus changed shape — expected 15 comparable blocks"
+    );
+    assert!(
+        saw_v1 && saw_v2,
+        "corpus must straddle the v1->v2 activation (saw_v1={saw_v1}, saw_v2={saw_v2})"
+    );
+}
+
+/// Provenance guard for the committed parity corpus: every entry's `id`
+/// must be the modifier id its `bytes` actually serialize to. This is an
+/// external-oracle check — the `id` values were captured from a mainnet
+/// node, so a corrupted or mis-sliced fixture (real-looking id paired
+/// with the wrong bytes) fails here instead of silently making
+/// `parallel_equivalent_to_sequential_on_committed_multitx_blocks` run on
+/// garbage.
+#[test]
+fn parity_corpus_header_ids_match_bytes() {
+    #[derive(Deserialize)]
+    struct Entry {
+        height: u32,
+        id: String,
+        bytes: String,
+    }
+    let data = std::fs::read_to_string("../test-vectors/mainnet/headers_v1v2_parity_curated.json")
+        .unwrap();
+    let mut entries: Vec<Entry> = serde_json::from_str(&data).unwrap();
+    entries.sort_by_key(|e| e.height);
+    assert_eq!(entries.len(), 16, "curated corpus must hold 16 headers");
+
+    let mut prev: Option<(u32, String)> = None;
+    for e in &entries {
+        let bytes = hex::decode(&e.bytes).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let h = read_header(&mut r).unwrap();
+        let (_, id) = serialize_header(&h).expect("real mainnet header serializes");
+        // bytes <-> committed id (external-oracle provenance).
+        assert_eq!(
+            hex::encode(id.as_bytes()),
+            e.id,
+            "header id does not match its bytes — corrupt parity fixture at h={}",
+            e.height
+        );
+        if let Some((prev_height, prev_id)) = &prev {
+            // Contiguous heights and a real parent chain — a mis-sliced
+            // fixture (gap, or a header from the wrong fork) fails here.
+            assert_eq!(e.height, prev_height + 1, "non-contiguous height");
+            assert_eq!(
+                hex::encode(h.parent_id.as_bytes()),
+                *prev_id,
+                "header at h={} does not link to its predecessor",
+                e.height
+            );
+        }
+        prev = Some((e.height, e.id.clone()));
+    }
+    assert_eq!(entries.first().unwrap().height, 417_785);
+    assert_eq!(entries.last().unwrap().height, 417_800);
+}
