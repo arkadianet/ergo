@@ -94,7 +94,7 @@ The workspace pins Rust 1.95.0 via [`rust-toolchain.toml`](./rust-toolchain.toml
 # Build the node + wallet binaries.
 cargo build --release -p ergo-node -p ergo-wallet
 
-# Run against the bundled developer config (mainnet; REST on 127.0.0.1:9099).
+# Run against the bundled default config (mainnet full archival; REST on 127.0.0.1:9099).
 ./target/release/ergo-node --config ergo-node/ergo-node.toml
 
 # CLI help.

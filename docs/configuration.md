@@ -22,9 +22,10 @@ the node falls back to built-in defaults. All validation runs at load
 time: any failure returns an error and the node refuses to start rather
 than booting into a misconfigured state.
 
-A bundled developer config ships at
-[`../ergo-node/ergo-node.toml`](../ergo-node/ergo-node.toml), and an
-operator template lives next to it at
+A ready-to-use default config ships at
+[`../ergo-node/ergo-node.toml`](../ergo-node/ergo-node.toml) — a mainnet
+full-archival node with the `/blockchain/*` extra-index enabled — and a
+fully-commented operator template lives next to it at
 [`../ergo-node/ergo-node.toml.example`](../ergo-node/ergo-node.toml.example).
 
 ### Unknown-key handling is per-section

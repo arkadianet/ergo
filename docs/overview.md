@@ -23,7 +23,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 ├── SECURITY.md                        scope + disclosure process
 ├── CODE_OF_CONDUCT.md                 community expectations
 ├── ergo-{primitives,ser,…}/           17 workspace crates (see docs/codemap.md)
-├── ergo-node/ergo-node.toml           bundled developer config
+├── ergo-node/ergo-node.toml           default config (full archival + extra index)
 ├── ergo-node/ergo-node.toml.example   operator template
 ├── docs/
 │   ├── overview.md                    this handbook
@@ -171,7 +171,7 @@ without opening the file.
 ## Running
 
 ```bash
-# Run against the bundled developer config.
+# Run against the bundled default config.
 ./target/release/ergo-node --config ergo-node/ergo-node.toml
 
 # Or as a one-shot dev run via cargo.
@@ -181,9 +181,11 @@ cargo run --release -p ergo-node -- --config ergo-node/ergo-node.toml
 ergo-node --help
 ```
 
-With the bundled developer config the node:
+With the bundled default config the node:
 
 - Connects on **mainnet** (P2P port 9030).
+- Runs as a **full-archival** node (keeps + validates every block) with the
+  `/blockchain/*` extra-index enabled.
 - Persists state under `./ergo-data/` by default.
 - Serves the REST API on `127.0.0.1:9099`. `/wallet/*` and `/node/shutdown`
   require an `api_key` request header that Blake2b-256-hashes to the configured
@@ -214,7 +216,7 @@ memory profiling), with a sidecar marker CSV recording lifecycle events.
 
 ## Configuration
 
-The bundled developer config is
+The bundled default config is
 [`../ergo-node/ergo-node.toml`](../ergo-node/ergo-node.toml); an operator
 template lives next to it as `ergo-node.toml.example`. Every field is documented
 by type in [`configuration.md`](./configuration.md). The high-level shape:
@@ -224,7 +226,7 @@ network  = "mainnet"            # or "testnet"
 # data_dir = "./ergo-data"      # default; node DB + logs
 
 [node]
-agent_name = "opus"
+agent_name = "ergo-rust"
 node_name  = "your-node"
 
 # Mode-selection knobs (defaults shown; omit to keep Mode 1 full archive):
