@@ -1,72 +1,47 @@
-# Ergo Rust Node — developer config (arkadia-dev)
-# Operator template: ergo-node.toml.example
+# Ergo Rust Node — ready-to-use default: a full-archival node with the
+# /blockchain/* extra-index enabled. Run with:
+#
+#   ergo-node --config ergo-node.toml
+#
+# Every other knob (alternative modes, fast bootstrap, tuning, mining) is
+# documented in the fully-commented reference: ergo-node.toml.example.
 
-network = "mainnet"
-# data_dir = "./ergo-data"  # default
+network  = "mainnet"             # or "testnet"
+# data_dir = "./ergo-data"       # default; holds the node DB + logs
 
 [node]
-agent_name = "opus"
-node_name = "arkadia-dev-mode2"
-
-# Mode 2 (UTXO snapshot bootstrap). Fresh data_dir → discover a
-# snapshot from quorum-agreeing peers, trust-check against the
-# header.state_root at the snapshot height, download chunks,
-# reconstruct + install the UTXO tree, then continue normal block
-# sync from snapshot_height + 1.
-#
-# Activation gate lifted in Mode 2 part 2j (commit ac2aadb).
-# Trust verification remains PROVISIONAL until a Scala oracle
-# vector is pinned — operator should cross-check the installed
-# root against a known-good Scala manifest before treating the
-# UTXO state as authoritative.
-state_type = "utxo"
-verify_transactions = true
-blocks_to_keep = -1
-
-[node.utxo]
-utxo_bootstrap = true
-
-[node.nipopow]
-# Part 2 sub-phase 14.6 — NiPoPoW bootstrap consume side. With this
-# flag set AND a fresh data_dir, the node fans GetNipopowProof out
-# to peers (filtered to those advertising NipopowSupport), latches
-# the best valid proof on quorum, and applies it via
-# apply_popow_proof. Bootstrap completes when the proof's suffix
-# tip + bounded forward catchup populate the canonical header at
-# snapshot_height; Mode 2 manifest verify + install then proceed
-# as normal. Expected wall-clock cut: header phase 22min -> seconds.
-nipopow_bootstrap = true
-# Default 2 (matches mainnet.conf::p2p_nipopows). Lower for a
-# faster but less-corroborated apply; higher for stronger
-# multi-peer confirmation at the cost of longer wait.
-p2p_nipopows = 2
+agent_name = "ergo-rust"
+node_name  = "ergo-rust-node"
+# Full archival is the default and needs no knobs: state_type = "utxo",
+# verify_transactions = true, blocks_to_keep = -1 — keep every block, validate
+# every transaction, and sync from genesis.
 
 [peers]
-target_outbound = 75
-max_connections = 100
-# Local Scala node (LAN) + loopback fallback. Scala mainnet p2p
-# defaults to 9030; REST is 9053. Multiple addresses give the
-# discovery + bootstrap path resilient peer surface.
-known = ["10.10.20.2:9030", "127.0.0.1:9030"]
+target_outbound = 60
+max_connections = 80
+# The bundled mainnet seed peers are merged in automatically; add your own here.
 
 [api]
-# (Submission routes are always mounted, matching Scala. Not-ready
-# signals during bootstrap come from the admission pipeline:
-# tip_unready → ibd_gated → ok as state catches up. Use
-# [mempool] disabled = true if you want to actively reject
-# submissions for archival or sync-test runs.)
+bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
+                                 # `public_bind = true` (and read the note below).
 
-[sync]
-enable_anchor_scheduler = true
+[api.security]
+# Lowercase Blake2b-256 of your secret api_key. The `api_key` request header
+# is required to reach /wallet/* and /node/shutdown (read routes stay open).
+# The value below is blake2b256("hello") — the same dev key the Scala node
+# documents. It is fine on loopback, but **CHANGE IT before `public_bind`**.
+# Generate your own:  printf 'your-secret' | b2sum -l 256
+api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
 
 [indexer]
-# R2 (Scala ErgoSettingsReader.consistentSettings:189): extra-index
-# requires not-pruned AND not-utxo-bootstrap. Disable during the
-# bootstrap window; can be re-enabled post-bootstrap with the
-# one-way-on caveat from the roadmap (would backfill from height 1
-# in a Mode 1 setup; for post-bootstrap Mode 2 the index would
-# start at snapshot_height — operator's choice).
-enabled = false
+enabled = true                   # /blockchain/* extra-index (boxes, tokens,
+                                 # addresses). Builds indexer.redb under data_dir
+                                 # on first start; requires this full-archival setup.
+
+[mining]
+enabled = false                  # external-miner API (GET /mining/candidate +
+                                 # POST /mining/solution). See ergo-node.toml.example
+                                 # for the reward-key and storage-rent knobs.
 
 [logging]
 default_level = "info"
@@ -74,5 +49,5 @@ default_level = "info"
 [logging.file]
 dir       = "."
 prefix    = "ergo-node"
-rotation  = "never"
-max_files = 1
+rotation  = "daily"
+max_files = 14

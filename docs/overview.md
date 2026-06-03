@@ -43,7 +43,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 │   ├── primitives/                    VLQ, Digest, GroupElement edge cases
 │   ├── scala/                         raw extracts to be processed by scripts/
 │   └── scripts/                       per-corpus extraction helpers
-├── scripts/                           Bash + Python capture / oracle helpers
+├── scripts/                           Scala-oracle vector-extraction helper
 └── .github/workflows/                 CI (fmt, clippy, test, audit, deny, machete)
 ```
 
