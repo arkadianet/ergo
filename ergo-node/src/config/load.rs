@@ -141,7 +141,10 @@ impl NodeConfig {
             ),
         };
 
-        let agent_name = toml_cfg.node.agent_name.unwrap_or_else(|| "opus".into());
+        let agent_name = toml_cfg
+            .node
+            .agent_name
+            .unwrap_or_else(|| "ergo-rust".into());
         let node_name = toml_cfg
             .node
             .node_name

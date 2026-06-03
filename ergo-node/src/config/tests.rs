@@ -179,10 +179,10 @@ fn load_rejects_outbound_target_above_max_connections() {
 }
 
 #[test]
-fn load_default_node_identity_matches_opus() {
+fn load_default_node_identity_uses_ergo_rust() {
     let cli = minimal_cli(None);
     let cfg = NodeConfig::load(cli).expect("load");
-    assert_eq!(cfg.agent_name, "opus");
+    assert_eq!(cfg.agent_name, "ergo-rust");
     assert_eq!(cfg.node_name, "ergo-rust-node");
 }
 

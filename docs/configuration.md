@@ -51,7 +51,7 @@ section rejects typos:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `agent_name` | string | `"opus"` | Agent name advertised in the P2P handshake. |
+| `agent_name` | string | `"ergo-rust"` | Agent name advertised in the P2P handshake. |
 | `node_name` | string | `"ergo-rust-node"` | Node name advertised in the handshake. |
 | `blocks_to_keep` | i32 | `-1` | Pruning suffix length. `-1` = full archive (keep every block). `N > 0` = retain a pruned suffix of `N` blocks. `0` is reserved for the headers-only combo (see below). Values below `-1` are rejected. A positive `N` must be at least the rollback-window floor (`ROLLBACK_WINDOW + SAFETY_MARGIN`); a smaller value is rejected because a reorg could otherwise need evicted block sections. |
 | `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` is accepted only in the headers-only combo below; any other digest configuration is rejected at load. |

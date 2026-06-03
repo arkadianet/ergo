@@ -8,7 +8,7 @@
 //! data_dir = "./ergo-data"
 //!
 //! [node]
-//! agent_name = "opus"
+//! agent_name = "ergo-rust"
 //! node_name = "my-node"
 //!
 //! [peers]

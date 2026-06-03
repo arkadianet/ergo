@@ -5,7 +5,7 @@ network = "mainnet"
 # data_dir = "./ergo-data"  # default
 
 [node]
-agent_name = "opus"
+agent_name = "ergo-rust"
 node_name = "my-ergo-node"
 
 # Pruning suffix length (Mode 3 of the node mode-coverage roadmap).

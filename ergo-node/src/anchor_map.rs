@@ -343,8 +343,11 @@ pub async fn http_get(url: &str) -> Result<Vec<u8>, String> {
     let parsed = parse_rest_url(url)?;
 
     let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: opus-ferruginis/0.1\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
-        parsed.path, parsed.host, parsed.port
+        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: ergo-rust/{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        parsed.path,
+        parsed.host,
+        parsed.port,
+        env!("CARGO_PKG_VERSION"),
     );
 
     let mut stream = TcpStream::connect((parsed.host.as_str(), parsed.port))
