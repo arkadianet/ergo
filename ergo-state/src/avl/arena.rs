@@ -15,9 +15,7 @@ use lru::LruCache;
 use redb::{Database, ReadableTable};
 
 use super::node::{AvlNode, NodeId};
-
-/// Table definition for AVL nodes (must match store.rs).
-const AVL_NODES: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("avl_nodes");
+use crate::store::AVL_NODES;
 
 /// Minimal crate-private abstraction over node storage.
 ///

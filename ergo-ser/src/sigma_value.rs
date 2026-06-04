@@ -205,6 +205,13 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
             write_option(w, elem_type, opt)?;
         }
         (SigmaType::STuple(elem_types), SigmaValue::Tuple(vals)) => {
+            if elem_types.len() != vals.len() {
+                return Err(WriteError::InvalidData(format!(
+                    "tuple arity mismatch: type has {} element(s), value has {}",
+                    elem_types.len(),
+                    vals.len()
+                )));
+            }
             for (t, v) in elem_types.iter().zip(vals.iter()) {
                 write_value(w, t, v)?;
             }
@@ -1217,6 +1224,26 @@ mod tests {
         let tpe = SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SLong]);
         let val = SigmaValue::Tuple(vec![SigmaValue::Int(42), SigmaValue::Long(-1)]);
         roundtrip_value(&tpe, &val);
+    }
+
+    #[test]
+    fn write_value_tuple_arity_mismatch_errors_without_writing() {
+        // Type declares a 3-tuple but the value carries 2 elements. A
+        // bare `zip` would silently truncate to the shorter side and
+        // emit a malformed 2-element encoding; the arity guard must
+        // reject it, and reject it before writing any bytes.
+        let tpe = SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SLong, SigmaType::SByte]);
+        let val = SigmaValue::Tuple(vec![SigmaValue::Int(1), SigmaValue::Long(2)]);
+        let mut w = VlqWriter::new();
+        let err = write_value(&mut w, &tpe, &val).unwrap_err();
+        assert!(
+            matches!(err, WriteError::InvalidData(_)),
+            "expected InvalidData, got {err:?}"
+        );
+        assert!(
+            w.result().is_empty(),
+            "guard must reject before writing any bytes"
+        );
     }
 
     // ===== 5. AvlTree roundtrips =====

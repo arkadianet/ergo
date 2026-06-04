@@ -18,10 +18,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable};
 use tracing::{debug, warn};
 
-use crate::store::StateError;
+use crate::store::{
+    StateError, AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, HEADER_CHAIN_INDEX, HEADER_META,
+    STATE_META, UNDO_LOG,
+};
 
 /// Shared commit progress + error state used as a real barrier between the
 /// persist worker and any caller of `flush()`.
@@ -164,14 +167,6 @@ impl Drop for WorkerWatchGuard {
         self.0.record_closed();
     }
 }
-
-const AVL_NODES: TableDefinition<u64, &[u8]> = TableDefinition::new("avl_nodes");
-const UNDO_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("undo_log");
-const STATE_META: TableDefinition<&str, &[u8]> = TableDefinition::new("state_meta");
-const CHAIN_INDEX: TableDefinition<u64, &[u8]> = TableDefinition::new("chain_index");
-const CHAIN_STATE_META: TableDefinition<&str, &[u8]> = TableDefinition::new("chain_state_meta");
-const HEADER_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("header_meta");
-const HEADER_CHAIN_INDEX: TableDefinition<u64, &[u8]> = TableDefinition::new("header_chain_index");
 
 /// A single block's worth of pre-serialized persist data.
 ///
