@@ -1007,7 +1007,7 @@ impl SyncCoordinator {
         // is gone its last-observed status is no longer relevant for
         // `/peers/syncInfo` (which lists current peers).
         self.peer_sync.remove(peer);
-        let result = self.delivery.cancel_peer(peer);
+        let result = self.delivery.cancel_peer(peer, now);
         let mut actions = Vec::new();
         if !result.retryable.is_empty() {
             info!(peer = %peer, count = result.retryable.len(), "reassigning in-flight requests from disconnected peer");

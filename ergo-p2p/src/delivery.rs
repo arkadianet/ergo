@@ -36,6 +36,13 @@ pub const MAX_RETRIES: u8 = 3;
 /// Max entries in the received set before oldest entries are pruned.
 /// 10,000 matches Scala's invalidation cache size [inherited].
 const MAX_RECEIVED_ENTRIES: usize = 10_000;
+/// How long a `recently_released` type-shadow may linger before the
+/// `check_timeouts` sweep reclaims it. The shadow is only read while a
+/// just-released id is being re-requested (the same tick it was created),
+/// so any entry older than this is abandoned — a timed-out id that was
+/// never retried (no eligible peer, or pruned in a reorg). Generous
+/// relative to `DELIVERY_TIMEOUT` so nothing in active use is ever swept.
+const RELEASED_SHADOW_TTL: Duration = Duration::from_secs(60);
 
 /// Status of a modifier in the delivery pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,10 +124,15 @@ pub struct DeliveryTracker {
     /// classifiers read the original requested type AFTER the
     /// inflight entry is gone.
     ///
-    /// Eviction policy: an entry is removed when the ID enters
-    /// `inflight` again (via `request`) or when it gets marked
-    /// `failed` (retries exhausted). Bounded by retry churn.
-    recently_released: HashMap<[u8; 32], u8>,
+    /// Value is `(modifier_type, released_at)`. Precise eviction drops an
+    /// entry when the ID re-enters `inflight` (via `request`), when
+    /// retries are exhausted, or when it is marked received (a late
+    /// delivery accepted post-timeout). An id that times out and is then
+    /// abandoned (never retried) has no such trigger, so the
+    /// `check_timeouts` sweep reclaims any entry older than
+    /// `RELEASED_SHADOW_TTL`. Either way the map cannot grow for the
+    /// node's lifetime.
+    recently_released: HashMap<[u8; 32], (u8, Instant)>,
 }
 
 impl DeliveryTracker {
@@ -259,6 +271,12 @@ impl DeliveryTracker {
         self.late_acceptable.remove(modifier_id);
         self.failed.remove(modifier_id);
         self.retry_count.remove(modifier_id);
+        // A modifier can reach `received` via a late delivery accepted
+        // after it timed out — in which case it still carries a
+        // `recently_released` type shadow. Receiving is terminal (it is
+        // never re-requested, re-timed-out, or exhausted), so evict the
+        // shadow here or it would never leave.
+        self.recently_released.remove(modifier_id);
         if self.received_set.insert(*modifier_id) {
             self.received_order.push_back(*modifier_id);
             // FIFO eviction when over capacity.
@@ -304,7 +322,7 @@ impl DeliveryTracker {
                 self.allow_late_delivery(*id, req.peer);
                 // Stash the modifier_type for the retry-bucket
                 // classifier after the inflight entry is gone.
-                self.recently_released.insert(*id, req.modifier_type);
+                self.recently_released.insert(*id, (req.modifier_type, now));
                 if let Some(count) = self.peer_inflight_count.get_mut(&req.peer) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -351,6 +369,13 @@ impl DeliveryTracker {
             }
         }
 
+        // Sweep abandoned shadows: any released-type entry older than the
+        // TTL was never re-requested (no eligible peer, or pruned in a
+        // reorg). Entries created this tick are age-0, so the working set
+        // the coordinator is about to re-request is never touched.
+        self.recently_released
+            .retain(|_, (_, released_at)| now.duration_since(*released_at) < RELEASED_SHADOW_TTL);
+
         TimeoutResult {
             retryable: retryable.into_iter().collect(),
             exhausted,
@@ -360,7 +385,7 @@ impl DeliveryTracker {
     /// Cancel all inflight requests for a peer (e.g., on disconnect).
     /// Increments retry count for each cancelled modifier. Returns two
     /// lists: retryable IDs (can be reassigned) and exhausted IDs (failed).
-    pub fn cancel_peer(&mut self, peer: &PeerId) -> CancelResult {
+    pub fn cancel_peer(&mut self, peer: &PeerId, now: Instant) -> CancelResult {
         // Capture (id, type) BEFORE removing inflight entries — the
         // retry-bucket classifier consults `recently_released` after
         // this loop, so the type must be stashed BEFORE the inflight
@@ -374,7 +399,7 @@ impl DeliveryTracker {
         for (id, modifier_type) in &cancelled {
             self.inflight.remove(id);
             self.late_acceptable.remove(id);
-            self.recently_released.insert(*id, *modifier_type);
+            self.recently_released.insert(*id, (*modifier_type, now));
         }
         self.peer_inflight_count.remove(peer);
 
@@ -559,7 +584,7 @@ impl DeliveryTracker {
         self.inflight
             .get(modifier_id)
             .map(|i| i.modifier_type)
-            .or_else(|| self.recently_released.get(modifier_id).copied())
+            .or_else(|| self.recently_released.get(modifier_id).map(|(t, _)| *t))
     }
 
     /// Whether the aggregate in-flight count has dropped below
@@ -672,6 +697,118 @@ mod tests {
     }
 
     #[test]
+    fn mark_received_evicts_recently_released_shadow_after_late_delivery() {
+        // Regression: a timed-out modifier is stashed in
+        // `recently_released` (the type shadow read by the retry-bucket
+        // classifier). If the original peer then answers late and the
+        // modifier is accepted + marked received, the shadow must be
+        // evicted — receiving is terminal, so the entry is otherwise
+        // never re-requested, re-timed-out, or exhausted and would leak
+        // one entry per timed-out-then-delivered modifier for the life
+        // of the node.
+        let mut tracker = DeliveryTracker::new();
+        let now = Instant::now();
+        let p = peer(9030);
+
+        tracker.request(p, 101, &[id(1)], now);
+        // Time it out: inflight -> recently_released, still retryable.
+        let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
+        assert_eq!(result.retryable.len(), 1);
+        assert!(
+            tracker.recently_released.contains_key(&id(1)),
+            "timeout should stash the type shadow"
+        );
+
+        // Original peer delivers late; the post-timeout window accepts it.
+        assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+        tracker.mark_received(&id(1));
+
+        assert_eq!(tracker.status(&id(1)), ModifierStatus::Received);
+        assert!(
+            tracker.recently_released.is_empty(),
+            "mark_received must evict the recently_released shadow, not leak it"
+        );
+        // Behavioural counterpart: the type lookup no longer resolves.
+        assert_eq!(tracker.modifier_type(&id(1)), None);
+    }
+
+    #[test]
+    fn check_timeouts_sweeps_abandoned_shadow_but_keeps_the_live_set() {
+        // An abandoned timed-out id — never re-requested (no eligible
+        // peer, or pruned in a reorg) — has no precise eviction point, so
+        // the age-based sweep must reclaim it. Critically, the sweep must
+        // NOT touch shadows created in the same tick: those are the live
+        // working set the coordinator is about to re-request.
+        let mut tracker = DeliveryTracker::new();
+        let t0 = Instant::now();
+        let p = peer(9030);
+
+        // id(1) times out at t0 and is then abandoned (never re-requested).
+        tracker.request(p, 102, &[id(1)], t0);
+        tracker.check_timeouts(t0 + DELIVERY_TIMEOUT + Duration::from_secs(1));
+        assert!(tracker.recently_released.contains_key(&id(1)));
+
+        // A later tick, past the shadow TTL, also times out a fresh id(2).
+        let later = t0 + RELEASED_SHADOW_TTL + DELIVERY_TIMEOUT + Duration::from_secs(2);
+        tracker.request(p, 102, &[id(2)], later);
+        tracker.check_timeouts(later + DELIVERY_TIMEOUT + Duration::from_secs(1));
+
+        // id(1) was abandoned long enough to be swept; id(2) is fresh and
+        // must survive (it is still awaiting re-request).
+        assert!(
+            !tracker.recently_released.contains_key(&id(1)),
+            "abandoned shadow must be swept after the TTL"
+        );
+        assert!(
+            tracker.recently_released.contains_key(&id(2)),
+            "a just-released shadow must NOT be swept — it is the live set"
+        );
+        assert_eq!(tracker.modifier_type(&id(2)), Some(102));
+    }
+
+    #[test]
+    fn cancel_peer_abandoned_shadow_swept_after_ttl() {
+        // Disconnect-originated shadows are timestamped by cancel_peer but
+        // swept by the periodic check_timeouts tick, so an abandoned one
+        // (peer gone, never re-requested) is still reclaimed after the TTL.
+        let mut tracker = DeliveryTracker::new();
+        let t0 = Instant::now();
+        let p = peer(9030);
+
+        tracker.request(p, 104, &[id(7)], t0);
+        tracker.cancel_peer(&p, t0);
+        assert!(tracker.recently_released.contains_key(&id(7)));
+
+        tracker.check_timeouts(t0 + RELEASED_SHADOW_TTL + Duration::from_secs(1));
+        assert!(
+            !tracker.recently_released.contains_key(&id(7)),
+            "disconnect-originated abandoned shadow must be swept after the TTL"
+        );
+    }
+
+    #[test]
+    fn rerequest_makes_inflight_authoritative_and_drops_shadow() {
+        // Re-requesting a timed-out id moves it back into `inflight`; the
+        // stale released shadow must be dropped so the live entry wins.
+        let mut tracker = DeliveryTracker::new();
+        let now = Instant::now();
+        let p = peer(9030);
+
+        tracker.request(p, 104, &[id(8)], now);
+        tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
+        assert!(tracker.recently_released.contains_key(&id(8)));
+
+        tracker.request(
+            peer(9031),
+            104,
+            &[id(8)],
+            now + DELIVERY_TIMEOUT + Duration::from_secs(2),
+        );
+        assert!(!tracker.recently_released.contains_key(&id(8)));
+        assert_eq!(tracker.status(&id(8)), ModifierStatus::Requested);
+    }
+
+    #[test]
     fn retry_exhaustion_returns_to_unknown_scala_parity() {
         // Scala parity (CheckDelivery handler at
         // ErgoNodeViewSynchronizer.scala:1287): when a non-header
@@ -759,7 +896,7 @@ mod tests {
         let p = peer(9030);
 
         tracker.request(p, 101, &[id(1), id(2), id(3)], now);
-        let result = tracker.cancel_peer(&p);
+        let result = tracker.cancel_peer(&p, now);
         assert_eq!(result.retryable.len(), 3); // first cancel, all retryable
         assert!(result.exhausted.is_empty());
         assert_eq!(tracker.inflight_count(&p), 0);
