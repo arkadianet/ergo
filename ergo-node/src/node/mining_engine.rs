@@ -1,14 +1,33 @@
-//! The off-loop mining-candidate engine task.
+//! The off-loop mining-candidate engine.
 //!
-//! Runs on its own tokio task, fed `BuildIntent`s by the action loop over a
-//! `watch` channel and driving [`ergo_mining::engine::build_and_publish`] off
-//! the single-writer loop. Each build opens one committed redb snapshot and
-//! CAS-publishes the result into the served cache; the action loop owns tip
-//! invalidation (`MiningHandle::set_best_tip`) and the API serves the cache
-//! only (`MiningHandle::cached_work_if_synced`).
+//! Split into an async **coordinator** and a synchronous build **worker**:
 //!
-//! The `watch` channel coalesces, so the task always builds the *latest*
-//! intent — rapid tip/mempool churn collapses to one build, never a backlog.
+//! - The coordinator runs on its own tokio task, fed `BuildIntent`s by the
+//!   action loop over a `watch` channel. It owns all sequencing — mode probe,
+//!   minimal→full refresh rule, the commit-visibility retry budget, cancel
+//!   handling, and every build-complete/failure log line.
+//! - The worker is a dedicated [`std::thread`] that owns the
+//!   [`ChainStoreReader`], the [`MiningHandle`] clone, and the indexer handle.
+//!   It receives [`BuildRequest`]s over a `std::sync::mpsc` channel, runs the
+//!   synchronous [`ergo_mining::engine::build_and_publish`] for each, and
+//!   returns the result over the request's `oneshot`.
+//!
+//! The worker is a plain OS thread, not a tokio task, by design: it will own
+//! the per-tip dry-run base cache — an `Rc<RefCell<Node>>` AVL graph that is
+//! `!Send` and therefore cannot live in a tokio-spawned (`Send`-bound) future.
+//! Keeping the build on a single owning thread is what lets that graph be
+//! reused across same-tip builds. With no cache yet (this phase) the thread is
+//! pure topology: every build full-hydrates exactly as the inline build did.
+//!
+//! Each build opens one committed redb snapshot and CAS-publishes the result
+//! into the served cache; the action loop owns tip invalidation
+//! (`MiningHandle::set_best_tip`) and the API serves the cache only
+//! (`MiningHandle::cached_work_if_synced`).
+//!
+//! The `watch` channel coalesces, so the coordinator always builds the
+//! *latest* intent — rapid tip/mempool churn collapses to one build, never a
+//! backlog. Builds are serial: the coordinator awaits each reply before
+//! issuing the next request, so at most one build is ever in flight.
 //!
 //! Two-phase publish per tip: a full candidate build can take seconds, during
 //! which `/mining/candidate` 503s for the new tip. So on a tip's *first* build
@@ -30,18 +49,20 @@
 //! worst-case serve gap for a new tip is the in-flight build's remainder plus
 //! the new tip's minimal build.
 
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_indexer::StorageRentEligibleDto;
 use ergo_mining::candidate::BuildMode;
-use ergo_mining::engine::{build_and_publish, BuildOutcome};
+use ergo_mining::engine::{build_and_publish, BuildIntent, BuildOutcome};
+use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::CommittedSnapshot;
 use ergo_validation::UtxoView;
-use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tokio::sync::{oneshot, watch};
+use tracing::{debug, error, info, warn};
 
 /// Storage-rent period in blocks (≈ 4 years). Non-votable protocol
 /// constant; mirrors `ergo-validation`'s `storage_period`. A box is
@@ -215,31 +236,124 @@ const MAX_VIS_RETRIES: u32 = 40;
 /// operator-actionable, not routine.
 const SLOW_BUILD_WARN_MS: u64 = 2_000;
 
+/// One build job handed from the coordinator to the build worker. The
+/// coordinator owns every sequencing decision (mode probe, retry budget,
+/// minimal→full refresh); the worker only executes the build serially and
+/// returns the result over `reply`.
+struct BuildRequest {
+    intent: BuildIntent,
+    mode: BuildMode,
+    /// Response channel. The coordinator awaits exactly one reply per request,
+    /// so the request→reply protocol stays strictly serial (≤1 in flight).
+    reply: oneshot::Sender<Result<BuildOutcome, MiningError>>,
+}
+
+/// Run the build worker loop until the request channel closes.
+///
+/// Owns the redb [`ChainStoreReader`], the [`MiningHandle`] clone, and the
+/// indexer handle for the engine's lifetime, executing one
+/// [`build_and_publish`] per [`BuildRequest`]. The wall-clock `now_ms` closure
+/// and the storage-rent resolver both live here (they capture only `Send`
+/// things — the indexer and mining handles) so the coordinator stays clock-
+/// and indexer-free, exactly as the inline build did.
+///
+/// `reply` send errors are ignored: a dropped receiver means the coordinator
+/// has gone, in which case the next `recv()` returns `Err` and the loop exits.
+fn run_build_worker(
+    reader: ChainStoreReader,
+    handle: MiningHandle,
+    indexer: Option<ergo_indexer::IndexerHandle>,
+    req_rx: mpsc::Receiver<BuildRequest>,
+) {
+    while let Ok(BuildRequest {
+        intent,
+        mode,
+        reply,
+    }) = req_rx.recv()
+    {
+        // Wall-clock closure, sampled by the engine core at the publish step so
+        // the stamped time is when the template is actually published (not when
+        // this possibly-retried build started). Lives on the worker, not the
+        // engine core, so the core stays clock-free and deterministic under
+        // test.
+        let now_ms = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        };
+        let result = build_and_publish(&reader, &handle, &intent, mode, now_ms, |snapshot, h| {
+            resolve_eligible_rent_boxes(
+                indexer.as_ref(),
+                snapshot,
+                h,
+                handle.max_storage_rent_claims(),
+            )
+        });
+        // Coordinator gone (receiver dropped) ⇒ ignore; the next `recv()` errs
+        // and the loop exits.
+        let _ = reply.send(result);
+    }
+}
+
 /// Drive the off-loop candidate engine until cancelled.
 ///
-/// Blocks on the intent channel; on each new (coalesced) intent, runs the
-/// build to a terminal [`BuildOutcome`] with bounded commit-visibility retry.
-/// `TipNotVisible` (committed tip behind the intent's expected parent) retries
-/// after a short backoff, re-reading the latest intent each attempt so a newer
-/// intent supersedes the current one (latest-wins). All other outcomes are
-/// terminal for the intent.
+/// The async coordinator: blocks on the intent channel; on each new (coalesced)
+/// intent, drives the build to a terminal [`BuildOutcome`] with bounded
+/// commit-visibility retry. Each build is dispatched to the dedicated build
+/// worker thread (spawned here at startup) and the coordinator awaits the
+/// reply. `TipNotVisible` (committed tip behind the intent's expected parent)
+/// retries after a short backoff, re-reading the latest intent each attempt so
+/// a newer intent supersedes the current one (latest-wins). All other outcomes
+/// are terminal for the intent.
 ///
-/// `indexer` is forwarded into the rent resolver closure passed to
-/// `build_and_publish`. The eligible-id page comes from the indexer's
-/// eventually-consistent extra-index; each box is then materialized against
-/// the build's committed snapshot, with stale rows skipped and backfilled
-/// (see [`resolve_eligible_rent_boxes`]).
+/// `reader` and `indexer` are moved into the worker thread (which runs the
+/// synchronous build and forwards `indexer` into the rent resolver); the worker
+/// also gets a `handle` clone, while the coordinator keeps `handle` for the mode
+/// probe and refresh predicate. The eligible-id page comes from the indexer's
+/// eventually-consistent extra-index; each box is then materialized against the
+/// build's committed snapshot, with stale rows skipped and backfilled (see
+/// [`resolve_eligible_rent_boxes`]).
 ///
 /// Exits when `cancel_rx` flips to `true` (clean shutdown) or the producer
-/// (action loop) drops the intent sender.
+/// (action loop) drops the intent sender. On exit the request sender is dropped
+/// and the worker thread is joined (its `recv()` errs on the closed channel).
 pub(super) async fn run_mining_engine(
     reader: ChainStoreReader,
     handle: MiningHandle,
     indexer: Option<ergo_indexer::IndexerHandle>,
-    mut intent_rx: watch::Receiver<Option<ergo_mining::engine::BuildIntent>>,
+    mut intent_rx: watch::Receiver<Option<BuildIntent>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
-    loop {
+    // Spawn the build worker. The worker owns the reader, mining-handle clone,
+    // and indexer for the engine's lifetime. It is a plain OS thread (not a
+    // tokio task) because it will own the `!Send` per-tip dry-run base cache.
+    //
+    // `tracing::subscriber::set_default` (used by the capture tests) installs a
+    // THREAD-LOCAL default, so a freshly spawned `std::thread` would not see it
+    // — its build logs would vanish from the test's capture buffer. Snapshot
+    // the active dispatcher here, on the spawning thread, and run the worker
+    // loop under it: in production this is the global default (no-op); under
+    // test it is the thread-local capture subscriber. Either way the worker's
+    // logs route exactly where the inline build's did.
+    let (req_tx, req_rx) = mpsc::channel::<BuildRequest>();
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+    // The worker gets its own `MiningHandle` clone (cheap `Arc` share, the same
+    // way the action loop and engine already hold clones); the coordinator
+    // keeps `handle` for the mode probe and the refresh predicate.
+    let worker = {
+        let handle = handle.clone();
+        std::thread::Builder::new()
+            .name("mining-build-worker".to_string())
+            .spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    run_build_worker(reader, handle, indexer, req_rx);
+                });
+            })
+            .expect("spawn mining build worker thread")
+    };
+
+    'outer: loop {
         // Wait for a new intent (or cancellation). `watch` retains the latest
         // value, so an intent published before this await is picked up below.
         tokio::select! {
@@ -275,17 +389,6 @@ pub(super) async fn run_mining_engine(
                 attempts = 0;
                 budget_parent = Some(intent.expected_parent);
             }
-            // Wall-clock closure, sampled by the engine core at the publish
-            // step so the stamped time is when the template is actually
-            // published (not when this possibly-retried build started). Kept in
-            // the async task, not the engine core, so the core stays clock-free
-            // and deterministic under test.
-            let now_ms = || {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0)
-            };
             // First build for a tip publishes a minimal (emission-only)
             // template so the serve gap is the minimal build's cost, not the
             // full build's; once anything serves this parent, build enriched.
@@ -296,28 +399,54 @@ pub(super) async fn run_mining_engine(
             } else {
                 BuildMode::Minimal
             };
-            // Time the build itself (excludes the inter-retry backoff sleeps),
-            // so `build_ms` is the candidate-assembly latency — the headline
-            // observability metric and the slow-build warn trigger. `outcome`
-            // doubles as the CAS-drop counter (`DroppedStale`) and `attempts`
-            // as the commit-visibility retry count.
+            // Dispatch the build to the worker and await its reply. `build_ms`
+            // times the request→reply round-trip — the wall time of the build
+            // itself (the worker runs it synchronously and replies immediately),
+            // preserving the metric's meaning across the thread hop. It excludes
+            // the inter-retry backoff sleeps, so `build_ms` stays the
+            // candidate-assembly latency — the headline observability metric and
+            // the slow-build warn trigger. `outcome` doubles as the CAS-drop
+            // counter (`DroppedStale`) and `attempts` as the commit-visibility
+            // retry count.
+            //
+            // We deliberately do NOT `select!` cancel against the reply: a build
+            // in flight is never preempted (the worker shares one serial
+            // request→reply protocol with this loop, and abandoning a reply
+            // mid-build would desync it — and later dirty the dry-run base). A
+            // cancel that arrives mid-build is observed at the next loop
+            // boundary, exactly as when the build ran inline.
             let build_start = Instant::now();
-            let result =
-                build_and_publish(&reader, &handle, &intent, mode, now_ms, |snapshot, h| {
-                    resolve_eligible_rent_boxes(
-                        indexer.as_ref(),
-                        snapshot,
-                        h,
-                        handle.max_storage_rent_claims(),
-                    )
-                });
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if req_tx
+                .send(BuildRequest {
+                    intent: intent.clone(),
+                    mode,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                // Worker thread gone (panicked or already joined). The engine
+                // can no longer build — treat it like the producer-gone path
+                // and shut the coordinator down cleanly (no panic).
+                error!("mining engine: build worker thread is gone; stopping engine");
+                break 'outer;
+            }
+            let result = match reply_rx.await {
+                Ok(r) => r,
+                Err(_) => {
+                    // The worker dropped the reply sender without replying ⇒ it
+                    // died mid-build. Same handling as a missing worker.
+                    error!("mining engine: build worker dropped the reply; stopping engine");
+                    break 'outer;
+                }
+            };
             let build_ms = build_start.elapsed().as_millis() as u64;
             match result {
                 Ok(BuildOutcome::TipNotVisible) if attempts < MAX_VIS_RETRIES => {
                     attempts += 1;
                     tokio::select! {
                         biased;
-                        _ = cancel_rx.changed() => return,
+                        _ = cancel_rx.changed() => break 'outer,
                         _ = tokio::time::sleep(VIS_BACKOFF) => {}
                     }
                 }
@@ -401,6 +530,22 @@ pub(super) async fn run_mining_engine(
                 }
             }
         }
+    }
+    // Shut the worker down: drop the request sender so its `recv()` errs, then
+    // join. The protocol is serial — no build is in flight once the loop exits
+    // (the last request's reply was already awaited) — so the worker observes
+    // the closed channel immediately and returns without blocking. Dropping the
+    // worker's `ChainStoreReader` only decrements an `Arc<Database>` refcount
+    // (no custom `Drop`), so the join never blocks the store's durable close,
+    // mirroring how the indexer-handle threading already guarantees the engine
+    // never pins the redb file at shutdown. This whole async task is itself
+    // awaited under a bounded timeout by `RunHandle::shutdown`.
+    drop(req_tx);
+    if worker.join().is_err() {
+        // A panic on the worker thread already aborted whatever build was in
+        // flight; surface it so a crashed build path is visible rather than
+        // silently swallowed.
+        error!("mining engine: build worker thread panicked");
     }
     debug!("mining engine task exiting");
 }
