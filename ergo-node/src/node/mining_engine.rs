@@ -79,7 +79,7 @@ use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
-use ergo_state::store::CommittedSnapshot;
+use ergo_state::store::{CommittedSnapshot, DryRunBase};
 use ergo_validation::UtxoView;
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
@@ -270,7 +270,13 @@ pub(super) struct BuildRequest {
     mode: BuildMode,
     /// Response channel. The coordinator awaits exactly one reply per request,
     /// so the request→reply protocol stays strictly serial (≤1 in flight).
-    reply: oneshot::Sender<Result<BuildOutcome, MiningError>>,
+    ///
+    /// The reply carries the build result plus the dry-run base-cache
+    /// disposition (`"off"` / `"primed"` / `"cold"`) for the build-complete log
+    /// line. The disposition is computed on the worker — the only place that
+    /// can observe the cache slot's state before the build — and threaded back
+    /// here because the log lines live on the coordinator.
+    reply: oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>,
 }
 
 /// Run the build worker loop until the request channel closes.
@@ -291,12 +297,27 @@ pub(super) struct BuildRequest {
 /// coordinator future is gone, whereas the future owns only the `req_tx`. That
 /// ownership split is what lets the worker drain its in-flight build and exit
 /// even when `RunHandle::shutdown` aborts the coordinator at an await point.
+/// `use_base_cache` enables the per-tip dry-run base cache
+/// (`[mining] candidate_base_cache`, threaded from boot). When on, the worker
+/// owns a single [`DryRunBase`] slot across requests and passes it into each
+/// build, so same-tip rebuilds reuse the memoized pristine AVL tree instead of
+/// re-hydrating the whole UTXO graph; on a tip change or any mid-apply failure
+/// the slot self-invalidates (the `ergo-state` poison contract). The slot is
+/// `!Send`, which is exactly why the worker is a plain OS thread and not a
+/// tokio task. Off (the default), the slot stays `None` and every build
+/// full-hydrates — bit-for-bit today's behaviour.
 pub(super) fn run_build_worker(
     reader: ChainStoreReader,
     handle: MiningHandle,
     indexer: Option<ergo_indexer::IndexerHandle>,
+    use_base_cache: bool,
     req_rx: mpsc::Receiver<BuildRequest>,
 ) {
+    // The per-tip pristine dry-run base, owned across requests so a same-tip
+    // rebuild reuses it. `!Send` (an `Rc<RefCell<Node>>` graph) — sound here
+    // because this worker is the single serial consumer. `None` when the cache
+    // is disabled; then every build full-hydrates exactly as before.
+    let mut base: Option<DryRunBase> = None;
     while let Ok(BuildRequest {
         intent,
         mode,
@@ -314,17 +335,45 @@ pub(super) fn run_build_worker(
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0)
         };
-        let result = build_and_publish(&reader, &handle, &intent, mode, now_ms, |snapshot, h| {
-            resolve_eligible_rent_boxes(
-                indexer.as_ref(),
-                snapshot,
-                h,
-                handle.max_storage_rent_claims(),
-            )
-        });
+        // Base-cache disposition for the build-complete log line, captured
+        // BEFORE the build (the only point the slot's pre-build state is
+        // observable). `"off"` when the cache is disabled; otherwise `"primed"`
+        // iff the slot already holds a base for the parent this build targets,
+        // else `"cold"`. The visibility gate in `build_and_publish` only builds
+        // when the committed snapshot tip equals `expected_parent`, so a
+        // `"primed"` slot (its `tip_id` == `expected_parent`) is a genuine cache
+        // hit by construction — the build reuses the memoized tree. This is an
+        // approximation only on the non-building outcomes (TipNotVisible /
+        // IntentSuperseded / NotSynced), where no dry-run runs at all and the
+        // base is left untouched, so the disposition is informational rather
+        // than wrong. `"cold"` covers both a fresh slot and a tip change (the
+        // latter rehydrates inside the cached path).
+        let base_cache = if !use_base_cache {
+            "off"
+        } else if base.as_ref().map(DryRunBase::tip_id) == Some(intent.expected_parent) {
+            "primed"
+        } else {
+            "cold"
+        };
+        let result = build_and_publish(
+            &reader,
+            &handle,
+            &intent,
+            mode,
+            use_base_cache.then_some(&mut base),
+            now_ms,
+            |snapshot, h| {
+                resolve_eligible_rent_boxes(
+                    indexer.as_ref(),
+                    snapshot,
+                    h,
+                    handle.max_storage_rent_claims(),
+                )
+            },
+        );
         // Coordinator gone (receiver dropped) ⇒ ignore; the next `recv()` errs
         // and the loop exits.
-        let _ = reply.send(result);
+        let _ = reply.send((result, base_cache));
     }
 }
 
@@ -434,7 +483,7 @@ pub(super) async fn run_mining_engine(
                 error!("mining engine: build worker thread is gone; stopping engine");
                 break 'outer;
             }
-            let result = match reply_rx.await {
+            let (result, base_cache) = match reply_rx.await {
                 Ok(r) => r,
                 Err(_) => {
                     // The worker dropped the reply sender without replying ⇒ it
@@ -466,6 +515,7 @@ pub(super) async fn run_mining_engine(
                                 attempts,
                                 build_ms,
                                 mode = ?mode,
+                                base_cache,
                                 emission_ms = t.emission.as_millis() as u64,
                                 rent_ms = t.rent.as_millis() as u64,
                                 select_ms = t.select.as_millis() as u64,
@@ -505,6 +555,7 @@ pub(super) async fn run_mining_engine(
                         attempts,
                         build_ms,
                         mode = ?mode,
+                        base_cache,
                         reason = ?intent.reason,
                         "mining engine: commit-visibility retries exhausted; awaiting next intent",
                     );
@@ -516,6 +567,7 @@ pub(super) async fn run_mining_engine(
                         attempts,
                         build_ms,
                         mode = ?mode,
+                        base_cache,
                         reason = ?intent.reason,
                         "mining engine: build not published",
                     );
@@ -526,6 +578,7 @@ pub(super) async fn run_mining_engine(
                         error = ?e,
                         build_ms,
                         mode = ?mode,
+                        base_cache,
                         reason = ?intent.reason,
                         "mining engine: build failed",
                     );

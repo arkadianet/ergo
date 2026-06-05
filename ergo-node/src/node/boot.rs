@@ -1460,6 +1460,10 @@ async fn run_inner_with_backend(
     ) = if let Some(handle) = mining_handle {
         let reader = state.store.reader_handle();
         let indexer = state.indexer_handle.clone();
+        // Per-tip dry-run base cache: off by default (a multi-GB resident AVL
+        // graph is an operator-facing deployment change). Captured by the
+        // worker thread's `move` closure below.
+        let use_base_cache = config.mining_config.candidate_base_cache;
         let (intent_tx, intent_rx) =
             tokio::sync::watch::channel::<Option<ergo_mining::engine::BuildIntent>>(None);
         let cancel_rx = mining_engine_cancel_tx.subscribe();
@@ -1488,6 +1492,7 @@ async fn run_inner_with_backend(
                             reader,
                             worker_handle,
                             indexer,
+                            use_base_cache,
                             req_rx,
                         );
                     });

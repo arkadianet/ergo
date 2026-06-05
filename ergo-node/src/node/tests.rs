@@ -1735,7 +1735,15 @@ fn spawn_engine_with_worker(
             .name("mining-build-worker-test".to_string())
             .spawn(move || {
                 tracing::dispatcher::with_default(&dispatch, || {
-                    super::mining_engine::run_build_worker(reader, worker_handle, indexer, req_rx);
+                    // Base cache off: these tests exercise the topology /
+                    // exhaustion path, not the cache itself.
+                    super::mining_engine::run_build_worker(
+                        reader,
+                        worker_handle,
+                        indexer,
+                        false,
+                        req_rx,
+                    );
                 });
             })
             .expect("spawn test mining build worker thread")

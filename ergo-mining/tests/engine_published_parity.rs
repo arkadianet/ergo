@@ -505,6 +505,7 @@ fn build_and_publish_resolves_rent_at_snapshot_height_when_enabled() {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |snapshot, h| {
             captured.set(Some((snapshot.best_full_block_height(), h)));
@@ -547,6 +548,7 @@ fn build_and_publish_skips_rent_resolver_when_disabled() {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |_, _| {
             called.set(true);
@@ -603,6 +605,7 @@ fn publish_and_serve_under(regime: &Regime) {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
     )
@@ -635,6 +638,96 @@ fn publish_and_serve_under(regime: &Regime) {
     );
     assert_eq!(served.height, regime.candidate_height());
     assert_eq!(served.pk, MINER_PK);
+}
+
+/// Phase-3 wiring oracle: the base-cache path (a `Some(&mut base)` slot) drives
+/// the SAME published work as the uncached path through `build_and_publish`,
+/// across a cold build (slot empty) then a hit build (slot primed for the same
+/// committed tip). Proves the `CachedSnapshotView` seam is byte-faithful and
+/// the worker-owned slot survives a request boundary without invalidating.
+/// (The exhaustive cached-vs-uncached `(Candidate, WorkMessage)` surface
+/// comparison and the flag-on e2e are Phase 4; this guards the wiring landed
+/// here.)
+#[test]
+fn build_and_publish_base_cache_cold_then_hit_matches_uncached() {
+    use ergo_state::store::DryRunBase;
+
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    // Uncached oracle: the served work the uncached (`None`) path publishes.
+    let oracle_w = {
+        let handle = handle(&regime);
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+        let out = build_and_publish(
+            &store.reader_handle(),
+            &handle,
+            &build_intent(tip, regime.parent_height),
+            BuildMode::Full,
+            None,
+            || BUILT_AT_MS,
+            |_, _| Vec::new(),
+        )
+        .expect("uncached build ok");
+        assert!(matches!(out, BuildOutcome::Published { .. }));
+        handle
+            .cached_work_if_synced()
+            .expect("uncached serves work")
+    };
+
+    // Cached path: one worker-owned slot across two same-tip builds. Cold build
+    // hydrates + memoizes; hit build reuses the memoized base. Both must publish
+    // work byte-identical to the uncached oracle.
+    let mut base: Option<DryRunBase> = None;
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    for pass in ["cold", "hit"] {
+        let out = build_and_publish(
+            &store.reader_handle(),
+            &handle,
+            &build_intent(tip, regime.parent_height),
+            BuildMode::Full,
+            Some(&mut base),
+            || BUILT_AT_MS,
+            |_, _| Vec::new(),
+        )
+        .unwrap_or_else(|e| panic!("cached {pass} build err: {e:?}"));
+        assert!(
+            matches!(out, BuildOutcome::Published { .. }),
+            "cached {pass} build must publish, got {out:?}",
+        );
+        // The slot is populated and keyed to the committed tip after each build
+        // (a successful build never poisons it).
+        let b = base.as_ref().expect("base populated after a clean build");
+        assert_eq!(
+            b.tip_id(),
+            tip,
+            "cached {pass}: base keyed to the committed tip",
+        );
+
+        let served = handle
+            .cached_work_if_synced()
+            .expect("cached path serves work");
+        assert_eq!(
+            served.msg, oracle_w.msg,
+            "cached {pass}: served msg must equal the uncached oracle",
+        );
+        assert_eq!(
+            served.target, oracle_w.target,
+            "cached {pass}: served target must equal the uncached oracle",
+        );
+        assert_eq!(served.height, oracle_w.height, "cached {pass}: height");
+        assert_eq!(served.pk, oracle_w.pk, "cached {pass}: pk");
+    }
 }
 
 #[test]
@@ -706,6 +799,7 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
     )

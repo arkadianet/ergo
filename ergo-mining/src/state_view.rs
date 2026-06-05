@@ -20,9 +20,13 @@
 //! the in-crate snapshot parity tests), so for the same committed tip the
 //! two views produce the same candidate.
 
+use std::cell::RefCell;
+
 use ergo_primitives::digest::ADDigest;
+use ergo_primitives::digest::Digest32;
+use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
-use ergo_state::store::{CommittedSnapshot, StateError, StateStore};
+use ergo_state::store::{CommittedSnapshot, DryRunBase, StateError, StateStore};
 use ergo_validation::{
     ActiveProtocolParameters, CheckedTransaction, ErgoValidationSettings, UtxoView,
 };
@@ -133,5 +137,85 @@ impl CandidateStateView for CommittedSnapshot {
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         CommittedSnapshot::candidate_dry_run(self, checked)
+    }
+}
+
+/// A [`CandidateStateView`] over a committed snapshot that routes the AVL
+/// dry-run through a per-tip pristine base cache. Every read except the
+/// dry-run delegates straight to `snap`'s `CommittedSnapshot` impl (so the
+/// candidate is sourced from the one held transaction exactly as the uncached
+/// path); only [`candidate_dry_run`](CandidateStateView::candidate_dry_run)
+/// consults `base`, calling [`CommittedSnapshot::candidate_dry_run_cached`] —
+/// a cache hit reuses the memoized pristine tree (shallow COW clone), a
+/// miss/tip-change full-rehydrates and re-memoizes.
+///
+/// The cached dry-run needs `&mut Option<DryRunBase>`, but the trait method is
+/// `&self`. The borrow is reconciled with a [`RefCell`] around the borrowed
+/// slot. This is sound because the build is strictly single-threaded and
+/// serial: the base graph is `!Send` and lives on the engine's one dedicated
+/// build worker thread, which runs at most one build at a time and calls
+/// `candidate_dry_run` exactly once per build. There is no other live borrow
+/// of the slot during a build, so the `RefCell` never double-borrows; it is
+/// purely the type-level bridge from the trait's `&self` to the cache's
+/// `&mut`, not a guard against real aliasing.
+pub struct CachedSnapshotView<'a> {
+    snap: &'a CommittedSnapshot,
+    base: RefCell<&'a mut Option<DryRunBase>>,
+}
+
+impl<'a> CachedSnapshotView<'a> {
+    /// Wrap `snap` so its dry-run routes through the per-tip `base` cache.
+    pub fn new(snap: &'a CommittedSnapshot, base: &'a mut Option<DryRunBase>) -> Self {
+        Self {
+            snap,
+            base: RefCell::new(base),
+        }
+    }
+}
+
+impl UtxoView for CachedSnapshotView<'_> {
+    fn get_box(&self, box_id: &Digest32) -> Option<ErgoBox> {
+        self.snap.get_box(box_id)
+    }
+}
+
+impl CandidateStateView for CachedSnapshotView<'_> {
+    fn best_full_block_id(&self) -> [u8; 32] {
+        CommittedSnapshot::best_full_block_id(self.snap)
+    }
+    fn best_full_block_height(&self) -> u32 {
+        CommittedSnapshot::best_full_block_height(self.snap)
+    }
+    fn get_header_bytes(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+        CommittedSnapshot::get_header_bytes(self.snap, id)
+    }
+    fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+        CommittedSnapshot::header_id_at_height(self.snap, height)
+    }
+    fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+        CommittedSnapshot::block_section(self.snap, modifier_id)
+    }
+    fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+        CommittedSnapshot::last_headers_window(self.snap)
+    }
+    fn tip_snapshot_params(
+        &self,
+    ) -> Result<(ActiveProtocolParameters, ErgoValidationSettings), StateError> {
+        Ok((
+            CommittedSnapshot::active_params(self.snap)?,
+            CommittedSnapshot::validation_settings(self.snap)?,
+        ))
+    }
+    fn candidate_dry_run(
+        &self,
+        checked: &[CheckedTransaction],
+    ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+        // Single serial build thread (see the type doc): this is the only
+        // borrow of the slot for the duration of the build, so the `RefCell`
+        // borrow can never conflict.
+        let mut base = self.base.borrow_mut();
+        // `base: RefMut<&mut Option<DryRunBase>>`; `&mut base` auto-derefs
+        // through `DerefMut` to the `&mut Option<DryRunBase>` the cache wants.
+        self.snap.candidate_dry_run_cached(&mut base, checked)
     }
 }

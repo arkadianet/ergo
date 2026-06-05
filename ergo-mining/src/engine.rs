@@ -23,11 +23,12 @@ use std::sync::Arc;
 use ergo_mempool::MempoolReadSnapshot;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
-use ergo_state::store::CommittedSnapshot;
+use ergo_state::store::{CommittedSnapshot, DryRunBase};
 
 use crate::candidate::{generate_candidate, BuildMode, Candidate};
 use crate::error::MiningError;
 use crate::handle::MiningHandle;
+use crate::state_view::CachedSnapshotView;
 use crate::work_message::WorkMessage;
 
 /// Why a build was requested. Recorded on the template identity for metrics;
@@ -193,11 +194,23 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// matches — so a reorg during the build wastes work rather than serving a
 /// wrong-parent candidate. The submitted block is fully re-validated on the
 /// action loop regardless.
+///
+/// `base` is the optional per-tip dry-run base cache slot. `None` ⇒ the
+/// uncached path: every build full-hydrates the AVL tree (today's behaviour;
+/// all existing callers and tests pass `None`). `Some(slot)` ⇒ the build's
+/// AVL dry-run routes through [`CachedSnapshotView`], reusing the memoized
+/// pristine tree when the slot already holds one for this committed tip and
+/// rehydrating on a miss/tip-change. The slot is `!Send` (it owns an
+/// `Rc<RefCell<Node>>` graph), so it must be owned by the single dedicated
+/// build worker thread that calls `build_and_publish`; it is never shared.
+/// Either path produces byte-identical `(state_root, ad_proof)` — the cached
+/// variant is proven against the uncached oracle in `ergo-state`.
 pub fn build_and_publish(
     reader: &ChainStoreReader,
     handle: &MiningHandle,
     intent: &BuildIntent,
     mode: BuildMode,
+    base: Option<&mut Option<DryRunBase>>,
     now_ms: impl Fn() -> u64,
     resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
 ) -> Result<BuildOutcome, MiningError> {
@@ -257,16 +270,38 @@ pub fn build_and_publish(
         }
     };
 
-    let built = generate_candidate(
-        &snapshot,
-        mode,
-        mempool,
-        &intent.miner_pk,
-        handle.monetary(),
-        handle.reemission_ref(),
-        handle.chain_config(),
-        eligible_rent_boxes.as_slice(),
-    )?;
+    // The dry-run is the build's dominant cost (full AVL hydration). When a
+    // base-cache slot is supplied, route the build through `CachedSnapshotView`
+    // so same-tip rebuilds reuse the memoized pristine tree; otherwise build
+    // directly against the snapshot (every build full-hydrates). Both views
+    // serve every non-dry-run read from the same one held transaction, so the
+    // candidate is identical bar the dry-run's hydration source — which is
+    // itself byte-identical (proven against the uncached oracle in ergo-state).
+    let built = match base {
+        Some(slot) => {
+            let view = CachedSnapshotView::new(&snapshot, slot);
+            generate_candidate(
+                &view,
+                mode,
+                mempool,
+                &intent.miner_pk,
+                handle.monetary(),
+                handle.reemission_ref(),
+                handle.chain_config(),
+                eligible_rent_boxes.as_slice(),
+            )?
+        }
+        None => generate_candidate(
+            &snapshot,
+            mode,
+            mempool,
+            &intent.miner_pk,
+            handle.monetary(),
+            handle.reemission_ref(),
+            handle.chain_config(),
+            eligible_rent_boxes.as_slice(),
+        )?,
+    };
     let Some((candidate, work, timings)) = built else {
         return Ok(BuildOutcome::Raced);
     };
@@ -377,6 +412,7 @@ mod tests {
             &handle().with_rent_config(true, 4),
             &intent([0u8; 32], 0),
             BuildMode::Full,
+            None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
@@ -395,6 +431,7 @@ mod tests {
             &handle().with_rent_config(true, 4),
             &intent([0x42u8; 32], 5),
             BuildMode::Full,
+            None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
@@ -414,6 +451,7 @@ mod tests {
             &handle().with_rent_config(true, 4),
             &intent([0x42u8; 32], 0),
             BuildMode::Full,
+            None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
@@ -432,6 +470,7 @@ mod tests {
             &handle().with_rent_config(true, 4),
             &intent([0u8; 32], 0),
             BuildMode::Full,
+            None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
