@@ -58,5 +58,5 @@ pub use task::{
 pub use ergo_indexer_types::{
     BalanceDto, BoxId, HeaderId, IndexedBlockDto, IndexedBoxDto, IndexedErgoBox,
     IndexedErgoTransaction, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerQuery,
-    IndexerStatus, Page, SortDir, TemplateHash, TokenId, TreeHash, TxId,
+    IndexerStatus, Page, SortDir, StorageRentEligibleDto, TemplateHash, TokenId, TreeHash, TxId,
 };

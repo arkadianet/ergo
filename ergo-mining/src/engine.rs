@@ -8,9 +8,11 @@
 //! authoritative [`BestTip`] on the [`MiningHandle`]. The engine task then
 //! calls [`build_and_publish`] off the loop: it opens ONE committed redb
 //! snapshot, waits for that snapshot to reflect the intent's expected
-//! parent (commit visibility), gates on `synced(tip)`, resolves
-//! storage-rent-eligible boxes against that same snapshot via the injected
-//! `resolve_rent` closure, runs the unchanged [`generate_candidate`]
+//! parent (commit visibility), gates on `synced(tip)`, materializes
+//! storage-rent-eligible boxes against that snapshot via the injected
+//! `resolve_rent` closure (the eligible-id list itself comes from the
+//! indexer's eventually-consistent extra-index), runs the unchanged
+//! [`generate_candidate`]
 //! against the snapshot, and CAS-publishes the result into the served cache
 //! only if the live tip still matches the parent it built against. A reorg
 //! or tip advance during the build wastes the work, never serves a
@@ -223,10 +225,13 @@ pub fn build_and_publish(
         return Ok(BuildOutcome::NotSynced);
     }
 
-    // Storage-rent eligibility, resolved HERE against the same committed
-    // snapshot the candidate builds from — never against a newer live view
-    // (a box spent in an applied-but-uncommitted block must not be claimed
-    // from a template that cannot see that spend, and vice versa). The
+    // Storage-rent eligibility, resolved HERE so each box is materialized
+    // against THIS committed snapshot — never a newer live view (a box spent
+    // in an applied-but-uncommitted block must not be claimed from a template
+    // that cannot see that spend, and vice versa). The eligible-id list the
+    // resolver pages over comes from the indexer's own eventually-consistent
+    // extra-index, so it may name boxes the snapshot no longer holds; those
+    // are skipped and backfilled in the resolver, never claimed blind. The
     // resolver is injected by the node driver (it owns the indexer handle);
     // rent disabled ⇒ never called.
     let eligible_rent_boxes = if handle.claim_storage_rent() {

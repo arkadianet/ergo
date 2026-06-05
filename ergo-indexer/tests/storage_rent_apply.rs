@@ -758,3 +758,55 @@ fn storage_rent_desync_surfaces_when_unspent_row_missing_at_apply_time() {
         "expected StorageRentDesync{{1, 0}}, got {err:?}",
     );
 }
+
+#[test]
+fn read_storage_rent_eligible_paged_offset_cursor_backfills_across_pages() {
+    // Pins the real redb offset/limit contract that the mining engine's
+    // `page_rent_boxes` cursor relies on: stepping `offset` by the previous
+    // page length walks the whole eligible set oldest-first, with no overlap
+    // and no gap, and a short final page signals exhaustion. The engine's
+    // unit tests mock `fetch_page`; this proves the live store matches that
+    // model so cross-page backfill is real, not assumed.
+    use ergo_indexer::SortDir;
+
+    let (store, _tmp) = open_store();
+    // Five unspent outputs, all creation_height 1 → global indices 0..=4,
+    // all with creation_height ≤ the cutoff we'll query.
+    let tx = Transaction {
+        inputs: vec![fake_input(0xAA)],
+        data_inputs: vec![],
+        output_candidates: (0..5).map(|_| candidate(1_000_000, 1)).collect(),
+    };
+    let block = IndexerBlock {
+        height: 1,
+        header_id: Digest32::from_bytes([0x11; 32]),
+        transactions: std::slice::from_ref(&tx),
+    };
+    apply_block(&store, &IndexerMeta::empty(), &block).unwrap();
+
+    let expected: Vec<Digest32> = (0..5).map(|i| sealed_box_id(&tx, i)).collect();
+
+    // Walk with limit 2, stepping offset by the returned page length exactly
+    // as `page_rent_boxes` does.
+    const LIMIT: u32 = 2;
+    let mut collected: Vec<Digest32> = Vec::new();
+    let mut offset = 0u32;
+    let mut pages = 0u32;
+    loop {
+        let page = store
+            .read_storage_rent_eligible_paged(1, offset, LIMIT, SortDir::Asc)
+            .unwrap();
+        pages += 1;
+        let page_len = page.len() as u32;
+        collected.extend(page.iter().map(|r| r.box_id));
+        if page_len < LIMIT {
+            break; // short page → index exhausted
+        }
+        offset += page_len;
+        assert!(pages < 10, "paging did not terminate");
+    }
+
+    // Pages were [2, 2, 1]: full union, oldest-first, no overlap, no gap.
+    assert_eq!(pages, 3);
+    assert_eq!(collected, expected);
+}
