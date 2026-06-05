@@ -4,22 +4,24 @@
 //!
 //! The action loop publishes a [`BuildIntent`] (everything that needs
 //! action-loop state access — the expected parent tip, a frozen mempool
-//! snapshot, the resolved miner reward key, and the resolved eligible
-//! storage-rent boxes — all resolved on the loop) and maintains the
+//! snapshot, and the resolved miner reward key) and maintains the
 //! authoritative [`BestTip`] on the [`MiningHandle`]. The engine task then
 //! calls [`build_and_publish`] off the loop: it opens ONE committed redb
 //! snapshot, waits for that snapshot to reflect the intent's expected
-//! parent (commit visibility), gates on `synced(tip)`, runs the unchanged
-//! [`generate_candidate`] against the snapshot, and CAS-publishes the
-//! result into the served cache only if the live tip still matches the
-//! parent it built against. A reorg or tip advance during the build wastes
-//! the work, never serves a wrong-parent candidate.
+//! parent (commit visibility), gates on `synced(tip)`, resolves
+//! storage-rent-eligible boxes against that same snapshot via the injected
+//! `resolve_rent` closure, runs the unchanged [`generate_candidate`]
+//! against the snapshot, and CAS-publishes the result into the served cache
+//! only if the live tip still matches the parent it built against. A reorg
+//! or tip advance during the build wastes the work, never serves a
+//! wrong-parent candidate.
 
 use std::sync::Arc;
 
 use ergo_mempool::MempoolReadSnapshot;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
+use ergo_state::store::CommittedSnapshot;
 
 use crate::candidate::{generate_candidate, Candidate};
 use crate::error::MiningError;
@@ -67,9 +69,10 @@ impl BestTip {
 }
 
 /// One build request, fully resolved by the action loop. Everything that
-/// needs action-loop state/wallet/indexer access is frozen here so the
-/// off-loop engine adds only the committed snapshot. Cheap to clone (the
-/// heavy inputs are behind `Arc`), so it rides a `tokio::watch`.
+/// needs action-loop state or wallet access is frozen here; storage-rent
+/// boxes are resolved by the engine driver against the build's committed
+/// snapshot. Cheap to clone (the heavy inputs are behind `Arc`), so it
+/// rides a `tokio::watch`.
 #[derive(Debug, Clone)]
 pub struct BuildIntent {
     /// In-memory best-full tip the loop saw when it signalled. The engine
@@ -83,9 +86,6 @@ pub struct BuildIntent {
     /// Reward key resolved on the loop (`Ready` only — the loop does not
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
-    /// Storage-rent-eligible boxes resolved on the loop (oldest-first,
-    /// already capped), or empty when rent self-claim is disabled.
-    pub eligible_rent_boxes: Arc<Vec<ErgoBox>>,
     pub reason: BuildReason,
 }
 
@@ -171,6 +171,12 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// `handle` (the served cache); the async driver in `ergo-node` calls this
 /// per intent and handles retry/debounce/latest-wins.
 ///
+/// `resolve_rent` is called with the snapshot and the candidate height
+/// exactly when rent is enabled (`handle.claim_storage_rent()` is true);
+/// it returns the storage-rent-eligible boxes to sweep into a self-claim.
+/// The closure is injected by the engine driver (which owns the indexer
+/// handle), keeping ergo-mining free of any ergo-indexer dependency.
+///
 /// Consensus-safety: the snapshot is one redb read transaction; the build
 /// runs the unchanged [`generate_candidate`] against it (byte-identical to
 /// an on-loop build for the same parent + tx-set, per the `ergo-state`
@@ -183,6 +189,7 @@ pub fn build_and_publish(
     handle: &MiningHandle,
     intent: &BuildIntent,
     now_ms: impl Fn() -> u64,
+    resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
 ) -> Result<BuildOutcome, MiningError> {
     let snapshot = match reader
         .committed_snapshot()
@@ -216,6 +223,18 @@ pub fn build_and_publish(
         return Ok(BuildOutcome::NotSynced);
     }
 
+    // Storage-rent eligibility, resolved HERE against the same committed
+    // snapshot the candidate builds from — never against a newer live view
+    // (a box spent in an applied-but-uncommitted block must not be claimed
+    // from a template that cannot see that spend, and vice versa). The
+    // resolver is injected by the node driver (it owns the indexer handle);
+    // rent disabled ⇒ never called.
+    let eligible_rent_boxes = if handle.claim_storage_rent() {
+        resolve_rent(&snapshot, snapshot.best_full_block_height() + 1)
+    } else {
+        Vec::new()
+    };
+
     let built = generate_candidate(
         &snapshot,
         (*intent.mempool).clone(),
@@ -223,7 +242,7 @@ pub fn build_and_publish(
         handle.monetary(),
         handle.reemission_ref(),
         handle.chain_config(),
-        intent.eligible_rent_boxes.as_slice(),
+        eligible_rent_boxes.as_slice(),
     )?;
     let Some((candidate, work, timings)) = built else {
         return Ok(BuildOutcome::Raced);
@@ -278,7 +297,6 @@ mod tests {
             expected_height,
             mempool: Arc::new(MempoolReadSnapshot::empty()),
             miner_pk: [0x02u8; 33],
-            eligible_rent_boxes: Arc::new(Vec::new()),
             reason: BuildReason::Startup,
         }
     }
@@ -336,6 +354,7 @@ mod tests {
             &handle(),
             &intent([0u8; 32], 0),
             || BUILT_AT_MS,
+            |_, _| Vec::new(),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::NoState);
@@ -352,6 +371,7 @@ mod tests {
             &handle(),
             &intent([0x42u8; 32], 5),
             || BUILT_AT_MS,
+            |_, _| Vec::new(),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::TipNotVisible);
@@ -369,6 +389,7 @@ mod tests {
             &handle(),
             &intent([0x42u8; 32], 0),
             || BUILT_AT_MS,
+            |_, _| Vec::new(),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::IntentSuperseded);
@@ -385,6 +406,7 @@ mod tests {
             &handle(),
             &intent([0u8; 32], 0),
             || BUILT_AT_MS,
+            |_, _| Vec::new(),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::NotSynced);

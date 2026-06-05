@@ -284,7 +284,7 @@ impl NodeConfig {
         }
         // Storage-rent self-claim requires the indexer: eligible boxes are
         // enumerated only from the extra-index `unspent_by_creation_height`
-        // table (`mining_dispatch::resolve_eligible_rent_boxes`). With the
+        // table (`mining_engine::resolve_eligible_rent_boxes`). With the
         // indexer off the claim silently collects nothing, so reject the
         // combo rather than let it no-op. Enabling the indexer in turn needs
         // a full archive (the R2 gates above), so this transitively pins

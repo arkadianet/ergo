@@ -125,11 +125,11 @@ pub struct Candidate {
 /// transactions are selected (placed after the coinbase tx, before the
 /// fee-collecting tx).
 ///
-/// `eligible_rent_boxes` are storage-rent-eligible boxes (resolved from
-/// state by the caller, oldest-first, already capped) the miner
-/// self-claims with no fee. The claim is pinned ahead of mempool selection
-/// so any conflicting fee-bearing claim on the same box is excluded. An
-/// empty slice disables rent collection.
+/// `eligible_rent_boxes` are storage-rent-eligible boxes (resolved by the
+/// engine driver against the build's committed snapshot, oldest-first,
+/// already capped) the miner self-claims with no fee. The claim is pinned
+/// ahead of mempool selection so any conflicting fee-bearing claim on the
+/// same box is excluded. An empty slice disables rent collection.
 pub fn generate_candidate<V: CandidateStateView>(
     view: &V,
     mempool: MempoolReadSnapshot,

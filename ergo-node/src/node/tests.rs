@@ -1799,7 +1799,6 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
         miner_pk: [0x02u8; 33],
-        eligible_rent_boxes: Arc::new(Vec::new()),
         reason: BuildReason::Startup,
     };
 
@@ -1813,7 +1812,7 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     intent_tx.send_if_modified(|_| true);
 
     let engine = tokio::spawn(super::mining_engine::run_mining_engine(
-        reader, handle, intent_rx, cancel_rx,
+        reader, handle, None, intent_rx, cancel_rx,
     ));
 
     // The target warn! message emitted after MAX_VIS_RETRIES exhaustion.

@@ -1450,6 +1450,7 @@ async fn run_inner_with_backend(
         let task = tokio::spawn(super::mining_engine::run_mining_engine(
             reader,
             engine_handle,
+            state.indexer_handle.clone(),
             intent_rx,
             cancel_rx,
         ));

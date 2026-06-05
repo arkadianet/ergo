@@ -14,9 +14,62 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_mining::engine::{build_and_publish, BuildOutcome};
 use ergo_mining::handle::MiningHandle;
+use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
+use ergo_state::store::CommittedSnapshot;
+use ergo_validation::UtxoView;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
+
+/// Storage-rent period in blocks (≈ 4 years). Non-votable protocol
+/// constant; mirrors `ergo-validation`'s `storage_period`. A box is
+/// rent-eligible at height `H` when its `creationHeight <= H - this`.
+const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
+
+/// Enumerate storage-rent-eligible boxes for the miner self-claim:
+/// oldest-first, capped at `max_claims`, each resolved to a full `ErgoBox`
+/// from the SAME committed snapshot the candidate builds against (the
+/// indexer DTO carries no script/tokens/registers). Boxes the snapshot
+/// cannot return (spent since the index scan, or a reorg) are skipped —
+/// never claimed blind. Degrades to empty (build without a rent claim)
+/// when no indexer is attached, the chain is younger than one storage
+/// period, or the index query fails — rent is policy, and a policy
+/// failure must never block candidate production.
+fn resolve_eligible_rent_boxes(
+    indexer: Option<&ergo_indexer::IndexerHandle>,
+    snapshot: &CommittedSnapshot,
+    candidate_height: u32,
+    max_claims: u32,
+) -> Vec<ErgoBox> {
+    let Some(store_idx) = indexer.and_then(|h| h.store()) else {
+        return Vec::new();
+    };
+    let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
+        return Vec::new();
+    };
+    let rows = match store_idx.read_storage_rent_eligible_paged(
+        height_cutoff,
+        0,
+        max_claims,
+        ergo_indexer::SortDir::Asc,
+    ) {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                error = ?e,
+                "mining: storage-rent resolution failed; building without rent self-claim",
+            );
+            return Vec::new();
+        }
+    };
+    let mut boxes = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(b) = snapshot.get_box(&row.box_id) {
+            boxes.push(b);
+        }
+    }
+    boxes
+}
 
 /// Backoff between commit-visibility retries (the committed redb tip trailing
 /// the in-memory tip the loop signalled). Short: persist-pipeline lag clears
@@ -43,11 +96,16 @@ const SLOW_BUILD_WARN_MS: u64 = 2_000;
 /// intent supersedes the current one (latest-wins). All other outcomes are
 /// terminal for the intent.
 ///
+/// `indexer` is forwarded into the rent resolver closure passed to
+/// `build_and_publish`; storage-rent boxes are resolved against the same
+/// committed snapshot the candidate builds from.
+///
 /// Exits when `cancel_rx` flips to `true` (clean shutdown) or the producer
 /// (action loop) drops the intent sender.
 pub(super) async fn run_mining_engine(
     reader: ChainStoreReader,
     handle: MiningHandle,
+    indexer: Option<ergo_indexer::IndexerHandle>,
     mut intent_rx: watch::Receiver<Option<ergo_mining::engine::BuildIntent>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
@@ -93,7 +151,14 @@ pub(super) async fn run_mining_engine(
             // (`DroppedStale`) and `attempts` as the commit-visibility retry
             // count.
             let build_start = Instant::now();
-            let result = build_and_publish(&reader, &handle, &intent, now_ms);
+            let result = build_and_publish(&reader, &handle, &intent, now_ms, |snapshot, h| {
+                resolve_eligible_rent_boxes(
+                    indexer.as_ref(),
+                    snapshot,
+                    h,
+                    handle.max_storage_rent_claims(),
+                )
+            });
             let build_ms = build_start.elapsed().as_millis() as u64;
             match result {
                 Ok(BuildOutcome::TipNotVisible) if attempts < MAX_VIS_RETRIES => {

@@ -22,45 +22,6 @@ use tracing::warn;
 use super::peer_actions::flush_actions;
 use super::NodeState;
 
-/// Storage-rent period in blocks (≈ 4 years). Non-votable protocol
-/// constant; mirrors `ergo-validation`'s `storage_period`. A box is
-/// rent-eligible at height `H` when its `creationHeight <= H - this`.
-const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
-
-/// Enumerate storage-rent-eligible boxes for the miner self-claim:
-/// oldest-first, capped at `max_claims`, each resolved to a full `ErgoBox`
-/// from the committed state (the indexer DTO carries no
-/// script/tokens/registers). Boxes the state can no longer return (spent
-/// since the index scan, or a reorg) are skipped — never claimed blind.
-/// Returns empty when no indexer is attached or the chain is younger than
-/// one storage period.
-fn resolve_eligible_rent_boxes(
-    indexer: Option<&ergo_indexer::IndexerHandle>,
-    store: &ergo_state::store::StateStore,
-    candidate_height: u32,
-    max_claims: u32,
-) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, ergo_mining::MiningError> {
-    let Some(store_idx) = indexer.and_then(|h| h.store()) else {
-        return Ok(Vec::new());
-    };
-    let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
-        return Ok(Vec::new());
-    };
-    let rows = store_idx
-        .read_storage_rent_eligible_paged(height_cutoff, 0, max_claims, ergo_indexer::SortDir::Asc)
-        .map_err(|e| ergo_mining::MiningError::StateRead {
-            op: "rent_eligible_query",
-            reason: format!("{e:?}"),
-        })?;
-    let mut boxes = Vec::with_capacity(rows.len());
-    for row in rows {
-        if let Some(b) = store.get_box(&row.box_id) {
-            boxes.push(b);
-        }
-    }
-    Ok(boxes)
-}
-
 /// The action loop's half of the off-loop mining wiring: a `MiningHandle`
 /// clone (sharing the candidate cache with the engine task) plus the producer
 /// end of the intent channel. Bundled into one value so the "mining enabled ⇒
@@ -201,8 +162,10 @@ impl MiningTipSnapshot {
 ///
 /// All consensus-bearing build inputs come from the engine's committed
 /// snapshot; only the *policy* inputs that need action-loop state — the
-/// resolved reward key, the frozen mempool snapshot, and the storage-rent-
-/// eligible boxes — are resolved here on the loop and frozen into the intent.
+/// resolved reward key and the frozen mempool snapshot — are resolved here
+/// on the loop and frozen into the intent. Storage-rent-eligible boxes are
+/// resolved by the engine task against the same committed snapshot the
+/// candidate builds from.
 ///
 /// `chain_seq` bumps on every best-full **id** change (including equal-height
 /// reorgs); a header-only advance keeps the same seq. Returns the captured tip
@@ -242,36 +205,12 @@ pub(super) fn signal_mining_engine(
         RewardKeyResolution::Ready(pk) => pk,
         RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => return now,
     };
-    // Resolve storage-rent-eligible boxes on the loop (oldest-first, capped). A
-    // transient indexer error degrades to building without a rent self-claim
-    // rather than producing no candidate at all (the block stays valid).
-    let candidate_height = now.best_full_height + 1;
-    let eligible_rent_boxes = if handle.claim_storage_rent() {
-        match resolve_eligible_rent_boxes(
-            state.indexer_handle.as_ref(),
-            store,
-            candidate_height,
-            handle.max_storage_rent_claims(),
-        ) {
-            Ok(boxes) => boxes,
-            Err(e) => {
-                warn!(
-                    error = ?e,
-                    "mining: storage-rent resolution failed; building without rent self-claim",
-                );
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
     let intent = BuildIntent {
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
         miner_pk,
-        eligible_rent_boxes: Arc::new(eligible_rent_boxes),
         reason,
     };
     // `watch::send` replaces the prior value (latest-wins); Err only if the

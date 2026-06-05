@@ -443,7 +443,6 @@ fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
         expected_height: parent_height,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
         miner_pk: MINER_PK,
-        eligible_rent_boxes: Arc::new(Vec::new()),
         reason: BuildReason::Startup,
     }
 }
@@ -484,6 +483,85 @@ fn serialize_txs(txs: &[Transaction]) -> Vec<Vec<u8>> {
 // ----- happy path -----
 
 #[test]
+fn build_and_publish_resolves_rent_at_snapshot_height_when_enabled() {
+    // When the handle has rent enabled, the injected resolver is called with
+    // the snapshot and `snapshot.best_full_block_height() + 1` (the candidate
+    // height). Capture the two arguments to assert the height invariant.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    let handle = handle(&regime).with_rent_config(true, 64);
+    let intent = build_intent(tip, regime.parent_height);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    let captured: std::cell::Cell<Option<(u32, u32)>> = std::cell::Cell::new(None);
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        || BUILT_AT_MS,
+        |snapshot, h| {
+            captured.set(Some((snapshot.best_full_block_height(), h)));
+            Vec::new()
+        },
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "engine must publish a candidate for the committed synced tip, got {outcome:?}",
+    );
+    let (snap_h, given_h) = captured
+        .get()
+        .expect("resolver was called when rent is enabled");
+    assert_eq!(
+        given_h,
+        snap_h + 1,
+        "resolver receives snapshot height + 1 as the candidate height",
+    );
+}
+
+#[test]
+fn build_and_publish_skips_rent_resolver_when_disabled() {
+    // When the handle has rent disabled (the default), the resolver closure
+    // is never called.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    let handle = handle(&regime); // rent disabled by default
+    let intent = build_intent(tip, regime.parent_height);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    let called: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        || BUILT_AT_MS,
+        |_, _| {
+            called.set(true);
+            Vec::new()
+        },
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "engine must publish a candidate for the committed synced tip, got {outcome:?}",
+    );
+    assert!(
+        !called.get(),
+        "resolver must not be called when rent is disabled",
+    );
+}
+
+#[test]
 fn build_and_publish_publishes_and_serves_onloop_work() {
     publish_and_serve_under(&Regime::pre_eip27());
 }
@@ -517,8 +595,14 @@ fn publish_and_serve_under(regime: &Regime) {
         synced: true,
     });
 
-    let outcome = build_and_publish(&store.reader_handle(), &handle, &intent, || BUILT_AT_MS)
-        .expect("build_and_publish ok");
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+    )
+    .expect("build_and_publish ok");
     let timings = match outcome {
         BuildOutcome::Published { timings } => timings,
         other => {
@@ -612,8 +696,14 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
     });
 
     let intent = build_intent(tip, regime.parent_height);
-    let outcome = build_and_publish(&store.reader_handle(), &handle, &intent, || BUILT_AT_MS)
-        .expect("build_and_publish ok");
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+    )
+    .expect("build_and_publish ok");
     assert_eq!(
         outcome,
         BuildOutcome::DroppedStale,
