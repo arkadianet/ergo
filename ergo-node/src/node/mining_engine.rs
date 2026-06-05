@@ -16,7 +16,7 @@ use ergo_mining::engine::{build_and_publish, BuildOutcome};
 use ergo_mining::handle::MiningHandle;
 use ergo_state::reader::ChainStoreReader;
 use tokio::sync::watch;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Backoff between commit-visibility retries (the committed redb tip trailing
 /// the in-memory tip the loop signalled). Short: persist-pipeline lag clears
@@ -27,6 +27,12 @@ const VIS_BACKOFF: Duration = Duration::from_millis(25);
 /// [`VIS_BACKOFF`]). On exhaustion the task stops retrying and waits for the
 /// next intent rather than spinning on a stalled persist pipeline.
 const MAX_VIS_RETRIES: u32 = 40;
+
+/// `build_ms` at or above this logs the build-complete line at `warn!` instead
+/// of `info!`: a build this slow leaves the new tip unservable for its whole
+/// duration (the 503 window the two-phase publish bounds), so it is
+/// operator-actionable, not routine.
+const SLOW_BUILD_WARN_MS: u64 = 2_000;
 
 /// Drive the off-loop candidate engine until cancelled.
 ///
@@ -97,6 +103,34 @@ pub(super) async fn run_mining_engine(
                         _ = cancel_rx.changed() => return,
                         _ = tokio::time::sleep(VIS_BACKOFF) => {}
                     }
+                }
+                Ok(BuildOutcome::Published { timings: t }) => {
+                    if build_ms >= SLOW_BUILD_WARN_MS {
+                        warn!(
+                            attempts,
+                            build_ms,
+                            emission_ms = t.emission_ms,
+                            rent_ms = t.rent_ms,
+                            select_ms = t.select_ms,
+                            dryrun_ms = t.dryrun_ms,
+                            roots_ms = t.roots_ms,
+                            reason = ?intent.reason,
+                            "mining engine: build complete (slow)",
+                        );
+                    } else {
+                        info!(
+                            attempts,
+                            build_ms,
+                            emission_ms = t.emission_ms,
+                            rent_ms = t.rent_ms,
+                            select_ms = t.select_ms,
+                            dryrun_ms = t.dryrun_ms,
+                            roots_ms = t.roots_ms,
+                            reason = ?intent.reason,
+                            "mining engine: build complete",
+                        );
+                    }
+                    break;
                 }
                 Ok(outcome) => {
                     debug!(
