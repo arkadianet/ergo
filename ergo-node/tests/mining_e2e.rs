@@ -709,6 +709,50 @@ async fn engine_builds_second_candidate_after_block_applies() {
     handle.shutdown().await.expect("clean shutdown");
 }
 
+/// §4.2 regression guard: after a block applies, the candidate for the NEW
+/// tip must become servable promptly (the minimal publish), not after a
+/// full enrichment pass. The bound is generous for CI; the property pinned
+/// is "serving resumes without an unbounded gap".
+#[tokio::test]
+async fn new_tip_candidate_serves_promptly_after_block_apply() {
+    let (_dir, handle, _parent_tip) = boot_synced_mining_node().await;
+    let addr = handle.api_addr.expect("api bound");
+
+    // Boot synced at N; serve the N+1 candidate.
+    assert!(
+        poll_best_full_height(&handle, PARENT_HEIGHT).await,
+        "node must boot synced at the seeded parent height {PARENT_HEIGHT}",
+    );
+    let work = poll_candidate(addr).await;
+    let h0 = work.h.expect("candidate carries a height");
+    assert_eq!(h0, CANDIDATE_HEIGHT, "boot candidate is for N+1");
+
+    // Solve + submit the N+1 block.
+    let nonce = solve(&msg_bytes(&work), h0, &work.b);
+    let solution_body = format!(r#"{{"n":"{}"}}"#, hex::encode(nonce));
+    let resp = http_request(addr, "POST", "/mining/solution", Some(&solution_body)).await;
+    assert_eq!(
+        resp.status, 200,
+        "solution must be accepted (200); body: {}",
+        resp.body,
+    );
+
+    // The tip advances; time how long until the N+2 candidate appears.
+    let started = std::time::Instant::now();
+    let next_work = poll_candidate_at_height(addr, h0 + 1).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        next_work.h,
+        Some(h0 + 1),
+        "served candidate must be for the new tip (N+2)",
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "new-tip candidate must become servable within 10s of submit; took {elapsed:?}",
+    );
+}
+
 /// `GET /mining/candidate?longpoll=<msg>` semantics, end-to-end through a booted
 /// node over real HTTP:
 ///   - a value that does NOT match the current template returns immediately
