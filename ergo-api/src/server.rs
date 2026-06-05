@@ -1058,11 +1058,13 @@ pub fn router_with_mempool_and_wallet_and_security(
                  latency: std::time::Duration,
                  _span: &tracing::Span| {
                     let latency_ms = latency.as_millis() as u64;
-                    match class {
+                    // `classification` renders identically on both levels so
+                    // the field has one shape for log consumers.
+                    match &class {
                         ServerErrorsFailureClass::StatusCode(code)
-                            if code == StatusCode::SERVICE_UNAVAILABLE =>
+                            if *code == StatusCode::SERVICE_UNAVAILABLE =>
                         {
-                            tracing::debug!(classification = %code, latency_ms, "response failed");
+                            tracing::debug!(classification = %class, latency_ms, "response failed");
                         }
                         _ => {
                             tracing::error!(classification = %class, latency_ms, "response failed");
