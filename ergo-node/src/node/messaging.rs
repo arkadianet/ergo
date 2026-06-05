@@ -379,22 +379,15 @@ pub(super) fn handle_message(
                     let bh = cs_after.best_header_height;
                     let fb = cs_after.best_full_block_height;
 
-                    // Auto-exit IBD durability when near tip
-                    if fb > fb_before
-                        && state
-                            .store
-                            .as_utxo()
-                            .expect("utxo-only: IBD durability mode is gated off in digest mode")
-                            .ibd_mode()
-                        && bh > 0
-                        && bh.saturating_sub(fb) < 10
-                    {
-                        state
-                            .store
-                            .as_utxo_mut()
-                            .expect("utxo-only: IBD durability mode is gated off in digest mode")
-                            .set_ibd_mode(false, 0);
-                        info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
+                    // Auto-exit IBD durability when near tip. IBD durability
+                    // mode is a UTXO-arena flush-cadence knob; the digest
+                    // backend commits per-apply and has no IBD concept, so
+                    // this only runs on the UTXO store.
+                    if let Some(u) = state.store.as_utxo_mut() {
+                        if fb > fb_before && u.ibd_mode() && bh > 0 && bh.saturating_sub(fb) < 10 {
+                            u.set_ibd_mode(false, 0);
+                            info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
+                        }
                     }
 
                     // Refill downloads without waiting for the next

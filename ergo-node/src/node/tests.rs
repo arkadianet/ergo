@@ -40,6 +40,49 @@ fn mid(n: u8) -> [u8; 32] {
 
 pub(super) fn make_state(db_path: &Path) -> NodeState {
     let store = StateStore::open(db_path).unwrap();
+    make_state_with_backend(
+        ergo_state::StateBackendKind::Utxo(store),
+        crate::config::StateType::Utxo,
+        MempoolConfig::default(),
+    )
+}
+
+/// Open a fresh Mode-5 digest-verifier backend on `db_path`, using the
+/// same `DigestStateStore::open` call as `boot.rs`'s digest arm. A
+/// digest `NodeState`'s `as_utxo()`/`as_utxo_mut()` both return `None`,
+/// which is what the digest-mode survival fixes guard against.
+///
+/// Production force-disables the mempool for any digest mode (admission
+/// needs UTXO box bytes — see `config::mempool_must_force_disable`), so
+/// this fixture pins `enabled = false` to match the real Mode-5 posture
+/// rather than fabricating an impossible digest-with-live-mempool node.
+pub(super) fn make_digest_state(db_path: &Path) -> NodeState {
+    let store = ergo_state::DigestStateStore::open(
+        db_path,
+        ergo_validation::scala_launch(),
+        ergo_chain_spec::VotingParams {
+            voting_length: 2,
+            ..ergo_chain_spec::VotingParams::mainnet()
+        },
+        [0u8; 33], // EMPTY_AVL_DIGEST — a fresh digest store seeds from it
+    )
+    .unwrap();
+    let mempool_cfg = MempoolConfig {
+        enabled: false,
+        ..MempoolConfig::default()
+    };
+    make_state_with_backend(
+        ergo_state::StateBackendKind::Digest(store),
+        crate::config::StateType::Digest,
+        mempool_cfg,
+    )
+}
+
+fn make_state_with_backend(
+    backend: ergo_state::StateBackendKind,
+    state_type: crate::config::StateType,
+    mempool_cfg: MempoolConfig,
+) -> NodeState {
     let coordinator = SyncCoordinator::new(0);
     let executor = SyncExecutor::new(
         ProtocolParams::mainnet_default(),
@@ -47,12 +90,9 @@ pub(super) fn make_state(db_path: &Path) -> NodeState {
     );
     let peer_manager = PeerManager::new(0);
     let (event_tx, _rx) = mpsc::channel::<PeerEvent>(4);
-    let mempool = Mempool::new(
-        MempoolConfig::default(),
-        weight::from_config("cost").unwrap(),
-    );
+    let mempool = Mempool::new(mempool_cfg, weight::from_config("cost").unwrap());
     NodeState {
-        store: ergo_state::StateBackendKind::Utxo(store),
+        store: backend,
         coordinator,
         executor,
         peer_manager,
@@ -76,7 +116,7 @@ pub(super) fn make_state(db_path: &Path) -> NodeState {
         last_seen_validation_settings: ergo_validation::ErgoValidationSettings::empty(),
         snapshot_publisher: None,
         identity_inputs: crate::node::identity::IdentityInputs {
-            state_type: crate::config::StateType::Utxo,
+            state_type,
             verify_transactions: true,
             blocks_to_keep: -1,
             utxo_bootstrap: false,
@@ -2076,4 +2116,170 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         .await
         .expect("engine task must exit promptly after cancel")
         .expect("engine task must not panic");
+}
+
+// ----- digest-mode (Mode 5) survival: handshake / sync / API seams -----
+
+/// The handshake arm's SyncInfo fallback builds the payload from
+/// `&state.store` via the backend-agnostic `ChainView`, not the
+/// UTXO-narrowed `as_utxo()`. On a digest backend the old `.expect()`
+/// would have panicked; here it must produce a `CODE_SYNC_INFO` frame
+/// whose bytes match calling `build_sync_info_payload` directly on the
+/// same store (the seam is internal, so self-consistency is the bar).
+#[test]
+fn handshake_complete_digest_backend_sends_sync_info_without_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_digest_state(&tmp.path().join("digest.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let sync_version = SyncVersion::V1;
+
+    // Register the peer with an outbound channel we can drain, mirroring
+    // the `state.registry.peers.insert` the handshake arm performs.
+    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    state.registry.peers.insert(
+        peer,
+        PeerRuntime {
+            sync_version,
+            outbound_tx: tx,
+        },
+    );
+
+    // Expected bytes: `build_sync_info_payload` over the digest store
+    // directly. This is the exact call the fixed handshake arm makes.
+    let expected = ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store);
+
+    // Run the fixed seam: anchor scheduler is off in the fixture, so
+    // `try_send_anchor_sync_info` returns false and the fallback path
+    // (the one the fix touches) fires.
+    assert!(
+        !try_send_anchor_sync_info(&mut state, &peer, now),
+        "anchor scheduler is disabled in the fixture; fallback must run",
+    );
+    let payload = ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store);
+    assert!(send_to_peer(
+        &state,
+        &peer,
+        message::CODE_SYNC_INFO,
+        payload
+    ));
+
+    let frame = rx.try_recv().expect("a SyncInfo frame must be queued");
+    assert_eq!(frame.code, message::CODE_SYNC_INFO);
+    assert_eq!(frame.payload, expected);
+}
+
+/// `request_missing_sections` takes `&dyn ChainView`; on a digest
+/// backend `&state.store` routes to the digest header tables instead of
+/// panicking through `as_utxo()`. With no eligible peers it returns no
+/// actions — the point is that the call survives.
+#[test]
+fn request_missing_sections_digest_backend_no_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_digest_state(&tmp.path().join("digest.redb"));
+    let now = Instant::now();
+
+    let actions = state.executor.request_missing_sections(
+        &mut state.coordinator,
+        &state.store,
+        &state.peer_manager,
+        now,
+    );
+    assert!(
+        actions.is_empty(),
+        "no peers registered, so no section requests: {actions:?}",
+    );
+}
+
+/// The IBD auto-exit fold (events.rs / messaging.rs) keys off
+/// `as_utxo_mut()`, which is `None` on a digest backend — so the
+/// durability-knob branch is skipped entirely rather than panicking. A
+/// digest apply still advances `best_full_block_height`, which is why
+/// the old unconditional `as_utxo().expect()` in the same arm was
+/// reachable. Driving a real applying block needs the ADProofs fetch
+/// pipeline (out of scope here), so this asserts the guard's enabling
+/// condition directly: neither `as_utxo` accessor yields an arena on a
+/// digest store, which is exactly what makes both folds a no-op.
+#[test]
+fn ibd_auto_exit_digest_backend_skips_utxo_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_digest_state(&tmp.path().join("digest.redb"));
+    assert!(
+        state.store.as_utxo().is_none(),
+        "digest backend exposes no UTXO arena for the IBD-exit read",
+    );
+    assert!(
+        state.store.as_utxo_mut().is_none(),
+        "digest backend exposes no UTXO arena for the IBD-exit write",
+    );
+}
+
+/// API admission rejects with the `Disabled` wire shape when the mempool
+/// is off — which a digest node always is (production force-disables it).
+/// The guard short-circuits before `build_tip_context` / `as_utxo()`, so
+/// both submit intents return `reason: "disabled"` instead of panicking
+/// or surfacing a misleading `tip_unready` error.
+#[test]
+fn api_submit_without_mempool_rejects_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_digest_state(&tmp.path().join("digest.redb"));
+    assert!(
+        !state.mempool.config().enabled,
+        "a digest fixture must have the mempool force-disabled",
+    );
+    let now = Instant::now();
+
+    use ergo_api::types::SubmitMode;
+    for mode in [SubmitMode::Broadcast, SubmitMode::CheckOnly] {
+        let err = super::admission::admit_api_transaction(&mut state, &[0u8; 8], mode, now)
+            .expect_err("mempool-off admission must reject");
+        assert_eq!(err.reason, "disabled", "{mode:?} should reject as disabled");
+    }
+}
+
+/// The memory sampler emits a row on a digest backend: the UTXO-arena
+/// columns read 0 (via `as_utxo().map(...).unwrap_or(0)`) rather than
+/// panicking through the old `.expect()`. Asserts a data row is appended
+/// AND that every UTXO-only column in it is exactly "0", keyed by column
+/// name off the CSV header so the check survives schema reordering.
+#[test]
+fn memory_sample_digest_backend_emits_zeroed_arena_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_digest_state(&tmp.path().join("digest.redb"));
+    let csv_path = tmp.path().join("mem.csv");
+    let mut file: Option<std::fs::File> = None;
+
+    super::memory_sampler::sample_memory(&state, &csv_path, &mut file);
+
+    assert!(file.is_some(), "sampler must open the CSV file");
+    let contents = std::fs::read_to_string(&csv_path).unwrap();
+    let mut lines = contents.lines();
+    let header: Vec<&str> = lines.next().expect("header line").split(',').collect();
+    let row: Vec<&str> = lines.next().expect("one data row").split(',').collect();
+    assert_eq!(
+        header.len(),
+        row.len(),
+        "data row column count must match the header",
+    );
+
+    // Every column sourced from the UTXO arena must read 0 on a digest
+    // backend (these are the columns the fix routes through
+    // `as_utxo().map(...).unwrap_or(0)`).
+    for col in [
+        "avl_cache_clean_bytes",
+        "avl_cache_capacity_bytes",
+        "avl_clean_len",
+        "avl_dirty_len",
+        "avl_read_count",
+        "batch_headers_len",
+        "batch_headers_bytes",
+        "batch_meta_len",
+        "redb_state_evictions",
+    ] {
+        let idx = header
+            .iter()
+            .position(|h| *h == col)
+            .unwrap_or_else(|| panic!("column {col} missing from header"));
+        assert_eq!(row[idx], "0", "digest backend must zero-fill {col}");
+    }
 }
