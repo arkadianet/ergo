@@ -351,10 +351,10 @@ mod tests {
         let store = StateStore::open(dir.path().join("s.redb").as_path()).unwrap();
         let out = build_and_publish(
             &store.reader_handle(),
-            &handle(),
+            &handle().with_rent_config(true, 4),
             &intent([0u8; 32], 0),
             || BUILT_AT_MS,
-            |_, _| Vec::new(),
+            |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::NoState);
@@ -368,10 +368,10 @@ mod tests {
         // height (0) < expected (5) ⇒ persist-lag ⇒ retryable.
         let out = build_and_publish(
             &store.reader_handle(),
-            &handle(),
+            &handle().with_rent_config(true, 4),
             &intent([0x42u8; 32], 5),
             || BUILT_AT_MS,
-            |_, _| Vec::new(),
+            |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::TipNotVisible);
@@ -386,10 +386,10 @@ mod tests {
         // chain forked away from it. Drop the stale intent rather than spin.
         let out = build_and_publish(
             &store.reader_handle(),
-            &handle(),
+            &handle().with_rent_config(true, 4),
             &intent([0x42u8; 32], 0),
             || BUILT_AT_MS,
-            |_, _| Vec::new(),
+            |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::IntentSuperseded);
@@ -403,10 +403,10 @@ mod tests {
         // the visibility check passes and the synced gate is what rejects.
         let out = build_and_publish(
             &store.reader_handle(),
-            &handle(),
+            &handle().with_rent_config(true, 4),
             &intent([0u8; 32], 0),
             || BUILT_AT_MS,
-            |_, _| Vec::new(),
+            |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::NotSynced);
