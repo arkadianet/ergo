@@ -34,6 +34,7 @@ use axum::{
     Json, Router,
 };
 use tokio::task::JoinHandle;
+use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
@@ -1034,16 +1035,41 @@ pub fn router_with_mempool_and_wallet_and_security(
     // path alone identifies the endpoint for correlation. Sensitive
     // per-request detail belongs in sanitized handler-level logs.
     assembled.layer(
-        TraceLayer::new_for_http().make_span_with(|request: &Request| {
-            static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
-            let req_id = HTTP_REQ_SEQ.fetch_add(1, Ordering::Relaxed);
-            tracing::info_span!(
-                "http",
-                req_id,
-                method = %request.method(),
-                path = %request.uri().path(),
-            )
-        }),
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &Request| {
+                static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
+                let req_id = HTTP_REQ_SEQ.fetch_add(1, Ordering::Relaxed);
+                tracing::info_span!(
+                    "http",
+                    req_id,
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                )
+            })
+            // 503 is this API's expected-unavailability reply (e.g. the
+            // tip-change gap on /mining/candidate, polled at 2 Hz by miners)
+            // — operational, not a fault. Everything else keeps the
+            // tower-http default ERROR. The closure cannot see the request
+            // path (tower-http classify gives only the failure class), so
+            // the demotion is status-scoped; the entered request span still
+            // attaches req_id/method/path to the event either way.
+            .on_failure(
+                |class: ServerErrorsFailureClass,
+                 latency: std::time::Duration,
+                 _span: &tracing::Span| {
+                    let latency_ms = latency.as_millis() as u64;
+                    match class {
+                        ServerErrorsFailureClass::StatusCode(code)
+                            if code == StatusCode::SERVICE_UNAVAILABLE =>
+                        {
+                            tracing::debug!(classification = %code, latency_ms, "response failed");
+                        }
+                        _ => {
+                            tracing::error!(classification = %class, latency_ms, "response failed");
+                        }
+                    }
+                },
+            ),
     )
 }
 
