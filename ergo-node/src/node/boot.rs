@@ -1442,20 +1442,67 @@ async fn run_inner_with_backend(
     // cache shared (via `Arc`) with the action-loop's `MiningHandle` clone.
     // Cancel is a latched `watch<bool>` mirroring the anchor builder; the
     // intent sender is handed to the action loop as the producer side.
+    //
+    // Boot owns the build-worker thread; the coordinator future owns only the
+    // request `Sender`. We create the `std::sync::mpsc` build channel and spawn
+    // the worker HERE so the worker `JoinHandle` outlives the coordinator
+    // future: `RunHandle::shutdown` aborts the coordinator (usually parked at
+    // `reply_rx.await`), which drops the future and its `Sender`, then joins the
+    // worker thread via the handle stored on `RunHandle`. If the worker were
+    // spawned inside the future its handle would be dropped (detached) on
+    // abort, letting a still-running build keep reading/publishing past
+    // shutdown — the regression this split closes.
     let mining_engine_cancel_tx = tokio::sync::watch::channel(false).0;
-    let (mining_wiring, mining_engine_handle): (
+    let (mining_wiring, mining_engine_handle, mining_worker_handle): (
         Option<super::mining_dispatch::MiningWiring>,
         Option<JoinHandle<()>>,
+        Option<std::thread::JoinHandle<()>>,
     ) = if let Some(handle) = mining_handle {
         let reader = state.store.reader_handle();
-        let engine_handle = handle.clone();
+        let indexer = state.indexer_handle.clone();
+        // Per-tip dry-run base cache: off by default (a multi-GB resident AVL
+        // graph is an operator-facing deployment change). Captured by the
+        // worker thread's `move` closure below.
+        let use_base_cache = config.mining_config.candidate_base_cache;
         let (intent_tx, intent_rx) =
             tokio::sync::watch::channel::<Option<ergo_mining::engine::BuildIntent>>(None);
         let cancel_rx = mining_engine_cancel_tx.subscribe();
+        // Build-request channel: the worker owns the receiver, the coordinator
+        // future owns the sender. The worker is a plain OS thread (not a tokio
+        // task) because it will own the `!Send` per-tip dry-run base cache.
+        //
+        // `tracing::subscriber::set_default` (the capture tests' mechanism)
+        // installs a THREAD-LOCAL default, so a freshly spawned `std::thread`
+        // would not inherit it and its build logs would vanish. Snapshot the
+        // active dispatcher here on the spawning thread and run the worker loop
+        // under it: in production this is the global default (no-op); under test
+        // it is the thread-local capture subscriber. The worker's logs then
+        // route exactly where the inline build's did.
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<super::mining_engine::BuildRequest>();
+        let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+        // Worker gets its own `MiningHandle` clone (cheap `Arc` share); the
+        // coordinator keeps `handle` for the mode probe and refresh predicate.
+        let worker = {
+            let worker_handle = handle.clone();
+            std::thread::Builder::new()
+                .name("mining-build-worker".to_string())
+                .spawn(move || {
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        super::mining_engine::run_build_worker(
+                            reader,
+                            worker_handle,
+                            indexer,
+                            use_base_cache,
+                            req_rx,
+                        );
+                    });
+                })
+                .expect("spawn mining build worker thread")
+        };
+        let engine_handle = handle.clone();
         let task = tokio::spawn(super::mining_engine::run_mining_engine(
-            reader,
             engine_handle,
-            state.indexer_handle.clone(),
+            req_tx,
             intent_rx,
             cancel_rx,
         ));
@@ -1468,9 +1515,10 @@ async fn run_inner_with_backend(
                 ),
             }),
             Some(task),
+            Some(worker),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -1506,6 +1554,7 @@ async fn run_inner_with_backend(
         anchor_builder_handle: Some(anchor_builder_handle),
         anchor_builder_cancel_tx: anchor_cancel_tx_for_handle,
         mining_engine_handle,
+        mining_worker_handle,
         mining_engine_cancel_tx,
         shutdown_notify,
     })

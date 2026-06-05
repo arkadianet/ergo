@@ -69,6 +69,16 @@ pub struct MiningConfig {
     /// more room for fee-paying user transactions.
     #[serde(default = "default_max_storage_rent_claims")]
     pub max_storage_rent_claims: u32,
+
+    /// `true`: the candidate engine keeps the hydrated AVL working set resident
+    /// between candidate builds, keyed on the committed tip. The first build per
+    /// block pays the full hydration; same-tip rebuilds (the enriched refresh
+    /// and every mempool-driven rebuild) then reuse it and are near-instant.
+    /// Default `false` — it holds the full UTXO AVL node graph resident
+    /// (multi-GB on a mainnet archival node, scaling with the UTXO-set size), so
+    /// it is opt-in for mining nodes with RAM headroom.
+    #[serde(default)]
+    pub candidate_base_cache: bool,
 }
 
 fn default_candidate_interval_ms() -> u64 {
@@ -101,6 +111,7 @@ impl Default for MiningConfig {
             use_external_miner: default_use_external_miner(),
             claim_storage_rent: false,
             max_storage_rent_claims: default_max_storage_rent_claims(),
+            candidate_base_cache: false,
         }
     }
 }
@@ -307,6 +318,8 @@ mod tests {
             cfg.max_storage_rent_claims,
             default_max_storage_rent_claims()
         );
+        // The dry-run base cache is opt-in (multi-GB resident graph).
+        assert!(!cfg.candidate_base_cache);
     }
 
     #[test]
@@ -343,5 +356,20 @@ mod tests {
         // safety ceiling (the block budget is the real limit).
         assert!(!parsed.claim_storage_rent);
         assert_eq!(parsed.max_storage_rent_claims, 4096);
+        // The dry-run base cache is opt-in (off) — a present-but-partial table
+        // gets the serde `#[serde(default)]` (false).
+        assert!(!parsed.candidate_base_cache);
+    }
+
+    #[test]
+    fn toml_parses_candidate_base_cache_when_set() {
+        // The opt-in path: an explicit `candidate_base_cache = true` parses
+        // through, so a mining operator can enable the resident AVL cache.
+        let toml_src = r#"
+            enabled = true
+            candidate_base_cache = true
+        "#;
+        let parsed: MiningConfig = toml::from_str(toml_src).expect("parse");
+        assert!(parsed.candidate_base_cache);
     }
 }

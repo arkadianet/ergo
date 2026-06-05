@@ -33,13 +33,17 @@ fn seed_genesis(store: &mut StateStore) {
 }
 
 fn synthetic_header(height: u32, parent_id: ModifierId) -> Header {
+    synthetic_header_with_ts_base(height, parent_id, 1_000_000)
+}
+
+fn synthetic_header_with_ts_base(height: u32, parent_id: ModifierId, ts_base: u64) -> Header {
     Header {
         version: 2,
         parent_id,
         ad_proofs_root: Digest32::from_bytes([0u8; 32]),
         transactions_root: Digest32::from_bytes([0u8; 32]),
         state_root: ADDigest::from_bytes([0u8; 33]),
-        timestamp: 1_000_000 + height as u64,
+        timestamp: ts_base + height as u64,
         extension_root: Digest32::from_bytes([0u8; 32]),
         n_bits: 16842752,
         height,
@@ -59,6 +63,27 @@ fn apply_n_blocks(store: &mut StateStore, n: u32) -> [u8; 32] {
     let mut tip = [0u8; 32];
     for h in 1..=n {
         let hdr = synthetic_header(h, parent_id);
+        let (bytes, id) = serialize_header(&hdr).expect("serialize header");
+        let id_bytes: [u8; 32] = *id.as_bytes();
+        store.store_header(&id_bytes, &bytes).expect("store_header");
+        let expected = store.root_digest();
+        store
+            .apply_block_unchecked_for_test(h, &id_bytes, &expected, &[])
+            .expect("apply");
+        parent_id = id;
+        tip = id_bytes;
+    }
+    tip
+}
+
+/// Like [`apply_n_blocks`] but with a custom timestamp base, so a second
+/// chain of the same height gets DIFFERENT header ids (the id hashes the
+/// timestamp). Used only by the equal-height reorg cache test.
+fn apply_n_blocks_with_timestamp_base(store: &mut StateStore, n: u32, ts_base: u64) -> [u8; 32] {
+    let mut parent_id: ModifierId = Digest32::from_bytes([0u8; 32]).into();
+    let mut tip = [0u8; 32];
+    for h in 1..=n {
+        let hdr = synthetic_header_with_ts_base(h, parent_id, ts_base);
         let (bytes, id) = serialize_header(&hdr).expect("serialize header");
         let id_bytes: [u8; 32] = *id.as_bytes();
         store.store_header(&id_bytes, &bytes).expect("store_header");
@@ -155,6 +180,137 @@ fn dry_run_matches_store_oracle_at_height_15() {
     assert_eq!(oracle.0, got.0, "state_root must be byte-identical");
     assert_eq!(oracle.1, got.1, "ad_proof_bytes must be byte-identical");
     assert_eq!(oracle.2, got.2, "snapshot tip id must match");
+}
+
+// ----- cached dry-run parity (per-tip base) -----
+
+/// Same-tip repeat: 1 miss + 2 hits, each bit-equal to a fresh uncached
+/// dry-run. Through the PUBLIC `candidate_dry_run_cached` entry point with an
+/// empty change set — the structural-parallel `build_utxo_changes_checked`
+/// path. (Hit-reuses-base identity is asserted by the crate-internal unit
+/// test, which can read the `Rc` root; this integration test pins the
+/// consensus property: cached bytes == uncached bytes.)
+#[test]
+fn cached_same_tip_repeat_matches_uncached() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    seed_genesis(&mut store);
+    apply_n_blocks(&mut store, 12);
+
+    let mut base = None;
+    for call in 0..3 {
+        let oracle = store.candidate_dry_run(&[]).expect("uncached oracle");
+        let snap = store.committed_snapshot().unwrap().expect("snapshot");
+        let got = snap
+            .candidate_dry_run_cached(&mut base, &[])
+            .expect("cached dry-run");
+        assert_eq!(oracle.0, got.0, "call {call}: state_root must match oracle");
+        assert_eq!(
+            oracle.1, got.1,
+            "call {call}: proof bytes must match oracle"
+        );
+        assert_eq!(oracle.2, got.2, "call {call}: tip id must match oracle");
+        assert!(base.is_some(), "call {call}: base memoized after success");
+    }
+}
+
+/// Tip advance: a cached call after applying a block must miss (tip id
+/// changed — even though an empty block leaves the AVL root unchanged, the
+/// key is the tip id, not the root), rebuild, and match the uncached oracle
+/// at the new tip. Proves the cache key is the committed tip id.
+#[test]
+fn cached_tip_advance_rebuilds_and_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    seed_genesis(&mut store);
+    let tip_a = apply_n_blocks(&mut store, 10);
+
+    let mut base = None;
+    let snap_a = store.committed_snapshot().unwrap().expect("snapshot A");
+    snap_a
+        .candidate_dry_run_cached(&mut base, &[])
+        .expect("first cached build");
+    assert_eq!(
+        base.as_ref().map(|b| b.tip_id()),
+        Some(tip_a),
+        "base keyed to tip A"
+    );
+
+    // Advance one block; the committed tip id changes.
+    let tip_b = apply_n_blocks(&mut store, 1);
+    assert_ne!(tip_a, tip_b, "applying a block changes the tip id");
+
+    let oracle = store.candidate_dry_run(&[]).expect("uncached oracle at B");
+    let snap_b = store.committed_snapshot().unwrap().expect("snapshot B");
+    let got = snap_b
+        .candidate_dry_run_cached(&mut base, &[])
+        .expect("cached build at B");
+    assert_eq!(
+        base.as_ref().map(|b| b.tip_id()),
+        Some(tip_b),
+        "base rebuilt and rekeyed to tip B (miss on tip change)"
+    );
+    assert_eq!(oracle.0, got.0, "state_root must match oracle at new tip");
+    assert_eq!(oracle.1, got.1, "proof bytes must match oracle at new tip");
+    assert_eq!(oracle.2, got.2, "tip id must match oracle at new tip");
+}
+
+/// Equal-height reorg: the parity harness builds only a single linear chain
+/// (`apply_block_unchecked_for_test` enforces parent linkage), so a true
+/// in-store sibling tip at the same height is not cheaply producible. We
+/// instead drive the exact key-mismatch the reorg invariant relies on: two
+/// independent stores reach height 10 along DIFFERENT block ids, and a base
+/// memoized against store A's tip is fed a snapshot of store B. Because the
+/// cache key is the committed tip id ONLY (never height, never the root),
+/// the differing tip id forces a miss + rebuild, and the rebuilt base matches
+/// B's uncached oracle.
+///
+/// What this proves: the tip-id key invalidates on an equal-height tip swap.
+/// What it does NOT prove: an in-store reorg's rollback mechanics (covered by
+/// the state-store reorg suite) — only the cache seam's reaction to a tip-id
+/// change at equal height.
+#[test]
+fn cached_reorg_same_height_rebuilds() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut store_a = StateStore::open(dir_a.path().join("a.redb").as_path()).unwrap();
+    seed_genesis(&mut store_a);
+    let tip_a = apply_n_blocks(&mut store_a, 10);
+
+    // Store B: same height, different tip id. The synthetic header id is a
+    // hash over (height, parent_id, timestamp, ...), so a distinct timestamp
+    // offset yields a divergent chain with different ids at every height —
+    // the genesis box alone would NOT change the header ids.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut store_b = StateStore::open(dir_b.path().join("b.redb").as_path()).unwrap();
+    seed_genesis(&mut store_b);
+    let tip_b = apply_n_blocks_with_timestamp_base(&mut store_b, 10, 9_000_000);
+    assert_ne!(
+        tip_a, tip_b,
+        "two divergent height-10 chains must have different tip ids"
+    );
+
+    // Memoize a base against store A's tip.
+    let mut base = None;
+    let snap_a = store_a.committed_snapshot().unwrap().expect("snapshot A");
+    snap_a
+        .candidate_dry_run_cached(&mut base, &[])
+        .expect("cached build on A");
+    assert_eq!(base.as_ref().map(|b| b.tip_id()), Some(tip_a));
+
+    // Now run against store B's snapshot: tip id differs ⇒ miss ⇒ rebuild.
+    let oracle_b = store_b.candidate_dry_run(&[]).expect("uncached oracle B");
+    let snap_b = store_b.committed_snapshot().unwrap().expect("snapshot B");
+    let got = snap_b
+        .candidate_dry_run_cached(&mut base, &[])
+        .expect("cached build on B");
+    assert_eq!(
+        base.as_ref().map(|b| b.tip_id()),
+        Some(tip_b),
+        "equal-height tip swap forces a rebuild rekeyed to B"
+    );
+    assert_eq!(oracle_b.0, got.0, "state_root must match B's oracle");
+    assert_eq!(oracle_b.1, got.1, "proof bytes must match B's oracle");
+    assert_eq!(oracle_b.2, got.2, "tip id must match B's oracle");
 }
 
 // ----- accessor parity -----

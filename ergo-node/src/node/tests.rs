@@ -1753,6 +1753,108 @@ fn is_canonical_mode_5_combo_pins_the_contract() {
 
 // ----- mining engine exhaustion -----
 
+/// Wire the build worker + coordinator exactly as `boot` does, for tests that
+/// drive `run_mining_engine` directly. Boot owns the worker thread and the
+/// coordinator future owns only the request `Sender`; this mirrors that split
+/// so the tests preserve the production lifecycle (and the log-capture
+/// dispatcher snapshot — taken here on the test thread so the worker inherits
+/// the test's thread-local subscriber). Returns the spawned coordinator task
+/// and the worker `JoinHandle`; the test joins the worker after cancelling.
+fn spawn_engine_with_worker(
+    reader: ergo_state::reader::ChainStoreReader,
+    handle: ergo_mining::handle::MiningHandle,
+    indexer: Option<ergo_indexer::IndexerHandle>,
+    intent_rx: tokio::sync::watch::Receiver<Option<ergo_mining::engine::BuildIntent>>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> (tokio::task::JoinHandle<()>, std::thread::JoinHandle<()>) {
+    let (req_tx, req_rx) = std::sync::mpsc::channel::<super::mining_engine::BuildRequest>();
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+    let worker = {
+        let worker_handle = handle.clone();
+        std::thread::Builder::new()
+            .name("mining-build-worker-test".to_string())
+            .spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    // Base cache off: these tests exercise the topology /
+                    // exhaustion path, not the cache itself.
+                    super::mining_engine::run_build_worker(
+                        reader,
+                        worker_handle,
+                        indexer,
+                        false,
+                        req_rx,
+                    );
+                });
+            })
+            .expect("spawn test mining build worker thread")
+    };
+    let engine = tokio::spawn(super::mining_engine::run_mining_engine(
+        handle, req_tx, intent_rx, cancel_rx,
+    ));
+    (engine, worker)
+}
+
+/// Aborting the coordinator task (the production shutdown path: `shutdown()`
+/// `abort()`s the engine after its bounded await, usually while it is parked at
+/// an await point) must leave the build worker quiescent — it observes the
+/// closed request channel and exits — so it can be joined, never detaching to
+/// keep reading/publishing past shutdown.
+///
+/// This pins the ownership inversion directly: because the coordinator future
+/// owns ONLY the `req_tx`, dropping it (on abort) closes the channel and the
+/// worker's `recv()` errs. Pre-split the worker `JoinHandle` lived inside the
+/// future and was dropped (detached) on abort, leaving the worker running. Here
+/// the worker is idle (no intent ever sent), so after the abort the join must
+/// complete promptly.
+#[tokio::test]
+async fn coordinator_abort_leaves_worker_joinable() {
+    use ergo_crypto::difficulty::DifficultyParams;
+    use ergo_mining::emission_rules::MonetarySettings;
+    use ergo_mining::handle::MiningHandle;
+    use ergo_mining::reemission::ReemissionSettings;
+    use ergo_state::store::StateStore;
+    use tokio::sync::watch;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(tmp.path().join("s.redb").as_path()).unwrap();
+    let mut box_id = [0u8; 32];
+    box_id[31] = 1;
+    store
+        .initialize_genesis(&[(box_id, vec![0xAAu8; 32])])
+        .unwrap();
+    let reader = store.reader_handle();
+
+    let handle = MiningHandle::new(
+        [0x02u8; 33],
+        MonetarySettings::mainnet(),
+        Some(ReemissionSettings::mainnet()),
+        DifficultyParams::mainnet(),
+    );
+
+    // No intent is ever sent, so the coordinator parks on the intent channel —
+    // an abort point. The worker parks on `req_rx.recv()`.
+    let (_intent_tx, intent_rx) = watch::channel(None);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let (engine, worker) = spawn_engine_with_worker(reader, handle, None, intent_rx, cancel_rx);
+
+    // Let both park.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Simulate the shutdown abort: drop the coordinator future. This drops its
+    // `req_tx`, so the worker's `recv()` errs and the worker exits.
+    engine.abort();
+    let _ = engine.await; // observe cancellation (JoinError::is_cancelled)
+
+    // The worker must now exit and be joinable promptly. Join off-runtime under
+    // a bound; a hang here is the regression (a detached, still-running worker).
+    let joined = tokio::task::spawn_blocking(move || worker.join());
+    tokio::time::timeout(std::time::Duration::from_secs(5), joined)
+        .await
+        .expect("worker must exit promptly after the coordinator future is dropped")
+        .expect("join task must not fail")
+        .expect("worker thread must not panic");
+}
+
 /// The engine task must survive `MAX_VIS_RETRIES` `TipNotVisible` returns and
 /// then go back to waiting — not spin, not exit.
 ///
@@ -1852,9 +1954,7 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     // forever without this bump — the receiver only wakes on a version advance.
     intent_tx.send_if_modified(|_| true);
 
-    let engine = tokio::spawn(super::mining_engine::run_mining_engine(
-        reader, handle, None, intent_rx, cancel_rx,
-    ));
+    let (engine, worker) = spawn_engine_with_worker(reader, handle, None, intent_rx, cancel_rx);
 
     // The target warn! message emitted after MAX_VIS_RETRIES exhaustion.
     const EXHAUSTION_MSG: &str =
@@ -1893,6 +1993,10 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
         .await
         .expect("engine task must exit promptly after cancel")
         .expect("engine task must not panic");
+    // The test owns the worker thread now (as boot does in production). The
+    // coordinator future dropped its request sender on exit, so the worker's
+    // recv() has erred — join it so the thread doesn't leak past the test.
+    worker.join().expect("worker thread must not panic");
 }
 
 /// Pins that a mid-retry parent switch grants the new tip a FULL
@@ -2016,9 +2120,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     intent_tx.send_if_modified(|_| true);
 
     let _a_started = Instant::now();
-    let engine = tokio::spawn(super::mining_engine::run_mining_engine(
-        reader, handle, None, intent_rx, cancel_rx,
-    ));
+    let (engine, worker) = spawn_engine_with_worker(reader, handle, None, intent_rx, cancel_rx);
 
     const EXHAUSTION_MSG: &str =
         "mining engine: commit-visibility retries exhausted; awaiting next intent";
@@ -2043,6 +2145,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
                 .await
                 .expect("engine task must exit promptly after cancel")
                 .expect("engine task must not panic");
+            worker.join().expect("worker thread must not panic");
             return;
         }
     }
@@ -2116,6 +2219,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         .await
         .expect("engine task must exit promptly after cancel")
         .expect("engine task must not panic");
+    worker.join().expect("worker thread must not panic");
 }
 
 // ----- digest-mode (Mode 5) survival: handshake / sync / API seams -----

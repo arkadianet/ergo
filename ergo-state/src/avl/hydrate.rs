@@ -66,13 +66,39 @@ pub(crate) fn hydrate_batch_avl_prover_from_fetch(
     tree_height: u8,
     fetch: &dyn Fn(NodeId) -> Result<AvlNode, StateError>,
 ) -> Result<BatchAVLProver, StateError> {
+    let oracle = hydrate_tree_from_fetch(root_id, tree_height, fetch)?;
+    Ok(batch_avl_prover_from_tree(oracle))
+}
+
+/// Hydrate the upstream `AVLTree` (the `Rc<RefCell<Node>>` graph + height)
+/// from an arbitrary node source, without wrapping it in a prover.
+///
+/// This is the one shared hydration implementation: both
+/// [`hydrate_batch_avl_prover_from_fetch`] and the cached committed-snapshot
+/// path memoize the very same materialized tree, so a per-tip base reused
+/// across builds is structurally identical to a freshly hydrated one. The
+/// returned tree's nodes are marked `is_new = false` / `visited = false`
+/// (see [`mark_loaded`]).
+pub(crate) fn hydrate_tree_from_fetch(
+    root_id: NodeId,
+    tree_height: u8,
+    fetch: &dyn Fn(NodeId) -> Result<AvlNode, StateError>,
+) -> Result<OracleTree, StateError> {
     let root = hydrate_subtree(root_id, fetch)?;
     let mut oracle = OracleTree::new(default_resolver, UTXO_KEY_LENGTH, None);
     oracle.root = Some(root);
     oracle.height = tree_height as usize;
-    Ok(BatchAVLProver::new(
-        oracle, /* collect_changed_nodes = */ true,
-    ))
+    Ok(oracle)
+}
+
+/// Wrap a hydrated `AVLTree` in a `BatchAVLProver` with the same
+/// `collect_changed_nodes = true` setting both dry-run paths rely on to
+/// extract AD-proof bytes after a batch. The clone the cached path passes
+/// here is a shallow O(1) `Rc`-refcount clone; mutations during ops
+/// copy-on-write the shared nodes (their `is_new == false`), leaving the
+/// pristine base structurally untouched.
+pub(crate) fn batch_avl_prover_from_tree(tree: OracleTree) -> BatchAVLProver {
+    BatchAVLProver::new(tree, /* collect_changed_nodes = */ true)
 }
 
 /// Default resolver for label-only stubs. Hydration produces a fully

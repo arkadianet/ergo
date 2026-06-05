@@ -72,6 +72,7 @@ use ergo_ser::token::Token;
 use ergo_ser::transaction::Transaction;
 use ergo_state::store::StateStore;
 use ergo_validation::popow::algos::pack_interlinks;
+use num_bigint::BigUint;
 use std::sync::Arc;
 
 // ----- helpers -----
@@ -505,6 +506,7 @@ fn build_and_publish_resolves_rent_at_snapshot_height_when_enabled() {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |snapshot, h| {
             captured.set(Some((snapshot.best_full_block_height(), h)));
@@ -547,6 +549,7 @@ fn build_and_publish_skips_rent_resolver_when_disabled() {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |_, _| {
             called.set(true);
@@ -603,6 +606,7 @@ fn publish_and_serve_under(regime: &Regime) {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
     )
@@ -635,6 +639,244 @@ fn publish_and_serve_under(regime: &Regime) {
     );
     assert_eq!(served.height, regime.candidate_height());
     assert_eq!(served.pk, MINER_PK);
+}
+
+/// Phase-3 wiring oracle: the base-cache path (a `Some(&mut base)` slot) drives
+/// the SAME published work as the uncached path through `build_and_publish`,
+/// across a cold build (slot empty) then a hit build (slot primed for the same
+/// committed tip). Proves the `CachedSnapshotView` seam is byte-faithful and
+/// the worker-owned slot survives a request boundary without invalidating.
+/// (The exhaustive cached-vs-uncached `(Candidate, WorkMessage)` surface
+/// comparison and the flag-on e2e are Phase 4; this guards the wiring landed
+/// here.)
+#[test]
+fn build_and_publish_base_cache_cold_then_hit_matches_uncached() {
+    use ergo_state::store::DryRunBase;
+
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    // Uncached oracle: the served work the uncached (`None`) path publishes.
+    let oracle_w = {
+        let handle = handle(&regime);
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+        let out = build_and_publish(
+            &store.reader_handle(),
+            &handle,
+            &build_intent(tip, regime.parent_height),
+            BuildMode::Full,
+            None,
+            || BUILT_AT_MS,
+            |_, _| Vec::new(),
+        )
+        .expect("uncached build ok");
+        assert!(matches!(out, BuildOutcome::Published { .. }));
+        handle
+            .cached_work_if_synced()
+            .expect("uncached serves work")
+    };
+
+    // Cached path: one worker-owned slot across two same-tip builds. Cold build
+    // hydrates + memoizes; hit build reuses the memoized base. Both must publish
+    // work byte-identical to the uncached oracle.
+    let mut base: Option<DryRunBase> = None;
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    for pass in ["cold", "hit"] {
+        let out = build_and_publish(
+            &store.reader_handle(),
+            &handle,
+            &build_intent(tip, regime.parent_height),
+            BuildMode::Full,
+            Some(&mut base),
+            || BUILT_AT_MS,
+            |_, _| Vec::new(),
+        )
+        .unwrap_or_else(|e| panic!("cached {pass} build err: {e:?}"));
+        assert!(
+            matches!(out, BuildOutcome::Published { .. }),
+            "cached {pass} build must publish, got {out:?}",
+        );
+        // The slot is populated and keyed to the committed tip after each build
+        // (a successful build never poisons it).
+        let b = base.as_ref().expect("base populated after a clean build");
+        assert_eq!(
+            b.tip_id(),
+            tip,
+            "cached {pass}: base keyed to the committed tip",
+        );
+
+        let served = handle
+            .cached_work_if_synced()
+            .expect("cached path serves work");
+        assert_eq!(
+            served.msg, oracle_w.msg,
+            "cached {pass}: served msg must equal the uncached oracle",
+        );
+        assert_eq!(
+            served.target, oracle_w.target,
+            "cached {pass}: served target must equal the uncached oracle",
+        );
+        assert_eq!(served.height, oracle_w.height, "cached {pass}: height");
+        assert_eq!(served.pk, oracle_w.pk, "cached {pass}: pk");
+    }
+}
+
+/// Every consensus-bearing surface a cached build emits, captured for a
+/// bit-for-bit comparison against the uncached oracle: serialized header bytes,
+/// the three header roots, the AVL proof bytes, the serialized transactions, and
+/// the full work message (msg / target / height / pk).
+#[derive(PartialEq, Eq, Debug)]
+struct FullSurface {
+    header_bytes: Vec<u8>,
+    transactions_root: Digest32,
+    state_root: ADDigest,
+    extension_root: Digest32,
+    ad_proof_bytes: Vec<u8>,
+    extension_fields: Vec<(Vec<u8>, Vec<u8>)>,
+    serialized_txs: Vec<Vec<u8>>,
+    work_msg: [u8; 32],
+    work_target: BigUint,
+    work_height: u32,
+    work_pk: [u8; 33],
+}
+
+impl FullSurface {
+    fn capture(c: &Candidate, w: &WorkMessage) -> Self {
+        Self {
+            header_bytes: serialize_header(&c.header).expect("serialize header").0,
+            transactions_root: c.header.transactions_root,
+            state_root: c.header.state_root,
+            extension_root: c.header.extension_root,
+            ad_proof_bytes: c.ad_proof_bytes.clone(),
+            extension_fields: c.extension_fields.clone(),
+            serialized_txs: serialize_txs(&c.transactions),
+            work_msg: w.msg,
+            work_target: w.target.clone(),
+            work_height: w.height,
+            work_pk: w.pk,
+        }
+    }
+}
+
+/// Build the candidate off `view` under `regime` and capture its full surface.
+fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
+    view: &V,
+    regime: &Regime,
+) -> FullSurface {
+    let (c, w, _timings) = generate_candidate(
+        view,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("generate_candidate ok")
+    .expect("candidate is Some");
+    FullSurface::capture(&c, &w)
+}
+
+/// Phase-4 headline: the cached dry-run path is byte-identical to the uncached
+/// path across the FULL candidate surface, on both a cold build (base slot
+/// empty → hydrate + memoize) and a hit build (base slot primed for the same
+/// committed tip → reuse the memoized tree, no rehydrate). This is the
+/// strongest in-process oracle that priming the per-tip AVL base changes
+/// nothing about the produced block — every serialized byte the consensus
+/// validator and the external miner see is identical.
+///
+/// Tip-advance (the cache key invalidating on a new committed tip, forcing a
+/// cold rebuild that matches a fresh uncached build at the new tip) is NOT
+/// driven here: this parity fixture seeds the parent's BlockTransactions +
+/// Extension sections only for the single tip the candidate builds against, so
+/// advancing the tip in-store cheaply is not possible without re-seeding those
+/// sections for the new parent — out of proportion to what it would add. That
+/// invalidation contract is pinned directly at the cache seam in
+/// `ergo-state`'s `committed_snapshot_parity`
+/// (`cached_tip_advance_rebuilds_and_matches`, `cached_reorg_same_height_rebuilds`)
+/// and end-to-end through a booted node's persistent worker base in
+/// `ergo-node`'s `mining_e2e` (`solve_and_submit_accepts_cache_built_blocks`,
+/// which mines two successive blocks off one flag-on cache — a cold build then
+/// a post-advance rebuild).
+#[test]
+fn cached_candidate_full_surface_matches_uncached_cold_and_hit() {
+    use ergo_mining::state_view::CachedSnapshotView;
+    use ergo_state::store::DryRunBase;
+
+    let regime = Regime::pre_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+    let snapshot = store
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+
+    // (a) Uncached oracle: the committed snapshot is itself a `CandidateStateView`
+    //     whose dry-run hydrates a fresh prover every call (the pre-cache path).
+    let uncached = build_full_surface(&snapshot, &regime);
+
+    // Sanity: the surface is non-trivial, so the equalities below are real
+    // comparisons, not empty-vector tautologies.
+    assert!(
+        !uncached.ad_proof_bytes.is_empty(),
+        "uncached dry-run must emit non-empty AVL proof bytes",
+    );
+    assert!(
+        !uncached.serialized_txs.is_empty(),
+        "uncached build must carry the coinbase emission tx",
+    );
+    assert!(
+        !uncached.extension_fields.is_empty(),
+        "uncached build must carry interlinks extension fields",
+    );
+
+    // (b) Cached COLD: an empty base slot. The first cached build hydrates the
+    //     pristine tree, memoizes it, and produces a candidate. Every surface
+    //     bit must equal the uncached oracle.
+    let mut base: Option<DryRunBase> = None;
+    let cold = {
+        let view = CachedSnapshotView::new(&snapshot, &mut base);
+        build_full_surface(&view, &regime)
+    };
+    assert_eq!(
+        cold, uncached,
+        "cached cold build must match the uncached oracle bit-for-bit across the full surface",
+    );
+    let cold_tip = base.as_ref().expect("cold build memoized a base").tip_id();
+    assert_eq!(
+        cold_tip,
+        snapshot.best_full_block_id(),
+        "memoized base is keyed to the committed tip",
+    );
+
+    // (c) Cached HIT: the slot is now primed for the same committed tip. A
+    //     second cached build must reuse the memoized tree (no rehydrate) and
+    //     still produce the identical full surface.
+    let hit = {
+        let view = CachedSnapshotView::new(&snapshot, &mut base);
+        build_full_surface(&view, &regime)
+    };
+    assert_eq!(
+        hit, uncached,
+        "cached hit build must match the uncached oracle bit-for-bit across the full surface",
+    );
+    assert_eq!(
+        base.as_ref()
+            .expect("hit build leaves the base populated")
+            .tip_id(),
+        cold_tip,
+        "a same-tip hit leaves the base keyed to the same committed tip (no invalidation)",
+    );
 }
 
 #[test]
@@ -706,6 +948,7 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
         &handle,
         &intent,
         BuildMode::Full,
+        None,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
     )

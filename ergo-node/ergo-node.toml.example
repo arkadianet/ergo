@@ -124,3 +124,33 @@ public_bind = false
 # pruned installs halt with IndexerError::SectionMissing.
 # Monitor via GET /blockchain/indexedHeight.
 # enabled = false
+
+[mining]
+# External-miner API (GET /mining/candidate + POST /mining/solution).
+# enabled = false
+
+# Compressed secp256k1 reward key (66 hex chars). Omit to resolve the
+# wallet's EIP-3 first-address key lazily, mirroring Scala's two-tier
+# resolution — candidate serving then waits until the wallet is
+# initialized and unlocked once.
+# miner_public_key_hex = "02..."
+
+# Debounce window (ms) for same-parent mempool-refresh rebuilds.
+# Floor 50. Tip changes always rebuild immediately regardless.
+# block_candidate_generation_interval_ms = 1000
+
+# Must stay true — an internal CPU miner is not supported.
+# use_external_miner = true
+
+# Sweep storage-rent-expired boxes into a pinned zero-fee self-claim in
+# each candidate. Requires [indexer] enabled = true (the eligible-box
+# scan reads the extra-index).
+# claim_storage_rent = false
+# max_storage_rent_claims = 4096
+
+# Cache the hydrated AVL working set between candidate builds, keyed on
+# the committed tip: the first build per block pays the full hydration,
+# same-tip rebuilds are near-instant. Holds the full UTXO node graph
+# resident (multi-GB on mainnet archival) — enable only on a mining
+# node with RAM headroom. See docs/configuration.md.
+# candidate_base_cache = false
