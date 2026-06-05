@@ -123,6 +123,7 @@ pub(super) fn make_state(db_path: &Path) -> NodeState {
         bootstrap_started_unix_ms: None,
         bootstrap_was_active_this_session: false,
         wallet_hook: None,
+        mining_enabled: false,
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
         recent_blocks_cache: None,
     }

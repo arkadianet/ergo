@@ -271,6 +271,9 @@ pub(crate) struct NodeState {
     /// up-to-date without coupling the sync layer to the wallet.
     /// `None` in no-API / headers-only mode.
     pub(super) wallet_hook: Option<Arc<wallet_bridge::WalletStateHook>>,
+    /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
+    /// itself lives on the action loop, out of the emitter's reach).
+    pub(super) mining_enabled: bool,
     /// Active mempool priority-weight function converted at boot to its
     /// wire form. Snapshot ticks read this directly — no per-tick
     /// `&str` → enum conversion. Surfaced on

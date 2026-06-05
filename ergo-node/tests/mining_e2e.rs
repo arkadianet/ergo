@@ -876,3 +876,35 @@ async fn shutdown_with_a_parked_longpoll_drains() {
         resp.status,
     );
 }
+
+/// `/info` reports `isMining = true` on a node booted with mining enabled.
+/// Pins the snapshot plumbing from `mining_enabled` (NodeState) through
+/// `SnapshotParts` → `NodeSnapshot` → `ScalaCompatBridge::info()` → the
+/// wire response.
+#[tokio::test]
+async fn info_reports_is_mining_true_on_a_mining_node() {
+    let (_dir, handle, _parent_tip) = boot_synced_mining_node().await;
+    let addr = handle.api_addr.expect("api bound");
+
+    // Poll /info until at least one snapshot has been published (the node
+    // needs one sync_tick to fire after boot before isMining propagates).
+    let mut is_mining = false;
+    for _ in 0..80 {
+        let resp = http_request(addr, "GET", "/info", None).await;
+        if resp.status == 200 {
+            let v: serde_json::Value = serde_json::from_str(&resp.body).expect("parse /info body");
+            if let Some(b) = v.get("isMining").and_then(|x| x.as_bool()) {
+                is_mining = b;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        is_mining,
+        "/info.isMining must be true on a mining-enabled node",
+    );
+
+    handle.shutdown().await.expect("clean shutdown");
+}

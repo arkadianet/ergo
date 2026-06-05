@@ -120,6 +120,16 @@ pub struct NodeSnapshot {
     /// precomputed each tick. Serves `GET /api/v1/blocks/recent` as a pure
     /// snapshot clone — no live store read on the request path.
     pub recent_blocks: Arc<Vec<ApiRecentBlock>>,
+    /// Best network-known header height — `SyncState::best_known_header_height()`
+    /// (our validated-header latch, initialized to the full-block tip and
+    /// advanced by peer sync info). Matches Scala's `maxPeerHeight` notion
+    /// (network best height), NOT a literal max over per-peer heights — the
+    /// literal max is derivable from `peer_sync` if ever needed.
+    pub max_peer_height: u32,
+    /// Whether mining is configured on (the candidate engine + wiring exist).
+    /// Feeds `/info.isMining` — Scala parity: Scala reports its configured
+    /// mining flag here, not liveness of candidate generation.
+    pub mining_enabled: bool,
 }
 
 /// Public-facing projection of a per-peer SyncInfo observation.
@@ -240,6 +250,8 @@ impl NodeSnapshot {
             delivery_counts: DeliveryCounters::default(),
             banned_ips: Arc::new(Vec::new()),
             recent_blocks: Arc::new(Vec::new()),
+            max_peer_height: 0,
+            mining_enabled: false,
         }
     }
 }
@@ -436,6 +448,12 @@ pub struct SnapshotParts<'a> {
     /// per-tip cache so an unchanged full-block tip re-publishes the same
     /// allocation. Drives `GET /api/v1/blocks/recent`.
     pub recent_blocks: Arc<Vec<ApiRecentBlock>>,
+    /// `SyncState::best_known_header_height()` — the network-best-height
+    /// latch advanced by peer sync info. Feeds `/info.maxPeerHeight`.
+    pub max_peer_height: u32,
+    /// Whether the mining engine + wiring are configured on this node.
+    /// Feeds `/info.isMining`.
+    pub mining_enabled: bool,
 }
 
 fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64) -> NodeSnapshot {
@@ -548,6 +566,8 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         delivery_counts: p.delivery_counts,
         banned_ips: p.banned_ips,
         recent_blocks: p.recent_blocks,
+        max_peer_height: p.max_peer_height,
+        mining_enabled: p.mining_enabled,
     }
 }
 
@@ -718,6 +738,8 @@ mod tests {
             banned_ips: Arc::new(Vec::new()),
             bootstrap: None,
             recent_blocks: Arc::new(Vec::new()),
+            max_peer_height: 0,
+            mining_enabled: false,
         }
     }
 
@@ -925,6 +947,24 @@ mod tests {
 
         assert_eq!(snap.pool_inputs.len(), 1);
         assert_eq!(snap.pool_inputs.get(&spent_box), Some(&spending_tx));
+    }
+
+    /// `max_peer_height` and `mining_enabled` travel from `SnapshotParts`
+    /// through `build_snapshot` to `NodeSnapshot`. A field added to one struct
+    /// but not threaded would silently fall back to 0/false here.
+    #[test]
+    fn build_snapshot_carries_mining_enabled_and_max_peer_height() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.max_peer_height = 1_000;
+        parts.mining_enabled = true;
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        assert_eq!(snap.max_peer_height, 1_000);
+        assert!(snap.mining_enabled);
     }
 
     /// Threading the configured weight function through `SnapshotPublisher::new`
