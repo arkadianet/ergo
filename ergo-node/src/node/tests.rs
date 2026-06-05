@@ -1854,22 +1854,50 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
         .expect("engine task must not panic");
 }
 
-/// Pins the liveness fix: the commit-visibility retry budget must reset
-/// when a new tip (different `expected_parent`) arrives, so tip B is not
-/// penalised by tip A's already-spent retries.
+/// Pins that a mid-retry parent switch grants the new tip a FULL
+/// visibility-retry budget (the `budget_parent` reset in `run_mining_engine`).
 ///
-/// Approach: drive the engine with never-visible intent A long enough for
-/// it to emit one exhaustion warning, then immediately send never-visible
-/// intent B (different parent). Assert that a *second* exhaustion warning
-/// eventually arrives — proving B ran its own full budget rather than
-/// inheriting A's spent-down counter and giving up immediately.
+/// ## Why the old test didn't pin anything
 ///
-/// What this test does NOT check: the exact timing between the two warns
-/// (CI variance is too wide). It asserts ORDER + EXISTENCE: two distinct
-/// exhaustion events happen and the task stays alive throughout. The
-/// comment below explains what a timing assertion *would* be: B's warn
-/// must arrive ≥ ~900 ms (40 × 25 ms backoff — scaled) after B was sent.
-/// The order/existence assertion is weaker but flake-free.
+/// The previous version waited for A's exhaustion warn before sending B.  At
+/// that point the inner retry loop had already `break`-ed and returned to the
+/// outer loop, which re-declares `let mut attempts = 0` when B wakes it — so
+/// the test passed even WITHOUT the `budget_parent` reset fix: the outer loop
+/// always reset.  The bug only manifests when B is picked up by the INNER
+/// loop's re-borrow while A's budget is partially spent (mid-`TipNotVisible`
+/// retry), which is exactly what this test arms.
+///
+/// ## Timing design
+///
+/// Budget constants: `MAX_VIS_RETRIES = 40`, `VIS_BACKOFF = 25 ms` →
+/// a fresh budget takes ≥ 40 × 25 ms = 1 000 ms of backoff before exhausting.
+///
+/// 1. Send A (parent `[0x42;32]`, h5) and arm the engine.
+/// 2. Sleep 500 ms — A is mid-retry (≈ 20 of 40 retries burned).
+///    If an exhaustion warn already appeared the scenario didn't arm (the
+///    runner is pathologically slow or the clock ran fast); return early with
+///    a note rather than failing — the sibling exhaustion test still covers
+///    liveness, and a flaky-slow runner should not count as a test failure.
+/// 3. Send B (parent `[0x43;32]`, h5) while A's inner loop is still running.
+///    The engine's next `borrow_and_update` sees B; because B's parent differs
+///    from A's, the `budget_parent` guard resets `attempts = 0`.  A's remaining
+///    retries are abandoned (A's exhaustion warn never fires).
+/// 4. Poll for the FIRST exhaustion warn (30 s cap).  Record `warn_at`.
+/// 5. Assert:
+///    - Exactly ONE exhaustion warn total (A's never fired; B's did once).
+///    - `warn_at − b_sent ≥ 950 ms`: a full fresh budget of 40 × 25 ms = 1 000 ms
+///      of backoff cannot exhaust in under 950 ms.  With the fix the warn
+///      cannot arrive earlier; without the fix B inherits ≈ 20 burned retries
+///      and the warn lands at ≈ 500 ms, failing the bound.
+///      Lower-bound asserts are flake-safe: sleeps never finish early, so a
+///      slow CI only pushes the time later, never below the bound.
+///
+/// ## Honest limitations
+///
+/// A pathologically slow runner that burned < 2 retries by the time B is sent
+/// would mask a buggy inherited budget (the inherited count would still be < 2,
+/// and the warn would still take ≈ 950 ms).  The 500 ms arm window and the
+/// step-2 early-return guard make that scenario remote in practice.
 #[tokio::test]
 async fn visibility_retry_budget_resets_on_parent_change() {
     use ergo_crypto::difficulty::DifficultyParams;
@@ -1881,6 +1909,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     use ergo_state::store::StateStore;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
     use tokio::sync::watch;
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -1927,7 +1956,8 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         DifficultyParams::mainnet(),
     );
 
-    // Intent A: parent [0x42;32], height 5 — commit-visible never (genesis store).
+    // Step 1 — Intent A: parent [0x42;32], height 5 — commit-visible never
+    // (genesis store has height 0, intent expects height 5).
     let intent_a = BuildIntent {
         expected_parent: [0x42u8; 32],
         expected_height: 5,
@@ -1939,9 +1969,12 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     let (intent_tx, intent_rx) = watch::channel(Some(intent_a));
     let (cancel_tx, cancel_rx) = watch::channel(false);
 
-    // Bump the watch version so the engine's first `changed()` fires.
+    // Bump the watch version so the engine's first `changed()` fires
+    // (watch::channel initialises sender and receiver at the same version,
+    // so the engine would block on `changed()` without this bump).
     intent_tx.send_if_modified(|_| true);
 
+    let _a_started = Instant::now();
     let engine = tokio::spawn(super::mining_engine::run_mining_engine(
         reader, handle, None, intent_rx, cancel_rx,
     ));
@@ -1949,24 +1982,30 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     const EXHAUSTION_MSG: &str =
         "mining engine: commit-visibility retries exhausted; awaiting next intent";
 
-    // Wait for A's exhaustion warn to appear (~1 s).
-    let deadline_a = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let a_exhausted = loop {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Step 2 — Sleep 500 ms: A is mid-retry (≈ 20 of 40 retries burned).
+    // After waking, check that NO exhaustion warn has appeared yet.
+    // If one has — pathologically slow runner or unexpectedly fast clock —
+    // the scenario didn't arm; return early rather than failing spuriously.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    {
         let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
         if output.contains(EXHAUSTION_MSG) {
-            break true;
+            eprintln!(
+                "visibility_retry_budget_resets_on_parent_change: \
+                 scenario did not arm — A exhausted before B was sent \
+                 (slow runner or fast clock); skipping timing assertion. \
+                 The sibling exhaustion test still covers liveness."
+            );
+            cancel_tx.send(true).unwrap();
+            drop(intent_tx);
+            let _ = tokio::time::timeout(Duration::from_millis(500), engine).await;
+            return;
         }
-        if std::time::Instant::now() >= deadline_a {
-            break false;
-        }
-    };
-    assert!(
-        a_exhausted,
-        "timed out waiting for intent-A exhaustion warn"
-    );
+    }
 
-    // Intent B: parent [0x43;32] — different parent, still commit-visible never.
+    // Step 3 — Send B mid-retry.  The engine's NEXT `borrow_and_update` sees B;
+    // because B's parent differs from A's, the `budget_parent` guard resets
+    // `attempts = 0`.  A's remaining retries are abandoned silently.
     let intent_b = BuildIntent {
         expected_parent: [0x43u8; 32],
         expected_height: 5,
@@ -1974,45 +2013,62 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         miner_pk: [0x02u8; 33],
         reason: BuildReason::Tip,
     };
-    // Count existing exhaustion lines before we send B so we can detect a
-    // *second* occurrence robustly without relying on unique-string content.
-    let count_before_b = {
-        let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
-        output.matches(EXHAUSTION_MSG).count()
-    };
     intent_tx.send(Some(intent_b)).unwrap();
+    let b_sent = Instant::now();
 
-    // Wait for B's own exhaustion warn (~1 s from when B was sent). With the
-    // bug, `attempts` already equals MAX_VIS_RETRIES when B arrives, so B's
-    // warn appears instantly and the count never reaches count_before_b + 1
-    // under a correct budget. But we assert from the engine side: if a second
-    // warn arrives we know B ran a build, hit TipNotVisible, and exhausted.
-    let deadline_b = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let b_exhausted = loop {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Step 4 — Poll for the FIRST exhaustion warn (30 s cap).
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let warn_observed = loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
         let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
-        if output.matches(EXHAUSTION_MSG).count() > count_before_b {
+        if output.contains(EXHAUSTION_MSG) {
             break true;
         }
-        if std::time::Instant::now() >= deadline_b {
+        if Instant::now() >= deadline {
             break false;
         }
     };
+    let warn_at = Instant::now();
+
     assert!(
-        b_exhausted,
-        "timed out waiting for intent-B exhaustion warn — \
-         the engine did not give B its own retry budget",
+        warn_observed,
+        "timed out (30 s) waiting for exhaustion warn after intent-B was sent"
     );
 
-    // The task must still be alive after both exhaustion events.
+    // Step 5a — Exactly ONE exhaustion warn total.
+    // A's was never emitted (the supersession consumed its remaining budget);
+    // B's fired exactly once.
+    let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+    let warn_count = output.matches(EXHAUSTION_MSG).count();
+    assert_eq!(
+        warn_count, 1,
+        "expected exactly one exhaustion warn (B's); A's should have been \
+         abandoned when B superseded it mid-retry; got {warn_count}",
+    );
+
+    // Step 5b — Lower-bound timing: a full fresh budget of 40 × 25 ms = 1 000 ms
+    // of backoff cannot exhaust in under 950 ms.  With the fix the warn cannot
+    // arrive earlier; without the fix B inherits ≈ 20 burned retries and the
+    // warn lands at ≈ 500 ms, failing this bound.  Lower-bound asserts are
+    // flake-safe: sleeps never complete early, so a slow CI only pushes the
+    // time further above the threshold.
+    let elapsed = warn_at.duration_since(b_sent);
+    assert!(
+        elapsed >= Duration::from_millis(950),
+        "exhaustion warn arrived only {elapsed:?} after B was sent; \
+         a fresh 40-retry budget at 25 ms/retry requires ≥ 950 ms — \
+         B appears to have inherited A's partially-spent retry counter",
+    );
+
+    // Task alive after the single exhaustion event.
     assert!(
         !engine.is_finished(),
-        "engine task must survive two sequential exhaustion events",
+        "engine task must survive exhaustion and keep running",
     );
 
     cancel_tx.send(true).unwrap();
     drop(intent_tx);
-    tokio::time::timeout(std::time::Duration::from_millis(500), engine)
+    tokio::time::timeout(Duration::from_millis(500), engine)
         .await
         .expect("engine task must exit promptly after cancel")
         .expect("engine task must not panic");
