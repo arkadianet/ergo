@@ -11,6 +11,7 @@ const state = {
   status: null,
   info: null,
   tip: null,
+  identity: null,
   peerDist: null,
   lastBlockMs: null,
   lastHeight: null,
@@ -64,6 +65,10 @@ export function mount(el) {
   root = el;
   el.innerHTML = `
     <div class="ov-top">
+      <div class="ov-ident" data-ident hidden>
+        <span class="ov-ident__mode" data-ident-mode>—</span>
+        <span class="ov-ident__chips" data-ident-chips></span>
+      </div>
       <div class="tabs ov-toggle">
         <button class="tab" type="button" data-view="cockpit">Cockpit</button>
         <button class="tab" type="button" data-view="charts">Charts</button>
@@ -91,6 +96,62 @@ export function mount(el) {
   });
   renderBody();
   if (state.status) onFast({ status: state.status, info: state.info });
+  // Node identity is static config — fetch once on mount. Render from
+  // the cached copy first so a re-entry doesn't flash empty.
+  if (state.identity) renderIdentity();
+  else fetchIdentity();
+}
+
+// ---- node identity strip (static, fetched once on mount) ----
+async function fetchIdentity() {
+  const id = await api.identity();
+  if (id) state.identity = id;
+  renderIdentity();
+}
+
+function chip(label, on) {
+  const c = document.createElement('span');
+  c.className = `pill ${on ? 'pill--ok' : ''}`;
+  c.textContent = `${label} ${on ? 'on' : 'off'}`;
+  return c;
+}
+
+function renderIdentity() {
+  if (!root) return;
+  const wrap = root.querySelector('[data-ident]');
+  const modeEl = root.querySelector('[data-ident-mode]');
+  const chips = root.querySelector('[data-ident-chips]');
+  if (!wrap || !modeEl || !chips) return;
+  const id = state.identity;
+  // No identity yet (fetch failed / in flight): keep the strip hidden
+  // so the page never shows a half-rendered node descriptor.
+  if (!id) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  modeEl.textContent = id.mode || '—';
+  chips.replaceChildren();
+  chips.append(chip('mining', !!id.mining), chip('extra-index', !!id.extra_index_enabled));
+  // verify-tx is the validation-core signal; flag it like the others.
+  const vtx = document.createElement('span');
+  vtx.className = `pill ${id.verify_transactions ? 'pill--ok' : 'pill--warn'}`;
+  vtx.textContent = id.verify_transactions ? 'verify-tx on' : 'verify-tx off';
+  chips.append(vtx);
+  // Bootstrap provenance is only meaningful when a jump actually ran;
+  // surface a chip per active source rather than two perpetual "off"s.
+  if (id.utxo_bootstrap) {
+    const b = document.createElement('span');
+    b.className = 'pill';
+    b.textContent = 'utxo-bootstrapped';
+    chips.append(b);
+  }
+  if (id.nipopow_bootstrap) {
+    const b = document.createElement('span');
+    b.className = 'pill';
+    b.textContent = 'popow-bootstrapped';
+    chips.append(b);
+  }
 }
 
 // ---- KPI band (1 Hz) ----
