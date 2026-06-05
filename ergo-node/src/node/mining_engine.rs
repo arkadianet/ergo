@@ -13,6 +13,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_indexer::StorageRentEligibleDto;
+use ergo_mining::candidate::BuildMode;
 use ergo_mining::engine::{build_and_publish, BuildOutcome};
 use ergo_mining::handle::MiningHandle;
 use ergo_ser::ergo_box::ErgoBox;
@@ -249,14 +250,21 @@ pub(super) async fn run_mining_engine(
             // (`DroppedStale`) and `attempts` as the commit-visibility retry
             // count.
             let build_start = Instant::now();
-            let result = build_and_publish(&reader, &handle, &intent, now_ms, |snapshot, h| {
-                resolve_eligible_rent_boxes(
-                    indexer.as_ref(),
-                    snapshot,
-                    h,
-                    handle.max_storage_rent_claims(),
-                )
-            });
+            let result = build_and_publish(
+                &reader,
+                &handle,
+                &intent,
+                BuildMode::Full,
+                now_ms,
+                |snapshot, h| {
+                    resolve_eligible_rent_boxes(
+                        indexer.as_ref(),
+                        snapshot,
+                        h,
+                        handle.max_storage_rent_claims(),
+                    )
+                },
+            );
             let build_ms = build_start.elapsed().as_millis() as u64;
             match result {
                 Ok(BuildOutcome::TipNotVisible) if attempts < MAX_VIS_RETRIES => {

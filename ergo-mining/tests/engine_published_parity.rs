@@ -50,7 +50,7 @@
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_mempool::MempoolReadSnapshot;
-use ergo_mining::candidate::{generate_candidate, Candidate};
+use ergo_mining::candidate::{generate_candidate, BuildMode, Candidate};
 use ergo_mining::emission_rules::MonetarySettings;
 use ergo_mining::engine::{build_and_publish, BestTip, BuildIntent, BuildOutcome, BuildReason};
 use ergo_mining::error::MiningError;
@@ -458,6 +458,7 @@ fn write_box_bytes(b: &ErgoBox) -> Vec<u8> {
 fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage) {
     let (c, w, _timings) = generate_candidate(
         store,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),
@@ -503,6 +504,7 @@ fn build_and_publish_resolves_rent_at_snapshot_height_when_enabled() {
         &store.reader_handle(),
         &handle,
         &intent,
+        BuildMode::Full,
         || BUILT_AT_MS,
         |snapshot, h| {
             captured.set(Some((snapshot.best_full_block_height(), h)));
@@ -544,6 +546,7 @@ fn build_and_publish_skips_rent_resolver_when_disabled() {
         &store.reader_handle(),
         &handle,
         &intent,
+        BuildMode::Full,
         || BUILT_AT_MS,
         |_, _| {
             called.set(true);
@@ -599,6 +602,7 @@ fn publish_and_serve_under(regime: &Regime) {
         &store.reader_handle(),
         &handle,
         &intent,
+        BuildMode::Full,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
     )
@@ -644,6 +648,7 @@ fn generate_candidate_measures_phase_timings() {
         .expect("committed state present");
     let (_c, _w, timings) = generate_candidate(
         &snapshot,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),
@@ -700,6 +705,7 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
         &store.reader_handle(),
         &handle,
         &intent,
+        BuildMode::Full,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
     )
@@ -732,6 +738,7 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
 
     let err = generate_candidate(
         &store,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),
@@ -791,6 +798,7 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         .expect("committed state present");
     let (snap_c, snap_w, _timings) = generate_candidate(
         &snap,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),

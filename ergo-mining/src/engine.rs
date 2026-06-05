@@ -25,7 +25,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::CommittedSnapshot;
 
-use crate::candidate::{generate_candidate, Candidate};
+use crate::candidate::{generate_candidate, BuildMode, Candidate};
 use crate::error::MiningError;
 use crate::handle::MiningHandle;
 use crate::work_message::WorkMessage;
@@ -173,11 +173,18 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// `handle` (the served cache); the async driver in `ergo-node` calls this
 /// per intent and handles retry/debounce/latest-wins.
 ///
+/// `mode` controls what the build includes: [`BuildMode::Minimal`] produces
+/// the emission-only template (no rent claim, no mempool selection, no fee tx)
+/// for fast publication the instant a new tip lands; [`BuildMode::Full`] adds
+/// the rent self-claim, mempool selection, and the fee tx for the enriched
+/// refresh.
+///
 /// `resolve_rent` is called with the snapshot and the candidate height
-/// exactly when rent is enabled (`handle.claim_storage_rent()` is true);
-/// it returns the storage-rent-eligible boxes to sweep into a self-claim.
-/// The closure is injected by the engine driver (which owns the indexer
-/// handle), keeping ergo-mining free of any ergo-indexer dependency.
+/// exactly when `mode == Full` and rent is enabled
+/// (`handle.claim_storage_rent()` is true); it returns the
+/// storage-rent-eligible boxes to sweep into a self-claim. The closure is
+/// injected by the engine driver (which owns the indexer handle), keeping
+/// ergo-mining free of any ergo-indexer dependency.
 ///
 /// Consensus-safety: the snapshot is one redb read transaction; the build
 /// runs the unchanged [`generate_candidate`] against it (byte-identical to
@@ -190,6 +197,7 @@ pub fn build_and_publish(
     reader: &ChainStoreReader,
     handle: &MiningHandle,
     intent: &BuildIntent,
+    mode: BuildMode,
     now_ms: impl Fn() -> u64,
     resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
 ) -> Result<BuildOutcome, MiningError> {
@@ -225,24 +233,34 @@ pub fn build_and_publish(
         return Ok(BuildOutcome::NotSynced);
     }
 
-    // Storage-rent eligibility, resolved HERE so each box is materialized
-    // against THIS committed snapshot — never a newer live view (a box spent
-    // in an applied-but-uncommitted block must not be claimed from a template
-    // that cannot see that spend, and vice versa). The eligible-id list the
-    // resolver pages over comes from the indexer's own eventually-consistent
-    // extra-index, so it may name boxes the snapshot no longer holds; those
-    // are skipped and backfilled in the resolver, never claimed blind. The
-    // resolver is injected by the node driver (it owns the indexer handle);
-    // rent disabled ⇒ never called.
-    let eligible_rent_boxes = if handle.claim_storage_rent() {
-        resolve_rent(&snapshot, snapshot.best_full_block_height() + 1)
-    } else {
-        Vec::new()
+    // Minimal builds freeze nothing from the pool and never touch the
+    // indexer: the emission-only template needs neither, and skipping both
+    // is what makes the minimal publish fast.
+    let (mempool, eligible_rent_boxes) = match mode {
+        BuildMode::Minimal => (MempoolReadSnapshot::empty(), Vec::new()),
+        BuildMode::Full => {
+            // Storage-rent eligibility, resolved HERE so each box is materialized
+            // against THIS committed snapshot — never a newer live view (a box
+            // spent in an applied-but-uncommitted block must not be claimed from a
+            // template that cannot see that spend, and vice versa). The eligible-id
+            // list the resolver pages over comes from the indexer's own
+            // eventually-consistent extra-index, so it may name boxes the snapshot
+            // no longer holds; those are skipped and backfilled in the resolver,
+            // never claimed blind. The resolver is injected by the node driver (it
+            // owns the indexer handle); rent disabled ⇒ never called.
+            let eligible = if handle.claim_storage_rent() {
+                resolve_rent(&snapshot, snapshot.best_full_block_height() + 1)
+            } else {
+                Vec::new()
+            };
+            ((*intent.mempool).clone(), eligible)
+        }
     };
 
     let built = generate_candidate(
         &snapshot,
-        (*intent.mempool).clone(),
+        mode,
+        mempool,
         &intent.miner_pk,
         handle.monetary(),
         handle.reemission_ref(),
@@ -358,6 +376,7 @@ mod tests {
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
             &intent([0u8; 32], 0),
+            BuildMode::Full,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
@@ -375,6 +394,7 @@ mod tests {
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
             &intent([0x42u8; 32], 5),
+            BuildMode::Full,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
@@ -393,6 +413,7 @@ mod tests {
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
             &intent([0x42u8; 32], 0),
+            BuildMode::Full,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
@@ -410,6 +431,7 @@ mod tests {
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
             &intent([0u8; 32], 0),
+            BuildMode::Full,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
         )
