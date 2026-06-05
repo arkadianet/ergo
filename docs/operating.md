@@ -76,7 +76,7 @@ to start on an unsupported combination.
 | **Mode 1 — UTXO full archive** | `state_type = "utxo"`, `verify_transactions = true`, `blocks_to_keep = -1` | Supported (default) | You want the full UTXO set on disk, can answer box/UTXO queries, and want to run the extra-index (Mode 1 only) or the external miner (any `state_type = "utxo"` mode — see below). |
 | **Mode 2 — UTXO snapshot bootstrap** | Mode 1 plus `[node.utxo] utxo_bootstrap = true` | Supported | Clean-DB boot and you want to skip multi-hour genesis replay by installing a UTXO snapshot, then resume normal sync. See the trust caveat below. |
 | **Mode 6 — headers-only** | `state_type = "digest"`, `verify_transactions = false`, `blocks_to_keep = 0`, `utxo_bootstrap = false` | Supported | You only need the validated header chain (PoW + difficulty) and never need block bodies, transaction validation, the mempool, or UTXO queries. |
-| **Mode 5 — digest verifier** | `state_type = "digest"`, `verify_transactions = true` | Partial — not bootable today | (Not yet selectable.) |
+| **Mode 5 — digest verifier** | `state_type = "digest"`, `verify_transactions = true` | Partial | Boots and passes handshake/sync seams; full sync stalls at the UTXO-typed executor header pipeline. AD-proof tx validation, external ADProof-corpus parity, and reorg-abort hardening remain open. |
 | **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the 232-block rollback floor — with `block_sections` eviction landed; activation-parity follow-ups remain. |
 | **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | Builds on Mode 3 + Mode 2; not yet wired. |
 

@@ -79,7 +79,7 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
 - `BestTip` (struct) — authoritative tip + synced bit (`parent_id`,
   `chain_seq`, `synced`) — `src/engine.rs:51`
 - `BuildIntent` (struct) — loop-resolved build request (expected parent,
-  mempool snapshot, miner pk, rent boxes) — `src/engine.rs:74`
+  mempool snapshot, miner pk) — `src/engine.rs:74`
 - `BuildOutcome` / `TemplateIdentity` / `Template` (enum/structs) — engine
   result, template versioning, published template — `src/engine.rs:131,98,122`
 - `CandidateStateView` (trait) — committed read surface for the builder —

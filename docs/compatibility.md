@@ -63,7 +63,9 @@ live mainnet has been part of the development loop since.
 
 **Modes that boot today** (against the reference node's mode taxonomy):
 Mode 1 (full archive), Mode 2 (UTXO snapshot bootstrap, consume and serve),
-and Mode 6 (headers-only digest). NiPoPoW bootstrap (consume and serve),
+Mode 5 (digest verifier — boots and passes handshake/sync seams; full sync
+stalls at the UTXO-typed executor header pipeline), and Mode 6 (headers-only
+digest). NiPoPoW bootstrap (consume and serve),
 the extra-index `/blockchain/*` surface, the external-miner mining protocol,
 and an HD wallet (single-prover signing, BIP39 + BIP32, AES-GCM secret
 storage) also ship. In operation, a combined Mode 2 + NiPoPoW boot from an
@@ -121,10 +123,11 @@ Be aware of these before depending on the node.
 - **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap; not yet wired.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
-  and AD-proof apply seam exist, but the runtime rejects any non–Mode 6
-  digest configuration at startup; the validator refactor that wires
-  AD-proof transaction validation into boot dispatch is pending. Of the
-  digest configurations, only headers-only Mode 6 boots today.
+  and AD-proof apply seam exist; the node boots and survives the
+  handshake, sync-info, and API seams. Full sync stalls at the UTXO-typed
+  executor header pipeline (the AD-proof transaction-validation path is
+  pending); external ADProof-corpus parity and reorg-abort hardening also
+  remain open.
 - **Mode 2 trust anchor** — the installed UTXO root verification is
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference
