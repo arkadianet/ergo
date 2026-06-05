@@ -97,6 +97,7 @@ fn archive_inputs() -> IdentityInputs {
         blocks_to_keep: -1,
         utxo_bootstrap: false,
         nipopow_bootstrap: false,
+        mining_enabled: false,
         extra_index_enabled: false,
         declared_addr: None,
         bind_addr: None,

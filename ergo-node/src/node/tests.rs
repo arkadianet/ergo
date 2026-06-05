@@ -121,6 +121,7 @@ fn make_state_with_backend(
             blocks_to_keep: -1,
             utxo_bootstrap: false,
             nipopow_bootstrap: false,
+            mining_enabled: false,
             extra_index_enabled: false,
             declared_addr: None,
             bind_addr: None,
@@ -986,6 +987,25 @@ fn build_api_identity_sentinel_active_archive_post_prune_label() {
     );
 }
 
+/// The `mining` flag on the projected identity tracks
+/// `IdentityInputs::mining_enabled` (sourced from
+/// `mining_config.enabled`) — a live mining node reports
+/// `mining = true`, an idle one reports `false`.
+#[test]
+fn build_api_identity_mining_flag_tracks_mining_enabled() {
+    use crate::node::identity::{build_api_identity_from_inputs, BootstrapKind};
+    for mining_enabled in [true, false] {
+        let mut inputs = inputs_for(crate::config::StateType::Utxo, true, -1, false, false);
+        inputs.mining_enabled = mining_enabled;
+        let id = build_api_identity_from_inputs(&inputs, 1, BootstrapKind::None)
+            .expect("archive inputs must project");
+        assert_eq!(
+            id.mining, mining_enabled,
+            "mining flag must mirror mining_enabled={mining_enabled}",
+        );
+    }
+}
+
 // ----- classify_node_mode (Phase 4a) -----
 
 use super::identity::{classify_node_mode, NodeMode};
@@ -1007,6 +1027,7 @@ fn inputs_for(
         blocks_to_keep,
         utxo_bootstrap,
         nipopow_bootstrap,
+        mining_enabled: false,
         extra_index_enabled: false,
         declared_addr: None,
         bind_addr: None,
