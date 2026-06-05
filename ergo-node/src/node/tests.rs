@@ -2196,8 +2196,8 @@ fn request_missing_sections_digest_backend_no_panic() {
 /// durability-knob branch is skipped entirely rather than panicking. A
 /// digest apply still advances `best_full_block_height`, which is why
 /// the old unconditional `as_utxo().expect()` in the same arm was
-/// reachable. Driving a real applying block needs the ADProofs fetch
-/// pipeline (out of scope here), so this asserts the guard's enabling
+/// reachable. Driving a real applying block needs a full apply path
+/// (out of scope here), so this asserts the guard's enabling
 /// condition directly: neither `as_utxo` accessor yields an arena on a
 /// digest store, which is exactly what makes both folds a no-op.
 #[test]
