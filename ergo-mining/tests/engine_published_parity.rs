@@ -50,7 +50,7 @@
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_mempool::MempoolReadSnapshot;
-use ergo_mining::candidate::{generate_candidate, Candidate, PhaseTimings};
+use ergo_mining::candidate::{generate_candidate, Candidate};
 use ergo_mining::emission_rules::MonetarySettings;
 use ergo_mining::engine::{build_and_publish, BestTip, BuildIntent, BuildOutcome, BuildReason};
 use ergo_mining::error::MiningError;
@@ -542,7 +542,7 @@ fn publish_and_serve_under(regime: &Regime) {
 }
 
 #[test]
-fn generate_candidate_populates_phase_timings() {
+fn generate_candidate_returns_phase_timings() {
     let regime = Regime::mainnet_post_eip27();
     let (_dir, store, _tip) = synced_store(&regime);
     let snapshot = store
@@ -561,11 +561,17 @@ fn generate_candidate_populates_phase_timings() {
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
-    // The dry-run always does real AVL work; the struct must be populated
-    // (not defaulted) even when sub-millisecond buckets round to 0.
-    assert!(timings.dryrun_ms < 60_000, "sane upper bound: {timings:?}",);
-    // Emission and select buckets are present (not zero-initialized struct).
-    let _ = PhaseTimings::default(); // confirm type is accessible
+    // The third tuple element is wired through on a real build and carries sane
+    // values. Sub-ms phases round to 0 on the test store, so non-zero buckets
+    // cannot be asserted here — only that every bucket is below a sane ceiling.
+    assert!(
+        timings.emission_ms < 60_000,
+        "emission_ms sane: {timings:?}"
+    );
+    assert!(timings.rent_ms < 60_000, "rent_ms sane: {timings:?}");
+    assert!(timings.select_ms < 60_000, "select_ms sane: {timings:?}");
+    assert!(timings.dryrun_ms < 60_000, "dryrun_ms sane: {timings:?}");
+    assert!(timings.roots_ms < 60_000, "roots_ms sane: {timings:?}");
 }
 
 // ----- error paths -----

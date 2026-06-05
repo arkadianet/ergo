@@ -21,24 +21,6 @@
 //!   construction is deferred (the proposed-update + validation-settings
 //!   extension encoding isn't implemented).
 
-/// Wall-clock cost of the expensive `generate_candidate` phases, measured per
-/// build and surfaced on the engine's build-complete log line. Millisecond
-/// granularity — these phases run 10²–10⁴ ms on a cold full-archival store.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PhaseTimings {
-    /// Phases 8–9: emission tx build + validation.
-    pub emission_ms: u64,
-    /// Phase 9c: storage-rent claim build (0 when rent disabled/empty).
-    pub rent_ms: u64,
-    /// Phases 9d–9e: mempool selection + per-tx re-validation + fee-tx trim.
-    pub select_ms: u64,
-    /// Phase 10: AVL+ dry-run (new_state_root + proof bytes) — the report's
-    /// prime cost suspect.
-    pub dryrun_ms: u64,
-    /// Phase 12: tx/witness-id derivation + transactions/extension roots.
-    pub roots_ms: u64,
-}
-
 use ergo_crypto::difficulty::{
     epoch_length_for_height, get_target, next_n_bits, previous_heights_for_recalculation,
     DifficultyParams,
@@ -74,6 +56,27 @@ use crate::work_message::WorkMessage;
 use ergo_validation::pre_header::{
     build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
 };
+
+/// Wall-clock cost of the expensive `generate_candidate` phases, measured per
+/// build and surfaced on the engine's build-complete log line. Millisecond
+/// granularity — these phases run 10²–10⁴ ms on a cold full-archival store.
+///
+/// The buckets cover the five named phases; cheap assembly steps between them
+/// are unmeasured, so the fields do not sum to the engine's total `build_ms`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhaseTimings {
+    /// Phases 8–9: emission tx build + validation.
+    pub emission_ms: u64,
+    /// Phase 9c: storage-rent claim build (0 when rent disabled/empty).
+    pub rent_ms: u64,
+    /// Phases 9d–9e: mempool selection + per-tx re-validation + fee-tx trim.
+    pub select_ms: u64,
+    /// Phase 10: AVL+ dry-run (new_state_root + proof bytes) — the report's
+    /// prime cost suspect.
+    pub dryrun_ms: u64,
+    /// Phase 12: tx/witness-id derivation + transactions/extension roots.
+    pub roots_ms: u64,
+}
 
 /// Cached state for a generated candidate. Wraps everything the
 /// solution path needs to assemble a `FullBlock`.
