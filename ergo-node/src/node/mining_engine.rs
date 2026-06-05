@@ -272,10 +272,13 @@ pub(super) struct BuildRequest {
     /// so the request→reply protocol stays strictly serial (≤1 in flight).
     ///
     /// The reply carries the build result plus the dry-run base-cache
-    /// disposition (`"off"` / `"primed"` / `"cold"`) for the build-complete log
-    /// line. The disposition is computed on the worker — the only place that
-    /// can observe the cache slot's state before the build — and threaded back
-    /// here because the log lines live on the coordinator.
+    /// disposition string for the build-complete log line:
+    /// `"off"` (cache disabled), `"primed"` (tip hit), `"advanced"` (single-step
+    /// advance succeeded), `"cold"` (full rehydrate), or `"cold_fallback"`
+    /// (advance attempted, failed, fell back to rehydrate). The disposition is
+    /// computed on the worker — the only place that can observe the cache slot
+    /// state after the build — and threaded back here because the log lines live
+    /// on the coordinator.
     reply: oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>,
 }
 
