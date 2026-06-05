@@ -105,31 +105,46 @@ pub(super) async fn run_mining_engine(
                     }
                 }
                 Ok(BuildOutcome::Published { timings: t }) => {
-                    if build_ms >= SLOW_BUILD_WARN_MS {
-                        warn!(
-                            attempts,
-                            build_ms,
-                            emission_ms = t.emission_ms,
-                            rent_ms = t.rent_ms,
-                            select_ms = t.select_ms,
-                            dryrun_ms = t.dryrun_ms,
-                            roots_ms = t.roots_ms,
-                            reason = ?intent.reason,
-                            "mining engine: build complete (slow)",
-                        );
-                    } else {
-                        info!(
-                            attempts,
-                            build_ms,
-                            emission_ms = t.emission_ms,
-                            rent_ms = t.rent_ms,
-                            select_ms = t.select_ms,
-                            dryrun_ms = t.dryrun_ms,
-                            roots_ms = t.roots_ms,
-                            reason = ?intent.reason,
-                            "mining engine: build complete",
-                        );
+                    // One message key for fast and slow builds: the level carries
+                    // the slow/fast dimension, so a scraper aggregating build_ms
+                    // by message template sees the whole population.
+                    // tracing 0.1 requires a const-level callsite, so we branch
+                    // on the two concrete macros while keeping the message
+                    // template identical.
+                    macro_rules! emit_build_complete {
+                        ($mac:ident) => {
+                            $mac!(
+                                attempts,
+                                build_ms,
+                                emission_ms = t.emission_ms,
+                                rent_ms = t.rent_ms,
+                                select_ms = t.select_ms,
+                                dryrun_ms = t.dryrun_ms,
+                                roots_ms = t.roots_ms,
+                                reason = ?intent.reason,
+                                "mining engine: build complete",
+                            )
+                        };
                     }
+                    if build_ms >= SLOW_BUILD_WARN_MS {
+                        emit_build_complete!(warn);
+                    } else {
+                        emit_build_complete!(info);
+                    }
+                    break;
+                }
+                Ok(BuildOutcome::TipNotVisible) => {
+                    // The guarded arm above exhausted MAX_VIS_RETRIES: the
+                    // committed tip never caught up to the intent's parent
+                    // (persist pipeline stalled or badly lagging). Surfaced at
+                    // warn! — candidates stop refreshing for this tip until the
+                    // next intent.
+                    warn!(
+                        attempts,
+                        build_ms,
+                        reason = ?intent.reason,
+                        "mining engine: commit-visibility retries exhausted; awaiting next intent",
+                    );
                     break;
                 }
                 Ok(outcome) => {
@@ -138,7 +153,7 @@ pub(super) async fn run_mining_engine(
                         attempts,
                         build_ms,
                         reason = ?intent.reason,
-                        "mining engine: build complete",
+                        "mining engine: build not published",
                     );
                     break;
                 }
