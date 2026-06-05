@@ -764,6 +764,113 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
 // that contract — a self-consistency proof between the two views, not an
 // external-oracle check.
 
+/// Pins that `Minimal` and `Full` produce identical consensus surfaces when the
+/// mempool is empty and there are no rent boxes to sweep. A Minimal build is
+/// the strict emission-only prefix of a Full block; with nothing to enrich the
+/// two pipelines must agree on every consensus-bearing output. This means the
+/// Minimal template inherits the full-candidate parity suite's guarantees: all
+/// the emission-tx, AVL dry-run, and interlinks oracle checks above hold for
+/// the minimal template as well, so the fast first-publish does not sacrifice
+/// correctness.
+///
+/// Node-level emission-only acceptance is exercised by the mining_e2e solve/
+/// submit path. The empirical shape (accepted empty blocks on mainnet) is the
+/// external oracle that anchors this; this test pins the internal invariant that
+/// both modes converge to it on a quiet chain.
+#[test]
+fn minimal_build_equals_full_build_on_quiet_chain() {
+    // Pre-EIP-27 regime: no reemission tokens, simplest coinbase path.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+
+    let snap = store
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+
+    // Minimal build: emission-only, no mempool, no rent.
+    let (min_c, _min_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Minimal,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("minimal generate_candidate ok")
+    .expect("minimal candidate is Some");
+
+    // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
+    let (full_c, _full_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("full generate_candidate ok")
+    .expect("full candidate is Some");
+
+    // Minimal must carry exactly the coinbase (emission) tx — the emission-only
+    // prefix is the contract for a Minimal build. Full with an empty mempool
+    // also carries only the coinbase, so both have exactly 1 transaction.
+    assert_eq!(
+        min_c.transactions.len(),
+        1,
+        "minimal candidate must carry exactly the coinbase emission tx",
+    );
+    assert_eq!(
+        full_c.transactions.len(),
+        1,
+        "full candidate on a quiet chain must also carry exactly the coinbase emission tx",
+    );
+
+    // Consensus surfaces must agree between the two modes. The timestamp field
+    // inside the header MAY differ if the two calls happen on different
+    // wall-clock milliseconds — but this regime uses `PARENT_TIMESTAMP` far
+    // in the future so the clamped-monotonic branch always wins and both calls
+    // produce the identical deterministic timestamp (`parent.timestamp + 1`).
+    // Explicit surface-by-surface assertions keep the contract legible.
+
+    // Transaction vector (serialized bytes must be identical).
+    assert_eq!(
+        serialize_txs(&min_c.transactions),
+        serialize_txs(&full_c.transactions),
+        "serialized transactions must match between Minimal and Full on a quiet chain",
+    );
+
+    // Canonical roots embedded in the header.
+    assert_eq!(
+        min_c.header.transactions_root, full_c.header.transactions_root,
+        "transactions_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.state_root, full_c.header.state_root,
+        "state_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.extension_root, full_c.header.extension_root,
+        "extension_root must match between Minimal and Full",
+    );
+
+    // AVL proof bytes.
+    assert_eq!(
+        min_c.ad_proof_bytes, full_c.ad_proof_bytes,
+        "ad_proof_bytes must match between Minimal and Full",
+    );
+
+    // Work height (same pipeline, same candidate height).
+    assert_eq!(
+        min_c.header.height, full_c.header.height,
+        "candidate height must match between Minimal and Full",
+    );
+}
+
 #[test]
 fn generate_candidate_offloop_snapshot_matches_onloop_store_byte_for_byte() {
     offloop_matches_onloop_under(&Regime::pre_eip27());
