@@ -56,7 +56,9 @@ pub(in crate::node) use self::peer_actions::{
     cleanup_disconnected_peer, flush_actions, send_to_peer,
 };
 pub(in crate::node) use self::state::{NodeState, PeerRuntime};
-pub(in crate::node) use self::sync_helpers::{hedge_request_modifiers, try_send_anchor_sync_info};
+pub(in crate::node) use self::sync_helpers::{
+    hedge_request_modifiers, maybe_exit_ibd, try_send_anchor_sync_info,
+};
 
 /// Type alias used across the node runtime. `Send + Sync` is
 /// required because the action loop returns errors across thread

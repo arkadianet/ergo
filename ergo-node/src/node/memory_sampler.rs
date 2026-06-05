@@ -36,13 +36,10 @@ pub(super) fn sample_memory(
     let chain = state.store.chain_state_meta();
     let bh = chain.best_header_height;
     let bf = chain.best_full_block_height;
-    // The arena/batch/redb metrics below are UTXO-arena counters with
-    // no digest-backend analogue; the memory sampler is gated off in
-    // digest mode.
-    let utxo = state
-        .store
-        .as_utxo()
-        .expect("utxo-only: arena/batch memory metrics are gated off in digest mode");
+    // The arena/batch/redb metrics below are UTXO-arena counters with no
+    // digest-backend analogue. A digest node still emits a row to keep the
+    // CSV schema stable across runs; those columns read 0.
+    let utxo = state.store.as_utxo();
     let sync_phase = if bh == 0 {
         "Bootstrap"
     } else if bf < bh {
@@ -76,14 +73,18 @@ pub(super) fn sample_memory(
         best_full_block: bf,
         sync_phase,
         proc,
-        avl_cache_clean_bytes: utxo.arena_cache_clean_bytes() as u64,
-        avl_cache_capacity_bytes: utxo.arena_cache_capacity_bytes() as u64,
-        avl_clean_len: utxo.arena_cache_clean_len() as u64,
-        avl_dirty_len: utxo.arena_cache_dirty_len() as u64,
-        avl_read_count: utxo.arena_read_count(),
-        batch_headers_len: utxo.batch_headers_len() as u64,
-        batch_headers_bytes: utxo.batch_headers_bytes() as u64,
-        batch_meta_len: utxo.batch_meta_len() as u64,
+        avl_cache_clean_bytes: utxo
+            .map(|u| u.arena_cache_clean_bytes() as u64)
+            .unwrap_or(0),
+        avl_cache_capacity_bytes: utxo
+            .map(|u| u.arena_cache_capacity_bytes() as u64)
+            .unwrap_or(0),
+        avl_clean_len: utxo.map(|u| u.arena_cache_clean_len() as u64).unwrap_or(0),
+        avl_dirty_len: utxo.map(|u| u.arena_cache_dirty_len() as u64).unwrap_or(0),
+        avl_read_count: utxo.map(|u| u.arena_read_count()).unwrap_or(0),
+        batch_headers_len: utxo.map(|u| u.batch_headers_len() as u64).unwrap_or(0),
+        batch_headers_bytes: utxo.map(|u| u.batch_headers_bytes() as u64).unwrap_or(0),
+        batch_meta_len: utxo.map(|u| u.batch_meta_len() as u64).unwrap_or(0),
         header_index_len: state.executor.header_index_len() as u64,
         header_index_est_bytes: state.executor.header_index_estimated_bytes() as u64,
         last_headers_len: state.executor.last_headers_len() as u64,
@@ -101,7 +102,7 @@ pub(super) fn sample_memory(
         // feature, so their `cache_stats().evictions()` returns 0. The
         // column is kept for wire-shape parity; only the indexer column
         // surfaces real numbers today.
-        redb_state_evictions: utxo.redb_cache_evictions(),
+        redb_state_evictions: utxo.map(|u| u.redb_cache_evictions()).unwrap_or(0),
         redb_indexer_evictions,
         redb_addrbook_evictions: 0,
         indexer_indexed_height,

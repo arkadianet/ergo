@@ -148,22 +148,7 @@ fn process_header_modifier_batch(
     let bh = cs_after.best_header_height;
     let fb = cs_after.best_full_block_height;
 
-    if fb > fb_before
-        && state
-            .store
-            .as_utxo()
-            .expect("utxo-only: IBD durability mode is gated off in digest mode")
-            .ibd_mode()
-        && bh > 0
-        && bh.saturating_sub(fb) < 10
-    {
-        state
-            .store
-            .as_utxo_mut()
-            .expect("utxo-only: IBD durability mode is gated off in digest mode")
-            .set_ibd_mode(false, 0);
-        info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
-    }
+    super::maybe_exit_ibd(&mut state.store, fb_before, fb, bh);
 
     if state.coordinator.sync_state().headers_chain_synced() {
         let window_advanced = fb > fb_before;
@@ -413,11 +398,8 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             // ~1s later (the throttle would think no recent send had
             // happened on this peer).
             if !try_send_anchor_sync_info(state, &addr, now) {
-                let chain = state
-                    .store
-                    .as_utxo()
-                    .expect("utxo-only: ChainView sync-info seam is gated off in digest mode");
-                let payload = ergo_sync::coordinator::build_sync_info_payload(sync_version, chain);
+                let payload =
+                    ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store);
                 send_to_peer(state, &addr, message::CODE_SYNC_INFO, payload);
             }
             state.coordinator.sync_state_mut().mark_sync_sent(addr, now);
@@ -434,13 +416,9 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             }
 
             // Request missing sections (runs on every handshake).
-            let chain = state
-                .store
-                .as_utxo()
-                .expect("utxo-only: ChainView section-request seam is gated off in digest mode");
             let missing_actions = state.executor.request_missing_sections(
                 &mut state.coordinator,
-                chain,
+                &state.store,
                 &state.peer_manager,
                 now,
             );

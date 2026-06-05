@@ -379,23 +379,7 @@ pub(super) fn handle_message(
                     let bh = cs_after.best_header_height;
                     let fb = cs_after.best_full_block_height;
 
-                    // Auto-exit IBD durability when near tip
-                    if fb > fb_before
-                        && state
-                            .store
-                            .as_utxo()
-                            .expect("utxo-only: IBD durability mode is gated off in digest mode")
-                            .ibd_mode()
-                        && bh > 0
-                        && bh.saturating_sub(fb) < 10
-                    {
-                        state
-                            .store
-                            .as_utxo_mut()
-                            .expect("utxo-only: IBD durability mode is gated off in digest mode")
-                            .set_ibd_mode(false, 0);
-                        info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
-                    }
+                    super::maybe_exit_ibd(&mut state.store, fb_before, fb, bh);
 
                     // Refill downloads without waiting for the next
                     // sync tick when (a) blocks were just applied —

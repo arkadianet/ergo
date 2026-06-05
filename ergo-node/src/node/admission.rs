@@ -157,6 +157,14 @@ pub(super) fn admit_api_transaction(
     mode: SubmitMode,
     now: Instant,
 ) -> Result<String, SubmitError> {
+    // No admission pipeline without a mempool (digest mode, or mempool
+    // disabled by config): reject as Disabled rather than failing deeper
+    // with a misleading tip/context error. `Mempool::process`/`check`
+    // already short-circuit to this reason when disabled; guarding here
+    // keeps the digest backend off the `as_utxo()` path below entirely.
+    if !state.mempool.config().enabled {
+        return Err(reject_to_submit_error(RejectReason::Disabled));
+    }
     let owned = match build_tip_context(state) {
         Some(o) => o,
         None => {
