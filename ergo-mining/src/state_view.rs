@@ -20,13 +20,13 @@
 //! the in-crate snapshot parity tests), so for the same committed tip the
 //! two views produce the same candidate.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use ergo_primitives::digest::ADDigest;
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
-use ergo_state::store::{CommittedSnapshot, DryRunBase, StateError, StateStore};
+use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase, StateError, StateStore};
 use ergo_validation::{
     ActiveProtocolParameters, CheckedTransaction, ErgoValidationSettings, UtxoView,
 };
@@ -149,6 +149,13 @@ impl CandidateStateView for CommittedSnapshot {
 /// a cache hit reuses the memoized pristine tree (shallow COW clone), a
 /// miss/tip-change full-rehydrates and re-memoizes.
 ///
+/// After a build, [`Self::last_disposition`] returns the path the dry-run
+/// took: [`BaseDisposition::Hit`], [`BaseDisposition::Advanced`],
+/// [`BaseDisposition::Rehydrated`], or
+/// [`BaseDisposition::RehydratedAfterFailedAdvance`]. The disposition is `None`
+/// if no build has completed through this view yet (i.e. `candidate_dry_run`
+/// has not been called).
+///
 /// The cached dry-run needs `&mut Option<DryRunBase>`, but the trait method is
 /// `&self`. The borrow is reconciled with a [`RefCell`] around the borrowed
 /// slot. This is sound because the build is strictly single-threaded and
@@ -161,6 +168,10 @@ impl CandidateStateView for CommittedSnapshot {
 pub struct CachedSnapshotView<'a> {
     snap: &'a CommittedSnapshot,
     base: RefCell<&'a mut Option<DryRunBase>>,
+    /// The disposition reported by the most recent `candidate_dry_run` call.
+    /// `Cell` (not `RefCell`) because we write a `Copy` value and never hold a
+    /// borrow — there is no aliasing hazard.
+    disposition: Cell<Option<BaseDisposition>>,
 }
 
 impl<'a> CachedSnapshotView<'a> {
@@ -169,7 +180,14 @@ impl<'a> CachedSnapshotView<'a> {
         Self {
             snap,
             base: RefCell::new(base),
+            disposition: Cell::new(None),
         }
+    }
+
+    /// The path taken by the most recent [`CandidateStateView::candidate_dry_run`]
+    /// call through this view. `None` if no build has run yet.
+    pub fn last_disposition(&self) -> Option<BaseDisposition> {
+        self.disposition.get()
     }
 }
 
@@ -216,6 +234,12 @@ impl CandidateStateView for CachedSnapshotView<'_> {
         let mut base = self.base.borrow_mut();
         // `base: RefMut<&mut Option<DryRunBase>>`; `&mut base` auto-derefs
         // through `DerefMut` to the `&mut Option<DryRunBase>` the cache wants.
-        self.snap.candidate_dry_run_cached(&mut base, checked)
+        let mut disp: Option<BaseDisposition> = None;
+        let result = self
+            .snap
+            .candidate_dry_run_cached(&mut base, checked, &mut disp);
+        // Record disposition even on error (the path taken is still informative).
+        self.disposition.set(disp);
+        result
     }
 }

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use ergo_mempool::MempoolReadSnapshot;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
-use ergo_state::store::{CommittedSnapshot, DryRunBase};
+use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 
 use crate::candidate::{generate_candidate, BuildMode, Candidate};
 use crate::error::MiningError;
@@ -205,6 +205,16 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// build worker thread that calls `build_and_publish`; it is never shared.
 /// Either path produces byte-identical `(state_root, ad_proof)` — the cached
 /// variant is proven against the uncached oracle in `ergo-state`.
+///
+/// `disposition_out` is set to the [`BaseDisposition`] only when `base` is
+/// `Some` and `generate_candidate` actually ran (i.e. the early-return
+/// outcomes — `NoState`, `TipNotVisible`, `IntentSuperseded`, `NotSynced` —
+/// leave it `None`). Callers that want the wire-string label should map the
+/// value after the call:
+/// `Hit → "primed"`, `Advanced → "advanced"`, `Rehydrated → "cold"`,
+/// `RehydratedAfterFailedAdvance → "cold_fallback"`,
+/// `None` with a `Some(base)` and a building outcome → treat as `"cold"`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_and_publish(
     reader: &ChainStoreReader,
     handle: &MiningHandle,
@@ -213,6 +223,7 @@ pub fn build_and_publish(
     base: Option<&mut Option<DryRunBase>>,
     now_ms: impl Fn() -> u64,
     resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
+    disposition_out: &mut Option<BaseDisposition>,
 ) -> Result<BuildOutcome, MiningError> {
     let snapshot = match reader
         .committed_snapshot()
@@ -280,7 +291,7 @@ pub fn build_and_publish(
     let built = match base {
         Some(slot) => {
             let view = CachedSnapshotView::new(&snapshot, slot);
-            generate_candidate(
+            let result = generate_candidate(
                 &view,
                 mode,
                 mempool,
@@ -289,7 +300,12 @@ pub fn build_and_publish(
                 handle.reemission_ref(),
                 handle.chain_config(),
                 eligible_rent_boxes.as_slice(),
-            )?
+            );
+            // Read disposition from the view regardless of whether the build
+            // succeeded — the path taken (Hit/Advanced/Rehydrated/…) is
+            // informative even on a dry-run or build error.
+            *disposition_out = view.last_disposition();
+            result?
         }
         None => generate_candidate(
             &snapshot,
@@ -407,6 +423,7 @@ mod tests {
     fn no_state_when_store_has_no_committed_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::open(dir.path().join("s.redb").as_path()).unwrap();
+        let mut disp = None;
         let out = build_and_publish(
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
@@ -415,9 +432,12 @@ mod tests {
             None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
+            &mut disp,
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::NoState);
+        // No build ran (early return), so disposition stays None.
+        assert_eq!(disp, None);
     }
 
     #[test]
@@ -426,6 +446,7 @@ mod tests {
         // Genesis committed tip is [0;32] @ height 0; the intent expects a
         // parent at height 5 (in-memory applied, not yet persisted). Committed
         // height (0) < expected (5) ⇒ persist-lag ⇒ retryable.
+        let mut disp = None;
         let out = build_and_publish(
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
@@ -434,9 +455,11 @@ mod tests {
             None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
+            &mut disp,
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::TipNotVisible);
+        assert_eq!(disp, None);
     }
 
     #[test]
@@ -446,6 +469,7 @@ mod tests {
         // parent also at height 0. Committed height (0) is not behind expected
         // (0), so the expected parent can never become commit-visible — the
         // chain forked away from it. Drop the stale intent rather than spin.
+        let mut disp = None;
         let out = build_and_publish(
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
@@ -454,9 +478,11 @@ mod tests {
             None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
+            &mut disp,
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::IntentSuperseded);
+        assert_eq!(disp, None);
     }
 
     #[test]
@@ -465,6 +491,7 @@ mod tests {
         // Genesis: best_full == [0;32] @ height 0 → not synced (height 0).
         // The intent's expected parent matches the committed (zeroed) tip, so
         // the visibility check passes and the synced gate is what rejects.
+        let mut disp = None;
         let out = build_and_publish(
             &store.reader_handle(),
             &handle().with_rent_config(true, 4),
@@ -473,9 +500,11 @@ mod tests {
             None,
             || BUILT_AT_MS,
             |_, _| unreachable!("rent resolver must not run when the build is gated off"),
+            &mut disp,
         )
         .unwrap();
         assert_eq!(out, BuildOutcome::NotSynced);
+        assert_eq!(disp, None);
     }
 
     // NOTE: the Published / DroppedStale paths require generate_candidate to

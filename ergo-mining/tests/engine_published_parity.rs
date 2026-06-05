@@ -512,6 +512,7 @@ fn build_and_publish_resolves_rent_at_snapshot_height_when_enabled() {
             captured.set(Some((snapshot.best_full_block_height(), h)));
             Vec::new()
         },
+        &mut None,
     )
     .expect("build_and_publish ok");
     assert!(
@@ -555,6 +556,7 @@ fn build_and_publish_skips_rent_resolver_when_disabled() {
             called.set(true);
             Vec::new()
         },
+        &mut None,
     )
     .expect("build_and_publish ok");
     assert!(
@@ -609,6 +611,7 @@ fn publish_and_serve_under(regime: &Regime) {
         None,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
+        &mut None,
     )
     .expect("build_and_publish ok");
     let timings = match outcome {
@@ -672,6 +675,7 @@ fn build_and_publish_base_cache_cold_then_hit_matches_uncached() {
             None,
             || BUILT_AT_MS,
             |_, _| Vec::new(),
+            &mut None,
         )
         .expect("uncached build ok");
         assert!(matches!(out, BuildOutcome::Published { .. }));
@@ -691,7 +695,8 @@ fn build_and_publish_base_cache_cold_then_hit_matches_uncached() {
         synced: true,
     });
 
-    for pass in ["cold", "hit"] {
+    for (pass_idx, pass) in ["cold", "hit"].iter().enumerate() {
+        let mut disp = None;
         let out = build_and_publish(
             &store.reader_handle(),
             &handle,
@@ -700,8 +705,20 @@ fn build_and_publish_base_cache_cold_then_hit_matches_uncached() {
             Some(&mut base),
             || BUILT_AT_MS,
             |_, _| Vec::new(),
+            &mut disp,
         )
         .unwrap_or_else(|e| panic!("cached {pass} build err: {e:?}"));
+        // First pass is a cold build (Rehydrated), second is a hit (Hit).
+        let expected_disp = if pass_idx == 0 {
+            ergo_state::store::BaseDisposition::Rehydrated
+        } else {
+            ergo_state::store::BaseDisposition::Hit
+        };
+        assert_eq!(
+            disp,
+            Some(expected_disp),
+            "cached {pass}: disposition must be {expected_disp:?}",
+        );
         assert!(
             matches!(out, BuildOutcome::Published { .. }),
             "cached {pass} build must publish, got {out:?}",
@@ -844,10 +861,18 @@ fn cached_candidate_full_surface_matches_uncached_cold_and_hit() {
     //     pristine tree, memoizes it, and produces a candidate. Every surface
     //     bit must equal the uncached oracle.
     let mut base: Option<DryRunBase> = None;
+    let cold_disp;
     let cold = {
         let view = CachedSnapshotView::new(&snapshot, &mut base);
-        build_full_surface(&view, &regime)
+        let surface = build_full_surface(&view, &regime);
+        cold_disp = view.last_disposition();
+        surface
     };
+    assert_eq!(
+        cold_disp,
+        Some(ergo_state::store::BaseDisposition::Rehydrated),
+        "cold build (empty slot) must report Rehydrated disposition",
+    );
     assert_eq!(
         cold, uncached,
         "cached cold build must match the uncached oracle bit-for-bit across the full surface",
@@ -862,10 +887,18 @@ fn cached_candidate_full_surface_matches_uncached_cold_and_hit() {
     // (c) Cached HIT: the slot is now primed for the same committed tip. A
     //     second cached build must reuse the memoized tree (no rehydrate) and
     //     still produce the identical full surface.
+    let hit_disp;
     let hit = {
         let view = CachedSnapshotView::new(&snapshot, &mut base);
-        build_full_surface(&view, &regime)
+        let surface = build_full_surface(&view, &regime);
+        hit_disp = view.last_disposition();
+        surface
     };
+    assert_eq!(
+        hit_disp,
+        Some(ergo_state::store::BaseDisposition::Hit),
+        "hit build (primed slot) must report Hit disposition",
+    );
     assert_eq!(
         hit, uncached,
         "cached hit build must match the uncached oracle bit-for-bit across the full surface",
@@ -951,6 +984,7 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
         None,
         || BUILT_AT_MS,
         |_, _| Vec::new(),
+        &mut None,
     )
     .expect("build_and_publish ok");
     assert_eq!(

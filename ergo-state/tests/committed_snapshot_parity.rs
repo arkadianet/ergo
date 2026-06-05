@@ -201,8 +201,9 @@ fn cached_same_tip_repeat_matches_uncached() {
     for call in 0..3 {
         let oracle = store.candidate_dry_run(&[]).expect("uncached oracle");
         let snap = store.committed_snapshot().unwrap().expect("snapshot");
+        let mut disp = None;
         let got = snap
-            .candidate_dry_run_cached(&mut base, &[])
+            .candidate_dry_run_cached(&mut base, &[], &mut disp)
             .expect("cached dry-run");
         assert_eq!(oracle.0, got.0, "call {call}: state_root must match oracle");
         assert_eq!(
@@ -228,7 +229,7 @@ fn cached_tip_advance_rebuilds_and_matches() {
     let mut base = None;
     let snap_a = store.committed_snapshot().unwrap().expect("snapshot A");
     snap_a
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut None)
         .expect("first cached build");
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
@@ -242,8 +243,9 @@ fn cached_tip_advance_rebuilds_and_matches() {
 
     let oracle = store.candidate_dry_run(&[]).expect("uncached oracle at B");
     let snap_b = store.committed_snapshot().unwrap().expect("snapshot B");
+    let mut disp_b = None;
     let got = snap_b
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut disp_b)
         .expect("cached build at B");
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
@@ -293,15 +295,16 @@ fn cached_reorg_same_height_rebuilds() {
     let mut base = None;
     let snap_a = store_a.committed_snapshot().unwrap().expect("snapshot A");
     snap_a
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut None)
         .expect("cached build on A");
     assert_eq!(base.as_ref().map(|b| b.tip_id()), Some(tip_a));
 
     // Now run against store B's snapshot: tip id differs ⇒ miss ⇒ rebuild.
     let oracle_b = store_b.candidate_dry_run(&[]).expect("uncached oracle B");
     let snap_b = store_b.committed_snapshot().unwrap().expect("snapshot B");
+    let mut disp_b = None;
     let got = snap_b
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut disp_b)
         .expect("cached build on B");
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
