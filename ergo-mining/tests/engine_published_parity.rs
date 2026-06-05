@@ -871,6 +871,87 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
     );
 }
 
+/// Mainnet / post-EIP-27 twin of `minimal_build_equals_full_build_on_quiet_chain`:
+/// same assertions under `reemission = Some(mainnet)` and candidate height 777_300.
+/// On mainnet (post-activation), both `Minimal` and `Full` with an empty mempool
+/// must agree on every consensus-bearing surface — the fast first-publish never
+/// sacrifices correctness on the deployed EIP-27 emission path.
+#[test]
+fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
+    let regime = Regime::mainnet_post_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+
+    let snap = store
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+
+    // Minimal build: emission-only, no mempool, no rent.
+    let (min_c, _min_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Minimal,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("minimal generate_candidate ok")
+    .expect("minimal candidate is Some");
+
+    // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
+    let (full_c, _full_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("full generate_candidate ok")
+    .expect("full candidate is Some");
+
+    assert_eq!(
+        min_c.transactions.len(),
+        1,
+        "minimal candidate must carry exactly the coinbase emission tx",
+    );
+    assert_eq!(
+        full_c.transactions.len(),
+        1,
+        "full candidate on a quiet chain must also carry exactly the coinbase emission tx",
+    );
+
+    assert_eq!(
+        serialize_txs(&min_c.transactions),
+        serialize_txs(&full_c.transactions),
+        "serialized transactions must match between Minimal and Full on a quiet chain",
+    );
+    assert_eq!(
+        min_c.header.transactions_root, full_c.header.transactions_root,
+        "transactions_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.state_root, full_c.header.state_root,
+        "state_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.extension_root, full_c.header.extension_root,
+        "extension_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.ad_proof_bytes, full_c.ad_proof_bytes,
+        "ad_proof_bytes must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.height, full_c.header.height,
+        "candidate height must match between Minimal and Full",
+    );
+}
+
 #[test]
 fn generate_candidate_offloop_snapshot_matches_onloop_store_byte_for_byte() {
     offloop_matches_onloop_under(&Regime::pre_eip27());

@@ -24,6 +24,11 @@
 //! refresh leaves unchanged). A quiet pool with rent disabled makes the full
 //! build byte-equivalent to the minimal one (modulo timestamp), so that
 //! redundant refresh is skipped — one publish per tip, no template-ring churn.
+//!
+//! A build in flight is never preempted — a tip arriving mid-build is observed
+//! at the next loop iteration (the stale build's publish CAS-drops), so the
+//! worst-case serve gap for a new tip is the in-flight build's remainder plus
+//! the new tip's minimal build.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -183,6 +188,17 @@ fn page_rent_boxes<E: std::fmt::Debug>(
     boxes
 }
 
+/// Whether the enriched (Full) refresh after a minimal publish would add
+/// nothing: an empty frozen pool with rent claiming off makes the full build
+/// byte-equivalent to the minimal one (modulo timestamp), so a second publish
+/// is pure template-ring churn.
+fn full_refresh_adds_nothing(
+    intent: &ergo_mining::engine::BuildIntent,
+    handle: &MiningHandle,
+) -> bool {
+    intent.mempool.is_empty() && !handle.claim_storage_rent()
+}
+
 /// Backoff between commit-visibility retries (the committed redb tip trailing
 /// the in-memory tip the loop signalled). Short: persist-pipeline lag clears
 /// in well under a tick in the common case.
@@ -240,6 +256,9 @@ pub(super) async fn run_mining_engine(
         }
 
         let mut attempts = 0u32;
+        // `attempts` deliberately carries into the enriched pass: a published
+        // minimal proves the tip is already commit-visible, so the full pass
+        // should never need its own retry budget.
         loop {
             // Re-borrow each attempt: a newer intent that arrived mid-retry
             // supersedes this one (latest-wins).
@@ -322,12 +341,9 @@ pub(super) async fn run_mining_engine(
                         emit_build_complete!(info);
                     }
                     if mode == BuildMode::Minimal {
-                        // The enriched same-parent refresh — but only when it
-                        // would add anything: a quiet pool with rent disabled
-                        // makes the full build byte-equivalent to the minimal
-                        // one (modulo timestamp), so a second publish is pure
-                        // template-ring churn.
-                        if intent.mempool.is_empty() && !handle.claim_storage_rent() {
+                        // The enriched same-parent refresh — skipped when it
+                        // would add nothing (quiet pool + rent disabled).
+                        if full_refresh_adds_nothing(&intent, &handle) {
                             break;
                         }
                         // Re-borrows the latest intent; the ring now holds this
@@ -621,6 +637,75 @@ mod tests {
             "front-deletion gap under-collects; missed boxes stay eligible for the next build"
         );
         assert_eq!(fetches.get(), 2);
+    }
+
+    // ----- full_refresh_adds_nothing predicate -----
+
+    fn minimal_intent(
+        mempool: ergo_mempool::MempoolReadSnapshot,
+    ) -> ergo_mining::engine::BuildIntent {
+        ergo_mining::engine::BuildIntent {
+            expected_parent: [0u8; 32],
+            expected_height: 0,
+            mempool: std::sync::Arc::new(mempool),
+            miner_pk: [0x02u8; 33],
+            reason: ergo_mining::engine::BuildReason::Startup,
+        }
+    }
+
+    fn plain_handle() -> MiningHandle {
+        MiningHandle::new(
+            [0x02u8; 33],
+            ergo_mining::emission_rules::MonetarySettings::mainnet(),
+            None,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        )
+    }
+
+    fn synth_entry(seed: u8) -> ergo_mempool::Entry {
+        ergo_mempool::Entry::new(
+            ergo_primitives::digest::Digest32::from_bytes([seed; 32]),
+            std::sync::Arc::from(Vec::<u8>::new().into_boxed_slice()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            1,
+            0,
+            0,
+            ergo_mempool::TxSource::Api,
+        )
+    }
+
+    #[test]
+    fn full_refresh_skipped_when_pool_empty_and_rent_off() {
+        let intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
+        let handle = plain_handle(); // rent off by default
+        assert!(
+            full_refresh_adds_nothing(&intent, &handle),
+            "empty pool + rent off means the full build would add nothing",
+        );
+    }
+
+    #[test]
+    fn full_refresh_not_skipped_when_pool_non_empty() {
+        let snap = ergo_mempool::MempoolReadSnapshot::from_entries(vec![synth_entry(1)]);
+        let intent = minimal_intent(snap);
+        let handle = plain_handle(); // rent off
+        assert!(
+            !full_refresh_adds_nothing(&intent, &handle),
+            "non-empty pool means the full build would add fee txs",
+        );
+    }
+
+    #[test]
+    fn full_refresh_not_skipped_when_rent_on() {
+        let intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
+        let handle = plain_handle().with_rent_config(true, 4);
+        assert!(
+            !full_refresh_adds_nothing(&intent, &handle),
+            "rent on means the full build may add a rent self-claim tx",
+        );
     }
 
     // ----- error paths -----
