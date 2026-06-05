@@ -9,6 +9,21 @@
 //!
 //! The `watch` channel coalesces, so the task always builds the *latest*
 //! intent — rapid tip/mempool churn collapses to one build, never a backlog.
+//!
+//! Two-phase publish per tip: a full candidate build can take seconds, during
+//! which `/mining/candidate` 503s for the new tip. So on a tip's *first* build
+//! the engine publishes a minimal, emission-only template
+//! ([`BuildMode::Minimal`] — consensus-complete; it forfeits only the fees for
+//! the few seconds until the refresh), then immediately rebuilds enriched
+//! ([`BuildMode::Full`] — rent self-claim + mempool selection + fee tx) as a
+//! same-parent refresh that the serve path's newest-matching-parent scan
+//! supersedes the minimal one with. The mode is chosen by probing the served
+//! ring for the parent ([`MiningHandle::has_template_for_parent`]), so the
+//! decision stays correct across superseded intents and ABA reorgs. `clean_jobs`
+//! fires once, on the minimal publish (it derives from `chain_seq`, which the
+//! refresh leaves unchanged). A quiet pool with rent disabled makes the full
+//! build byte-equivalent to the minimal one (modulo timestamp), so that
+//! redundant refresh is skipped — one publish per tip, no template-ring churn.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -243,28 +258,31 @@ pub(super) async fn run_mining_engine(
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0)
             };
+            // First build for a tip publishes a minimal (emission-only)
+            // template so the serve gap is the minimal build's cost, not the
+            // full build's; once anything serves this parent, build enriched.
+            // Probing the ring (not per-intent state) keeps the decision
+            // correct across superseded intents and ABA reorgs for free.
+            let mode = if handle.has_template_for_parent(&intent.expected_parent) {
+                BuildMode::Full
+            } else {
+                BuildMode::Minimal
+            };
             // Time the build itself (excludes the inter-retry backoff sleeps),
             // so `build_ms` is the candidate-assembly latency — the headline
-            // observability metric (and the trigger for the deferred per-tip
-            // base-cache decision). `outcome` doubles as the CAS-drop counter
-            // (`DroppedStale`) and `attempts` as the commit-visibility retry
-            // count.
+            // observability metric and the slow-build warn trigger. `outcome`
+            // doubles as the CAS-drop counter (`DroppedStale`) and `attempts`
+            // as the commit-visibility retry count.
             let build_start = Instant::now();
-            let result = build_and_publish(
-                &reader,
-                &handle,
-                &intent,
-                BuildMode::Full,
-                now_ms,
-                |snapshot, h| {
+            let result =
+                build_and_publish(&reader, &handle, &intent, mode, now_ms, |snapshot, h| {
                     resolve_eligible_rent_boxes(
                         indexer.as_ref(),
                         snapshot,
                         h,
                         handle.max_storage_rent_claims(),
                     )
-                },
-            );
+                });
             let build_ms = build_start.elapsed().as_millis() as u64;
             match result {
                 Ok(BuildOutcome::TipNotVisible) if attempts < MAX_VIS_RETRIES => {
@@ -287,6 +305,7 @@ pub(super) async fn run_mining_engine(
                             $mac!(
                                 attempts,
                                 build_ms,
+                                mode = ?mode,
                                 emission_ms = t.emission.as_millis() as u64,
                                 rent_ms = t.rent.as_millis() as u64,
                                 select_ms = t.select.as_millis() as u64,
@@ -302,6 +321,21 @@ pub(super) async fn run_mining_engine(
                     } else {
                         emit_build_complete!(info);
                     }
+                    if mode == BuildMode::Minimal {
+                        // The enriched same-parent refresh — but only when it
+                        // would add anything: a quiet pool with rent disabled
+                        // makes the full build byte-equivalent to the minimal
+                        // one (modulo timestamp), so a second publish is pure
+                        // template-ring churn.
+                        if intent.mempool.is_empty() && !handle.claim_storage_rent() {
+                            break;
+                        }
+                        // Re-borrows the latest intent; the ring now holds this
+                        // parent's minimal template, so the probe yields Full
+                        // (no infinite Minimal loop — this task is the only
+                        // publisher and set_best_tip never evicts).
+                        continue;
+                    }
                     break;
                 }
                 Ok(BuildOutcome::TipNotVisible) => {
@@ -313,6 +347,7 @@ pub(super) async fn run_mining_engine(
                     warn!(
                         attempts,
                         build_ms,
+                        mode = ?mode,
                         reason = ?intent.reason,
                         "mining engine: commit-visibility retries exhausted; awaiting next intent",
                     );
@@ -323,6 +358,7 @@ pub(super) async fn run_mining_engine(
                         ?outcome,
                         attempts,
                         build_ms,
+                        mode = ?mode,
                         reason = ?intent.reason,
                         "mining engine: build not published",
                     );
@@ -332,6 +368,7 @@ pub(super) async fn run_mining_engine(
                     warn!(
                         error = ?e,
                         build_ms,
+                        mode = ?mode,
                         reason = ?intent.reason,
                         "mining engine: build failed",
                     );
