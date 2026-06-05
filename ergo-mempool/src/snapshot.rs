@@ -42,13 +42,11 @@ impl MempoolReadSnapshot {
         Self { entries }
     }
 
-    /// An empty snapshot, for tests only. Production candidate triggers —
-    /// including startup and wallet-ready rebuilds — always snapshot the live
-    /// pool via [`MempoolReadSnapshot::from_pool`] (which yields an empty
-    /// snapshot naturally when the pool happens to be empty), so no real build
-    /// intent is ever constructed on a forced-empty mempool. Gating this
-    /// constructor out of production builds keeps that guarantee structural.
-    #[cfg(any(test, feature = "test-support"))]
+    /// An empty snapshot. Used by the engine's `BuildMode::Minimal` path,
+    /// which deliberately selects no user transactions and builds an
+    /// emission-only candidate. `Full` builds always snapshot the live pool
+    /// via [`MempoolReadSnapshot::from_pool`], so a forced-empty view never
+    /// silently replaces real pool contents on the enriched path.
     pub fn empty() -> Self {
         Self {
             entries: Vec::new(),
