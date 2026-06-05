@@ -2167,6 +2167,29 @@ mod tests {
             Some(hdr_np1_id_b),
             "base rekeyed to N+1 after advance"
         );
+        // Reuse the advanced base: a second same-tip call must report Hit and
+        // still match the oracle. This pins that the advanced base (built from
+        // a post-mutation tree) is correctly pristine for reuse — the same
+        // invariant as `advanced_base_second_dry_run_still_matches_oracle` but
+        // now after a non-empty-block advance, not an empty one.
+        let snap_np1_b = store.committed_snapshot().unwrap().expect("snap N+1 b");
+        let mut disp_hit = None;
+        let got2 = snap_np1_b
+            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp_hit)
+            .expect("second same-tip hit after non-empty advance");
+        assert_eq!(
+            oracle.0, got2.0,
+            "second hit state_root still matches oracle"
+        );
+        assert_eq!(
+            oracle.1, got2.1,
+            "second hit proof bytes still match oracle"
+        );
+        assert_eq!(
+            disp_hit,
+            Some(BaseDisposition::Hit),
+            "second same-tip call after non-empty advance must report Hit"
+        );
     }
 
     /// Digest-mismatch fallback: store a BlockTransactions section for block
