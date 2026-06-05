@@ -385,6 +385,16 @@ fn seed_synced_chain(db: &std::path::Path) -> [u8; 32] {
 /// boots already synced, so the off-loop engine primes a Startup candidate
 /// build for `CANDIDATE_HEIGHT`.
 async fn boot_synced_mining_node() -> (tempfile::TempDir, RunHandle, [u8; 32]) {
+    boot_synced_mining_node_with_cache(false).await
+}
+
+/// `boot_synced_mining_node` parameterized by the `[mining] candidate_base_cache`
+/// flag. The default-off path (`false`) is what all the existing tests boot; the
+/// flag-on path (`true`) routes every candidate build through the worker's
+/// persistent per-tip dry-run base (`solve_and_submit_accepts_cache_built_blocks`).
+async fn boot_synced_mining_node_with_cache(
+    candidate_base_cache: bool,
+) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("state.redb");
     let parent_tip = seed_synced_chain(&db);
@@ -392,6 +402,7 @@ async fn boot_synced_mining_node() -> (tempfile::TempDir, RunHandle, [u8; 32]) {
     let mut config = make_test_config(dir.path().to_path_buf());
     config.mining_config.enabled = true;
     config.mining_config.miner_public_key_hex = Some(hex::encode(MINER_PK));
+    config.mining_config.candidate_base_cache = candidate_base_cache;
     let handle = spawn_node(config).await;
     (dir, handle, parent_tip)
 }
@@ -633,6 +644,111 @@ async fn solve_and_submit_advances_the_tip() {
         new_tip.best_full_block.parent_id,
         hex::encode(parent_tip),
         "the mined block's parent must be the seeded tip — it built directly on N",
+    );
+
+    handle.shutdown().await.expect("clean shutdown");
+}
+
+/// Flag-on (`[mining] candidate_base_cache = true`) end-to-end: the full
+/// consensus validator is the strongest oracle for cache-built blocks. Boot a
+/// node with the per-tip dry-run base cache enabled, then mine TWO successive
+/// blocks through the real solve → submit → `verify_solution` →
+/// `apply_mined_block` → `process_header_cfg` path:
+///
+///   - The N+1 block is built off a COLD base (the worker's slot is empty at
+///     boot, so the first candidate hydrates + memoizes the pristine tree).
+///   - After it applies and the tip advances to N+1, the worker's persistent
+///     base is keyed to the OLD tip (N); the N+2 candidate build therefore
+///     misses, drops the stale base, and rebuilds COLD against the new tip —
+///     exercising the post-advance rehydrate on the worker's own slot.
+///
+/// Both blocks being accepted (200) and applied proves the cache produces
+/// consensus-valid blocks on both the cold and post-advance paths, through a
+/// booted node, with the cache flag actually flipped on (the other eight
+/// `mining_e2e` tests all boot default-off). The byte-identity of cached vs
+/// uncached candidates is pinned in-process by `ergo-mining`'s
+/// `cached_candidate_full_surface_matches_uncached_across_tip_advance`; this is
+/// the node-level acceptance oracle that the bytes the cache emits are not just
+/// equal to the uncached path but independently consensus-valid.
+#[tokio::test]
+async fn solve_and_submit_accepts_cache_built_blocks() {
+    let (_dir, handle, parent_tip) = boot_synced_mining_node_with_cache(true).await;
+    let addr = handle.api_addr.expect("api bound");
+
+    // Boot synced at N.
+    assert!(
+        poll_best_full_height(&handle, PARENT_HEIGHT).await,
+        "node must boot synced at the seeded parent height {PARENT_HEIGHT}",
+    );
+    assert_eq!(
+        handle.read.tip().best_full_block.header_id,
+        hex::encode(parent_tip),
+        "booted tip id must be the seeded parent",
+    );
+
+    // First block (N+1), built off a COLD base (worker slot empty at boot).
+    let first = poll_candidate(addr).await;
+    assert_eq!(
+        first.h,
+        Some(CANDIDATE_HEIGHT),
+        "first candidate is for N+1"
+    );
+    let nonce = solve(&msg_bytes(&first), CANDIDATE_HEIGHT, &first.b);
+    let resp = http_request(
+        addr,
+        "POST",
+        "/mining/solution",
+        Some(&format!(r#"{{"n":"{}"}}"#, hex::encode(nonce))),
+    )
+    .await;
+    assert_eq!(
+        resp.status, 200,
+        "cache-built N+1 block must be accepted (200); body: {}",
+        resp.body,
+    );
+    assert!(
+        poll_best_full_height(&handle, CANDIDATE_HEIGHT).await,
+        "best-full tip did not advance to N+1 ({CANDIDATE_HEIGHT}) after the cache-built submit",
+    );
+
+    // Second block (N+2). The worker's persistent base is still keyed to N, so
+    // this candidate build misses → drops the stale base → rebuilds cold against
+    // the new tip. Solve + submit it too: a second accepted block proves the
+    // post-advance rebuild on the worker's own slot also produces a
+    // consensus-valid block.
+    let second_height = CANDIDATE_HEIGHT + 1;
+    let second = poll_candidate_at_height(addr, second_height).await;
+    assert_eq!(
+        second.h,
+        Some(second_height),
+        "engine must publish a candidate for the new tip (N+2) off the rebuilt base",
+    );
+    assert_ne!(
+        second.msg, first.msg,
+        "the N+2 candidate's work message must differ from the N+1 candidate's",
+    );
+    let nonce2 = solve(&msg_bytes(&second), second_height, &second.b);
+    let resp2 = http_request(
+        addr,
+        "POST",
+        "/mining/solution",
+        Some(&format!(r#"{{"n":"{}"}}"#, hex::encode(nonce2))),
+    )
+    .await;
+    assert_eq!(
+        resp2.status, 200,
+        "cache-built (post-advance) N+2 block must be accepted (200); body: {}",
+        resp2.body,
+    );
+    assert!(
+        poll_best_full_height(&handle, second_height).await,
+        "best-full tip did not advance to N+2 ({second_height}) after the second cache-built submit",
+    );
+
+    let new_tip = handle.read.tip();
+    assert_eq!(
+        new_tip.best_full_block.height, second_height,
+        "tip ref height must be N+2 after two cache-built blocks",
     );
 
     handle.shutdown().await.expect("clean shutdown");
