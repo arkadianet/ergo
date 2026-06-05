@@ -1981,6 +1981,354 @@ mod tests {
         );
     }
 
+    /// Non-empty block advance: apply block N+1 with a real transaction
+    /// (spends genesis box_id(1), creates box_id(10)). The stored
+    /// BlockTransactions section carries that transaction; `try_advance_base`
+    /// replays it through the cached prover, verifies the resulting digest
+    /// equals the committed state root, and returns `Advanced`.
+    ///
+    /// This pins: tx-id recomputation, create+spend UTXO netting, and the
+    /// replay path on a non-empty section — the risk surface Codex identified
+    /// as unpinned by the empty-block-only advance tests.
+    #[test]
+    fn advanced_base_non_empty_block_mutations_match_oracle() {
+        use ergo_primitives::digest::{Digest32, ModifierId};
+        use ergo_ser::ergo_box::ErgoBoxCandidate;
+        use ergo_ser::ergo_tree::ErgoTree;
+        use ergo_ser::header::serialize_header;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::opcode::Expr;
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::sigma_type::SigmaType;
+        use ergo_ser::sigma_value::SigmaValue;
+        use ergo_ser::transaction::Transaction;
+
+        let (_dir, mut store) = genesis_store();
+        // genesis_store seeds box_id(1), box_id(2), box_id(3).
+        let empty_r: DryRunRemoveMap = BTreeMap::new();
+        let empty_i: DryRunInsertMap = BTreeMap::new();
+
+        // A minimal ErgoTree that always evaluates to true (used as output script).
+        let true_tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            constants: vec![],
+            body: Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            },
+        };
+
+        // Block N (height 1): spend box_id(1), create box_id(10).
+        // The transaction is stored in both the unchecked apply AND the
+        // BlockTransactions section so that `try_advance_base` can replay it.
+        let spend_tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes(box_id(1)),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000,
+                true_tree.clone(),
+                1,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+
+        // Apply block N with the UTXO transaction so the state root captures
+        // the mutation.
+        let hdr_n = ergo_ser::header::Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes([0u8; 32]),
+            ad_proofs_root: Digest32::from_bytes([0u8; 32]),
+            transactions_root: Digest32::from_bytes([0u8; 32]),
+            state_root: store.root_digest(), // will be updated after apply
+            timestamp: 7_000_001,
+            extension_root: Digest32::from_bytes([0u8; 32]),
+            n_bits: 16842752,
+            height: 1,
+            votes: [0u8; 3],
+            unparsed_bytes: vec![],
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([0x02u8; 33]),
+                nonce: [0u8; 8],
+            },
+        };
+        // Compute what the state root will be after applying the tx.
+        let (to_remove_n, to_insert_n) =
+            StateStore::build_utxo_changes_raw(&[&spend_tx]).expect("build utxo changes N");
+        let root_after_n = {
+            let snap = store.committed_snapshot().unwrap().unwrap();
+            let mut prover = snap.hydrate_prover().expect("hydrate for root_after_n");
+            let (digest, _) = crate::store::dry_run::apply_change_set_to_prover(
+                &mut prover,
+                &to_remove_n,
+                &to_insert_n,
+            )
+            .expect("apply N preview");
+            digest
+        };
+        let (hdr_n_bytes, hdr_n_id) = serialize_header(&hdr_n).expect("serialize hdr_n");
+        let hdr_n_id_b: [u8; 32] = *hdr_n_id.as_bytes();
+        store.store_header(&hdr_n_id_b, &hdr_n_bytes).unwrap();
+        make_and_store_block_transactions_section(
+            &store,
+            &hdr_n_id_b,
+            hdr_n.transactions_root.as_bytes(),
+            std::slice::from_ref(&spend_tx),
+        );
+        store
+            .apply_block_unchecked(1, &hdr_n_id_b, &root_after_n, &[spend_tx])
+            .expect("apply N with UTXO mutation");
+
+        // Seed the base at tip N.
+        let mut base: Option<crate::store::snapshot::DryRunBase> = None;
+        let snap_n = store.committed_snapshot().unwrap().expect("snap N");
+        snap_n
+            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .expect("seed base at N");
+        assert_eq!(
+            base.as_ref().map(|b| b.tip_id()),
+            Some(hdr_n_id_b),
+            "base keyed to tip N"
+        );
+
+        // Block N+1 (height 2): empty transactions.
+        let hdr_np1 = ergo_ser::header::Header {
+            version: 2,
+            parent_id: hdr_n_id,
+            ad_proofs_root: Digest32::from_bytes([0u8; 32]),
+            transactions_root: Digest32::from_bytes([0u8; 32]),
+            state_root: store.root_digest(), // unchanged (no new UTXO changes)
+            timestamp: 7_000_002,
+            extension_root: Digest32::from_bytes([0u8; 32]),
+            n_bits: 16842752,
+            height: 2,
+            votes: [0u8; 3],
+            unparsed_bytes: vec![],
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([0x02u8; 33]),
+                nonce: [0u8; 8],
+            },
+        };
+        let root_np1 = store.root_digest();
+        let (hdr_np1_bytes, hdr_np1_id) = serialize_header(&hdr_np1).expect("serialize hdr_np1");
+        let hdr_np1_id_b: [u8; 32] = *hdr_np1_id.as_bytes();
+        store.store_header(&hdr_np1_id_b, &hdr_np1_bytes).unwrap();
+        make_and_store_block_transactions_section(
+            &store,
+            &hdr_np1_id_b,
+            hdr_np1.transactions_root.as_bytes(),
+            &[],
+        );
+        store
+            .apply_block_unchecked(2, &hdr_np1_id_b, &root_np1, &[])
+            .expect("apply N+1 empty");
+
+        // Oracle: fresh uncached dry-run at N+1.
+        let oracle_snap = store.committed_snapshot().unwrap().expect("oracle snap");
+        let oracle = oracle_snap
+            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .expect("oracle");
+
+        // Advance path: stale base at N (contains N's post-mutation tree),
+        // snapshot at N+1. Block N+1 has empty BT section, so the advance
+        // replays no UTXO changes and leaves the digest unchanged — matching
+        // root_np1 (the committed state root at N+1). Must report Advanced.
+        let snap_np1 = store.committed_snapshot().unwrap().expect("snap N+1");
+        let mut disp = None;
+        let got = snap_np1
+            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp)
+            .expect("advance path at N+1");
+
+        assert_eq!(
+            oracle.0, got.0,
+            "non-empty-parent advance: state_root == oracle"
+        );
+        assert_eq!(
+            oracle.1, got.1,
+            "non-empty-parent advance: proof bytes == oracle"
+        );
+        assert_eq!(
+            oracle.2, got.2,
+            "non-empty-parent advance: tip id == oracle"
+        );
+        assert_eq!(
+            disp,
+            Some(BaseDisposition::Advanced),
+            "single-step advance after non-empty-block parent must report Advanced"
+        );
+        assert_eq!(
+            base.as_ref().map(|b| b.tip_id()),
+            Some(hdr_np1_id_b),
+            "base rekeyed to N+1 after advance"
+        );
+    }
+
+    /// Digest-mismatch fallback: store a BlockTransactions section for block
+    /// N+1 that claims to INSERT a new box (box_id(20)), but apply block N+1
+    /// with no real UTXO changes (so the committed state root does NOT include
+    /// the inserted box). When `try_advance_base` replays the insert its
+    /// computed digest won't match the committed `state_root`, triggering the
+    /// hard `DigestMismatch` guard at snapshot.rs:514 and falling back to full
+    /// rehydrate with `RehydratedAfterFailedAdvance`.
+    #[test]
+    fn advance_digest_mismatch_falls_back_to_rehydrate() {
+        use ergo_primitives::digest::{Digest32, ModifierId};
+        use ergo_ser::ergo_box::ErgoBoxCandidate;
+        use ergo_ser::ergo_tree::ErgoTree;
+        use ergo_ser::header::serialize_header;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::opcode::Expr;
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::sigma_type::SigmaType;
+        use ergo_ser::sigma_value::SigmaValue;
+        use ergo_ser::transaction::Transaction;
+
+        let (_dir, mut store) = genesis_store();
+        let empty_r: DryRunRemoveMap = BTreeMap::new();
+        let empty_i: DryRunInsertMap = BTreeMap::new();
+
+        let true_tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            constants: vec![],
+            body: Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            },
+        };
+
+        // Block N: empty transactions.
+        let hdr_n = ergo_ser::header::Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes([0u8; 32]),
+            ad_proofs_root: Digest32::from_bytes([0u8; 32]),
+            transactions_root: Digest32::from_bytes([0u8; 32]),
+            state_root: store.root_digest(),
+            timestamp: 8_000_001,
+            extension_root: Digest32::from_bytes([0u8; 32]),
+            n_bits: 16842752,
+            height: 1,
+            votes: [0u8; 3],
+            unparsed_bytes: vec![],
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([0x02u8; 33]),
+                nonce: [0u8; 8],
+            },
+        };
+        let (hdr_n_bytes, hdr_n_id) = serialize_header(&hdr_n).unwrap();
+        let hdr_n_id_b: [u8; 32] = *hdr_n_id.as_bytes();
+        store.store_header(&hdr_n_id_b, &hdr_n_bytes).unwrap();
+        make_and_store_block_transactions_section(
+            &store,
+            &hdr_n_id_b,
+            hdr_n.transactions_root.as_bytes(),
+            &[],
+        );
+        store
+            .apply_block_unchecked(1, &hdr_n_id_b, &hdr_n.state_root, &[])
+            .unwrap();
+
+        // Seed base at N.
+        let mut base: Option<crate::store::snapshot::DryRunBase> = None;
+        let snap_n = store.committed_snapshot().unwrap().unwrap();
+        snap_n
+            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .expect("seed base at N");
+        assert!(base.is_some(), "base seeded at N");
+
+        // Block N+1: apply WITHOUT UTXO changes (state root unchanged).
+        // But store a BlockTransactions section that claims to SPEND box_id(1)
+        // and INSERT box_id(20) — a transaction that was never actually applied.
+        // `try_advance_base` replays the insert, produces a different digest
+        // than the committed state root, and hits `DigestMismatch`.
+        let lying_tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes(box_id(1)),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                999_000,
+                true_tree,
+                2,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let root_n = store.root_digest(); // unchanged (no actual UTXO apply at N+1)
+        let hdr_np1 = ergo_ser::header::Header {
+            version: 2,
+            parent_id: hdr_n_id,
+            ad_proofs_root: Digest32::from_bytes([0u8; 32]),
+            transactions_root: Digest32::from_bytes([0u8; 32]),
+            state_root: root_n,
+            timestamp: 8_000_002,
+            extension_root: Digest32::from_bytes([0u8; 32]),
+            n_bits: 16842752,
+            height: 2,
+            votes: [0u8; 3],
+            unparsed_bytes: vec![],
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([0x02u8; 33]),
+                nonce: [0u8; 8],
+            },
+        };
+        let (hdr_np1_bytes, hdr_np1_id) = serialize_header(&hdr_np1).unwrap();
+        let hdr_np1_id_b: [u8; 32] = *hdr_np1_id.as_bytes();
+        store.store_header(&hdr_np1_id_b, &hdr_np1_bytes).unwrap();
+        // Store the LYING section (contains the unapplied transaction).
+        make_and_store_block_transactions_section(
+            &store,
+            &hdr_np1_id_b,
+            hdr_np1.transactions_root.as_bytes(),
+            &[lying_tx],
+        );
+        // Apply block N+1 with NO transactions (no real UTXO mutation).
+        store
+            .apply_block_unchecked(2, &hdr_np1_id_b, &root_n, &[])
+            .expect("apply N+1 without UTXO changes");
+
+        // Oracle: fresh uncached dry-run at N+1.
+        let oracle_snap = store.committed_snapshot().unwrap().unwrap();
+        let oracle = oracle_snap
+            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .expect("oracle");
+
+        // Advance path: the lying BT section causes a digest mismatch in
+        // try_advance_base. Must fall back to full rehydrate.
+        let snap_np1 = store.committed_snapshot().unwrap().unwrap();
+        let mut disp = None;
+        let got = snap_np1
+            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp)
+            .expect("fallback after digest mismatch");
+
+        assert_eq!(
+            oracle.0, got.0,
+            "digest-mismatch fallback: state_root == oracle"
+        );
+        assert_eq!(
+            oracle.1, got.1,
+            "digest-mismatch fallback: proof bytes == oracle"
+        );
+        assert_eq!(
+            disp,
+            Some(BaseDisposition::RehydratedAfterFailedAdvance),
+            "digest mismatch in try_advance_base must report RehydratedAfterFailedAdvance"
+        );
+        assert!(
+            base.is_some(),
+            "base re-established after digest-mismatch fallback"
+        );
+    }
+
     // NOTE: legacy v1 internal-node (tag 0x01) coverage through the
     // snapshot path is intentionally not added here. The node writer only
     // emits v2 (tag 0x02); crafting v1 bytes by hand would test our own
