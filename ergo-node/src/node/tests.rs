@@ -1713,14 +1713,20 @@ fn is_canonical_mode_5_combo_pins_the_contract() {
 // ----- mining engine exhaustion -----
 
 /// The engine task must survive `MAX_VIS_RETRIES` `TipNotVisible` returns and
-/// then go back to waiting — not spin, not exit. The intent carries an
-/// `expected_parent` / `expected_height` that can never become commit-visible
-/// against a genesis-only store (committed height 0, intent height 5).
+/// then go back to waiting — not spin, not exit.
 ///
-/// The 40 × 25 ms backoff sleeps run in real time (~1 s total); the test is
-/// correct but slow by design. If the suite budget becomes a concern, enabling
-/// the tokio `test-util` feature and using `start_paused = true` would collapse
-/// the wait to zero elapsed real time.
+/// The intent carries an `expected_parent` / `expected_height` that can never
+/// become commit-visible against a genesis-only store (committed height 0,
+/// intent height 5). The test observes the exhaustion `warn!` event via log
+/// capture (no fixed-sleep race), then proves the task survives exhaustion and
+/// keeps running.
+///
+/// Capture mechanism: `tracing::subscriber::set_default` installs the
+/// collecting subscriber as the thread-local default and returns a guard that
+/// keeps it active until dropped. `#[tokio::test]` uses the current-thread
+/// runtime, so all task polls (including the spawned engine) execute on this
+/// thread and see the same thread-local default — every `warn!` emitted inside
+/// the engine goes through the capture buffer.
 #[tokio::test]
 async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     use ergo_crypto::difficulty::DifficultyParams;
@@ -1730,8 +1736,44 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     use ergo_mining::handle::MiningHandle;
     use ergo_mining::reemission::ReemissionSettings;
     use ergo_state::store::StateStore;
-    use std::sync::Arc;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
     use tokio::sync::watch;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    // Shared capture buffer — same pattern as handle_message_emits_span_with_peer_and_code.
+    #[derive(Clone)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+    impl Write for SharedBuf {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for SharedBuf {
+        type Writer = SharedBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buf = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(buf.clone())
+        .finish();
+
+    // `set_default` returns a guard that keeps the subscriber active as the
+    // thread-local default until dropped. Because #[tokio::test] uses the
+    // current-thread runtime, all task polls happen on this thread, so every
+    // tracing event dispatched during the test (including from the spawned
+    // engine task) routes to `buf`.
+    let _guard = tracing::subscriber::set_default(subscriber);
 
     // A genesis-only store: committed tip is zeroed @ height 0.
     let tmp = tempfile::tempdir().unwrap();
@@ -1764,18 +1806,41 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     let (intent_tx, intent_rx) = watch::channel(Some(intent));
     let (cancel_tx, cancel_rx) = watch::channel(false);
 
-    // Spawn the engine task.
+    // Re-send the intent to advance the watch version from INITIAL (0) to 1.
+    // `watch::channel` initialises both the sender state and the receiver at
+    // the same version (0), so the engine's first `changed()` call would block
+    // forever without this bump — the receiver only wakes on a version advance.
+    intent_tx.send_if_modified(|_| true);
+
     let engine = tokio::spawn(super::mining_engine::run_mining_engine(
         reader, handle, intent_rx, cancel_rx,
     ));
 
-    // Give the task time to exhaust all retries: 40 × 25 ms = 1 000 ms.
-    // Under paused time this returns immediately after tokio advances the
-    // clock through all the sleep calls.
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    // The target warn! message emitted after MAX_VIS_RETRIES exhaustion.
+    const EXHAUSTION_MSG: &str =
+        "mining engine: commit-visibility retries exhausted; awaiting next intent";
 
-    // The engine must still be alive (exhaustion goes back to waiting,
-    // does not exit or panic).
+    // Poll every 50 ms until the exhaustion warn appears in the capture buffer.
+    // Normal arrival: ~1 s (40 × 25 ms backoff). Timeout at 30 s only caps a
+    // hung test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let observed = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        if output.contains(EXHAUSTION_MSG) {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+    };
+    assert!(
+        observed,
+        "timed out (30 s) waiting for exhaustion warn — \
+         the engine never emitted '{EXHAUSTION_MSG}'",
+    );
+
+    // Exhaustion goes back to waiting, not exit or panic.
     assert!(
         !engine.is_finished(),
         "engine task must survive retry exhaustion and keep running",
@@ -1783,7 +1848,6 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
 
     // Cancel cleanly and join within a tight deadline.
     cancel_tx.send(true).unwrap();
-    // Drop the sender so the watch channel closes, letting the task notice.
     drop(intent_tx);
     tokio::time::timeout(std::time::Duration::from_millis(500), engine)
         .await
