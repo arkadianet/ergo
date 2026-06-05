@@ -810,7 +810,7 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
 /// which mines two successive blocks off one flag-on cache — a cold build then
 /// a post-advance rebuild).
 #[test]
-fn cached_candidate_full_surface_matches_uncached_across_tip_advance() {
+fn cached_candidate_full_surface_matches_uncached_cold_and_hit() {
     use ergo_mining::state_view::CachedSnapshotView;
     use ergo_state::store::DryRunBase;
 

@@ -667,7 +667,7 @@ async fn solve_and_submit_advances_the_tip() {
 /// booted node, with the cache flag actually flipped on (the other eight
 /// `mining_e2e` tests all boot default-off). The byte-identity of cached vs
 /// uncached candidates is pinned in-process by `ergo-mining`'s
-/// `cached_candidate_full_surface_matches_uncached_across_tip_advance`; this is
+/// `cached_candidate_full_surface_matches_uncached_cold_and_hit`; this is
 /// the node-level acceptance oracle that the bytes the cache emits are not just
 /// equal to the uncached path but independently consensus-valid.
 #[tokio::test]
