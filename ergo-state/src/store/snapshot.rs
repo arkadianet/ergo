@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
+use ergo_avltree_rust::batch_node::AVLTree as OracleTree;
 use ergo_primitives::digest::{ADDigest, Digest32};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::{read_ergo_box, ErgoBox};
@@ -38,7 +39,7 @@ use super::{
     HEADER_CHAIN_INDEX, STATE_META,
 };
 use crate::active_params;
-use crate::avl::hydrate::hydrate_batch_avl_prover_from_fetch;
+use crate::avl::hydrate::{batch_avl_prover_from_tree, hydrate_tree_from_fetch};
 use crate::avl::node::{AvlNode, NodeId, NULL_NODE};
 use crate::chain::ChainStateMeta;
 
@@ -331,17 +332,23 @@ impl CommittedSnapshot {
         Ok(active_params::compute_validation_settings_at(&self.txn, h)?)
     }
 
-    /// Hydrate a throwaway `BatchAVLProver` from this snapshot's committed
-    /// AVL+ nodes (read from `AVL_NODES` in the held transaction). No
-    /// persistent/COW tree is retained — the prover is dropped after the
-    /// dry-run.
-    pub fn hydrate_prover(&self) -> Result<BatchAVLProver, StateError> {
+    /// Hydrate the upstream `AVLTree` (the materialized `Rc<RefCell<Node>>`
+    /// graph) and its height from this snapshot's committed AVL+ nodes (read
+    /// from `AVL_NODES` in the held transaction).
+    ///
+    /// This is the single hydration implementation shared by the uncached
+    /// dry-run ([`Self::hydrate_prover`] → [`Self::candidate_dry_run`]) and
+    /// the cached dry-run ([`Self::candidate_dry_run_cached`], which memoizes
+    /// the returned tree as a per-tip [`DryRunBase`]). Sharing it is what
+    /// guarantees a reused base is structurally identical to a fresh hydrate.
+    fn hydrate_tree(&self) -> Result<(OracleTree, u8), StateError> {
         let root_id = self.state_meta.root_node_id;
         if root_id == NULL_NODE {
             return Err(StateError::InternalInvariant {
-                what: "CommittedSnapshot::hydrate_prover: empty/NULL committed state root",
+                what: "CommittedSnapshot::hydrate_tree: empty/NULL committed state root",
             });
         }
+        let height = self.state_meta.tree_height;
         let nodes = self.txn.open_table(AVL_NODES)?;
         let fetch = |id: NodeId| -> Result<AvlNode, StateError> {
             let guard = nodes.get(id)?.ok_or_else(|| StateError::DbCorruption {
@@ -351,7 +358,17 @@ impl CommittedSnapshot {
             })?;
             super::node_from_bytes(guard.value())
         };
-        hydrate_batch_avl_prover_from_fetch(root_id, self.state_meta.tree_height, &fetch)
+        let tree = hydrate_tree_from_fetch(root_id, height, &fetch)?;
+        Ok((tree, height))
+    }
+
+    /// Hydrate a throwaway `BatchAVLProver` from this snapshot's committed
+    /// AVL+ nodes (read from `AVL_NODES` in the held transaction). No
+    /// persistent/COW tree is retained — the prover is dropped after the
+    /// dry-run.
+    pub fn hydrate_prover(&self) -> Result<BatchAVLProver, StateError> {
+        let (tree, _height) = self.hydrate_tree()?;
+        Ok(batch_avl_prover_from_tree(tree))
     }
 
     /// Speculatively apply `checked` over this committed snapshot and
@@ -367,6 +384,187 @@ impl CommittedSnapshot {
         let (new_root, proof) =
             super::dry_run::apply_change_set_to_prover(prover, &to_remove, &to_insert)?;
         Ok((new_root, proof, self.chain_state.best_full_block_id))
+    }
+
+    /// Test-only uncached oracle taking pre-built change-maps. Byte-identical
+    /// to [`Self::candidate_dry_run`] (same `hydrate_prover` +
+    /// `apply_change_set_to_prover`); exists only because the public method
+    /// takes `&[CheckedTransaction]`, which cannot be forged in unit tests.
+    #[cfg(test)]
+    pub(crate) fn candidate_dry_run_via_changes_for_test(
+        &self,
+        to_remove: &super::dry_run::DryRunRemoveMap,
+        to_insert: &super::dry_run::DryRunInsertMap,
+    ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+        let prover = self.hydrate_prover()?;
+        let (new_root, proof) =
+            super::dry_run::apply_change_set_to_prover(prover, to_remove, to_insert)?;
+        Ok((new_root, proof, self.chain_state.best_full_block_id))
+    }
+
+    /// Cached variant of [`Self::candidate_dry_run`]: reuses `base` when it
+    /// matches this snapshot's committed tip, otherwise full-hydrates and
+    /// memoizes the pristine tree once for this tip. Returns
+    /// `(new_state_root, raw_ad_proof_bytes, snapshot_tip_id)` **bit-identical**
+    /// to the uncached path for the same parent + change-set — the uncached
+    /// path is the oracle.
+    ///
+    /// Cache key is the committed `best_full_block_id` ONLY: any tip change
+    /// (advance OR equal-height reorg) misses and rehydrates. `state_root` is
+    /// carried for a `debug_assert` cross-check, never as a key.
+    ///
+    /// Poison contract (consensus-critical): each build clones the pristine
+    /// `base.tree` (shallow O(1) `Rc` clone) and runs ops on the clone. Ops
+    /// copy-on-write structural nodes (their `is_new == false`), so the base's
+    /// structure is never mutated — BUT they transiently set `visited` flags on
+    /// the *shared* nodes, and only a completed `generate_proof` clears them
+    /// (via `pack_tree`'s post-order `mark_visited(false)`). `BatchAVLProver::new`
+    /// does not sanitize, so reusing a base whose shared nodes still carry dirty
+    /// `visited` bits would emit wrong proof bytes silently. Therefore any error
+    /// — or panic — between the first op and proof completion HARD-DROPS the base:
+    /// the next call rehydrates a clean one. A success leaves the base reusable.
+    pub fn candidate_dry_run_cached(
+        &self,
+        base: &mut Option<DryRunBase>,
+        checked: &[CheckedTransaction],
+    ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+        let (to_remove, to_insert) = StateStore::build_utxo_changes_checked(checked)?;
+        self.candidate_dry_run_cached_with_changes(base, &to_remove, &to_insert)
+    }
+
+    /// Change-map core of [`Self::candidate_dry_run_cached`]. Split out so the
+    /// hard-drop / poison contract can be exercised directly with a change set
+    /// (a `CheckedTransaction` is unforgeable outside `ergo-validation`, so the
+    /// forced-error test drives a remove-of-a-missing-key here). The public
+    /// entry point and the uncached oracle both build the maps via the one
+    /// `build_utxo_changes_checked` netting builder, keeping the two paths
+    /// structurally parallel.
+    pub(crate) fn candidate_dry_run_cached_with_changes(
+        &self,
+        base: &mut Option<DryRunBase>,
+        to_remove: &super::dry_run::DryRunRemoveMap,
+        to_insert: &super::dry_run::DryRunInsertMap,
+    ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+        let tip = self.best_full_block_id();
+
+        // Miss or stale tip: drop the old graph BEFORE hydrating the new one
+        // (peak memory: never two full ~UTXO-graphs resident at once), then
+        // memoize the pristine tree for this committed tip.
+        if base.as_ref().map(|b| b.tip_id) != Some(tip) {
+            *base = None;
+            let (tree, tree_height) = self.hydrate_tree()?;
+            *base = Some(DryRunBase {
+                tip_id: tip,
+                state_root: self.state_root(),
+                tree,
+                tree_height,
+            });
+        }
+
+        // Shallow COW clone of the pristine base. Ops copy `is_new == false`
+        // nodes; the base structure is untouched. `visited` bits ARE dirtied on
+        // the shared nodes during ops and cleaned by `generate_proof` — so a
+        // failure (or panic) before proof completion must poison the base.
+        // Done before the guard's mutable borrow takes over the slot.
+        let prover = {
+            let b = base
+                .as_ref()
+                .expect("base ensured present for this tip just above");
+            debug_assert_eq!(
+                b.state_root,
+                self.state_root(),
+                "DryRunBase/snapshot state-root divergence for the same committed tip"
+            );
+            batch_avl_prover_from_tree(b.tree.clone())
+        };
+
+        // Arm the poison guard: if ops/proof unwind (panic) past here, or we
+        // return an Err below, the base is dropped before the next caller sees
+        // it. Disarmed only on a fully successful build (proof generated ⇒
+        // shared `visited` bits clean).
+        let mut guard = PoisonGuard { base: Some(base) };
+        match super::dry_run::apply_change_set_to_prover(prover, to_remove, to_insert) {
+            Ok((new_root, proof)) => {
+                // Success: the just-run `generate_proof` cleaned the shared
+                // `visited` bits, so the base stays reusable for the next
+                // same-tip build.
+                guard.disarm();
+                Ok((new_root, proof, tip))
+            }
+            // Err: guard's `Drop` hard-drops the (possibly dirty) base on the
+            // way out of this scope.
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Pristine hydrated AVL base for one committed tip, reused across same-tip
+/// candidate builds so full UTXO-graph hydration happens once per block
+/// instead of once per build.
+///
+/// Poison contract: the shared-node `visited` flags are clean ⇔ the last use
+/// either completed `generate_proof` or the base was dropped. A build that
+/// runs ops without reaching `generate_proof` (error/panic) leaves `visited`
+/// bits dirty on the shared graph; reusing such a base would emit silently
+/// wrong proofs. [`CommittedSnapshot::candidate_dry_run_cached`] enforces the
+/// contract by hard-dropping the base on any such failure.
+///
+/// `!Send`: the inner `Rc<RefCell<Node>>` graph cannot cross a thread
+/// boundary, so the base lives on a single dedicated build thread (one serial
+/// consumer — never shared).
+pub struct DryRunBase {
+    tip_id: [u8; 32],
+    /// Debug cross-check only — never part of the cache key.
+    state_root: ADDigest,
+    tree: OracleTree,
+    tree_height: u8,
+}
+
+impl DryRunBase {
+    /// Committed best-full-block id this base was hydrated for (the cache key).
+    pub fn tip_id(&self) -> [u8; 32] {
+        self.tip_id
+    }
+
+    /// Hydrated tree height (debug/instrumentation; the prover carries its own).
+    pub fn tree_height(&self) -> u8 {
+        self.tree_height
+    }
+
+    /// Identity of the hydrated root node (the `Rc` allocation address). Two
+    /// calls returning the same id prove the same memoized base was reused —
+    /// i.e. a cache hit did NOT rehydrate. Test-only: it leaks an allocation
+    /// address and must never be part of shipped behavior.
+    #[cfg(test)]
+    fn root_identity(&self) -> Option<usize> {
+        self.tree
+            .root
+            .as_ref()
+            .map(|r| std::rc::Rc::as_ptr(r) as usize)
+    }
+}
+
+/// Drop-guard that hard-drops a [`DryRunBase`] unless explicitly disarmed.
+///
+/// Armed immediately before the first prover op and disarmed only after a
+/// completed `generate_proof`. So whether the dry-run returns `Err` or unwinds
+/// on a panic between the first op and proof completion, the (possibly
+/// `visited`-dirty) base is set to `None` before any later caller can reuse it.
+struct PoisonGuard<'a> {
+    base: Option<&'a mut Option<DryRunBase>>,
+}
+
+impl PoisonGuard<'_> {
+    fn disarm(&mut self) {
+        self.base = None;
+    }
+}
+
+impl Drop for PoisonGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.base.take() {
+            *slot = None;
+        }
     }
 }
 
@@ -686,6 +884,145 @@ mod tests {
                 Err(StateError::DbCorruption { .. })
             ),
             "reader lookup_box must surface DbCorruption identically"
+        );
+    }
+
+    // ----- cached dry-run: hit identity + hard-drop contract -----
+
+    /// 3 consecutive same-tip cached calls (1 miss + 2 hits) each bit-equal
+    /// the uncached oracle, and the 2 hits reuse the SAME memoized base (no
+    /// rehydrate) — proven by `Rc` root identity holding across calls. This
+    /// is the post-`generate_proof` flag-cleanup guarantee: a hit on a base
+    /// whose `visited` bits were left dirty would emit divergent proof bytes.
+    #[test]
+    fn cached_same_tip_repeat_matches_uncached_and_reuses_base() {
+        let (_dir, store) = genesis_store();
+
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(box_id(2), ());
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(box_id(9), vec![0x99u8; 44]);
+
+        let mut base: Option<crate::store::snapshot::DryRunBase> = None;
+        let mut prev_identity: Option<usize> = None;
+
+        for call in 0..3 {
+            // Fresh uncached oracle each iteration (its own throwaway prover).
+            let snap_oracle = store.committed_snapshot().unwrap().expect("snap oracle");
+            let oracle = snap_oracle
+                .candidate_dry_run_via_changes_for_test(&to_remove, &to_insert)
+                .expect("uncached oracle");
+
+            let snap = store.committed_snapshot().unwrap().expect("snap cached");
+            let got = snap
+                .candidate_dry_run_cached_with_changes(&mut base, &to_remove, &to_insert)
+                .expect("cached dry-run");
+
+            assert_eq!(oracle.0, got.0, "call {call}: state_root must match oracle");
+            assert_eq!(
+                oracle.1, got.1,
+                "call {call}: proof bytes must match oracle"
+            );
+            assert_eq!(oracle.2, got.2, "call {call}: tip id must match oracle");
+
+            let identity = base
+                .as_ref()
+                .expect("base present after a successful call")
+                .root_identity()
+                .expect("hydrated base has a root node");
+            if let Some(prev) = prev_identity {
+                assert_eq!(
+                    prev, identity,
+                    "call {call}: same tip must reuse the memoized base (no rehydrate)"
+                );
+            }
+            prev_identity = Some(identity);
+        }
+    }
+
+    /// Forced mid-apply failure (remove of a never-inserted key) must
+    /// hard-drop the base, and the NEXT call must rehydrate a clean base and
+    /// return bytes bit-equal to the uncached oracle. Drives the change-map
+    /// core directly because a `CheckedTransaction` is unforgeable here.
+    #[test]
+    fn cached_error_drops_base_then_recovers() {
+        let (_dir, store) = genesis_store();
+        let mut base: Option<crate::store::snapshot::DryRunBase> = None;
+
+        // Prime the base with a clean successful build so there is a graph to
+        // poison.
+        let empty_r: DryRunRemoveMap = BTreeMap::new();
+        let empty_i: DryRunInsertMap = BTreeMap::new();
+        let snap = store.committed_snapshot().unwrap().expect("snap prime");
+        snap.candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i)
+            .expect("prime build");
+        assert!(base.is_some(), "base memoized after a clean build");
+
+        // Force an error: remove a key that is not in the committed tree.
+        let mut bad_remove: DryRunRemoveMap = BTreeMap::new();
+        bad_remove.insert(box_id(0xEE), ());
+        let snap = store.committed_snapshot().unwrap().expect("snap err");
+        let err = snap
+            .candidate_dry_run_cached_with_changes(&mut base, &bad_remove, &empty_i)
+            .expect_err("removing a missing key must error");
+        assert!(
+            matches!(err, StateError::CandidateDryRunProverFailed { .. }),
+            "expected CandidateDryRunProverFailed, got {err:?}"
+        );
+        assert!(
+            base.is_none(),
+            "base must be hard-dropped after a mid-apply error (poison contract)"
+        );
+
+        // Recovery: a real change set after the drop rehydrates and matches the
+        // uncached oracle byte-for-byte.
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(box_id(7), vec![0x77u8; 40]);
+        let snap_oracle = store.committed_snapshot().unwrap().expect("snap oracle");
+        let oracle = snap_oracle
+            .candidate_dry_run_via_changes_for_test(&empty_r, &to_insert)
+            .expect("uncached oracle");
+        let snap = store.committed_snapshot().unwrap().expect("snap recover");
+        let got = snap
+            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &to_insert)
+            .expect("recovered cached build");
+        assert!(base.is_some(), "base rehydrated after recovery");
+        assert_eq!(oracle.0, got.0, "recovered state_root must match oracle");
+        assert_eq!(oracle.1, got.1, "recovered proof bytes must match oracle");
+    }
+
+    /// Panic-path of the poison contract: a `PoisonGuard` armed over a
+    /// populated base must hard-drop that base when a panic unwinds through
+    /// its scope (the exact branch that fires when ops dirty shared `visited`
+    /// bits and then something panics before `generate_proof` cleans them).
+    /// Drives the real `Drop` impl via `catch_unwind`, mirroring how the
+    /// armed guard wraps `apply_change_set_to_prover` in the cached method.
+    #[test]
+    fn poison_guard_drops_base_on_unwind() {
+        let (_dir, store) = genesis_store();
+        let snap = store.committed_snapshot().unwrap().expect("snapshot");
+        let (tree, tree_height) = snap.hydrate_tree().expect("hydrate base");
+        let mut base = Some(super::DryRunBase {
+            tip_id: snap.best_full_block_id(),
+            state_root: snap.state_root(),
+            tree,
+            tree_height,
+        });
+        assert!(base.as_ref().unwrap().root_identity().is_some());
+
+        // Arm the guard over `base`, then panic before disarming — exactly the
+        // unwind shape of an op-then-panic-before-proof. The guard's `Drop`
+        // must run during unwind and null the base.
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = super::PoisonGuard {
+                base: Some(&mut base),
+            };
+            panic!("injected mid-build panic before generate_proof");
+        }));
+        assert!(res.is_err(), "the injected panic must unwind");
+        assert!(
+            base.is_none(),
+            "PoisonGuard::drop must hard-drop the base on unwind (poison contract)"
         );
     }
 
