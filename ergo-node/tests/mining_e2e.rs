@@ -886,15 +886,17 @@ async fn info_reports_is_mining_true_on_a_mining_node() {
     let (_dir, handle, _parent_tip) = boot_synced_mining_node().await;
     let addr = handle.api_addr.expect("api bound");
 
-    // Poll /info until at least one snapshot has been published (the node
-    // needs one sync_tick to fire after boot before isMining propagates).
+    // Poll /info until isMining flips true: the boot-empty snapshot serves
+    // `false` until the action loop publishes its first real snapshot, so
+    // breaking on the first parseable value would assert against the
+    // placeholder, not the plumbing under test.
     let mut is_mining = false;
     for _ in 0..80 {
         let resp = http_request(addr, "GET", "/info", None).await;
         if resp.status == 200 {
             let v: serde_json::Value = serde_json::from_str(&resp.body).expect("parse /info body");
-            if let Some(b) = v.get("isMining").and_then(|x| x.as_bool()) {
-                is_mining = b;
+            if v.get("isMining").and_then(|x| x.as_bool()) == Some(true) {
+                is_mining = true;
                 break;
             }
         }
