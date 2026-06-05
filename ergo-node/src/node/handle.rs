@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::NodeError;
 
@@ -86,6 +86,16 @@ pub struct RunHandle {
     /// a `ChainStoreReader` over the same redb database — does not outlive the
     /// action loop that runs the final durable `shutdown_cleanly()`.
     pub(super) mining_engine_handle: Option<JoinHandle<()>>,
+    /// JoinHandle for the mining build-worker OS thread (the
+    /// `ChainStoreReader`/`MiningHandle`/`IndexerHandle` owner). `Some` only
+    /// when mining is enabled. Boot spawns the thread and the coordinator
+    /// future owns only the request `Sender`, so on shutdown — even when the
+    /// coordinator task is `abort()`ed at an await point — dropping the future
+    /// closes the channel and the worker drains its in-flight build and exits.
+    /// `shutdown()` joins this AFTER the coordinator await/abort so a worker
+    /// still finishing a build can never detach and keep reading/publishing
+    /// past shutdown. `Option` so `Drop`/`shutdown` can `take()` it.
+    pub(super) mining_worker_handle: Option<std::thread::JoinHandle<()>>,
     /// Latched-cancellation sender for the mining engine (`watch<bool>`).
     /// `send(true)` flips the value so the engine leaves its `select!`/backoff
     /// promptly. Always allocated (cheap); fired by both `shutdown()` and
@@ -144,6 +154,18 @@ impl RunHandle {
     ///    which is the load-bearing signal for the
     ///    AVL+undo_log+chain_index+state_meta atomic-commit invariant.
     ///
+    /// Background-task teardown (anchor builder, mining engine + its build
+    /// worker, indexer) is interleaved between steps 1 and 2: each is
+    /// cancelled and awaited under its own bounded timeout before the API
+    /// drain, so a stuck background task can't block the API/loop shutdown.
+    /// The mining build worker is the one thread shutdown does not strictly
+    /// *bound* to completion: its join is bounded to 5 s, and on timeout
+    /// shutdown proceeds while the worker finishes its in-flight build in the
+    /// background. That is safe for step 5's invariant — the worker holds only
+    /// an `Arc<Database>` MVCC read snapshot (no commit-path lock), so redb's
+    /// final durable write in `shutdown_cleanly` neither waits on nor is
+    /// corrupted by a still-open read view.
+    ///
     /// Also releases bound ports promptly — important for tests that
     /// spin up many nodes back-to-back.
     pub async fn shutdown(mut self) -> Result<(), NodeError> {
@@ -185,15 +207,14 @@ impl RunHandle {
             }
         }
         // Mining engine cancel — latched watch + bounded await, same pattern.
-        // The engine checks the cancel flag at every await (between builds and
-        // during backoff), so it exits within at most one candidate build of
-        // the signal. `abort()` cannot preempt that synchronous build, but a
-        // single build is bounded (one block's worth of work) and far under the
-        // 5 s timeout; the abort fallback covers only a pathological stall. The
-        // engine's `ChainStoreReader` holds an MVCC read view that does not
-        // block the action loop's final durable `shutdown_cleanly`. send-error
-        // ignored (the engine may already have exited when its intent sender
-        // dropped).
+        // The coordinator checks the cancel flag at every await (between builds
+        // and during backoff), so it exits within at most one candidate build of
+        // the signal. `abort()` cannot preempt an in-flight build on the worker
+        // thread, but the coordinator future owns only the request `Sender`:
+        // aborting it (or its cooperative return) drops the future, closes the
+        // build channel, and the worker drains its in-flight build then exits.
+        // send-error ignored (the engine may already have exited when its intent
+        // sender dropped).
         let _ = self.mining_engine_cancel_tx.send(true);
         if let Some(mut h) = self.mining_engine_handle.take() {
             if tokio::time::timeout(Duration::from_secs(5), &mut h)
@@ -206,6 +227,52 @@ impl RunHandle {
                 );
                 h.abort();
                 let _ = h.await;
+            }
+        }
+        // Join the build-worker thread — AFTER the coordinator future is gone
+        // (returned or aborted above), so its request `Sender` has dropped and
+        // the worker's `recv()` has erred. The worker then drains its (≤1)
+        // in-flight build and exits. The blocking `thread::join` runs off the
+        // runtime via `spawn_blocking` (it must not block a tokio worker), and
+        // the `timeout` bounds how long THIS shutdown future waits on it to 5 s.
+        //
+        // On timeout we stop awaiting and proceed; the `spawn_blocking` task is
+        // not abortable, so it keeps running in the background until the
+        // in-flight build finishes and the worker exits — we simply no longer
+        // observe it. That is safe for the load-bearing invariant: the store's
+        // durable close happens in `loop_handle` (the action loop's
+        // `shutdown_cleanly`), and the worker holds only an `Arc<Database>`
+        // refcount via its MVCC read snapshot (no commit-path lock, no custom
+        // `Drop`), so a still-running build never blocks or corrupts that close
+        // — it just defers the final `Arc` deref until its snapshot drops. The
+        // 5 s bound on the shutdown future is what the e2e asserts; the lingering
+        // join task is a leak only on a pathologically stuck build, and it is
+        // self-clearing the moment that build returns.
+        if let Some(worker) = self.mining_worker_handle.take() {
+            let joined = tokio::task::spawn_blocking(move || worker.join());
+            match tokio::time::timeout(Duration::from_secs(5), joined).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(_))) => {
+                    // The worker panicked (a build path crashed). The panic
+                    // already aborted that build; surface it rather than
+                    // swallowing it, then proceed — matches the pre-split
+                    // task-panic tolerance.
+                    error!("mining build worker thread panicked");
+                }
+                Ok(Err(_)) => {
+                    // The `spawn_blocking` task itself failed (runtime shutting
+                    // down / cancelled). Nothing more to do; proceed.
+                    warn!("mining build worker join task did not complete; proceeding");
+                }
+                Err(_) => {
+                    warn!(
+                        timeout_s = 5,
+                        "mining build worker still running at shutdown; shutdown proceeds \
+                         while the background join task waits for the in-flight build to \
+                         finish (DB close is unaffected — the worker holds only an MVCC \
+                         read snapshot, not the commit path)"
+                    );
+                }
             }
         }
         // Drain the API + inbound surfaces with graceful semantics.
@@ -360,9 +427,16 @@ impl Drop for RunHandle {
             h.abort();
         }
         // Mining engine: latched cancel + abort (Drop is sync, can't await).
+        // Aborting the coordinator drops its future and the build-request
+        // `Sender`, so the worker's `recv()` errs and it drains its in-flight
+        // build then exits. We can't join the worker thread here (Drop is sync
+        // and must not block), so we just detach it by dropping its handle —
+        // same best-effort, no-durable-close caveat as the action loop and
+        // indexer above. Embedders needing a clean join call `shutdown().await`.
         let _ = self.mining_engine_cancel_tx.send(true);
         if let Some(h) = self.mining_engine_handle.take() {
             h.abort();
         }
+        drop(self.mining_worker_handle.take());
     }
 }

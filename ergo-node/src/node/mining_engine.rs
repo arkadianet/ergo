@@ -5,12 +5,32 @@
 //! - The coordinator runs on its own tokio task, fed `BuildIntent`s by the
 //!   action loop over a `watch` channel. It owns all sequencing — mode probe,
 //!   minimal→full refresh rule, the commit-visibility retry budget, cancel
-//!   handling, and every build-complete/failure log line.
+//!   handling, and every build-complete/failure log line. It holds only the
+//!   `mpsc::Sender<BuildRequest>` end of the build channel, never the worker
+//!   thread.
 //! - The worker is a dedicated [`std::thread`] that owns the
 //!   [`ChainStoreReader`], the [`MiningHandle`] clone, and the indexer handle.
 //!   It receives [`BuildRequest`]s over a `std::sync::mpsc` channel, runs the
 //!   synchronous [`ergo_mining::engine::build_and_publish`] for each, and
 //!   returns the result over the request's `oneshot`.
+//!
+//! ## Lifecycle: spawner owns the thread, the future owns the sender
+//!
+//! The build worker is spawned by [`boot`](super::boot) (production) or by the
+//! engine tests, *not* by [`run_mining_engine`]. The spawner keeps the worker's
+//! [`JoinHandle`](std::thread::JoinHandle); the coordinator future owns only the
+//! `mpsc::Sender<BuildRequest>`. This split is load-bearing for shutdown.
+//!
+//! `RunHandle::shutdown` awaits the coordinator task under a bounded timeout and
+//! then `abort()`s it. At rest the coordinator is parked at `reply_rx.await` — an
+//! abort point — so an abort drops the future. Because the future owns the
+//! sender (not the thread), dropping it on *any* exit — cooperative return or
+//! abort-drop — closes the channel; the worker's `recv()` then errs, it drains
+//! its at-most-one in-flight build, and exits. Shutdown joins the worker thread
+//! *after* the coordinator is gone, via the `JoinHandle` it kept, so a worker
+//! still finishing a build can never detach and keep reading/publishing past
+//! shutdown. Pre-split the worker handle lived inside the future and was dropped
+//! (detached) on abort — exactly the regression this ownership inversion closes.
 //!
 //! The worker is a plain OS thread, not a tokio task, by design: it will own
 //! the per-tip dry-run base cache — an `Rc<RefCell<Node>>` AVL graph that is
@@ -240,7 +260,12 @@ const SLOW_BUILD_WARN_MS: u64 = 2_000;
 /// coordinator owns every sequencing decision (mode probe, retry budget,
 /// minimal→full refresh); the worker only executes the build serially and
 /// returns the result over `reply`.
-struct BuildRequest {
+///
+/// `pub(super)` because the request channel is created by the spawner (boot or
+/// the engine tests) — it owns the worker thread, the coordinator future owns
+/// only the `Sender<BuildRequest>` — so the type must be nameable there even
+/// though only `run_mining_engine` ever constructs a `BuildRequest`.
+pub(super) struct BuildRequest {
     intent: BuildIntent,
     mode: BuildMode,
     /// Response channel. The coordinator awaits exactly one reply per request,
@@ -259,7 +284,14 @@ struct BuildRequest {
 ///
 /// `reply` send errors are ignored: a dropped receiver means the coordinator
 /// has gone, in which case the next `recv()` returns `Err` and the loop exits.
-fn run_build_worker(
+///
+/// Spawned by [`boot`](super::boot) (production) or directly by the engine
+/// tests, never by [`run_mining_engine`]: the spawner owns the worker
+/// [`JoinHandle`](std::thread::JoinHandle) so shutdown can join it *after* the
+/// coordinator future is gone, whereas the future owns only the `req_tx`. That
+/// ownership split is what lets the worker drain its in-flight build and exit
+/// even when `RunHandle::shutdown` aborts the coordinator at an await point.
+pub(super) fn run_build_worker(
     reader: ChainStoreReader,
     handle: MiningHandle,
     indexer: Option<ergo_indexer::IndexerHandle>,
@@ -300,59 +332,30 @@ fn run_build_worker(
 ///
 /// The async coordinator: blocks on the intent channel; on each new (coalesced)
 /// intent, drives the build to a terminal [`BuildOutcome`] with bounded
-/// commit-visibility retry. Each build is dispatched to the dedicated build
-/// worker thread (spawned here at startup) and the coordinator awaits the
-/// reply. `TipNotVisible` (committed tip behind the intent's expected parent)
-/// retries after a short backoff, re-reading the latest intent each attempt so
-/// a newer intent supersedes the current one (latest-wins). All other outcomes
-/// are terminal for the intent.
+/// commit-visibility retry. Each build is dispatched over `req_tx` to the
+/// dedicated build worker thread — spawned by the caller
+/// ([`boot`](super::boot) or the engine tests), which keeps its `JoinHandle` —
+/// and the coordinator awaits the reply. `TipNotVisible` (committed tip behind
+/// the intent's expected parent) retries after a short backoff, re-reading the
+/// latest intent each attempt so a newer intent supersedes the current one
+/// (latest-wins). All other outcomes are terminal for the intent.
 ///
-/// `reader` and `indexer` are moved into the worker thread (which runs the
-/// synchronous build and forwards `indexer` into the rent resolver); the worker
-/// also gets a `handle` clone, while the coordinator keeps `handle` for the mode
-/// probe and refresh predicate. The eligible-id page comes from the indexer's
-/// eventually-consistent extra-index; each box is then materialized against the
-/// build's committed snapshot, with stale rows skipped and backfilled (see
-/// [`resolve_eligible_rent_boxes`]).
+/// The coordinator keeps `handle` for the mode probe and refresh predicate; the
+/// `reader`/`indexer`/worker-`handle` live in the worker thread the caller
+/// spawned ([`run_build_worker`]). The future owns *only* `req_tx`: on any exit
+/// — clean cancel, producer-drop, OR a `shutdown`-driven `abort()` at the
+/// `reply_rx.await` point — `req_tx` drops, the worker's `recv()` errs, and it
+/// drains its in-flight build then exits. The caller joins the worker thread
+/// after this future is gone; the future never joins a handle it does not own.
 ///
 /// Exits when `cancel_rx` flips to `true` (clean shutdown) or the producer
-/// (action loop) drops the intent sender. On exit the request sender is dropped
-/// and the worker thread is joined (its `recv()` errs on the closed channel).
+/// (action loop) drops the intent sender.
 pub(super) async fn run_mining_engine(
-    reader: ChainStoreReader,
     handle: MiningHandle,
-    indexer: Option<ergo_indexer::IndexerHandle>,
+    req_tx: mpsc::Sender<BuildRequest>,
     mut intent_rx: watch::Receiver<Option<BuildIntent>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
-    // Spawn the build worker. The worker owns the reader, mining-handle clone,
-    // and indexer for the engine's lifetime. It is a plain OS thread (not a
-    // tokio task) because it will own the `!Send` per-tip dry-run base cache.
-    //
-    // `tracing::subscriber::set_default` (used by the capture tests) installs a
-    // THREAD-LOCAL default, so a freshly spawned `std::thread` would not see it
-    // — its build logs would vanish from the test's capture buffer. Snapshot
-    // the active dispatcher here, on the spawning thread, and run the worker
-    // loop under it: in production this is the global default (no-op); under
-    // test it is the thread-local capture subscriber. Either way the worker's
-    // logs route exactly where the inline build's did.
-    let (req_tx, req_rx) = mpsc::channel::<BuildRequest>();
-    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
-    // The worker gets its own `MiningHandle` clone (cheap `Arc` share, the same
-    // way the action loop and engine already hold clones); the coordinator
-    // keeps `handle` for the mode probe and the refresh predicate.
-    let worker = {
-        let handle = handle.clone();
-        std::thread::Builder::new()
-            .name("mining-build-worker".to_string())
-            .spawn(move || {
-                tracing::dispatcher::with_default(&dispatch, || {
-                    run_build_worker(reader, handle, indexer, req_rx);
-                });
-            })
-            .expect("spawn mining build worker thread")
-    };
-
     'outer: loop {
         // Wait for a new intent (or cancellation). `watch` retains the latest
         // value, so an intent published before this await is picked up below.
@@ -531,22 +534,14 @@ pub(super) async fn run_mining_engine(
             }
         }
     }
-    // Shut the worker down: drop the request sender so its `recv()` errs, then
-    // join. The protocol is serial — no build is in flight once the loop exits
-    // (the last request's reply was already awaited) — so the worker observes
-    // the closed channel immediately and returns without blocking. Dropping the
-    // worker's `ChainStoreReader` only decrements an `Arc<Database>` refcount
-    // (no custom `Drop`), so the join never blocks the store's durable close,
-    // mirroring how the indexer-handle threading already guarantees the engine
-    // never pins the redb file at shutdown. This whole async task is itself
-    // awaited under a bounded timeout by `RunHandle::shutdown`.
+    // Drop the request sender so the worker's `recv()` errs and it exits. The
+    // future owns ONLY `req_tx`, not the worker `JoinHandle`, so this drop runs
+    // on every exit path — cooperative return here, OR a `shutdown`-driven
+    // `abort()` that drops this future while it is parked at `reply_rx.await`.
+    // Either way the worker drains its (≤1) in-flight build and exits; the
+    // caller joins the thread afterward. We deliberately do NOT join here: the
+    // handle lives with the spawner (see this module's lifecycle doc).
     drop(req_tx);
-    if worker.join().is_err() {
-        // A panic on the worker thread already aborted whatever build was in
-        // flight; surface it so a crashed build path is visible rather than
-        // silently swallowed.
-        error!("mining engine: build worker thread panicked");
-    }
     debug!("mining engine task exiting");
 }
 
