@@ -879,6 +879,41 @@ async fn shutdown_with_a_parked_longpoll_drains() {
     );
 }
 
+/// The StateStore at the node's data-dir db path must be reopenable
+/// immediately after a clean `shutdown()` — no `DatabaseAlreadyOpen`. This
+/// pins the shutdown-join contract: `shutdown()` only returns once the
+/// build-worker thread has fully exited and its `Arc<Database>` read snapshot
+/// has dropped, so a subsequent `StateStore::open` on the same path always
+/// succeeds.
+///
+/// Regression guard for the `spawn_blocking` timeout defect: the old bounded
+/// join let `shutdown()` return while the worker still held a live
+/// `Arc<Database>` refcount; the next `StateStore::open` (or node restart)
+/// then hit `redb::DatabaseAlreadyOpen`.
+#[tokio::test]
+async fn store_reopens_after_clean_shutdown() {
+    let (dir, handle, _parent_tip) = boot_synced_mining_node().await;
+    let addr = handle.api_addr.expect("api bound");
+    let db_path = dir.path().join("state.redb");
+
+    // Ensure the engine actually ran at least one build before we shut down —
+    // that way the worker thread was alive and held a read snapshot, which is
+    // precisely what the old code left dangling.
+    let _work = poll_candidate(addr).await;
+
+    // Clean shutdown — must complete with the worker quiescent.
+    handle.shutdown().await.expect("clean shutdown");
+
+    // The key assertion: reopen the same redb file. If the worker's
+    // Arc<Database> is still live this panics with DatabaseAlreadyOpen.
+    let reopened = StateStore::open(&db_path).expect(
+        "StateStore must be reopenable immediately after shutdown (no DatabaseAlreadyOpen)",
+    );
+
+    // Release the handle so Windows can clean up the tempdir.
+    drop(reopened);
+}
+
 /// `/info` reports `isMining = true` on a node booted with mining enabled.
 /// Pins the snapshot plumbing from `mining_enabled` (NodeState) through
 /// `SnapshotParts` → `NodeSnapshot` → `ScalaCompatBridge::info()` → the

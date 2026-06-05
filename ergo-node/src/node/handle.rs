@@ -158,13 +158,14 @@ impl RunHandle {
     /// worker, indexer) is interleaved between steps 1 and 2: each is
     /// cancelled and awaited under its own bounded timeout before the API
     /// drain, so a stuck background task can't block the API/loop shutdown.
-    /// The mining build worker is the one thread shutdown does not strictly
-    /// *bound* to completion: its join is bounded to 5 s, and on timeout
-    /// shutdown proceeds while the worker finishes its in-flight build in the
-    /// background. That is safe for step 5's invariant — the worker holds only
-    /// an `Arc<Database>` MVCC read snapshot (no commit-path lock), so redb's
-    /// final durable write in `shutdown_cleanly` neither waits on nor is
-    /// corrupted by a still-open read view.
+    /// The mining build worker is awaited to completion (unbounded): shutdown
+    /// completes only when the worker is quiescent. The in-flight build bounds
+    /// the wait (~20 s worst case today, milliseconds once the per-tip base
+    /// cache serves same-tip builds). This is the truthful contract — tokio's
+    /// runtime drop waits for `spawn_blocking` tasks anyway, so a
+    /// proceed-on-timeout design only makes the API lie while process exit
+    /// still blocks. Awaiting here also prevents `DatabaseAlreadyOpen` on a
+    /// restart before the worker drops its `Arc<Database>` read snapshot.
     ///
     /// Also releases bound ports promptly — important for tests that
     /// spin up many nodes back-to-back.
@@ -233,45 +234,59 @@ impl RunHandle {
         // (returned or aborted above), so its request `Sender` has dropped and
         // the worker's `recv()` has erred. The worker then drains its (≤1)
         // in-flight build and exits. The blocking `thread::join` runs off the
-        // runtime via `spawn_blocking` (it must not block a tokio worker), and
-        // the `timeout` bounds how long THIS shutdown future waits on it to 5 s.
+        // runtime via `spawn_blocking` (it must not block a tokio worker).
         //
-        // On timeout we stop awaiting and proceed; the `spawn_blocking` task is
-        // not abortable, so it keeps running in the background until the
-        // in-flight build finishes and the worker exits — we simply no longer
-        // observe it. That is safe for the load-bearing invariant: the store's
-        // durable close happens in `loop_handle` (the action loop's
-        // `shutdown_cleanly`), and the worker holds only an `Arc<Database>`
-        // refcount via its MVCC read snapshot (no commit-path lock, no custom
-        // `Drop`), so a still-running build never blocks or corrupts that close
-        // — it just defers the final `Arc` deref until its snapshot drops. The
-        // 5 s bound on the shutdown future is what the e2e asserts; the lingering
-        // join task is a leak only on a pathologically stuck build, and it is
-        // self-clearing the moment that build returns.
+        // Shutdown completes only when the worker is quiescent. The in-flight
+        // build bounds the wait (~20 s worst case today, milliseconds once the
+        // per-tip base cache serves same-tip builds). This is the truthful
+        // contract: tokio's runtime drop in `#[tokio::main]` waits for started
+        // `spawn_blocking` tasks anyway (see tokio src/task/blocking.rs), so a
+        // bounded-await-then-proceed strategy only makes the API lie — process
+        // exit still blocks on the orphaned join task. Awaiting to completion
+        // here also prevents `redb::DatabaseAlreadyOpen` on a restart/reopen
+        // that happens before the still-running worker drops its `Arc<Database>`
+        // read snapshot.
+        //
+        // Slow-path observability: a 5 s race emits one info line if the build
+        // takes longer than usual; the join future continues to completion in
+        // all branches. On worker panic: log + proceed (unchanged tolerance).
         if let Some(worker) = self.mining_worker_handle.take() {
             let joined = tokio::task::spawn_blocking(move || worker.join());
-            match tokio::time::timeout(Duration::from_secs(5), joined).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(_))) => {
-                    // The worker panicked (a build path crashed). The panic
-                    // already aborted that build; surface it rather than
-                    // swallowing it, then proceed — matches the pre-split
-                    // task-panic tolerance.
-                    error!("mining build worker thread panicked");
+            // Pin the future so we can poll it in both select! arms.
+            tokio::pin!(joined);
+            tokio::select! {
+                biased;
+                result = &mut joined => {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => {
+                            // The worker panicked (a build path crashed). Surface
+                            // it rather than swallowing it, then proceed.
+                            error!("mining build worker thread panicked");
+                        }
+                        Err(_) => {
+                            // The `spawn_blocking` task itself failed (runtime
+                            // shutting down). Nothing more to do; proceed.
+                            warn!("mining build worker join task did not complete; proceeding");
+                        }
+                    }
                 }
-                Ok(Err(_)) => {
-                    // The `spawn_blocking` task itself failed (runtime shutting
-                    // down / cancelled). Nothing more to do; proceed.
-                    warn!("mining build worker join task did not complete; proceeding");
-                }
-                Err(_) => {
-                    warn!(
-                        timeout_s = 5,
-                        "mining build worker still running at shutdown; shutdown proceeds \
-                         while the background join task waits for the in-flight build to \
-                         finish (DB close is unaffected — the worker holds only an MVCC \
-                         read snapshot, not the commit path)"
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    info!(
+                        "waiting for in-flight candidate build to finish before shutdown completes"
                     );
+                    // Continue awaiting — the join must complete before we
+                    // proceed so the worker's Arc<Database> snapshot drops
+                    // before the store is reopened or the process exits.
+                    match joined.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => {
+                            error!("mining build worker thread panicked");
+                        }
+                        Err(_) => {
+                            warn!("mining build worker join task did not complete; proceeding");
+                        }
+                    }
                 }
             }
         }
