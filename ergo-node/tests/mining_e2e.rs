@@ -747,9 +747,11 @@ async fn new_tip_candidate_serves_promptly_after_block_apply() {
         Some(h0 + 1),
         "served candidate must be for the new tip (N+2)",
     );
+    // Below poll_candidate_at_height's own ~8s panic bound, so this assertion
+    // (not the helper's panic) is what fails on a slow publish.
     assert!(
-        elapsed < Duration::from_secs(10),
-        "new-tip candidate must become servable within 10s of submit; took {elapsed:?}",
+        elapsed < Duration::from_secs(6),
+        "new-tip candidate must become servable within 6s of submit; took {elapsed:?}",
     );
 }
 
