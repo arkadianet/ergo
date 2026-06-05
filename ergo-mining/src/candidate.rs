@@ -58,24 +58,23 @@ use ergo_validation::pre_header::{
 };
 
 /// Wall-clock cost of the expensive `generate_candidate` phases, measured per
-/// build and surfaced on the engine's build-complete log line. Millisecond
-/// granularity — these phases run 10²–10⁴ ms on a cold full-archival store.
+/// build and surfaced on the engine's build-complete log line.
 ///
 /// The buckets cover the five named phases; cheap assembly steps between them
-/// are unmeasured, so the fields do not sum to the engine's total `build_ms`.
+/// are unmeasured, so the fields do not sum to the engine's total build time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhaseTimings {
     /// Phases 8–9: emission tx build + validation.
-    pub emission_ms: u64,
-    /// Phase 9c: storage-rent claim build (0 when rent disabled/empty).
-    pub rent_ms: u64,
+    pub emission: std::time::Duration,
+    /// Phase 9c: storage-rent claim build (zero when rent disabled/empty).
+    pub rent: std::time::Duration,
     /// Phases 9d–9e: mempool selection + per-tx re-validation + fee-tx trim.
-    pub select_ms: u64,
+    pub select: std::time::Duration,
     /// Phase 10: AVL+ dry-run (new_state_root + proof bytes) — the report's
     /// prime cost suspect.
-    pub dryrun_ms: u64,
+    pub dryrun: std::time::Duration,
     /// Phase 12: tx/witness-id derivation + transactions/extension roots.
-    pub roots_ms: u64,
+    pub roots: std::time::Duration,
 }
 
 /// Cached state for a generated candidate. Wraps everything the
@@ -300,7 +299,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         })?
     };
     let emission_cost = emission_cost_acc.total_block_cost();
-    timings.emission_ms = phase_start.elapsed().as_millis() as u64;
+    timings.emission = phase_start.elapsed();
 
     // 9b. Seed an in-block overlay (over the committed state tip — the same
     //     base view the submit-time validator uses) with the emission tx.
@@ -345,7 +344,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         }
         None => (None, 0, 0),
     };
-    timings.rent_ms = phase_start.elapsed().as_millis() as u64;
+    timings.rent = phase_start.elapsed();
 
     // 9d. Select mempool transactions into the budget remaining after the
     //     coinbase + rent claim. The overlay (emission + rent applied)
@@ -463,7 +462,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         }
         user_checked.pop();
     };
-    timings.select_ms = phase_start.elapsed().as_millis() as u64;
+    timings.select = phase_start.elapsed();
 
     // 9f. Assemble the final tx list in block order:
     //     emission, rent, user txs, fee.
@@ -484,7 +483,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     let phase_start = std::time::Instant::now();
     let (new_state_root, ad_proof_bytes, snapshot_tip_id) =
         view.candidate_dry_run(&checked).map_err(state_err)?;
-    timings.dryrun_ms = phase_start.elapsed().as_millis() as u64;
+    timings.dryrun = phase_start.elapsed();
 
     // 11. Parent-id guard: best-full advanced during generation.
     if snapshot_tip_id != parent_id {
@@ -533,7 +532,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
     let extension_root_bytes = extension_root(&extension_field_refs);
-    timings.roots_ms = phase_start.elapsed().as_millis() as u64;
+    timings.roots = phase_start.elapsed();
 
     // 13. Assemble header with placeholder solution.
     let placeholder_solution = AutolykosSolution::V2 {

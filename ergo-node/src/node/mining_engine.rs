@@ -116,11 +116,11 @@ pub(super) async fn run_mining_engine(
                             $mac!(
                                 attempts,
                                 build_ms,
-                                emission_ms = t.emission_ms,
-                                rent_ms = t.rent_ms,
-                                select_ms = t.select_ms,
-                                dryrun_ms = t.dryrun_ms,
-                                roots_ms = t.roots_ms,
+                                emission_ms = t.emission.as_millis() as u64,
+                                rent_ms = t.rent.as_millis() as u64,
+                                select_ms = t.select.as_millis() as u64,
+                                dryrun_ms = t.dryrun.as_millis() as u64,
+                                roots_ms = t.roots.as_millis() as u64,
                                 reason = ?intent.reason,
                                 "mining engine: build complete",
                             )

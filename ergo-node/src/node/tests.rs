@@ -1709,3 +1709,84 @@ fn is_canonical_mode_5_combo_pins_the_contract() {
         true
     ));
 }
+
+// ----- mining engine exhaustion -----
+
+/// The engine task must survive `MAX_VIS_RETRIES` `TipNotVisible` returns and
+/// then go back to waiting — not spin, not exit. The intent carries an
+/// `expected_parent` / `expected_height` that can never become commit-visible
+/// against a genesis-only store (committed height 0, intent height 5).
+///
+/// The 40 × 25 ms backoff sleeps run in real time (~1 s total); the test is
+/// correct but slow by design. If the suite budget becomes a concern, enabling
+/// the tokio `test-util` feature and using `start_paused = true` would collapse
+/// the wait to zero elapsed real time.
+#[tokio::test]
+async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
+    use ergo_crypto::difficulty::DifficultyParams;
+    use ergo_mempool::MempoolReadSnapshot;
+    use ergo_mining::emission_rules::MonetarySettings;
+    use ergo_mining::engine::{BuildIntent, BuildReason};
+    use ergo_mining::handle::MiningHandle;
+    use ergo_mining::reemission::ReemissionSettings;
+    use ergo_state::store::StateStore;
+    use std::sync::Arc;
+    use tokio::sync::watch;
+
+    // A genesis-only store: committed tip is zeroed @ height 0.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(tmp.path().join("s.redb").as_path()).unwrap();
+    let mut box_id = [0u8; 32];
+    box_id[31] = 1;
+    store
+        .initialize_genesis(&[(box_id, vec![0xAAu8; 32])])
+        .unwrap();
+    let reader = store.reader_handle();
+
+    let handle = MiningHandle::new(
+        [0x02u8; 33],
+        MonetarySettings::mainnet(),
+        Some(ReemissionSettings::mainnet()),
+        DifficultyParams::mainnet(),
+    );
+
+    // Intent whose expected_parent / expected_height can never become
+    // commit-visible: committed height is 0, intent expects height 5.
+    let intent = BuildIntent {
+        expected_parent: [0x42u8; 32],
+        expected_height: 5,
+        mempool: Arc::new(MempoolReadSnapshot::empty()),
+        miner_pk: [0x02u8; 33],
+        eligible_rent_boxes: Arc::new(Vec::new()),
+        reason: BuildReason::Startup,
+    };
+
+    let (intent_tx, intent_rx) = watch::channel(Some(intent));
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+
+    // Spawn the engine task.
+    let engine = tokio::spawn(super::mining_engine::run_mining_engine(
+        reader, handle, intent_rx, cancel_rx,
+    ));
+
+    // Give the task time to exhaust all retries: 40 × 25 ms = 1 000 ms.
+    // Under paused time this returns immediately after tokio advances the
+    // clock through all the sleep calls.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+
+    // The engine must still be alive (exhaustion goes back to waiting,
+    // does not exit or panic).
+    assert!(
+        !engine.is_finished(),
+        "engine task must survive retry exhaustion and keep running",
+    );
+
+    // Cancel cleanly and join within a tight deadline.
+    cancel_tx.send(true).unwrap();
+    // Drop the sender so the watch channel closes, letting the task notice.
+    drop(intent_tx);
+    tokio::time::timeout(std::time::Duration::from_millis(500), engine)
+        .await
+        .expect("engine task must exit promptly after cancel")
+        .expect("engine task must not panic");
+}

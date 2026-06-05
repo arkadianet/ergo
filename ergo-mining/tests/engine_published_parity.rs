@@ -519,9 +519,17 @@ fn publish_and_serve_under(regime: &Regime) {
 
     let outcome = build_and_publish(&store.reader_handle(), &handle, &intent, || BUILT_AT_MS)
         .expect("build_and_publish ok");
+    let timings = match outcome {
+        BuildOutcome::Published { timings } => timings,
+        other => {
+            panic!("engine must publish a candidate for the committed synced tip, got {other:?}",)
+        }
+    };
+    // build_and_publish must PRESERVE the measured payload, not default it.
+    // dryrun always executes real work so its Duration is provably non-zero.
     assert!(
-        matches!(outcome, BuildOutcome::Published { .. }),
-        "engine must publish a candidate for the committed synced tip, got {outcome:?}",
+        timings.dryrun > std::time::Duration::ZERO,
+        "build_and_publish must thread non-zero dryrun timing through Published: {timings:?}",
     );
 
     // Serving then returns the published work, whose `msg` matches the
@@ -542,7 +550,7 @@ fn publish_and_serve_under(regime: &Regime) {
 }
 
 #[test]
-fn generate_candidate_returns_phase_timings() {
+fn generate_candidate_measures_phase_timings() {
     let regime = Regime::mainnet_post_eip27();
     let (_dir, store, _tip) = synced_store(&regime);
     let snapshot = store
@@ -561,17 +569,28 @@ fn generate_candidate_returns_phase_timings() {
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
-    // The third tuple element is wired through on a real build and carries sane
-    // values. Sub-ms phases round to 0 on the test store, so non-zero buckets
-    // cannot be asserted here — only that every bucket is below a sane ceiling.
+
+    // emission, dryrun, and roots always execute real multi-statement work,
+    // so nanosecond-resolution Duration provably exceeds zero even on the
+    // fast in-memory test store.
     assert!(
-        timings.emission_ms < 60_000,
-        "emission_ms sane: {timings:?}"
+        timings.emission > std::time::Duration::ZERO,
+        "emission phase must record non-zero elapsed time: {timings:?}",
     );
-    assert!(timings.rent_ms < 60_000, "rent_ms sane: {timings:?}");
-    assert!(timings.select_ms < 60_000, "select_ms sane: {timings:?}");
-    assert!(timings.dryrun_ms < 60_000, "dryrun_ms sane: {timings:?}");
-    assert!(timings.roots_ms < 60_000, "roots_ms sane: {timings:?}");
+    assert!(
+        timings.dryrun > std::time::Duration::ZERO,
+        "dryrun phase must record non-zero elapsed time: {timings:?}",
+    );
+    assert!(
+        timings.roots > std::time::Duration::ZERO,
+        "roots phase must record non-zero elapsed time: {timings:?}",
+    );
+
+    // rent and select legitimately measure near-zero on an empty mempool /
+    // no rent boxes — assert only a sane upper ceiling (60 s).
+    let sixty_s = std::time::Duration::from_secs(60);
+    assert!(timings.rent < sixty_s, "rent ceiling: {timings:?}");
+    assert!(timings.select < sixty_s, "select ceiling: {timings:?}");
 }
 
 // ----- error paths -----
