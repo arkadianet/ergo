@@ -21,6 +21,24 @@
 //!   construction is deferred (the proposed-update + validation-settings
 //!   extension encoding isn't implemented).
 
+/// Wall-clock cost of the expensive `generate_candidate` phases, measured per
+/// build and surfaced on the engine's build-complete log line. Millisecond
+/// granularity — these phases run 10²–10⁴ ms on a cold full-archival store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhaseTimings {
+    /// Phases 8–9: emission tx build + validation.
+    pub emission_ms: u64,
+    /// Phase 9c: storage-rent claim build (0 when rent disabled/empty).
+    pub rent_ms: u64,
+    /// Phases 9d–9e: mempool selection + per-tx re-validation + fee-tx trim.
+    pub select_ms: u64,
+    /// Phase 10: AVL+ dry-run (new_state_root + proof bytes) — the report's
+    /// prime cost suspect.
+    pub dryrun_ms: u64,
+    /// Phase 12: tx/witness-id derivation + transactions/extension roots.
+    pub roots_ms: u64,
+}
+
 use ergo_crypto::difficulty::{
     epoch_length_for_height, get_target, next_n_bits, previous_heights_for_recalculation,
     DifficultyParams,
@@ -118,13 +136,14 @@ pub fn generate_candidate<V: CandidateStateView>(
     reemission: Option<&ReemissionSettings>,
     chain_config: &DifficultyParams,
     eligible_rent_boxes: &[ErgoBox],
-) -> Result<Option<(Candidate, WorkMessage)>, MiningError> {
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
     //    redb read txn so the whole build is one consistent committed view).
     let parent_id: [u8; 32] = view.best_full_block_id();
     let parent_height = view.best_full_block_height();
     let candidate_height = parent_height + 1;
+    let mut timings = PhaseTimings::default();
 
     if is_epoch_boundary_mainnet(candidate_height) {
         return Err(MiningError::InvalidConfig(format!(
@@ -224,6 +243,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     //     practice now that mainnet is past activation).
     //   - reemission = None: network has no EIP-27 protocol (new
     //     public testnet); always pre-EIP-27 emission tx.
+    let phase_start = std::time::Instant::now();
     let emission_box = lookup_emission_box_from_parent(view, &parent_id, &parent_header)?;
     let emission_tx = match reemission {
         Some(reem) if candidate_height > reem.activation_height => {
@@ -277,6 +297,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         })?
     };
     let emission_cost = emission_cost_acc.total_block_cost();
+    timings.emission_ms = phase_start.elapsed().as_millis() as u64;
 
     // 9b. Seed an in-block overlay (over the committed state tip — the same
     //     base view the submit-time validator uses) with the emission tx.
@@ -296,6 +317,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     //     miner P2PK.
     let max_block_cost = active_params.max_block_cost as u64;
     let max_block_size = active_params.max_block_size as u64;
+    let phase_start = std::time::Instant::now();
     let rent_cost_ceiling = max_block_cost
         .saturating_sub(DEFAULT_COST_SAFETY_GAP)
         .saturating_sub(emission_cost)
@@ -320,12 +342,14 @@ pub fn generate_candidate<V: CandidateStateView>(
         }
         None => (None, 0, 0),
     };
+    timings.rent_ms = phase_start.elapsed().as_millis() as u64;
 
     // 9d. Select mempool transactions into the budget remaining after the
     //     coinbase + rent claim. The overlay (emission + rent applied)
     //     excludes intra-block double-spends and rent conflicts; the budgets
     //     keep the block under the voted cost/size caps (candidate_dry_run
     //     checks neither).
+    let phase_start = std::time::Instant::now();
     let cost_budget = max_block_cost
         .saturating_sub(DEFAULT_COST_SAFETY_GAP)
         .saturating_sub(emission_cost)
@@ -436,6 +460,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         }
         user_checked.pop();
     };
+    timings.select_ms = phase_start.elapsed().as_millis() as u64;
 
     // 9f. Assemble the final tx list in block order:
     //     emission, rent, user txs, fee.
@@ -453,8 +478,10 @@ pub fn generate_candidate<V: CandidateStateView>(
     let raw_txs: Vec<Transaction> = checked.iter().map(|c| c.transaction().clone()).collect();
 
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
+    let phase_start = std::time::Instant::now();
     let (new_state_root, ad_proof_bytes, snapshot_tip_id) =
         view.candidate_dry_run(&checked).map_err(state_err)?;
+    timings.dryrun_ms = phase_start.elapsed().as_millis() as u64;
 
     // 11. Parent-id guard: best-full advanced during generation.
     if snapshot_tip_id != parent_id {
@@ -462,6 +489,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     }
 
     // 12. Compute roots.
+    let phase_start = std::time::Instant::now();
     let ad_proofs_root = Digest32::from_bytes(*blake2b256(&ad_proof_bytes).as_bytes());
 
     let tx_ids_owned: Vec<[u8; 32]> = raw_txs
@@ -502,6 +530,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
     let extension_root_bytes = extension_root(&extension_field_refs);
+    timings.roots_ms = phase_start.elapsed().as_millis() as u64;
 
     // 13. Assemble header with placeholder solution.
     let placeholder_solution = AutolykosSolution::V2 {
@@ -551,7 +580,7 @@ pub fn generate_candidate<V: CandidateStateView>(
 
     let _ = (validation_settings,); // reserved for v2 user-tx validation
 
-    Ok(Some((candidate, work_msg)))
+    Ok(Some((candidate, work_msg, timings)))
 }
 
 // ---- private helpers ----

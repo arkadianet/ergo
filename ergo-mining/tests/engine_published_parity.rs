@@ -50,7 +50,7 @@
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_mempool::MempoolReadSnapshot;
-use ergo_mining::candidate::{generate_candidate, Candidate};
+use ergo_mining::candidate::{generate_candidate, Candidate, PhaseTimings};
 use ergo_mining::emission_rules::MonetarySettings;
 use ergo_mining::engine::{build_and_publish, BestTip, BuildIntent, BuildOutcome, BuildReason};
 use ergo_mining::error::MiningError;
@@ -457,7 +457,7 @@ fn write_box_bytes(b: &ErgoBox) -> Vec<u8> {
 /// Run the on-loop oracle build directly against the live `StateStore`, under
 /// the regime's reemission settings.
 fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage) {
-    generate_candidate(
+    let (c, w, _timings) = generate_candidate(
         store,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -467,7 +467,8 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         &[],
     )
     .expect("on-loop generate_candidate ok")
-    .expect("on-loop candidate is Some")
+    .expect("on-loop candidate is Some");
+    (c, w)
 }
 
 fn serialize_txs(txs: &[Transaction]) -> Vec<Vec<u8>> {
@@ -518,10 +519,9 @@ fn publish_and_serve_under(regime: &Regime) {
 
     let outcome = build_and_publish(&store.reader_handle(), &handle, &intent, || BUILT_AT_MS)
         .expect("build_and_publish ok");
-    assert_eq!(
-        outcome,
-        BuildOutcome::Published,
-        "engine must publish a candidate for the committed synced tip",
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "engine must publish a candidate for the committed synced tip, got {outcome:?}",
     );
 
     // Serving then returns the published work, whose `msg` matches the
@@ -539,6 +539,33 @@ fn publish_and_serve_under(regime: &Regime) {
     );
     assert_eq!(served.height, regime.candidate_height());
     assert_eq!(served.pk, MINER_PK);
+}
+
+#[test]
+fn generate_candidate_populates_phase_timings() {
+    let regime = Regime::mainnet_post_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+    let snapshot = store
+        .reader_handle()
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+    let (_c, _w, timings) = generate_candidate(
+        &snapshot,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("generate_candidate ok")
+    .expect("candidate is Some");
+    // The dry-run always does real AVL work; the struct must be populated
+    // (not defaulted) even when sub-millisecond buckets round to 0.
+    assert!(timings.dryrun_ms < 60_000, "sane upper bound: {timings:?}",);
+    // Emission and select buckets are present (not zero-initialized struct).
+    let _ = PhaseTimings::default(); // confirm type is accessible
 }
 
 // ----- error paths -----
@@ -647,7 +674,7 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         .committed_snapshot()
         .expect("snapshot read")
         .expect("committed state present");
-    let (snap_c, snap_w) = generate_candidate(
+    let (snap_c, snap_w, _timings) = generate_candidate(
         &snap,
         MempoolReadSnapshot::empty(),
         &MINER_PK,

@@ -129,8 +129,11 @@ pub struct Template {
 /// this to decide whether to retry (commit-visibility), drop, or move on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildOutcome {
-    /// Built and published into the served cache.
-    Published,
+    /// Built and published into the served cache. Carries the per-phase build
+    /// timings so the driver logs one histogram-friendly line per build.
+    Published {
+        timings: crate::candidate::PhaseTimings,
+    },
     /// Built, but the live tip moved off the built parent before publish —
     /// discarded (wasted, not wrong).
     DroppedStale,
@@ -222,7 +225,7 @@ pub fn build_and_publish(
         handle.chain_config(),
         intent.eligible_rent_boxes.as_slice(),
     )?;
-    let Some((candidate, work)) = built else {
+    let Some((candidate, work, timings)) = built else {
         return Ok(BuildOutcome::Raced);
     };
 
@@ -240,7 +243,7 @@ pub fn build_and_publish(
         now_ms,
         intent.reason,
     ) {
-        Some(_) => Ok(BuildOutcome::Published),
+        Some(_) => Ok(BuildOutcome::Published { timings }),
         None => Ok(BuildOutcome::DroppedStale),
     }
 }
