@@ -1999,7 +1999,10 @@ async fn visibility_retry_budget_resets_on_parent_change() {
             );
             cancel_tx.send(true).unwrap();
             drop(intent_tx);
-            let _ = tokio::time::timeout(Duration::from_millis(500), engine).await;
+            tokio::time::timeout(Duration::from_millis(500), engine)
+                .await
+                .expect("engine task must exit promptly after cancel")
+                .expect("engine task must not panic");
             return;
         }
     }

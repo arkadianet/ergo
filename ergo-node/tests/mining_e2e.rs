@@ -753,6 +753,8 @@ async fn new_tip_candidate_serves_promptly_after_block_apply() {
         elapsed < Duration::from_secs(6),
         "new-tip candidate must become servable within 6s of submit; took {elapsed:?}",
     );
+
+    handle.shutdown().await.expect("clean shutdown");
 }
 
 /// `GET /mining/candidate?longpoll=<msg>` semantics, end-to-end through a booted
