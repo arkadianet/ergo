@@ -256,9 +256,14 @@ pub(super) async fn run_mining_engine(
         }
 
         let mut attempts = 0u32;
-        // `attempts` deliberately carries into the enriched pass: a published
-        // minimal proves the tip is already commit-visible, so the full pass
-        // should never need its own retry budget.
+        // Parent the retry budget is charged against: a re-borrow that lands
+        // on a NEW tip gets a fresh budget (its persist lag is its own), while
+        // the same-parent Minimal→Full pass deliberately shares one budget —
+        // a published minimal proves that parent is already commit-visible.
+        // This reset also covers a mid-retry parent switch (new tip arriving
+        // during TipNotVisible backoff); the fresh budget is per-parent, so
+        // every tip gets its full MAX_VIS_RETRIES regardless of prior history.
+        let mut budget_parent: Option<[u8; 32]> = None;
         loop {
             // Re-borrow each attempt: a newer intent that arrived mid-retry
             // supersedes this one (latest-wins).
@@ -266,6 +271,10 @@ pub(super) async fn run_mining_engine(
                 Some(i) => i,
                 None => break,
             };
+            if budget_parent != Some(intent.expected_parent) {
+                attempts = 0;
+                budget_parent = Some(intent.expected_parent);
+            }
             // Wall-clock closure, sampled by the engine core at the publish
             // step so the stamped time is when the template is actually
             // published (not when this possibly-retried build started). Kept in

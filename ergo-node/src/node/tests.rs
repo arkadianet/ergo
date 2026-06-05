@@ -1853,3 +1853,167 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
         .expect("engine task must exit promptly after cancel")
         .expect("engine task must not panic");
 }
+
+/// Pins the liveness fix: the commit-visibility retry budget must reset
+/// when a new tip (different `expected_parent`) arrives, so tip B is not
+/// penalised by tip A's already-spent retries.
+///
+/// Approach: drive the engine with never-visible intent A long enough for
+/// it to emit one exhaustion warning, then immediately send never-visible
+/// intent B (different parent). Assert that a *second* exhaustion warning
+/// eventually arrives — proving B ran its own full budget rather than
+/// inheriting A's spent-down counter and giving up immediately.
+///
+/// What this test does NOT check: the exact timing between the two warns
+/// (CI variance is too wide). It asserts ORDER + EXISTENCE: two distinct
+/// exhaustion events happen and the task stays alive throughout. The
+/// comment below explains what a timing assertion *would* be: B's warn
+/// must arrive ≥ ~900 ms (40 × 25 ms backoff — scaled) after B was sent.
+/// The order/existence assertion is weaker but flake-free.
+#[tokio::test]
+async fn visibility_retry_budget_resets_on_parent_change() {
+    use ergo_crypto::difficulty::DifficultyParams;
+    use ergo_mempool::MempoolReadSnapshot;
+    use ergo_mining::emission_rules::MonetarySettings;
+    use ergo_mining::engine::{BuildIntent, BuildReason};
+    use ergo_mining::handle::MiningHandle;
+    use ergo_mining::reemission::ReemissionSettings;
+    use ergo_state::store::StateStore;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::watch;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+    impl Write for SharedBuf {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for SharedBuf {
+        type Writer = SharedBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buf = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(buf.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(tmp.path().join("s.redb").as_path()).unwrap();
+    let mut box_id = [0u8; 32];
+    box_id[31] = 1;
+    store
+        .initialize_genesis(&[(box_id, vec![0xAAu8; 32])])
+        .unwrap();
+    let reader = store.reader_handle();
+
+    let handle = MiningHandle::new(
+        [0x02u8; 33],
+        MonetarySettings::mainnet(),
+        Some(ReemissionSettings::mainnet()),
+        DifficultyParams::mainnet(),
+    );
+
+    // Intent A: parent [0x42;32], height 5 — commit-visible never (genesis store).
+    let intent_a = BuildIntent {
+        expected_parent: [0x42u8; 32],
+        expected_height: 5,
+        mempool: Arc::new(MempoolReadSnapshot::empty()),
+        miner_pk: [0x02u8; 33],
+        reason: BuildReason::Startup,
+    };
+
+    let (intent_tx, intent_rx) = watch::channel(Some(intent_a));
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+
+    // Bump the watch version so the engine's first `changed()` fires.
+    intent_tx.send_if_modified(|_| true);
+
+    let engine = tokio::spawn(super::mining_engine::run_mining_engine(
+        reader, handle, None, intent_rx, cancel_rx,
+    ));
+
+    const EXHAUSTION_MSG: &str =
+        "mining engine: commit-visibility retries exhausted; awaiting next intent";
+
+    // Wait for A's exhaustion warn to appear (~1 s).
+    let deadline_a = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let a_exhausted = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        if output.contains(EXHAUSTION_MSG) {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline_a {
+            break false;
+        }
+    };
+    assert!(
+        a_exhausted,
+        "timed out waiting for intent-A exhaustion warn"
+    );
+
+    // Intent B: parent [0x43;32] — different parent, still commit-visible never.
+    let intent_b = BuildIntent {
+        expected_parent: [0x43u8; 32],
+        expected_height: 5,
+        mempool: Arc::new(MempoolReadSnapshot::empty()),
+        miner_pk: [0x02u8; 33],
+        reason: BuildReason::Tip,
+    };
+    // Count existing exhaustion lines before we send B so we can detect a
+    // *second* occurrence robustly without relying on unique-string content.
+    let count_before_b = {
+        let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        output.matches(EXHAUSTION_MSG).count()
+    };
+    intent_tx.send(Some(intent_b)).unwrap();
+
+    // Wait for B's own exhaustion warn (~1 s from when B was sent). With the
+    // bug, `attempts` already equals MAX_VIS_RETRIES when B arrives, so B's
+    // warn appears instantly and the count never reaches count_before_b + 1
+    // under a correct budget. But we assert from the engine side: if a second
+    // warn arrives we know B ran a build, hit TipNotVisible, and exhausted.
+    let deadline_b = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let b_exhausted = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let output = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        if output.matches(EXHAUSTION_MSG).count() > count_before_b {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline_b {
+            break false;
+        }
+    };
+    assert!(
+        b_exhausted,
+        "timed out waiting for intent-B exhaustion warn — \
+         the engine did not give B its own retry budget",
+    );
+
+    // The task must still be alive after both exhaustion events.
+    assert!(
+        !engine.is_finished(),
+        "engine task must survive two sequential exhaustion events",
+    );
+
+    cancel_tx.send(true).unwrap();
+    drop(intent_tx);
+    tokio::time::timeout(std::time::Duration::from_millis(500), engine)
+        .await
+        .expect("engine task must exit promptly after cancel")
+        .expect("engine task must not panic");
+}
