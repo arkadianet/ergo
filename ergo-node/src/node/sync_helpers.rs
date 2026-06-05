@@ -1,7 +1,10 @@
-//! Anchor-aware SyncInfo dispatch and hedged RequestModifier fan-out.
+//! Anchor-aware SyncInfo dispatch, hedged RequestModifier fan-out, and
+//! shared IBD auto-exit logic.
 //!
-//! Two helpers used by the action loop's sync paths:
+//! Helpers shared by the action loop's sync paths:
 //!
+//! - `maybe_exit_ibd` — after a full block is applied, exit IBD durability
+//!   mode once the full-block tip is within 10 of the header tip.
 //! - `try_send_anchor_sync_info` — Step C+D crafted single-anchor V1
 //!   SyncInfo for a peer, falling back to the standard tip-tail
 //!   payload via the caller when the anchor path is not eligible.
@@ -12,9 +15,10 @@
 
 use ergo_p2p::message;
 use ergo_p2p::peer::PeerId;
-use ergo_state::ChainStateRead;
+use ergo_state::{ChainStateRead, StateBackendKind};
 use ergo_sync::coordinator::Action;
 use std::time::Instant;
+use tracing::info;
 
 use super::{send_to_peer, NodeState};
 
@@ -185,4 +189,26 @@ fn pick_hedge_peers(state: &NodeState, exclude: PeerId, n: usize) -> Vec<PeerId>
         .collect();
     peers.sort_by_key(|(_, cnt)| *cnt);
     peers.into_iter().take(n).map(|(p, _)| p).collect()
+}
+
+/// Exit IBD durability mode once the full-block tip is close to the header
+/// tip.
+///
+/// IBD durability mode is a UTXO-arena flush-cadence knob; the digest
+/// backend commits per-apply and has no IBD concept, so `as_utxo_mut()`
+/// returns `None` and this becomes a no-op on digest stores while
+/// `best_full_block_height` still advances normally.
+///
+/// The exit fires when all four hold:
+///   - `fb` advanced from `fb_before` (a full block was actually applied),
+///   - the arena is currently in IBD mode,
+///   - `bh` is above genesis (`bh > 0`), and
+///   - the gap `bh - fb` has dropped below 10 headers.
+pub(super) fn maybe_exit_ibd(store: &mut StateBackendKind, fb_before: u32, fb: u32, bh: u32) {
+    if let Some(u) = store.as_utxo_mut() {
+        if fb > fb_before && u.ibd_mode() && bh > 0 && bh.saturating_sub(fb) < 10 {
+            u.set_ibd_mode(false, 0);
+            info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
+        }
+    }
 }

@@ -148,15 +148,7 @@ fn process_header_modifier_batch(
     let bh = cs_after.best_header_height;
     let fb = cs_after.best_full_block_height;
 
-    // IBD durability mode is a UTXO-arena flush-cadence knob; the digest
-    // backend commits per-apply and has no IBD concept, so this auto-exit
-    // only runs on the UTXO store.
-    if let Some(u) = state.store.as_utxo_mut() {
-        if fb > fb_before && u.ibd_mode() && bh > 0 && bh.saturating_sub(fb) < 10 {
-            u.set_ibd_mode(false, 0);
-            info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
-        }
-    }
+    super::maybe_exit_ibd(&mut state.store, fb_before, fb, bh);
 
     if state.coordinator.sync_state().headers_chain_synced() {
         let window_advanced = fb > fb_before;

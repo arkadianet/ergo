@@ -2191,26 +2191,55 @@ fn request_missing_sections_digest_backend_no_panic() {
     );
 }
 
-/// The IBD auto-exit fold (events.rs / messaging.rs) keys off
-/// `as_utxo_mut()`, which is `None` on a digest backend — so the
-/// durability-knob branch is skipped entirely rather than panicking. A
-/// digest apply still advances `best_full_block_height`, which is why
-/// the old unconditional `as_utxo().expect()` in the same arm was
-/// reachable. Driving a real applying block needs a full apply path
-/// (out of scope here), so this asserts the guard's enabling
-/// condition directly: neither `as_utxo` accessor yields an arena on a
-/// digest store, which is exactly what makes both folds a no-op.
+/// `maybe_exit_ibd` is a no-op on a digest backend: `as_utxo_mut()` returns
+/// `None`, so the function returns without touching anything. Calling it with
+/// condition-satisfying values (fb advanced, gap < 10) must not panic.
 #[test]
 fn ibd_auto_exit_digest_backend_skips_utxo_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = make_digest_state(&tmp.path().join("digest.redb"));
-    assert!(
-        state.store.as_utxo().is_none(),
-        "digest backend exposes no UTXO arena for the IBD-exit read",
-    );
+    // Confirm the guard's enabling condition: no UTXO arena on a digest store.
     assert!(
         state.store.as_utxo_mut().is_none(),
-        "digest backend exposes no UTXO arena for the IBD-exit write",
+        "digest backend exposes no UTXO arena — maybe_exit_ibd must be a no-op",
+    );
+    // Calling with condition-satisfying values must be a silent no-op, not a panic.
+    maybe_exit_ibd(&mut state.store, 0, 5, 7);
+}
+
+/// `maybe_exit_ibd` exits IBD mode on a UTXO backend when the full-block tip
+/// advances within 10 of the header tip.
+#[test]
+fn ibd_auto_exit_utxo_backend_exits_ibd_when_near_tip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("utxo.redb"));
+    // Arm IBD mode (same call as boot.rs:664).
+    state.store.as_utxo_mut().unwrap().set_ibd_mode(true, 50);
+    assert!(
+        state.store.as_utxo_mut().unwrap().ibd_mode(),
+        "pre-condition: IBD armed"
+    );
+
+    // Condition-satisfying call: fb advanced (0→5), bh=7, gap=2 < 10.
+    maybe_exit_ibd(&mut state.store, 0, 5, 7);
+    assert!(
+        !state.store.as_utxo_mut().unwrap().ibd_mode(),
+        "IBD must have exited when gap < 10",
+    );
+}
+
+/// `maybe_exit_ibd` leaves IBD mode unchanged when the gap is >= 10.
+#[test]
+fn ibd_auto_exit_utxo_backend_stays_ibd_when_gap_large() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("utxo.redb"));
+    state.store.as_utxo_mut().unwrap().set_ibd_mode(true, 50);
+
+    // Gap = bh - fb = 100 - 5 = 95, well above the threshold.
+    maybe_exit_ibd(&mut state.store, 0, 5, 100);
+    assert!(
+        state.store.as_utxo_mut().unwrap().ibd_mode(),
+        "IBD must stay armed when gap >= 10",
     );
 }
 
