@@ -140,6 +140,7 @@ pub struct Candidate {
 /// already capped) the miner self-claims with no fee. The claim is pinned
 /// ahead of mempool selection so any conflicting fee-bearing claim on the
 /// same box is excluded. An empty slice disables rent collection.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_candidate<V: CandidateStateView>(
     view: &V,
     mode: BuildMode,

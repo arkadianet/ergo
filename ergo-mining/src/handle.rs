@@ -43,8 +43,11 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// solution arriving, given that longpoll (§9) keeps miners on a fresh template
 /// rather than grinding a stale one. A solution for a template evicted beyond
 /// this window is not rejected — the miner re-polls (design §336), and the
-/// submit-time executor recheck remains authoritative.
-const MAX_RETAINED_TEMPLATES: usize = 8;
+/// submit-time executor recheck remains authoritative. Sized for two publishes
+/// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
+/// tip-changes of in-flight solution history, matching the pre-two-phase
+/// horizon.
+const MAX_RETAINED_TEMPLATES: usize = 16;
 
 /// Where the miner reward key comes from. Mirrors Scala's two-tier
 /// resolution (`ErgoMiner`): an operator-configured key, or the wallet's
@@ -332,6 +335,19 @@ impl MiningHandle {
             .rev()
             .find(|t| t.candidate.parent_id == parent)
             .map(|t| t.work.clone())
+    }
+
+    /// Whether any retained template was built against `parent`. The engine
+    /// driver uses this to decide a tip's first build (nothing servable yet →
+    /// publish a minimal template first) versus a refresh (a template already
+    /// serves → go straight to the enriched build).
+    pub fn has_template_for_parent(&self, parent: &[u8; 32]) -> bool {
+        let cache = self.cache.read().expect("cache poisoned");
+        cache
+            .templates
+            .iter()
+            .rev()
+            .any(|t| t.candidate.parent_id == *parent)
     }
 
     /// Like [`MiningHandle::cached_work_if_synced`], but also returns the
@@ -1037,6 +1053,40 @@ mod tests {
             matches!(outcome, SolutionOutcome::StaleParent { .. }),
             "verify must scan past the PoW-failing newest templates to the deep \
              PoW-passing one, got {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn has_template_for_parent_tracks_publishes() {
+        // False before any publish for the parent; true immediately after;
+        // false for a different parent.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent_p = [0xE0u8; 32];
+        let parent_q = [0xE1u8; 32];
+
+        // Nothing published yet — no template for any parent.
+        assert!(
+            !h.has_template_for_parent(&parent_p),
+            "no template retained before any publish",
+        );
+
+        // Set the tip so publish_if_current accepts.
+        h.set_best_tip(synced_tip(parent_p));
+
+        // Publish one template for parent P.
+        let (c, w) = candidate_pair(parent_p);
+        assert!(h
+            .publish_if_current(c, w, &parent_p, || BUILT_AT_MS, BuildReason::Tip)
+            .is_some());
+
+        // Now P is retained; Q is not.
+        assert!(
+            h.has_template_for_parent(&parent_p),
+            "template for P is retained after publishing it",
+        );
+        assert!(
+            !h.has_template_for_parent(&parent_q),
+            "no template for Q when only P was published",
         );
     }
 
