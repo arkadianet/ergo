@@ -55,7 +55,7 @@ ergo-sigma         = { workspace = true }
 [dev-dependencies]
 tempfile           = { workspace = true }
 ergo-api           = { workspace = true }
-ergo-mempool       = { workspace = true }
+ergo-mempool       = { workspace = true, features = ["test-support"] }
 ergo-p2p           = { workspace = true }
 ergo-primitives    = { workspace = true }
 ergo-state         = { workspace = true, features = ["test-helpers"] }

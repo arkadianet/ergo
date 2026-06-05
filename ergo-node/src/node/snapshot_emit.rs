@@ -154,6 +154,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     let download_window = state.coordinator.sync_state().download_window() as u32;
     let pending_blocks = state.coordinator.sync_state().pending_count() as u32;
     let headers_chain_synced = state.coordinator.sync_state().headers_chain_synced();
+    let max_peer_height = state.coordinator.sync_state().best_known_header_height();
     let recovery_done = state.executor.recovery_done();
 
     let peer_count = state.peer_manager.connected_peers().count() as u32;
@@ -302,6 +303,8 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         banned_ips,
         bootstrap,
         recent_blocks,
+        max_peer_height,
+        mining_enabled: state.mining_enabled,
     };
 
     if let Some(pub_) = state.snapshot_publisher.as_mut() {

@@ -50,7 +50,7 @@
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_mempool::MempoolReadSnapshot;
-use ergo_mining::candidate::{generate_candidate, Candidate};
+use ergo_mining::candidate::{generate_candidate, BuildMode, Candidate};
 use ergo_mining::emission_rules::MonetarySettings;
 use ergo_mining::engine::{build_and_publish, BestTip, BuildIntent, BuildOutcome, BuildReason};
 use ergo_mining::error::MiningError;
@@ -443,7 +443,6 @@ fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
         expected_height: parent_height,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
         miner_pk: MINER_PK,
-        eligible_rent_boxes: Arc::new(Vec::new()),
         reason: BuildReason::Startup,
     }
 }
@@ -457,8 +456,9 @@ fn write_box_bytes(b: &ErgoBox) -> Vec<u8> {
 /// Run the on-loop oracle build directly against the live `StateStore`, under
 /// the regime's reemission settings.
 fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage) {
-    generate_candidate(
+    let (c, w, _timings) = generate_candidate(
         store,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),
@@ -467,7 +467,8 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         &[],
     )
     .expect("on-loop generate_candidate ok")
-    .expect("on-loop candidate is Some")
+    .expect("on-loop candidate is Some");
+    (c, w)
 }
 
 fn serialize_txs(txs: &[Transaction]) -> Vec<Vec<u8>> {
@@ -481,6 +482,87 @@ fn serialize_txs(txs: &[Transaction]) -> Vec<Vec<u8>> {
 }
 
 // ----- happy path -----
+
+#[test]
+fn build_and_publish_resolves_rent_at_snapshot_height_when_enabled() {
+    // When the handle has rent enabled, the injected resolver is called with
+    // the snapshot and `snapshot.best_full_block_height() + 1` (the candidate
+    // height). Capture the two arguments to assert the height invariant.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    let handle = handle(&regime).with_rent_config(true, 64);
+    let intent = build_intent(tip, regime.parent_height);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    let captured: std::cell::Cell<Option<(u32, u32)>> = std::cell::Cell::new(None);
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        BuildMode::Full,
+        || BUILT_AT_MS,
+        |snapshot, h| {
+            captured.set(Some((snapshot.best_full_block_height(), h)));
+            Vec::new()
+        },
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "engine must publish a candidate for the committed synced tip, got {outcome:?}",
+    );
+    let (snap_h, given_h) = captured
+        .get()
+        .expect("resolver was called when rent is enabled");
+    assert_eq!(
+        given_h,
+        snap_h + 1,
+        "resolver receives snapshot height + 1 as the candidate height",
+    );
+}
+
+#[test]
+fn build_and_publish_skips_rent_resolver_when_disabled() {
+    // When the handle has rent disabled (the default), the resolver closure
+    // is never called.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    let handle = handle(&regime); // rent disabled by default
+    let intent = build_intent(tip, regime.parent_height);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    let called: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        BuildMode::Full,
+        || BUILT_AT_MS,
+        |_, _| {
+            called.set(true);
+            Vec::new()
+        },
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "engine must publish a candidate for the committed synced tip, got {outcome:?}",
+    );
+    assert!(
+        !called.get(),
+        "resolver must not be called when rent is disabled",
+    );
+}
 
 #[test]
 fn build_and_publish_publishes_and_serves_onloop_work() {
@@ -516,12 +598,26 @@ fn publish_and_serve_under(regime: &Regime) {
         synced: true,
     });
 
-    let outcome = build_and_publish(&store.reader_handle(), &handle, &intent, || BUILT_AT_MS)
-        .expect("build_and_publish ok");
-    assert_eq!(
-        outcome,
-        BuildOutcome::Published,
-        "engine must publish a candidate for the committed synced tip",
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        BuildMode::Full,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+    )
+    .expect("build_and_publish ok");
+    let timings = match outcome {
+        BuildOutcome::Published { timings } => timings,
+        other => {
+            panic!("engine must publish a candidate for the committed synced tip, got {other:?}",)
+        }
+    };
+    // build_and_publish must PRESERVE the measured payload, not default it.
+    // dryrun always executes real work so its Duration is provably non-zero.
+    assert!(
+        timings.dryrun > std::time::Duration::ZERO,
+        "build_and_publish must thread non-zero dryrun timing through Published: {timings:?}",
     );
 
     // Serving then returns the published work, whose `msg` matches the
@@ -539,6 +635,51 @@ fn publish_and_serve_under(regime: &Regime) {
     );
     assert_eq!(served.height, regime.candidate_height());
     assert_eq!(served.pk, MINER_PK);
+}
+
+#[test]
+fn generate_candidate_measures_phase_timings() {
+    let regime = Regime::mainnet_post_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+    let snapshot = store
+        .reader_handle()
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+    let (_c, _w, timings) = generate_candidate(
+        &snapshot,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("generate_candidate ok")
+    .expect("candidate is Some");
+
+    // emission, dryrun, and roots always execute real multi-statement work,
+    // so nanosecond-resolution Duration provably exceeds zero even on the
+    // fast in-memory test store.
+    assert!(
+        timings.emission > std::time::Duration::ZERO,
+        "emission phase must record non-zero elapsed time: {timings:?}",
+    );
+    assert!(
+        timings.dryrun > std::time::Duration::ZERO,
+        "dryrun phase must record non-zero elapsed time: {timings:?}",
+    );
+    assert!(
+        timings.roots > std::time::Duration::ZERO,
+        "roots phase must record non-zero elapsed time: {timings:?}",
+    );
+
+    // rent and select legitimately measure near-zero on an empty mempool /
+    // no rent boxes — assert only a sane upper ceiling (60 s).
+    let sixty_s = std::time::Duration::from_secs(60);
+    assert!(timings.rent < sixty_s, "rent ceiling: {timings:?}");
+    assert!(timings.select < sixty_s, "select ceiling: {timings:?}");
 }
 
 // ----- error paths -----
@@ -560,8 +701,15 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
     });
 
     let intent = build_intent(tip, regime.parent_height);
-    let outcome = build_and_publish(&store.reader_handle(), &handle, &intent, || BUILT_AT_MS)
-        .expect("build_and_publish ok");
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        BuildMode::Full,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+    )
+    .expect("build_and_publish ok");
     assert_eq!(
         outcome,
         BuildOutcome::DroppedStale,
@@ -590,6 +738,7 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
 
     let err = generate_candidate(
         &store,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),
@@ -614,6 +763,194 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
 // that its off-loop committed-snapshot build is byte-identical to it. This pins
 // that contract — a self-consistency proof between the two views, not an
 // external-oracle check.
+
+/// Pins that `Minimal` and `Full` produce identical consensus surfaces when the
+/// mempool is empty and there are no rent boxes to sweep. A Minimal build is
+/// the strict emission-only prefix of a Full block; with nothing to enrich the
+/// two pipelines must agree on every consensus-bearing output. This means the
+/// Minimal template inherits the full-candidate parity suite's guarantees: all
+/// the emission-tx, AVL dry-run, and interlinks oracle checks above hold for
+/// the minimal template as well, so the fast first-publish does not sacrifice
+/// correctness.
+///
+/// Node-level emission-only acceptance is exercised by the mining_e2e solve/
+/// submit path. The empirical shape (accepted empty blocks on mainnet) is the
+/// external oracle that anchors this; this test pins the internal invariant that
+/// both modes converge to it on a quiet chain.
+#[test]
+fn minimal_build_equals_full_build_on_quiet_chain() {
+    // Pre-EIP-27 regime: no reemission tokens, simplest coinbase path.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+
+    let snap = store
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+
+    // Minimal build: emission-only, no mempool, no rent.
+    let (min_c, _min_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Minimal,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("minimal generate_candidate ok")
+    .expect("minimal candidate is Some");
+
+    // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
+    let (full_c, _full_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("full generate_candidate ok")
+    .expect("full candidate is Some");
+
+    // Minimal must carry exactly the coinbase (emission) tx — the emission-only
+    // prefix is the contract for a Minimal build. Full with an empty mempool
+    // also carries only the coinbase, so both have exactly 1 transaction.
+    assert_eq!(
+        min_c.transactions.len(),
+        1,
+        "minimal candidate must carry exactly the coinbase emission tx",
+    );
+    assert_eq!(
+        full_c.transactions.len(),
+        1,
+        "full candidate on a quiet chain must also carry exactly the coinbase emission tx",
+    );
+
+    // Consensus surfaces must agree between the two modes. The timestamp field
+    // inside the header MAY differ if the two calls happen on different
+    // wall-clock milliseconds — but this regime uses `PARENT_TIMESTAMP` far
+    // in the future so the clamped-monotonic branch always wins and both calls
+    // produce the identical deterministic timestamp (`parent.timestamp + 1`).
+    // Explicit surface-by-surface assertions keep the contract legible.
+
+    // Transaction vector (serialized bytes must be identical).
+    assert_eq!(
+        serialize_txs(&min_c.transactions),
+        serialize_txs(&full_c.transactions),
+        "serialized transactions must match between Minimal and Full on a quiet chain",
+    );
+
+    // Canonical roots embedded in the header.
+    assert_eq!(
+        min_c.header.transactions_root, full_c.header.transactions_root,
+        "transactions_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.state_root, full_c.header.state_root,
+        "state_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.extension_root, full_c.header.extension_root,
+        "extension_root must match between Minimal and Full",
+    );
+
+    // AVL proof bytes.
+    assert_eq!(
+        min_c.ad_proof_bytes, full_c.ad_proof_bytes,
+        "ad_proof_bytes must match between Minimal and Full",
+    );
+
+    // Work height (same pipeline, same candidate height).
+    assert_eq!(
+        min_c.header.height, full_c.header.height,
+        "candidate height must match between Minimal and Full",
+    );
+}
+
+/// Mainnet / post-EIP-27 twin of `minimal_build_equals_full_build_on_quiet_chain`:
+/// same assertions under `reemission = Some(mainnet)` and candidate height 777_300.
+/// On mainnet (post-activation), both `Minimal` and `Full` with an empty mempool
+/// must agree on every consensus-bearing surface — the fast first-publish never
+/// sacrifices correctness on the deployed EIP-27 emission path.
+#[test]
+fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
+    let regime = Regime::mainnet_post_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+
+    let snap = store
+        .committed_snapshot()
+        .expect("snapshot read")
+        .expect("committed state present");
+
+    // Minimal build: emission-only, no mempool, no rent.
+    let (min_c, _min_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Minimal,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("minimal generate_candidate ok")
+    .expect("minimal candidate is Some");
+
+    // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
+    let (full_c, _full_w, _) = generate_candidate(
+        &snap,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+    )
+    .expect("full generate_candidate ok")
+    .expect("full candidate is Some");
+
+    assert_eq!(
+        min_c.transactions.len(),
+        1,
+        "minimal candidate must carry exactly the coinbase emission tx",
+    );
+    assert_eq!(
+        full_c.transactions.len(),
+        1,
+        "full candidate on a quiet chain must also carry exactly the coinbase emission tx",
+    );
+
+    assert_eq!(
+        serialize_txs(&min_c.transactions),
+        serialize_txs(&full_c.transactions),
+        "serialized transactions must match between Minimal and Full on a quiet chain",
+    );
+    assert_eq!(
+        min_c.header.transactions_root, full_c.header.transactions_root,
+        "transactions_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.state_root, full_c.header.state_root,
+        "state_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.extension_root, full_c.header.extension_root,
+        "extension_root must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.ad_proof_bytes, full_c.ad_proof_bytes,
+        "ad_proof_bytes must match between Minimal and Full",
+    );
+    assert_eq!(
+        min_c.header.height, full_c.header.height,
+        "candidate height must match between Minimal and Full",
+    );
+}
 
 #[test]
 fn generate_candidate_offloop_snapshot_matches_onloop_store_byte_for_byte() {
@@ -647,8 +984,9 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         .committed_snapshot()
         .expect("snapshot read")
         .expect("committed state present");
-    let (snap_c, snap_w) = generate_candidate(
+    let (snap_c, snap_w, _timings) = generate_candidate(
         &snap,
+        BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
         &MonetarySettings::mainnet(),

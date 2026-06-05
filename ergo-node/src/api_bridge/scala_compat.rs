@@ -141,18 +141,15 @@ impl NodeChainQuery for ScalaCompatBridge {
             headers_height: snap.tip.best_header.height,
             state_version: snap.tip.best_full_block.header_id.clone(),
             full_blocks_score: score_to_u128(&snap.best_full_block_score),
-            // Known divergence from Scala: the value would come from
-            // `SyncState::best_known_header_height()` (maintained from peer
-            // status messages), which the snapshot doesn't surface yet.
-            // Emits 0 until the field is plumbed through the snapshot.
-            max_peer_height: 0,
+            // SyncState::best_known_header_height() via the snapshot — the network-best-height notion Scala's maxPeerHeight tracks.
+            max_peer_height: snap.max_peer_height,
             launch_time: cfg.launch_time_unix_ms,
             is_explorer: false,
             last_seen_message_time: snap.last_seen_message_unix_ms,
             eip27_supported: true,
             headers_score: score_to_u128(&snap.best_header_score),
             parameters,
-            is_mining: false,
+            is_mining: snap.mining_enabled,
         }
     }
 

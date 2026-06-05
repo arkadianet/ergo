@@ -1382,6 +1382,11 @@ async fn run_inner_with_backend(
         } else {
             None
         },
+        // True exactly when the mining engine was spawned (config.mining_config.enabled
+        // AND the wiring was built above). `mining_handle.is_some()` is the
+        // authoritative gate — it matches the expression that determined whether
+        // to enter the `if config.mining_config.enabled` arm.
+        mining_enabled: mining_handle.is_some(),
         api_weight_function,
         recent_blocks_cache: None,
     };
@@ -1450,6 +1455,7 @@ async fn run_inner_with_backend(
         let task = tokio::spawn(super::mining_engine::run_mining_engine(
             reader,
             engine_handle,
+            state.indexer_handle.clone(),
             intent_rx,
             cancel_rx,
         ));

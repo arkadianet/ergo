@@ -709,6 +709,54 @@ async fn engine_builds_second_candidate_after_block_applies() {
     handle.shutdown().await.expect("clean shutdown");
 }
 
+/// §4.2 regression guard: after a block applies, the candidate for the NEW
+/// tip must become servable promptly (the minimal publish), not after a
+/// full enrichment pass. The bound is generous for CI; the property pinned
+/// is "serving resumes without an unbounded gap".
+#[tokio::test]
+async fn new_tip_candidate_serves_promptly_after_block_apply() {
+    let (_dir, handle, _parent_tip) = boot_synced_mining_node().await;
+    let addr = handle.api_addr.expect("api bound");
+
+    // Boot synced at N; serve the N+1 candidate.
+    assert!(
+        poll_best_full_height(&handle, PARENT_HEIGHT).await,
+        "node must boot synced at the seeded parent height {PARENT_HEIGHT}",
+    );
+    let work = poll_candidate(addr).await;
+    let h0 = work.h.expect("candidate carries a height");
+    assert_eq!(h0, CANDIDATE_HEIGHT, "boot candidate is for N+1");
+
+    // Solve + submit the N+1 block.
+    let nonce = solve(&msg_bytes(&work), h0, &work.b);
+    let solution_body = format!(r#"{{"n":"{}"}}"#, hex::encode(nonce));
+    let resp = http_request(addr, "POST", "/mining/solution", Some(&solution_body)).await;
+    assert_eq!(
+        resp.status, 200,
+        "solution must be accepted (200); body: {}",
+        resp.body,
+    );
+
+    // The tip advances; time how long until the N+2 candidate appears.
+    let started = std::time::Instant::now();
+    let next_work = poll_candidate_at_height(addr, h0 + 1).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        next_work.h,
+        Some(h0 + 1),
+        "served candidate must be for the new tip (N+2)",
+    );
+    // Below poll_candidate_at_height's own ~8s panic bound, so this assertion
+    // (not the helper's panic) is what fails on a slow publish.
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "new-tip candidate must become servable within 6s of submit; took {elapsed:?}",
+    );
+
+    handle.shutdown().await.expect("clean shutdown");
+}
+
 /// `GET /mining/candidate?longpoll=<msg>` semantics, end-to-end through a booted
 /// node over real HTTP:
 ///   - a value that does NOT match the current template returns immediately
@@ -829,4 +877,38 @@ async fn shutdown_with_a_parked_longpoll_drains() {
         "a longpoll drained at shutdown returns 503 (shutting down) or a final 200, got {}",
         resp.status,
     );
+}
+
+/// `/info` reports `isMining = true` on a node booted with mining enabled.
+/// Pins the snapshot plumbing from `mining_enabled` (NodeState) through
+/// `SnapshotParts` → `NodeSnapshot` → `ScalaCompatBridge::info()` → the
+/// wire response.
+#[tokio::test]
+async fn info_reports_is_mining_true_on_a_mining_node() {
+    let (_dir, handle, _parent_tip) = boot_synced_mining_node().await;
+    let addr = handle.api_addr.expect("api bound");
+
+    // Poll /info until isMining flips true: the boot-empty snapshot serves
+    // `false` until the action loop publishes its first real snapshot, so
+    // breaking on the first parseable value would assert against the
+    // placeholder, not the plumbing under test.
+    let mut is_mining = false;
+    for _ in 0..80 {
+        let resp = http_request(addr, "GET", "/info", None).await;
+        if resp.status == 200 {
+            let v: serde_json::Value = serde_json::from_str(&resp.body).expect("parse /info body");
+            if v.get("isMining").and_then(|x| x.as_bool()) == Some(true) {
+                is_mining = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        is_mining,
+        "/info.isMining must be true on a mining-enabled node",
+    );
+
+    handle.shutdown().await.expect("clean shutdown");
 }

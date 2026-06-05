@@ -43,8 +43,11 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// solution arriving, given that longpoll (§9) keeps miners on a fresh template
 /// rather than grinding a stale one. A solution for a template evicted beyond
 /// this window is not rejected — the miner re-polls (design §336), and the
-/// submit-time executor recheck remains authoritative.
-const MAX_RETAINED_TEMPLATES: usize = 8;
+/// submit-time executor recheck remains authoritative. Sized for two publishes
+/// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
+/// tip-changes of in-flight solution history, matching the pre-two-phase
+/// horizon.
+const MAX_RETAINED_TEMPLATES: usize = 16;
 
 /// Where the miner reward key comes from. Mirrors Scala's two-tier
 /// resolution (`ErgoMiner`): an operator-configured key, or the wallet's
@@ -332,6 +335,19 @@ impl MiningHandle {
             .rev()
             .find(|t| t.candidate.parent_id == parent)
             .map(|t| t.work.clone())
+    }
+
+    /// Whether any retained template was built against `parent`. The engine
+    /// driver uses this to decide a tip's first build (nothing servable yet →
+    /// publish a minimal template first) versus a refresh (a template already
+    /// serves → go straight to the enriched build).
+    pub fn has_template_for_parent(&self, parent: &[u8; 32]) -> bool {
+        let cache = self.cache.read().expect("cache poisoned");
+        cache
+            .templates
+            .iter()
+            .rev()
+            .any(|t| t.candidate.parent_id == *parent)
     }
 
     /// Like [`MiningHandle::cached_work_if_synced`], but also returns the
@@ -706,6 +722,62 @@ mod tests {
     }
 
     #[test]
+    fn minimal_then_full_same_parent_publishes_one_clean_jobs_and_serves_newest() {
+        // Two-phase publish contract: the Minimal publish (template A) and the
+        // enriched Full publish (template B) for the SAME parent must produce
+        // exactly one clean_jobs = true (the first/minimal publish on a new tip)
+        // and one clean_jobs = false (the enriched refresh on the same tip), with
+        // template_seq incrementing by 1 on the second publish. Serving returns
+        // the newest matching the current tip, so B (the enriched template) wins.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0xCC_u8; 32];
+        h.set_best_tip(synced_tip_seq(parent, 4));
+
+        // Phase 1: Minimal publish (template A, msg [0xAA;32]).
+        let (ca, wa) = candidate_pair_msg(parent, [0xAA_u8; 32]);
+        let id_a = h
+            .publish_if_current(ca, wa, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .expect("minimal (first) publish for new tip must succeed");
+        assert!(
+            id_a.clean_jobs,
+            "first publish on a new tip must be clean_jobs = true",
+        );
+        let seq_a = id_a.template_seq;
+
+        // Phase 2: Full (enriched) publish (template B, msg [0xBB;32]) — same parent.
+        let (cb, wb) = candidate_pair_msg(parent, [0xBB_u8; 32]);
+        let id_b = h
+            .publish_if_current(
+                cb,
+                wb.clone(),
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::MempoolRefresh,
+            )
+            .expect("enriched (second) publish for same parent must succeed");
+        assert!(
+            !id_b.clean_jobs,
+            "same-parent republish must not flag clean_jobs",
+        );
+        assert_eq!(
+            id_b.chain_seq, id_a.chain_seq,
+            "same-parent republish carries the same chain_seq",
+        );
+        assert_eq!(
+            id_b.template_seq,
+            seq_a + 1,
+            "enriched publish increments template_seq by exactly 1",
+        );
+
+        // Serving returns the newest (B), not A.
+        assert_eq!(
+            h.cached_work_if_synced().map(|w| w.msg),
+            Some([0xBB_u8; 32]),
+            "cached_work_if_synced must serve the newest (enriched) template, not the minimal one",
+        );
+    }
+
+    #[test]
     fn publish_stamps_live_tip_era_not_stale_intent_era_on_aba() {
         // ABA reorg: tip A → B → back to A. A build that started in the first
         // A-era can finish and publish only after the chain has flipped back to
@@ -1037,6 +1109,40 @@ mod tests {
             matches!(outcome, SolutionOutcome::StaleParent { .. }),
             "verify must scan past the PoW-failing newest templates to the deep \
              PoW-passing one, got {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn has_template_for_parent_tracks_publishes() {
+        // False before any publish for the parent; true immediately after;
+        // false for a different parent.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent_p = [0xE0u8; 32];
+        let parent_q = [0xE1u8; 32];
+
+        // Nothing published yet — no template for any parent.
+        assert!(
+            !h.has_template_for_parent(&parent_p),
+            "no template retained before any publish",
+        );
+
+        // Set the tip so publish_if_current accepts.
+        h.set_best_tip(synced_tip(parent_p));
+
+        // Publish one template for parent P.
+        let (c, w) = candidate_pair(parent_p);
+        assert!(h
+            .publish_if_current(c, w, &parent_p, || BUILT_AT_MS, BuildReason::Tip)
+            .is_some());
+
+        // Now P is retained; Q is not.
+        assert!(
+            h.has_template_for_parent(&parent_p),
+            "template for P is retained after publishing it",
+        );
+        assert!(
+            !h.has_template_for_parent(&parent_q),
+            "no template for Q when only P was published",
         );
     }
 

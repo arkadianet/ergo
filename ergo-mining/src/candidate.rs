@@ -57,6 +57,36 @@ use ergo_validation::pre_header::{
     build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
 };
 
+/// Wall-clock cost of the expensive `generate_candidate` phases, measured per
+/// build and surfaced on the engine's build-complete log line.
+///
+/// The buckets cover the five named phases; cheap assembly steps between them
+/// are unmeasured, so the fields do not sum to the engine's total build time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhaseTimings {
+    /// Phases 8–9: emission tx build + validation.
+    pub emission: std::time::Duration,
+    /// Phase 9c: storage-rent claim build (zero when rent disabled/empty).
+    pub rent: std::time::Duration,
+    /// Phases 9d–9e: mempool selection + per-tx re-validation + fee-tx trim.
+    pub select: std::time::Duration,
+    /// Phase 10: AVL+ dry-run (new_state_root + proof bytes) — the report's
+    /// prime cost suspect.
+    pub dryrun: std::time::Duration,
+    /// Phase 12: tx/witness-id derivation + transactions/extension roots.
+    pub roots: std::time::Duration,
+}
+
+/// What a candidate build includes. `Minimal` is the consensus-complete
+/// emission-only template published the instant a new tip lands (forfeits
+/// only fees for the seconds until the enriched refresh); `Full` adds the
+/// rent self-claim, mempool selection, and the fee tx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildMode {
+    Minimal,
+    Full,
+}
+
 /// Cached state for a generated candidate. Wraps everything the
 /// solution path needs to assemble a `FullBlock`.
 #[derive(Debug, Clone)]
@@ -105,26 +135,29 @@ pub struct Candidate {
 /// transactions are selected (placed after the coinbase tx, before the
 /// fee-collecting tx).
 ///
-/// `eligible_rent_boxes` are storage-rent-eligible boxes (resolved from
-/// state by the caller, oldest-first, already capped) the miner
-/// self-claims with no fee. The claim is pinned ahead of mempool selection
-/// so any conflicting fee-bearing claim on the same box is excluded. An
-/// empty slice disables rent collection.
+/// `eligible_rent_boxes` are storage-rent-eligible boxes (resolved by the
+/// engine driver against the build's committed snapshot, oldest-first,
+/// already capped) the miner self-claims with no fee. The claim is pinned
+/// ahead of mempool selection so any conflicting fee-bearing claim on the
+/// same box is excluded. An empty slice disables rent collection.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_candidate<V: CandidateStateView>(
     view: &V,
+    mode: BuildMode,
     mempool: MempoolReadSnapshot,
     miner_pk: &[u8; 33],
     monetary: &MonetarySettings,
     reemission: Option<&ReemissionSettings>,
     chain_config: &DifficultyParams,
     eligible_rent_boxes: &[ErgoBox],
-) -> Result<Option<(Candidate, WorkMessage)>, MiningError> {
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
     //    redb read txn so the whole build is one consistent committed view).
     let parent_id: [u8; 32] = view.best_full_block_id();
     let parent_height = view.best_full_block_height();
     let candidate_height = parent_height + 1;
+    let mut timings = PhaseTimings::default();
 
     if is_epoch_boundary_mainnet(candidate_height) {
         return Err(MiningError::InvalidConfig(format!(
@@ -224,6 +257,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     //     practice now that mainnet is past activation).
     //   - reemission = None: network has no EIP-27 protocol (new
     //     public testnet); always pre-EIP-27 emission tx.
+    let phase_start = std::time::Instant::now();
     let emission_box = lookup_emission_box_from_parent(view, &parent_id, &parent_header)?;
     let emission_tx = match reemission {
         Some(reem) if candidate_height > reem.activation_height => {
@@ -277,164 +311,180 @@ pub fn generate_candidate<V: CandidateStateView>(
         })?
     };
     let emission_cost = emission_cost_acc.total_block_cost();
+    timings.emission = phase_start.elapsed();
 
-    // 9b. Seed an in-block overlay (over the committed state tip — the same
-    //     base view the submit-time validator uses) with the emission tx.
-    let base: &dyn UtxoView = view;
-    let mut overlay = CandidateOverlay::new(base);
-    overlay.apply_tx(&emission_tx)?;
+    // 9b–9e. Block enrichment — skipped wholesale in a Minimal build: no
+    //        overlay, no rent claim, no mempool selection, no fee tx. The
+    //        minimal template is the strict [emission] prefix of a full
+    //        block — same shape, same consensus pipeline below.
+    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal {
+        (None, Vec::new(), None)
+    } else {
+        // 9b. Seed an in-block overlay (over the committed state tip — the same
+        //     base view the submit-time validator uses) with the emission tx.
+        let base: &dyn UtxoView = view;
+        let mut overlay = CandidateOverlay::new(base);
+        overlay.apply_tx(&emission_tx)?;
 
-    // 9c. Pinned storage-rent self-claim, sized to FILL the block budget.
-    //     Sweep the oldest eligible boxes into a claim bounded by the block
-    //     cost/size budget (after the coinbase, reserving ~1/16 of the block
-    //     for fee-paying user txs), so the pinned [coinbase, rent] prefix can
-    //     never exceed max_block_cost / max_block_size — only the block caps
-    //     gate a self-mined tx (no consensus per-tx size limit; per-tx counts
-    //     cap at 32_767, far above what fits). The claim is applied to the
-    //     overlay BEFORE mempool selection so any conflicting fee-bearing
-    //     claim on the same box is excluded. Zero fee; proceeds to the
-    //     miner P2PK.
-    let max_block_cost = active_params.max_block_cost as u64;
-    let max_block_size = active_params.max_block_size as u64;
-    let rent_cost_ceiling = max_block_cost
-        .saturating_sub(DEFAULT_COST_SAFETY_GAP)
-        .saturating_sub(emission_cost)
-        .saturating_sub(max_block_cost / 16);
-    let rent_size_ceiling = max_block_size
-        .saturating_sub(emission_size)
-        .saturating_sub(max_block_size / 16);
-    let (checked_rent, rent_cost, rent_size) = match build_budget_bounded_rent_claim(
-        eligible_rent_boxes,
-        candidate_height,
-        &params,
-        eligible_rent_boxes.len(),
-        miner_pk,
-        &ctx,
-        last_headers.as_slice(),
-        rent_cost_ceiling,
-        rent_size_ceiling,
-    )? {
-        Some((checked, cost, size)) => {
-            overlay.apply_tx(checked.transaction())?;
-            (Some(checked), cost, size)
-        }
-        None => (None, 0, 0),
-    };
-
-    // 9d. Select mempool transactions into the budget remaining after the
-    //     coinbase + rent claim. The overlay (emission + rent applied)
-    //     excludes intra-block double-spends and rent conflicts; the budgets
-    //     keep the block under the voted cost/size caps (candidate_dry_run
-    //     checks neither).
-    let cost_budget = max_block_cost
-        .saturating_sub(DEFAULT_COST_SAFETY_GAP)
-        .saturating_sub(emission_cost)
-        .saturating_sub(rent_cost);
-    let size_budget = max_block_size
-        .saturating_sub(emission_size)
-        .saturating_sub(rent_size)
-        .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
-
-    let selected = select_user_txs(
-        &mut overlay,
-        &mempool,
-        &ctx,
-        &params,
-        last_headers.as_slice(),
-        cost_budget,
-        size_budget,
-    )?;
-
-    // 9e. Decide the final user set + fee tx. Trim the lowest-priority user
-    //     tx (rebuilding the fee tx) until the assembled block fits BOTH the
-    //     voted cost cap — emission + rent + user txs + the fee tx's OWN
-    //     cost, under a safety gap — and the BlockTransactions size cap
-    //     (rule 306). `candidate_dry_run` checks neither, and the fee tx's
-    //     cost (one input per collected fee box) is otherwise unbudgeted, so
-    //     a block could pass the dry-run yet be rejected at submit on
-    //     `max_block_cost`. The fee tx is validated against a FRESH overlay
-    //     rebuilt from the kept set, so a trimmed tx never leaves a stale
-    //     spend behind.
-    let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
-    let cost_ceiling = max_block_cost.saturating_sub(DEFAULT_COST_SAFETY_GAP);
-    let checked_fee = loop {
-        let user_raw: Vec<Transaction> = user_checked
-            .iter()
-            .map(|(c, _)| c.transaction().clone())
-            .collect();
-        let fee_tx_opt = build_fee_tx(&user_raw, miner_pk, candidate_height)?;
-
-        // Fresh overlay over [emission, rent, kept user txs] so the fee tx's
-        // inputs resolve against exactly the block's contents.
-        let mut fee_overlay = CandidateOverlay::new(base);
-        fee_overlay.apply_tx(&emission_tx)?;
-        if let Some(cr) = &checked_rent {
-            fee_overlay.apply_tx(cr.transaction())?;
-        }
-        for (c, _) in &user_checked {
-            fee_overlay.apply_tx(c.transaction())?;
-        }
-
-        let (checked_fee, fee_cost) = match &fee_tx_opt {
-            Some(fee_tx) => {
-                let fee_bytes = serialize_tx(fee_tx, "serialize_fee_tx")?;
-                let (fee_inputs, fee_data_inputs) =
-                    fee_overlay
-                        .resolve_tx(fee_tx)
-                        .ok_or_else(|| MiningError::IdComputation {
-                            op: "fee_tx_resolve",
-                            reason: "fee-proposition box not resolvable against in-block overlay"
-                                .into(),
-                        })?;
-                let mut fee_cost_acc = CostAccumulator::new(block_cap);
-                let cf = {
-                    let mut fee_ctx = TxValidationCtx {
-                        ctx: &ctx,
-                        params: &params,
-                        cost: &mut fee_cost_acc,
-                        last_headers: last_headers.as_slice(),
-                    };
-                    validate_transaction_parsed(
-                        fee_tx.clone(),
-                        &fee_bytes,
-                        fee_inputs,
-                        fee_data_inputs,
-                        false,
-                        &mut fee_ctx,
-                    )
-                    .map_err(|e| MiningError::IdComputation {
-                        op: "validate_fee_tx",
-                        reason: format!("{e:?}"),
-                    })?
-                };
-                (Some(cf), fee_cost_acc.total_block_cost())
+        // 9c. Pinned storage-rent self-claim, sized to FILL the block budget.
+        //     Sweep the oldest eligible boxes into a claim bounded by the block
+        //     cost/size budget (after the coinbase, reserving ~1/16 of the block
+        //     for fee-paying user txs), so the pinned [coinbase, rent] prefix can
+        //     never exceed max_block_cost / max_block_size — only the block caps
+        //     gate a self-mined tx (no consensus per-tx size limit; per-tx counts
+        //     cap at 32_767, far above what fits). The claim is applied to the
+        //     overlay BEFORE mempool selection so any conflicting fee-bearing
+        //     claim on the same box is excluded. Zero fee; proceeds to the
+        //     miner P2PK.
+        let max_block_cost = active_params.max_block_cost as u64;
+        let max_block_size = active_params.max_block_size as u64;
+        let phase_start = std::time::Instant::now();
+        let rent_cost_ceiling = max_block_cost
+            .saturating_sub(DEFAULT_COST_SAFETY_GAP)
+            .saturating_sub(emission_cost)
+            .saturating_sub(max_block_cost / 16);
+        let rent_size_ceiling = max_block_size
+            .saturating_sub(emission_size)
+            .saturating_sub(max_block_size / 16);
+        let (checked_rent, rent_cost, rent_size) = match build_budget_bounded_rent_claim(
+            eligible_rent_boxes,
+            candidate_height,
+            &params,
+            eligible_rent_boxes.len(),
+            miner_pk,
+            &ctx,
+            last_headers.as_slice(),
+            rent_cost_ceiling,
+            rent_size_ceiling,
+        )? {
+            Some((checked, cost, size)) => {
+                overlay.apply_tx(checked.transaction())?;
+                (Some(checked), cost, size)
             }
-            None => (None, 0),
+            None => (None, 0, 0),
         };
+        timings.rent = phase_start.elapsed();
 
-        let user_cost: u64 = user_checked.iter().map(|(_, cost)| *cost).sum();
-        let total_cost = emission_cost
-            .saturating_add(rent_cost)
-            .saturating_add(user_cost)
-            .saturating_add(fee_cost);
+        // 9d. Select mempool transactions into the budget remaining after the
+        //     coinbase + rent claim. The overlay (emission + rent applied)
+        //     excludes intra-block double-spends and rent conflicts; the budgets
+        //     keep the block under the voted cost/size caps (candidate_dry_run
+        //     checks neither).
+        let phase_start = std::time::Instant::now();
+        let cost_budget = max_block_cost
+            .saturating_sub(DEFAULT_COST_SAFETY_GAP)
+            .saturating_sub(emission_cost)
+            .saturating_sub(rent_cost);
+        let size_budget = max_block_size
+            .saturating_sub(emission_size)
+            .saturating_sub(rent_size)
+            .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
 
-        let mut probe: Vec<Transaction> = Vec::with_capacity(3 + user_raw.len());
-        probe.push(emission_tx.clone());
-        if let Some(cr) = &checked_rent {
-            probe.push(cr.transaction().clone());
-        }
-        probe.extend(user_raw);
-        if let Some(ft) = &fee_tx_opt {
-            probe.push(ft.clone());
-        }
-        let section_size = block_transactions_section_size(&probe, pre_header.version)?;
+        let selected = select_user_txs(
+            &mut overlay,
+            &mempool,
+            &ctx,
+            &params,
+            last_headers.as_slice(),
+            cost_budget,
+            size_budget,
+        )?;
 
-        if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
-            || user_checked.is_empty()
-        {
-            break checked_fee;
-        }
-        user_checked.pop();
+        // 9e. Decide the final user set + fee tx. Trim the lowest-priority user
+        //     tx (rebuilding the fee tx) until the assembled block fits BOTH the
+        //     voted cost cap — emission + rent + user txs + the fee tx's OWN
+        //     cost, under a safety gap — and the BlockTransactions size cap
+        //     (rule 306). `candidate_dry_run` checks neither, and the fee tx's
+        //     cost (one input per collected fee box) is otherwise unbudgeted, so
+        //     a block could pass the dry-run yet be rejected at submit on
+        //     `max_block_cost`. The fee tx is validated against a FRESH overlay
+        //     rebuilt from the kept set, so a trimmed tx never leaves a stale
+        //     spend behind.
+        let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
+        let cost_ceiling = max_block_cost.saturating_sub(DEFAULT_COST_SAFETY_GAP);
+        let checked_fee = loop {
+            let user_raw: Vec<Transaction> = user_checked
+                .iter()
+                .map(|(c, _)| c.transaction().clone())
+                .collect();
+            let fee_tx_opt = build_fee_tx(&user_raw, miner_pk, candidate_height)?;
+
+            // Fresh overlay over [emission, rent, kept user txs] so the fee tx's
+            // inputs resolve against exactly the block's contents.
+            let mut fee_overlay = CandidateOverlay::new(base);
+            fee_overlay.apply_tx(&emission_tx)?;
+            if let Some(cr) = &checked_rent {
+                fee_overlay.apply_tx(cr.transaction())?;
+            }
+            for (c, _) in &user_checked {
+                fee_overlay.apply_tx(c.transaction())?;
+            }
+
+            let (checked_fee, fee_cost) = match &fee_tx_opt {
+                Some(fee_tx) => {
+                    let fee_bytes = serialize_tx(fee_tx, "serialize_fee_tx")?;
+                    let (fee_inputs, fee_data_inputs) =
+                        fee_overlay.resolve_tx(fee_tx).ok_or_else(|| {
+                            MiningError::IdComputation {
+                                op: "fee_tx_resolve",
+                                reason:
+                                    "fee-proposition box not resolvable against in-block overlay"
+                                        .into(),
+                            }
+                        })?;
+                    let mut fee_cost_acc = CostAccumulator::new(block_cap);
+                    let cf = {
+                        let mut fee_ctx = TxValidationCtx {
+                            ctx: &ctx,
+                            params: &params,
+                            cost: &mut fee_cost_acc,
+                            last_headers: last_headers.as_slice(),
+                        };
+                        validate_transaction_parsed(
+                            fee_tx.clone(),
+                            &fee_bytes,
+                            fee_inputs,
+                            fee_data_inputs,
+                            false,
+                            &mut fee_ctx,
+                        )
+                        .map_err(|e| MiningError::IdComputation {
+                            op: "validate_fee_tx",
+                            reason: format!("{e:?}"),
+                        })?
+                    };
+                    (Some(cf), fee_cost_acc.total_block_cost())
+                }
+                None => (None, 0),
+            };
+
+            let user_cost: u64 = user_checked.iter().map(|(_, cost)| *cost).sum();
+            let total_cost = emission_cost
+                .saturating_add(rent_cost)
+                .saturating_add(user_cost)
+                .saturating_add(fee_cost);
+
+            let mut probe: Vec<Transaction> = Vec::with_capacity(3 + user_raw.len());
+            probe.push(emission_tx.clone());
+            if let Some(cr) = &checked_rent {
+                probe.push(cr.transaction().clone());
+            }
+            probe.extend(user_raw);
+            if let Some(ft) = &fee_tx_opt {
+                probe.push(ft.clone());
+            }
+            let section_size = block_transactions_section_size(&probe, pre_header.version)?;
+
+            if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
+                || user_checked.is_empty()
+            {
+                break checked_fee;
+            }
+            user_checked.pop();
+        };
+        timings.select = phase_start.elapsed();
+
+        (checked_rent, user_checked, checked_fee)
     };
 
     // 9f. Assemble the final tx list in block order:
@@ -453,8 +503,10 @@ pub fn generate_candidate<V: CandidateStateView>(
     let raw_txs: Vec<Transaction> = checked.iter().map(|c| c.transaction().clone()).collect();
 
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
+    let phase_start = std::time::Instant::now();
     let (new_state_root, ad_proof_bytes, snapshot_tip_id) =
         view.candidate_dry_run(&checked).map_err(state_err)?;
+    timings.dryrun = phase_start.elapsed();
 
     // 11. Parent-id guard: best-full advanced during generation.
     if snapshot_tip_id != parent_id {
@@ -462,6 +514,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     }
 
     // 12. Compute roots.
+    let phase_start = std::time::Instant::now();
     let ad_proofs_root = Digest32::from_bytes(*blake2b256(&ad_proof_bytes).as_bytes());
 
     let tx_ids_owned: Vec<[u8; 32]> = raw_txs
@@ -502,6 +555,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
     let extension_root_bytes = extension_root(&extension_field_refs);
+    timings.roots = phase_start.elapsed();
 
     // 13. Assemble header with placeholder solution.
     let placeholder_solution = AutolykosSolution::V2 {
@@ -551,7 +605,7 @@ pub fn generate_candidate<V: CandidateStateView>(
 
     let _ = (validation_settings,); // reserved for v2 user-tx validation
 
-    Ok(Some((candidate, work_msg)))
+    Ok(Some((candidate, work_msg, timings)))
 }
 
 // ---- private helpers ----
