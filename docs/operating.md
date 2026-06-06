@@ -340,11 +340,15 @@ The default posture is **safe by default for a single-host operator**:
 
 What the `api_key` actually gates is **narrow, by design** (Scala parity):
 only the `/wallet/*` JSON subtree and `POST /node/shutdown` (and its
-`/api/v1/node/shutdown` alias) require the key. **Everything else is public**
+`/api/v1/node/shutdown` alias) require the key. The gate covers those
+whole path prefixes — an unknown subpath under `/wallet/` or `/node/`
+still rejects on the key first, mirroring Scala's
+`pathPrefix(...) & withAuth`; every other unmatched path is a plain,
+ungated `404`. **Everything else is public**
 regardless of `public_bind` — including transaction submission
 (`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
 `POST /blocks`, `/mining/solution`, all reads, `/blockchain/*`,
-`/peers/*`, `/utils/*`, the dashboard, and `/metrics`.
+`/emission/*`, `/peers/*`, `/utils/*`, the dashboard, and `/metrics`.
 
 **Before exposing the node beyond localhost:**
 

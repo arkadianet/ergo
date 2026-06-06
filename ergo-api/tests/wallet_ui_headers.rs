@@ -72,6 +72,7 @@ fn app() -> axum::Router {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        emission: None,
         utxo_reads_supported: true,
     };
     // Security gate is irrelevant to these header assertions; `None`

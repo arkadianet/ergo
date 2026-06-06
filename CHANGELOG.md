@@ -16,6 +16,39 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- **Scala-compat `GET /emission/at/{blockHeight}`** — per-height emission
+  schedule data: `{height, minerReward, totalCoinsIssued, totalRemainCoins,
+  reemitted}`, EIP-27-aware (mirrors `EmissionApiRoute.emissionInfoAtHeight`:
+  once reemission activates, the charge moves out of `minerReward` and shows
+  up as `reemitted`). Public route — no `api_key`, mounted in every node
+  mode; the schedule is static per-network math. The cumulative-issuance
+  primitives (`issued_coins_after_height`, `coins_and_blocks_total`,
+  `emission_info_at_height`) join `ergo-mining::emission_rules`,
+  differential-tested against 17 vectors captured from a live Scala mainnet
+  node (`test-vectors/api/emission/`). `GET /emission/scripts` remains
+  unimplemented — the emission/reemission contract-tree predefs aren't
+  exposed in the workspace yet; its oracle capture ships at
+  `test-vectors/api/emission/scripts.json` for whoever picks it up.
+
+### Fixed
+
+- **Unknown paths no longer answer `403 invalid.api-key` when the API key
+  gate is configured.** The `api_key` (and indexer status-gate) middleware
+  was attached with `Router::layer`, which also wraps the subtree's implicit
+  fallback; `Router::merge` then propagates that wrapped fallback
+  router-wide, so every unmatched path — including not-yet-implemented
+  Scala-compat routes like `/emission/at` — rejected with 403 instead of
+  404, masquerading as an auth problem. All route middleware now mounts via
+  `route_layer` (matched routes only) and unmatched paths answer a plain,
+  ungated 404. Scala's whole-prefix gating semantics survive through
+  explicit catch-all routes: unknown `/wallet/*` and `/node/*` subpaths
+  still reject on the key first (parity with Scala's
+  `pathPrefix(...) & withAuth`), then 404 once the key passes. The public
+  `/wallet/ui` static routes are unaffected (exact-path routes outrank the
+  gated wildcard).
+
 ## [0.3.0] - 2026-06-03
 
 First public release of the independent Rust Ergo full node. Rolls up all

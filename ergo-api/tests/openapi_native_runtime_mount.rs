@@ -219,6 +219,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        emission: None,
         utxo_reads_supported: true,
     }
 }
@@ -357,5 +358,187 @@ async fn runtime_mount_all_wired_gates_shutdown_on_api_key() {
     assert_eq!(
         body, "shutdown_requested",
         "202 body is the literal shutdown_requested"
+    );
+}
+
+// ----- auth gate vs. router fallback (unknown paths must 404, never 403) -----
+//
+// Regression tests for the `.layer` fallback-capture bug: wrapping a
+// subtree with `Router::layer` also wraps that subtree's implicit
+// fallback, and `Router::merge` propagates the wrapped fallback into the
+// assembled router. The observable symptom: with security wired, EVERY
+// unmatched path (e.g. the then-unimplemented `/emission/at/{h}`)
+// answered `403 invalid.api-key` instead of `404` — masking "route does
+// not exist" as "you need a key". The gate must be mounted with
+// `route_layer` (fires only on matched routes); the gated prefixes keep
+// Scala's whole-prefix semantics via explicit catch-all routes instead.
+
+async fn get_with_key(app: &axum::Router, path: &str, api_key: Option<&str>) -> StatusCode {
+    let mut b = Request::builder().method(Method::GET).uri(path);
+    if let Some(k) = api_key {
+        b = b.header(API_KEY_HEADER, k);
+    }
+    app.clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+fn all_wired_app() -> axum::Router {
+    router_with_mempool_and_wallet_and_security(
+        ctx(Some(submit())),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    )
+}
+
+#[tokio::test]
+async fn unknown_path_is_404_not_auth_gated() {
+    let app = all_wired_app();
+    assert_eq!(
+        get_with_key(&app, "/zzz-definitely-not-a-route", None).await,
+        StatusCode::NOT_FOUND,
+        "an unmatched path must 404 bare — a 403 here means an auth layer \
+         captured the router fallback",
+    );
+    assert_eq!(
+        get_with_key(&app, "/zzz-definitely-not-a-route", Some("hello")).await,
+        StatusCode::NOT_FOUND,
+        "an unmatched path must 404 with a valid key too",
+    );
+}
+
+#[tokio::test]
+async fn unknown_wallet_subpath_keeps_whole_prefix_gated() {
+    // Scala gates the whole `wallet` pathPrefix before inner route
+    // matching (`(pathPrefix("wallet") & withAuth)`, WalletApiRoute.scala),
+    // so an unknown subpath rejects on the key first.
+    let app = all_wired_app();
+    assert_eq!(
+        get_with_key(&app, "/wallet/zzz-not-a-wallet-route", None).await,
+        StatusCode::FORBIDDEN,
+        "unknown /wallet/* subpath must still hit the api_key gate bare",
+    );
+    assert_eq!(
+        get_with_key(&app, "/wallet/zzz-not-a-wallet-route", Some("hello")).await,
+        StatusCode::NOT_FOUND,
+        "unknown /wallet/* subpath is a plain 404 once the key passes \
+         (house unmounted/unknown-surface rule; Scala would render its \
+         global 400 bad.request envelope here — deliberate divergence)",
+    );
+    assert_eq!(
+        get_with_key(&app, "/wallet", None).await,
+        StatusCode::FORBIDDEN,
+        "the bare /wallet prefix itself is gated (Scala pathPrefix parity)",
+    );
+}
+
+#[tokio::test]
+async fn unknown_node_subpath_keeps_whole_prefix_gated() {
+    // Scala gates the whole `node` pathPrefix the same way (probed live:
+    // GET /node/zzz on the reference node → 403 forbidden).
+    let app = all_wired_app();
+    assert_eq!(
+        get_with_key(&app, "/node/zzz-not-a-node-route", None).await,
+        StatusCode::FORBIDDEN,
+        "unknown /node/* subpath must still hit the api_key gate bare",
+    );
+    assert_eq!(
+        get_with_key(&app, "/node/zzz-not-a-node-route", Some("hello")).await,
+        StatusCode::NOT_FOUND,
+        "unknown /node/* subpath is a plain 404 once the key passes",
+    );
+}
+
+// ----- /emission/at (Scala-compat, public, stateless) -----
+//
+// The schedule math is oracle-tested in `ergo-mining` against vectors
+// captured from the live Scala node; these tests pin the route shape:
+// JSON key spelling, publicness (no api_key even when security is
+// wired — the original `/emission/at` 403 regression), the axum-default
+// 400 on a malformed height (house pattern, same as `/blocks/at/:h`),
+// and the unmounted→404 rule.
+
+struct FixtureEmission;
+
+impl ergo_api::emission::EmissionSchedule for FixtureEmission {
+    fn emission_info_at(&self, height: u32) -> ergo_api::emission::EmissionInfoJson {
+        // The h=1_786_000 live-Scala vector (15 ERG era: charge 12, miner 3).
+        ergo_api::emission::EmissionInfoJson {
+            height,
+            miner_reward: 3_000_000_000,
+            total_coins_issued: 95_261_940_000_000_000,
+            total_remain_coins: 2_477_985_000_000_000,
+            reemitted: 12_000_000_000,
+        }
+    }
+}
+
+fn app_with_emission_and_security() -> axum::Router {
+    let mut c = ctx(None);
+    c.emission = Some(Arc::new(FixtureEmission));
+    router_with_mempool_and_wallet_and_security(
+        c,
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    )
+}
+
+#[tokio::test]
+async fn emission_at_is_public_even_with_security_wired() {
+    let app = app_with_emission_and_security();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/emission/at/1786000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "emission/at is ungated — Scala's EmissionApiRoute carries no withAuth",
+    );
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let got: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        got,
+        serde_json::json!({
+            "height": 1_786_000u32,
+            "minerReward": 3_000_000_000u64,
+            "totalCoinsIssued": 95_261_940_000_000_000u64,
+            "totalRemainCoins": 2_477_985_000_000_000u64,
+            "reemitted": 12_000_000_000u64,
+        }),
+        "JSON keys + values must match the live-Scala envelope",
+    );
+}
+
+#[tokio::test]
+async fn emission_at_malformed_height_is_400() {
+    let app = app_with_emission_and_security();
+    assert_eq!(
+        get_with_key(&app, "/emission/at/not-a-number", None).await,
+        StatusCode::BAD_REQUEST,
+        "malformed height rejects with the axum-default 400 (house \
+         pattern, same as /blocks/at/:height)",
+    );
+}
+
+#[tokio::test]
+async fn emission_unwired_is_404_bare() {
+    // No emission view in the ctx → the route is not mounted → the
+    // (ungated) fallback answers 404 even bare with security wired.
+    let app = all_wired_app();
+    assert_eq!(
+        get_with_key(&app, "/emission/at/1786000", None).await,
+        StatusCode::NOT_FOUND,
+        "unmounted /emission/at must 404 bare, never 403",
     );
 }

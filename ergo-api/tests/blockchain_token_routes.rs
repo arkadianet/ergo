@@ -645,6 +645,7 @@ fn build_app_with_mempool(
             network: NetworkPrefix::Mainnet,
             chain_params: None,
             mining: None,
+            emission: None,
             utxo_reads_supported: true,
         },
         None, // admin — tests don't exercise the shutdown endpoint

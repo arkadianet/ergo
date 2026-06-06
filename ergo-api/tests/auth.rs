@@ -182,13 +182,11 @@ async fn scala_hello_secret_unlocks_scala_hello_hash() {
 // reproduce the shutdown router shape and verify the middleware
 // layer in isolation.
 //
-// **Known coverage gap:** these tests do NOT exercise the real
-// `router_with_mempool_and_wallet_and_security(...)` merge path. A
-// future refactor that reorders the merges or moves a route could
-// ship an ungated alias without these tests failing. Closing the gap
-// requires building ~80 LOC of `NodeReadState` + `IndexerQuery` +
-// `NodeChainQuery` fixtures, which is a shared concern between this
-// file, `wallet_*`, and `blockchain_*_routes.rs` tests.
+// The real `router_with_mempool_and_wallet_and_security(...)` merge
+// path is exercised by `tests/openapi_native_runtime_mount.rs`, which
+// pins both the gated aliases AND the fallback discipline (an
+// unmatched path must 404 bare, never 403 — the `.layer` vs
+// `.route_layer` fallback-capture regression).
 //
 // Scope reminder: TransactionsApiRoute.scala:174 leaves
 // `POST /transactions` unauthenticated in the Scala node; we match.
@@ -203,7 +201,9 @@ fn shutdown_app_gated() -> axum::Router {
     let admin_routes: axum::Router = axum::Router::new()
         .route("/api/v1/node/shutdown", post(stub_shutdown))
         .route("/node/shutdown", post(stub_shutdown));
-    admin_routes.layer(axum::middleware::from_fn_with_state(
+    // `route_layer`, mirroring the production wiring in `server.rs` —
+    // a plain `layer` would capture this router's fallback too.
+    admin_routes.route_layer(axum::middleware::from_fn_with_state(
         security(),
         ergo_api::auth::require_api_key,
     ))

@@ -15,9 +15,20 @@
 //!   (`http/api/ApiError.scala:37`).
 //!
 //! Mounted by [`crate::wallet::router_with_security`] and [`crate::server`] around the
-//! `/wallet/*` and `/node/shutdown` routes when an [`ApiSecurity`] is
+//! `/wallet/*` and `/node/*` subtrees when an [`ApiSecurity`] is
 //! configured. Public routes (`/info`, `/blocks/*`, `/peers/*`, …) do not
 //! receive the layer.
+//!
+//! **Mounting discipline**: always attach this gate with
+//! `Router::route_layer`, never `Router::layer`. A plain `layer` also
+//! wraps the subtree's implicit fallback, and `Router::merge` propagates
+//! that wrapped fallback into the assembled router — every unmatched
+//! path node-wide then answers `403 invalid.api-key` instead of `404`,
+//! masking "route does not exist" as "you need a key". Whole-prefix
+//! gating (Scala's `pathPrefix(...) & withAuth`) is preserved via
+//! explicit catch-all routes ([`unknown_gated_subpath`]) that
+//! `route_layer` does cover. Regression pinned by
+//! `tests/openapi_native_runtime_mount.rs`.
 
 use axum::{
     body::Body,
@@ -128,6 +139,22 @@ pub async fn require_api_key(
     } else {
         reject_invalid()
     }
+}
+
+/// Post-auth catch-all for unknown subpaths under a gated prefix
+/// (`/wallet/*`, `/node/*`). Scala gates the whole `pathPrefix` before
+/// inner route matching (`(pathPrefix("wallet") & withAuth)`,
+/// `WalletApiRoute.scala`), so an unknown gated subpath rejects on the
+/// key first; once the key passes we return the house plain `404`
+/// (Scala renders its global `handleNotFound` 400 `bad.request`
+/// envelope here — `ApiRejectionHandler.scala:35` — the 404 is the same
+/// deliberate divergence as the unmounted-surface rule).
+///
+/// Registered as real routes (`/wallet`, `/wallet/*rest`, …) rather
+/// than a subtree fallback so the `route_layer`-mounted gate covers
+/// them — see the mounting-discipline note in the module docs.
+pub(crate) async fn unknown_gated_subpath() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 fn reject_invalid() -> Response {

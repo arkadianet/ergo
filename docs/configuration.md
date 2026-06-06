@@ -133,10 +133,15 @@ beyond loopback.
 
 The `api_key` gate is narrow by design, matching the Scala reference
 node: it protects only the `/wallet/*` routes and the
-`/node/shutdown` route. Every other route is unauthenticated regardless
+`/node/shutdown` route. The gate covers those whole path prefixes —
+an unknown subpath under `/wallet/` or `/node/` rejects on the key
+first (mirroring Scala's `pathPrefix(...) & withAuth`), while any
+other unmatched path is a plain, ungated `404`. Every other route is
+unauthenticated regardless
 of bind scope — including transaction submission
 (`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
-`POST /blocks`, `/mining/*`, all read endpoints, and `/metrics`.
+`POST /blocks`, `/mining/*`, `/emission/*`, all read endpoints, and
+`/metrics`.
 
 Consequences:
 

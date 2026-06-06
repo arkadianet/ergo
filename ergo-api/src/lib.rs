@@ -18,6 +18,7 @@
 pub mod auth;
 pub mod blockchain;
 pub mod compat;
+pub mod emission;
 pub mod mining;
 pub mod server;
 pub mod traits;
