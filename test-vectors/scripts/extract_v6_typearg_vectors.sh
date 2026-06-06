@@ -51,9 +51,10 @@ PYEOF
 for entry in "${SOURCES[@]}"; do
     name="${entry%%|*}"
     source="${entry#*|}"
-    address=$(curl -sf -X POST "$NODE_URL/script/p2sAddress" \
+    address=$(jq --arg source "$source" -n '{"source":$source,"treeVersion":3}' |
+        curl -sf -X POST "$NODE_URL/script/p2sAddress" \
         -H "api_key: $API_KEY" -H "Content-Type: application/json" \
-        -d "{\"source\": \"$source\", \"treeVersion\": 3}" |
+        -d @- |
         python -c "import sys, json; print(json.load(sys.stdin)['address'])")
     tree_hex=$(b58_to_tree_hex "$address")
     printf '%s\t%s\t%s\n' "$name" "$address" "$tree_hex"
