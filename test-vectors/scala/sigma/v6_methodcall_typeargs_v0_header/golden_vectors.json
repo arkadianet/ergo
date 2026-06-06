@@ -1,0 +1,76 @@
+{
+  "_source": "Compiled by official Scala node ergo-6.1.2.jar (sha256 cb1a684e…, ergoplatform/ergo release v6.1.2) via POST /script/p2sAddress with {source, treeVersion: 3}; tree bytes recovered by base58-decoding the returned P2S address (strip 0x03 prefix + 4-byte checksum). See README.md in this directory for full provenance and re-extraction steps.",
+  "_format": "Each entry: { method: human name, call: MethodCall|PropertyCall|ExtractRegisterAs, type_id/method_id: Sigma 6.0.2 ids (0 for the non-MethodCall control), explicit_type_arg: trailing type byte meaning, source: ErgoScript compiled, address: node-returned mainnet P2S address, tree_hex: full ErgoTree wire bytes, header 0x10 }",
+  "vectors": [
+    {
+      "method": "SGlobal.deserializeTo[Header]",
+      "call": "MethodCall",
+      "type_id": 106,
+      "method_id": 4,
+      "explicit_type_arg": "SHeader (0x68)",
+      "source": "sigmaProp(Global.deserializeTo[Header](INPUTS(0).R4[Coll[Byte]].get).height > 100)",
+      "address": "51u9BvdCZPAGkfYiyFbAqdc5rQe8jBDNBqYg4rfyHQU1y9",
+      "tree_hex": "1002040004c801d191db6809dc6a04dd01e4c6b2a4730000040e687301"
+    },
+    {
+      "method": "SGlobal.fromBigEndianBytes[Long]",
+      "call": "MethodCall",
+      "type_id": 106,
+      "method_id": 5,
+      "explicit_type_arg": "SLong (0x05)",
+      "source": "sigmaProp(Global.fromBigEndianBytes[Long](INPUTS(0).R4[Coll[Byte]].get) > 0L)",
+      "address": "cbKCL9sNHmwqjkqnr5ycSw4Fgjjjj3J8stmtxHYD",
+      "tree_hex": "100204000500d191dc6a05dd01e4c6b2a4730000040e057301"
+    },
+    {
+      "method": "SGlobal.some[Int]",
+      "call": "MethodCall",
+      "type_id": 106,
+      "method_id": 9,
+      "explicit_type_arg": "SInt (0x04)",
+      "source": "sigmaProp(Global.some[Int](100).isDefined)",
+      "address": "3UXeVbjc4vJUfNc1QBjnpbuUC5a",
+      "tree_hex": "100104c801d1e6dc6a09dd01730004"
+    },
+    {
+      "method": "SGlobal.none[Int]",
+      "call": "PropertyCall",
+      "type_id": 106,
+      "method_id": 10,
+      "explicit_type_arg": "SInt (0x04)",
+      "source": "sigmaProp(Global.none[Int]().isEmpty)",
+      "address": "5yE83JgkD2vr273XfPYw",
+      "tree_hex": "1000d1efe6db6a0add04"
+    },
+    {
+      "method": "SBox.getReg[Int] (dynamic index)",
+      "call": "MethodCall",
+      "type_id": 99,
+      "method_id": 19,
+      "explicit_type_arg": "SInt (0x04)",
+      "source": "sigmaProp(SELF.getReg[Int](INPUTS.size).isDefined)",
+      "address": "2fp6mEfiurFvjxF6rfk7bju",
+      "tree_hex": "1000d1e6dc6313a701b1a404"
+    },
+    {
+      "method": "SContext.getVarFromInput[Int]",
+      "call": "MethodCall",
+      "type_id": 101,
+      "method_id": 12,
+      "explicit_type_arg": "SInt (0x04)",
+      "source": "sigmaProp(CONTEXT.getVarFromInput[Int](0, 1).isDefined)",
+      "address": "4fnj48BVVN5yjp62Yi9sTHxTNvRSu8N",
+      "tree_hex": "100203000201d1e6dc650cfe027300730104"
+    },
+    {
+      "method": "SBox.getReg[Int] (literal index control: folds to ExtractRegisterAs, no MethodCall, no type byte)",
+      "call": "ExtractRegisterAs",
+      "type_id": 0,
+      "method_id": 0,
+      "explicit_type_arg": "none",
+      "source": "sigmaProp(SELF.getReg[Int](4).isDefined)",
+      "address": "Fo6m5EVJqYdQF5DFk",
+      "tree_hex": "1000d1e6c6a70404"
+    }
+  ]
+}

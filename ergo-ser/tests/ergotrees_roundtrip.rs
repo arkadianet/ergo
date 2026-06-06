@@ -182,3 +182,102 @@ fn v6_unsigned_bigint_tree_h210076_roundtrips() {
         "canonical re-serialized bytes must equal the testnet wire bytes",
     );
 }
+
+#[derive(Deserialize)]
+struct V6TypeArgVectorFile {
+    vectors: Vec<V6TypeArgVector>,
+}
+
+#[derive(Deserialize)]
+struct V6TypeArgVector {
+    method: String,
+    call: String,
+    type_id: u8,
+    method_id: u8,
+    tree_hex: String,
+}
+
+/// Scala-extracted oracle: v6 method calls carrying explicit type-arg
+/// bytes inside v0-header (`0x10`) trees. The official Scala node 6.1.2
+/// compiler emits exactly this shape — the tree-header version byte is a
+/// wire-format selector, so `method_explicit_type_args_count` must key
+/// the trailing-type-byte read on `(type_id, method_id)` alone, never on
+/// `tree_version`. Covers all six Sigma 6.0.2 `hasExplicitTypeArgs`
+/// pairs plus a literal-index `getReg` control that folds to
+/// `ExtractRegisterAs` (no MethodCall, no type byte). Provenance and
+/// re-extraction steps:
+/// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/README.md`.
+#[test]
+fn v6_methodcall_typeargs_v0_header_trees_roundtrip() {
+    const METHOD_CALL: u8 = 0xdc;
+    const PROPERTY_CALL: u8 = 0xdb;
+    const EXTRACT_REGISTER_AS: u8 = 0xc6;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/golden_vectors.json");
+    let data = fs::read_to_string(&path)
+        .expect("v6_methodcall_typeargs_v0_header/golden_vectors.json must exist");
+    let file: V6TypeArgVectorFile = serde_json::from_str(&data).expect("vector file must parse");
+    assert_eq!(file.vectors.len(), 7, "fixture changed: expected 7 vectors");
+
+    for v in &file.vectors {
+        let raw =
+            hex::decode(&v.tree_hex).unwrap_or_else(|e| panic!("bad hex for {}: {e}", v.method));
+        assert_eq!(
+            raw[0], 0x10,
+            "{}: header byte must be 0x10 (v0, cseg, no size bit)",
+            v.method,
+        );
+
+        let mut r = VlqReader::new(&raw);
+        let tree = read_ergo_tree(&mut r)
+            .unwrap_or_else(|e| panic!("{}: Scala-compiled v0 tree must parse: {e}", v.method));
+        assert_eq!(tree.version, 0, "{}: tree version", v.method);
+        assert!(!tree.has_size, "{}: no size bit", v.method);
+        assert!(tree.constant_segregation, "{}: cseg bit", v.method);
+
+        // The wire bytes must really carry the claimed call shape.
+        match v.call.as_str() {
+            "MethodCall" | "PropertyCall" => {
+                let opcode = if v.call == "MethodCall" {
+                    METHOD_CALL
+                } else {
+                    PROPERTY_CALL
+                };
+                let triple = [opcode, v.type_id, v.method_id];
+                assert!(
+                    raw.windows(3).any(|w| w == triple),
+                    "{}: bytes must contain [0x{opcode:02x}, {}, {}]",
+                    v.method,
+                    v.type_id,
+                    v.method_id,
+                );
+            }
+            "ExtractRegisterAs" => {
+                assert!(
+                    raw.contains(&EXTRACT_REGISTER_AS),
+                    "{}: control vector must use the ExtractRegisterAs primitive",
+                    v.method,
+                );
+                assert!(
+                    !raw.windows(3).any(|w| w == [METHOD_CALL, 99, 19]),
+                    "{}: literal-index getReg must NOT emit the (99,19) MethodCall",
+                    v.method,
+                );
+            }
+            other => panic!("{}: unknown call kind {other}", v.method),
+        }
+
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree)
+            .unwrap_or_else(|e| panic!("{}: re-serialize must succeed: {e}", v.method));
+        assert_eq!(
+            raw,
+            w.result(),
+            "{}: canonical re-serialized bytes must equal the Scala node's wire bytes",
+            v.method,
+        );
+    }
+}
