@@ -1169,12 +1169,10 @@ async fn run_inner_with_backend(
                     mining: mining_bridge.clone(),
                     // Static per-network schedule math — always wired.
                     // Public route by Scala parity (no withAuth).
-                    emission: Some(Arc::new(
-                        crate::api_bridge::EmissionScheduleBridge::new(
-                            config.chain_spec.monetary,
-                            config.chain_spec.reemission.clone(),
-                        ),
-                    )),
+                    emission: Some(Arc::new(crate::api_bridge::EmissionScheduleBridge::new(
+                        config.chain_spec.monetary,
+                        config.chain_spec.reemission.clone(),
+                    ))),
                     // `/utxo/*` mount-vs-503 follows the backend: only
                     // the UTXO backend retains box bytes. The digest
                     // backend's boot dispatch (Mode 5) doesn't reach

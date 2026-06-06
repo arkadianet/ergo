@@ -86,7 +86,8 @@ pub fn issued_coins_after_height(h: u32, s: &MonetarySettings) -> u64 {
             }
             full_epochs_issued += rate * u64::from(s.epoch_length);
         }
-        let height_in_this_epoch = u64::from(h - s.fixed_rate_period) % u64::from(s.epoch_length) + 1;
+        let height_in_this_epoch =
+            u64::from(h - s.fixed_rate_period) % u64::from(s.epoch_length) + 1;
         let rate_this_epoch = s
             .fixed_rate
             .saturating_sub(s.one_epoch_reduction.saturating_mul(epoch + 1));

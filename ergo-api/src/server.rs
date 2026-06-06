@@ -559,7 +559,10 @@ pub fn router_with_mempool_and_wallet_and_security(
             // GET /node/zzz on the reference node → 403), so unknown
             // `/node/*` subpaths keep rejecting on the key first. Real
             // routes (not a fallback) so `route_layer` covers them.
-            .route("/node", axum::routing::any(crate::auth::unknown_gated_subpath))
+            .route(
+                "/node",
+                axum::routing::any(crate::auth::unknown_gated_subpath),
+            )
             .route(
                 "/node/*rest",
                 axum::routing::any(crate::auth::unknown_gated_subpath),
