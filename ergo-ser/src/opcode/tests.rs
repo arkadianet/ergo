@@ -944,59 +944,42 @@ fn methodcall_box_getreg_v5_roundtrips_without_explicit_type_arg() {
     roundtrip_v(&body, false, 0);
 }
 
-/// And cross-check that a `Payload::MethodCall` with non-empty
-/// `type_args` parsed on a v5 stream would mismatch — guards against
-/// a future refactor that drops the version gate and over-reads on
-/// legacy trees.
+/// v6-shaped MethodCall (with one explicit type arg) must round-trip
+/// byte-identically even when parsed with `tree_version=0`. The Scala
+/// 6.0 compiler emits v6 method calls inside v0-header trees (the
+/// tree-header version is a wire-format selector, not a script-version
+/// selector), so the parser must read `hasExplicitTypeArgs` based on
+/// `(type_id, method_id)` alone. Soft-fork rejection happens at
+/// evaluation time via `activated_script_version`, not at parse time.
+///
+/// This test previously asserted the *opposite* (asserting that v0
+/// parse should NOT round-trip a v6-shaped MethodCall, guarding a
+/// version gate). That gate was wrong: it caused real 6.0-compiled
+/// trees with header byte 0x10 to mis-align right after the value
+/// args, mis-interpreting the trailing type byte as the next
+/// expression's opcode/type-code. Removed when the gate was lifted in
+/// `method_explicit_type_args_count`.
 #[test]
-fn methodcall_box_getreg_with_type_arg_under_v5_would_misalign() {
-    use ergo_primitives::writer::VlqWriter;
-    // Manually serialize the v6 shape (with one type byte) ...
-    let mut w = VlqWriter::new();
-    write_body(
-        &mut w,
-        &Expr::Op(IrNode {
-            opcode: 0xDC,
-            payload: Payload::MethodCall {
-                type_id: 99,
-                method_id: 19,
-                obj: Box::new(Expr::Op(IrNode {
-                    opcode: 0xA7,
-                    payload: Payload::Zero,
-                })),
-                args: vec![Expr::Op(IrNode {
-                    opcode: 0xA3,
-                    payload: Payload::Zero,
-                })],
-                type_args: vec![SigmaType::SInt],
-            },
-        }),
-        false,
-    )
-    .unwrap();
-    let data = w.result();
-
-    // ... then try to parse with tree_version=0 (no explicit-type-arg
-    // read). Either the leftover byte is detected at the body
-    // boundary OR the trailing `SInt` byte is misinterpreted as the
-    // next opcode. Either way, parse-then-write does NOT round-trip
-    // byte-identically — pinning the version-gated dispatch.
-    let mut r = ergo_primitives::reader::VlqReader::new(&data);
-    match parse_body(&mut r, 0) {
-        Ok(decoded) => {
-            let mut w2 = VlqWriter::new();
-            write_body(&mut w2, &decoded, false).unwrap();
-            assert_ne!(
-                data,
-                w2.result(),
-                "v5 parse of a v6-shaped MethodCall must NOT byte-round-trip",
-            );
-        }
-        Err(_) => {
-            // Acceptable: v5 parse rejects the trailing byte as
-            // garbage. The version-gated dispatch is doing its job.
-        }
-    }
+fn methodcall_box_getreg_v6_shape_roundtrips_in_v0_tree() {
+    let body = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 99,
+            method_id: 19,
+            obj: Box::new(Expr::Op(IrNode {
+                opcode: 0xA7,
+                payload: Payload::Zero,
+            })),
+            args: vec![Expr::Op(IrNode {
+                opcode: 0xA3,
+                payload: Payload::Zero,
+            })],
+            type_args: vec![SigmaType::SInt],
+        },
+    });
+    // Parse-version 0: must still consume the explicit type byte for
+    // (99, 19) because the method id is what governs the wire shape.
+    roundtrip_v(&body, false, 0);
 }
 
 /// Regression surface for the v5/v6 `getReg` split: the v5 slot (id 7)
@@ -1080,12 +1063,16 @@ fn propertycall_global_none_v6_roundtrips_with_explicit_type_arg() {
     roundtrip_v(&body, false, 3);
 }
 
-/// Version-gate twin: the same `SGlobal.none` PropertyCall on a v5 tree
-/// (tree_version=0) carries NO type byte, because the explicit-type-arg
-/// read is gated on `tree_version >= 3`. Pins that the PropertyCall path
-/// is version-aware rather than unconditionally reading a type byte.
+/// `SGlobal.none[T]` PropertyCall carries its explicit `[T]` type
+/// byte in any tree version. The Scala 6.0 compiler emits v6
+/// PropertyCalls in v0-header trees (header byte 0x10), so the
+/// explicit-type-arg read must be governed by `(type_id, method_id)`
+/// alone, not by `tree_version`. Previously gated on `tree_version >=
+/// 3`; the gate caused real 6.0-compiled trees to mis-align after the
+/// PropertyCall body. See `method_explicit_type_args_count` doc for
+/// the design correction.
 #[test]
-fn propertycall_global_none_v5_roundtrips_without_explicit_type_arg() {
+fn propertycall_global_none_v6_roundtrips_in_v0_tree() {
     let obj = Expr::Op(IrNode {
         opcode: 0xDD, // Global (SGlobal receiver)
         payload: Payload::Zero,
@@ -1097,7 +1084,7 @@ fn propertycall_global_none_v5_roundtrips_without_explicit_type_arg() {
             method_id: 10,
             obj: Box::new(obj),
             args: vec![],
-            type_args: vec![],
+            type_args: vec![SigmaType::SInt], // [Int] type arg now always present
         },
     });
     roundtrip_v(&body, false, 0);

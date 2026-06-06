@@ -527,23 +527,33 @@ pub fn opcode_name(op: u8) -> &'static str {
 /// `0xDC MethodCall` wire when `SMethod.hasExplicitTypeArgs` is `true`
 /// in the Scala registry. Source: `sigma/ast/methods.scala` on the
 /// `v6.0.2` release — every method that sets
-/// `hasExplicitTypeArgs = Seq(tT)` (so one type parameter). The check
-/// gates on `tree_version >= 3` (= Sigma 6.0 = EIP-50): the v6
-/// `SBox.getReg` is a *new* method id (19) carrying
-/// `hasExplicitTypeArgs`, distinct from the V5+ `getReg` (id 7) which
-/// carries none. The slot is not re-defined, it is added; only the v6
-/// ids enumerated below read a type byte.
+/// `hasExplicitTypeArgs = Seq(tT)` (so one type parameter).
 ///
-/// Returns `0` when no type bytes follow — covers (a) every method on
-/// a pre-v6 tree, (b) every method on v6 whose `SMethod` does not set
-/// the flag, (c) unknown `(type_id, method_id)` pairs (Scala would
-/// also read zero bytes there since `SMethod.fromIds` would throw,
-/// matching our downstream evaluator's "expected supported
-/// MethodCall" reject).
-pub fn method_explicit_type_args_count(type_id: u8, method_id: u8, tree_version: u8) -> usize {
-    if tree_version < 3 {
-        return 0;
-    }
+/// The count is determined purely by `(type_id, method_id)`, NOT by
+/// the ErgoTree header's version byte. The Scala 6.0 compiler emits
+/// v6 method calls inside v0-header trees (the tree-header version is
+/// a wire-format selector, not a script-version selector) — the
+/// MethodCall opcode and its explicit-type-args extension are valid
+/// payload in any tree version. Soft-fork rejection of v6 methods on
+/// chains that haven't activated EIP-50 happens at *evaluation* time
+/// via `activated_script_version`, not at parse time. The pre-fix gate
+/// on `tree_version >= 3` caused valid v6 trees with header byte 0x10
+/// (v0, constants-segregated, no size bit) to mis-align right after
+/// the value args — the type-arg byte was then mis-interpreted as the
+/// next expression's opcode/type-code (e.g. `0x68` = SHeader code,
+/// triggering a spurious read of a non-existent SHeader inline
+/// constant).
+///
+/// `tree_version` is still threaded through for callers that want to
+/// log it, but is no longer consulted by this function. (Pre-v6 trees
+/// can never carry a `(type_id, method_id)` from the list below
+/// because those method ids did not exist before 6.0, so reading the
+/// extra type byte is a no-op on legitimate legacy trees.)
+///
+/// Returns `0` when no type bytes follow — covers methods whose
+/// `SMethod` does not set the flag and unknown `(type_id, method_id)`
+/// pairs.
+pub fn method_explicit_type_args_count(type_id: u8, method_id: u8, _tree_version: u8) -> usize {
     // v6 / EIP-50 methods with `hasExplicitTypeArgs = Seq(tT)`.
     // Each carries exactly one `tT` type binding on the wire.
     matches!(
