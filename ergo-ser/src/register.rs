@@ -136,13 +136,14 @@ fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), Rea
         read_constant(r)
     } else {
         // Expression opcode — parse the full expression and extract type + value.
-        // Pass `tree_version=0`: register expressions in real blocks
-        // are pre-v6 constructor forms (CreateTuple, ConcreteCollection)
-        // — none of them use the v6 MethodCall explicit-type-args
-        // shape. A v6-method register expression would mis-parse
-        // here, but the network has not produced one in practice
-        // (every v6 MethodCall observed sits in the script body,
-        // not a register).
+        // Register bytes carry no tree header, so pass `tree_version=0`.
+        // The version does not affect method-call parsing: explicit
+        // type-args reads are keyed on `(type_id, method_id)` alone, so
+        // a v6 MethodCall here consumes its full wire shape without
+        // desyncing the stream. `expr_to_register_value` below then
+        // accepts only evaluated forms (Const, CreateTuple,
+        // ConcreteCollection), so a method-call register value is a
+        // typed error, not a mis-parse.
         let expr = parse_expr(r, 0, 0)?;
         expr_to_register_value(&expr)
     }

@@ -508,10 +508,11 @@ pub(in crate::evaluator) fn eval_deserialize_context(
     // Deserialize as expression subtree (no constant segregation)
     let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
     // tree_version=0: the deserialized expression has no header of its
-    // own; we conservatively read the v5 wire form (no explicit type
-    // args). v6 scripts that put MethodCall-with-explicit-type-args
-    // inside a DeserializeContext/Register payload would mis-parse,
-    // but the network has not produced such a script.
+    // own. The version does not affect method-call parsing — explicit
+    // type-args reads are keyed on `(type_id, method_id)` alone — so a
+    // v6 MethodCall in the payload parses correctly; not-yet-activated
+    // v6 methods are then rejected at evaluation time
+    // (`require_method_version`).
     let expr = ergo_ser::opcode::parse_body(&mut r, 0).map_err(|e| EvalError::TypeError {
         expected: "valid serialized expression",
         got: format!("deserialization error: {e}"),
@@ -572,10 +573,11 @@ pub(in crate::evaluator) fn eval_deserialize_register(
             add_cost_per_item(cx.cost, 0xD5, bytes.len() as u32)?;
             let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
             // tree_version=0: the deserialized expression has no header of its
-            // own; we conservatively read the v5 wire form (no explicit type
-            // args). v6 scripts that put MethodCall-with-explicit-type-args
-            // inside a DeserializeContext/Register payload would mis-parse,
-            // but the network has not produced such a script.
+            // own. The version does not affect method-call parsing — explicit
+            // type-args reads are keyed on `(type_id, method_id)` alone — so a
+            // v6 MethodCall in the payload parses correctly; not-yet-activated
+            // v6 methods are then rejected at evaluation time
+            // (`require_method_version`).
             let expr =
                 ergo_ser::opcode::parse_body(&mut r, 0).map_err(|e| EvalError::TypeError {
                     expected: "valid serialized expression in register",
