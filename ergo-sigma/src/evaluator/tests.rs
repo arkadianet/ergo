@@ -2880,6 +2880,162 @@ fn opcode_deserialize_register_absent_with_default() {
     assert_eq!(run_eval_ctx(&expr, &ctx), Value::Bool(false));
 }
 
+/// Serialized `Global.deserializeTo[Boolean](Coll[Byte](0x01))` body —
+/// a v6 MethodCall whose wire form ends with the trailing explicit
+/// type byte (`0x01` = SBoolean). Embedded-deserialization payloads
+/// carry no tree header, so `parse_body(.., 0)` must consume that
+/// byte keyed on `(type_id, method_id)` alone; the layout is
+/// oracle-pinned by
+/// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/`.
+fn v6_typearg_methodcall_payload() -> Vec<u8> {
+    let expr = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 106,
+            method_id: 4,
+            obj: Box::new(op(0xDD, Payload::Zero)),
+            args: vec![const_bytes(vec![0x01])],
+            type_args: vec![SigmaType::SBoolean],
+        },
+    });
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::opcode::write_body(&mut w, &expr, false).unwrap();
+    w.result()
+}
+
+#[test]
+fn opcode_deserialize_context_v6_typearg_payload_evaluates() {
+    let b = make_test_box();
+    let mut ctx = ctx_with_self_box(&b);
+    ctx.extension.insert(
+        1,
+        (
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(
+                v6_typearg_methodcall_payload(),
+            )),
+        ),
+    );
+    let expr = op(
+        0xD4,
+        Payload::DeserializeContext {
+            id: 1,
+            tpe: SigmaType::SBoolean,
+        },
+    );
+    assert_eq!(run_eval_ctx(&expr, &ctx), Value::Bool(true));
+}
+
+#[test]
+fn opcode_deserialize_register_v6_typearg_payload_evaluates() {
+    let mut b = make_test_box();
+    b.registers[2] = Some(ergo_ser::register::RegisterValue {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+        value: SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(
+            v6_typearg_methodcall_payload(),
+        )),
+    });
+    let ctx = ctx_with_self_box(&b);
+    let expr = op(
+        0xD5,
+        Payload::DeserializeRegister {
+            reg_id: 6,
+            tpe: SigmaType::SBoolean,
+            default: None,
+        },
+    );
+    assert_eq!(run_eval_ctx(&expr, &ctx), Value::Bool(true));
+}
+
+#[test]
+fn opcode_deserialize_context_v6_typearg_payload_rejects_pre_eip50() {
+    let b = make_test_box();
+    let mut ctx = ctx_with_self_box(&b);
+    ctx.activated_script_version = 2;
+    ctx.extension.insert(
+        1,
+        (
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(
+                v6_typearg_methodcall_payload(),
+            )),
+        ),
+    );
+    let expr = op(
+        0xD4,
+        Payload::DeserializeContext {
+            id: 1,
+            tpe: SigmaType::SBoolean,
+        },
+    );
+    // The payload parses (type-byte read is version-independent); the
+    // not-yet-activated v6 method is rejected at evaluation time.
+    match run_eval_ctx_err(&expr, &ctx) {
+        EvalError::SoftForkNotActivated {
+            type_id,
+            method_id,
+            required,
+            got,
+        } => {
+            assert_eq!((type_id, method_id), (106, 4));
+            assert_eq!((required, got), (3, 2));
+        }
+        other => panic!("expected SoftForkNotActivated, got {other:?}"),
+    }
+}
+
+#[test]
+fn opcode_deserialize_context_v6_typearg_payload_truncated_errors() {
+    let mut payload = v6_typearg_methodcall_payload();
+    payload.pop(); // drop the trailing explicit type byte
+    let b = make_test_box();
+    let mut ctx = ctx_with_self_box(&b);
+    ctx.extension.insert(
+        1,
+        (
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(payload)),
+        ),
+    );
+    let expr = op(
+        0xD4,
+        Payload::DeserializeContext {
+            id: 1,
+            tpe: SigmaType::SBoolean,
+        },
+    );
+    let err = run_eval_ctx_err(&expr, &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+/// End-to-end: an inline `SBox` constant whose proposition is the
+/// Scala-6.1.2-compiled sizeless v0-header (`0x10`) tree carrying the
+/// `SGlobal.none[T]` v6 PropertyCall (oracle vector
+/// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/`).
+/// `skip_ergo_tree` has no size field to skip by, so capturing the
+/// box-byte boundary walks the v6 body through the full parser; the
+/// evaluator then rehydrates the `OpaqueBoxBytes` via `read_ergo_box`.
+#[test]
+fn opcode_extract_amount_sbox_constant_with_sizeless_v6_typearg_tree() {
+    let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_u64(1_000_000); // value
+    w.put_bytes(&tree); // proposition (sizeless v0-header v6 tree)
+    w.put_u32(100); // creation height
+    w.put_u8(0); // token count
+    w.put_u8(0); // register count
+    w.put_bytes(&[0u8; 32]); // tx id
+    w.put_u16(0); // output index
+    let box_bytes = w.result();
+
+    let sbox = Expr::Const {
+        tpe: SigmaType::SBox,
+        val: SigmaValue::OpaqueBoxBytes(box_bytes),
+    };
+    let expr = op(0xC1, Payload::One(Box::new(sbox))); // ExtractAmount
+    assert_eq!(run_eval(&expr), Value::Long(1_000_000));
+}
+
 // AtLeast (0x98) — k-of-n threshold
 #[test]
 fn opcode_atleast_all_trivial_true() {

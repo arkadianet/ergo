@@ -1377,4 +1377,34 @@ mod tests {
         write_bits(&mut w, &bits);
         assert_eq!(w.result(), [0x4D, 0x01]);
     }
+
+    /// Inline `SBox` constant whose proposition is the
+    /// Scala-6.1.2-compiled sizeless v0-header (`0x10`) tree carrying
+    /// the `SGlobal.none[T]` v6 PropertyCall with its trailing explicit
+    /// type byte (oracle vector
+    /// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/`).
+    /// A sizeless tree gives `skip_ergo_tree` no blob length to skip
+    /// by, so finding the box-field boundary walks the v6 body through
+    /// the full parser — the explicit type byte must be consumed or
+    /// every later box field shifts.
+    #[test]
+    fn sbox_constant_with_sizeless_v6_typearg_tree_roundtrips() {
+        let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+        let mut w = VlqWriter::new();
+        w.put_u64(1_000_000); // value
+        w.put_bytes(&tree); // proposition (sizeless v0-header v6 tree)
+        w.put_u32(100); // creation height
+        w.put_u8(0); // token count
+        w.put_u8(0); // register count
+        w.put_bytes(&[0u8; 32]); // tx id
+        w.put_u16(0); // output index
+        let box_bytes = w.result();
+
+        let mut r = VlqReader::new(&box_bytes);
+        let val = read_value(&mut r, &SigmaType::SBox)
+            .expect("SBox constant with embedded v6 tree must parse");
+        assert!(r.is_empty(), "box-field boundary must land exactly at end");
+        assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
+        roundtrip_value(&SigmaType::SBox, &val);
+    }
 }

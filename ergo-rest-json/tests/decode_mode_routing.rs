@@ -293,3 +293,28 @@ fn serde_json_preserves_context_extension_key_order() {
          the DTO type drifted back to BTreeMap.",
     );
 }
+
+/// Submit-mode pin for the Scala-6.1.2-compiled v0-header (`0x10`)
+/// tree carrying the v6 `SGlobal.deserializeTo` MethodCall with its
+/// trailing explicit type byte (oracle vector
+/// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/`).
+/// Header version 0 is within `MAX_SUPPORTED_TREE_VERSION`, so Submit
+/// must accept it and canonicalize to the input bytes — matching
+/// Scala's post-EIP-50 acceptance of its own compiler output.
+/// Pre-activation Scala submit-rejects via version-context method
+/// lookup; the Rust equivalent rejection is evaluation-time
+/// `require_method_version`, not the decode layer.
+#[test]
+fn decode_ergo_tree_submit_accepts_v0_header_v6_typearg_tree() {
+    let hex_str = "1002040004c801d191db6809dc6a04dd01e4c6b2a4730000040e687301";
+    let (tree, canonical) =
+        ergo_rest_json::decode_ergo_tree_canonicalize_with_mode(hex_str, DecodeMode::Submit)
+            .expect("Submit decode of a v0-header tree with a v6 type-arg method call");
+    assert_eq!(tree.version, 0, "header version");
+    assert!(!tree.has_size, "sizeless tree");
+    assert_eq!(
+        canonical,
+        hex::decode(hex_str).unwrap(),
+        "canonical bytes must be the input bytes",
+    );
+}

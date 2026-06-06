@@ -11,14 +11,14 @@ use super::types::{
 /// Parse an ErgoTree body (single root expression) from bytes.
 ///
 /// `tree_version` is the ErgoTree header version byte (`0..=3` in
-/// real-world chains). It gates v6-only wire-format extensions —
-/// principally the `MethodCall` explicit-type-args bytes that follow
-/// the value args for methods like `SBox.getReg[T]`. Callers that
-/// parse expressions outside an ErgoTree header (registers,
-/// `DeserializeContext`/`DeserializeRegister` payloads) pass `0` to
-/// keep behaviour conservative — these rarely contain v6 method
-/// calls, and over-reading explicit-type bytes there would corrupt
-/// the stream.
+/// real-world chains), threaded through the whole expression walk the
+/// way Scala's `SigmaByteReader` exposes the version context to every
+/// serializer. No current body-wire rule consults it: the `MethodCall`
+/// explicit-type-args bytes are keyed on `(type_id, method_id)` alone
+/// (see [`method_explicit_type_args_count`]), so callers without a
+/// surrounding tree header (registers,
+/// `DeserializeContext`/`DeserializeRegister` payloads) pass `0` and
+/// still parse v6 method calls correctly.
 pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError> {
     parse_expr(r, 0, tree_version)
 }
@@ -26,11 +26,11 @@ pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError
 /// Parse a single expression from the byte stream.
 ///
 /// `depth` guards against stack overflow on malicious input.
-/// `tree_version` — see [`parse_body`] for the v6 wire-format rules.
+/// `_tree_version` — see [`parse_body`].
 ///
 /// Public so that register values — which are serialized as arbitrary
 /// evaluated expressions, not just plain constants — can be parsed.
-pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<Expr, ReadError> {
+pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<Expr, ReadError> {
     if depth > MAX_EXPR_DEPTH {
         return Err(ReadError::InvalidData(format!(
             "expression depth exceeds maximum ({MAX_EXPR_DEPTH})"
@@ -53,28 +53,28 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         ArgPattern::Zero => Payload::Zero,
 
         ArgPattern::One => {
-            let a = parse_expr(r, next, tree_version)?;
+            let a = parse_expr(r, next, _tree_version)?;
             Payload::One(Box::new(a))
         }
 
         ArgPattern::Two => {
-            let a = parse_expr(r, next, tree_version)?;
-            let b = parse_expr(r, next, tree_version)?;
+            let a = parse_expr(r, next, _tree_version)?;
+            let b = parse_expr(r, next, _tree_version)?;
             Payload::Two(Box::new(a), Box::new(b))
         }
 
         ArgPattern::Three => {
-            let a = parse_expr(r, next, tree_version)?;
-            let b = parse_expr(r, next, tree_version)?;
-            let c = parse_expr(r, next, tree_version)?;
+            let a = parse_expr(r, next, _tree_version)?;
+            let b = parse_expr(r, next, _tree_version)?;
+            let c = parse_expr(r, next, _tree_version)?;
             Payload::Three(Box::new(a), Box::new(b), Box::new(c))
         }
 
         ArgPattern::Four => {
-            let a = parse_expr(r, next, tree_version)?;
-            let b = parse_expr(r, next, tree_version)?;
-            let c = parse_expr(r, next, tree_version)?;
-            let d = parse_expr(r, next, tree_version)?;
+            let a = parse_expr(r, next, _tree_version)?;
+            let b = parse_expr(r, next, _tree_version)?;
+            let c = parse_expr(r, next, _tree_version)?;
+            let d = parse_expr(r, next, _tree_version)?;
             Payload::Four(Box::new(a), Box::new(b), Box::new(c), Box::new(d))
         }
 
@@ -107,7 +107,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             // Type is never serialized: Scala's reader always has a non-null
             // constantStore (ConstantStore.empty for non-cseg trees), so the
             // `if (r.constantStore == null) r.getType()` branch is never taken.
-            let rhs = parse_expr(r, next, tree_version)?;
+            let rhs = parse_expr(r, next, _tree_version)?;
             Payload::ValDef {
                 id,
                 tpe: None,
@@ -117,7 +117,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
 
         ArgPattern::FunDef => {
             let id = r.get_u32_exact()?;
-            let rhs = parse_expr(r, next, tree_version)?;
+            let rhs = parse_expr(r, next, _tree_version)?;
             Payload::FunDef {
                 id,
                 tpe: None,
@@ -134,9 +134,9 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             }
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, tree_version)?);
+                items.push(parse_expr(r, next, _tree_version)?);
             }
-            let result = parse_expr(r, next, tree_version)?;
+            let result = parse_expr(r, next, _tree_version)?;
             Payload::BlockValue {
                 items,
                 result: Box::new(result),
@@ -157,7 +157,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
                 let tpe = Some(read_type(r)?);
                 args.push((id, tpe));
             }
-            let body = parse_expr(r, next, tree_version)?;
+            let body = parse_expr(r, next, _tree_version)?;
             Payload::FuncValue {
                 args,
                 body: Box::new(body),
@@ -167,7 +167,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         ArgPattern::PropertyCall => {
             let type_id = r.get_u8()?;
             let method_id = r.get_u8()?;
-            let obj = parse_expr(r, next, tree_version)?;
+            let obj = parse_expr(r, next, _tree_version)?;
             // PropertyCall (0xDB) is the zero-args form, but a v6
             // property-call SMethod can still declare
             // `hasExplicitTypeArgs`: `SGlobal.none[T]` carries `Seq(tT)`.
@@ -175,7 +175,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             // does. Scala's `PropertyCallSerializer.parse` reads these
             // right after `obj` when `method.hasExplicitTypeArgs`, with
             // no args list in between.
-            let n_type_args = method_explicit_type_args_count(type_id, method_id, tree_version);
+            let n_type_args = method_explicit_type_args_count(type_id, method_id);
             let mut type_args = Vec::with_capacity(n_type_args);
             for _ in 0..n_type_args {
                 type_args.push(read_type(r)?);
@@ -192,7 +192,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         ArgPattern::MethodCall => {
             let type_id = r.get_u8()?;
             let method_id = r.get_u8()?;
-            let obj = parse_expr(r, next, tree_version)?;
+            let obj = parse_expr(r, next, _tree_version)?;
             let n_args = r.get_u32_exact()? as usize;
             if n_args > 10_000 {
                 return Err(ReadError::InvalidData(format!(
@@ -201,15 +201,15 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             }
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
-                args.push(parse_expr(r, next, tree_version)?);
+                args.push(parse_expr(r, next, _tree_version)?);
             }
             // v6 / EIP-50: methods whose Scala `SMethod` sets
             // `hasExplicitTypeArgs = true` write N type bytes after
             // the value args. Without this read the next opcode byte
             // is mis-aligned by N — silent failure further down the
             // body parse. See `method_explicit_type_args_count` doc
-            // for the gated method set and version rationale.
-            let n_type_args = method_explicit_type_args_count(type_id, method_id, tree_version);
+            // for the method set.
+            let n_type_args = method_explicit_type_args_count(type_id, method_id);
             let mut type_args = Vec::with_capacity(n_type_args);
             for _ in 0..n_type_args {
                 type_args.push(read_type(r)?);
@@ -228,7 +228,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             let elem_type = read_type(r)?;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, tree_version)?);
+                items.push(parse_expr(r, next, _tree_version)?);
             }
             Payload::ConcreteCollection { elem_type, items }
         }
@@ -263,13 +263,13 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             let count = count_byte as usize;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, tree_version)?);
+                items.push(parse_expr(r, next, _tree_version)?);
             }
             Payload::Tuple { items }
         }
 
         ArgPattern::SelectField => {
-            let input = parse_expr(r, next, tree_version)?;
+            let input = parse_expr(r, next, _tree_version)?;
             let field_idx = r.get_u8()?;
             Payload::SelectField {
                 input: Box::new(input),
@@ -278,7 +278,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         }
 
         ArgPattern::ExtractRegisterAs => {
-            let input = parse_expr(r, next, tree_version)?;
+            let input = parse_expr(r, next, _tree_version)?;
             let reg_id = r.get_u8()?;
             let tpe = read_type(r)?;
             Payload::ExtractRegisterAs {
@@ -306,7 +306,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             let tpe = read_type(r)?;
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
-                Some(Box::new(parse_expr(r, next, tree_version)?))
+                Some(Box::new(parse_expr(r, next, _tree_version)?))
             } else {
                 None
             };
@@ -321,7 +321,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             let count = r.get_u16()? as usize;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, tree_version)?);
+                items.push(parse_expr(r, next, _tree_version)?);
             }
             Payload::SigmaCollection { items }
         }
@@ -332,11 +332,11 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         }
 
         ArgPattern::ByIndex => {
-            let input = parse_expr(r, next, tree_version)?;
-            let index = parse_expr(r, next, tree_version)?;
+            let input = parse_expr(r, next, _tree_version)?;
+            let index = parse_expr(r, next, _tree_version)?;
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
-                Some(Box::new(parse_expr(r, next, tree_version)?))
+                Some(Box::new(parse_expr(r, next, _tree_version)?))
             } else {
                 None
             };
@@ -348,7 +348,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         }
 
         ArgPattern::NumericCast => {
-            let input = parse_expr(r, next, tree_version)?;
+            let input = parse_expr(r, next, _tree_version)?;
             let tpe = read_type(r)?;
             Payload::NumericCast {
                 input: Box::new(input),
@@ -357,7 +357,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
         }
 
         ArgPattern::FuncApply => {
-            let func = parse_expr(r, next, tree_version)?;
+            let func = parse_expr(r, next, _tree_version)?;
             let n_args = r.get_u32_exact()? as usize;
             if n_args > 10_000 {
                 return Err(ReadError::InvalidData(format!(
@@ -366,7 +366,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
             }
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
-                args.push(parse_expr(r, next, tree_version)?);
+                args.push(parse_expr(r, next, _tree_version)?);
             }
             Payload::FuncApply {
                 func: Box::new(func),
@@ -394,8 +394,8 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, tree_version: u8) -> Result<E
                 });
                 Payload::Two(a, b)
             } else {
-                let a = Box::new(parse_expr(r, next, tree_version)?);
-                let b = Box::new(parse_expr(r, next, tree_version)?);
+                let a = Box::new(parse_expr(r, next, _tree_version)?);
+                let b = Box::new(parse_expr(r, next, _tree_version)?);
                 Payload::Two(a, b)
             }
         }
