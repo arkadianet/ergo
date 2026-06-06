@@ -499,7 +499,7 @@ pub use backfill::ModifierIndexBackfillEvent;
 use backfill::{MODIFIER_INDEX_CHUNK_BYTES_BUDGET, MODIFIER_INDEX_CHUNK_ROWS_CAP};
 pub use error::{PopowByIdLookup, PopowMissingAt, StateError, VotedParamsWriteError};
 use meta::StateMeta;
-pub use snapshot::{CommittedSnapshot, DryRunBase};
+pub use snapshot::{BaseDisposition, CommittedSnapshot, DryRunBase};
 use undo::undo_log_key;
 pub use undo::UndoEntry;
 use votes::compute_epoch_votes_via_txn;

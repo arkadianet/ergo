@@ -79,7 +79,7 @@ use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
-use ergo_state::store::{CommittedSnapshot, DryRunBase};
+use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 use ergo_validation::UtxoView;
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
@@ -272,10 +272,13 @@ pub(super) struct BuildRequest {
     /// so the request→reply protocol stays strictly serial (≤1 in flight).
     ///
     /// The reply carries the build result plus the dry-run base-cache
-    /// disposition (`"off"` / `"primed"` / `"cold"`) for the build-complete log
-    /// line. The disposition is computed on the worker — the only place that
-    /// can observe the cache slot's state before the build — and threaded back
-    /// here because the log lines live on the coordinator.
+    /// disposition string for the build-complete log line:
+    /// `"off"` (cache disabled), `"primed"` (tip hit), `"advanced"` (single-step
+    /// advance succeeded), `"cold"` (full rehydrate), or `"cold_fallback"`
+    /// (advance attempted, failed, fell back to rehydrate). The disposition is
+    /// computed on the worker — the only place that can observe the cache slot
+    /// state after the build — and threaded back here because the log lines live
+    /// on the coordinator.
     reply: oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>,
 }
 
@@ -335,26 +338,13 @@ pub(super) fn run_build_worker(
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0)
         };
-        // Base-cache disposition for the build-complete log line, captured
-        // BEFORE the build (the only point the slot's pre-build state is
-        // observable). `"off"` when the cache is disabled; otherwise `"primed"`
-        // iff the slot already holds a base for the parent this build targets,
-        // else `"cold"`. The visibility gate in `build_and_publish` only builds
-        // when the committed snapshot tip equals `expected_parent`, so a
-        // `"primed"` slot (its `tip_id` == `expected_parent`) is a genuine cache
-        // hit by construction — the build reuses the memoized tree. This is an
-        // approximation only on the non-building outcomes (TipNotVisible /
-        // IntentSuperseded / NotSynced), where no dry-run runs at all and the
-        // base is left untouched, so the disposition is informational rather
-        // than wrong. `"cold"` covers both a fresh slot and a tip change (the
-        // latter rehydrates inside the cached path).
-        let base_cache = if !use_base_cache {
-            "off"
-        } else if base.as_ref().map(DryRunBase::tip_id) == Some(intent.expected_parent) {
-            "primed"
-        } else {
-            "cold"
-        };
+        // Base-cache disposition, set by `build_and_publish` when the build
+        // actually ran (i.e. `generate_candidate` was called). When the cache
+        // is disabled (no `base` slot), or when the build returns an early
+        // outcome (TipNotVisible / IntentSuperseded / NotSynced / NoState),
+        // the disposition stays `None` and we fall back to a sensible wire
+        // label.
+        let mut raw_disposition: Option<BaseDisposition> = None;
         let result = build_and_publish(
             &reader,
             &handle,
@@ -370,7 +360,34 @@ pub(super) fn run_build_worker(
                     handle.max_storage_rent_claims(),
                 )
             },
+            &mut raw_disposition,
         );
+        // Map the returned disposition to the wire string the coordinator logs.
+        // `"off"` when the cache is disabled; `"advanced"` / `"primed"` /
+        // `"cold"` / `"cold_fallback"` from the actual path taken.
+        // Non-building outcomes (TipNotVisible etc.) leave `raw_disposition`
+        // `None`; we keep `"off"` when the cache is disabled and `"cold"` as
+        // the fallback for the non-building paths (the slot is unaffected, so
+        // its pre-call state is the nearest truth).
+        let base_cache: &'static str = if !use_base_cache {
+            "off"
+        } else {
+            match raw_disposition {
+                Some(BaseDisposition::Hit) => "primed",
+                Some(BaseDisposition::Advanced) => "advanced",
+                Some(BaseDisposition::Rehydrated) => "cold",
+                Some(BaseDisposition::RehydratedAfterFailedAdvance) => "cold_fallback",
+                // Cache enabled but no build ran (early-return outcome): keep
+                // the pre-call slot state as an approximation.
+                None => {
+                    if base.as_ref().map(DryRunBase::tip_id) == Some(intent.expected_parent) {
+                        "primed"
+                    } else {
+                        "cold"
+                    }
+                }
+            }
+        };
         // Coordinator gone (receiver dropped) ⇒ ignore; the next `recv()` errs
         // and the loop exits.
         let _ = reply.send((result, base_cache));

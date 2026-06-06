@@ -47,8 +47,8 @@ pub(crate) fn apply_change_set_via_prover(
     to_remove: &DryRunRemoveMap,
     to_insert: &DryRunInsertMap,
 ) -> Result<(ADDigest, Vec<u8>), StateError> {
-    let prover = hydrate_batch_avl_prover(tree)?;
-    apply_change_set_to_prover(prover, to_remove, to_insert)
+    let mut prover = hydrate_batch_avl_prover(tree)?;
+    apply_change_set_to_prover(&mut prover, to_remove, to_insert)
 }
 
 /// Apply a batch of removes then inserts to an already-hydrated
@@ -60,8 +60,13 @@ pub(crate) fn apply_change_set_via_prover(
 /// both hydrate a prover from equivalent committed state, then run this
 /// identical mutation → digest → proof sequence, so for the same parent
 /// and change-set they produce byte-identical `(state_root, proof)`.
+///
+/// Takes `&mut BatchAVLProver` so callers that need the post-op tree
+/// (e.g. the cached-base advance path) can extract `prover.base.tree`
+/// after this call. The prover's `visited` flags are cleaned by the
+/// internal `generate_proof` call, so the tree is pristine for reuse.
 pub(crate) fn apply_change_set_to_prover(
-    mut prover: BatchAVLProver,
+    prover: &mut BatchAVLProver,
     to_remove: &DryRunRemoveMap,
     to_insert: &DryRunInsertMap,
 ) -> Result<(ADDigest, Vec<u8>), StateError> {
@@ -106,8 +111,9 @@ pub(crate) fn apply_change_set_to_prover(
     new_root.copy_from_slice(&digest_bytes);
     let new_root = ADDigest::from_bytes(new_root);
 
-    // Extract the raw proof bytes. Mutates prover internals but the
-    // prover is dropped immediately after this call.
+    // Extract the raw proof bytes. Also clears `visited` flags on the
+    // shared nodes (via `pack_tree`'s post-order `mark_visited(false)`),
+    // leaving the prover's tree pristine for reuse.
     let proof = prover.generate_proof().to_vec();
 
     Ok((new_root, proof))

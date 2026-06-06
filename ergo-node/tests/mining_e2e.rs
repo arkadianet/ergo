@@ -658,9 +658,13 @@ async fn solve_and_submit_advances_the_tip() {
 ///   - The N+1 block is built off a COLD base (the worker's slot is empty at
 ///     boot, so the first candidate hydrates + memoizes the pristine tree).
 ///   - After it applies and the tip advances to N+1, the worker's persistent
-///     base is keyed to the OLD tip (N); the N+2 candidate build therefore
-///     misses, drops the stale base, and rebuilds COLD against the new tip —
-///     exercising the post-advance rehydrate on the worker's own slot.
+///     base is keyed to the OLD tip (N). The N+2 candidate build finds a
+///     1-block-old stale base and attempts a single-step advance
+///     (`try_advance_base`) — replaying N+1's UTXO changes through the cached
+///     prover and verifying the resulting digest. On success the build takes the
+///     `Advanced` path (fast reuse); on failure it falls back to full rehydrate.
+///     Either way the produced block is consensus-valid, which is what this test
+///     pins: the N+2 block is accepted (200) regardless of which sub-path ran.
 ///
 /// Both blocks being accepted (200) and applied proves the cache produces
 /// consensus-valid blocks on both the cold and post-advance paths, through a
@@ -711,11 +715,10 @@ async fn solve_and_submit_accepts_cache_built_blocks() {
         "best-full tip did not advance to N+1 ({CANDIDATE_HEIGHT}) after the cache-built submit",
     );
 
-    // Second block (N+2). The worker's persistent base is still keyed to N, so
-    // this candidate build misses → drops the stale base → rebuilds cold against
-    // the new tip. Solve + submit it too: a second accepted block proves the
-    // post-advance rebuild on the worker's own slot also produces a
-    // consensus-valid block.
+    // Second block (N+2). The worker's persistent base is keyed to N; the N+2
+    // build attempts a single-step advance (try_advance_base) and takes either
+    // the Advanced or cold-fallback path. Solve + submit it too: a second
+    // accepted block (200) proves both paths produce consensus-valid blocks.
     let second_height = CANDIDATE_HEIGHT + 1;
     let second = poll_candidate_at_height(addr, second_height).await;
     assert_eq!(

@@ -201,8 +201,9 @@ fn cached_same_tip_repeat_matches_uncached() {
     for call in 0..3 {
         let oracle = store.candidate_dry_run(&[]).expect("uncached oracle");
         let snap = store.committed_snapshot().unwrap().expect("snapshot");
+        let mut disp = None;
         let got = snap
-            .candidate_dry_run_cached(&mut base, &[])
+            .candidate_dry_run_cached(&mut base, &[], &mut disp)
             .expect("cached dry-run");
         assert_eq!(oracle.0, got.0, "call {call}: state_root must match oracle");
         assert_eq!(
@@ -228,7 +229,7 @@ fn cached_tip_advance_rebuilds_and_matches() {
     let mut base = None;
     let snap_a = store.committed_snapshot().unwrap().expect("snapshot A");
     snap_a
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut None)
         .expect("first cached build");
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
@@ -242,8 +243,9 @@ fn cached_tip_advance_rebuilds_and_matches() {
 
     let oracle = store.candidate_dry_run(&[]).expect("uncached oracle at B");
     let snap_b = store.committed_snapshot().unwrap().expect("snapshot B");
+    let mut disp_b = None;
     let got = snap_b
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut disp_b)
         .expect("cached build at B");
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
@@ -253,6 +255,18 @@ fn cached_tip_advance_rebuilds_and_matches() {
     assert_eq!(oracle.0, got.0, "state_root must match oracle at new tip");
     assert_eq!(oracle.1, got.1, "proof bytes must match oracle at new tip");
     assert_eq!(oracle.2, got.2, "tip id must match oracle at new tip");
+    // The tip changed (N→N+1) so the cache misses. A stale base exists (keyed
+    // to tip_a), so try_advance_base runs: the parent-id check passes
+    // (tip_b's header.parent_id == tip_a), but no BlockTransactions section is
+    // stored for tip_b (apply_n_blocks does not store BT sections), so the
+    // advance fails on the missing-section guard and falls back to full rehydrate.
+    // The disposition is RehydratedAfterFailedAdvance (not Rehydrated, which only
+    // fires when no prior base exists at all).
+    assert_eq!(
+        disp_b,
+        Some(ergo_state::store::BaseDisposition::RehydratedAfterFailedAdvance),
+        "tip-advance without a stored BT section must report RehydratedAfterFailedAdvance"
+    );
 }
 
 /// Equal-height reorg: the parity harness builds only a single linear chain
@@ -293,15 +307,16 @@ fn cached_reorg_same_height_rebuilds() {
     let mut base = None;
     let snap_a = store_a.committed_snapshot().unwrap().expect("snapshot A");
     snap_a
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut None)
         .expect("cached build on A");
     assert_eq!(base.as_ref().map(|b| b.tip_id()), Some(tip_a));
 
     // Now run against store B's snapshot: tip id differs ⇒ miss ⇒ rebuild.
     let oracle_b = store_b.candidate_dry_run(&[]).expect("uncached oracle B");
     let snap_b = store_b.committed_snapshot().unwrap().expect("snapshot B");
+    let mut disp_b = None;
     let got = snap_b
-        .candidate_dry_run_cached(&mut base, &[])
+        .candidate_dry_run_cached(&mut base, &[], &mut disp_b)
         .expect("cached build on B");
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
@@ -311,6 +326,17 @@ fn cached_reorg_same_height_rebuilds() {
     assert_eq!(oracle_b.0, got.0, "state_root must match B's oracle");
     assert_eq!(oracle_b.1, got.1, "proof bytes must match B's oracle");
     assert_eq!(oracle_b.2, got.2, "tip id must match B's oracle");
+    // A stale base exists (keyed to tip_a). For the sibling reorg, store B's
+    // tip_b has a different parent_id than tip_a (they're independent chains),
+    // so try_advance_base's parent-id check fires first and returns an error
+    // ("not single-step"). The advance falls back to full rehydrate with
+    // RehydratedAfterFailedAdvance (not Rehydrated, which only fires when
+    // no prior base exists at all).
+    assert_eq!(
+        disp_b,
+        Some(ergo_state::store::BaseDisposition::RehydratedAfterFailedAdvance),
+        "equal-height tip swap (sibling reorg) must report RehydratedAfterFailedAdvance"
+    );
 }
 
 // ----- accessor parity -----
