@@ -225,6 +225,10 @@ pub fn build_and_publish(
     resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
     disposition_out: &mut Option<BaseDisposition>,
 ) -> Result<BuildOutcome, MiningError> {
+    // Reset at entry so the documented None-for-non-building contract holds
+    // even when a caller reuses one slot across calls — the early-return
+    // outcomes below never write it otherwise.
+    *disposition_out = None;
     let snapshot = match reader
         .committed_snapshot()
         .map_err(|e| MiningError::StateRead {
@@ -438,6 +442,29 @@ mod tests {
         assert_eq!(out, BuildOutcome::NoState);
         // No build ran (early return), so disposition stays None.
         assert_eq!(disp, None);
+    }
+
+    #[test]
+    fn disposition_slot_resets_on_early_return_even_when_reused() {
+        // A caller reusing one slot across calls must never see a previous
+        // call's disposition leak through a non-building outcome — the
+        // entry reset, not caller initialization, enforces the contract.
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(dir.path().join("s.redb").as_path()).unwrap();
+        let mut disp = Some(ergo_state::store::BaseDisposition::Hit);
+        let out = build_and_publish(
+            &store.reader_handle(),
+            &handle(),
+            &intent([0u8; 32], 0),
+            BuildMode::Full,
+            None,
+            || BUILT_AT_MS,
+            |_, _| unreachable!("rent resolver must not run when the build is gated off"),
+            &mut disp,
+        )
+        .unwrap();
+        assert_eq!(out, BuildOutcome::NoState);
+        assert_eq!(disp, None, "stale disposition must be cleared at entry");
     }
 
     #[test]
