@@ -119,6 +119,11 @@ pub struct ServerCtx {
     /// the API is unaffected. The integrator mounts a real handle when
     /// `[mining].enabled = true`.
     pub mining: Option<Arc<dyn crate::mining::NodeMining>>,
+    /// Scala-compat `/emission/at/{height}` schedule view. `None` ⇒ the
+    /// route is not mounted (404). Production always wires it — the
+    /// schedule is static per-network math, valid in every node mode.
+    /// Public by Scala parity: never touched by the `api_key` gate.
+    pub emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
     /// Whether the node's state backend retains UTXO box bytes. When
     /// `true` (default — Mode 1 UTXO backend), the six `/utxo/*`
     /// routes mount the real handlers. When `false` (Mode 5 digest
@@ -180,6 +185,7 @@ pub fn serve_on(
         network,
         chain_params: None,
         mining: None,
+        emission: None,
         utxo_reads_supported,
     };
     serve_on_with_mempool(ctx, listener, shutdown_rx, None)
@@ -442,6 +448,7 @@ pub fn router_with_wallet(
         network,
         chain_params: None,
         mining: None,
+        emission: None,
         utxo_reads_supported,
     };
     router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
@@ -490,6 +497,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         network,
         chain_params,
         mining,
+        emission,
         utxo_reads_supported,
     } = ctx;
     let operator: Router = Router::new()
@@ -547,9 +555,21 @@ pub fn router_with_mempool_and_wallet_and_security(
         let admin_routes: Router = Router::new()
             .route("/api/v1/node/shutdown", post(shutdown_handler))
             .route("/node/shutdown", post(shutdown_handler))
+            // Scala gates the whole `node` pathPrefix (probed live:
+            // GET /node/zzz on the reference node → 403), so unknown
+            // `/node/*` subpaths keep rejecting on the key first. Real
+            // routes (not a fallback) so `route_layer` covers them.
+            .route(
+                "/node",
+                axum::routing::any(crate::auth::unknown_gated_subpath),
+            )
+            .route(
+                "/node/*rest",
+                axum::routing::any(crate::auth::unknown_gated_subpath),
+            )
             .with_state(admin);
         let admin_routes = match security.clone() {
-            Some(sec) => admin_routes.layer(axum::middleware::from_fn_with_state(
+            Some(sec) => admin_routes.route_layer(axum::middleware::from_fn_with_state(
                 sec,
                 crate::auth::require_api_key,
             )),
@@ -750,7 +770,12 @@ pub fn router_with_mempool_and_wallet_and_security(
                     post(blocks_by_header_ids_handler),
                 );
         }
-        let gated = gated.layer(axum::middleware::from_fn_with_state(
+        // `route_layer`, not `layer`: the status gate must fire only on
+        // the routes registered above — a plain `layer` would also wrap
+        // this subtree's implicit fallback, which `merge` propagates
+        // router-wide (unknown paths would then 503 while the indexer
+        // catches up, the same capture bug as the api_key gate).
+        let gated = gated.route_layer(axum::middleware::from_fn_with_state(
             blockchain_state.clone(),
             enforce_status_gate,
         ));
@@ -776,6 +801,17 @@ pub fn router_with_mempool_and_wallet_and_security(
     // builder in `crate::mining` so the handler list lives there.
     let operator = if let Some(m) = mining {
         operator.merge(crate::mining::mining_router(m))
+    } else {
+        operator
+    };
+
+    // `/emission/at/{height}` mounts whenever the schedule view is
+    // wired (always, in production — static per-network math, valid in
+    // every node mode). Public by Scala parity: `EmissionApiRoute`
+    // carries no `withAuth`, so this merge happens entirely outside
+    // the gated subtrees.
+    let operator = if let Some(em) = emission {
+        operator.merge(crate::emission::emission_router(em))
     } else {
         operator
     };

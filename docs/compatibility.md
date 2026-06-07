@@ -132,6 +132,12 @@ Be aware of these before depending on the node.
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference
   before treating the state as authoritative.
+- **`/emission` surface** — `GET /emission/at/{blockHeight}` is implemented
+  (EIP-27-aware, differential-tested against live-Scala vectors at
+  `test-vectors/api/emission/`); `GET /emission/scripts` is not — it needs
+  the emission / reemission / pay2Reemission contract-tree predefs plus P2S
+  address encoding, which the workspace doesn't expose yet. The captured
+  Scala oracle for it ships at `test-vectors/api/emission/scripts.json`.
 - **NiPoPoW prover/verifier** — the algorithmic core, the serve-side walk,
   and sub-chain / score checks have landed; full Scala-oracle byte parity
   and adversarial-proof edge cases are still open.

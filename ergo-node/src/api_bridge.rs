@@ -39,12 +39,15 @@ use crate::snapshot::{unix_now_ms, SnapshotHandle};
 
 mod block_reassembly;
 mod compat;
+mod emission;
 mod error;
+
 use block_reassembly::{
     assemble_full_block, build_proof_for_tx, load_and_encode_block_transactions,
     load_and_encode_header, load_and_encode_modifier_by_id, load_headers_in_range,
 };
 use compat::*;
+pub use emission::EmissionScheduleBridge;
 use error::BridgeError;
 
 /// Lock-free identity slot. The action loop swaps a fresh

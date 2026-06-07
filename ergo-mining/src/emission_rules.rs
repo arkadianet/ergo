@@ -57,6 +57,114 @@ pub fn miners_reward_at_height(h: u32, s: &MonetarySettings) -> u64 {
     }
 }
 
+/// Cumulative coins issued at height `h` and before. Mirror of
+/// `EmissionRules.issuedCoinsAfterHeight` (`EmissionRules.scala:42-60`).
+///
+/// Note the fixed-rate term `fixed_rate * (fixed_rate_period - 1)`:
+/// heights are 1-based and the block AT `fixed_rate_period` is already
+/// the first epoch-1 (reduced) block, so only `fixed_rate_period - 1`
+/// full-rate blocks exist. The `h < fixed_rate_period` branch counts
+/// `h` blocks directly (so `h = fixed_rate_period - 1` and the boundary
+/// agree). Pinned by the live-Scala oracle vector at h = 525_600.
+pub fn issued_coins_after_height(h: u32, s: &MonetarySettings) -> u64 {
+    if h < s.fixed_rate_period {
+        s.fixed_rate * u64::from(h)
+    } else {
+        let fixed_rate_issue = s.fixed_rate * u64::from(s.fixed_rate_period - 1);
+        let epoch = u64::from(h - s.fixed_rate_period) / u64::from(s.epoch_length);
+        // Σ over complete epochs of max(fixed_rate − reduction·e, 0) ·
+        // epoch_length. Once the rate clamps to 0 every later term is 0
+        // too, so the early break is arithmetically identical to
+        // Scala's full `(1 to epoch).map(...).sum`.
+        let mut full_epochs_issued = 0u64;
+        for e in 1..=epoch {
+            let rate = s
+                .fixed_rate
+                .saturating_sub(s.one_epoch_reduction.saturating_mul(e));
+            if rate == 0 {
+                break;
+            }
+            full_epochs_issued += rate * u64::from(s.epoch_length);
+        }
+        let height_in_this_epoch =
+            u64::from(h - s.fixed_rate_period) % u64::from(s.epoch_length) + 1;
+        let rate_this_epoch = s
+            .fixed_rate
+            .saturating_sub(s.one_epoch_reduction.saturating_mul(epoch + 1));
+        fixed_rate_issue + full_epochs_issued + height_in_this_epoch * rate_this_epoch
+    }
+}
+
+/// Total coins ever emitted and the last height with positive emission.
+/// Mirror of the Scala lazy pair `EmissionRules.{coinsTotal, blocksTotal}`
+/// (`EmissionRules.scala:22-34`) — a verbatim port of its walk from
+/// height 1 until `emissionAtHeight` first returns 0 (mainnet: ~2.08M
+/// trivial iterations, microseconds in release; callers cache the result).
+pub fn coins_and_blocks_total(s: &MonetarySettings) -> (u64, u32) {
+    let mut acc = 0u64;
+    let mut h = 1u32;
+    loop {
+        let rate = emission_at_height(h, s);
+        if rate == 0 {
+            return (acc, h - 1);
+        }
+        acc += rate;
+        h += 1;
+    }
+}
+
+/// One `/emission/at/{height}` row: plain numbers, no serde — the API
+/// crate owns the JSON shape. Field semantics mirror Scala
+/// `EmissionApiRoute.EmissionInfo` (`EmissionApiRoute.scala:65-69`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmissionInfo {
+    pub height: u32,
+    pub miner_reward: u64,
+    pub total_coins_issued: u64,
+    pub total_remain_coins: u64,
+    pub reemitted: u64,
+}
+
+/// Scala-parity composition for `/emission/at/{height}`. Mirror of
+/// `EmissionApiRoute.emissionInfoAtHeight` (`EmissionApiRoute.scala:71-79`):
+///
+/// ```text
+/// reemitted        = reemissionForHeight(h)
+/// minerReward      = minersRewardAtHeight(h) − reemitted
+/// totalCoinsIssued = issuedCoinsAfterHeight(h)
+/// totalRemainCoins = coinsTotal − totalCoinsIssued
+/// ```
+///
+/// `coins_total` is passed in precomputed (Scala caches it as a lazy
+/// val; callers here cache [`coins_and_blocks_total`] at boot).
+///
+/// `r = None` (a chain spec without EIP-27 reemission, e.g. synthetic
+/// dev chains) means `reemitted` is always 0 and `minerReward` is the
+/// plain pre-EIP-27 share — mirroring a Scala node with reemission
+/// disabled.
+pub fn emission_info_at_height(
+    h: u32,
+    s: &MonetarySettings,
+    r: Option<&crate::reemission::ReemissionSettings>,
+    coins_total: u64,
+) -> EmissionInfo {
+    let reemitted = r.map_or(0, |r| crate::reemission::reemission_for_height(h, s, r));
+    // The EIP-27 charge never exceeds the miner share by construction
+    // (12 ERG only while emission ≥ 15 ERG; proportional with a 3 ERG
+    // floor below that), so the saturation never fires on real params —
+    // it exists so absurd custom params clamp instead of panicking.
+    let miner_reward = miners_reward_at_height(h, s).saturating_sub(reemitted);
+    let total_coins_issued = issued_coins_after_height(h, s);
+    let total_remain_coins = coins_total.saturating_sub(total_coins_issued);
+    EmissionInfo {
+        height: h,
+        miner_reward,
+        total_coins_issued,
+        total_remain_coins,
+        reemitted,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +275,95 @@ mod tests {
                 "h={h}"
             );
         }
+    }
+
+    // ----- /emission/at oracle differential -----
+    //
+    // Vectors captured live from the reference Scala mainnet node
+    // (`GET 127.0.0.1:9053/emission/at/{h}`, 2026-06-07, node v6-era)
+    // BEFORE the Rust implementation existed — a true external oracle.
+    // Heights cover: genesis edge (0, 1), the fixed-rate boundary
+    // (525_599 / 525_600 — pins the `fixedRatePeriod − 1` quirk), the
+    // founders-window end (655_199 / 655_200), EIP-27 activation
+    // (777_216 / 777_217), the 15 ERG era (1_786_000, reemission charge
+    // 12 → miner 3), emission end (2_080_799 / 2_080_800), and
+    // past-the-end heights where issued must clamp at coinsTotal.
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EmissionAtVector {
+        height: u32,
+        miner_reward: u64,
+        total_coins_issued: u64,
+        total_remain_coins: u64,
+        reemitted: u64,
+    }
+
+    fn load_emission_at(h: u32) -> EmissionAtVector {
+        let path = format!(
+            "{}/../test-vectors/api/emission/at_{}.json",
+            env!("CARGO_MANIFEST_DIR"),
+            h
+        );
+        let bytes = std::fs::read(&path).expect("read emission vector");
+        serde_json::from_slice(&bytes).expect("parse emission vector")
+    }
+
+    const EMISSION_AT_ORACLE_HEIGHTS: &[u32] = &[
+        0, 1, 1000, 525_599, 525_600, 590_400, 655_199, 655_200, 777_216, 777_217, 1_000_000,
+        1_786_000, 2_080_799, 2_080_800, 2_143_999, 2_144_000, 3_000_000,
+    ];
+
+    #[test]
+    fn emission_info_matches_live_scala_oracle() {
+        let s = MonetarySettings::mainnet();
+        let r = crate::reemission::ReemissionSettings::mainnet();
+        let (coins_total, _) = coins_and_blocks_total(&s);
+        for &h in EMISSION_AT_ORACLE_HEIGHTS {
+            let v = load_emission_at(h);
+            assert_eq!(v.height, h, "vector file/height mismatch");
+            let info = emission_info_at_height(h, &s, Some(&r), coins_total);
+            assert_eq!(info.height, v.height, "height h={h}");
+            assert_eq!(info.miner_reward, v.miner_reward, "minerReward h={h}");
+            assert_eq!(
+                info.total_coins_issued, v.total_coins_issued,
+                "totalCoinsIssued h={h}"
+            );
+            assert_eq!(
+                info.total_remain_coins, v.total_remain_coins,
+                "totalRemainCoins h={h}"
+            );
+            assert_eq!(info.reemitted, v.reemitted, "reemitted h={h}");
+        }
+    }
+
+    #[test]
+    fn coins_and_blocks_total_mainnet_pins() {
+        // coinsTotal = issued + remain from any oracle row
+        // (97_739_925 ERG); blocksTotal: the oracle shows minerReward
+        // 3 ERG at 2_080_799 and 0 from 2_080_800 on.
+        let s = MonetarySettings::mainnet();
+        assert_eq!(
+            coins_and_blocks_total(&s),
+            (97_739_925_000_000_000, 2_080_799)
+        );
+    }
+
+    #[test]
+    fn issued_coins_fixed_rate_boundary_quirk() {
+        // Scala counts only `fixedRatePeriod − 1` full-rate blocks: the
+        // block AT the boundary is the first epoch-1 block (72 ERG).
+        let s = MonetarySettings::mainnet();
+        assert_eq!(issued_coins_after_height(0, &s), 0);
+        assert_eq!(
+            issued_coins_after_height(s.fixed_rate_period - 1, &s),
+            u64::from(s.fixed_rate_period - 1) * s.fixed_rate
+        );
+        assert_eq!(
+            issued_coins_after_height(s.fixed_rate_period, &s),
+            u64::from(s.fixed_rate_period - 1) * s.fixed_rate
+                + (s.fixed_rate - s.one_epoch_reduction)
+        );
     }
 
     // ----- saturation guard -----

@@ -126,6 +126,7 @@ fn build_app(indexer: StubIndexer) -> axum::Router {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         chain_params: Some(Arc::new(StubChainParams) as Arc<dyn ChainParamsView>),
         mining: None,
+        emission: None,
         utxo_reads_supported: true,
     };
     router_with_mempool(ctx, None)

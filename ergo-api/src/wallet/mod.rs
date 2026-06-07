@@ -247,9 +247,15 @@ pub enum WalletAdminError {
 }
 
 /// Build the `/wallet/*` axum router and, if `security` is `Some`,
-/// wrap it with the [`crate::auth::require_api_key`] middleware. The
-/// gate fires on the entire `/wallet/*` subtree — every route inherits
-/// the layer in one call rather than per-route `.route_layer(...)`.
+/// wrap it with the [`crate::auth::require_api_key`] middleware via
+/// `route_layer` — which fires only on matched routes. A plain `layer`
+/// here would also wrap this subtree's implicit fallback, which
+/// `Router::merge` then propagates router-wide, auth-gating every
+/// unmatched path on the node (the `/emission/at` 403 regression).
+/// Whole-prefix coverage — Scala's `(pathPrefix("wallet") & withAuth)`
+/// rejects unknown subpaths on the key before route matching — is kept
+/// via the explicit `/wallet` + `/wallet/*rest` catch-all routes, which
+/// `route_layer` does cover.
 ///
 /// **Security boundary**: callers MUST pass an explicit `Option` — no
 /// convenience wrapper exists that hides the choice. Production callers
@@ -261,7 +267,7 @@ pub fn router_with_security(
     admin: Arc<dyn WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> axum::Router {
-    use axum::routing::{get, post};
+    use axum::routing::{any, get, post};
     let r = axum::Router::new()
         .route("/wallet/status", get(lifecycle::status))
         .route("/wallet/init", post(lifecycle::init))
@@ -314,9 +320,13 @@ pub fn router_with_security(
             "/wallet/getPrivateKey",
             post(admin_advanced::get_private_key),
         )
+        // Whole-prefix gate parity: real catch-all routes (not a
+        // fallback) so the `route_layer` below covers them.
+        .route("/wallet", any(crate::auth::unknown_gated_subpath))
+        .route("/wallet/*rest", any(crate::auth::unknown_gated_subpath))
         .with_state(admin);
     match security {
-        Some(sec) => r.layer(axum::middleware::from_fn_with_state(
+        Some(sec) => r.route_layer(axum::middleware::from_fn_with_state(
             sec,
             crate::auth::require_api_key,
         )),
