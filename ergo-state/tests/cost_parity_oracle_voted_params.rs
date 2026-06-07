@@ -382,6 +382,7 @@ fn cost_parity_against_scala_corpus_sampled() {
             utxo: &utxo,
             params: &params,
             voting_length: 1024,
+            votes_unknown_rule_disabled: false,
             parent_extension: None,
             soft_fork_state: None,
             last_headers: &last_headers,

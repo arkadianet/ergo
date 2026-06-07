@@ -392,6 +392,28 @@ pub fn check_votes_known(header: &Header, voting_length: u32) -> Result<(), Head
     Ok(())
 }
 
+/// Rule 215 (`hdrVotesUnknown`) gated by its soft-fork deactivation
+/// status. Scala marks this rule `mayBeDisabled = true`; mainnet's
+/// v6.0 activation disabled it (its `ErgoValidationSettingsUpdate`
+/// carries `rules_to_disable = [215, 409]`) so the new
+/// `SubblocksPerBlock` parameter (id 9, absent from
+/// `Parameters.parametersDescs`) — and downward parameter proposals
+/// such as `MaxBlockCostDecrease` (-4) — can be voted on at an epoch
+/// start. When the activated validation settings disable the rule,
+/// Scala's `ValidationState` never runs it; we mirror that by skipping
+/// the check entirely. `rule_disabled` is supplied by the caller from
+/// `ErgoValidationSettings::is_rule_disabled(215)`.
+pub fn check_votes_known_active(
+    header: &Header,
+    voting_length: u32,
+    rule_disabled: bool,
+) -> Result<(), HeaderValidationError> {
+    if rule_disabled {
+        return Ok(());
+    }
+    check_votes_known(header, voting_length)
+}
+
 /// `Parameters.parametersDescs` keys from
 /// `reference/ergo/.../settings/Parameters.scala:332-342`. The
 /// Increase variants (1-8) for the eight votable parameters plus
@@ -866,5 +888,40 @@ mod tests {
         assert!(check_votes_known(&unknown, MAINNET_VOTING_LENGTH).is_ok());
         let err = check_votes_known(&unknown, 128).unwrap_err();
         assert!(matches!(err, HeaderValidationError::VotesUnknown { .. }));
+    }
+
+    #[test]
+    fn votes_known_active_skips_when_rule_215_disabled() {
+        // Real mainnet block 1802240 — an epoch start (1802240 % 1024
+        // == 0) whose header votes are `fc0000`: slot 0 = -4
+        // (MaxBlockCostDecrease), slots 1-2 = no-vote. Mainnet's v6.0
+        // soft-fork disabled rule 215 (alongside 409) so the new
+        // SubblocksPerBlock param id 9 — and downward proposals — are
+        // votable at an epoch start; the canonical chain contains this
+        // block. Scala's `ValidationState` never runs a disabled rule,
+        // so the node must skip rule 215 when the activated validation
+        // settings disable it. Enforcing it unconditionally is what
+        // stalled the node at 1802240.
+        let h = header_with_height(1802240, [(-4i8) as u8, 0, 0]);
+
+        // Rule active (not disabled): still rejected, identical to the
+        // raw rule — regression guard that the gate never loosens the
+        // active path.
+        match check_votes_known_active(&h, MAINNET_VOTING_LENGTH, false).unwrap_err() {
+            HeaderValidationError::VotesUnknown {
+                height,
+                index,
+                vote,
+            } => {
+                assert_eq!(height, 1802240);
+                assert_eq!(index, 0);
+                assert_eq!(vote, -4);
+            }
+            other => panic!("expected VotesUnknown when rule active, got {other:?}"),
+        }
+
+        // Rule disabled by an activated soft-fork: accepted, matching
+        // the canonical mainnet chain and Scala.
+        assert!(check_votes_known_active(&h, MAINNET_VOTING_LENGTH, true).is_ok());
     }
 }
