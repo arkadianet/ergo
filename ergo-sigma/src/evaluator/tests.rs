@@ -4788,9 +4788,12 @@ fn empty_map_over_byte_producing_body_infers_coll_byte() {
     );
 }
 
-/// Byte/Short overflow rejection round-trip.
-/// All three cases must return EvalError::RuntimeException —
-/// Scala ByteIsExactIntegral / ShortIsExactIntegral throws.
+/// Byte/Short Plus/Minus overflow rejection.
+/// Both cases must return EvalError::RuntimeException — Scala
+/// ByteIsExactIntegral / ShortIsExactIntegral override plus/minus/times
+/// with addExact/subtractExact/multiplyExact, which throw on overflow.
+/// (Division/Modulo/Negation are NOT exact — they wrap; see
+/// `byte_short_div_mod_negation_wrap_parity`.)
 #[test]
 fn byte_short_overflow_rejects() {
     // Byte.MaxValue + 1.toByte
@@ -4836,43 +4839,11 @@ fn byte_short_overflow_rejects() {
         matches!(err, EvalError::RuntimeException(_)),
         "Short.- overflow must be RuntimeException, got {err:?}"
     );
-
-    // Byte.MinValue / -1.toByte (division overflow edge case)
-    let min_b = op(
-        0x7D,
-        Payload::NumericCast {
-            input: Box::new(const_int(-128)),
-            tpe: SigmaType::SByte,
-        },
-    );
-    let neg_one_b = op(
-        0x7D,
-        Payload::NumericCast {
-            input: Box::new(const_int(-1)),
-            tpe: SigmaType::SByte,
-        },
-    );
-    let overflow_div = op(0x9D, Payload::Two(Box::new(min_b), Box::new(neg_one_b)));
-    let err = run_eval_err(&overflow_div);
-    assert!(
-        matches!(err, EvalError::RuntimeException(_)),
-        "Byte./ MIN/-1 overflow must be RuntimeException, got {err:?}"
-    );
-
-    // -Byte.MinValue (negation overflow)
-    let min_b2 = op(
-        0x7D,
-        Payload::NumericCast {
-            input: Box::new(const_int(-128)),
-            tpe: SigmaType::SByte,
-        },
-    );
-    let overflow_neg = op(0xF0, Payload::One(Box::new(min_b2)));
-    let err = run_eval_err(&overflow_neg);
-    assert!(
-        matches!(err, EvalError::RuntimeException(_)),
-        "-Byte.MinValue must be RuntimeException, got {err:?}"
-    );
+    // Note: Byte/Short Division/Modulo of MIN by -1 and unary Negation of
+    // MIN do NOT throw — they wrap (Scala routes them through the default
+    // ExactIntegral.quot/divisionRemainder = n.quot/n.rem and ExactNumeric
+    // .negate = n.negate, all plain two's-complement). Asserted in
+    // `byte_short_div_mod_negation_wrap_parity`, not here.
 }
 
 /// Int/Long Plus/Minus/Multiply must THROW on 2's-complement overflow
@@ -4941,6 +4912,268 @@ fn int_long_arith_overflow_parity() {
         Payload::Two(Box::new(const_int(2)), Box::new(const_int(3))),
     );
     assert_eq!(run_eval(&ok), Value::Int(5));
+}
+
+/// Byte/Short Division/Modulo of MIN by -1, and unary Negation of MIN,
+/// must WRAP (no throw) — matching Scala's default ExactIntegral
+/// quot/divisionRemainder (= scala.math.Numeric.{Byte,Short}IsIntegral,
+/// which promote to Int, divide, and `.toByte`/`.toShort` back) and
+/// ExactNumeric.negate (= n.negate). e.g. (-128:Byte)/(-1) = -128,
+/// (-128:Byte)%(-1) = 0, -(-128:Byte) = -128. The current Rust used
+/// checked_div/checked_rem/checked_neg, which threw — a consensus
+/// divergence invisible to the SANTA harness (error-variant only).
+#[test]
+fn byte_short_div_mod_negation_wrap_parity() {
+    let to_byte = |v: i32| {
+        op(
+            0x7D,
+            Payload::NumericCast {
+                input: Box::new(const_int(v)),
+                tpe: SigmaType::SByte,
+            },
+        )
+    };
+    let to_short = |v: i32| {
+        op(
+            0x7D,
+            Payload::NumericCast {
+                input: Box::new(const_int(v)),
+                tpe: SigmaType::SShort,
+            },
+        )
+    };
+
+    // Byte MIN / -1 wraps to MIN; MIN % -1 == 0.
+    let bdiv = op(
+        0x9D,
+        Payload::Two(Box::new(to_byte(-128)), Box::new(to_byte(-1))),
+    );
+    assert_eq!(run_eval(&bdiv), Value::Byte(-128), "(-128:Byte)/(-1) wraps");
+    let bmod = op(
+        0x9E,
+        Payload::Two(Box::new(to_byte(-128)), Box::new(to_byte(-1))),
+    );
+    assert_eq!(run_eval(&bmod), Value::Byte(0), "(-128:Byte)%(-1) == 0");
+
+    // Short MIN / -1 wraps to MIN; MIN % -1 == 0.
+    let sdiv = op(
+        0x9D,
+        Payload::Two(Box::new(to_short(-32768)), Box::new(to_short(-1))),
+    );
+    assert_eq!(
+        run_eval(&sdiv),
+        Value::Short(-32768),
+        "(-32768:Short)/(-1) wraps"
+    );
+    let smod = op(
+        0x9E,
+        Payload::Two(Box::new(to_short(-32768)), Box::new(to_short(-1))),
+    );
+    assert_eq!(run_eval(&smod), Value::Short(0), "(-32768:Short)%(-1) == 0");
+
+    // Unary negation of MIN wraps to MIN.
+    let bneg = op(0xF0, Payload::One(Box::new(to_byte(-128))));
+    assert_eq!(
+        run_eval(&bneg),
+        Value::Byte(-128),
+        "-(-128:Byte) wraps to -128"
+    );
+    let sneg = op(0xF0, Payload::One(Box::new(to_short(-32768))));
+    assert_eq!(
+        run_eval(&sneg),
+        Value::Short(-32768),
+        "-(-32768:Short) wraps to -32768"
+    );
+
+    // Divide-by-zero still throws (distinct from MIN/-1 wrap).
+    let bdz = op(
+        0x9D,
+        Payload::Two(Box::new(to_byte(5)), Box::new(to_byte(0))),
+    );
+    assert!(
+        matches!(run_eval_err(&bdz), EvalError::RuntimeException(_)),
+        "Byte / 0 still throws"
+    );
+}
+
+/// BigInt Plus/Minus/Multiply enforce the signed-256-bit bound
+/// UNCONDITIONALLY (Scala CBigInt.add/subtract/multiply wrap the result in
+/// `.toSignedBigIntValueExact`, which throws "BigInteger out of 256 bit
+/// range" when bitLength()>255). The valid signed range is exactly
+/// [-2^255, 2^255-1]: -2^255 fits (bitLength 255), 2^255 and -2^255-1 do
+/// not. divide/mod/min/max have NO such check.
+#[test]
+fn bigint_arith_256bit_bound() {
+    let big = |n: num_bigint::BigInt| Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(n),
+    };
+    let one = num_bigint::BigInt::from(1);
+    let two_pow_255 = &one << 255u32;
+    let max = &two_pow_255 - &one; // 2^255 - 1
+    let min = -&two_pow_255; // -2^255
+    let two_pow_254 = &one << 254u32;
+
+    // In-range arithmetic is unaffected.
+    let ok = op(
+        0x9A,
+        Payload::Two(Box::new(big(100.into())), Box::new(big(200.into()))),
+    );
+    assert_eq!(run_eval(&ok), Value::BigInt(300.into()));
+
+    // Boundary values are accepted (bitLength == 255).
+    let max_ok = op(
+        0x9A,
+        Payload::Two(Box::new(big(max.clone())), Box::new(big(0.into()))),
+    );
+    assert_eq!(
+        run_eval(&max_ok),
+        Value::BigInt(max.clone()),
+        "2^255-1 fits"
+    );
+    let min_ok = op(
+        0x99,
+        Payload::Two(Box::new(big(min.clone())), Box::new(big(0.into()))),
+    );
+    assert_eq!(run_eval(&min_ok), Value::BigInt(min.clone()), "-2^255 fits");
+
+    // Plus overflow: (2^255-1) + 1 == 2^255 -> reject.
+    let add_of = op(
+        0x9A,
+        Payload::Two(Box::new(big(max.clone())), Box::new(big(one.clone()))),
+    );
+    assert!(
+        matches!(run_eval_err(&add_of), EvalError::RuntimeException(_)),
+        "(2^255-1)+1 overflows 256-bit"
+    );
+    // Minus underflow: (-2^255) - 1 == -2^255-1 -> reject.
+    let sub_uf = op(
+        0x99,
+        Payload::Two(Box::new(big(min.clone())), Box::new(big(one.clone()))),
+    );
+    assert!(
+        matches!(run_eval_err(&sub_uf), EvalError::RuntimeException(_)),
+        "(-2^255)-1 underflows 256-bit"
+    );
+    // Multiply overflow: 2^254 * 2 == 2^255 -> reject.
+    let mul_of = op(
+        0x9C,
+        Payload::Two(Box::new(big(two_pow_254)), Box::new(big(2.into()))),
+    );
+    assert!(
+        matches!(run_eval_err(&mul_of), EvalError::RuntimeException(_)),
+        "2^254*2 overflows 256-bit"
+    );
+}
+
+/// BigInt unary Negation enforces the same 256-bit bound (CBigInt.negate
+/// = wrappedValue.negate().toSignedBigIntValueExact). -(-2^255) == 2^255
+/// is out of range and must throw; -(2^255-1) is in range.
+#[test]
+fn bigint_negate_256bit_bound() {
+    let big = |n: num_bigint::BigInt| Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(n),
+    };
+    let one = num_bigint::BigInt::from(1);
+    let two_pow_255 = &one << 255u32;
+    let max = &two_pow_255 - &one;
+    let min = -&two_pow_255;
+
+    let neg_min = op(0xF0, Payload::One(Box::new(big(min))));
+    assert!(
+        matches!(run_eval_err(&neg_min), EvalError::RuntimeException(_)),
+        "-(-2^255) == 2^255 overflows 256-bit"
+    );
+    let neg_max = op(0xF0, Payload::One(Box::new(big(max.clone()))));
+    assert_eq!(
+        run_eval(&neg_max),
+        Value::BigInt(-max),
+        "-(2^255-1) is in range"
+    );
+}
+
+/// BigInt Modulo follows java.math.BigInteger.mod: a non-positive modulus
+/// (b <= 0) throws ("BigInteger: modulus not positive"); for b > 0 the
+/// result is the NON-NEGATIVE remainder in [0, b) regardless of the sign
+/// of the dividend (floored mod, NOT sign-of-dividend remainder).
+#[test]
+fn bigint_modulo_nonpositive_modulus_rejects() {
+    let big = |n: i64| Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(n.into()),
+    };
+
+    // Non-positive modulus throws.
+    let neg_mod = op(0x9E, Payload::Two(Box::new(big(7)), Box::new(big(-3))));
+    assert!(
+        matches!(run_eval_err(&neg_mod), EvalError::RuntimeException(_)),
+        "7 % -3 (non-positive modulus) must throw"
+    );
+    // Zero modulus throws too (modulus not positive).
+    let zero_mod = op(0x9E, Payload::Two(Box::new(big(7)), Box::new(big(0))));
+    assert!(
+        matches!(run_eval_err(&zero_mod), EvalError::RuntimeException(_)),
+        "7 % 0 must throw"
+    );
+    // Valid positive modulus: non-negative result even for negative dividend.
+    let neg_dividend = op(0x9E, Payload::Two(Box::new(big(-7)), Box::new(big(3))));
+    assert_eq!(
+        run_eval(&neg_dividend),
+        Value::BigInt(2.into()),
+        "-7 mod 3 == 2 (non-negative)"
+    );
+    let pos = op(0x9E, Payload::Two(Box::new(big(7)), Box::new(big(3))));
+    assert_eq!(run_eval(&pos), Value::BigInt(1.into()), "7 mod 3 == 1");
+}
+
+/// byteArrayToBigInt (0x7B) rejects an empty input (Scala
+/// `new BigInteger(new byte[0])` throws NumberFormatException) and a value
+/// exceeding the signed 256-bit range (toSignedBigIntValueExact). The
+/// decode is SIGNED big-endian; boundary 32-byte values -2^255 and 2^255-1
+/// are accepted.
+#[test]
+fn bytearraytobigint_empty_and_oversize_reject() {
+    // Empty input -> reject.
+    let empty = op(0x7B, Payload::One(Box::new(const_bytes(vec![]))));
+    assert!(
+        matches!(run_eval_err(&empty), EvalError::RuntimeException(_)),
+        "empty byteArrayToBigInt must throw"
+    );
+
+    // 33-byte value 2^256 (0x01 ++ 32 zero bytes) -> out of 256-bit range.
+    let mut oversize = vec![0x01u8];
+    oversize.extend(std::iter::repeat_n(0u8, 32));
+    let over = op(0x7B, Payload::One(Box::new(const_bytes(oversize))));
+    assert!(
+        matches!(run_eval_err(&over), EvalError::RuntimeException(_)),
+        "33-byte 2^256 must throw (out of 256-bit range)"
+    );
+
+    // Boundary 32-byte values are accepted.
+    let one = num_bigint::BigInt::from(1);
+    let min = -(&one << 255u32); // -2^255
+    let max = (&one << 255u32) - &one; // 2^255-1
+    let mut min_bytes = vec![0x80u8];
+    min_bytes.extend(std::iter::repeat_n(0u8, 31));
+    let min_expr = op(0x7B, Payload::One(Box::new(const_bytes(min_bytes))));
+    assert_eq!(
+        run_eval(&min_expr),
+        Value::BigInt(min),
+        "0x80 ++ 0*31 == -2^255"
+    );
+    let mut max_bytes = vec![0x7fu8];
+    max_bytes.extend(std::iter::repeat_n(0xffu8, 31));
+    let max_expr = op(0x7B, Payload::One(Box::new(const_bytes(max_bytes))));
+    assert_eq!(
+        run_eval(&max_expr),
+        Value::BigInt(max),
+        "0x7f ++ 0xff*31 == 2^255-1"
+    );
+
+    // Small valid value still works.
+    let small = op(0x7B, Payload::One(Box::new(const_bytes(vec![0, 1]))));
+    assert_eq!(run_eval(&small), Value::BigInt(1.into()), "[0,1] == 1");
 }
 
 // ----- oracle parity -----
