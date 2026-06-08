@@ -13,6 +13,14 @@
 //!   follows java.math.BigInteger.mod: a non-positive modulus throws
 //!   ("modulus not positive"); for a positive modulus the result is the
 //!   non-negative remainder in [0, b). BigInt Divide has no 256-bit check.
+//!   UnsignedBigInt (v6 SUnsignedBigInt, in ArithOp.impls) Plus/Minus/
+//!   Multiply enforce the UNSIGNED-256-bit bound (CUnsignedBigInt.* ->
+//!   toUnsignedBigIntValueExact, result in [0, 2^256-1] or throw — exact,
+//!   not modular: overflow and underflow both throw). UnsignedBigInt Divide
+//!   is BigInteger.divide (non-negative operands -> floor); Modulo is
+//!   BigInteger.mod (zero modulus throws; result in [0, b)). The ArithOp
+//!   cost for UnsignedBigInt is the TypeBasedCost `case _` default (15 for
+//!   +/-/*//%, 5 for min/max), since SUnsignedBigInt is not SBigInt.
 //! - 0xA1 Min, 0xA2 Max — n-ary numeric reducers.
 //! - 0xF0 Negation — unary minus. Fixed-width integers wrap (Scala
 //!   ExactNumeric.negate is not exact); BigInt negate enforces the 256-bit
@@ -49,6 +57,19 @@ fn fits_in_256_bits(x: &num_bigint::BigInt) -> bool {
     x >= &min && x < &two_pow_255
 }
 
+/// Scala `Extensions.toUnsignedBigIntValueExact` accepts `x` iff
+/// `x.compareTo(ZERO) >= 0 && x.bitLength() <= 256`, i.e. `x ∈ [0, 2^256-1]`.
+/// `CUnsignedBigInt.{add,subtract,multiply}` route their BigInteger result
+/// through this check (UNCONDITIONAL — it is exact, not modular: an overflow
+/// past `2^256-1` or an underflow below `0` throws `ArithmeticException`).
+/// `num_bigint::BigInt::bits()` returns the magnitude bit-width, which equals
+/// `BigInteger.bitLength()` for non-negative values (and the sign check
+/// rejects negatives before it matters), so `x >= 0 && bits() <= 256` is the
+/// faithful port.
+fn fits_in_unsigned_256_bits(x: &num_bigint::BigInt) -> bool {
+    x.sign() != num_bigint::Sign::Minus && x.bits() <= 256
+}
+
 // 0x99 Minus
 pub(in crate::evaluator) fn eval_minus(
     left: &Expr,
@@ -81,6 +102,18 @@ pub(in crate::evaluator) fn eval_minus(
                 Ok(Value::BigInt(r))
             } else {
                 Err(EvalError::RuntimeException("BigInt.- out of 256-bit range"))
+            }
+        }
+        // CUnsignedBigInt.subtract -> toUnsignedBigIntValueExact: underflow
+        // (a < b -> negative) throws, exactly like the signed-BigInt bound.
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => {
+            let r = a - b;
+            if fits_in_unsigned_256_bits(&r) {
+                Ok(Value::UnsignedBigInt(r))
+            } else {
+                Err(EvalError::RuntimeException(
+                    "UnsignedBigInt.- out of [0, 2^256) range",
+                ))
             }
         }
         (l, r) => Err(EvalError::TypeError {
@@ -124,6 +157,18 @@ pub(in crate::evaluator) fn eval_plus(
                 Err(EvalError::RuntimeException("BigInt.+ out of 256-bit range"))
             }
         }
+        // CUnsignedBigInt.add -> toUnsignedBigIntValueExact: overflow past
+        // 2^256-1 throws (exact, not modular wrapping).
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => {
+            let r = a + b;
+            if fits_in_unsigned_256_bits(&r) {
+                Ok(Value::UnsignedBigInt(r))
+            } else {
+                Err(EvalError::RuntimeException(
+                    "UnsignedBigInt.+ out of [0, 2^256) range",
+                ))
+            }
+        }
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Plus",
             got: format!("{l:?}, {r:?}"),
@@ -165,6 +210,18 @@ pub(in crate::evaluator) fn eval_multiply(
                 Err(EvalError::RuntimeException("BigInt.* out of 256-bit range"))
             }
         }
+        // CUnsignedBigInt.multiply -> toUnsignedBigIntValueExact: overflow
+        // past 2^256-1 throws (exact, not modular wrapping).
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => {
+            let r = a * b;
+            if fits_in_unsigned_256_bits(&r) {
+                Ok(Value::UnsignedBigInt(r))
+            } else {
+                Err(EvalError::RuntimeException(
+                    "UnsignedBigInt.* out of [0, 2^256) range",
+                ))
+            }
+        }
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Multiply",
             got: format!("{l:?}, {r:?}"),
@@ -199,6 +256,9 @@ pub(in crate::evaluator) fn eval_division(
         (Value::BigInt(_), Value::BigInt(ref b)) if b.is_zero() => {
             Err(EvalError::RuntimeException("BigInt./ divide by zero"))
         }
+        (Value::UnsignedBigInt(_), Value::UnsignedBigInt(ref b)) if b.is_zero() => Err(
+            EvalError::RuntimeException("UnsignedBigInt./ divide by zero"),
+        ),
         // wrapping_div matches Java/Scala integer `/`: MinValue / -1 wraps
         // to MinValue (no exception) for ALL fixed-width types. Scala's
         // ExactIntegral does not override quot, so it delegates to plain
@@ -210,6 +270,11 @@ pub(in crate::evaluator) fn eval_division(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_div(b))),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_div(b))),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a / b)),
+        // CUnsignedBigInt.divide = BigInteger.divide (truncating toward zero;
+        // both operands non-negative, so this is floor division). Divisor is
+        // non-zero (zero handled above). Result <= dividend, so it stays in
+        // range — no exact check needed.
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::UnsignedBigInt(a / b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Division",
             got: format!("{l:?}, {r:?}"),
@@ -265,6 +330,18 @@ pub(in crate::evaluator) fn eval_modulo(
                 Ok(Value::BigInt(r))
             }
         }
+        // CUnsignedBigInt.mod = java.math.BigInteger.mod: a non-positive
+        // modulus throws ("modulus not positive"). An UnsignedBigInt is
+        // always >= 0, so non-positive ⟺ zero. The dividend is also >= 0, so
+        // the remainder is already the non-negative value in [0, b).
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(ref b)) => {
+            if !b.is_positive() {
+                return Err(EvalError::RuntimeException(
+                    "UnsignedBigInt.% modulus not positive",
+                ));
+            }
+            Ok(Value::UnsignedBigInt(&a % b))
+        }
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Modulo (non-zero divisor)",
             got: format!("{l:?}, {r:?}"),
@@ -287,6 +364,7 @@ pub(in crate::evaluator) fn eval_min(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.min(b))),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.min(b))),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a.min(b))),
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::UnsignedBigInt(a.min(b))),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Min",
             got: format!("{l:?}, {r:?}"),
@@ -309,6 +387,7 @@ pub(in crate::evaluator) fn eval_max(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.max(b))),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.max(b))),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a.max(b))),
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::UnsignedBigInt(a.max(b))),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Max",
             got: format!("{l:?}, {r:?}"),
