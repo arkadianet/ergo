@@ -4484,6 +4484,44 @@ fn methodcall_avltree_bad_proof_contains_false_get_errors() {
     );
 }
 
+/// `SAvlTree.isInsertAllowed(5)` / `isUpdateAllowed(6)` / `isRemoveAllowed(7)`
+/// each return the matching `enabledOperations` bit as a Boolean. These are
+/// zero-arg flag accessors, so they ride the `0xDB PropertyCall` wire form
+/// (empty args) and resolve through `eval_no_arg_method`. Mixed flags
+/// (insert=true, update=false, remove=true) prove each accessor reads its own
+/// bit rather than aliasing a shared default. Scala `SAvlTreeMethods` cost
+/// kind is `FixedCost(JitCost(15))`, V5+/ungated.
+#[test]
+fn methodcall_avltree_flag_accessors_read_own_bit() {
+    let tree_data = ergo_ser::sigma_value::AvlTreeData {
+        digest: ergo_primitives::digest::ADDigest::from_bytes([0x07; 33]),
+        insert_allowed: true,
+        update_allowed: false,
+        remove_allowed: true,
+        key_length: 32,
+        value_length_opt: None,
+    };
+    let avl_const = Expr::Const {
+        tpe: SigmaType::SAvlTree,
+        val: SigmaValue::AvlTree(tree_data),
+    };
+    let prop = |method_id: u8| {
+        Expr::Op(IrNode {
+            opcode: 0xDB,
+            payload: Payload::MethodCall {
+                type_id: 100,
+                method_id,
+                obj: Box::new(avl_const.clone()),
+                args: vec![],
+                type_args: vec![],
+            },
+        })
+    };
+    assert_eq!(run_eval(&prop(5)), Value::Bool(true), "isInsertAllowed");
+    assert_eq!(run_eval(&prop(6)), Value::Bool(false), "isUpdateAllowed");
+    assert_eq!(run_eval(&prop(7)), Value::Bool(true), "isRemoveAllowed");
+}
+
 /// 0xB7 TreeLookup is not executable in Scala
 /// (costKind = notSupportedError at trees.scala:1336). User-level
 /// AVL lookup uses SAvlTree.get method call, not this direct form.
@@ -4974,6 +5012,67 @@ fn empty_map_over_byte_producing_body_infers_coll_byte() {
         run_eval(&expr),
         Value::CollBytes(vec![]),
         "empty map with Byte-inferred body must produce empty Coll[Byte], not Tuple"
+    );
+}
+
+/// Regression guard: the AVL Boolean flag accessors must resolve in the
+/// `infer_op_type` table so an empty `map` whose body is one of them infers
+/// `Coll[Boolean]` instead of falling back to `CollGeneric(SAny)`. Pins
+/// (100, 5/6/7) → SBoolean.
+#[test]
+fn infer_op_type_avltree_flag_accessors() {
+    let bindings = std::collections::HashMap::new();
+    let constants: Vec<(SigmaType, SigmaValue)> = Vec::new();
+    let mc = |method_id: u8| IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 100,
+            method_id,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    };
+    for mid in [5u8, 6, 7] {
+        assert_eq!(
+            infer_op_type(&mc(mid), &bindings, &constants),
+            Some(SigmaType::SBoolean),
+            "SAvlTree flag accessor (100, {mid}) must infer SBoolean"
+        );
+    }
+}
+
+/// End-to-end empty-map inference: an empty `Coll[Int]` mapped through a body
+/// of `tree.isInsertAllowed` (100, 5) must yield `Value::CollBool(vec![])`.
+/// Without the (100, 5..=7) inference entries the body's type is unknown for
+/// an empty input (the body is never evaluated), so the result would degrade
+/// to `CollGeneric(SAny)` and diverge from Scala's `Coll[Boolean]()`.
+#[test]
+fn empty_map_over_bool_producing_body_infers_coll_bool() {
+    let empty_coll = const_coll_int(vec![]);
+    let body = op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 100,
+            method_id: 5,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(body),
+        },
+    );
+    let expr = op(0xAD, Payload::Two(Box::new(empty_coll), Box::new(func)));
+
+    assert_eq!(
+        run_eval(&expr),
+        Value::CollBool(vec![]),
+        "empty map with Bool-inferred body must produce empty Coll[Boolean]"
     );
 }
 

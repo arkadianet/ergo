@@ -512,6 +512,12 @@ pub(crate) fn infer_op_type(
                 (105, 1) => Some(SigmaType::SByte),
                 // SAvlTree.enabledOperations (type_id=100, method 2) → Byte
                 (100, 2) => Some(SigmaType::SByte),
+                // SAvlTree.isInsertAllowed/isUpdateAllowed/isRemoveAllowed
+                // (type_id=100, methods 5/6/7) → Boolean. Needed so an empty
+                // `map` whose body is a flag accessor infers Coll[Boolean]
+                // rather than degrading to CollGeneric(SAny). Cross-check:
+                // eval_no_arg_method returns Value::Bool for the same ids.
+                (100, 5) | (100, 6) | (100, 7) => Some(SigmaType::SBoolean),
                 // SHeader.height (104, 9) → Int
                 (104, 9) => Some(SigmaType::SInt),
                 // SHeader.timestamp (104, 7) → Long

@@ -231,7 +231,10 @@ pub(super) fn eval_no_arg_method(
         (100, 3) => {
             add_method_cost(cost, 15)?;
             match obj_val {
-                Value::AvlTree(avl) => Ok(Some(Value::Int(avl.key_length as i32))),
+                // key_length is i32 (Scala keyLength: Int): a wrapped-negative
+                // length surfaces as a negative SInt here, matching the
+                // reference (e.g. keyLength-negative -> Int(-2147483648)).
+                Value::AvlTree(avl) => Ok(Some(Value::Int(avl.key_length))),
                 other => Err(EvalError::TypeError {
                     expected: "AvlTree for keyLength",
                     got: format!("{other:?}"),
@@ -242,10 +245,43 @@ pub(super) fn eval_no_arg_method(
             add_method_cost(cost, 15)?;
             match obj_val {
                 Value::AvlTree(avl) => Ok(Some(Value::Opt(
-                    avl.value_length_opt.map(|v| Box::new(Value::Int(v as i32))),
+                    avl.value_length_opt.map(|v| Box::new(Value::Int(v))),
                 ))),
                 other => Err(EvalError::TypeError {
                     expected: "AvlTree for valueLengthOpt",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        // SAvlTree.isInsertAllowed(5) / isUpdateAllowed(6) / isRemoveAllowed(7)
+        // -> Boolean, FixedCost(JitCost(15)). Zero-arg flag accessors over the
+        // enabledOperations bits (Scala SAvlTreeMethods, V5+/ungated).
+        (100, 5) => {
+            add_method_cost(cost, 15)?;
+            match obj_val {
+                Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.insert_allowed))),
+                other => Err(EvalError::TypeError {
+                    expected: "AvlTree for isInsertAllowed",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        (100, 6) => {
+            add_method_cost(cost, 15)?;
+            match obj_val {
+                Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.update_allowed))),
+                other => Err(EvalError::TypeError {
+                    expected: "AvlTree for isUpdateAllowed",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        (100, 7) => {
+            add_method_cost(cost, 15)?;
+            match obj_val {
+                Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.remove_allowed))),
+                other => Err(EvalError::TypeError {
+                    expected: "AvlTree for isRemoveAllowed",
                     got: format!("{other:?}"),
                 }),
             }

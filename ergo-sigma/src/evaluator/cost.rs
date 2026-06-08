@@ -227,17 +227,13 @@ pub(crate) fn avl_tree_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
 /// successful construction `keyLength > 0` holds, so this returns the digest
 /// height as before.
 ///
-/// The metadata `require`s are evaluated against the SIGNED `Int` view that
-/// Scala exposes: `require(keyLength > 0)` and `require(valueLengthOpt
-/// .forall(_ >= 0))`. A serialized length above `i32::MAX` shows up in Scala
-/// as a NEGATIVE `Int` and fails these requires, so it must be treated as
-/// invalid metadata here too — hence the `as i32` reinterpretation (a no-op
-/// for the current `get_u32_exact`-bounded `[0, i32::MAX]` range, but correct
-/// once keyLength/valueLengthOpt are read with the wrapping cast).
+/// The metadata `require`s are evaluated against the SIGNED `Int` view Scala
+/// exposes: `require(keyLength > 0)` and `require(valueLengthOpt.forall(_ >=
+/// 0))`. `key_length`/`value_length_opt` are now signed `i32` (a serialized
+/// length above `i32::MAX` is read wrapped to a NEGATIVE value), so a wrapped
+/// length is directly `< 0` here and correctly counts as invalid metadata.
 pub(crate) fn avl_cost_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
-    let key_ok = (avl.key_length as i32) > 0;
-    let value_ok = avl.value_length_opt.is_none_or(|v| (v as i32) >= 0);
-    if key_ok && value_ok {
+    if avl.key_length > 0 && avl.value_length_opt.is_none_or(|v| v >= 0) {
         avl_tree_height(avl)
     } else {
         0
@@ -249,6 +245,21 @@ pub(crate) fn make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
     proof: &[u8],
 ) -> Result<crate::avl::AvlVerifier, EvalError> {
+    // Reject invalid metadata up front (scrypto `require(keyLength > 0)` /
+    // `require(valueLengthOpt.forall(_ >= 0))` — these fail BEFORE the tree is
+    // reconstructed, yielding reconstructedTree=None). Doing this here mirrors
+    // Scala AND avoids passing a wrapped-negative length to the third-party
+    // crate as a huge `usize`. `try_make_avl_verifier` maps this Err to None,
+    // so the method arms degrade gracefully (contains→false, etc.).
+    if avl.key_length <= 0 || avl.value_length_opt.is_some_and(|v| v < 0) {
+        return Err(EvalError::TypeError {
+            expected: "valid AVL metadata (keyLength > 0, valueLengthOpt >= 0)",
+            got: format!(
+                "keyLength={}, valueLengthOpt={:?}",
+                avl.key_length, avl.value_length_opt
+            ),
+        });
+    }
     crate::avl::AvlVerifier::new(
         avl.digest.as_bytes(),
         proof,
