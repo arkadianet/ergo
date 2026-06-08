@@ -42,6 +42,17 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         // Inline constant: first byte is a type code
         let tpe = decode_type(r, first)?;
         let val = read_value(r, &tpe)?;
+        // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
+        // (Scala DataSerializer.deserialize(SHeader)). The gate fires PER
+        // materialized header, so a constant that actually CARRIES a header
+        // (incl. nested) in a pre-v3 (version < 3) tree is rejected by the
+        // reference at parse time — but an empty Coll[Header] (no header
+        // materialized) is accepted. Match that value-based behavior.
+        if _tree_version < 3 && val.contains_header() {
+            return Err(ReadError::InvalidData(format!(
+                "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
+            )));
+        }
         return Ok(Expr::Const { tpe, val });
     }
 

@@ -279,6 +279,8 @@ pub fn validate_scripts(
                     key_length: 32,
                     value_length_opt: None,
                 });
+        let ergo_tree = resolved.candidate.ergo_tree();
+
         let reduction_ctx = ReductionContext {
             height: cx.ctx.height,
             self_box: Some(&eval_inputs[i]),
@@ -297,9 +299,12 @@ pub fn validate_scripts(
             last_headers: &eval_headers,
             last_block_utxo_root,
             activated_script_version: cx.ctx.activated_script_version,
+            // ErgoTree HEADER version (low 3 bits of the tree's header byte),
+            // distinct from activatedScriptVersion. Scala keys
+            // isV3OrLaterErgoTreeVersion on this for the v6 SHeader data
+            // serialization gate.
+            ergo_tree_version: ergo_tree.version,
         };
-
-        let ergo_tree = resolved.candidate.ergo_tree();
 
         let verified = verify_spending_proof_with_context_and_cost(
             ergo_tree,

@@ -116,6 +116,31 @@ pub enum SigmaValue {
     /// Preserved verbatim for roundtrip; full structural parsing happens
     /// at the ergo_box layer.
     OpaqueBoxBytes(Vec<u8>),
+    /// Block header (`SHeader`) value — the full parsed header. Carries the
+    /// same data as the block-header wire format; (de)serialized via
+    /// `read_header`/`write_header`. Only reachable on v6 (ErgoTree v3+) trees:
+    /// Scala gates `DataSerializer.{de,}serialize(SHeader)` on
+    /// `isV3OrLaterErgoTreeVersion`, enforced by the evaluator at the
+    /// value-materialization boundary.
+    Header(Box<crate::header::Header>),
+}
+
+impl SigmaValue {
+    /// `true` if an actual `Header` value appears anywhere in this value tree.
+    /// Scala gates `SHeader` (de)serialization on `isV3OrLaterErgoTreeVersion`
+    /// PER MATERIALIZED VALUE (`DataSerializer.deserialize(SHeader)`), not per
+    /// static type — so an EMPTY `Coll[Header]` (which materializes no header)
+    /// is NOT gated. Callers gate on this, not on the type containing SHeader.
+    pub fn contains_header(&self) -> bool {
+        match self {
+            SigmaValue::Header(_) => true,
+            SigmaValue::Coll(CollValue::Values(vs)) | SigmaValue::Tuple(vs) => {
+                vs.iter().any(SigmaValue::contains_header)
+            }
+            SigmaValue::Opt(Some(inner)) => inner.contains_header(),
+            _ => false,
+        }
+    }
 }
 
 /// Element-type-specialised collection storage. The bool and byte
@@ -165,6 +190,12 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
         }
         (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
             w.put_bytes(bytes);
+        }
+        // SHeader: full block-header data format (Scala DataSerializer ->
+        // ErgoHeader.sigmaSerializer). The v3+ gate is enforced by the
+        // evaluator before this point.
+        (SigmaType::SHeader, SigmaValue::Header(h)) => {
+            crate::header::write_header(w, h)?;
         }
         (SigmaType::SString, SigmaValue::Str(s)) => {
             w.put_u32(s.len() as u32);
@@ -303,6 +334,13 @@ pub fn read_value(r: &mut VlqReader, tpe: &SigmaType) -> Result<SigmaValue, Read
             Ok(SigmaValue::BigInt(v))
         }
         SigmaType::SBox => read_opaque_box(r),
+        // SHeader: full block-header data format (Scala DataSerializer ->
+        // ErgoHeader.sigmaSerializer.parse). This decoder is version-agnostic;
+        // the v3+ (isV3OrLaterErgoTreeVersion) gate is applied by the callers
+        // that have the ErgoTree version (the evaluator's value-materialization
+        // boundary and the tree-constant parser), NOT here, so a stray
+        // pre-v3 SHeader constant cannot slip through ungated.
+        SigmaType::SHeader => Ok(SigmaValue::Header(Box::new(crate::header::read_header(r)?))),
         SigmaType::SFunc { .. } => Err(ReadError::InvalidData(
             "SFunc value deserialization is not supported".into(),
         )),
@@ -311,7 +349,6 @@ pub fn read_value(r: &mut VlqReader, tpe: &SigmaType) -> Result<SigmaValue, Read
         ))),
         SigmaType::SAny
         | SigmaType::SContext
-        | SigmaType::SHeader
         | SigmaType::SPreHeader
         | SigmaType::SGlobal
         | SigmaType::STypeVar(_) => Err(ReadError::InvalidData(format!(

@@ -598,7 +598,7 @@ pub(in crate::evaluator) fn eval_method_call(
             // JIT cost parity tests green.
             add_cost(cx.cost, 0xC6)?;
             let b = super::super::helpers::resolve_box(&obj_val, cx.ctx)?;
-            super::box_context::read_register_option(b, reg_id, 0xDC)
+            super::box_context::read_register_option(b, reg_id, 0xDC, cx.ctx)
         }
         // SContext.getVar (101, 11) is intentionally NOT handled here:
         // it falls through to the catch-all "unsupported MethodCall"
@@ -661,7 +661,8 @@ pub(in crate::evaluator) fn eval_method_call(
             };
             match ext.get(&var_id) {
                 Some((ext_tpe, ext_val)) if *ext_tpe == tpe => {
-                    let val = super::super::helpers::sigma_to_value(ext_tpe, ext_val)?;
+                    let val =
+                        super::super::helpers::sigma_to_value_versioned(ext_tpe, ext_val, cx.ctx)?;
                     Ok(Value::Opt(Some(Box::new(val))))
                 }
                 _ => Ok(Value::Opt(None)),
@@ -709,6 +710,12 @@ pub(in crate::evaluator) fn eval_method_call(
                 expected: "explicit type argument for SGlobal.deserializeTo",
                 got: "no type_args provided".into(),
             })?;
+            // SHeader uses the full block-header data format (Scala
+            // DataSerializer.deserialize(SHeader) -> ErgoHeader.sigmaSerializer
+            // .parse), gated on isV3OrLaterErgoTreeVersion. `read_value` /
+            // `sigma_to_value_versioned` handle SHeader and enforce that gate
+            // (GHSA-hfj8-hjph-7r78); a pre-v3 ErgoTree calling
+            // deserializeTo[SHeader] is rejected here, matching the reference.
             let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
             let parsed = ergo_ser::sigma_value::read_value(&mut r, target_type).map_err(|e| {
                 EvalError::TypeError {
@@ -722,7 +729,7 @@ pub(in crate::evaluator) fn eval_method_call(
                     got: format!("{} trailing bytes", r.remaining()),
                 });
             }
-            super::super::helpers::sigma_to_value(target_type, &parsed)
+            super::super::helpers::sigma_to_value_versioned(target_type, &parsed, cx.ctx)
         }
         // SGlobal(106).fromBigEndianBytes(5, bytes: Coll[Byte])[T] -> T
         // EIP-50 v6 method, soft-fork-gated. Decodes big-endian
@@ -797,45 +804,10 @@ pub(in crate::evaluator) fn eval_method_call(
                     })
                 }
             };
-            // Rebuild a serialization-layer `Header` from the
-            // evaluator carrier so `verify_pow_solution` sees the
-            // same bytes the validator originally hashed. Solution
-            // reconstruction picks the variant based on header
-            // version (v1 â†’ Autolykos v1, v2+ â†’ Autolykos v2),
-            // matching `EvalHeader::from_header` in reverse.
-            use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
-            use ergo_primitives::group_element::GroupElement;
-            use ergo_ser::autolykos::AutolykosSolution;
-            let pk_ge = GroupElement::from_bytes(eh.miner_pk);
-            let solution = if eh.version == 1 {
-                let w_ge = GroupElement::from_bytes(eh.pow_onetime_pk);
-                let d_bytes = eh.pow_distance.to_signed_bytes_be();
-                AutolykosSolution::V1 {
-                    pk: pk_ge,
-                    w: w_ge,
-                    nonce: eh.pow_nonce,
-                    d: d_bytes,
-                }
-            } else {
-                AutolykosSolution::V2 {
-                    pk: pk_ge,
-                    nonce: eh.pow_nonce,
-                }
-            };
-            let header = ergo_ser::header::Header {
-                version: eh.version,
-                parent_id: ModifierId::from_bytes(eh.parent_id),
-                ad_proofs_root: Digest32::from_bytes(eh.ad_proofs_root),
-                transactions_root: Digest32::from_bytes(eh.transactions_root),
-                state_root: ADDigest::from_bytes(eh.state_root),
-                timestamp: eh.timestamp,
-                extension_root: Digest32::from_bytes(eh.extension_root),
-                n_bits: eh.n_bits,
-                height: eh.height,
-                votes: eh.votes,
-                unparsed_bytes: eh.unparsed_bytes.clone(),
-                solution,
-            };
+            // Rebuild a serialization-layer `Header` from the evaluator
+            // carrier (inverse of `EvalHeader::from_header`) so
+            // `verify_pow_solution` sees the same bytes the validator hashed.
+            let header = eh.to_header();
             Ok(Value::Bool(
                 ergo_crypto::pow::verify_pow_solution(&header).is_ok(),
             ))
@@ -2661,6 +2633,9 @@ pub(in crate::evaluator) fn serialize_put_cost(
             }
             s
         }
+        // NOTE: SHeader serialize is deferred — value_to_typed_sigma rejects
+        // Value::Header, so this arm is unreachable until the DynamicCost is
+        // reconciled to the reference (a focused follow-up).
         _ => {
             return Err(EvalError::TypeError {
                 expected: "DataSerializer-serializable value for SGlobal.serialize",

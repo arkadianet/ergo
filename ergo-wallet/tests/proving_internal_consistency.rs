@@ -862,6 +862,7 @@ fn make_verifier_context<'a>(
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2, // block_version 3 - 1
+        ergo_tree_version: 2,
     }
 }
 

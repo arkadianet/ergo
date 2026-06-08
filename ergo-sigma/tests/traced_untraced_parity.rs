@@ -66,6 +66,7 @@ fn traced_and_untraced_produce_identical_result_and_cost() {
             last_headers: &[],
             last_block_utxo_root: None,
             activated_script_version: 2,
+            ergo_tree_version: 2,
             pre_header_version: 0,
             pre_header_parent_id: [0u8; 32],
             pre_header_n_bits: 0,
