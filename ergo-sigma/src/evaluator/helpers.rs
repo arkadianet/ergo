@@ -946,6 +946,11 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
                 SigmaValue::Coll(CollValue::Values(sigma_vals)),
             ))
         }
+        // NOTE: Value::Header is intentionally NOT serialized here yet.
+        // serialize[SHeader] needs a Scala-exact DynamicCost (the
+        // SigmaByteWriter per-put model for ErgoHeader.sigmaSerializer); that
+        // cost could not be reconciled to the reference and is a focused
+        // follow-up. The READ side (deserializeTo[SHeader]) is complete.
         // Catch-all rejects non-serializable runtime carriers
         // (BoxCollection / SelfBox / BoxRef / InlineBox / Func /
         // Global / Opt / Tokens / Header / AvlTree / PreHeader /
@@ -1054,6 +1059,31 @@ pub(crate) fn subst_constants(
 ///
 /// Shared lowering path for constants (ConstPlaceholder), register values
 /// (ExtractRegisterAs), and any other typed sigma data entering the evaluator.
+/// [`sigma_to_value`] with the v6 SHeader gate. Scala materializes an
+/// `SHeader` value (constant, context var, register, deserializeTo) only when
+/// `VersionContext.isV3OrLaterErgoTreeVersion` — a pre-v3 ErgoTree carrying an
+/// SHeader value is rejected by `DataSerializer`. Mirror that here so we never
+/// accept input the reference node rejects (accept-invalid fork hazard).
+///
+/// The gate keys on whether the VALUE actually contains a header (Scala gates
+/// per materialized header, not per static type): an empty `Coll[Header]`
+/// materializes no header and is accepted on any version, matching the
+/// reference. Use this at every evaluator boundary that turns a `SigmaValue`
+/// into a `Value`.
+pub(crate) fn sigma_to_value_versioned(
+    tpe: &SigmaType,
+    val: &SigmaValue,
+    ctx: &ReductionContext<'_>,
+) -> Result<Value, EvalError> {
+    if !ctx.is_v3_ergo_tree() && val.contains_header() {
+        return Err(EvalError::TypeError {
+            expected: "ErgoTree version >= 3 for an SHeader value (isV3OrLaterErgoTreeVersion)",
+            got: format!("ergoTreeVersion={}", ctx.ergo_tree_version),
+        });
+    }
+    sigma_to_value(tpe, val)
+}
+
 pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalError> {
     use ergo_ser::sigma_value::CollValue;
     match (tpe, val) {
@@ -1273,6 +1303,22 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
         }
         (SigmaType::SAvlTree, SigmaValue::AvlTree(data)) => Ok(Value::AvlTree(data.clone())),
         (SigmaType::SString, SigmaValue::Str(s)) => Ok(Value::Str(s.clone())),
+        // SHeader value -> Value::Header. The header id is Blake2b256 over the
+        // serialized header (the block-header path computes it the same way).
+        // Version-agnostic: the v3+ (isV3OrLaterErgoTreeVersion) gate is
+        // enforced by the evaluator callers that materialize an SHeader value
+        // (getVar / constant eval / deserializeTo), which carry the ErgoTree
+        // version; this converter does not.
+        (SigmaType::SHeader, SigmaValue::Header(h)) => {
+            let (_bytes, hid) =
+                ergo_ser::header::serialize_header(h).map_err(|e| EvalError::TypeError {
+                    expected: "re-serializable SHeader value",
+                    got: format!("{e:?}"),
+                })?;
+            Ok(Value::Header(Box::new(
+                crate::evaluator::types::EvalHeader::from_header(h, *hid.as_bytes()),
+            )))
+        }
         _ => Err(EvalError::UnsupportedConstant(tpe.clone())),
     }
 }

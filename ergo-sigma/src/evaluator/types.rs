@@ -144,6 +144,44 @@ impl EvalHeader {
             unparsed_bytes: h.unparsed_bytes.clone(),
         }
     }
+
+    /// Rebuild a serialization-layer [`ergo_ser::header::Header`] — the inverse
+    /// of [`Self::from_header`]. The PoW solution variant is chosen by header
+    /// version (v1 → Autolykos v1, v2+ → Autolykos v2). Used by
+    /// `SHeader.checkPow` (re-hash) and `SGlobal.serialize[SHeader]` (re-emit).
+    pub fn to_header(&self) -> ergo_ser::header::Header {
+        use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+        use ergo_primitives::group_element::GroupElement;
+        use ergo_ser::autolykos::AutolykosSolution;
+        let pk = GroupElement::from_bytes(self.miner_pk);
+        let solution = if self.version == 1 {
+            AutolykosSolution::V1 {
+                pk,
+                w: GroupElement::from_bytes(self.pow_onetime_pk),
+                nonce: self.pow_nonce,
+                d: self.pow_distance.to_signed_bytes_be(),
+            }
+        } else {
+            AutolykosSolution::V2 {
+                pk,
+                nonce: self.pow_nonce,
+            }
+        };
+        ergo_ser::header::Header {
+            version: self.version,
+            parent_id: ModifierId::from_bytes(self.parent_id),
+            ad_proofs_root: Digest32::from_bytes(self.ad_proofs_root),
+            transactions_root: Digest32::from_bytes(self.transactions_root),
+            state_root: ADDigest::from_bytes(self.state_root),
+            timestamp: self.timestamp,
+            extension_root: Digest32::from_bytes(self.extension_root),
+            n_bits: self.n_bits,
+            height: self.height,
+            votes: self.votes,
+            unparsed_bytes: self.unparsed_bytes.clone(),
+            solution,
+        }
+    }
 }
 
 /// Evaluation context — borrows transaction-scoped box data.
@@ -220,6 +258,14 @@ pub struct ReductionContext<'a> {
     /// Controls consensus-preserving behavior differences across protocol versions.
     /// Pre-JIT (< 2): selfBoxIndex returns -1 (known bug preserved as consensus).
     pub activated_script_version: u8,
+    /// ErgoTree HEADER version of the script under evaluation (the low 3 bits
+    /// of the tree's header byte), NOT the activated/block version. Scala's
+    /// `VersionContext.isV3OrLaterErgoTreeVersion` keys several v6 behaviors on
+    /// THIS value, not on `activatedScriptVersion` — notably
+    /// `DataSerializer.{de,}serialize(SHeader)`. Distinct because a legacy
+    /// (version < 3) tree can be spent in a block whose activated version is
+    /// already >= 3, and those two versions then disagree.
+    pub ergo_tree_version: u8,
 }
 
 impl<'a> ReductionContext<'a> {
@@ -248,7 +294,19 @@ impl<'a> ReductionContext<'a> {
             // pin pre-JIT (< 2) or pre-EIP-50 (2) behavior hand-build the
             // context with the explicit version.
             activated_script_version: 3,
+            // Default to a v6 ErgoTree (version 3) so v6 type-gated paths
+            // (e.g. deserializeTo[SHeader]) work in unit tests without
+            // per-test ceremony; tests pinning legacy behavior set it
+            // explicitly.
+            ergo_tree_version: 3,
         }
+    }
+
+    /// Whether the script under evaluation is a v6 (version >= 3) ErgoTree —
+    /// Scala's `VersionContext.isV3OrLaterErgoTreeVersion`. Gates the v6 SHeader
+    /// data-serialization paths.
+    pub fn is_v3_ergo_tree(&self) -> bool {
+        self.ergo_tree_version >= 3
     }
 
     /// Like [`minimal`], but activated at EIP-50 / Sigma 6.0 (block

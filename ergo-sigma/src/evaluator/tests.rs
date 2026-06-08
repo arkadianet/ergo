@@ -107,6 +107,7 @@ fn box_equality_self_vs_inputs_0() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -152,6 +153,7 @@ fn box_equality_in_tuple() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -196,6 +198,7 @@ fn box_equality_in_option() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -253,6 +256,7 @@ fn box_collection_vs_derived_tuple() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -328,6 +332,7 @@ fn coll_box_eq_cost_uses_per_item() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -1537,6 +1542,7 @@ fn ctx_with_self_box(b: &EvalBox) -> ReductionContext<'_> {
         // `ReductionContext::minimal`'s default. Lets v6 MethodCall
         // tests share this helper.
         activated_script_version: 3,
+        ergo_tree_version: 3,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -2544,6 +2550,140 @@ fn methodcall_global_deserializeto_v6_evaluates_serialized_true() {
         },
     });
     assert_eq!(run_eval(&expr), Value::Bool(true));
+}
+
+/// GHSA-hfj8-hjph-7r78 regression: `SGlobal.deserializeTo[SHeader]` must parse
+/// the full block-header data format. Scala `DataSerializer.deserialize(SHeader)`
+/// delegates to `ErgoHeader.sigmaSerializer.parse` (v3+ ErgoTree); our value
+/// deserializer had no SHeader case, so a script using `deserializeTo[SHeader]`
+/// errored — halting from-genesis testnet sync at block 28,474 (a block the
+/// Scala reference accepts). The bytes are produced by the same header
+/// serializer the node uses for block headers, so this is a faithful round-trip.
+#[test]
+fn methodcall_global_deserializeto_v6_header_roundtrip() {
+    let h = ergo_ser::header::Header {
+        version: 2,
+        parent_id: ergo_primitives::digest::ModifierId::from_bytes([0x11; 32]),
+        ad_proofs_root: ergo_primitives::digest::Digest32::from_bytes([0x22; 32]),
+        transactions_root: ergo_primitives::digest::Digest32::from_bytes([0x33; 32]),
+        state_root: ergo_primitives::digest::ADDigest::from_bytes([0x44; 33]),
+        timestamp: 1_700_000_000_000,
+        extension_root: ergo_primitives::digest::Digest32::from_bytes([0x55; 32]),
+        n_bits: 0x1a01_7660,
+        height: 28_474,
+        votes: [0, 0, 0],
+        unparsed_bytes: vec![],
+        solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from_bytes([0x02; 33]),
+            nonce: [0; 8],
+        },
+    };
+    let (bytes, id) = ergo_ser::header::serialize_header(&h).expect("serialize header");
+    let expr = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 106,
+            method_id: 4,
+            obj: Box::new(op(0xDD, Payload::Zero)),
+            args: vec![const_bytes(bytes)],
+            type_args: vec![SigmaType::SHeader],
+        },
+    });
+    let expected = Value::Header(Box::new(EvalHeader::from_header(&h, *id.as_bytes())));
+    assert_eq!(run_eval(&expr), expected);
+}
+
+/// `deserializeTo[SHeader]` is gated on the ErgoTree HEADER version (Scala
+/// `isV3OrLaterErgoTreeVersion`), NOT `activatedScriptVersion`. A legacy
+/// (version < 3) tree calling it must error even when activated >= 3 —
+/// otherwise we'd return a Header where the reference throws (accept-invalid
+/// fork hazard, codex P1 / GHSA-hfj8-hjph-7r78).
+#[test]
+fn deserializeto_sheader_gated_on_ergo_tree_version() {
+    let h = ergo_ser::header::Header {
+        version: 2,
+        parent_id: ergo_primitives::digest::ModifierId::from_bytes([0x11; 32]),
+        ad_proofs_root: ergo_primitives::digest::Digest32::from_bytes([0x22; 32]),
+        transactions_root: ergo_primitives::digest::Digest32::from_bytes([0x33; 32]),
+        state_root: ergo_primitives::digest::ADDigest::from_bytes([0x44; 33]),
+        timestamp: 1,
+        extension_root: ergo_primitives::digest::Digest32::from_bytes([0x55; 32]),
+        n_bits: 0x1a01_7660,
+        height: 1,
+        votes: [0, 0, 0],
+        unparsed_bytes: vec![],
+        solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from_bytes([0x02; 33]),
+            nonce: [0; 8],
+        },
+    };
+    let (bytes, _id) = ergo_ser::header::serialize_header(&h).unwrap();
+    let expr = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 106,
+            method_id: 4,
+            obj: Box::new(op(0xDD, Payload::Zero)),
+            args: vec![const_bytes(bytes)],
+            type_args: vec![SigmaType::SHeader],
+        },
+    });
+    // activated >= 3 (deserializeTo is callable) but ergoTree version < 3.
+    let ctx = ReductionContext {
+        ergo_tree_version: 2,
+        ..ReductionContext::minimal(0, 0)
+    };
+    assert!(
+        matches!(
+            eval_to_value(&expr, &ctx, &[]),
+            Err(EvalError::TypeError { .. })
+        ),
+        "deserializeTo[SHeader] on a v<3 ErgoTree must error (isV3OrLaterErgoTreeVersion)"
+    );
+}
+
+/// The SHeader version gate is VALUE-based, not TYPE-based: Scala fires it per
+/// materialized header (`DataSerializer.deserialize(SHeader)`), so an EMPTY
+/// `Coll[Header]` (no header materialized) is accepted even on a v<3 tree,
+/// while an actual header is rejected. Regression guard for over-gating
+/// empty header collections.
+#[test]
+fn sheader_gate_is_value_based_not_type_based() {
+    let ctx_v2 = ReductionContext {
+        ergo_tree_version: 2,
+        ..ReductionContext::minimal(0, 0)
+    };
+    // Empty Coll[Header] on a v<3 tree: NOT gated (no header materialized).
+    let empty = SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Values(vec![]));
+    let t = SigmaType::SColl(Box::new(SigmaType::SHeader));
+    assert!(
+        crate::evaluator::helpers::sigma_to_value_versioned(&t, &empty, &ctx_v2).is_ok(),
+        "empty Coll[Header] must not be gated on a v<3 tree"
+    );
+    // A real header value on a v<3 tree IS gated.
+    let h = ergo_ser::header::Header {
+        version: 2,
+        parent_id: ergo_primitives::digest::ModifierId::from_bytes([0x11; 32]),
+        ad_proofs_root: ergo_primitives::digest::Digest32::from_bytes([0x22; 32]),
+        transactions_root: ergo_primitives::digest::Digest32::from_bytes([0x33; 32]),
+        state_root: ergo_primitives::digest::ADDigest::from_bytes([0x44; 33]),
+        timestamp: 1,
+        extension_root: ergo_primitives::digest::Digest32::from_bytes([0x55; 32]),
+        n_bits: 0x1a01_7660,
+        height: 1,
+        votes: [0, 0, 0],
+        unparsed_bytes: vec![],
+        solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from_bytes([0x02; 33]),
+            nonce: [0; 8],
+        },
+    };
+    let hv = SigmaValue::Header(Box::new(h));
+    assert!(
+        crate::evaluator::helpers::sigma_to_value_versioned(&SigmaType::SHeader, &hv, &ctx_v2)
+            .is_err(),
+        "an actual SHeader value must be gated on a v<3 tree"
+    );
 }
 
 /// EIP-50 v6 `SGlobal.fromBigEndianBytes[T]` (MethodCall 106, 5) —
@@ -7829,6 +7969,7 @@ fn coll_updated_inputs_updated_self_succeeds_via_eval() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 3,
+        ergo_tree_version: 3,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -7879,6 +8020,7 @@ fn coll_updated_inputs_rejects_int_element_via_eval() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 3,
+        ergo_tree_version: 3,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,

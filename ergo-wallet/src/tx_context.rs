@@ -116,6 +116,10 @@ impl ReductionContextOwned {
             last_headers: &self.last_headers,
             last_block_utxo_root: self.last_block_utxo_root.clone(),
             activated_script_version: self.activated_script_version,
+            // ErgoTree HEADER version of the box being spent (low 3 bits of the
+            // tree's first byte), distinct from activatedScriptVersion. Drives
+            // the v6 SHeader data-serialization gate (isV3OrLaterErgoTreeVersion).
+            ergo_tree_version: self.self_box.script_bytes.first().map_or(0, |b| b & 0x07),
         }
     }
 }

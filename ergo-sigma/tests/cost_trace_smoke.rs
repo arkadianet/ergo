@@ -54,6 +54,7 @@ fn trace_captures_opcode_costs() {
         last_headers: &[],
         last_block_utxo_root: None,
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -159,6 +160,7 @@ fn trace_pins_method_indexof_cumulative_total() {
         // version 2 is sufficient. Keeping below 3 keeps this test
         // independent of EIP-50 activation gates.
         activated_script_version: 2,
+        ergo_tree_version: 2,
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,

@@ -115,7 +115,7 @@ pub(in crate::evaluator) fn eval_expr(
     let result = match expr {
         Expr::Const { tpe, val } => {
             cost.add(ergo_primitives::cost::JitCost::from_jit(5))?;
-            sigma_to_value(tpe, val)
+            sigma_to_value_versioned(tpe, val, ctx)
         }
         Expr::Op(node) => eval_op(node, ctx, constants, env, depth, cost, trace),
     };

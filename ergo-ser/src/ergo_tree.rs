@@ -217,7 +217,17 @@ fn parse_body(
         let count = r.get_u32_exact()? as usize;
         let mut consts = Vec::with_capacity(count.min(CONSTANTS_VEC_SOFT_CAP));
         for _ in 0..count {
-            consts.push(read_constant(r)?);
+            let (tpe, val) = read_constant(r)?;
+            // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
+            // (Scala DataSerializer.deserialize(SHeader)), per materialized
+            // header: a segregated constant carrying a header in a pre-v3 tree
+            // is rejected; an empty Coll[Header] is accepted.
+            if version < 3 && val.contains_header() {
+                return Err(ReadError::InvalidData(format!(
+                    "SHeader value requires ErgoTree version >= 3 (got {version})"
+                )));
+            }
+            consts.push((tpe, val));
         }
         consts
     } else {

@@ -15,7 +15,7 @@ use ergo_ser::sigma_type::SigmaType;
 
 use super::super::cost::add_cost;
 use super::super::eval_ctx::EvalCtx;
-use super::super::helpers::{resolve_box, sigma_to_value};
+use super::super::helpers::{resolve_box, sigma_to_value_versioned};
 use super::super::types::{EvalBox, EvalError, ReductionContext, Value};
 
 // 0xC7 ExtractCreationInfo — (creationHeight, transactionId ++ Shorts.toByteArray(outputIndex))
@@ -76,7 +76,7 @@ pub(in crate::evaluator) fn eval_extract_register_as(
     add_cost(cx.cost, 0xC6)?;
     let box_val = cx.eval_expr(input)?;
     let b = resolve_box(&box_val, cx.ctx)?;
-    read_register_option(b, reg_id, 0xC6)
+    read_register_option(b, reg_id, 0xC6, cx.ctx)
 }
 
 /// Shared register-read helper: resolves register `reg_id` on a
@@ -91,6 +91,7 @@ pub(in crate::evaluator) fn read_register_option(
     b: &EvalBox,
     reg_id: u8,
     unsupported_opcode: u8,
+    ctx: &ReductionContext<'_>,
 ) -> Result<Value, EvalError> {
     match reg_id {
         // R0: box.value (Long)
@@ -118,7 +119,7 @@ pub(in crate::evaluator) fn read_register_option(
             let reg_idx = (reg_id - 4) as usize;
             match &b.registers[reg_idx] {
                 Some(rv) => {
-                    let val = sigma_to_value(&rv.tpe, &rv.value)?;
+                    let val = sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?;
                     Ok(Value::Opt(Some(Box::new(val))))
                 }
                 None => Ok(Value::Opt(None)),
@@ -181,7 +182,7 @@ pub(in crate::evaluator) fn eval_get_var(
             if ext_tpe != tpe {
                 return Ok(Value::Opt(None));
             }
-            let val = sigma_to_value(ext_tpe, ext_val)?;
+            let val = sigma_to_value_versioned(ext_tpe, ext_val, ctx)?;
             Ok(Value::Opt(Some(Box::new(val))))
         }
         None => Ok(Value::Opt(None)),
