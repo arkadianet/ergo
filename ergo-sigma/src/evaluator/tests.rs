@@ -9285,3 +9285,155 @@ fn coll_short_map_per_item_delta_matches_coll_int() {
          Expected={expected}, got={short_delta}",
     );
 }
+
+// ---- Coll.updateMany (12,21): Scala CollOverArray.updateMany + PerItemCost(20,2,10) ----
+// `coll.updateMany(indexes, values)`: requireSameLength(indexes, values)
+// (throw on mismatch), then for each i write resArr[indexes[i]] = values[i]
+// with an out-of-range index throwing IndexOutOfBoundsException (duplicate
+// indexes allowed, in order). Cost = PerItemCost(20, 2, 10) over the
+// RECEIVER length.
+
+fn coll_update_many(recv: Expr, indexes: Expr, values: Expr) -> Expr {
+    op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 21,
+            obj: Box::new(recv),
+            args: vec![indexes, values],
+            type_args: vec![],
+        },
+    )
+}
+
+#[test]
+fn coll_update_many_value_and_bounds() {
+    let cx = ReductionContext::minimal(500_000, 0);
+    // [1,2,3].updateMany([0,2],[10,30]) -> [10,2,30]
+    assert_eq!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2, 3]),
+                const_coll_int(vec![0, 2]),
+                const_coll_int(vec![10, 30]),
+            ),
+            &cx,
+            &[],
+        )
+        .unwrap(),
+        Value::CollInt(vec![10, 2, 30]),
+    );
+    // duplicate index, last write wins (in order): [1,2].updateMany([0,0],[7,9]) -> [9,2]
+    assert_eq!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2]),
+                const_coll_int(vec![0, 0]),
+                const_coll_int(vec![7, 9]),
+            ),
+            &cx,
+            &[],
+        )
+        .unwrap(),
+        Value::CollInt(vec![9, 2]),
+    );
+    // out-of-range index throws: [1].updateMany([5],[0])
+    assert!(matches!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1]),
+                const_coll_int(vec![5]),
+                const_coll_int(vec![0]),
+            ),
+            &cx,
+            &[],
+        ),
+        Err(EvalError::RuntimeException(_))
+    ));
+    // empty receiver, index 0 -> out of range throws (mirrors nice vector #0)
+    assert!(matches!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![]),
+                const_coll_int(vec![0]),
+                const_coll_int(vec![0]),
+            ),
+            &cx,
+            &[],
+        ),
+        Err(EvalError::RuntimeException(_))
+    ));
+    // length mismatch throws: [1,2].updateMany([0,1],[0])
+    assert!(matches!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2]),
+                const_coll_int(vec![0, 1]),
+                const_coll_int(vec![0]),
+            ),
+            &cx,
+            &[],
+        ),
+        Err(EvalError::RuntimeException(_))
+    ));
+}
+
+#[test]
+fn coll_update_many_cost_matches_scala() {
+    // MethodCall(4) + obj const(5) + indexes const(5) + values const(5) +
+    // updateMany PerItemCost(20,2,10).cost(3): chunks(3)=(3-1)/10+1=1 -> 22.
+    // Total 4 + 5 + 5 + 5 + 22 = 41.
+    let expr = coll_update_many(
+        const_coll_int(vec![1, 2, 3]),
+        const_coll_int(vec![0, 2]),
+        const_coll_int(vec![10, 30]),
+    );
+    let cx = ReductionContext::minimal(500_000, 0);
+    let mut cost = CostAccumulator::recording_only();
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut trace = None;
+    eval_expr(&expr, &cx, &[], &mut env, &mut depth, &mut cost, &mut trace).unwrap();
+    assert_eq!(
+        cost.total().value(),
+        41,
+        "updateMany over receiver len 3: 4 + 5 + 5 + 5 + PerItem(20,2,10).cost(3)=22",
+    );
+}
+
+#[test]
+fn coll_update_many_rejects_mismatched_value_type() {
+    let cx = ReductionContext::minimal(500_000, 0);
+    // Writing a Long into a Coll[Int] receiver mirrors Scala's Array[Int]
+    // store of a boxed Long -> ArrayStoreException. Reject.
+    assert!(matches!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2]),
+                const_coll_int(vec![0]),
+                const_coll_long(vec![5]),
+            ),
+            &cx,
+            &[],
+        ),
+        Err(EvalError::TypeError { .. })
+    ));
+    // But an EMPTY mismatched values collection writes nothing, so it is
+    // accepted (returns the receiver clone) — matching Scala, which only
+    // touches `values` per written index. The indexes carrier is likewise
+    // erased: an empty non-Int indexes collection (Coll[Long]()) passes
+    // requireSameLength and the zero-iteration loop, returning the clone.
+    assert_eq!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2]),
+                const_coll_long(vec![]),
+                const_coll_long(vec![]),
+            ),
+            &cx,
+            &[],
+        )
+        .unwrap(),
+        Value::CollInt(vec![1, 2]),
+    );
+}
