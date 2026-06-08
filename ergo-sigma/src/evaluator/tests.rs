@@ -4484,6 +4484,44 @@ fn methodcall_avltree_bad_proof_contains_false_get_errors() {
     );
 }
 
+/// `SAvlTree.isInsertAllowed(5)` / `isUpdateAllowed(6)` / `isRemoveAllowed(7)`
+/// each return the matching `enabledOperations` bit as a Boolean. These are
+/// zero-arg flag accessors, so they ride the `0xDB PropertyCall` wire form
+/// (empty args) and resolve through `eval_no_arg_method`. Mixed flags
+/// (insert=true, update=false, remove=true) prove each accessor reads its own
+/// bit rather than aliasing a shared default. Scala `SAvlTreeMethods` cost
+/// kind is `FixedCost(JitCost(15))`, V5+/ungated.
+#[test]
+fn methodcall_avltree_flag_accessors_read_own_bit() {
+    let tree_data = ergo_ser::sigma_value::AvlTreeData {
+        digest: ergo_primitives::digest::ADDigest::from_bytes([0x07; 33]),
+        insert_allowed: true,
+        update_allowed: false,
+        remove_allowed: true,
+        key_length: 32,
+        value_length_opt: None,
+    };
+    let avl_const = Expr::Const {
+        tpe: SigmaType::SAvlTree,
+        val: SigmaValue::AvlTree(tree_data),
+    };
+    let prop = |method_id: u8| {
+        Expr::Op(IrNode {
+            opcode: 0xDB,
+            payload: Payload::MethodCall {
+                type_id: 100,
+                method_id,
+                obj: Box::new(avl_const.clone()),
+                args: vec![],
+                type_args: vec![],
+            },
+        })
+    };
+    assert_eq!(run_eval(&prop(5)), Value::Bool(true), "isInsertAllowed");
+    assert_eq!(run_eval(&prop(6)), Value::Bool(false), "isUpdateAllowed");
+    assert_eq!(run_eval(&prop(7)), Value::Bool(true), "isRemoveAllowed");
+}
+
 /// 0xB7 TreeLookup is not executable in Scala
 /// (costKind = notSupportedError at trees.scala:1336). User-level
 /// AVL lookup uses SAvlTree.get method call, not this direct form.

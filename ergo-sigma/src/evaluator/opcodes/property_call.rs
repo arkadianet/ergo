@@ -253,6 +253,39 @@ pub(super) fn eval_no_arg_method(
                 }),
             }
         }
+        // SAvlTree.isInsertAllowed(5) / isUpdateAllowed(6) / isRemoveAllowed(7)
+        // -> Boolean, FixedCost(JitCost(15)). Zero-arg flag accessors over the
+        // enabledOperations bits (Scala SAvlTreeMethods, V5+/ungated).
+        (100, 5) => {
+            add_method_cost(cost, 15)?;
+            match obj_val {
+                Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.insert_allowed))),
+                other => Err(EvalError::TypeError {
+                    expected: "AvlTree for isInsertAllowed",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        (100, 6) => {
+            add_method_cost(cost, 15)?;
+            match obj_val {
+                Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.update_allowed))),
+                other => Err(EvalError::TypeError {
+                    expected: "AvlTree for isUpdateAllowed",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        (100, 7) => {
+            add_method_cost(cost, 15)?;
+            match obj_val {
+                Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.remove_allowed))),
+                other => Err(EvalError::TypeError {
+                    expected: "AvlTree for isRemoveAllowed",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
         // SColl(12).indices(14) -> Coll[Int]                   cost: 20
         (12, 14) => {
             add_method_cost(cost, 20)?;
