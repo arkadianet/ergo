@@ -94,6 +94,15 @@ pub struct BlockValidationContext<'a> {
     /// rather than on `ProtocolParams` because it's a chain-level constant
     /// (not a votable per-epoch param).
     pub voting_length: u32,
+    /// Whether rule 215 (`hdrVotesUnknown`) has been deactivated by an
+    /// activated soft-fork (`ErgoValidationSettings::is_rule_disabled(215)`).
+    /// Scala marks the rule `mayBeDisabled = true` and mainnet's v6.0
+    /// activation disabled it (`rules_to_disable = [215, 409]`) so the
+    /// new `SubblocksPerBlock` param and downward proposals are votable
+    /// at an epoch start. When `true`, rule 215 is skipped — Scala's
+    /// `ValidationState` never runs a disabled rule. Defaults to `false`
+    /// (rule active) for callers that don't track validation settings.
+    pub votes_unknown_rule_disabled: bool,
     /// Parent block's extension. Drives interlink validation
     /// (rules 401 / 402): when `Some`, the current extension's
     /// interlink fields must decode and equal `update_interlinks(
@@ -921,12 +930,18 @@ pub fn validate_full_block(
     }
 
     // 2.5. Header vote-known check (Scala rule 215). Fires only on
-    // epoch-start headers; off-epoch headers no-op. Block-level
-    // because `voting_length` is a chain config carried on the
-    // validation context. Wired into `validate_full_block_parallel_impl`
-    // too — keep both paths in sync.
-    crate::header::check_votes_known(header, ctx.voting_length)
-        .map_err(BlockValidationError::Header)?;
+    // epoch-start headers; off-epoch headers no-op. Skipped entirely
+    // when an activated soft-fork has disabled the rule
+    // (`ctx.votes_unknown_rule_disabled`) — mainnet did so at v6.0.
+    // Block-level because `voting_length` is a chain config carried on
+    // the validation context. Wired into
+    // `validate_full_block_parallel_impl` too — keep both paths in sync.
+    crate::header::check_votes_known_active(
+        header,
+        ctx.voting_length,
+        ctx.votes_unknown_rule_disabled,
+    )
+    .map_err(BlockValidationError::Header)?;
 
     // 2.6. Fork-vote prohibited-window check (Scala rule 407).
     // No-op when no soft-fork is in progress (ctx.soft_fork_state
@@ -1195,9 +1210,14 @@ fn validate_full_block_parallel_impl(
     }
 
     // 2.5. Header vote-known check (Scala rule 215). Same step as
-    // sequential `validate_full_block`; keep both paths in sync.
-    crate::header::check_votes_known(header, ctx.voting_length)
-        .map_err(BlockValidationError::Header)?;
+    // sequential `validate_full_block`; keep both paths in sync. Skipped
+    // when an activated soft-fork disabled the rule.
+    crate::header::check_votes_known_active(
+        header,
+        ctx.voting_length,
+        ctx.votes_unknown_rule_disabled,
+    )
+    .map_err(BlockValidationError::Header)?;
 
     // 2.6. Fork-vote prohibited-window check (Scala rule 407).
     // Mirror of sequential step 2.6.

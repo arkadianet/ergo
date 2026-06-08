@@ -232,6 +232,7 @@ fn full_block_pipeline_blocks_1_5() {
             utxo: &store,
             params: &params,
             voting_length: 1024,
+            votes_unknown_rule_disabled: false,
             parent_extension: None,
             soft_fork_state: None,
             last_headers: &[],

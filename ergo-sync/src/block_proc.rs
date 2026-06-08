@@ -547,11 +547,19 @@ fn process_block_utxo(
         }
         _ => None,
     };
+    // Rule 215 (`hdrVotesUnknown`) is soft-fork-deactivatable. Mainnet's
+    // v6.0 activation disabled it (`rules_to_disable = [215, 409]`), so an
+    // epoch-start header may legitimately propose downward / new-param
+    // votes (e.g. block 1802240 votes -4 = MaxBlockCostDecrease). Honor
+    // the activated validation settings so we don't reject canonical
+    // blocks the rest of the network accepted.
+    let votes_unknown_rule_disabled = store.validation_settings().is_rule_disabled(215);
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: store,
         params,
         voting_length,
+        votes_unknown_rule_disabled,
         parent_extension: None,
         soft_fork_state,
         last_headers,
@@ -1026,11 +1034,15 @@ fn process_block_digest(
         }
         _ => None,
     };
+    // Rule 215 honored against the activated soft-fork settings — see the
+    // UTXO-arm context above for the full rationale.
+    let votes_unknown_rule_disabled = store.validation_settings().is_rule_disabled(215);
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: &digest_view,
         params,
         voting_length,
+        votes_unknown_rule_disabled,
         parent_extension: None,
         soft_fork_state,
         last_headers,

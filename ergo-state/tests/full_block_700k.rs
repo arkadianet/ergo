@@ -288,6 +288,7 @@ fn full_block_v2_700k_with_state() {
             utxo: &utxo,
             params: &params,
             voting_length: 1024,
+            votes_unknown_rule_disabled: false,
             parent_extension: None,
             soft_fork_state: None,
             last_headers: &checked_last,
