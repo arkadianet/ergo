@@ -2533,6 +2533,86 @@ fn methodcall_context_getvarfrominput_v6_reads_other_inputs() {
 /// `DataSerializer.deserialize(typeArg, reader)`, which reads raw
 /// typed value bytes (NOT an expression body). For `SBoolean`,
 /// `DataSerializer.deserialize` is `r.getUByte() != 0` — non-strict,
+/// Zero-arg v6 methods are serialized by the compiler as `0xDB PropertyCall`
+/// (not `0xDC MethodCall`), so they must resolve through the shared no-arg
+/// dispatch table. Pins the dispatch unification: bitwiseInverse (numeric +
+/// UnsignedBigInt), SBigInt.toUnsigned, SUnsignedBigInt.toSigned, and
+/// Coll.reverse all evaluate via PropertyCall. Previously these handlers lived
+/// only in `eval_method_call`'s args-arms and errored ("supported PropertyCall").
+#[test]
+fn zero_arg_v6_methods_resolve_via_property_call() {
+    let prop = |type_id: u8, method_id: u8, obj: Expr| {
+        Expr::Op(IrNode {
+            opcode: 0xDB,
+            payload: Payload::MethodCall {
+                type_id,
+                method_id,
+                obj: Box::new(obj),
+                args: vec![],
+                type_args: vec![],
+            },
+        })
+    };
+    let bigint = |n: i64| Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(num_bigint::BigInt::from(n)),
+    };
+    let ubigint = |n: u64| Expr::Const {
+        tpe: SigmaType::SUnsignedBigInt,
+        val: SigmaValue::BigInt(num_bigint::BigInt::from(n)),
+    };
+    // bitwiseInverse: Int(4)/Long(5) -> ~x
+    assert_eq!(run_eval(&prop(4, 8, const_int(1))), Value::Int(-2));
+    assert_eq!(run_eval(&prop(5, 8, const_long(1))), Value::Long(-2));
+    // bitwiseInverse: BigInt(6) -> ~x
+    assert_eq!(
+        run_eval(&prop(6, 8, bigint(0))),
+        Value::BigInt(num_bigint::BigInt::from(-1))
+    );
+    // SUnsignedBigInt(9).bitwiseInverse -> (2^256-1) XOR n; for 0 -> 2^256-1
+    let mask = (num_bigint::BigInt::from(1) << 256u32) - num_bigint::BigInt::from(1);
+    assert_eq!(
+        run_eval(&prop(9, 8, ubigint(0))),
+        Value::UnsignedBigInt(mask)
+    );
+    // SBigInt(6).toUnsigned(14)
+    assert_eq!(
+        run_eval(&prop(6, 14, bigint(5))),
+        Value::UnsignedBigInt(num_bigint::BigInt::from(5))
+    );
+    // SUnsignedBigInt(9).toSigned(19)
+    assert_eq!(
+        run_eval(&prop(9, 19, ubigint(7))),
+        Value::BigInt(num_bigint::BigInt::from(7))
+    );
+    // SColl(12).reverse(30) preserves the typed carrier
+    assert_eq!(
+        run_eval(&prop(12, 30, const_coll_int(vec![1, 2, 3]))),
+        Value::CollInt(vec![3, 2, 1])
+    );
+
+    // Arity is still enforced for the moved no-arg methods: a malformed 0xDC
+    // MethodCall carrying extra args must error (not silently ignore them),
+    // matching the `check_arity(args, 0)` the explicit arms used to do.
+    let bad = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 4,
+            method_id: 8, // bitwiseInverse — no-arg
+            obj: Box::new(const_int(1)),
+            args: vec![const_int(99)], // bogus extra arg
+            type_args: vec![],
+        },
+    });
+    assert!(
+        matches!(
+            run_eval_err(&bad),
+            EvalError::ArityMismatch { expected: 0, .. }
+        ),
+        "no-arg method invoked with args must error on arity"
+    );
+}
+
 /// so any nonzero byte reads as `true`. Pin the boolean branch
 /// here; the multi-type round-trip with serialize is pinned by
 /// `methodcall_global_serialize_roundtrips_via_deserializeto`.
