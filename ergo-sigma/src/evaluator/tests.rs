@@ -5015,6 +5015,67 @@ fn empty_map_over_byte_producing_body_infers_coll_byte() {
     );
 }
 
+/// Regression guard: the AVL Boolean flag accessors must resolve in the
+/// `infer_op_type` table so an empty `map` whose body is one of them infers
+/// `Coll[Boolean]` instead of falling back to `CollGeneric(SAny)`. Pins
+/// (100, 5/6/7) → SBoolean.
+#[test]
+fn infer_op_type_avltree_flag_accessors() {
+    let bindings = std::collections::HashMap::new();
+    let constants: Vec<(SigmaType, SigmaValue)> = Vec::new();
+    let mc = |method_id: u8| IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 100,
+            method_id,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    };
+    for mid in [5u8, 6, 7] {
+        assert_eq!(
+            infer_op_type(&mc(mid), &bindings, &constants),
+            Some(SigmaType::SBoolean),
+            "SAvlTree flag accessor (100, {mid}) must infer SBoolean"
+        );
+    }
+}
+
+/// End-to-end empty-map inference: an empty `Coll[Int]` mapped through a body
+/// of `tree.isInsertAllowed` (100, 5) must yield `Value::CollBool(vec![])`.
+/// Without the (100, 5..=7) inference entries the body's type is unknown for
+/// an empty input (the body is never evaluated), so the result would degrade
+/// to `CollGeneric(SAny)` and diverge from Scala's `Coll[Boolean]()`.
+#[test]
+fn empty_map_over_bool_producing_body_infers_coll_bool() {
+    let empty_coll = const_coll_int(vec![]);
+    let body = op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 100,
+            method_id: 5,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(body),
+        },
+    );
+    let expr = op(0xAD, Payload::Two(Box::new(empty_coll), Box::new(func)));
+
+    assert_eq!(
+        run_eval(&expr),
+        Value::CollBool(vec![]),
+        "empty map with Bool-inferred body must produce empty Coll[Boolean]"
+    );
+}
+
 /// Byte/Short Plus/Minus overflow rejection.
 /// Both cases must return EvalError::RuntimeException — Scala
 /// ByteIsExactIntegral / ShortIsExactIntegral override plus/minus/times
