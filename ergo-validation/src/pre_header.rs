@@ -81,8 +81,9 @@ pub struct CandidateValidationContext {
 pub const ERGO_UTXO_INSERT_ALLOWED: bool = true;
 pub const ERGO_UTXO_UPDATE_ALLOWED: bool = true;
 pub const ERGO_UTXO_REMOVE_ALLOWED: bool = true;
-/// Key length for `LastBlockUtxoRootHash`. 32-byte box ids.
-pub const ERGO_UTXO_KEY_LENGTH: u32 = 32;
+/// Key length for `LastBlockUtxoRootHash`. 32-byte box ids. Signed `i32` to
+/// match `AvlTreeData.key_length` (Scala `keyLength: Int`).
+pub const ERGO_UTXO_KEY_LENGTH: i32 = 32;
 
 /// Build the AvlTreeData for `CONTEXT.LastBlockUtxoRootHash` given the
 /// parent block's state root. Matches the script-validation fallback

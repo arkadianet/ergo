@@ -136,6 +136,28 @@ impl<'a> VlqReader<'a> {
         Ok(val as u32)
     }
 
+    /// Decode a VLQ-encoded unsigned int with Scala `getUInt().toInt`
+    /// semantics: VLQ-decode bounded to the full `u32` range
+    /// (`[0, 0xFFFF_FFFF]`, matching `getUInt`'s `Long` range), then narrow
+    /// to `i32` with two's-complement WRAP (Scala `.toInt`). A value above
+    /// `i32::MAX` becomes negative (e.g. `0x8000_0000` -> `i32::MIN`).
+    ///
+    /// Unlike [`Self::get_u32_exact`] this does NOT reject values in
+    /// `(i32::MAX, u32::MAX]` — it wraps them, exactly as the reference node
+    /// does for `AvlTreeData.{keyLength, valueLengthOpt}` ("the deserializer
+    /// succeeds with invalid AvlTreeData" when those wrap negative).
+    pub fn get_uint_to_i32(&mut self) -> Result<i32, ReadError> {
+        let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
+        if val > u32::MAX as u64 {
+            return Err(ReadError::ValueTooLarge {
+                type_name: "u32 (Scala getUInt bound, u32::MAX)",
+                got: val,
+            });
+        }
+        self.pos += consumed;
+        Ok(val as u32 as i32)
+    }
+
     pub fn get_u64(&mut self) -> Result<u64, ReadError> {
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
         self.pos += consumed;
