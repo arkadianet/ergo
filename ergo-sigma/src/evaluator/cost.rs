@@ -214,6 +214,36 @@ pub(crate) fn avl_tree_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
         .expect("ADDigest is always 33 bytes by construction (32 digest + 1 height)") as u32
 }
 
+/// The tree height to use for AVL per-op/lookup cost (`nItems`). scrypto's
+/// `BatchAVLVerifier` sets `rootNodeHeight = startingDigest.last` (= the
+/// digest's height byte) only AFTER its metadata `require`s pass — chiefly
+/// `require(keyLength > 0)`. If the metadata itself is rejected (a tree with
+/// `keyLength == 0`, or a wrapped-negative keyLength), reconstruction fails
+/// BEFORE `rootNodeHeight` is set, so `treeHeight` stays 0. A bad PROOF on
+/// otherwise-valid metadata fails AFTER `rootNodeHeight` is set, so the
+/// height is still the digest byte. This distinction is consensus-visible in
+/// the per-op cost (`Math.max(treeHeight, 1)` for mutators), so a tree with
+/// invalid metadata must cost `nItems = 1`, not the digest height. On a
+/// successful construction `keyLength > 0` holds, so this returns the digest
+/// height as before.
+///
+/// The metadata `require`s are evaluated against the SIGNED `Int` view that
+/// Scala exposes: `require(keyLength > 0)` and `require(valueLengthOpt
+/// .forall(_ >= 0))`. A serialized length above `i32::MAX` shows up in Scala
+/// as a NEGATIVE `Int` and fails these requires, so it must be treated as
+/// invalid metadata here too — hence the `as i32` reinterpretation (a no-op
+/// for the current `get_u32_exact`-bounded `[0, i32::MAX]` range, but correct
+/// once keyLength/valueLengthOpt are read with the wrapping cast).
+pub(crate) fn avl_cost_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
+    let key_ok = (avl.key_length as i32) > 0;
+    let value_ok = avl.value_length_opt.is_none_or(|v| (v as i32) >= 0);
+    if key_ok && value_ok {
+        avl_tree_height(avl)
+    } else {
+        0
+    }
+}
+
 /// Construct an AVL proof verifier from AvlTreeData and proof bytes.
 pub(crate) fn make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
