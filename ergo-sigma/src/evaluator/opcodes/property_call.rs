@@ -256,9 +256,10 @@ pub(super) fn eval_no_arg_method(
             let len = collection_len(obj_val, ctx) as i32;
             Ok(Some(Value::CollInt((0..len).collect())))
         }
-        // SGroupElement(7).getEncoded(2) -> Coll[Byte]         cost: 10
+        // SGroupElement(7).getEncoded(2) -> Coll[Byte]
+        // Scala SGroupElement.GetEncodedMethod.costKind = FixedCost(JitCost(250)).
         (7, 2) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, 250)?;
             match obj_val {
                 Value::GroupElement(bytes) => Ok(Some(Value::CollBytes(bytes.to_vec()))),
                 _ => Err(EvalError::TypeError {
@@ -267,10 +268,11 @@ pub(super) fn eval_no_arg_method(
                 }),
             }
         }
-        // SGroupElement(7).negate(5) -> GroupElement           cost: 10
+        // SGroupElement(7).negate(5) -> GroupElement
+        // Scala SGroupElement.NegateMethod.costKind = FixedCost(JitCost(45)).
         // Compressed SEC1 negation flips the prefix byte (02↔03).
         (7, 5) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, 45)?;
             match obj_val {
                 Value::GroupElement(bytes) => {
                     let mut negated = *bytes;

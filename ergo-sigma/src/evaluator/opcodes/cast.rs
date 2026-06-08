@@ -6,9 +6,19 @@
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
 
-use super::super::cost::add_cost;
+use super::super::cost::add_method_cost;
 use super::super::eval_ctx::EvalCtx;
 use super::super::types::{EvalError, Value};
+
+/// Scala numeric-cast cost is `TypeBasedCost`: a widening/narrowing to a
+/// BigInt-family target costs `JitCost(30)`; all other (fixed-width) targets
+/// cost `JitCost(10)`. Charging a flat 10 undercharged casts to BigInt.
+fn numeric_cast_cost(tpe: &SigmaType) -> u64 {
+    match tpe {
+        SigmaType::SBigInt | SigmaType::SUnsignedBigInt => 30,
+        _ => 10,
+    }
+}
 
 // 0x7E Upcast — numeric type widening. Byte/Short preserved as typed carriers.
 pub(in crate::evaluator) fn eval_upcast(
@@ -16,7 +26,7 @@ pub(in crate::evaluator) fn eval_upcast(
     tpe: &SigmaType,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0x7E)?;
+    add_method_cost(cx.cost, numeric_cast_cost(tpe))?;
     let val = cx.eval_expr(input)?;
     match (val, tpe) {
         // Byte → {Byte, Short, Int, Long, BigInt}
@@ -54,7 +64,7 @@ pub(in crate::evaluator) fn eval_downcast(
     tpe: &SigmaType,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0x7D)?;
+    add_method_cost(cx.cost, numeric_cast_cost(tpe))?;
     let val = cx.eval_expr(input)?;
     match (val, tpe) {
         // Identity
