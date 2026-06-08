@@ -595,6 +595,18 @@ fn const_bytes(v: Vec<u8>) -> Expr {
     }
 }
 
+/// A flat `(Int, Int, ...)` tuple as a CONSTANT. Tuples with more than 2
+/// elements only exist as values/constants (STuple = Coll[Any]); the
+/// `0x86 CreateTuple` opcode evaluates only pairs (Scala `Tuple.eval`
+/// errors for arity != 2). Use this to exercise SelectField on >2-element
+/// tuples without building a non-evaluable CreateTuple node.
+fn int_tuple_const(vals: &[i32]) -> Expr {
+    Expr::Const {
+        tpe: SigmaType::STuple(vals.iter().map(|_| SigmaType::SInt).collect()),
+        val: SigmaValue::Tuple(vals.iter().map(|&v| SigmaValue::Int(v)).collect()),
+    }
+}
+
 fn run_eval(expr: &Expr) -> Value {
     eval_to_value(expr, &ReductionContext::minimal(500_000, 0), &[]).unwrap()
 }
@@ -1025,6 +1037,51 @@ fn opcode_select_field() {
         },
     );
     assert_eq!(run_eval(&expr), Value::Int(20));
+}
+
+/// CreateTuple (0x86) must reject any arity other than 2 at evaluation
+/// time. Scala `Tuple.eval` does `if (items.length != 2) syntax.error(...)`
+/// (values.scala) — only 2-element tuples are valid in v4/v5/v6; an arity-3
+/// (or arity-0/1) tuple is deserializable but throws when evaluated. The
+/// check is unconditional (no ErgoTree-version gate). A valid pair still
+/// evaluates. (ExtractCreationInfo is a separate node and is unaffected.)
+#[test]
+fn tuple_arity_not_two_rejects() {
+    // Arity-2 still works.
+    let pair = op(
+        0x86,
+        Payload::Tuple {
+            items: vec![const_int(1), const_int(2)],
+        },
+    );
+    assert_eq!(
+        run_eval(&pair),
+        Value::Tuple(vec![Value::Int(1), Value::Int(2)])
+    );
+
+    // Arity-3 errors.
+    let triple = op(
+        0x86,
+        Payload::Tuple {
+            items: vec![const_bool(true), const_int(2), const_int(3)],
+        },
+    );
+    assert!(
+        matches!(run_eval_err(&triple), EvalError::ArityMismatch { .. }),
+        "arity-3 tuple must error"
+    );
+
+    // Arity-1 errors too.
+    let single = op(
+        0x86,
+        Payload::Tuple {
+            items: vec![const_int(1)],
+        },
+    );
+    assert!(
+        matches!(run_eval_err(&single), EvalError::ArityMismatch { .. }),
+        "arity-1 tuple must error"
+    );
 }
 
 // -- Constants --
@@ -2824,15 +2881,10 @@ fn opcode_logical_not_false() {
 fn select_field_4_and_5() {
     // Post-Phase-6 parity sweep: tuple field access at indices 4 and
     // 5 goes through 0x8C SelectField with `field_idx = 4/5`, not
-    // through the removed 0x8A/0x8B dispatch arms.
-    let items = vec![
-        const_int(10),
-        const_int(20),
-        const_int(30),
-        const_int(40),
-        const_int(50),
-    ];
-    let tuple = op(0x86, Payload::Tuple { items });
+    // through the removed 0x8A/0x8B dispatch arms. A >2-element tuple
+    // only exists as a value/constant (CreateTuple 0x86 evaluates only
+    // pairs), so the fixture is a 5-tuple constant.
+    let tuple = int_tuple_const(&[10, 20, 30, 40, 50]);
     let s4 = op(
         0x8C,
         Payload::SelectField {
@@ -3573,21 +3625,11 @@ fn reject_garbage_proof_for_provedlog() {
 // accept-set parity-reject coverage intact.
 
 /// SelectField with field_idx 1/2/3 is the Scala-emitted form of
-/// tuple field access. Exercises all three on a 5-tuple.
+/// tuple field access. Exercises all three on a 5-tuple constant
+/// (>2-element tuples exist only as values, not CreateTuple nodes).
 #[test]
 fn select_field_1_2_3_on_tuple_of_5() {
-    let tuple = op(
-        0x86,
-        Payload::Tuple {
-            items: vec![
-                const_int(10),
-                const_int(20),
-                const_int(30),
-                const_int(40),
-                const_int(50),
-            ],
-        },
-    );
+    let tuple = int_tuple_const(&[10, 20, 30, 40, 50]);
     let s1 = op(
         0x8C,
         Payload::SelectField {
@@ -3616,19 +3658,20 @@ fn select_field_1_2_3_on_tuple_of_5() {
 
 #[test]
 fn select_field_out_of_range_errors() {
-    // field_idx = 1 on empty tuple must error.
-    let tuple = op(0x86, Payload::Tuple { items: vec![] });
-    let s1 = op(
+    // field_idx beyond the tuple arity must error (1-indexed; a pair has
+    // only fields 1 and 2).
+    let tuple = int_tuple_const(&[10, 20]);
+    let s3 = op(
         0x8C,
         Payload::SelectField {
             input: Box::new(tuple),
-            field_idx: 1,
+            field_idx: 3,
         },
     );
-    let err = run_eval_err(&s1);
+    let err = run_eval_err(&s3);
     assert!(
         matches!(err, EvalError::TypeError { .. }),
-        "SelectField on empty tuple must error, got {err:?}"
+        "SelectField out of range must error, got {err:?}"
     );
 }
 
@@ -3722,10 +3765,12 @@ fn select_field_parse_eval_roundtrip() {
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::opcode::{parse_expr, write_body};
 
+    // CreateTuple (0x86) evaluates only pairs, so the roundtrip uses a
+    // 2-element tuple; the point of the test is SelectField's wire shape.
     let tuple = op(
         0x86,
         Payload::Tuple {
-            items: vec![const_int(100), const_int(200), const_int(300)],
+            items: vec![const_int(100), const_int(200)],
         },
     );
     let ir = op(
