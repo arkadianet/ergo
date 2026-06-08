@@ -3134,6 +3134,49 @@ fn opcode_extract_amount_sbox_constant_with_sizeless_v6_typearg_tree() {
     assert_eq!(run_eval(&expr), Value::Long(1_000_000));
 }
 
+/// An SBox materialized from a constant must keep the real transaction id
+/// and output index from the serialized box tail (read_ergo_box parses
+/// both), not zero them. ExtractCreationInfo (0xC7) surfaces them as the R3
+/// reference = transactionId.toBytes (32) ++ Shorts.toByteArray(index) (a
+/// FIXED 2-byte big-endian index), per Scala ErgoBox.get(ReferenceRegId).
+/// Uses a multi-byte index (22588) so a zeroed index is unmistakable.
+#[test]
+fn sbox_constant_preserves_txid_and_index_in_creation_info() {
+    let txid = [0xABu8; 32];
+    let index: u16 = 22588; // 0x583C; big-endian 2-byte = [0x58, 0x3C]
+    let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_u64(1_000_000); // value
+    w.put_bytes(&tree); // proposition
+    w.put_u32(100); // creation height
+    w.put_u8(0); // token count
+    w.put_u8(0); // register count
+    w.put_bytes(&txid); // tx id (32 bytes)
+    w.put_u16(index); // output index (VLQ)
+    let box_bytes = w.result();
+    let sbox = Expr::Const {
+        tpe: SigmaType::SBox,
+        val: SigmaValue::OpaqueBoxBytes(box_bytes),
+    };
+
+    // ExtractCreationInfo (0xC7) -> (creationHeight, txid ++ index_be2).
+    let ci = op(0xC7, Payload::One(Box::new(sbox)));
+    match run_eval(&ci) {
+        Value::Tuple(items) => {
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0], Value::Int(100), "creation height");
+            let mut expected_ref = txid.to_vec();
+            expected_ref.extend_from_slice(&index.to_be_bytes());
+            assert_eq!(
+                items[1],
+                Value::CollBytes(expected_ref),
+                "R3 ref must be the real txid ++ 2-byte big-endian index",
+            );
+        }
+        other => panic!("expected creationInfo tuple, got {other:?}"),
+    }
+}
+
 // AtLeast (0x98) — k-of-n threshold
 #[test]
 fn opcode_atleast_all_trivial_true() {
