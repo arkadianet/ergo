@@ -208,17 +208,19 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) {
 }
 
 fn write_coll(w: &mut VlqWriter, elem: &SigmaType) {
-    // Check for Coll[Coll[T]] — constrId 2
+    // Coll[Coll[embeddable]] has a compressed single-byte form (constrId 2,
+    // 0x18 + the embeddable code). This optimization applies ONLY when the
+    // innermost element is embeddable; Coll[Coll[non-embeddable]] uses the
+    // general nested form `0x0c <Coll[inner]>` = `0x0c 0x0c <inner>` (Scala
+    // `TypeSerializer.serialize`). Emitting the compressed `0x18` prefix for
+    // a non-embeddable inner produced non-canonical bytes vs the reference.
     if let SigmaType::SColl(inner) = elem {
         if let Some(code) = inner.embeddable_code() {
-            // Coll[Coll[embeddable]] — single byte
             w.put_u8(COLL_COLL_CODE + code);
-        } else {
-            // Coll[Coll[complex]] — constrId 2 + primId 0, then read inner type
-            w.put_u8(COLL_COLL_CODE);
-            write_type(w, inner);
+            return;
         }
-        return;
+        // else: fall through to the general Coll[elem] path below, which
+        // writes COLL_CODE then recurses into `elem` (the inner Coll).
     }
     // Coll[T] — constrId 1
     if let Some(code) = elem.embeddable_code() {
@@ -609,6 +611,24 @@ mod tests {
         // Coll[SBox] — constrId 1, primId 0
         roundtrip(&SigmaType::SColl(Box::new(SigmaType::SBox)));
         roundtrip(&SigmaType::SColl(Box::new(SigmaType::SAvlTree)));
+    }
+
+    #[test]
+    fn coll_coll_nonembeddable_uses_general_prefix() {
+        // Coll[Coll[X]] with a NON-embeddable inner element X must serialize
+        // as the general nested form `0x0c 0x0c <X>` (two Coll constructors),
+        // NOT the compressed `0x18` prefix — Scala reserves the compressed
+        // form for Coll[Coll[embeddable]] only. (SANTA Constant.json
+        // coll_62/63/69 re-encode to the canonical 0x0c0c form.)
+        let nested_box = SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SBox))));
+        assert_eq!(encode(&nested_box), vec![COLL_CODE, COLL_CODE, SBOX_CODE]);
+        roundtrip(&nested_box);
+
+        // The compressed prefix is still used when the inner element IS
+        // embeddable (Coll[Coll[Byte]] -> 0x18 + Byte's embeddable code).
+        let nested_byte = SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte))));
+        let byte_code = SigmaType::SByte.embeddable_code().unwrap();
+        assert_eq!(encode(&nested_byte), vec![COLL_COLL_CODE + byte_code]);
     }
 
     #[test]

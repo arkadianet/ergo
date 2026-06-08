@@ -136,9 +136,13 @@ fn golden_coll_coll_int() {
 
 #[test]
 fn golden_coll_coll_box() {
-    // constrId 2, primId 0 = 24, then SBox = 0x63
+    // Coll[Coll[non-embeddable]] is NOT the compressed constrId-2 form.
+    // Scala's TypeSerializer reserves 0x18+code for Coll[Coll[embeddable]];
+    // a non-embeddable inner (SBox) serializes as the general nested form
+    // 0x0c (outer Coll) + 0x0c (inner Coll) + 0x63 (SBox). Confirmed against
+    // the JVM-blessed SANTA wire vectors (Constant.json coll_62/63/69).
     let t = SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SBox))));
-    assert_eq!(encode(&t), [0x18, 0x63]);
+    assert_eq!(encode(&t), [0x0C, 0x0C, 0x63]);
 }
 
 // -- Option (constrId 3) --
