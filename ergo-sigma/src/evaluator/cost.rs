@@ -231,6 +231,39 @@ pub(crate) fn make_avl_verifier(
     })
 }
 
+/// Construct an AVL verifier, degrading gracefully on ANY construction
+/// failure — both the typed `Err` (digest mismatch) AND a panic from the
+/// third-party `ergo_avltree_rust` crate's eager proof-graph reconstruction
+/// (a malformed/empty/truncated/0x00 proof panics inside
+/// `BatchAVLVerifier::new`). Returns `None` on failure, mirroring scrypto,
+/// where a bad proof yields `reconstructedTree = None` (the constructor
+/// never throws) — so each SAvlTree method arm maps `None` to its Scala
+/// per-method outcome (contains → false, get/getMany → error, insert
+/// pre-v3 → error / v3+ → None, update/remove/insertOrUpdate → None)
+/// instead of aborting the whole evaluation.
+///
+/// COST NOTE: a failed construction yields `digest = None`, but its
+/// `treeHeight` is STILL the digest's height byte — scrypto sets
+/// `rootNodeHeight = startingDigest.last` BEFORE the proof parse that fails
+/// (BatchAVLVerifier), so `treeHeight` does not drop to 0 on failure.
+/// Therefore the failure-path lookup/op per-item cost uses the digest height
+/// (`avl_tree_height`), exactly as the success path — NOT zero. (Verified
+/// against the JVM-blessed contains-on-bad-proof vector cost.)
+///
+/// The `catch_unwind` is confined to this evaluator-only helper; the shared
+/// [`crate::avl::AvlVerifier`] is left untouched so the digest-mode
+/// validator (which has its own construction guard) is unaffected.
+pub(crate) fn try_make_avl_verifier(
+    avl: &ergo_ser::sigma_value::AvlTreeData,
+    proof: &[u8],
+) -> Option<crate::avl::AvlVerifier> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        make_avl_verifier(avl, proof)
+    }))
+    .ok()
+    .and_then(|r| r.ok())
+}
+
 /// Get the length of a collection value (for per-item costing).
 pub(crate) fn collection_len(coll: &Value, ctx: &ReductionContext) -> usize {
     match coll {
