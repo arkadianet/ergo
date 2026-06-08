@@ -4832,7 +4832,11 @@ fn int_long_arith_overflow_parity() {
         0x9D,
         Payload::Two(Box::new(const_int(i32::MIN)), Box::new(const_int(-1))),
     );
-    assert_eq!(run_eval(&int_div), Value::Int(i32::MIN), "Int MIN / -1 wraps");
+    assert_eq!(
+        run_eval(&int_div),
+        Value::Int(i32::MIN),
+        "Int MIN / -1 wraps"
+    );
     let long_mod = op(
         0x9E,
         Payload::Two(Box::new(const_long(i64::MIN)), Box::new(const_long(-1))),
