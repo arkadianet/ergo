@@ -16,7 +16,7 @@ use num_traits::One;
 
 use super::super::cost::{
     add_cost, add_cost_per_item, add_method_cost, avl_tree_height, collection_len,
-    make_avl_verifier,
+    make_avl_verifier, try_make_avl_verifier,
 };
 use super::super::dispatch::eval_expr;
 use super::super::eval_ctx::EvalCtx;
@@ -945,21 +945,27 @@ pub(in crate::evaluator) fn eval_method_call(
                 chunk_size: 64,
             };
             cx.cost.add(create_cost.compute(proof.len() as u32)?)?;
-            let mut bv = make_avl_verifier(avl, &proof)?;
-            let tree_height = avl_tree_height(avl);
             let lookup_cost = CostKind::PerItem {
                 base: JitCost::from_jit(40),
                 per_chunk: JitCost::from_jit(10),
                 chunk_size: 1,
             };
-            cx.cost.add(lookup_cost.compute(tree_height)?)?;
-            match bv.lookup(&key) {
-                Ok(Some(_)) => Ok(Value::Bool(true)),
-                Ok(None) => Ok(Value::Bool(false)),
-                Err(_) => Err(EvalError::TypeError {
-                    expected: "valid AVL proof for contains",
-                    got: "proof verification failed".into(),
-                }),
+            // Scala contains_eval (CErgoTreeEvaluator.scala:78-93): a bad
+            // proof yields reconstructedTree=None and performLookup ->
+            // Failure -> `case Failure(_) => false`. It NEVER throws —
+            // construction OR lookup failure both return false, as does a
+            // witnessed-absent key (Success(None)). The LookupAvlTree cost is
+            // charged over bv.treeHeight, which equals the digest's height
+            // byte (rootNodeHeight = startingDigest.last, set BEFORE the proof
+            // parse) even on a failed construction — so the lookup cost is the
+            // same on both paths.
+            cx.cost.add(lookup_cost.compute(avl_tree_height(avl))?)?;
+            match try_make_avl_verifier(avl, &proof) {
+                Some(mut bv) => match bv.lookup(&key) {
+                    Ok(Some(_)) => Ok(Value::Bool(true)),
+                    Ok(None) | Err(_) => Ok(Value::Bool(false)),
+                },
+                None => Ok(Value::Bool(false)),
             }
         }
         // SAvlTree(100).get(10) -> Option[Coll[Byte]]
@@ -1005,20 +1011,30 @@ pub(in crate::evaluator) fn eval_method_call(
                 chunk_size: 64,
             };
             cx.cost.add(create_cost.compute(proof.len() as u32)?)?;
-            let mut bv = make_avl_verifier(avl, &proof)?;
-            let tree_height = avl_tree_height(avl);
             let lookup_cost = CostKind::PerItem {
                 base: JitCost::from_jit(40),
                 per_chunk: JitCost::from_jit(10),
                 chunk_size: 1,
             };
-            cx.cost.add(lookup_cost.compute(tree_height)?)?;
-            match bv.lookup(&key) {
-                Ok(Some(v)) => Ok(Value::Opt(Some(Box::new(Value::CollBytes(v))))),
-                Ok(None) => Ok(Value::Opt(None)),
-                Err(_) => Err(EvalError::TypeError {
+            // Scala get_eval (CErgoTreeEvaluator.scala:95-109): a Failure
+            // (bad-proof construction OR a lookup that throws) calls
+            // syntax.error -> the script errors (NOT version-gated). Only a
+            // witnessed-absent key (Success(None)) returns None.
+            match try_make_avl_verifier(avl, &proof) {
+                Some(mut bv) => {
+                    cx.cost.add(lookup_cost.compute(avl_tree_height(avl))?)?;
+                    match bv.lookup(&key) {
+                        Ok(Some(v)) => Ok(Value::Opt(Some(Box::new(Value::CollBytes(v))))),
+                        Ok(None) => Ok(Value::Opt(None)),
+                        Err(_) => Err(EvalError::TypeError {
+                            expected: "valid AVL proof for get",
+                            got: "proof verification failed".into(),
+                        }),
+                    }
+                }
+                None => Err(EvalError::TypeError {
                     expected: "valid AVL proof for get",
-                    got: "proof verification failed".into(),
+                    got: "verifier construction failed".into(),
                 }),
             }
         }
@@ -1077,17 +1093,31 @@ pub(in crate::evaluator) fn eval_method_call(
                 chunk_size: 64,
             };
             cx.cost.add(create_cost.compute(proof.len() as u32)?)?;
-            let mut bv = make_avl_verifier(avl, &proof)?;
-            let tree_height = avl_tree_height(avl);
             let lookup_cost = CostKind::PerItem {
                 base: JitCost::from_jit(40),
                 per_chunk: JitCost::from_jit(10),
                 chunk_size: 1,
             };
+            // Scala getMany_eval (CErgoTreeEvaluator.scala:111-130): the
+            // proof failure is only observed INSIDE the per-key lookup
+            // (`keys.map { ... case Failure(_) => syntax.error }`), so a
+            // construction failure must NOT abort before the loop — with an
+            // empty key list NO lookup runs and the method returns an empty
+            // Coll, which Scala accepts. Carry the verifier as an Option and
+            // treat a construction failure as a per-key lookup Failure; a
+            // Failure (construction OR lookup) errors when a key is processed
+            // (NOT version-gated). A witnessed-absent key yields a None
+            // element.
+            let mut bv_opt = try_make_avl_verifier(avl, &proof);
+            let tree_height = avl_tree_height(avl);
             let mut results = Vec::with_capacity(keys.len());
             for key in keys {
                 cx.cost.add(lookup_cost.compute(tree_height)?)?;
-                match bv.lookup(&key) {
+                let looked = match bv_opt.as_mut() {
+                    Some(bv) => bv.lookup(&key),
+                    None => Err(()),
+                };
+                match looked {
                     Ok(Some(v)) => results.push(Value::Opt(Some(Box::new(Value::CollBytes(v))))),
                     Ok(None) => results.push(Value::Opt(None)),
                     Err(_) => {

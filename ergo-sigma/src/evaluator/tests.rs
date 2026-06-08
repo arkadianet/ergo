@@ -4383,6 +4383,107 @@ fn methodcall_avltree_contains_matches_get() {
     );
 }
 
+/// AVL crate-boundary: a malformed proof makes `ergo_avltree_rust` PANIC
+/// during proof-graph reconstruction. The `try_make_avl_verifier`
+/// catch_unwind boundary must contain it and degrade per Scala: `contains`
+/// returns `false` (contains_eval `case Failure(_) => false`), `get` errors
+/// (get_eval `case Failure(_) => syntax.error`). Neither may panic or abort.
+#[test]
+fn methodcall_avltree_bad_proof_contains_false_get_errors() {
+    // A valid-shaped 33-byte digest (last byte = tree height 7) but a
+    // single-0x00 proof, which panics inside the crate's reconstruct_tree.
+    let tree_data = ergo_ser::sigma_value::AvlTreeData {
+        digest: ergo_primitives::digest::ADDigest::from_bytes([0x07; 33]),
+        insert_allowed: true,
+        update_allowed: true,
+        remove_allowed: true,
+        key_length: 32,
+        value_length_opt: None,
+    };
+    let avl_const = Expr::Const {
+        tpe: SigmaType::SAvlTree,
+        val: SigmaValue::AvlTree(tree_data),
+    };
+    let key = vec![0x11u8; 32];
+    let bad_proof = vec![0x00u8];
+    let mk = |method_id: u8| {
+        Expr::Op(IrNode {
+            opcode: 0xDC,
+            payload: Payload::MethodCall {
+                type_id: 100,
+                method_id,
+                obj: Box::new(avl_const.clone()),
+                args: vec![const_bytes(key.clone()), const_bytes(bad_proof.clone())],
+                type_args: vec![],
+            },
+        })
+    };
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+
+    // contains -> false (graceful, no panic).
+    assert_eq!(
+        eval_to_value(&mk(9), &ctx, &[]).expect("contains must not error on a bad proof"),
+        Value::Bool(false),
+        "contains on a malformed proof must degrade to false",
+    );
+    // get -> errored (graceful, no panic).
+    assert!(
+        matches!(
+            eval_to_value(&mk(10), &ctx, &[]),
+            Err(EvalError::TypeError { .. })
+        ),
+        "get on a malformed proof must error (not panic)",
+    );
+
+    // getMany with EMPTY keys on a malformed proof returns an empty Coll,
+    // NOT an error: Scala getMany_eval observes the failure only inside the
+    // per-key `keys.map` body, so with no keys no lookup runs. (Non-empty
+    // keys DO error — the first key's lookup surfaces the failure.)
+    let getmany = |keys: Vec<SigmaValue>| {
+        Expr::Op(IrNode {
+            opcode: 0xDC,
+            payload: Payload::MethodCall {
+                type_id: 100,
+                method_id: 11,
+                obj: Box::new(avl_const.clone()),
+                args: vec![
+                    Expr::Const {
+                        tpe: SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(
+                            SigmaType::SByte,
+                        )))),
+                        val: SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Values(keys)),
+                    },
+                    const_bytes(bad_proof.clone()),
+                ],
+                type_args: vec![],
+            },
+        })
+    };
+    match eval_to_value(&getmany(vec![]), &ctx, &[]).expect("empty getMany must not error") {
+        Value::CollGeneric(items, _) => {
+            assert!(
+                items.is_empty(),
+                "empty getMany on a bad proof -> empty Coll"
+            )
+        }
+        other => panic!("expected empty CollGeneric, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            eval_to_value(
+                &getmany(vec![SigmaValue::Coll(
+                    ergo_ser::sigma_value::CollValue::Bytes(key.clone())
+                )]),
+                &ctx,
+                &[]
+            ),
+            Err(EvalError::TypeError { .. })
+        ),
+        "non-empty getMany on a malformed proof must error",
+    );
+}
+
 /// 0xB7 TreeLookup is not executable in Scala
 /// (costKind = notSupportedError at trees.scala:1336). User-level
 /// AVL lookup uses SAvlTree.get method call, not this direct form.
