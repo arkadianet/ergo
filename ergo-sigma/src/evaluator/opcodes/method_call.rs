@@ -478,60 +478,75 @@ pub(in crate::evaluator) fn eval_method_call(
             };
             add_method_cost(cx.cost, 5)?;
             let is_left = method_id == 12;
-            // Fixed-width path: cast through i32 for Byte/Short to
-            // match Java/Scala promotion rules; mask shift count to
-            // 0..bit_width-1 (mod-32 for Byte/Short/Int, mod-64 for
-            // Long). Right shift uses arithmetic shift to preserve
-            // the sign bit, matching Java's `>>` operator.
+            // Scala ExactIntegral.shiftLeft/shiftRight REJECT an
+            // out-of-range count: they throw IllegalArgumentException
+            // when `bits < 0 || bits >= width` (Byte 8, Short 16, Int 32,
+            // Long 64; BigIntegerOps uses 256 for BigInt). We previously
+            // masked the count (n & 31 / n & 63) and so silently accepted
+            // out-of-range shifts the reference rejects. With the count
+            // validated in range, the shift then matches Java: Byte/Short
+            // promote through i32 and truncate; right shift is arithmetic
+            // (sign-preserving).
+            let width: i32 = match &obj_val {
+                Value::Byte(_) => 8,
+                Value::Short(_) => 16,
+                Value::Int(_) => 32,
+                Value::Long(_) => 64,
+                Value::BigInt(_) => 256,
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "numeric type for shift",
+                        got: format!("{other:?}"),
+                    })
+                }
+            };
+            if n < 0 || n >= width {
+                return Err(EvalError::RuntimeException(
+                    "shift count out of range (0 <= bits < bit width)",
+                ));
+            }
+            let shift = n as u32;
             match obj_val {
                 Value::Byte(v) => {
-                    let masked = (n & 31) as u32;
                     let promoted = v as i32;
                     let r = if is_left {
-                        promoted.wrapping_shl(masked)
+                        promoted.wrapping_shl(shift)
                     } else {
-                        promoted.wrapping_shr(masked)
+                        promoted.wrapping_shr(shift)
                     };
                     Ok(Value::Byte(r as i8))
                 }
                 Value::Short(v) => {
-                    let masked = (n & 31) as u32;
                     let promoted = v as i32;
                     let r = if is_left {
-                        promoted.wrapping_shl(masked)
+                        promoted.wrapping_shl(shift)
                     } else {
-                        promoted.wrapping_shr(masked)
+                        promoted.wrapping_shr(shift)
                     };
                     Ok(Value::Short(r as i16))
                 }
                 Value::Int(v) => {
-                    let masked = (n & 31) as u32;
                     let r = if is_left {
-                        v.wrapping_shl(masked)
+                        v.wrapping_shl(shift)
                     } else {
-                        v.wrapping_shr(masked)
+                        v.wrapping_shr(shift)
                     };
                     Ok(Value::Int(r))
                 }
                 Value::Long(v) => {
-                    let masked = (n & 63) as u32;
                     let r = if is_left {
-                        v.wrapping_shl(masked)
+                        v.wrapping_shl(shift)
                     } else {
-                        v.wrapping_shr(masked)
+                        v.wrapping_shr(shift)
                     };
                     Ok(Value::Long(r))
                 }
                 Value::BigInt(v) => {
-                    if n < 0 {
-                        return Err(EvalError::RuntimeException(
-                            "BigInt shift: negative shift count",
-                        ));
-                    }
-                    let amt = n as usize;
+                    let amt = shift as usize;
                     let r = if is_left { v << amt } else { v >> amt };
                     Ok(Value::BigInt(r))
                 }
+                // The `width` match above already rejected non-numeric types.
                 other => Err(EvalError::TypeError {
                     expected: "numeric type for shift",
                     got: format!("{other:?}"),
