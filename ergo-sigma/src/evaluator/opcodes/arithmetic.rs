@@ -1,11 +1,14 @@
 //! Arithmetic and byte-array-numeric opcodes:
 //!
 //! - 0x99 Minus, 0x9A Plus, 0x9C Multiply, 0x9D Divide, 0x9E Modulo —
-//!   binary arithmetic. Byte/Short use checked_* for Scala
-//!   ExactIntegral parity (Scala throws on overflow). Int/Long keep
-//!   wrapping_* as pre-existing latent divergence (tracked separately).
-//!   BigInt Modulo follows java.math.BigInteger.mod (Euclidean,
-//!   non-negative remainder).
+//!   binary arithmetic. Byte/Short/Int/Long all use checked_* for Plus/
+//!   Minus/Multiply, matching Scala ExactIntegral (add/subtract/multiply
+//!   Exact throw ArithmeticException on overflow). Divide/Modulo use
+//!   wrapping_div/wrapping_rem for the fixed-width integers, matching
+//!   Java/Scala `/`/`%` (MinValue / -1 wraps to MinValue, MinValue % -1
+//!   == 0 — no exception, and no Rust divide-overflow panic). BigInt
+//!   Modulo follows java.math.BigInteger.mod (Euclidean, non-negative
+//!   remainder).
 //! - 0xA1 Min, 0xA2 Max — n-ary numeric reducers.
 //! - 0xF0 Negation — unary minus, checked_neg for Byte/Short.
 //! - 0xFF XorOf — XOR-reduce of a Coll[Boolean] -> Boolean
@@ -41,8 +44,14 @@ pub(in crate::evaluator) fn eval_minus(
             .checked_sub(b)
             .map(Value::Short)
             .ok_or(EvalError::RuntimeException("Short.- overflow")),
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(b))),
-        (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_sub(b))),
+        (Value::Int(a), Value::Int(b)) => a
+            .checked_sub(b)
+            .map(Value::Int)
+            .ok_or(EvalError::RuntimeException("Int.- overflow")),
+        (Value::Long(a), Value::Long(b)) => a
+            .checked_sub(b)
+            .map(Value::Long)
+            .ok_or(EvalError::RuntimeException("Long.- overflow")),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a - b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Minus",
@@ -69,8 +78,14 @@ pub(in crate::evaluator) fn eval_plus(
             .checked_add(b)
             .map(Value::Short)
             .ok_or(EvalError::RuntimeException("Short.+ overflow")),
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
-        (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_add(b))),
+        (Value::Int(a), Value::Int(b)) => a
+            .checked_add(b)
+            .map(Value::Int)
+            .ok_or(EvalError::RuntimeException("Int.+ overflow")),
+        (Value::Long(a), Value::Long(b)) => a
+            .checked_add(b)
+            .map(Value::Long)
+            .ok_or(EvalError::RuntimeException("Long.+ overflow")),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a + b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Plus",
@@ -97,8 +112,14 @@ pub(in crate::evaluator) fn eval_multiply(
             .checked_mul(b)
             .map(Value::Short)
             .ok_or(EvalError::RuntimeException("Short.* overflow")),
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(b))),
-        (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_mul(b))),
+        (Value::Int(a), Value::Int(b)) => a
+            .checked_mul(b)
+            .map(Value::Int)
+            .ok_or(EvalError::RuntimeException("Int.* overflow")),
+        (Value::Long(a), Value::Long(b)) => a
+            .checked_mul(b)
+            .map(Value::Long)
+            .ok_or(EvalError::RuntimeException("Long.* overflow")),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a * b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Multiply",
@@ -131,8 +152,10 @@ pub(in crate::evaluator) fn eval_division(
                     "Short./ overflow or divide-by-zero",
                 ))
         }
-        (Value::Int(a), Value::Int(b)) if b != 0 => Ok(Value::Int(a / b)),
-        (Value::Long(a), Value::Long(b)) if b != 0 => Ok(Value::Long(a / b)),
+        // wrapping_div matches Java/Scala integer `/`: MinValue / -1 wraps
+        // to MinValue (no exception), where Rust's native `/` would panic.
+        (Value::Int(a), Value::Int(b)) if b != 0 => Ok(Value::Int(a.wrapping_div(b))),
+        (Value::Long(a), Value::Long(b)) if b != 0 => Ok(Value::Long(a.wrapping_div(b))),
         (Value::BigInt(a), Value::BigInt(ref b)) if !b.is_zero() => Ok(Value::BigInt(a / b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Division (non-zero divisor)",
@@ -165,8 +188,10 @@ pub(in crate::evaluator) fn eval_modulo(
                     "Short.% overflow or divide-by-zero",
                 ))
         }
-        (Value::Int(a), Value::Int(b)) if b != 0 => Ok(Value::Int(a % b)),
-        (Value::Long(a), Value::Long(b)) if b != 0 => Ok(Value::Long(a % b)),
+        // wrapping_rem matches Java/Scala `%`: MinValue % -1 == 0 (no
+        // exception), where Rust's native `%` would panic on that pair.
+        (Value::Int(a), Value::Int(b)) if b != 0 => Ok(Value::Int(a.wrapping_rem(b))),
+        (Value::Long(a), Value::Long(b)) if b != 0 => Ok(Value::Long(a.wrapping_rem(b))),
         // Scala's `%` on BigInt uses java.math.BigInteger.mod() which
         // returns the non-negative remainder (Euclidean mod), not
         // Rust's truncated remainder.

@@ -4783,6 +4783,70 @@ fn byte_short_overflow_rejects() {
     );
 }
 
+/// Int/Long Plus/Minus/Multiply must THROW on 2's-complement overflow
+/// (Scala IntIsExactIntegral/LongIsExactIntegral route +/-/* through
+/// java7.compat.Math.addExact/subtractExact/multiplyExact, which raise
+/// ArithmeticException). Previously these arms used `wrapping_*` and
+/// silently succeeded — a consensus divergence: scripts that overflow
+/// were accepted here but rejected by the reference. Division/Modulo of
+/// MinValue by -1 must instead WRAP (Java `/`/`%` semantics: Scala does
+/// not throw there), where Rust's native `/`/`%` would panic.
+#[test]
+fn int_long_arith_overflow_parity() {
+    // +/-/* overflow -> RuntimeException
+    let int_add = op(
+        0x9A,
+        Payload::Two(Box::new(const_int(i32::MAX)), Box::new(const_int(1))),
+    );
+    assert!(
+        matches!(run_eval_err(&int_add), EvalError::RuntimeException(_)),
+        "Int.+ overflow must throw"
+    );
+    let long_add = op(
+        0x9A,
+        Payload::Two(Box::new(const_long(i64::MAX)), Box::new(const_long(1))),
+    );
+    assert!(
+        matches!(run_eval_err(&long_add), EvalError::RuntimeException(_)),
+        "Long.+ overflow must throw"
+    );
+    let int_sub = op(
+        0x99,
+        Payload::Two(Box::new(const_int(i32::MIN)), Box::new(const_int(1))),
+    );
+    assert!(
+        matches!(run_eval_err(&int_sub), EvalError::RuntimeException(_)),
+        "Int.- overflow must throw"
+    );
+    let long_mul = op(
+        0x9C,
+        Payload::Two(Box::new(const_long(i64::MIN)), Box::new(const_long(-1))),
+    );
+    assert!(
+        matches!(run_eval_err(&long_mul), EvalError::RuntimeException(_)),
+        "Long.* overflow must throw"
+    );
+
+    // Division/Modulo of MinValue by -1 wraps (no panic, no throw).
+    let int_div = op(
+        0x9D,
+        Payload::Two(Box::new(const_int(i32::MIN)), Box::new(const_int(-1))),
+    );
+    assert_eq!(run_eval(&int_div), Value::Int(i32::MIN), "Int MIN / -1 wraps");
+    let long_mod = op(
+        0x9E,
+        Payload::Two(Box::new(const_long(i64::MIN)), Box::new(const_long(-1))),
+    );
+    assert_eq!(run_eval(&long_mod), Value::Long(0), "Long MIN % -1 == 0");
+
+    // In-range arithmetic is unaffected.
+    let ok = op(
+        0x9A,
+        Payload::Two(Box::new(const_int(2)), Box::new(const_int(3))),
+    );
+    assert_eq!(run_eval(&ok), Value::Int(5));
+}
+
 // ----- oracle parity -----
 //
 // Tests below pin behavior between two evaluator entry points
