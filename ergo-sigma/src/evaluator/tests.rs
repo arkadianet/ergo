@@ -338,19 +338,19 @@ fn coll_box_eq_cost_uses_per_item() {
     // Expected cost: MatchType(1) + PerItem(base=15, perChunk=5, chunk=1, n=2)
     // = 1 + (15 + 5*2) = 26
     let mut cost = CostAccumulator::recording_only();
-    add_eq_neq_cost(
-        &mut cost,
+    eq_with_cost(
         &Value::BoxCollection(BoxSource::Inputs),
         &Value::BoxCollection(BoxSource::Inputs),
         &ctx,
+        &mut cost,
     )
     .unwrap();
     assert_eq!(cost.total().value(), 26);
 
     // Derived `CollGeneric` of BoxRefs (same length) should get the
     // same cost — the post-disambiguation boxed-element coll carrier
-    // routes through the all-box `CollGeneric` branch in
-    // `add_eq_neq_cost`, charging as Coll[Box] EQ.
+    // routes through the `CollGeneric` SBox-descriptor branch in
+    // `eq_with_cost`, charging as Coll[Box] EQ.
     let mut cost2 = CostAccumulator::recording_only();
     let derived = Value::CollGeneric(
         vec![
@@ -365,21 +365,172 @@ fn coll_box_eq_cost_uses_per_item() {
         ],
         Box::new(SigmaType::SBox),
     );
-    add_eq_neq_cost(&mut cost2, &derived, &derived, &ctx).unwrap();
+    eq_with_cost(&derived, &derived, &ctx, &mut cost2).unwrap();
     assert_eq!(cost2.total().value(), 26);
 
     // Empty CollBox (e.g. INPUTS.filter(_ => false)) — charges EQ_COA_Box
     // PerItemCost(15, 5, 1) with 0 items: Scala chunks = (0-1)/1+1 = 0, cost = 15+5*0 = 15
     // Plus 1 MatchType dispatch: total = 1 + 15 = 16
     let mut cost3 = CostAccumulator::recording_only();
-    add_eq_neq_cost(
-        &mut cost3,
+    eq_with_cost(
         &Value::CollBox(vec![]),
         &Value::CollBox(vec![]),
         &ctx,
+        &mut cost3,
     )
     .unwrap();
     assert_eq!(cost3.total().value(), 16);
+}
+
+/// `eq_with_cost` must charge the exact Scala `DataValueComparer` delta (the
+/// per-comparison cost, on top of the eval frame) for collections and tuples,
+/// AND return the same boolean as `values_equal`. Deltas verified against the
+/// JVM reference vectors (NEQ_of_collections / _nested / _tuples): each row's
+/// blessed `expected` cost is `95 (frame) + the delta asserted here`.
+#[test]
+fn eq_with_cost_matches_scala_deltas() {
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let eq_cost = |l: &Value, r: &Value| -> (bool, u64) {
+        let mut cost = CostAccumulator::recording_only();
+        let eq = eq_with_cost(l, r, &ctx, &mut cost).unwrap();
+        (eq, cost.total().value())
+    };
+    let ge = |b: u8| Value::GroupElement([b; 33]);
+    let coll_ge = |n: usize| {
+        Value::CollGeneric(
+            (0..n).map(|i| ge(i as u8)).collect(),
+            Box::new(SigmaType::SGroupElement),
+        )
+    };
+    let coll_bigint = |n: usize| {
+        Value::CollGeneric(
+            (0..n).map(|i| Value::BigInt((i as u32).into())).collect(),
+            Box::new(SigmaType::SBigInt),
+        )
+    };
+
+    // Length mismatch: only MatchType(1) is charged, regardless of element type.
+    assert_eq!(
+        eq_cost(&Value::CollBytes(vec![]), &Value::CollBytes(vec![1])).1,
+        1
+    );
+    assert_eq!(
+        eq_cost(&coll_ge(1), &coll_ge(0)).1,
+        1,
+        "GE length-mismatch charges only MatchType"
+    );
+    assert_eq!(eq_cost(&coll_bigint(0), &coll_bigint(1)).1, 1);
+
+    // Descriptor colls, equal length: MatchType(1) + EQ_COA PerItem(full len).
+    // Coll[Byte] n=2: 1 + (15 + 2*ceil(2/128)) = 1 + 17 = 18.
+    assert_eq!(
+        eq_cost(&Value::CollBytes(vec![1, 2]), &Value::CollBytes(vec![1, 2])).1,
+        18
+    );
+    // Coll[GroupElement] n=0 (CollGeneric SGroupElement, cs1): 1 + (15 + 5*0) = 16.
+    assert_eq!(eq_cost(&coll_ge(0), &coll_ge(0)).1, 16);
+    // Coll[BigInt] n=0 (cs5): chunks(0)=(0-1)/5+1=1 -> 1 + (15 + 7*1) = 23.
+    assert_eq!(eq_cost(&coll_bigint(0), &coll_bigint(0)).1, 23);
+
+    // Tuple `&&` short-circuit: differ at first element charges only the first.
+    let t = |a: i8, b: i8| Value::Tuple(vec![Value::Byte(a), Value::Byte(b)]);
+    assert_eq!(
+        eq_cost(&t(0, 1), &t(1, 1)),
+        (false, 7),
+        "EQ_Tuple(4)+EQ_Prim(3), short-circuit"
+    );
+    assert_eq!(
+        eq_cost(&t(1, 0), &t(1, 1)),
+        (false, 10),
+        "first equal, second differs: 4+3+3"
+    );
+    assert_eq!(eq_cost(&t(1, 1), &t(1, 1)), (true, 10), "all equal: 4+3+3");
+
+    // Scalar GroupElement: EQ_GroupElement(172).
+    assert_eq!(eq_cost(&ge(7), &ge(7)), (true, 172));
+
+    // Nested Coll[Coll[Int]] (fallback): outer MatchType + per-element recursion
+    // + EQ_Coll(10,2,1) over k_eff.
+    let cci = |inner: Vec<Vec<i32>>| {
+        Value::CollGeneric(
+            inner.into_iter().map(Value::CollInt).collect(),
+            Box::new(SigmaType::SColl(Box::new(SigmaType::SInt))),
+        )
+    };
+    // both empty outer: 1(MT) + EQ_Coll.compute(0)=10 = 11.
+    assert_eq!(eq_cost(&cci(vec![]), &cci(vec![])), (true, 11));
+    // one element, inner equal-length differing value Coll(1) vs Coll(2):
+    // 1(outer MT) + [inner: 1(MT)+PerItem(15,2,64).compute(1)=17 = 18] + EQ_Coll.compute(1)=12 = 31.
+    assert_eq!(
+        eq_cost(&cci(vec![vec![1]]), &cci(vec![vec![2]])),
+        (false, 31)
+    );
+    // one element, inner length-mismatch Coll() vs Coll(1):
+    // 1(outer MT) + [inner: 1(MT) only] + EQ_Coll.compute(1)=12 = 14.
+    assert_eq!(
+        eq_cost(&cci(vec![vec![]]), &cci(vec![vec![1]])),
+        (false, 14)
+    );
+}
+
+/// Value-safety: `eq_with_cost` must return the SAME boolean as the uncosted
+/// `values_equal` for every shape — only the cost is being changed, never the
+/// equality result.
+#[test]
+fn eq_with_cost_boolean_matches_values_equal() {
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let ge = |b: u8| Value::GroupElement([b; 33]);
+    let cases: Vec<(Value, Value)> = vec![
+        (Value::Int(1), Value::Int(1)),
+        (Value::Int(1), Value::Int(2)),
+        (Value::CollBytes(vec![1, 2]), Value::CollBytes(vec![1, 2])),
+        (Value::CollBytes(vec![1, 2]), Value::CollBytes(vec![1, 3])),
+        (Value::CollBytes(vec![1]), Value::CollBytes(vec![1, 2])),
+        (
+            Value::CollGeneric(vec![ge(1)], Box::new(SigmaType::SGroupElement)),
+            Value::CollGeneric(vec![ge(1)], Box::new(SigmaType::SGroupElement)),
+        ),
+        (
+            Value::CollGeneric(vec![ge(1)], Box::new(SigmaType::SGroupElement)),
+            Value::CollGeneric(vec![ge(2)], Box::new(SigmaType::SGroupElement)),
+        ),
+        (
+            Value::Tuple(vec![Value::Byte(1), Value::Byte(2)]),
+            Value::Tuple(vec![Value::Byte(1), Value::Byte(2)]),
+        ),
+        (
+            Value::Tuple(vec![Value::Byte(1), Value::Byte(2)]),
+            Value::Tuple(vec![Value::Byte(9), Value::Byte(2)]),
+        ),
+        (
+            Value::Opt(Some(Box::new(Value::Int(5)))),
+            Value::Opt(Some(Box::new(Value::Int(5)))),
+        ),
+        (Value::Opt(None), Value::Opt(Some(Box::new(Value::Int(5))))),
+        (
+            Value::CollGeneric(
+                vec![Value::CollInt(vec![1])],
+                Box::new(SigmaType::SColl(Box::new(SigmaType::SInt))),
+            ),
+            Value::CollGeneric(
+                vec![Value::CollInt(vec![1])],
+                Box::new(SigmaType::SColl(Box::new(SigmaType::SInt))),
+            ),
+        ),
+    ];
+    // Check both operand orders: dispatch is left-shape-driven, so a swapped
+    // pair exercises a different code path and catches asymmetric regressions.
+    for (l, r) in &cases {
+        for (a, b) in [(l, r), (r, l)] {
+            let mut cost = CostAccumulator::recording_only();
+            let costed = eq_with_cost(a, b, &ctx, &mut cost).unwrap();
+            let plain = crate::evaluator::helpers::values_equal(a, b, &ctx).unwrap();
+            assert_eq!(
+                costed, plain,
+                "eq_with_cost must match values_equal for {a:?} vs {b:?}"
+            );
+        }
+    }
 }
 
 #[test]

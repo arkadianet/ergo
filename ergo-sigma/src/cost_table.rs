@@ -239,14 +239,14 @@ pub fn arith_cost(opcode: u8, is_bigint: bool) -> Result<JitCost, EvalError> {
 }
 
 // EQ/NEQ dynamic cost constants (matching Scala's DataValueComparer)
-const MATCH_TYPE: u64 = 1;
+pub(crate) const MATCH_TYPE: u64 = 1;
 const EQ_PRIM: u64 = 3;
-const EQ_TUPLE: u64 = 4;
+pub(crate) const EQ_TUPLE: u64 = 4;
 const EQ_GROUP_ELEMENT: u64 = 172;
 const EQ_BIGINT: u64 = 5;
 const EQ_AVL_TREE: u64 = 6;
 const EQ_BOX: u64 = 6;
-const EQ_OPTION: u64 = 4;
+pub(crate) const EQ_OPTION: u64 = 4;
 const EQ_PRE_HEADER: u64 = 4;
 const EQ_HEADER: u64 = 6;
 

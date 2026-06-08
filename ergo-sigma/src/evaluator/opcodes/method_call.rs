@@ -15,7 +15,7 @@ use num_integer::Integer;
 use num_traits::One;
 
 use super::super::cost::{
-    add_cost, add_cost_per_item, add_method_cost, avl_cost_height, collection_len,
+    add_cost, add_cost_per_item, add_method_cost, avl_cost_height, collection_len, eq_with_cost,
     try_make_avl_verifier,
 };
 use super::super::dispatch::eval_expr;
@@ -79,7 +79,10 @@ pub(in crate::evaluator) fn eval_method_call(
             let mut iters = 0u32;
             for (i, item) in items.into_iter().enumerate().skip(from) {
                 iters += 1;
-                if values_equal(&item, &elem, cx.ctx)? {
+                // Scala `indexOf_eval` calls `DataValueComparer.equalDataValues`
+                // per iteration, charging its cost (e.g. EQ_Prim(3) for a
+                // primitive element) inside the addSeqCost loop body.
+                if eq_with_cost(&item, &elem, cx.ctx, cx.cost)? {
                     result = i as i32;
                     break;
                 }
