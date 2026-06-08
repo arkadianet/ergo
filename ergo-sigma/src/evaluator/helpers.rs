@@ -1253,8 +1253,13 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
                 value: ergo_box.candidate.value as i64,
                 id: *box_id.as_bytes(),
-                transaction_id: [0u8; 32],
-                output_index: 0,
+                // read_ergo_box parses the real transaction id and output
+                // index from the box tail; carry them through so
+                // ExtractCreationInfo (R3 ref = txId ++ 2-byte big-endian
+                // index) and ExtractBytesWithNoRef (strips 32 + VLQ(index))
+                // reflect the real identity rather than zeros.
+                transaction_id: *ergo_box.transaction_id.as_bytes(),
+                output_index: ergo_box.index,
                 registers,
                 tokens,
                 raw_bytes,
