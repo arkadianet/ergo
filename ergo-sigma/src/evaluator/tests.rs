@@ -3937,19 +3937,15 @@ fn methodcall_numeric_shift_left_right_v6_match_java_promotion() {
         run_eval(&mk(5, 13, const_long(0x100), 4)),
         Value::Long(0x10),
     );
-    // Byte promotion: (127: Byte) << 1 = (254: Int).toByte = -2.
-    // Direct i8.wrapping_shl(1) gives 0x7F<<1 = -2 too, but the
-    // distinction matters for shift counts >= 8 (Java masks mod 32
-    // on Int after promotion; a naive `i8::wrapping_shl(8)` would
-    // mask mod 8 = 0 and return the input unchanged). Use shift=9
-    // to exercise the Java path: ((127: Byte) << 9) = 127 << 9 =
-    // 0xFE00 truncated to Byte = 0x00 = 0.
+    // Byte promotion for an IN-RANGE shift: (127: Byte) << 1 =
+    // (254: Int).toByte = -2. (A shift count >= 8 is out of range for a
+    // Byte and is rejected — see methodcall_numeric_shift_out_of_range_rejects;
+    // Scala's ExactIntegral.shiftLeft throws there rather than masking.)
     let byte = |v: i8| Expr::Const {
         tpe: SigmaType::SByte,
         val: SigmaValue::Byte(v),
     };
     assert_eq!(run_eval(&mk(2, 12, byte(127), 1)), Value::Byte(-2),);
-    assert_eq!(run_eval(&mk(2, 12, byte(127), 9)), Value::Byte(0),);
     // BigInt shift left: 1 << 200 = 2^200
     let big = |n: i64| Expr::Const {
         tpe: SigmaType::SBigInt,
@@ -3960,6 +3956,54 @@ fn methodcall_numeric_shift_left_right_v6_match_java_promotion() {
         run_eval(&mk(6, 12, big(1), 200)),
         Value::BigInt(two_pow_200),
     );
+}
+
+/// Shift count out of range must throw, per Scala ExactIntegral:
+/// shiftLeft/shiftRight raise IllegalArgumentException when
+/// `bits < 0 || bits >= width` (Byte 8, Short 16, Int 32, Long 64,
+/// BigInt 256). Previously the fixed-width arms masked the count
+/// (n & 31 / n & 63) and the BigInt arm only checked `n < 0`, so a
+/// script with an out-of-range shift was accepted here but rejected by
+/// the reference — a consensus divergence.
+#[test]
+fn methodcall_numeric_shift_out_of_range_rejects() {
+    let mk = |type_id: u8, method_id: u8, obj: Expr, n: i32| {
+        Expr::Op(IrNode {
+            opcode: 0xDC,
+            payload: Payload::MethodCall {
+                type_id,
+                method_id,
+                obj: Box::new(obj),
+                args: vec![const_int(n)],
+                type_args: vec![],
+            },
+        })
+    };
+    let byte = |v: i8| Expr::Const {
+        tpe: SigmaType::SByte,
+        val: SigmaValue::Byte(v),
+    };
+    let big = |n: i64| Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(n.into()),
+    };
+    // Each at the exclusive upper bound (== width) must throw, for both
+    // shiftLeft (12) and shiftRight (13).
+    for (label, expr) in [
+        ("Byte<<8", mk(2, 12, byte(1), 8)),
+        ("Short<<16", mk(3, 12, const_short(1), 16)),
+        ("Int<<32", mk(4, 12, const_int(1), 32)),
+        ("Long>>64", mk(5, 13, const_long(1), 64)),
+        ("BigInt<<256", mk(6, 12, big(1), 256)),
+    ] {
+        assert!(
+            matches!(run_eval_err(&expr), EvalError::RuntimeException(_)),
+            "{label} (bits == width) must throw"
+        );
+    }
+    // In-range shifts at width-1 still succeed.
+    assert_eq!(run_eval(&mk(4, 12, const_int(1), 31)), Value::Int(1 << 31));
+    assert_eq!(run_eval(&mk(2, 12, byte(1), 7)), Value::Byte(-128)); // 1<<7 = 0x80 -> -128
 }
 
 #[test]
@@ -3980,7 +4024,7 @@ fn methodcall_numeric_bigint_shift_negative_count_rejects() {
     });
     match run_eval_err(&expr) {
         EvalError::RuntimeException(msg) => {
-            assert!(msg.contains("negative shift count"), "{msg}");
+            assert!(msg.contains("out of range"), "{msg}");
         }
         other => panic!("expected RuntimeException, got {other:?}"),
     }
