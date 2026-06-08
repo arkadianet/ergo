@@ -727,6 +727,13 @@ pub(crate) fn values_equal(
             (Some(ai), Some(bi)) => values_equal(ai, bi, ctx),
             _ => Ok(false),
         },
+        // NOTE: SigmaProp / Coll[SigmaProp] are handled by the catch-all
+        // `l == r` (structural PartialEq) — NOT the throwing equalSigmaBoolean.
+        // `values_equal` is the plain-equality authority used by
+        // `SColl.startsWith`/`endsWith`, whose Scala impls (`xs.startsWith(ys)`)
+        // use normal element `==` and return `false` on a constructor mismatch.
+        // Only the DataValueComparer paths (`==`/`!=`/`indexOf`, via
+        // `eq_with_cost`) get the throwing conjecture-mismatch semantics.
         // Cross-type CollBytes ↔ CollInt is intentionally not bridged here —
         // see the PartialEq impl above for the type-strictness rationale.
         // Primitive types and collections of primitives — Value::PartialEq is correct
@@ -967,9 +974,12 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
 /// Count total nodes in a SigmaBoolean tree (for SigmaPropBytes PerItem cost).
 pub(crate) fn count_sigma_nodes(sb: &SigmaBoolean) -> usize {
     match sb {
-        SigmaBoolean::TrivialProp(_)
-        | SigmaBoolean::ProveDlog(_)
-        | SigmaBoolean::ProveDHTuple { .. } => 1,
+        SigmaBoolean::TrivialProp(_) | SigmaBoolean::ProveDlog(_) => 1,
+        // Scala `ProveDHTuple.size = 4` ("one node for each EcPoint",
+        // SigmaBoolean.scala). SigmaPropBytes' PerItemCost(35,6,1) is charged
+        // over `SigmaBoolean.size`, so a DHTuple counts 3 nodes more than a
+        // Dlog (compounding through CAND/COR/CTHRESHOLD children).
+        SigmaBoolean::ProveDHTuple { .. } => 4,
         SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
             1 + children.iter().map(count_sigma_nodes).sum::<usize>()
         }

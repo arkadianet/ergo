@@ -538,6 +538,69 @@ fn eq_with_cost_boolean_matches_values_equal() {
     }
 }
 
+/// SigmaProp `==` mirrors Scala `equalSigmaBoolean` for BOTH cost and the
+/// consensus-critical value/error asymmetry: a LEAF (ProveDlog/ProveDHTuple/
+/// TrivialProp) on the left vs a different-constructor right returns `false`,
+/// but a CONJECTURE (Cand/Cor/Cthreshold) on the left vs a different-constructor
+/// right ERRORS (Scala `sys.error`). Order-sensitive. eq_with_cost (costed) and
+/// values_equal (uncosted) must agree, including on Err.
+#[test]
+fn sigmaprop_equality_value_error_and_cost() {
+    use ergo_primitives::group_element::GroupElement;
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let dlog = |b: u8| Value::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([b; 33])));
+    let cand = |b: u8| {
+        Value::SigmaProp(SigmaBoolean::Cand(vec![SigmaBoolean::ProveDlog(
+            GroupElement::from_bytes([b; 33]),
+        )]))
+    };
+    let eqc = |l: &Value, r: &Value| {
+        let mut c = CostAccumulator::recording_only();
+        eq_with_cost(l, r, &ctx, &mut c).map(|b| (b, c.total().value()))
+    };
+    let ve = |l: &Value, r: &Value| crate::evaluator::helpers::values_equal(l, r, &ctx);
+
+    // ProveDlog == ProveDlog (equal): MatchType(equalDataValues) + MatchType(node)
+    // + EQ_GroupElement(172) = 174.
+    assert_eq!(eqc(&dlog(1), &dlog(1)).unwrap(), (true, 174));
+    assert_eq!(eqc(&dlog(1), &dlog(2)).unwrap(), (false, 174));
+
+    // LEAF left vs conjecture right -> false (NOT error), order-sensitive.
+    assert!(!eqc(&dlog(1), &cand(1)).unwrap().0);
+    assert!(!ve(&dlog(1), &cand(1)).unwrap());
+
+    // CONJECTURE left vs leaf right: the DataValueComparer path (eq_with_cost,
+    // used by ==/!=/indexOf) ERRORS; the plain-equality authority (values_equal,
+    // used by startsWith/endsWith) returns false (Scala `xs.startsWith` uses
+    // structural `==`, never throws). The two paths INTENTIONALLY differ here.
+    assert!(matches!(
+        eqc(&cand(1), &dlog(1)),
+        Err(EvalError::RuntimeException(_))
+    ));
+    assert!(!ve(&cand(1), &dlog(1)).unwrap());
+
+    // Same conjecture constructor, equal children -> true (no error).
+    assert!(eqc(&cand(1), &cand(1)).unwrap().0);
+
+    // Cthreshold k-mismatch is false (NOT error — same constructor).
+    let cth = |k: u8| {
+        Value::SigmaProp(SigmaBoolean::Cthreshold {
+            k,
+            children: vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([1; 33]))],
+        })
+    };
+    assert!(eqc(&cth(1), &cth(1)).unwrap().0);
+    // Different k with same single child: equalSigmaBooleans not reached; false.
+    let cth2 = Value::SigmaProp(SigmaBoolean::Cthreshold {
+        k: 1,
+        children: vec![
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes([1; 33])),
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes([2; 33])),
+        ],
+    });
+    assert!(!eqc(&cth(1), &cth2).unwrap().0);
+}
+
 #[test]
 fn infer_collection_from_mapper_body() {
     use ergo_ser::opcode::{Expr, IrNode, Payload};

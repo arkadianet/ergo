@@ -1,7 +1,122 @@
 use ergo_primitives::cost::{CostAccumulator, CostKind, JitCost};
+use ergo_ser::sigma_value::SigmaBoolean;
 
 use super::types::{BoxSource, EvalError, ReductionContext, Value};
 use crate::cost_table;
+
+/// Faithful port of Scala `DataValueComparer.equalSigmaBoolean` (cost AND
+/// value/error). `cost` is `Some` on the consensus EQ/NEQ path (charges the
+/// Scala costs) and `None` for the uncosted `values_equal` authority — both
+/// must agree on the boolean AND on when to error.
+///
+/// Per Scala (DataValueComparer.scala:252-282):
+/// * one `MatchType` (JitCost 1) per node, charged at the top before dispatch;
+/// * `EQ_GroupElement` (JitCost 172) per EcPoint comparison, with the
+///   ProveDHTuple `&&` short-circuit (no cost past the first unequal point);
+/// * LEAF arms (ProveDlog/ProveDHTuple/TrivialProp) have NO guard and return
+///   `false` on a constructor mismatch;
+/// * CONJECTURE arms (Cand/Cor/Cthreshold) are guarded, and a mismatched-right
+///   falls through to `sys.error` — i.e. THROWS (errored). Order-sensitive:
+///   `CAND` left vs `ProveDlog` right errors, but `ProveDlog` left vs `CAND`
+///   right is `false`.
+pub(crate) fn equal_sigma_boolean(
+    l: &SigmaBoolean,
+    r: &SigmaBoolean,
+    mut cost: Option<&mut CostAccumulator>,
+) -> Result<bool, EvalError> {
+    // One MatchType per node, before dispatch (charged even on throwing arms).
+    if let Some(c) = cost.as_deref_mut() {
+        c.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+    }
+    let mismatch =
+        || EvalError::RuntimeException("Cannot compare SigmaBoolean values: unknown type");
+    match l {
+        SigmaBoolean::ProveDlog(x) => match r {
+            SigmaBoolean::ProveDlog(y) => {
+                if let Some(c) = cost.as_deref_mut() {
+                    c.add(JitCost::from_jit(cost_table::EQ_GROUP_ELEMENT))?;
+                }
+                Ok(x == y)
+            }
+            _ => Ok(false),
+        },
+        SigmaBoolean::ProveDHTuple {
+            g: xg,
+            h: xh,
+            u: xu,
+            v: xv,
+        } => match r {
+            SigmaBoolean::ProveDHTuple {
+                g: yg,
+                h: yh,
+                u: yu,
+                v: yv,
+            } => {
+                // `&&` short-circuit: equalECPoint charges 172 then compares;
+                // a mismatch stops the chain (later points not charged).
+                for (a, b) in [(xg, yg), (xh, yh), (xu, yu)] {
+                    if let Some(c) = cost.as_deref_mut() {
+                        c.add(JitCost::from_jit(cost_table::EQ_GROUP_ELEMENT))?;
+                    }
+                    if a != b {
+                        return Ok(false);
+                    }
+                }
+                if let Some(c) = cost.as_deref_mut() {
+                    c.add(JitCost::from_jit(cost_table::EQ_GROUP_ELEMENT))?;
+                }
+                Ok(xv == yv)
+            }
+            _ => Ok(false),
+        },
+        SigmaBoolean::TrivialProp(a) => match r {
+            // No extra cost beyond the per-node MatchType already charged.
+            SigmaBoolean::TrivialProp(b) => Ok(a == b),
+            _ => Ok(false),
+        },
+        SigmaBoolean::Cand(ch) => match r {
+            SigmaBoolean::Cand(rch) => equal_sigma_booleans(ch, rch, cost),
+            _ => Err(mismatch()),
+        },
+        SigmaBoolean::Cor(ch) => match r {
+            SigmaBoolean::Cor(rch) => equal_sigma_booleans(ch, rch, cost),
+            _ => Err(mismatch()),
+        },
+        SigmaBoolean::Cthreshold { k, children } => match r {
+            SigmaBoolean::Cthreshold {
+                k: k2,
+                children: c2,
+            } => {
+                // `k == k2 && equalSigmaBooleans(...)`: k mismatch short-circuits
+                // to false (NOT an error — same constructor).
+                if k != k2 {
+                    return Ok(false);
+                }
+                equal_sigma_booleans(children, c2, cost)
+            }
+            _ => Err(mismatch()),
+        },
+    }
+}
+
+/// Scala `equalSigmaBooleans`: length mismatch -> `false` (no recursion/cost);
+/// otherwise compare element-wise with a first-false short-circuit (errors
+/// propagate).
+pub(crate) fn equal_sigma_booleans(
+    xs: &[SigmaBoolean],
+    ys: &[SigmaBoolean],
+    mut cost: Option<&mut CostAccumulator>,
+) -> Result<bool, EvalError> {
+    if xs.len() != ys.len() {
+        return Ok(false);
+    }
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        if !equal_sigma_boolean(x, y, cost.as_deref_mut())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 pub(crate) fn add_cost(cost: &mut CostAccumulator, opcode: u8) -> Result<(), EvalError> {
     let delta = cost_table::opcode_cost(opcode)?.compute(0)?;
@@ -238,6 +353,52 @@ fn eq_with_cost_inner(
             add_coll_box_eq_cost(cost, n as u32, match_len)?;
             Ok(super::helpers::values_equal(left, right, ctx)?)
         }
+        // SigmaProp: Scala equalDataValues charges ONE MatchType then dispatches
+        // to equalSigmaBoolean (which has its own per-node cost AND the
+        // conjecture-mismatch throw). Must be its own arm — the add_eq_cost +
+        // values_equal split cannot express the short-circuit nor the error.
+        Value::SigmaProp(lsb) => {
+            cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+            match right {
+                Value::SigmaProp(rsb) => equal_sigma_boolean(lsb, rsb, Some(cost)),
+                _ => Ok(false),
+            }
+        }
+        // Coll[SigmaProp]: Scala has NO primitive descriptor for SigmaProp, so
+        // it uses the equalColls fallback — collection MatchType, then per
+        // element `equalDataValues` (one MatchType + equalSigmaBoolean), then
+        // EQ_Coll = PerItemCost(10,2,1) over the elements actually compared.
+        // Routing through equalSigmaBoolean is what lets a Coll[CAND] vs
+        // Coll[ProveDlog] element throw (errored), matching the reference.
+        Value::CollSigmaProp(a) => {
+            cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+            match right {
+                Value::CollSigmaProp(b) => {
+                    if a.len() != b.len() {
+                        return Ok(false);
+                    }
+                    let mut k_eff = 0u32;
+                    let mut all_eq = true;
+                    for (li, ri) in a.iter().zip(b.iter()) {
+                        k_eff += 1;
+                        // per-element equalDataValues SigmaProp-case MatchType
+                        cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+                        if !equal_sigma_boolean(li, ri, Some(cost))? {
+                            all_eq = false;
+                            break;
+                        }
+                    }
+                    let eq_coll = CostKind::PerItem {
+                        base: JitCost::from_jit(10),
+                        per_chunk: JitCost::from_jit(2),
+                        chunk_size: 1,
+                    };
+                    cost.add(eq_coll.compute(k_eff)?)?;
+                    Ok(all_eq)
+                }
+                _ => Ok(false),
+            }
+        }
         // Typed primitive/descriptor coll carriers + Tokens: the existing
         // `add_eq_cost` arms already charge MatchType + length-gated PerItem
         // faithfully (full length, no per-element short-circuit — Scala's
@@ -248,7 +409,6 @@ fn eq_with_cost_inner(
         | Value::CollLong(_)
         | Value::CollShort(_)
         | Value::Str(_)
-        | Value::CollSigmaProp(_)
         | Value::CollBox(_)
         | Value::CollHeader(_)
         | Value::Tokens(_) => {
@@ -257,7 +417,7 @@ fn eq_with_cost_inner(
             Ok(super::helpers::values_equal(left, right, ctx)?)
         }
         // Scalars / Box / AvlTree / Header / PreHeader / GroupElement / BigInt /
-        // SigmaProp / Global: fixed cost, no recursion.
+        // Global: fixed cost, no recursion.
         _ => {
             cost_table::add_eq_cost(cost, left, true)?;
             Ok(super::helpers::values_equal(left, right, ctx)?)
