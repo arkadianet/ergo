@@ -140,50 +140,9 @@ pub(in crate::evaluator) fn eval_method_call(
                 Box::new(SigmaType::STuple(vec![elem_a, elem_b])),
             ))
         }
-        // SColl(12).reverse(30) -> Coll[T]
-        // EIP-50 v6 method. Scala `SCollectionMethods.reverseMethod` â€”
-        // cost matches `Append.costKind` (`PerItemCost(20, 2, 100)`).
-        // Preserves the typed carrier where possible so downstream
-        // typed-collection consumers (e.g. `Coll[Byte]` â†’
-        // `byteArrayToBigInt`) keep working.
-        (12, 30) => {
-            check_arity(args, 0)?;
-            let n = collection_len(&obj_val, cx.ctx) as u32;
-            let reverse_cost = CostKind::PerItem {
-                base: JitCost::from_jit(20),
-                per_chunk: JitCost::from_jit(2),
-                chunk_size: 100,
-            };
-            cx.cost.add(reverse_cost.compute(n)?)?;
-            match obj_val {
-                Value::CollBytes(mut v) => {
-                    v.reverse();
-                    Ok(Value::CollBytes(v))
-                }
-                Value::CollInt(mut v) => {
-                    v.reverse();
-                    Ok(Value::CollInt(v))
-                }
-                Value::CollLong(mut v) => {
-                    v.reverse();
-                    Ok(Value::CollLong(v))
-                }
-                Value::CollShort(mut v) => {
-                    v.reverse();
-                    Ok(Value::CollShort(v))
-                }
-                Value::CollBool(mut v) => {
-                    v.reverse();
-                    Ok(Value::CollBool(v))
-                }
-                other => {
-                    let elem_type = coll_elem_type(&other).unwrap_or(SigmaType::SAny);
-                    let (_kind, mut items) = collection_to_values(other, cx.ctx)?;
-                    items.reverse();
-                    Ok(Value::CollGeneric(items, Box::new(elem_type)))
-                }
-            }
-        }
+        // SColl(12).reverse(30) is a zero-arg method handled by the shared
+        // `eval_no_arg_method` table (reachable via 0xDB PropertyCall — the
+        // form the compiler emits — and the 0xDC no-arg fallthrough).
         // SColl(12).startsWith(31) / endsWith(32) -> Boolean
         // EIP-50 v6 methods. Scala cost is `Zip_CostKind`
         // (`PerItemCost(10, 1, 10)`) over the prefix/suffix length.
@@ -400,21 +359,10 @@ pub(in crate::evaluator) fn eval_method_call(
         // mod-32; Long uses mod-64; BigInt accepts any non-negative
         // shift count and rejects negatives as `RuntimeException` (mirrors
         // Scala's `IllegalArgumentException` from `BigInteger.shiftLeft`).
-        (2..=6, 8) => {
-            check_arity(args, 0)?;
-            add_method_cost(cx.cost, 5)?;
-            match obj_val {
-                Value::Byte(n) => Ok(Value::Byte(!n)),
-                Value::Short(n) => Ok(Value::Short(!n)),
-                Value::Int(n) => Ok(Value::Int(!n)),
-                Value::Long(n) => Ok(Value::Long(!n)),
-                Value::BigInt(n) => Ok(Value::BigInt(!n)),
-                other => Err(EvalError::TypeError {
-                    expected: "numeric type for bitwiseInverse",
-                    got: format!("{other:?}"),
-                }),
-            }
-        }
+        // bitwiseInverse (2..=6, 8) is a zero-arg method handled by the shared
+        // `eval_no_arg_method` table (reachable via 0xDB PropertyCall — the
+        // form the compiler emits — and the 0xDC no-arg fallthrough), so it is
+        // intentionally not duplicated here.
         (2..=6, 9) | (2..=6, 10) | (2..=6, 11) => {
             check_arity(args, 1)?;
             let rhs_val = cx.eval_expr(&args[0])?;
@@ -1985,18 +1933,8 @@ pub(in crate::evaluator) fn eval_method_call(
         // unsigned type can't represent it). toUnsignedMod: reduces
         // any signed value modulo `m`, always producing a value in
         // [0, m). `m` must be non-zero.
-        (6, 14) => {
-            check_arity(args, 0)?;
-            let signed = expect_bigint(&obj_val, "SBigInt.toUnsigned receiver")?;
-            add_method_cost(cx.cost, 5)?;
-            if signed.sign() == num_bigint::Sign::Minus {
-                return Err(EvalError::TypeError {
-                    expected: "non-negative SBigInt for toUnsigned",
-                    got: format!("{signed:?}"),
-                });
-            }
-            Ok(Value::UnsignedBigInt(signed.clone()))
-        }
+        // SBigInt.toUnsigned (6, 14) is a zero-arg method handled by the shared
+        // `eval_no_arg_method` table (reachable via 0xDB PropertyCall).
         (6, 15) => {
             check_arity(args, 1)?;
             let signed = expect_bigint(&obj_val, "SBigInt.toUnsignedMod receiver")?;
@@ -2031,13 +1969,9 @@ pub(in crate::evaluator) fn eval_method_call(
         // count outside [0, 256) and reject a shiftLeft result exceeding
         // 256 bits (CUnsignedBigInt's ctor throws), rather than masking
         // the count the way the fixed-width (2..=6, 12|13) arms do.
-        (9, 8) => {
-            check_arity(args, 0)?;
-            let a = expect_unsigned_bigint(&obj_val, "SUnsignedBigInt.bitwiseInverse receiver")?;
-            add_method_cost(cx.cost, 5)?;
-            let mask = (num_bigint::BigInt::from(1) << 256u32) - num_bigint::BigInt::from(1);
-            Ok(Value::UnsignedBigInt(&mask ^ a))
-        }
+        // SUnsignedBigInt.bitwiseInverse (9, 8) is a zero-arg method handled by
+        // the shared `eval_no_arg_method` table (reachable via 0xDB
+        // PropertyCall), so it is intentionally not duplicated here.
         (9, 9) | (9, 10) | (9, 11) => {
             check_arity(args, 1)?;
             let a = expect_unsigned_bigint(&obj_val, "SUnsignedBigInt bitwise receiver")?.clone();
@@ -2207,22 +2141,8 @@ pub(in crate::evaluator) fn eval_method_call(
             }
             Ok(Value::UnsignedBigInt(a % m))
         }
-        (9, 19) => {
-            check_arity(args, 0)?;
-            let a = expect_unsigned_bigint(&obj_val, "SUnsignedBigInt.toSigned receiver")?;
-            add_method_cost(cx.cost, 10)?;
-            // Scala throws if the value can't fit in signed 256-bit
-            // (top bit set means it would become negative). Our 256-bit
-            // upper bound is enforced at the wire layer; here we
-            // reject values >= 2^255.
-            let two_pow_255 = num_bigint::BigInt::from(1) << 255;
-            if a >= &two_pow_255 {
-                return Err(EvalError::RuntimeException(
-                    "SUnsignedBigInt.toSigned: value exceeds signed 256-bit range",
-                ));
-            }
-            Ok(Value::BigInt(a.clone()))
-        }
+        // SUnsignedBigInt.toSigned (9, 19) is a zero-arg method handled by the
+        // shared `eval_no_arg_method` table (reachable via 0xDB PropertyCall).
         // SGroupElement(7).exp(6, e: UnsignedBigInt) -> GroupElement
         // Scala `SGroupElementMethods.ExponentiateUnsignedMethod`
         // (EIP-50 / v6Methods, confirmed by disassembly of
@@ -2278,10 +2198,26 @@ pub(in crate::evaluator) fn eval_method_call(
         // Fall through to the shared no-arg method table for any
         // (type_id, method_id) the args-using arms above did not
         // claim. This dedupes the header / preheader / global / AVL
-        // property logic that otherwise lives in two places.
+        // property logic that otherwise lives in two places. The table
+        // is NO-arg only, so enforce arity here: a no-arg method invoked
+        // with arguments is malformed and must error (preserving the
+        // `check_arity(args, 0)` the moved bitwiseInverse / toUnsigned /
+        // toSigned / reverse arms used to enforce — a 0xDC MethodCall
+        // carrying extra args must not silently ignore them).
         _ => match super::property_call::eval_no_arg_method(
             type_id, method_id, &obj_val, cx.ctx, cx.cost,
         )? {
+            // The shared table is NO-arg only: if it claims this method but the
+            // 0xDC MethodCall carried arguments, the tree is malformed — error
+            // on arity (preserving the `check_arity(args, 0)` the moved
+            // bitwiseInverse / toUnsigned / toSigned / reverse arms enforced, so
+            // extra args are never silently ignored). Methods the table does NOT
+            // claim (e.g. SContext.getVar, which legitimately takes args) fall
+            // through to the unsupported-MethodCall error regardless of arity.
+            Some(_) if !args.is_empty() => Err(EvalError::ArityMismatch {
+                expected: 0,
+                got: args.len(),
+            }),
             Some(v) => Ok(v),
             None => Err(EvalError::TypeError {
                 expected: "supported MethodCall",

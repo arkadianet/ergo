@@ -19,12 +19,13 @@
 //! fail to match. The two opcode dispatch costs are equal so the no-arg
 //! flow yields identical total cost regardless of which entry fired.
 
-use ergo_primitives::cost::CostAccumulator;
+use ergo_primitives::cost::{CostAccumulator, CostKind, JitCost};
 use ergo_ser::opcode::Expr;
+use ergo_ser::sigma_type::SigmaType;
 
 use super::super::cost::{add_cost, add_method_cost, collection_len};
 use super::super::eval_ctx::EvalCtx;
-use super::super::helpers::resolve_box;
+use super::super::helpers::{coll_elem_type, collection_to_values, resolve_box};
 use super::super::types::{BoxSource, EvalError, ReductionContext, Value, SECP256K1_GENERATOR};
 
 /// Entry point for `0xDB PropertyCall`.
@@ -350,6 +351,123 @@ pub(super) fn eval_no_arg_method(
             } else {
                 Value::CollBool(bits_msb_first(&bytes))
             }))
+        }
+        // SNumericTypeMethods.bitwiseInverse(8) for Byte(2)/Short(3)/Int(4)/
+        // Long(5)/BigInt(6) -> ~x. Zero-arg, FixedCost(JitCost(5)). The
+        // compiler emits this as 0xDB PropertyCall, so it must live in the
+        // shared no-arg table (it was previously only in eval_method_call's
+        // args-arms and thus unreachable via PropertyCall).
+        (2..=6, 8) => {
+            add_method_cost(cost, 5)?;
+            match obj_val {
+                Value::Byte(n) => Ok(Some(Value::Byte(!n))),
+                Value::Short(n) => Ok(Some(Value::Short(!n))),
+                Value::Int(n) => Ok(Some(Value::Int(!n))),
+                Value::Long(n) => Ok(Some(Value::Long(!n))),
+                Value::BigInt(n) => Ok(Some(Value::BigInt(!n))),
+                other => Err(EvalError::TypeError {
+                    expected: "numeric type for bitwiseInverse",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        // SUnsignedBigInt.bitwiseInverse(8) -> (2^256 - 1) XOR n (masked
+        // complement in the unsigned 256-bit domain). Zero-arg, FixedCost(5).
+        (9, 8) => {
+            add_method_cost(cost, 5)?;
+            match obj_val {
+                Value::UnsignedBigInt(n) => {
+                    let mask =
+                        (num_bigint::BigInt::from(1) << 256u32) - num_bigint::BigInt::from(1);
+                    Ok(Some(Value::UnsignedBigInt(&mask ^ n)))
+                }
+                other => Err(EvalError::TypeError {
+                    expected: "UnsignedBigInt for bitwiseInverse",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        // SBigInt.toUnsigned(14) -> UnsignedBigInt. Zero-arg, FixedCost(5).
+        // Errors if the receiver is negative (the unsigned type can't represent
+        // it). The compiler emits this as 0xDB PropertyCall.
+        (6, 14) => {
+            add_method_cost(cost, 5)?;
+            match obj_val {
+                Value::BigInt(n) => {
+                    if n.sign() == num_bigint::Sign::Minus {
+                        return Err(EvalError::TypeError {
+                            expected: "non-negative SBigInt for toUnsigned",
+                            got: format!("{n:?}"),
+                        });
+                    }
+                    Ok(Some(Value::UnsignedBigInt(n.clone())))
+                }
+                other => Err(EvalError::TypeError {
+                    expected: "SBigInt for toUnsigned",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        // SUnsignedBigInt.toSigned(19) -> BigInt. Zero-arg, FixedCost(10).
+        // Errors if the value would not fit signed 256-bit (>= 2^255).
+        (9, 19) => {
+            add_method_cost(cost, 10)?;
+            match obj_val {
+                Value::UnsignedBigInt(a) => {
+                    let two_pow_255 = num_bigint::BigInt::from(1) << 255;
+                    if a >= &two_pow_255 {
+                        return Err(EvalError::RuntimeException(
+                            "SUnsignedBigInt.toSigned: value exceeds signed 256-bit range",
+                        ));
+                    }
+                    Ok(Some(Value::BigInt(a.clone())))
+                }
+                other => Err(EvalError::TypeError {
+                    expected: "UnsignedBigInt for toSigned",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        // SColl.reverse(30) -> Coll[T]. Zero-arg; cost PerItemCost(20,2,100)
+        // over the collection length. The compiler emits it as 0xDB
+        // PropertyCall, so it lives in the shared no-arg table.
+        (12, 30) => {
+            let n = collection_len(obj_val, ctx) as u32;
+            let reverse_cost = CostKind::PerItem {
+                base: JitCost::from_jit(20),
+                per_chunk: JitCost::from_jit(2),
+                chunk_size: 100,
+            };
+            cost.add(reverse_cost.compute(n)?)?;
+            let reversed = match obj_val.clone() {
+                Value::CollBytes(mut v) => {
+                    v.reverse();
+                    Value::CollBytes(v)
+                }
+                Value::CollInt(mut v) => {
+                    v.reverse();
+                    Value::CollInt(v)
+                }
+                Value::CollLong(mut v) => {
+                    v.reverse();
+                    Value::CollLong(v)
+                }
+                Value::CollShort(mut v) => {
+                    v.reverse();
+                    Value::CollShort(v)
+                }
+                Value::CollBool(mut v) => {
+                    v.reverse();
+                    Value::CollBool(v)
+                }
+                other => {
+                    let elem_type = coll_elem_type(&other).unwrap_or(SigmaType::SAny);
+                    let (_kind, mut items) = collection_to_values(other, ctx)?;
+                    items.reverse();
+                    Value::CollGeneric(items, Box::new(elem_type))
+                }
+            };
+            Ok(Some(reversed))
         }
         _ => Ok(None),
     }
