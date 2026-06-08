@@ -1089,9 +1089,12 @@ fn error_division_by_zero_int() {
         Payload::Two(Box::new(const_int(42)), Box::new(const_int(0))),
     );
     let err = run_eval_err(&expr);
+    // Division by zero is a runtime arithmetic error (Scala/Java throw
+    // ArithmeticException), matching the Byte/Short divide-by-zero arms —
+    // not a TypeError.
     assert!(
-        matches!(err, EvalError::TypeError { .. }),
-        "expected TypeError, got {err:?}"
+        matches!(err, EvalError::RuntimeException(_)),
+        "expected RuntimeException, got {err:?}"
     );
 }
 
@@ -1102,10 +1105,53 @@ fn error_modulo_by_zero_int() {
         Payload::Two(Box::new(const_int(42)), Box::new(const_int(0))),
     );
     let err = run_eval_err(&expr);
+    // Modulo by zero is a runtime arithmetic error, matching Division and
+    // the Byte/Short arms — not a TypeError.
     assert!(
-        matches!(err, EvalError::TypeError { .. }),
-        "expected TypeError, got {err:?}"
+        matches!(err, EvalError::RuntimeException(_)),
+        "expected RuntimeException, got {err:?}"
     );
+}
+
+/// Long and BigInt divide/modulo by zero must also be RuntimeException,
+/// matching Int and the Byte/Short arms (consistency across all numeric
+/// types). For BigInt the explicit zero arm also guards the divide path,
+/// which would otherwise panic in num_bigint.
+#[test]
+fn error_div_mod_by_zero_long_bigint() {
+    let big = |n: i64| Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(n.into()),
+    };
+    for (label, expr) in [
+        (
+            "Long /",
+            op(
+                0x9D,
+                Payload::Two(Box::new(const_long(42)), Box::new(const_long(0))),
+            ),
+        ),
+        (
+            "Long %",
+            op(
+                0x9E,
+                Payload::Two(Box::new(const_long(42)), Box::new(const_long(0))),
+            ),
+        ),
+        (
+            "BigInt /",
+            op(0x9D, Payload::Two(Box::new(big(42)), Box::new(big(0)))),
+        ),
+        (
+            "BigInt %",
+            op(0x9E, Payload::Two(Box::new(big(42)), Box::new(big(0)))),
+        ),
+    ] {
+        assert!(
+            matches!(run_eval_err(&expr), EvalError::RuntimeException(_)),
+            "{label} by zero must be RuntimeException"
+        );
+    }
 }
 
 #[test]
@@ -3401,7 +3447,8 @@ fn reject_division_by_zero_long() {
         Payload::Two(Box::new(const_long(100)), Box::new(const_long(0))),
     );
     let err = run_eval_err(&expr);
-    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+    // Runtime arithmetic error, not a type error (matches Int + Byte/Short).
+    assert!(matches!(err, EvalError::RuntimeException(_)), "got {err:?}");
 }
 
 // Modulo by zero — Long variant
@@ -3412,7 +3459,8 @@ fn reject_modulo_by_zero_long() {
         Payload::Two(Box::new(const_long(100)), Box::new(const_long(0))),
     );
     let err = run_eval_err(&expr);
-    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+    // Runtime arithmetic error, not a type error (matches Int + Byte/Short).
+    assert!(matches!(err, EvalError::RuntimeException(_)), "got {err:?}");
 }
 
 // Lt type mismatch (Int vs Long)

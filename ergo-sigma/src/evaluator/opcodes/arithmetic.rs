@@ -152,13 +152,26 @@ pub(in crate::evaluator) fn eval_division(
                     "Short./ overflow or divide-by-zero",
                 ))
         }
+        // Zero divisor is a runtime arithmetic error (Scala/Java throw
+        // ArithmeticException), not a type error — surfaced as
+        // RuntimeException to match the Byte/Short arms above (which reach
+        // it via checked_div). Handled explicitly so the divide arms below
+        // never see a zero divisor.
+        (Value::Int(_), Value::Int(0)) => Err(EvalError::RuntimeException("Int./ divide by zero")),
+        (Value::Long(_), Value::Long(0)) => {
+            Err(EvalError::RuntimeException("Long./ divide by zero"))
+        }
+        (Value::BigInt(_), Value::BigInt(ref b)) if b.is_zero() => {
+            Err(EvalError::RuntimeException("BigInt./ divide by zero"))
+        }
         // wrapping_div matches Java/Scala integer `/`: MinValue / -1 wraps
         // to MinValue (no exception), where Rust's native `/` would panic.
-        (Value::Int(a), Value::Int(b)) if b != 0 => Ok(Value::Int(a.wrapping_div(b))),
-        (Value::Long(a), Value::Long(b)) if b != 0 => Ok(Value::Long(a.wrapping_div(b))),
-        (Value::BigInt(a), Value::BigInt(ref b)) if !b.is_zero() => Ok(Value::BigInt(a / b)),
+        // Divisor is non-zero here (zero handled above).
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_div(b))),
+        (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_div(b))),
+        (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a / b)),
         (l, r) => Err(EvalError::TypeError {
-            expected: "matching numeric types for Division (non-zero divisor)",
+            expected: "matching numeric types for Division",
             got: format!("{l:?}, {r:?}"),
         }),
     }
@@ -188,14 +201,25 @@ pub(in crate::evaluator) fn eval_modulo(
                     "Short.% overflow or divide-by-zero",
                 ))
         }
+        // Zero divisor is a runtime arithmetic error (Scala/Java throw
+        // ArithmeticException), not a type error — matches the Byte/Short
+        // arms above and the Division opcode.
+        (Value::Int(_), Value::Int(0)) => Err(EvalError::RuntimeException("Int.% divide by zero")),
+        (Value::Long(_), Value::Long(0)) => {
+            Err(EvalError::RuntimeException("Long.% divide by zero"))
+        }
+        (Value::BigInt(_), Value::BigInt(ref b)) if b.is_zero() => {
+            Err(EvalError::RuntimeException("BigInt.% divide by zero"))
+        }
         // wrapping_rem matches Java/Scala `%`: MinValue % -1 == 0 (no
         // exception), where Rust's native `%` would panic on that pair.
-        (Value::Int(a), Value::Int(b)) if b != 0 => Ok(Value::Int(a.wrapping_rem(b))),
-        (Value::Long(a), Value::Long(b)) if b != 0 => Ok(Value::Long(a.wrapping_rem(b))),
+        // Divisor is non-zero here (zero handled above).
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_rem(b))),
+        (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_rem(b))),
         // Scala's `%` on BigInt uses java.math.BigInteger.mod() which
         // returns the non-negative remainder (Euclidean mod), not
-        // Rust's truncated remainder.
-        (Value::BigInt(a), Value::BigInt(ref b)) if !b.is_zero() => {
+        // Rust's truncated remainder. Divisor is non-zero here.
+        (Value::BigInt(a), Value::BigInt(ref b)) => {
             let r = &a % b;
             // Java BigInteger.mod: result is always non-negative for positive modulus
             if r.sign() == num_bigint::Sign::Minus {
