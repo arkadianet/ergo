@@ -24,7 +24,7 @@ use ergo_validation::block::{
 };
 use ergo_validation::context::{ProtocolParams, UtxoView};
 use ergo_validation::error::ValidationError;
-use ergo_validation::header::CheckedHeader;
+use ergo_validation::header::{CheckedHeader, HeaderValidationError};
 
 use serde::Deserialize;
 
@@ -921,4 +921,97 @@ fn parity_corpus_header_ids_match_bytes() {
     }
     assert_eq!(entries.first().unwrap().height, 417_785);
     assert_eq!(entries.last().unwrap().height, 417_800);
+}
+
+/// Call-site gating for rule 215 (`hdrVotesUnknown`) through both full-block
+/// validators. Mainnet's v6.0 soft-fork disabled the rule
+/// (`rules_to_disable = [215, 409]`), and `block_proc` now sets
+/// `BlockValidationContext.votes_unknown_rule_disabled` from
+/// `ErgoValidationSettings::is_rule_disabled(215)`. The unit test in
+/// `header.rs` covers `check_votes_known_active` in isolation; this drives
+/// the real `validate_full_block` / `validate_full_block_parallel` entry
+/// points with the flag off vs on, reproducing the epoch-start
+/// `MaxBlockCostDecrease` (-4) proposal that froze the node at block
+/// 1802240. Flag off → rejected at the rule; flag on → passes the rule and
+/// fails later (tx-root over the empty section list), never with
+/// `VotesUnknown`.
+#[test]
+fn rule_215_gated_at_full_block_call_sites() {
+    let headers = load_headers_map("../test-vectors/mainnet/headers_1_2000.json");
+
+    // A real header re-stamped to an epoch start (1024 % 1024 == 0) with a
+    // `-4` vote in slot 0 — the shape of mainnet block 1802240. Re-serialize
+    // so the header_id matches the mutated bytes (sections link to it below).
+    let (base, _) = headers[&1024].clone();
+    let mut header = base;
+    header.height = 1024;
+    header.votes = [(-4i8) as u8, 0, 0];
+    let (_, id) = serialize_header(&header).expect("mutated header serializes");
+    let header_id = *id.as_bytes();
+
+    // Minimal sections that satisfy section-to-header linkage (step 2) so
+    // validation reaches the rule-215 step (2.5). Empty transactions
+    // intentionally mismatch the tx root, so the rule-disabled path fails
+    // *after* the gate with a non-215 error.
+    let bt = BlockTransactions {
+        header_id: ModifierId::from_bytes(header_id),
+        transactions: vec![],
+    };
+    let ext = Extension {
+        header_id: ModifierId::from_bytes(header_id),
+        fields: vec![],
+    };
+
+    let (parent, parent_id) = headers[&1023].clone();
+    let checked_parent = CheckedHeader::trust_me(parent, parent_id);
+    let params = ProtocolParams::mainnet_default();
+
+    let is_votes_unknown = |e: &BlockValidationError| {
+        matches!(
+            e,
+            BlockValidationError::Header(HeaderValidationError::VotesUnknown { vote: -4, .. })
+        )
+    };
+
+    for &disabled in &[false, true] {
+        let ctx = BlockValidationContext {
+            parent: &checked_parent,
+            utxo: &EmptyUtxo,
+            params: &params,
+            voting_length: 1024,
+            votes_unknown_rule_disabled: disabled,
+            parent_extension: None,
+            soft_fork_state: None,
+            last_headers: &[],
+            script_validation_checkpoint: None,
+        };
+        let seq = validate_full_block(
+            CheckedHeader::trust_me(header.clone(), header_id),
+            &bt,
+            &ext,
+            &ctx,
+        );
+        let par = validate_full_block_parallel(
+            CheckedHeader::trust_me(header.clone(), header_id),
+            &bt,
+            &ext,
+            &ctx,
+        );
+        for (label, res) in [("seq", seq), ("par", par)] {
+            // The block is structurally incomplete either way, so both
+            // paths always error — only *which* error distinguishes the gate.
+            let err = res.expect_err("structurally incomplete block must error");
+            if disabled {
+                assert!(
+                    !is_votes_unknown(&err),
+                    "{label}: rule disabled must pass the gate, got {err:?}"
+                );
+            } else {
+                assert!(
+                    is_votes_unknown(&err),
+                    "{label}: rule active must reject the epoch-start -4 vote, got {err:?}"
+                );
+            }
+        }
+    }
 }
