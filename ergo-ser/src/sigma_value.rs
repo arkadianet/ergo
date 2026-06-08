@@ -713,16 +713,16 @@ fn read_option(
     r: &mut VlqReader,
     elem_type: &SigmaType,
 ) -> Result<Option<Box<SigmaValue>>, ReadError> {
+    // scorex VLQReader.getOption: `if (tag != 0) Some(getValue) else None`.
+    // ANY nonzero discriminant byte (not just 0x01) is Some; only 0x00 is
+    // None. The SOption data path delegates to this reader, so e.g. tag 0x02
+    // deserializes as Some(value).
     let tag = r.get_u8()?;
-    match tag {
-        0x00 => Ok(None),
-        0x01 => {
-            let val = read_value(r, elem_type)?;
-            Ok(Some(Box::new(val)))
-        }
-        _ => Err(ReadError::InvalidData(format!(
-            "invalid Option discriminant: 0x{tag:02X}"
-        ))),
+    if tag == 0 {
+        Ok(None)
+    } else {
+        let val = read_value(r, elem_type)?;
+        Ok(Some(Box::new(val)))
     }
 }
 
@@ -805,6 +805,44 @@ mod tests {
         let mut bytes = [prefix; 33];
         bytes[0] = 0x02; // valid SEC1 compressed prefix
         GroupElement::from_bytes(bytes)
+    }
+
+    /// scorex `VLQReader.getOption` reads one discriminant byte and treats
+    /// ANY nonzero value as `Some` (`if (tag != 0) Some(getValue) else None`)
+    /// — only `0x00` is `None`. We previously rejected any tag other than
+    /// 0x00/0x01.
+    #[test]
+    fn read_option_treats_any_nonzero_tag_as_some() {
+        let tpe = SigmaType::SOption(Box::new(SigmaType::SInt));
+        // Encode Some(Int 5): write_option emits discriminant 0x01 + payload.
+        let mut w = VlqWriter::new();
+        write_value(
+            &mut w,
+            &tpe,
+            &SigmaValue::Opt(Some(Box::new(SigmaValue::Int(5)))),
+        )
+        .unwrap();
+        let mut bytes = w.result();
+        assert_eq!(bytes[0], 0x01, "Some writes discriminant 0x01");
+
+        // Flip the discriminant to 0x02 — scorex still reads it as Some.
+        bytes[0] = 0x02;
+        let mut r = VlqReader::new(&bytes);
+        let decoded = read_value(&mut r, &tpe).unwrap();
+        assert!(r.is_empty(), "option read must consume all bytes");
+        assert_eq!(
+            decoded,
+            SigmaValue::Opt(Some(Box::new(SigmaValue::Int(5)))),
+            "any nonzero Option discriminant must decode as Some",
+        );
+
+        // 0x00 still decodes as None.
+        let mut r0 = VlqReader::new(&[0x00]);
+        assert_eq!(
+            read_value(&mut r0, &tpe).unwrap(),
+            SigmaValue::Opt(None),
+            "0x00 discriminant is None",
+        );
     }
 
     // ===== 1. Primitive roundtrips =====
