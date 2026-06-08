@@ -115,11 +115,30 @@ pub(in crate::evaluator) fn eval_if(
     }
 }
 
-// 0x86 Tuple — eager construction
+// 0x86 Tuple — eager construction. Scala `Tuple.eval` (values.scala) rejects
+// any arity other than 2 (`if (items.length != 2) syntax.error("Invalid
+// tuple ...")`) — only pairs are valid in v4/v5/v6. (ExtractCreationInfo is a
+// separate node producing an arity-2 result and is unaffected.)
+//
+// The arity check is intentionally BEFORE `add_cost`, mirroring Scala
+// exactly: Tuple.eval runs the `items.length != 2` check first and calls
+// `addCost(Tuple.costKind)` only at the very end (after evaluating the two
+// items). So a non-pair tuple errors with the arity error WITHOUT charging
+// the Tuple cost — even under a cost budget below 0x86's fixed cost, the
+// arity error must win over a cost-limit error (matching Scala's
+// `syntax.error` firing before `addCost`). Do NOT move `add_cost` above this
+// guard: that would surface CostExceeded where Scala surfaces "Invalid
+// tuple" — a consensus divergence on the error class.
 pub(in crate::evaluator) fn eval_tuple(
     items: &[Expr],
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
+    if items.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            expected: 2,
+            got: items.len(),
+        });
+    }
     add_cost(cx.cost, 0x86)?;
     let mut values = Vec::with_capacity(items.len());
     for item in items {
