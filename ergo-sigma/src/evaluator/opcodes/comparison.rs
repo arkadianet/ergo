@@ -8,9 +8,9 @@
 
 use ergo_ser::opcode::Expr;
 
-use super::super::cost::{add_cost, add_eq_neq_cost};
+use super::super::cost::{add_cost, eq_with_cost};
 use super::super::eval_ctx::EvalCtx;
-use super::super::helpers::{require_comparable, values_equal};
+use super::super::helpers::require_comparable;
 use super::super::types::{EvalError, Value};
 
 // 0x8F LT (<)
@@ -109,9 +109,8 @@ pub(in crate::evaluator) fn eval_eq(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
-    add_eq_neq_cost(cx.cost, &l, &r, cx.ctx)?;
     require_comparable(&l, &r)?;
-    Ok(Value::Bool(values_equal(&l, &r, cx.ctx)?))
+    Ok(Value::Bool(eq_with_cost(&l, &r, cx.ctx, cx.cost)?))
 }
 
 // 0x94 NEQ (!=)
@@ -122,7 +121,6 @@ pub(in crate::evaluator) fn eval_neq(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
-    add_eq_neq_cost(cx.cost, &l, &r, cx.ctx)?;
     require_comparable(&l, &r)?;
-    Ok(Value::Bool(!values_equal(&l, &r, cx.ctx)?))
+    Ok(Value::Bool(!eq_with_cost(&l, &r, cx.ctx, cx.cost)?))
 }

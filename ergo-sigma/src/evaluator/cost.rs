@@ -57,134 +57,17 @@ pub(crate) fn add_arith_cost(
     Ok(())
 }
 
-/// Add EQ/NEQ dynamic cost based on value structure.
-///
-/// For BoxCollection values, resolves the collection length from context
-/// and charges EQ_COA_Box = PerItemCost(15, 5, 1) matching Scala's
-/// DataValueComparer collection dispatch. For derived Coll[Box] stored as
-/// Tuple of BoxRefs, charges the same per-item cost instead of tuple cost.
-pub(crate) fn add_eq_neq_cost(
-    cost: &mut CostAccumulator,
-    left: &Value,
-    right: &Value,
-    ctx: &ReductionContext<'_>,
-) -> Result<(), EvalError> {
-    // Scala short-circuits collection EQ when lengths differ: only charges
-    // MatchType(1) without equalColls_Dispatch. We replicate this by
-    // checking if both sides are collections of matching length.
-    let colls_match_len = match (left, right) {
-        (Value::CollBytes(a), Value::CollBytes(b)) => a.len() == b.len(),
-        (Value::CollBytes(a), Value::CollInt(b)) | (Value::CollInt(b), Value::CollBytes(a)) => {
-            a.len() == b.len()
-        }
-        (Value::CollInt(a), Value::CollInt(b)) => a.len() == b.len(),
-        (Value::CollLong(a), Value::CollLong(b)) => a.len() == b.len(),
-        (Value::CollBool(a), Value::CollBool(b)) => a.len() == b.len(),
-        (Value::CollSigmaProp(a), Value::CollSigmaProp(b)) => a.len() == b.len(),
-        (Value::CollBox(a), Value::CollBox(b)) => a.len() == b.len(),
-        (Value::CollHeader(a), Value::CollHeader(b)) => a.len() == b.len(),
-        (Value::Tokens(a), Value::Tokens(b)) => a.len() == b.len(),
-        // Tokens ↔ CollGeneric bridge: Tokens carries (id, amt) pairs;
-        // an evaluator path that decomposed via collection_to_values
-        // expresses them as a `CollGeneric` of `Tuple(CollBytes, Long)`.
-        (Value::Tokens(a), Value::CollGeneric(b, _))
-        | (Value::CollGeneric(b, _), Value::Tokens(a)) => a.len() == b.len(),
-        // CollGeneric ↔ CollGeneric — boxed-element coll length
-        // short-circuit. Scala charges only `MatchType` and skips the
-        // per-item recursion when lengths differ; without this arm
-        // the per-item cost is still charged here, drifting from the
-        // Scala-anchored cost boundary.
-        (Value::CollGeneric(a, _), Value::CollGeneric(b, _)) => a.len() == b.len(),
-        // Cross-carrier Coll[Box] length short-circuits. After the
-        // carrier split, `Coll[Box]` can arrive as `CollBox`,
-        // `BoxCollection`, or `CollGeneric` (when filter / flatMap
-        // demoted it). Skipping these here meant the per-item
-        // `EQ_COA_Box` charge fired even on length-mismatched
-        // operands — Scala-anchored cost drift.
-        (Value::CollBox(a), Value::CollGeneric(b, _))
-        | (Value::CollGeneric(b, _), Value::CollBox(a)) => a.len() == b.len(),
-        (Value::BoxCollection(src), Value::CollGeneric(b, _))
-        | (Value::CollGeneric(b, _), Value::BoxCollection(src)) => {
-            let len = match src {
-                BoxSource::Outputs => ctx.outputs.len(),
-                BoxSource::Inputs => ctx.inputs.len(),
-                BoxSource::DataInputs => ctx.data_inputs.len(),
-            };
-            len == b.len()
-        }
-        (Value::BoxCollection(a), Value::BoxCollection(b)) => {
-            let len = |s: &BoxSource| match s {
-                BoxSource::Outputs => ctx.outputs.len(),
-                BoxSource::Inputs => ctx.inputs.len(),
-                BoxSource::DataInputs => ctx.data_inputs.len(),
-            };
-            len(a) == len(b)
-        }
-        _ => true, // non-collection types: no short-circuit
-    };
-    match left {
-        Value::BoxCollection(source) => {
-            let n = match source {
-                BoxSource::Outputs => ctx.outputs.len(),
-                BoxSource::Inputs => ctx.inputs.len(),
-                BoxSource::DataInputs => ctx.data_inputs.len(),
-            };
-            add_coll_box_eq_cost(cost, n as u32, colls_match_len)
-        }
-        Value::CollBox(elems) => add_coll_box_eq_cost(cost, elems.len() as u32, colls_match_len),
-        // A `CollGeneric` whose elements are all box-shaped is a
-        // Coll[Box] arriving via the boxed-element fallback carrier;
-        // cost it as `Coll[Box] EQ`, not as a tuple compare. A real
-        // `Value::Tuple` is fixed-arity STuple and falls through to
-        // the per-type branch below.
-        Value::CollGeneric(elems, _)
-            if !elems.is_empty()
-                && elems
-                    .iter()
-                    .all(|e| matches!(e, Value::SelfBox | Value::BoxRef { .. })) =>
-        {
-            add_coll_box_eq_cost(cost, elems.len() as u32, colls_match_len)
-        }
-        _ => {
-            #[cfg(feature = "cost-trace")]
-            let before = cost.total().value();
-            cost_table::add_eq_cost(cost, left, colls_match_len)?;
-            #[cfg(feature = "cost-trace")]
-            {
-                let label = match left {
-                    Value::CollBytes(_) => "EQ:CollBytes",
-                    Value::CollInt(_) => "EQ:CollInt",
-                    Value::CollLong(_) => "EQ:CollLong",
-                    Value::CollBool(_) => "EQ:CollBool",
-                    Value::CollSigmaProp(_) => "EQ:CollSigmaProp",
-                    Value::Tokens(_) => "EQ:Tokens",
-                    Value::Tuple(_) => "EQ:Tuple",
-                    Value::CollGeneric(_, _) => "EQ:CollGeneric",
-                    Value::SigmaProp(_) => "EQ:SigmaProp",
-                    _ => "EQ:Prim",
-                };
-                crate::cost_trace::record(
-                    label,
-                    cost.total().value() - before,
-                    cost.total().value(),
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
 /// Charge EQ_COA_Box = PerItemCost(base=15, perChunk=5, chunk=1) for Coll[Box] equality.
 /// Scala short-circuits when collection lengths differ — only MatchType(1) is charged.
-pub(crate) fn add_coll_box_eq_cost(
+/// Called only from [`eq_with_cost_inner`]; the `eq_with_cost` wrapper emits the
+/// single cumulative `cost-trace` entry, so no per-charge tracing is done here.
+fn add_coll_box_eq_cost(
     cost: &mut CostAccumulator,
     n: u32,
     colls_match_len: bool,
 ) -> Result<(), EvalError> {
     // MatchType for collection dispatch in equalDataValues (1 only, no inner dispatch)
     cost.add(JitCost::from_jit(1))?;
-    #[cfg(feature = "cost-trace")]
-    crate::cost_trace::record("EQ:CollBox:MatchType", 1, cost.total().value());
     if colls_match_len {
         let delta = CostKind::PerItem {
             base: JitCost::from_jit(15),
@@ -193,14 +76,238 @@ pub(crate) fn add_coll_box_eq_cost(
         }
         .compute(n)?;
         cost.add(delta)?;
-        #[cfg(feature = "cost-trace")]
-        crate::cost_trace::record(
-            format!("EQ:CollBox:PerItem(n={})", n),
-            delta.value(),
-            cost.total().value(),
-        );
     }
     Ok(())
+}
+
+/// Runtime length of a collection-carrier `Value` (resolving `BoxCollection`
+/// through the context). Returns 0 for non-collection values (callers only
+/// ask about collections).
+fn coll_len(v: &Value, ctx: &ReductionContext<'_>) -> usize {
+    match v {
+        Value::CollBytes(c) => c.len(),
+        Value::CollBool(c) => c.len(),
+        Value::CollInt(c) => c.len(),
+        Value::CollLong(c) => c.len(),
+        Value::CollShort(c) => c.len(),
+        Value::Str(s) => s.len(),
+        Value::CollSigmaProp(c) => c.len(),
+        Value::CollBox(c) => c.len(),
+        Value::CollHeader(c) => c.len(),
+        Value::Tokens(c) => c.len(),
+        Value::CollGeneric(c, _) => c.len(),
+        Value::BoxCollection(src) => match src {
+            BoxSource::Outputs => ctx.outputs.len(),
+            BoxSource::Inputs => ctx.inputs.len(),
+            BoxSource::DataInputs => ctx.data_inputs.len(),
+        },
+        _ => 0,
+    }
+}
+
+/// `EQ_COA_*` per-item cost descriptor for a `Coll[elem]` whose element type
+/// has a dedicated Scala `DataValueComparer` descriptor (the
+/// `equalColls_Dispatch` primitive/descriptor branches). Returns `None` for
+/// element types with NO descriptor (`Coll`/`Tuple`/`Option`/`Any`/…), which
+/// Scala routes to the `equalColls` FALLBACK (per-element recursion + EQ_Coll).
+///
+/// Chunk sizes mirror `sigma.data.DataValueComparer`: Boolean/Byte 128,
+/// Short 96, Int 64, Long 48, BigInt (15,7,5), GroupElement/Box/Header (15,5,1),
+/// AvlTree (15,5,2), PreHeader (15,3,1).
+fn descriptor_cost_kind(elem: &ergo_ser::sigma_type::SigmaType) -> Option<CostKind> {
+    use ergo_ser::sigma_type::SigmaType as T;
+    let pic = |per_chunk: u64, chunk_size: u32| CostKind::PerItem {
+        base: JitCost::from_jit(15),
+        per_chunk: JitCost::from_jit(per_chunk),
+        chunk_size,
+    };
+    Some(match elem {
+        T::SBoolean | T::SByte => pic(2, 128),
+        T::SShort => pic(2, 96),
+        T::SInt => pic(2, 64),
+        T::SLong => pic(2, 48),
+        T::SBigInt | T::SUnsignedBigInt => pic(7, 5),
+        T::SGroupElement => pic(5, 1),
+        T::SAvlTree => pic(5, 2),
+        T::SBox => pic(5, 1),
+        T::SPreHeader => pic(3, 1),
+        T::SHeader => pic(5, 1),
+        // No Scala descriptor for SigmaProp; our typed `CollSigmaProp`
+        // carrier has historically costed (15,5,1) and no vector exercises
+        // a `Coll[SigmaProp]` equality, so keep parity here pending a vector.
+        T::SSigmaProp => pic(5, 1),
+        // SColl/SOption/STuple/SAny/SString/SContext/SGlobal/SFunc/STypeVar/
+        // SUnit/SReserved* → equalColls fallback (no descriptor).
+        _ => return None,
+    })
+}
+
+/// Cost-aware structural equality for the `EQ`/`NEQ` opcodes and `indexOf`,
+/// faithfully mirroring Scala `DataValueComparer.equalDataValues`: it dispatches
+/// on the LEFT value, charges the same per-case cost in the same order, and
+/// returns the SAME boolean as [`super::helpers::values_equal`] (which stays the
+/// uncosted equality authority for callers like `startsWith`/`endsWith` that
+/// charge no per-element cost in Scala).
+///
+/// Charge model (all values are `JitCost`):
+/// * primitives `EQ_Prim(3)`, BigInt `EQ_BigInt(5)`, GroupElement(172),
+///   Box(6), AvlTree(6), Header(6), PreHeader(4) — fixed, via `add_eq_cost`.
+/// * Tuple: `EQ_Tuple(4)` then pairwise recursion with `&&` short-circuit.
+/// * Option: `EQ_Option(4)` then inner recursion on `(Some, Some)`.
+/// * Collection: `MatchType(1)` UNCONDITIONALLY; on length mismatch returns
+///   `false` having charged only the MatchType (Scala's `return false`); else
+///   either the descriptor `EQ_COA_*` PerItem over the full length (boolean
+///   from `values_equal`), or the `equalColls` fallback (per-element recursion
+///   + `EQ_Coll(10,2,1)` over the number of elements actually compared).
+///
+/// This thin wrapper records a single cumulative `cost-trace` entry covering
+/// the whole comparison (all recursion goes through the untraced
+/// [`eq_with_cost_inner`]), so the trace's per-entry cumulative invariant
+/// holds and the trace total still equals the accumulator total.
+pub(crate) fn eq_with_cost(
+    left: &Value,
+    right: &Value,
+    ctx: &ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+) -> Result<bool, EvalError> {
+    #[cfg(feature = "cost-trace")]
+    let before = cost.total().value();
+    let result = eq_with_cost_inner(left, right, ctx, cost);
+    #[cfg(feature = "cost-trace")]
+    {
+        let total = cost.total().value();
+        if total != before {
+            crate::cost_trace::record("EQ", total - before, total);
+        }
+    }
+    result
+}
+
+/// Untraced recursive core of [`eq_with_cost`]; see that function's docs. All
+/// internal recursion calls THIS (not the wrapper) so the wrapper records
+/// exactly one trace entry per top-level comparison.
+fn eq_with_cost_inner(
+    left: &Value,
+    right: &Value,
+    ctx: &ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+) -> Result<bool, EvalError> {
+    match left {
+        // Tuple: EQ_Tuple, then pairwise `&&` short-circuit (Scala case 3).
+        Value::Tuple(a) => {
+            cost.add(JitCost::from_jit(cost_table::EQ_TUPLE))?;
+            match right {
+                Value::Tuple(b) if a.len() == b.len() => {
+                    for (ai, bi) in a.iter().zip(b.iter()) {
+                        if !eq_with_cost_inner(ai, bi, ctx, cost)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        // Option: EQ_Option, then recurse the inner value on (Some, Some).
+        Value::Opt(a) => {
+            cost.add(JitCost::from_jit(cost_table::EQ_OPTION))?;
+            match (a.as_deref(), right) {
+                (None, Value::Opt(None)) => Ok(true),
+                (Some(ai), Value::Opt(Some(bi))) => eq_with_cost_inner(ai, bi, ctx, cost),
+                _ => Ok(false),
+            }
+        }
+        // Boxed-element collection carrier: dispatch on the element-type tag.
+        Value::CollGeneric(a, elem_type) => {
+            cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+            let match_len = a.len() == coll_len(right, ctx);
+            if !match_len {
+                return Ok(false); // Scala `return false` after the lone MatchType.
+            }
+            if let Some(kind) = descriptor_cost_kind(elem_type) {
+                cost.add(kind.compute(a.len() as u32)?)?;
+                Ok(super::helpers::values_equal(left, right, ctx)?)
+            } else {
+                eq_coll_fallback(a, right, ctx, cost)
+            }
+        }
+        // BoxCollection — Coll[Box]; length needs the context.
+        Value::BoxCollection(_) => {
+            let n = coll_len(left, ctx);
+            let match_len = n == coll_len(right, ctx);
+            add_coll_box_eq_cost(cost, n as u32, match_len)?;
+            Ok(super::helpers::values_equal(left, right, ctx)?)
+        }
+        // Typed primitive/descriptor coll carriers + Tokens: the existing
+        // `add_eq_cost` arms already charge MatchType + length-gated PerItem
+        // faithfully (full length, no per-element short-circuit — Scala's
+        // primitive/descriptor branches cost the whole array).
+        Value::CollBytes(_)
+        | Value::CollBool(_)
+        | Value::CollInt(_)
+        | Value::CollLong(_)
+        | Value::CollShort(_)
+        | Value::Str(_)
+        | Value::CollSigmaProp(_)
+        | Value::CollBox(_)
+        | Value::CollHeader(_)
+        | Value::Tokens(_) => {
+            let match_len = coll_len(left, ctx) == coll_len(right, ctx);
+            cost_table::add_eq_cost(cost, left, match_len)?;
+            Ok(super::helpers::values_equal(left, right, ctx)?)
+        }
+        // Scalars / Box / AvlTree / Header / PreHeader / GroupElement / BigInt /
+        // SigmaProp / Global: fixed cost, no recursion.
+        _ => {
+            cost_table::add_eq_cost(cost, left, true)?;
+            Ok(super::helpers::values_equal(left, right, ctx)?)
+        }
+    }
+}
+
+/// Scala `equalColls` FALLBACK for a `Coll[non-descriptor]` (e.g. `Coll[Coll]`,
+/// `Coll[Tuple]`, `Coll[Option]`): recurse per element charging each element's
+/// `equalDataValues` cost, stopping at the first unequal element, then charge
+/// `EQ_Coll = PerItemCost(10, 2, 1)` over the number of elements ACTUALLY
+/// compared (`k_eff`) — matching Scala's `addSeqCost(EQ_Coll, i)` after the loop.
+/// The caller has already charged the collection `MatchType` and verified equal
+/// lengths.
+fn eq_coll_fallback(
+    a: &[Value],
+    right: &Value,
+    ctx: &ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+) -> Result<bool, EvalError> {
+    let b: &[Value] = match right {
+        Value::CollGeneric(b, _) | Value::CollBox(b) => b,
+        // Non-descriptor element collections are carried as CollGeneric on
+        // both sides; any other right carrier is a type the comparison cannot
+        // reach (require_comparable gates this). Fall back to the uncosted
+        // authority for the boolean; cost already reflects the MatchType.
+        _ => {
+            return super::helpers::values_equal(
+                &Value::CollGeneric(a.to_vec(), Box::new(ergo_ser::sigma_type::SigmaType::SAny)),
+                right,
+                ctx,
+            )
+        }
+    };
+    let mut k_eff = 0u32;
+    let mut all_eq = true;
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        k_eff += 1;
+        if !eq_with_cost_inner(ai, bi, ctx, cost)? {
+            all_eq = false;
+            break;
+        }
+    }
+    let eq_coll = CostKind::PerItem {
+        base: JitCost::from_jit(10),
+        per_chunk: JitCost::from_jit(2),
+        chunk_size: 1,
+    };
+    cost.add(eq_coll.compute(k_eff)?)?;
+    Ok(all_eq)
 }
 
 /// Tree-height byte stored in the trailing position of an `ADDigest`
