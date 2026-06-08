@@ -287,11 +287,26 @@ pub(super) fn eval_no_arg_method(
                 }),
             }
         }
-        // SColl(12).indices(14) -> Coll[Int]                   cost: 20
+        // SColl(12).indices(14) -> Coll[Int]
+        // Scala `SCollection.IndicesMethod_CostKind = PerItemCost(baseCost=20,
+        // perChunkCost=2, chunkSize=16)` over the collection length (NOT a
+        // flat 20): chunks(n) = (n-1)/16+1, so cost(n<=16)=22, (17..=32)=24, …
         (12, 14) => {
-            add_method_cost(cost, 20)?;
-            let len = collection_len(obj_val, ctx) as i32;
-            Ok(Some(Value::CollInt((0..len).collect())))
+            let len = collection_len(obj_val, ctx);
+            let delta = CostKind::PerItem {
+                base: JitCost::from_jit(20),
+                per_chunk: JitCost::from_jit(2),
+                chunk_size: 16,
+            }
+            .compute(len as u32)?;
+            cost.add(delta)?;
+            #[cfg(feature = "cost-trace")]
+            crate::cost_trace::record(
+                format!("Method:indices(n={len})"),
+                delta.value(),
+                cost.total().value(),
+            );
+            Ok(Some(Value::CollInt((0..len as i32).collect())))
         }
         // SGroupElement(7).getEncoded(2) -> Coll[Byte]
         // Scala SGroupElement.GetEncodedMethod.costKind = FixedCost(JitCost(250)).

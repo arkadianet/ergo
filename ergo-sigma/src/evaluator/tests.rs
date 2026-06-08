@@ -9285,3 +9285,107 @@ fn coll_short_map_per_item_delta_matches_coll_int() {
          Expected={expected}, got={short_delta}",
     );
 }
+
+// ---- Coll.indices (12,14) cost: Scala PerItemCost(20, 2, 16) ----
+// `SCollection.IndicesMethod_CostKind = PerItemCost(20, 2, 16)`, not a flat
+// 20. For small collections chunks(n) = (n-1)/16+1 = 1, so cost(n)=22 for
+// n in 0..=16; n in 17..=32 -> 24, etc.
+
+fn eval_total(expr: &Expr) -> u64 {
+    let cx = ReductionContext::minimal(10_000_000, 0);
+    let mut cost = CostAccumulator::recording_only();
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut trace = None;
+    eval_expr(expr, &cx, &[], &mut env, &mut depth, &mut cost, &mut trace).unwrap();
+    cost.total().value()
+}
+
+#[test]
+fn coll_indices_cost_matches_scala_peritem_20_2_16() {
+    // PropertyCall(12,14) on a Coll[Int] const: 4 (PropertyCall 0xDB) +
+    // 5 (coll const) + IndicesCost. IndicesCost(n<=16)=22, (17..=32)=24.
+    let indices = |coll: Expr| {
+        op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 12,
+                method_id: 14,
+                obj: Box::new(coll),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    };
+    // size 2 -> chunks(2)=1 -> 22; total 4 + 5 + 22 = 31
+    assert_eq!(
+        eval_total(&indices(const_coll_int(vec![1, 2]))),
+        31,
+        "indices over Coll[Int] size 2: 4 + 5 + PerItem(20,2,16).cost(2)=22",
+    );
+    // size 20 -> chunks(20)=(20-1)/16+1=2 -> 20+2*2=24; total 4 + 5 + 24 = 33
+    assert_eq!(
+        eval_total(&indices(const_coll_int((0..20).collect()))),
+        33,
+        "indices over Coll[Int] size 20: 4 + 5 + PerItem(20,2,16).cost(20)=24",
+    );
+}
+
+// ---- Option.map (36,7) cost: Scala FixedCost(20) + lambda AddToEnv(5) ----
+// `SOption.MapMethod.costKind = FixedCost(JitCost(20))` (we charged 10), and
+// applying the lambda to a Some value charges AddToEnv(5) like every other
+// HOF lambda application (Coll.map etc.). None applies no lambda.
+
+fn option_map_inc(obj: Expr) -> Expr {
+    // obj.map((y: Int) => y + 1) as MethodCall(36, 7)
+    let lambda = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(2, Some(SigmaType::SInt))],
+            body: Box::new(op(
+                0x9A,
+                Payload::Two(
+                    Box::new(op(0x72, Payload::ValUse { id: 2 })),
+                    Box::new(const_int(1)),
+                ),
+            )),
+        },
+    );
+    op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 36,
+            method_id: 7,
+            obj: Box::new(obj),
+            args: vec![lambda],
+            type_args: vec![],
+        },
+    )
+}
+
+#[test]
+fn option_map_cost_matches_scala_fixed20_plus_addtoenv() {
+    // Some(5).map(y => y+1): 4 (MethodCall) + 5 (obj const) + 20 (map) +
+    // 5 (FuncValue arg) + 5 (AddToEnv) + body[ValUse 5 + Const 5 + Plus 15
+    // = 25] = 64.
+    let some = Expr::Const {
+        tpe: SigmaType::SOption(Box::new(SigmaType::SInt)),
+        val: SigmaValue::Opt(Some(Box::new(SigmaValue::Int(5)))),
+    };
+    assert_eq!(
+        eval_total(&option_map_inc(some)),
+        64,
+        "Some.map: 4 + 5 + 20 (map) + 5 (func) + 5 (AddToEnv) + 25 (body)",
+    );
+    // None.map(...): 4 + 5 (obj const) + 20 (map) + 5 (FuncValue) = 34 (no
+    // lambda application, no AddToEnv, no body).
+    let none = Expr::Const {
+        tpe: SigmaType::SOption(Box::new(SigmaType::SInt)),
+        val: SigmaValue::Opt(None),
+    };
+    assert_eq!(
+        eval_total(&option_map_inc(none)),
+        34,
+        "None.map: 4 + 5 + 20 (map) + 5 (func)",
+    );
+}
