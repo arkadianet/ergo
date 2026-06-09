@@ -9339,3 +9339,181 @@ fn atleast_eval_total_cost_matches_scala() {
         "AtLeast(2, [true,true]) total cost: 5 (bound) + 5 (coll) + 23 (AtLeast)",
     );
 }
+
+// ---- v6 UnsignedBigInt arithmetic (ArithOp on SUnsignedBigInt) ----
+//
+// SUnsignedBigInt is NOT SBigInt, so ArithOp's TypeBasedCost
+// (`sigma.ast.ArithOp.{Plus,Minus,Multiply,Division,Modulo}.costKind`:
+// `case SBigInt => 20/25; case _ => 15`) charges the default 15 for every
+// UnsignedBigInt arithmetic op. Values follow `CUnsignedBigInt`
+// (core/.../sigma/data/CUnsignedBigInt.scala): add/subtract/multiply route
+// their result through `toUnsignedBigIntValueExact` — EXACT, not modular:
+// the result must satisfy `0 <= r && r.bitLength() <= 256` (i.e. r in
+// [0, 2^256-1]) or an ArithmeticException is thrown. divide is
+// BigInteger.divide (truncating, both operands non-negative); mod is
+// BigInteger.mod, which throws on a non-positive (here: zero) modulus and
+// otherwise returns the non-negative remainder in [0, m).
+
+/// An `SUnsignedBigInt` CONSTANT carrying `v` (must be in [0, 2^256-1] for a
+/// legal value; eval rejects a negative magnitude).
+fn const_ubi(v: num_bigint::BigInt) -> Expr {
+    Expr::Const {
+        tpe: SigmaType::SUnsignedBigInt,
+        val: SigmaValue::BigInt(v),
+    }
+}
+
+fn ubi(v: i64) -> num_bigint::BigInt {
+    num_bigint::BigInt::from(v)
+}
+
+/// `op(left, right)` where `op` is a binary ArithOp opcode, both operands
+/// `SUnsignedBigInt` constants.
+fn ubi_arith(opcode: u8, a: num_bigint::BigInt, b: num_bigint::BigInt) -> Expr {
+    op(
+        opcode,
+        Payload::Two(Box::new(const_ubi(a)), Box::new(const_ubi(b))),
+    )
+}
+
+#[test]
+fn ubi_arith_values_match_cunsignedbigint() {
+    let cx = ReductionContext::minimal(500_000, 0);
+    let max: num_bigint::BigInt = (num_bigint::BigInt::from(1) << 256u32) - ubi(1); // 2^256 - 1
+    let two_127 = num_bigint::BigInt::from(1) << 127u32;
+    let two_128 = num_bigint::BigInt::from(1) << 128u32;
+    let two_255 = num_bigint::BigInt::from(1) << 255u32;
+    let cases: &[(
+        u8,
+        num_bigint::BigInt,
+        num_bigint::BigInt,
+        num_bigint::BigInt,
+    )] = &[
+        (0x9A, ubi(3), ubi(5), ubi(8)),                    // plus-small
+        (0x9A, max.clone() - ubi(1), ubi(1), max.clone()), // plus-to-max (boundary OK)
+        (0x99, ubi(5), ubi(3), ubi(2)),                    // minus-small
+        (0x99, ubi(7), ubi(7), ubi(0)),                    // minus-to-zero
+        (0x9C, ubi(3), ubi(5), ubi(15)),                   // multiply-small
+        (0x9C, two_128.clone(), two_127.clone(), two_255), // multiply-big (boundary OK)
+        (0x9D, ubi(7), ubi(2), ubi(3)),                    // divide-floor
+        (0x9E, ubi(7), ubi(5), ubi(2)),                    // mod-small
+    ];
+    for (opcode, a, b, want) in cases {
+        assert_eq!(
+            eval_to_value(&ubi_arith(*opcode, a.clone(), b.clone()), &cx, &[]).unwrap(),
+            Value::UnsignedBigInt(want.clone()),
+            "0x{opcode:02X}({a}, {b})",
+        );
+    }
+}
+
+#[test]
+fn ubi_arith_exact_bounds_and_zero_divisor_throw() {
+    let cx = ReductionContext::minimal(500_000, 0);
+    let max: num_bigint::BigInt = (num_bigint::BigInt::from(1) << 256u32) - ubi(1); // 2^256 - 1
+    let two_255 = num_bigint::BigInt::from(1) << 255u32;
+    // (opcode, a, b, why)
+    let cases: &[(u8, num_bigint::BigInt, num_bigint::BigInt, &str)] = &[
+        (0x9A, max.clone(), ubi(1), "plus overflow > 2^256-1"),
+        (0x99, ubi(3), ubi(5), "minus underflow < 0"),
+        (0x9C, two_255.clone(), ubi(2), "multiply overflow = 2^256"),
+        (0x9D, ubi(7), ubi(0), "divide by zero"),
+        (0x9E, ubi(7), ubi(0), "modulo by zero"),
+    ];
+    for (opcode, a, b, why) in cases {
+        assert!(
+            matches!(
+                eval_to_value(&ubi_arith(*opcode, a.clone(), b.clone()), &cx, &[]),
+                Err(EvalError::RuntimeException(_))
+            ),
+            "0x{opcode:02X} must throw RuntimeException: {why}",
+        );
+    }
+}
+
+#[test]
+fn ubi_min_max_values_and_cost() {
+    // SUnsignedBigInt is in ArithOp.impls, so Min/Max (0xA1/0xA2) are
+    // consensus-reachable: `impl.o.{min,max}` via UnsignedBigIntOrdering.
+    // Cost is the `case _ => 5` default; with two placeholders the total is
+    // 1 + 1 + 5 = 7.
+    let cx = ReductionContext::minimal(500_000, 0);
+    // direct-constant value checks
+    assert_eq!(
+        eval_to_value(&ubi_arith(0xA1, ubi(7), ubi(5)), &cx, &[]).unwrap(),
+        Value::UnsignedBigInt(ubi(5)),
+        "min(7,5)",
+    );
+    assert_eq!(
+        eval_to_value(&ubi_arith(0xA2, ubi(7), ubi(5)), &cx, &[]).unwrap(),
+        Value::UnsignedBigInt(ubi(7)),
+        "max(7,5)",
+    );
+    // cost via placeholders
+    let constants = vec![
+        (SigmaType::SUnsignedBigInt, SigmaValue::BigInt(ubi(7))),
+        (SigmaType::SUnsignedBigInt, SigmaValue::BigInt(ubi(5))),
+    ];
+    for opcode in [0xA1_u8, 0xA2] {
+        let body = op(
+            opcode,
+            Payload::Two(
+                Box::new(op(0x73, Payload::ConstPlaceholder { index: 0 })),
+                Box::new(op(0x73, Payload::ConstPlaceholder { index: 1 })),
+            ),
+        );
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        eval_expr(
+            &body, &cx, &constants, &mut env, &mut depth, &mut cost, &mut trace,
+        )
+        .unwrap();
+        assert_eq!(
+            cost.total().value(),
+            7,
+            "0x{opcode:02X} UnsignedBigInt min/max total cost must be 7 (1 + 1 + 5)",
+        );
+    }
+}
+
+#[test]
+fn ubi_arith_cost_is_17_via_constant_placeholders() {
+    // Mirror the SANTA vector exactly: segregated constants + the body
+    // `Plus(ConstPlaceholder(0), ConstPlaceholder(1))`. Cost =
+    // 1 (placeholder) + 1 (placeholder) + 15 (ArithOp `case _`) = 17.
+    let cx = ReductionContext::minimal(500_000, 0);
+    // 7 and 5 keep every op in range: +12, -2, *35, /1, %2.
+    let constants = vec![
+        (SigmaType::SUnsignedBigInt, SigmaValue::BigInt(ubi(7))),
+        (SigmaType::SUnsignedBigInt, SigmaValue::BigInt(ubi(5))),
+    ];
+    for opcode in [0x9A_u8, 0x99, 0x9C, 0x9D, 0x9E] {
+        let body = op(
+            opcode,
+            Payload::Two(
+                Box::new(op(0x73, Payload::ConstPlaceholder { index: 0 })),
+                Box::new(op(0x73, Payload::ConstPlaceholder { index: 1 })),
+            ),
+        );
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        let v = eval_expr(
+            &body, &cx, &constants, &mut env, &mut depth, &mut cost, &mut trace,
+        )
+        .unwrap_or_else(|e| panic!("0x{opcode:02X} eval failed: {e:?}"));
+        assert!(
+            matches!(v, Value::UnsignedBigInt(_)),
+            "0x{opcode:02X} must yield UnsignedBigInt, got {v:?}",
+        );
+        assert_eq!(
+            cost.total().value(),
+            17,
+            "0x{opcode:02X} UnsignedBigInt arith total cost must be 17 \
+             (1 + 1 placeholders + 15 ArithOp default)",
+        );
+    }
+}
