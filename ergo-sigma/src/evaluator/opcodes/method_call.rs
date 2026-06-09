@@ -1798,6 +1798,107 @@ pub(in crate::evaluator) fn eval_method_call(
                 }),
             }
         }
+        // SCollection(12).updateMany(21) -> Coll[T]
+        // Scala `CollOverArray.updateMany(indexes, values)`
+        // (CollsOverArrays.scala): `requireSameLength(indexes, values)`
+        // (throws on length mismatch), clone the receiver, then for each i
+        // set `resArr[indexes[i]] = values[i]` — an index `< 0 || >= len`
+        // throws IndexOutOfBoundsException; duplicate indexes are allowed
+        // (processed in order, last write wins). Cost is
+        // `PerItemCost(baseCost=20, perChunkCost=2, chunkSize=10)` charged
+        // over the RECEIVER length (methods.scala UpdateManyMethod /
+        // updateMany_eval `addSeqCost(costKind, coll.length)`).
+        (12, 21) => {
+            if args.len() != 2 {
+                return Err(EvalError::ArityMismatch {
+                    expected: 2,
+                    got: args.len(),
+                });
+            }
+            // Capture the receiver's element type and length before
+            // `collection_to_values` consumes the carrier. A non-collection
+            // receiver has no element type -> reject (matches the
+            // type-checked surface; `collection_len` would otherwise return
+            // 0 and mis-class the error).
+            let elem_type = coll_elem_type(&obj_val).ok_or(EvalError::TypeError {
+                expected: "Coll for updateMany receiver",
+                got: format!("{obj_val:?}"),
+            })?;
+            let n = collection_len(&obj_val, cx.ctx);
+            let indexes_val = cx.eval_expr(&args[0])?;
+            let values_val = cx.eval_expr(&args[1])?;
+            // PerItemCost(20,2,10) over the receiver length, charged before
+            // the operation (matches Scala addSeqCost wrapping the block).
+            let delta = CostKind::PerItem {
+                base: JitCost::from_jit(20),
+                per_chunk: JitCost::from_jit(2),
+                chunk_size: 10,
+            }
+            .compute(n as u32)?;
+            cx.cost.add(delta)?;
+            #[cfg(feature = "cost-trace")]
+            crate::cost_trace::record(
+                format!("Method:updateMany(n={n})"),
+                delta.value(),
+                cx.cost.total().value(),
+            );
+            // Decompose `indexes` as a generic collection rather than
+            // requiring the `CollInt` carrier up front. Scala's JIT erases
+            // the static `Coll[Int]` type, so a malformed-but-deserializable
+            // tree whose indexes carrier is empty with a non-Int element type
+            // (e.g. `Coll[Long]()`) still passes `requireSameLength` and the
+            // zero-iteration loop, returning the receiver clone. Each index
+            // is cast to Int only when READ (Scala `indexes(i)` -> Int, a
+            // ClassCastException on a non-Int element).
+            let (_ikind, index_vals) = collection_to_values(indexes_val, cx.ctx)?;
+            let (kind, mut items) = collection_to_values(obj_val, cx.ctx)?;
+            let (_vkind, values) = collection_to_values(values_val, cx.ctx)?;
+            // requireSameLength(indexes, values) — IllegalArgumentException.
+            if index_vals.len() != values.len() {
+                return Err(EvalError::RuntimeException(
+                    "Coll.updateMany: indexes and values length mismatch",
+                ));
+            }
+            for (idx_val, val) in index_vals.into_iter().zip(values) {
+                let pos = match idx_val {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Int index for updateMany",
+                            got: format!("{other:?}"),
+                        })
+                    }
+                };
+                if pos < 0 || pos as usize >= items.len() {
+                    return Err(EvalError::RuntimeException(
+                        "Coll.updateMany: index out of bounds",
+                    ));
+                }
+                // Each WRITTEN value must be assignable to the receiver's
+                // element type. Scala's `Coll[A]` is backed by `Array[A]`, so
+                // storing a value of a different type throws ArrayStoreException
+                // (the values:Coll[A] signature is otherwise enforced at type-
+                // check time). We mirror that per write — using the SAny-aware
+                // `sigma_type_compatible` so `Coll[Option[T]].updateMany(_,
+                // [None])` (None erases to SOption(SAny)) still passes. An
+                // empty values collection writes nothing, so it is accepted
+                // regardless of its declared element type — matching Scala.
+                let val_ty = value_to_sigma_type(&val).ok_or(EvalError::TypeError {
+                    expected: "element with recoverable SigmaType for updateMany",
+                    got: format!("{val:?}"),
+                })?;
+                if !sigma_type_compatible(&elem_type, &val_ty) {
+                    return Err(EvalError::TypeError {
+                        expected: "matching element type for updateMany",
+                        got: format!("{elem_type:?} vs {val_ty:?}"),
+                    });
+                }
+                items[pos as usize] = val;
+            }
+            // `values_to_collection` rebuilds the receiver's carrier (the
+            // written elements are already type-checked above).
+            values_to_collection(kind, items, elem_type)
+        }
         // SOption(36).map(7) -> Option[B]
         // Scala: opt.map(f) â€” apply f to value if Some, return None if None.
         // `SOption.MapMethod.costKind = FixedCost(JitCost(20))`; applying the
