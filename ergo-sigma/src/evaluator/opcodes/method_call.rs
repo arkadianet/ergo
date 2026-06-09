@@ -729,37 +729,10 @@ pub(in crate::evaluator) fn eval_method_call(
                 }),
             }
         }
-        // SHeader(104).checkPow(16) -> Boolean
-        // EIP-50 v6 method, soft-fork-gated. Re-verifies Autolykos
-        // PoW on the receiver header: Boolean true iff the
-        // header's solution satisfies the difficulty target encoded
-        // in its `nBits`. Reconstructs an
-        // `ergo_ser::header::Header` from the carried `EvalHeader`
-        // and delegates to `ergo_crypto::pow::verify_pow_solution`,
-        // which is the same code path the validator uses at
-        // block-apply time. Cost: `Fixed(700)` per Scala source
-        // â€” by far the heaviest method-call cost in the registry,
-        // reflecting the hash-and-curve work.
-        (104, 16) => {
-            check_arity(args, 0)?;
-            add_method_cost(cx.cost, 700)?;
-            let eh = match &obj_val {
-                Value::Header(h) => h.clone(),
-                other => {
-                    return Err(EvalError::TypeError {
-                        expected: "Header for SHeader.checkPow",
-                        got: format!("{other:?}"),
-                    })
-                }
-            };
-            // Rebuild a serialization-layer `Header` from the evaluator
-            // carrier (inverse of `EvalHeader::from_header`) so
-            // `verify_pow_solution` sees the same bytes the validator hashed.
-            let header = eh.to_header();
-            Ok(Value::Bool(
-                ergo_crypto::pow::verify_pow_solution(&header).is_ok(),
-            ))
-        }
+        // SHeader(104).checkPow(16) is a zero-arg method emitted as a 0xDB
+        // PropertyCall; it lives in the shared `eval_no_arg_method` table
+        // (property_call.rs), which this arm's catch-all delegates to. No 0xDC
+        // arm here — a no-arg method has no MethodCall-specific behavior.
         // SGlobal(106).xor(2, left: Coll[Byte], right: Coll[Byte]) -> Coll[Byte]
         // V5+ method (predates EIP-50). Element-wise XOR, truncates to
         // `min(left.len, right.len)` per Scala
