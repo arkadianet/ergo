@@ -1407,6 +1407,33 @@ pub(in crate::evaluator) fn eval_method_call(
                                 }
                                 Value::CollBool(out)
                             }
+                            Value::CollShort(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollShort(v) = c {
+                                        out.extend(v);
+                                    }
+                                }
+                                Value::CollShort(out)
+                            }
+                            Value::CollSigmaProp(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollSigmaProp(v) = c {
+                                        out.extend(v);
+                                    }
+                                }
+                                Value::CollSigmaProp(out)
+                            }
+                            Value::CollHeader(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollHeader(v) = c {
+                                        out.extend(v);
+                                    }
+                                }
+                                Value::CollHeader(out)
+                            }
                             Value::Tokens(_) => {
                                 let mut out = Vec::new();
                                 for c in inner_colls {
