@@ -10604,3 +10604,108 @@ fn methodcall_global_serialize_box_value_and_cost() {
     assert_eq!(v, Value::CollBytes(bytes));
     assert_eq!(acc.total().value(), 80);
 }
+
+// ── Coll.flatMap cost = PerItemCost(60,10,8) over OUTPUT length ──────────────
+// Scala flatMap_eval (methods.scala) charges FlatMapMethod_CostKind =
+// PerItemCost(base=60, perChunk=10, chunkSize=8) over res.length — the OUTPUT
+// (flattened) length — via addSeqCost. Our arm previously charged a flat
+// bogus 0xDC=4 + a bogus 10/input and NO output cost. This pins the missing
+// output-length term: two flatMaps differing ONLY in output length must differ
+// in total cost by exactly FlatMap.cost(big) - FlatMap.cost(small). The lambda
+// body is a constant Coll[Byte] (Expr::Const = fixed 5 regardless of length),
+// so per-input cost and framing are identical across the two — only outLen
+// (= n_in * body_len) differs.
+#[test]
+fn flatmap_charges_peritemcost_over_output_length() {
+    fn mk(body_len: usize) -> Expr {
+        let coll = const_coll_int(vec![1, 2]); // n_in = 2
+        let func = op(
+            0xD9,
+            Payload::FuncValue {
+                args: vec![(1, Some(SigmaType::SInt))],
+                body: Box::new(const_bytes(vec![7u8; body_len])),
+            },
+        );
+        op(
+            0xDC,
+            Payload::MethodCall {
+                type_id: 12,
+                method_id: 15,
+                obj: Box::new(coll),
+                args: vec![func],
+                type_args: vec![],
+            },
+        )
+    }
+    fn cost_of(e: &Expr) -> u64 {
+        let cx = ReductionContext::minimal(0, 0);
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut acc = CostAccumulator::recording_only();
+        let mut trace = None;
+        eval_expr(e, &cx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
+        acc.total().value()
+    }
+    // small: outLen = 2*2  = 4  -> chunks((4-1)/8+1)=1  -> FlatMap.cost = 70
+    // big:   outLen = 2*18 = 36 -> chunks((36-1)/8+1)=5 -> FlatMap.cost = 110
+    // empty: outLen = 2*0  = 0  -> chunks=1 (truncates)  -> FlatMap.cost = 70
+    // difference attributable solely to the output-length cost.
+    let empty = cost_of(&mk(0));
+    let small = cost_of(&mk(2));
+    let big = cost_of(&mk(18));
+    assert_eq!(
+        big - small,
+        40,
+        "flatMap must charge PerItemCost(60,10,8) over the OUTPUT length \
+         (got diff {} between outLen 36 and 4)",
+        big - small,
+    );
+    // compute(0) = 70 (chunks truncate to 1), so the empty-output case costs
+    // the same as outLen=4 (both chunk to 1); the big case is +40 over either.
+    assert_eq!(
+        small - empty,
+        0,
+        "outLen 4 and 0 both chunk to 1 -> identical FlatMap.cost (70)",
+    );
+    assert_eq!(
+        big - empty,
+        40,
+        "empty-output compute(0) path must be charged"
+    );
+}
+
+// The flatMap flattening arms must cover every Coll element type the lambda
+// body can produce — including Coll[Short]/Coll[SigmaProp]/Coll[Header], which
+// the `first_shape` empty-result capture already handles. A lambda returning
+// Coll[Short] must flatten, not fall through to a TypeError (reject-valid).
+#[test]
+fn flatmap_flattens_coll_short_body() {
+    use ergo_ser::sigma_value::CollValue;
+    let coll = const_coll_int(vec![1, 2]);
+    // body: i => Coll[Short](9, 9)  (independent of i)
+    let short_coll = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SShort)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Short(9),
+            SigmaValue::Short(9),
+        ])),
+    };
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(short_coll),
+        },
+    );
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 15,
+            obj: Box::new(coll),
+            args: vec![func],
+            type_args: vec![],
+        },
+    );
+    assert_eq!(run_eval(&expr), Value::CollShort(vec![9, 9, 9, 9]));
+}

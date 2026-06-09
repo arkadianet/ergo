@@ -1274,8 +1274,12 @@ pub(in crate::evaluator) fn eval_method_call(
                     got: args.len(),
                 });
             }
-            let n = collection_len(&obj_val, cx.ctx);
-            add_cost_per_item(cx.cost, 0xDC, n as u32)?;
+            // MethodCall.costKind = FixedCost(4) is charged ONCE at the
+            // eval_method_call entry (opcode 0xDC); the FuncValue arg eval
+            // charges FixedCost(5). The flatMap method's own cost is
+            // FlatMapMethod_CostKind = PerItemCost(60,10,8) over the OUTPUT
+            // (flattened) length, charged below — Scala flatMap_eval
+            // (methods.scala) wraps `xs.flatMap(f); res.length` in addSeqCost.
             let func_val = cx.eval_expr(&args[0])?;
             let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
             match func_val {
@@ -1289,9 +1293,11 @@ pub(in crate::evaluator) fn eval_method_call(
                     // so we can reassemble the correct output type.
                     let mut inner_colls: Vec<Value> = Vec::new();
                     for item in items {
-                        cx.cost.add(JitCost::from_jit(10))?;
                         let mut call_env = (*captured_env).clone();
                         if let Some(param_id) = params.first() {
+                            // Scala FuncValue closure binds its argument on each
+                            // application: addFixedCost(AddToEnvironment = 5).
+                            cx.cost.add(JitCost::from_jit(5))?;
                             call_env.insert(*param_id, item);
                         }
                         let inner = eval_expr(
@@ -1361,87 +1367,132 @@ pub(in crate::evaluator) fn eval_method_call(
                         _ => Value::CollBytes(vec![]),
                     });
                     inner_colls.retain(|v| !matches!(v, Value::CollGeneric(t, _) if t.is_empty()));
-                    if inner_colls.is_empty() {
-                        return Ok(first_shape.unwrap_or(Value::CollBytes(vec![])));
-                    }
-                    match &inner_colls[0] {
-                        Value::CollBytes(_) => {
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                if let Value::CollBytes(b) = c {
-                                    out.extend(b);
+                    let result = if inner_colls.is_empty() {
+                        first_shape.unwrap_or(Value::CollBytes(vec![]))
+                    } else {
+                        match &inner_colls[0] {
+                            Value::CollBytes(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollBytes(b) = c {
+                                        out.extend(b);
+                                    }
                                 }
+                                Value::CollBytes(out)
                             }
-                            Ok(Value::CollBytes(out))
-                        }
-                        Value::CollInt(_) => {
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                if let Value::CollInt(v) = c {
-                                    out.extend(v);
+                            Value::CollInt(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollInt(v) = c {
+                                        out.extend(v);
+                                    }
                                 }
+                                Value::CollInt(out)
                             }
-                            Ok(Value::CollInt(out))
-                        }
-                        Value::CollLong(_) => {
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                if let Value::CollLong(v) = c {
-                                    out.extend(v);
+                            Value::CollLong(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollLong(v) = c {
+                                        out.extend(v);
+                                    }
                                 }
+                                Value::CollLong(out)
                             }
-                            Ok(Value::CollLong(out))
-                        }
-                        Value::CollBool(_) => {
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                if let Value::CollBool(v) = c {
-                                    out.extend(v);
+                            Value::CollBool(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollBool(v) = c {
+                                        out.extend(v);
+                                    }
                                 }
+                                Value::CollBool(out)
                             }
-                            Ok(Value::CollBool(out))
-                        }
-                        Value::Tokens(_) => {
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                if let Value::Tokens(v) = c {
-                                    out.extend(v);
+                            Value::CollShort(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollShort(v) = c {
+                                        out.extend(v);
+                                    }
                                 }
+                                Value::CollShort(out)
                             }
-                            Ok(Value::Tokens(out))
-                        }
-                        Value::CollBox(_) => {
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                if let Value::CollBox(v) = c {
-                                    out.extend(v);
+                            Value::CollSigmaProp(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollSigmaProp(v) = c {
+                                        out.extend(v);
+                                    }
                                 }
+                                Value::CollSigmaProp(out)
                             }
-                            Ok(Value::CollBox(out))
-                        }
-                        // Boxed-element coll fallback — flatten all
-                        // elements into one `CollGeneric`. Handles
-                        // Coll[Coll[Byte]] and any other nested
-                        // boxed-element coll. The first inner's
-                        // elem_type drives the output tag (all
-                        // inners share the same element type under
-                        // the IR's static-type system).
-                        Value::CollGeneric(_, elem_type) => {
-                            let elem_type = elem_type.clone();
-                            let mut out = Vec::new();
-                            for c in inner_colls {
-                                match c {
-                                    Value::CollGeneric(elems, _) => out.extend(elems),
-                                    other => out.push(other),
+                            Value::CollHeader(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollHeader(v) = c {
+                                        out.extend(v);
+                                    }
                                 }
+                                Value::CollHeader(out)
                             }
-                            Ok(Value::CollGeneric(out, elem_type))
+                            Value::Tokens(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::Tokens(v) = c {
+                                        out.extend(v);
+                                    }
+                                }
+                                Value::Tokens(out)
+                            }
+                            Value::CollBox(_) => {
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    if let Value::CollBox(v) = c {
+                                        out.extend(v);
+                                    }
+                                }
+                                Value::CollBox(out)
+                            }
+                            // Boxed-element coll fallback — flatten all
+                            // elements into one `CollGeneric`. Handles
+                            // Coll[Coll[Byte]] and any other nested
+                            // boxed-element coll. The first inner's
+                            // elem_type drives the output tag (all
+                            // inners share the same element type under
+                            // the IR's static-type system).
+                            Value::CollGeneric(_, elem_type) => {
+                                let elem_type = elem_type.clone();
+                                let mut out = Vec::new();
+                                for c in inner_colls {
+                                    match c {
+                                        Value::CollGeneric(elems, _) => out.extend(elems),
+                                        other => out.push(other),
+                                    }
+                                }
+                                Value::CollGeneric(out, elem_type)
+                            }
+                            other => {
+                                return Err(EvalError::TypeError {
+                                    expected: "collection result from flatMap body",
+                                    got: format!("{other:?}"),
+                                })
+                            }
                         }
-                        other => Err(EvalError::TypeError {
-                            expected: "collection result from flatMap body",
-                            got: format!("{other:?}"),
-                        }),
-                    }
+                    };
+                    // FlatMapMethod_CostKind = PerItemCost(60, 10, 8) charged
+                    // over the OUTPUT (flattened) length — Scala flatMap_eval
+                    // (methods.scala) does `addSeqCost(costKind){ res.length }`.
+                    // compute(0) = 70 (chunks truncate to 1), matching the
+                    // empty-result case.
+                    let out_len = collection_len(&result, cx.ctx) as u32;
+                    cx.cost.add(
+                        CostKind::PerItem {
+                            base: JitCost::from_jit(60),
+                            per_chunk: JitCost::from_jit(10),
+                            chunk_size: 8,
+                        }
+                        .compute(out_len)?,
+                    )?;
+                    Ok(result)
                 }
                 _ => Err(EvalError::TypeError {
                     expected: "Func for flatMap",
