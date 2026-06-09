@@ -10438,8 +10438,12 @@ fn value_to_typed_sigma_inline_box_surfaces_opaque_bytes() {
 #[test]
 fn methodcall_global_serialize_box_value_and_cost() {
     // End-to-end: SGlobal.serialize(box constant) -> Coll[Byte] equal to the
-    // box bytes (verbatim raw_bytes), and the method's put-cost is the SBox
-    // serialize cost.
+    // box bytes (verbatim raw_bytes), AND the total JitCost = 80:
+    //   14 shared MethodCall framing (SGlobal receiver 0xDD + 0xDC dispatch +
+    //      the SBox arg const) — the same 14 documented in
+    //      methodcall_deserialize_to_cost_matches_v6_0_2
+    //   + StartWriterCost(10) + serialize_put_cost(SBox minimal)=56
+    //   (56 is pinned independently by serialize_put_cost_box_minimal).
     let bytes = build_box(
         1_000_000,
         &ser_box_tree(),
@@ -10465,8 +10469,11 @@ fn methodcall_global_serialize_box_value_and_cost() {
     );
     let mut cx = ReductionContext::minimal(0, 0);
     cx.activated_script_version = 3;
-    assert_eq!(
-        eval_to_value(&ser, &cx, &[]).unwrap(),
-        Value::CollBytes(bytes),
-    );
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut acc = CostAccumulator::recording_only();
+    let mut trace = None;
+    let v = eval_expr(&ser, &cx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
+    assert_eq!(v, Value::CollBytes(bytes));
+    assert_eq!(acc.total().value(), 80);
 }
