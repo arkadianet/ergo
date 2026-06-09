@@ -28,6 +28,7 @@ pub(in crate::evaluator) fn eval_lt(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Bool(a < b)),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::Bool(a < b)),
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::Bool(a < b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Lt",
             got: format!("{l:?}, {r:?}"),
@@ -50,6 +51,7 @@ pub(in crate::evaluator) fn eval_le(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Bool(a <= b)),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::Bool(a <= b)),
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::Bool(a <= b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Le",
             got: format!("{l:?}, {r:?}"),
@@ -72,6 +74,7 @@ pub(in crate::evaluator) fn eval_gt(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Bool(a > b)),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::Bool(a > b)),
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::Bool(a > b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for Gt",
             got: format!("{l:?}, {r:?}"),
@@ -94,6 +97,7 @@ pub(in crate::evaluator) fn eval_ge(
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Bool(a >= b)),
         (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::Bool(a >= b)),
+        (Value::UnsignedBigInt(a), Value::UnsignedBigInt(b)) => Ok(Value::Bool(a >= b)),
         (l, r) => Err(EvalError::TypeError {
             expected: "matching numeric types for GE",
             got: format!("{l:?}, {r:?}"),

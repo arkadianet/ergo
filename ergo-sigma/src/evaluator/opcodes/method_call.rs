@@ -723,6 +723,14 @@ pub(in crate::evaluator) fn eval_method_call(
                 S::SBigInt if bytes.len() <= 32 => Ok(Value::BigInt(
                     num_bigint::BigInt::from_signed_bytes_be(&bytes),
                 )),
+                // SUnsignedBigInt: UNSIGNED big-endian parse (Scala
+                // BigIntegers.fromUnsignedByteArray == new BigInteger(1, bytes),
+                // always non-negative). Same <=32-byte cap as SBigInt
+                // (SUnsignedBigInt.MaxSizeInBytes = 32). Must NOT use the
+                // two's-complement from_signed_bytes_be path.
+                S::SUnsignedBigInt if bytes.len() <= 32 => Ok(Value::UnsignedBigInt(
+                    num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &bytes),
+                )),
                 _ => Err(EvalError::TypeError {
                     expected: "Coll[Byte] of the target numeric type's exact width",
                     got: format!("type={tpe:?}, bytes.len={}", bytes.len()),
