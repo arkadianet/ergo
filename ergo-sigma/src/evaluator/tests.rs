@@ -872,7 +872,7 @@ fn every_value_variant_equals_itself() {
         unparsed_bytes: Vec::new(),
     };
     let avl = ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes([0x11; 33]),
+        digest: [0x11; 33].to_vec(),
         insert_allowed: true,
         update_allowed: true,
         remove_allowed: true,
@@ -4779,7 +4779,7 @@ fn methodcall_avltree_contains_matches_get() {
     let proof_bytes = prover.generate_proof().to_vec();
 
     let tree_data = ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes(digest),
+        digest: digest.to_vec(),
         insert_allowed: true,
         update_allowed: true,
         remove_allowed: true,
@@ -4827,7 +4827,7 @@ fn methodcall_avltree_bad_proof_contains_false_get_errors() {
     // A valid-shaped 33-byte digest (last byte = tree height 7) but a
     // single-0x00 proof, which panics inside the crate's reconstruct_tree.
     let tree_data = ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes([0x07; 33]),
+        digest: [0x07; 33].to_vec(),
         insert_allowed: true,
         update_allowed: true,
         remove_allowed: true,
@@ -4928,7 +4928,7 @@ fn methodcall_avltree_bad_proof_contains_false_get_errors() {
 #[test]
 fn methodcall_avltree_flag_accessors_read_own_bit() {
     let tree_data = ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes([0x07; 33]),
+        digest: [0x07; 33].to_vec(),
         insert_allowed: true,
         update_allowed: false,
         remove_allowed: true,
@@ -5003,7 +5003,7 @@ fn last_block_utxo_root_hash_mainnet_defaults() {
     // See ergo-master/ergo-wallet/…/ErgoInterpreter.scala:103.
     let state_root: [u8; 33] = [0xAB; 33];
     let tree = ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes(state_root),
+        digest: state_root.to_vec(),
         insert_allowed: true,
         update_allowed: true,
         remove_allowed: true,
@@ -5018,7 +5018,7 @@ fn last_block_utxo_root_hash_mainnet_defaults() {
     let result = eval_to_value(&e, &ctx, &[]).expect("eval");
     match result {
         Value::AvlTree(avl) => {
-            assert_eq!(*avl.digest.as_bytes(), state_root);
+            assert_eq!(avl.digest.as_slice(), &state_root[..]);
             assert!(avl.insert_allowed, "mainnet uses AllOperationsAllowed");
             assert!(avl.update_allowed);
             assert!(avl.remove_allowed);
@@ -5037,7 +5037,7 @@ fn last_block_utxo_root_hash_mainnet_defaults() {
 fn last_block_utxo_root_hash_preserves_non_default_metadata() {
     let state_root: [u8; 33] = [0xCD; 33];
     let tree = ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes(state_root),
+        digest: state_root.to_vec(),
         insert_allowed: true,
         update_allowed: false, // NOT AllOperationsAllowed
         remove_allowed: true,
@@ -5052,7 +5052,7 @@ fn last_block_utxo_root_hash_preserves_non_default_metadata() {
     let result = eval_to_value(&e, &ctx, &[]).expect("eval");
     match result {
         Value::AvlTree(avl) => {
-            assert_eq!(*avl.digest.as_bytes(), state_root);
+            assert_eq!(avl.digest.as_slice(), &state_root[..]);
             assert!(avl.insert_allowed);
             assert!(!avl.update_allowed, "preserved non-default update flag");
             assert!(avl.remove_allowed);
@@ -9940,7 +9940,7 @@ fn coll_update_many_rejects_mismatched_value_type() {
 
 fn test_avl_tree(value_length: Option<i32>) -> ergo_ser::sigma_value::AvlTreeData {
     ergo_ser::sigma_value::AvlTreeData {
-        digest: ergo_primitives::digest::ADDigest::from_bytes([0u8; 33]),
+        digest: [0u8; 33].to_vec(),
         insert_allowed: true,
         update_allowed: false,
         remove_allowed: true,
@@ -10708,4 +10708,190 @@ fn flatmap_flattens_coll_short_body() {
         },
     );
     assert_eq!(run_eval(&expr), Value::CollShort(vec![9, 9, 9, 9]));
+}
+
+// ── AvlTree.updateDigest (100,15) / updateOperations (100,8) + variable digest ──
+// Scala CAvlTree.updateDigest stores any-length Coll[Byte] verbatim (no length
+// check); updateOperations swaps the flags byte (insert=&0x01, update=&0x02,
+// remove=&0x04). Costs (46/51/65/262) are pinned by the SANTA vectors (which
+// use ConstPlaceholder framing); these tests pin the VALUE behavior + the
+// variable-length-digest cost-helper guard. The digest field is now Vec<u8>.
+fn avl_const_expr(digest: Vec<u8>) -> Expr {
+    Expr::Const {
+        tpe: SigmaType::SAvlTree,
+        val: SigmaValue::AvlTree(ergo_ser::sigma_value::AvlTreeData {
+            digest,
+            insert_allowed: true,
+            update_allowed: true,
+            remove_allowed: true,
+            key_length: 32,
+            value_length_opt: None,
+        }),
+    }
+}
+
+fn avl_method(obj: Expr, method_id: u8, args: Vec<Expr>) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 100,
+            method_id,
+            obj: Box::new(obj),
+            args,
+            type_args: vec![],
+        },
+    })
+}
+
+#[test]
+fn avltree_update_digest_accepts_any_length() {
+    let ctx = ReductionContext::minimal(0, 0);
+    let base = || avl_const_expr(vec![0x07; 33]);
+    // 3-byte, empty, and 40-byte digests are all stored verbatim (no validation).
+    for new_digest in [vec![1u8, 2, 3], vec![], vec![0xAB; 40], vec![0x05; 33]] {
+        let expr = avl_method(base(), 15, vec![const_bytes(new_digest.clone())]);
+        match eval_to_value(&expr, &ctx, &[]).unwrap() {
+            Value::AvlTree(avl) => {
+                assert_eq!(
+                    avl.digest, new_digest,
+                    "updateDigest stores the digest verbatim"
+                );
+                // other fields untouched
+                assert!(avl.insert_allowed && avl.update_allowed && avl.remove_allowed);
+                assert_eq!(avl.key_length, 32);
+            }
+            other => panic!("updateDigest must return AvlTree, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn avltree_update_digest_readback_returns_stored_bytes() {
+    // tree.updateDigest(Coll[Byte](1,2,3)).digest -> Coll[Byte](1,2,3).
+    let ctx = ReductionContext::minimal(0, 0);
+    let updated = avl_method(
+        avl_const_expr(vec![0x07; 33]),
+        15,
+        vec![const_bytes(vec![1, 2, 3])],
+    );
+    let readback = avl_method(updated, 1, vec![]); // (100,1) digest property
+    assert_eq!(
+        eval_to_value(&readback, &ctx, &[]).unwrap(),
+        Value::CollBytes(vec![1, 2, 3]),
+    );
+}
+
+#[test]
+fn avltree_update_operations_swaps_flags() {
+    let ctx = ReductionContext::minimal(0, 0);
+    // flags 0 -> all read-only; 7 (0b111) -> all allowed; 1 -> insert only.
+    // Higher bits (>= 0x08) are IGNORED (Scala AvlTreeFlags decodes only the
+    // low 3 bits): 0xF8 -> low 3 bits clear -> all false; 0xFF (-1) -> all set.
+    let cases: &[(i8, bool, bool, bool)] = &[
+        (0, false, false, false),
+        (7, true, true, true),
+        (1, true, false, false),
+        (2, false, true, false),
+        (4, false, false, true),
+        (0xF8u8 as i8, false, false, false),
+        (-1, true, true, true),
+    ];
+    for &(flags, ins, upd, rem) in cases {
+        let expr = avl_method(
+            avl_const_expr(vec![0x07; 33]),
+            8,
+            vec![Expr::Const {
+                tpe: SigmaType::SByte,
+                val: SigmaValue::Byte(flags),
+            }],
+        );
+        match eval_to_value(&expr, &ctx, &[]).unwrap() {
+            Value::AvlTree(avl) => {
+                assert_eq!(
+                    (avl.insert_allowed, avl.update_allowed, avl.remove_allowed),
+                    (ins, upd, rem),
+                    "updateOperations({flags}) flag decode",
+                );
+                // digest/keyLength untouched
+                assert_eq!(avl.digest, vec![0x07; 33]);
+                assert_eq!(avl.key_length, 32);
+            }
+            other => panic!("updateOperations must return AvlTree, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn avl_tree_height_no_panic_on_variable_digest() {
+    use super::cost::{avl_cost_height, avl_tree_height};
+    let mk = |digest: Vec<u8>| ergo_ser::sigma_value::AvlTreeData {
+        digest,
+        insert_allowed: true,
+        update_allowed: true,
+        remove_allowed: true,
+        key_length: 32,
+        value_length_opt: None,
+    };
+    // avl_tree_height = trailing byte, or 0 for empty (NO panic).
+    assert_eq!(avl_tree_height(&mk(vec![])), 0);
+    assert_eq!(avl_tree_height(&mk(vec![1, 2, 3])), 3);
+    assert_eq!(avl_tree_height(&mk(vec![0x07; 33])), 7);
+    // avl_cost_height returns 0 unless the digest is exactly 33 bytes (scrypto
+    // require(startingDigest.length == 33) throws before rootNodeHeight is set),
+    // so a 3-byte digest costs contains at height 0 (the Tier-2 cost), NOT 3.
+    assert_eq!(avl_cost_height(&mk(vec![1, 2, 3])), 0);
+    assert_eq!(avl_cost_height(&mk(vec![])), 0);
+    assert_eq!(avl_cost_height(&mk(vec![0x07; 33])), 7);
+}
+
+#[test]
+fn avltree_update_digest_operations_fixed_cost_invariant() {
+    // updateDigest (100,15) = FixedCost(40), updateOperations (100,8) =
+    // FixedCost(45): the eval cost must NOT vary with the digest length or the
+    // flags value (a regression guard against per-input cost drift). The
+    // absolute totals here use Expr::Const framing, not the vectors'
+    // ConstPlaceholder framing — the SANTA vectors pin the exact 46/51.
+    let ctx = ReductionContext::minimal(0, 0);
+    let cost_of = |e: &Expr| {
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut acc = CostAccumulator::recording_only();
+        let mut trace = None;
+        eval_expr(e, &ctx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
+        acc.total().value()
+    };
+    // updateDigest: empty / 3-byte / 33-byte digests all cost the same.
+    let ud = |d: Vec<u8>| avl_method(avl_const_expr(vec![0x07; 33]), 15, vec![const_bytes(d)]);
+    let c_ud = cost_of(&ud(vec![]));
+    assert_eq!(
+        cost_of(&ud(vec![1, 2, 3])),
+        c_ud,
+        "updateDigest cost is digest-length-independent (FixedCost)",
+    );
+    assert_eq!(cost_of(&ud(vec![0xAB; 33])), c_ud);
+    // updateOperations: flags 0 / 7 / 0xFF all cost the same.
+    let uo = |f: i8| {
+        avl_method(
+            avl_const_expr(vec![0x07; 33]),
+            8,
+            vec![Expr::Const {
+                tpe: SigmaType::SByte,
+                val: SigmaValue::Byte(f),
+            }],
+        )
+    };
+    let c_uo = cost_of(&uo(0));
+    assert_eq!(
+        cost_of(&uo(7)),
+        c_uo,
+        "updateOperations cost is flags-value-independent (FixedCost)",
+    );
+    assert_eq!(cost_of(&uo(-1)), c_uo);
+    // Framing is identical (Const obj + MethodCall + Const arg), so the only
+    // difference is the method body: updateOperations(45) - updateDigest(40) = 5.
+    assert_eq!(
+        c_uo - c_ud,
+        5,
+        "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
+    );
 }

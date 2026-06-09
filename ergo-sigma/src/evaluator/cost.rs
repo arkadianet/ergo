@@ -475,10 +475,11 @@ fn eq_coll_fallback(
 /// `AvlTreeData.treeHeight` and is the input the lookup-cost
 /// per-item model multiplies against.
 pub(crate) fn avl_tree_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
-    *avl.digest
-        .as_bytes()
-        .last()
-        .expect("ADDigest is always 33 bytes by construction (32 digest + 1 height)") as u32
+    // The trailing byte of a 33-byte digest is the tree height. After
+    // `SAvlTree.updateDigest` the digest may be any length (incl. empty), so
+    // this must NOT panic: an empty digest has no height byte -> 0 (matching
+    // scrypto's `rootNodeHeight` initializer).
+    avl.digest.last().copied().map(u32::from).unwrap_or(0)
 }
 
 /// The tree height to use for AVL per-op/lookup cost (`nItems`). scrypto's
@@ -500,7 +501,12 @@ pub(crate) fn avl_tree_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
 /// length above `i32::MAX` is read wrapped to a NEGATIVE value), so a wrapped
 /// length is directly `< 0` here and correctly counts as invalid metadata.
 pub(crate) fn avl_cost_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
-    if avl.key_length > 0 && avl.value_length_opt.is_none_or(|v| v >= 0) {
+    // scrypto's `BatchAVLVerifier` `require(startingDigest.length == labelLength
+    // + 1)` (= 33) throws BEFORE `rootNodeHeight = startingDigest.last` is set,
+    // so a non-33-byte digest (e.g. from `updateDigest`) yields a failed
+    // reconstruction with treeHeight 0 — NOT the trailing byte. Without this
+    // guard a 3-byte digest would mis-cost the lookup at height = its last byte.
+    if avl.key_length > 0 && avl.value_length_opt.is_none_or(|v| v >= 0) && avl.digest.len() == 33 {
         avl_tree_height(avl)
     } else {
         0
@@ -528,7 +534,7 @@ pub(crate) fn make_avl_verifier(
         });
     }
     crate::avl::AvlVerifier::new(
-        avl.digest.as_bytes(),
+        &avl.digest,
         proof,
         avl.key_length as usize,
         avl.value_length_opt.map(|v| v as usize),

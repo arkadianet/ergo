@@ -272,7 +272,7 @@ pub fn validate_scripts(
             eval_headers
                 .first()
                 .map(|h| ergo_ser::sigma_value::AvlTreeData {
-                    digest: ergo_primitives::digest::ADDigest::from_bytes(h.state_root),
+                    digest: h.state_root.to_vec(),
                     insert_allowed: true,
                     update_allowed: true,
                     remove_allowed: true,
