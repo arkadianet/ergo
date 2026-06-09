@@ -104,7 +104,15 @@ pub(in crate::evaluator) fn eval_prove_dh_tuple(
 }
 
 // 0xEE DecodePoint — first 33 bytes of a Coll[Byte] → GroupElement.
-// Scala reads exactly 33 bytes from the front, ignoring trailing data.
+// Scala `GroupElementSerializer.parse` reads exactly 33 bytes from the front
+// (trailing data ignored) and then VALIDATES on the curve:
+//   - `encoded(0) == 0` → `CryptoContext.default.infinity` (the canonical
+//     identity), whose encoding is 33 zero bytes — any trailing X bytes are
+//     discarded.
+//   - otherwise → `decodePoint(encoded)` (BouncyCastle on the JVM oracle),
+//     which REJECTS off-curve points, wrong prefixes, and non-square X.
+// Our prior code copied the raw 33 bytes with no validation (accept-invalid
+// for off-curve inputs, and raw bytes — not 33 zeros — for zero-lead inputs).
 pub(in crate::evaluator) fn eval_decode_point(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -115,7 +123,16 @@ pub(in crate::evaluator) fn eval_decode_point(
         Value::CollBytes(b) if b.len() >= 33 => {
             let mut arr = [0u8; 33];
             arr.copy_from_slice(&b[..33]);
-            Ok(Value::GroupElement(arr))
+            if arr[0] == 0x00 {
+                // Identity canonicalizes to 33 zeros (discards trailing bytes).
+                Ok(Value::GroupElement([0u8; 33]))
+            } else {
+                // Reject off-curve / malformed encodings (k256, same SEC1
+                // validation the JVM's BouncyCastle applies). A valid 0x02/0x03
+                // compressed point is already its own canonical encoding.
+                decode_group_element(&arr)?;
+                Ok(Value::GroupElement(arr))
+            }
         }
         _ => Err(EvalError::TypeError {
             expected: "Coll[Byte] of length >= 33",
