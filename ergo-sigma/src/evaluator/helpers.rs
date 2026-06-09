@@ -1154,13 +1154,13 @@ pub(crate) fn subst_constants(
                 ));
             }
             // Re-serializing a Header constant runs the same version-gated
-            // DataSerializer.serialize(SHeader); a pre-v3 executing ErgoTree
-            // must reject it (matches SGlobal.serialize[SHeader]).
+            // DataSerializer.serialize(SHeader) (which throws pre-v3); a pre-v3
+            // executing ErgoTree must reject it. Same `errored` class as the
+            // template-constant gate above — both mirror a Scala throw.
             if sv.contains_header() && !is_v3_ergo_tree {
-                return Err(EvalError::TypeError {
-                    expected: "ErgoTree version >= 3 for SHeader in SubstConstants",
-                    got: "pre-v3 ErgoTree".to_string(),
-                });
+                return Err(EvalError::RuntimeException(
+                    "substConstants: SHeader substitution requires ErgoTree version >= 3",
+                ));
             }
             // Serialize with the TEMPLATE type (== the new value's type by the
             // check above), matching Scala and preserving the template's
