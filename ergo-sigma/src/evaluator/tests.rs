@@ -9772,4 +9772,36 @@ fn coll_update_many_rejects_mismatched_value_type() {
         .unwrap(),
         Value::CollInt(vec![1, 2]),
     );
+    // A NON-empty non-Int indexes collection IS rejected — but only once an
+    // index is actually read and cast to Int. The lengths must match first
+    // (requireSameLength precedes the per-index cast), so values is length 1
+    // here; the Long index then fails the Int cast -> TypeError.
+    assert!(matches!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2]),
+                const_coll_long(vec![0]),
+                const_coll_int(vec![5]),
+            ),
+            &cx,
+            &[],
+        ),
+        Err(EvalError::TypeError { .. })
+    ));
+    // The same non-Int indexes paired with an EMPTY values collection is a
+    // length mismatch, which throws BEFORE any index is read —
+    // RuntimeException, not TypeError (the index cast is never reached). This
+    // is why the "empty values" shape is not a TypeError.
+    assert!(matches!(
+        eval_to_value(
+            &coll_update_many(
+                const_coll_int(vec![1, 2]),
+                const_coll_long(vec![0]),
+                const_coll_long(vec![]),
+            ),
+            &cx,
+            &[],
+        ),
+        Err(EvalError::RuntimeException(_))
+    ));
 }
