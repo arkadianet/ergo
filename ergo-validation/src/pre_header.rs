@@ -90,7 +90,7 @@ pub const ERGO_UTXO_KEY_LENGTH: i32 = 32;
 /// at script.rs:211-221.
 pub fn build_last_block_utxo_root(parent_state_root: ADDigest) -> AvlTreeData {
     AvlTreeData {
-        digest: parent_state_root,
+        digest: parent_state_root.as_bytes().to_vec(),
         insert_allowed: ERGO_UTXO_INSERT_ALLOWED,
         update_allowed: ERGO_UTXO_UPDATE_ALLOWED,
         remove_allowed: ERGO_UTXO_REMOVE_ALLOWED,
@@ -110,7 +110,7 @@ mod tests {
     fn build_last_block_utxo_root_uses_pinned_constants() {
         let digest = ADDigest::from_bytes([0xABu8; 33]);
         let tree = build_last_block_utxo_root(digest);
-        assert_eq!(tree.digest.as_bytes(), &[0xABu8; 33]);
+        assert_eq!(tree.digest.as_slice(), &[0xABu8; 33]);
         assert!(tree.insert_allowed);
         assert!(tree.update_allowed);
         assert!(tree.remove_allowed);

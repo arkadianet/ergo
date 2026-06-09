@@ -1256,14 +1256,83 @@ pub(in crate::evaluator) fn eval_method_call(
             match bv_opt.as_ref().and_then(|bv| bv.digest()) {
                 Some(d) if d.len() == 33 => {
                     cx.cost.add(JitCost::from_jit(40))?; // updateDigest_Info
-                    let mut digest_arr = [0u8; 33];
-                    digest_arr.copy_from_slice(&d);
                     let mut updated = avl.clone();
-                    updated.digest = ergo_primitives::digest::ADDigest::from_bytes(digest_arr);
+                    updated.digest = d;
                     Ok(Value::Opt(Some(Box::new(Value::AvlTree(updated)))))
                 }
                 _ => Ok(Value::Opt(None)),
             }
+        }
+        // SAvlTree(100).updateDigest(15): SFunc(SAvlTree, SByteArray) -> SAvlTree.
+        // Scala CAvlTree.updateDigest = treeData.copy(digest = newDigest) — stores
+        // the new Coll[Byte] VERBATIM with NO length validation (3-byte, empty
+        // and over-length digests are all accepted). Body cost
+        // FixedCost(JitCost(40)); the 0xDC MethodCall(4) + obj/arg framing is
+        // charged at the eval entry. Returns a plain AvlTree (NOT Option).
+        (100, 15) => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let mut updated = match &obj_val {
+                Value::AvlTree(a) => a.clone(),
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "AvlTree for updateDigest",
+                        got: format!("{other:?}"),
+                    })
+                }
+            };
+            let new_digest = match cx.eval_expr(&args[0])? {
+                Value::CollBytes(b) => b,
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "Coll[Byte] for updateDigest",
+                        got: format!("{other:?}"),
+                    })
+                }
+            };
+            cx.cost.add(JitCost::from_jit(40))?; // updateDigest FixedCost
+            updated.digest = new_digest;
+            Ok(Value::AvlTree(updated))
+        }
+        // SAvlTree(100).updateOperations(8): SFunc(SAvlTree, SByte) -> SAvlTree.
+        // Scala CAvlTree.updateOperations = treeData.copy(treeFlags =
+        // AvlTreeFlags(newOps)) — decodes the Byte bit-by-bit (insert = & 0x01,
+        // update = & 0x02, remove = & 0x04; higher bits ignored). Body cost
+        // FixedCost(JitCost(45)). Touches only the flags. Returns a plain AvlTree.
+        (100, 8) => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let mut updated = match &obj_val {
+                Value::AvlTree(a) => a.clone(),
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "AvlTree for updateOperations",
+                        got: format!("{other:?}"),
+                    })
+                }
+            };
+            let flags = match cx.eval_expr(&args[0])? {
+                Value::Byte(b) => b as u8,
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "Byte for updateOperations",
+                        got: format!("{other:?}"),
+                    })
+                }
+            };
+            cx.cost.add(JitCost::from_jit(45))?; // updateOperations FixedCost
+            updated.insert_allowed = flags & 0x01 != 0;
+            updated.update_allowed = flags & 0x02 != 0;
+            updated.remove_allowed = flags & 0x04 != 0;
+            Ok(Value::AvlTree(updated))
         }
         // SColl(12).flatMap(15) -> Coll[B]
         // Scala: xs.flatMap(f) â€” map each element to a collection, flatten results.
@@ -2649,10 +2718,8 @@ fn eval_avl_mutate(
     match bv_opt.as_ref().and_then(|bv| bv.digest()) {
         Some(d) if d.len() == 33 => {
             cx.cost.add(JitCost::from_jit(40))?; // updateDigest_Info (success only)
-            let mut digest_arr = [0u8; 33];
-            digest_arr.copy_from_slice(&d);
             let mut updated = avl.clone();
-            updated.digest = ergo_primitives::digest::ADDigest::from_bytes(digest_arr);
+            updated.digest = d;
             Ok(Value::Opt(Some(Box::new(Value::AvlTree(updated)))))
         }
         _ => Ok(Value::Opt(None)),
@@ -2749,7 +2816,7 @@ pub(in crate::evaluator) fn serialize_put_cost(
         //   (+ if Some: inner putUInt=0).
         // Constant 38 regardless of flags / keyLength / Some-vs-None, because
         // putUInt costs 0 and the option tag byte is always written.
-        (T::SAvlTree, Sv::AvlTree(avl)) => (3 + avl.digest.as_bytes().len() as u64) + 1 + 1,
+        (T::SAvlTree, Sv::AvlTree(avl)) => (3 + avl.digest.len() as u64) + 1 + 1,
         // ErgoHeader.sigmaSerializer = HeaderWithoutPowSerializer +
         // AutolykosSolution.sigmaSerializer (mirrors ergo_ser::write_header +
         // write_solution). chunk(n) = 3 + n. put_u8 = 1; put_u64(timestamp) =

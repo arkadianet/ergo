@@ -128,7 +128,7 @@ pub(super) fn eval_no_arg_method(
                 4 => Value::CollBytes(h.ad_proofs_root.to_vec()),
                 5 => {
                     let avl = ergo_ser::sigma_value::AvlTreeData {
-                        digest: ergo_primitives::digest::ADDigest::from_bytes(h.state_root),
+                        digest: h.state_root.to_vec(),
                         insert_allowed: false,
                         update_allowed: false,
                         remove_allowed: false,
@@ -206,7 +206,7 @@ pub(super) fn eval_no_arg_method(
         (100, 1) => {
             add_method_cost(cost, 15)?;
             match obj_val {
-                Value::AvlTree(avl) => Ok(Some(Value::CollBytes(avl.digest.as_bytes().to_vec()))),
+                Value::AvlTree(avl) => Ok(Some(Value::CollBytes(avl.digest.clone()))),
                 other => Err(EvalError::TypeError {
                     expected: "AvlTree for digest",
                     got: format!("{other:?}"),

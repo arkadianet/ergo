@@ -1,4 +1,3 @@
-use ergo_primitives::digest::ADDigest;
 use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
@@ -58,8 +57,13 @@ pub enum SigmaBoolean {
 /// mutability flags and key/value shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvlTreeData {
-    /// 33-byte AVL+ root (32-byte digest + 1-byte tree height).
-    pub digest: ADDigest,
+    /// AVL+ root digest. 33 bytes on the wire / from deserialization
+    /// (32-byte digest + 1-byte tree height), but may hold a
+    /// variable-length value at runtime after `SAvlTree.updateDigest`
+    /// (Scala `CAvlTree.updateDigest` stores the new digest verbatim with
+    /// no length check — 3-byte, empty, and over-length digests are all
+    /// accepted). Hence `Vec<u8>`, not a fixed `ADDigest`.
+    pub digest: Vec<u8>,
     /// Whether new keys may be inserted into the tree.
     pub insert_allowed: bool,
     /// Whether existing values may be updated.
@@ -773,7 +777,12 @@ fn read_option(
 // -- AvlTree serialization --
 
 fn write_avl_tree(w: &mut VlqWriter, avl: &AvlTreeData) {
-    w.put_bytes(avl.digest.as_bytes());
+    // Raw digest bytes, NO length prefix (Scala AvlTreeData.serializer:
+    // `putBytes(digest.toArray)`). Wire-derived / literal trees always carry a
+    // 33-byte digest, so the emitted bytes are unchanged from the old fixed
+    // `ADDigest`; a runtime updateDigest result is consumed in-memory and never
+    // re-serialized to the AvlTree wire.
+    w.put_bytes(&avl.digest);
     let flags = (avl.insert_allowed as u8)
         | ((avl.update_allowed as u8) << 1)
         | ((avl.remove_allowed as u8) << 2);
@@ -794,7 +803,10 @@ fn write_avl_tree(w: &mut VlqWriter, avl: &AvlTreeData) {
 }
 
 fn read_avl_tree(r: &mut VlqReader) -> Result<AvlTreeData, ReadError> {
-    let digest = ADDigest::from_bytes(r.get_array::<33>()?);
+    // Wire digest is ALWAYS a fixed 33 bytes (Scala AvlTreeData.parse reads
+    // `getBytes(DigestSize=33)`, no length prefix); store as a Vec. A
+    // length-prefixed read would fork.
+    let digest = r.get_array::<33>()?.to_vec();
 
     let flags = r.get_u8()?;
     let insert_allowed = flags & 0x01 != 0;
@@ -1371,7 +1383,7 @@ mod tests {
     #[test]
     fn roundtrip_avl_tree_with_value_length() {
         let avl = AvlTreeData {
-            digest: ADDigest::from_bytes([0xAB; 33]),
+            digest: vec![0xAB; 33],
             insert_allowed: true,
             update_allowed: false,
             remove_allowed: true,
@@ -1384,7 +1396,7 @@ mod tests {
     #[test]
     fn roundtrip_avl_tree_without_value_length() {
         let avl = AvlTreeData {
-            digest: ADDigest::from_bytes([0xCD; 33]),
+            digest: vec![0xCD; 33],
             insert_allowed: false,
             update_allowed: true,
             remove_allowed: false,
@@ -1433,7 +1445,7 @@ mod tests {
     fn constant_roundtrip_avl_tree() {
         let tpe = SigmaType::SAvlTree;
         let avl = AvlTreeData {
-            digest: ADDigest::from_bytes([0x01; 33]),
+            digest: vec![0x01; 33],
             insert_allowed: true,
             update_allowed: true,
             remove_allowed: true,
