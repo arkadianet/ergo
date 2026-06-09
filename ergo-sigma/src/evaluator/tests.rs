@@ -10785,12 +10785,16 @@ fn avltree_update_digest_readback_returns_stored_bytes() {
 fn avltree_update_operations_swaps_flags() {
     let ctx = ReductionContext::minimal(0, 0);
     // flags 0 -> all read-only; 7 (0b111) -> all allowed; 1 -> insert only.
+    // Higher bits (>= 0x08) are IGNORED (Scala AvlTreeFlags decodes only the
+    // low 3 bits): 0xF8 -> low 3 bits clear -> all false; 0xFF (-1) -> all set.
     let cases: &[(i8, bool, bool, bool)] = &[
         (0, false, false, false),
         (7, true, true, true),
         (1, true, false, false),
         (2, false, true, false),
         (4, false, false, true),
+        (0xF8u8 as i8, false, false, false),
+        (-1, true, true, true),
     ];
     for &(flags, ins, upd, rem) in cases {
         let expr = avl_method(
@@ -10838,4 +10842,56 @@ fn avl_tree_height_no_panic_on_variable_digest() {
     assert_eq!(avl_cost_height(&mk(vec![1, 2, 3])), 0);
     assert_eq!(avl_cost_height(&mk(vec![])), 0);
     assert_eq!(avl_cost_height(&mk(vec![0x07; 33])), 7);
+}
+
+#[test]
+fn avltree_update_digest_operations_fixed_cost_invariant() {
+    // updateDigest (100,15) = FixedCost(40), updateOperations (100,8) =
+    // FixedCost(45): the eval cost must NOT vary with the digest length or the
+    // flags value (a regression guard against per-input cost drift). The
+    // absolute totals here use Expr::Const framing, not the vectors'
+    // ConstPlaceholder framing — the SANTA vectors pin the exact 46/51.
+    let ctx = ReductionContext::minimal(0, 0);
+    let cost_of = |e: &Expr| {
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut acc = CostAccumulator::recording_only();
+        let mut trace = None;
+        eval_expr(e, &ctx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
+        acc.total().value()
+    };
+    // updateDigest: empty / 3-byte / 33-byte digests all cost the same.
+    let ud = |d: Vec<u8>| avl_method(avl_const_expr(vec![0x07; 33]), 15, vec![const_bytes(d)]);
+    let c_ud = cost_of(&ud(vec![]));
+    assert_eq!(
+        cost_of(&ud(vec![1, 2, 3])),
+        c_ud,
+        "updateDigest cost is digest-length-independent (FixedCost)",
+    );
+    assert_eq!(cost_of(&ud(vec![0xAB; 33])), c_ud);
+    // updateOperations: flags 0 / 7 / 0xFF all cost the same.
+    let uo = |f: i8| {
+        avl_method(
+            avl_const_expr(vec![0x07; 33]),
+            8,
+            vec![Expr::Const {
+                tpe: SigmaType::SByte,
+                val: SigmaValue::Byte(f),
+            }],
+        )
+    };
+    let c_uo = cost_of(&uo(0));
+    assert_eq!(
+        cost_of(&uo(7)),
+        c_uo,
+        "updateOperations cost is flags-value-independent (FixedCost)",
+    );
+    assert_eq!(cost_of(&uo(-1)), c_uo);
+    // Framing is identical (Const obj + MethodCall + Const arg), so the only
+    // difference is the method body: updateOperations(45) - updateDigest(40) = 5.
+    assert_eq!(
+        c_uo - c_ud,
+        5,
+        "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
+    );
 }
