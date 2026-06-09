@@ -8374,6 +8374,133 @@ fn subst_constants_none_preserves_template_option_type() {
     );
 }
 
+// substConstants parity with Scala ErgoTreeSerializer.substituteConstants
+// (over-strict fix). Byte vectors taken verbatim from the SANTA
+// substConstants_equivalence vector (blessed jvm:sigma-state-6.0.3); the
+// replacement value is always sigmaProp(false). The substitution keeps the
+// tree body as opaque raw bytes, skips out-of-range positions
+// (getPositionsBackref ignores them), returns no-segregation trees unchanged,
+// and the returned nConstants drives the PerItemCost(100,100,1) charge.
+#[test]
+fn subst_constants_scala_parity_success_cases() {
+    use super::helpers::subst_constants;
+    let false_prop = || Value::SigmaProp(SigmaBoolean::TrivialProp(false));
+
+    // No-segregation tree (header 0x00): no constants section -> returned
+    // unchanged, nConstants = 0.
+    assert_eq!(
+        subst_constants(&[0x00, 0x08, 0xD3], &[0], &[false_prop()], false).unwrap(),
+        (vec![0x00, 0x08, 0xD3], 0),
+    );
+    assert_eq!(
+        subst_constants(&[0x00, 0x00, 0x08, 0xD3], &[0], &[false_prop()], false).unwrap(),
+        (vec![0x00, 0x00, 0x08, 0xD3], 0),
+    );
+    // Segregated (0x10) but with 0 constants -> position 0 is out of range ->
+    // skipped -> unchanged, nConstants = 0.
+    assert_eq!(
+        subst_constants(&[0x10, 0x00, 0x08, 0xD3], &[0], &[false_prop()], false).unwrap(),
+        (vec![0x10, 0x00, 0x08, 0xD3], 0),
+    );
+    // Segregated, 1 SSigmaProp constant (true = 0xD3), substitute position 0 ->
+    // sigmaProp(false) = 0xD2. Body (0x73 0x00) preserved verbatim. nConstants = 1.
+    assert_eq!(
+        subst_constants(
+            &[0x10, 0x01, 0x08, 0xD3, 0x73, 0x00],
+            &[0],
+            &[false_prop()],
+            false
+        )
+        .unwrap(),
+        (vec![0x10, 0x01, 0x08, 0xD2, 0x73, 0x00], 1),
+    );
+    // Segregated, 1 constant, position 1 is out of range -> skipped ->
+    // unchanged, nConstants = 1.
+    assert_eq!(
+        subst_constants(
+            &[0x10, 0x01, 0x08, 0xD3, 0x73, 0x00],
+            &[1],
+            &[false_prop()],
+            false
+        )
+        .unwrap(),
+        (vec![0x10, 0x01, 0x08, 0xD3, 0x73, 0x00], 1),
+    );
+}
+
+#[test]
+fn subst_constants_scala_parity_error_cases() {
+    use super::helpers::subst_constants;
+    let false_prop = || Value::SigmaProp(SigmaBoolean::TrivialProp(false));
+    // Empty bytes: the header read fails -> Scala throws RuntimeException
+    // ("errored"), NOT UnsupportedOpcode ("not-implemented").
+    let e_empty = subst_constants(&[], &[0], &[false_prop()], false).unwrap_err();
+    assert!(
+        matches!(e_empty, EvalError::RuntimeException(_)),
+        "empty bytes must error as RuntimeException, got {e_empty:?}",
+    );
+    // Type mismatch: replacing an SInt constant (=10) with a SigmaProp ->
+    // Scala `require(c.tpe == newConst.tpe)` throws -> RuntimeException.
+    let e_type = subst_constants(
+        &[0x10, 0x01, 0x04, 0x14, 0x73, 0x00],
+        &[0],
+        &[false_prop()],
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(e_type, EvalError::RuntimeException(_)),
+        "type mismatch must error as RuntimeException, got {e_type:?}",
+    );
+    // Length mismatch (positions vs newValues) -> require fails -> RuntimeException.
+    let e_len = subst_constants(&[0x10, 0x00], &[0, 1], &[false_prop()], false).unwrap_err();
+    assert!(
+        matches!(e_len, EvalError::RuntimeException(_)),
+        "positions/newValues length mismatch must error, got {e_len:?}",
+    );
+}
+
+// A template whose constants section carries an SHeader value (reachable via
+// crafted scriptBytes) must be rejected by a pre-v3 executing ErgoTree even
+// when that constant is NOT the one being substituted: Scala deserializes the
+// constants under the executing VersionContext and DataSerializer.deserialize
+// (SHeader) throws pre-v3. A v3+ executing tree accepts it and round-trips.
+#[test]
+fn subst_constants_pre_v3_template_header_constant_rejected() {
+    use super::helpers::subst_constants;
+    use ergo_primitives::reader::VlqReader;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::header::read_header;
+    use ergo_ser::sigma_value::write_constant;
+    // Real mainnet header -> a single SHeader constant in a segregated tree.
+    let raw = std::fs::read_to_string("../test-vectors/mainnet/headers_1_10.json")
+        .expect("headers_1_10 fixture must exist");
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let hbytes = hex::decode(v[0]["bytes"].as_str().unwrap()).unwrap();
+    let header = read_header(&mut VlqReader::new(&hbytes)).expect("header parse");
+    let header_val = SigmaValue::Header(Box::new(header));
+
+    let mut w = VlqWriter::new();
+    w.put_u8(0x10); // header: segregated
+    w.put_u32(1); // 1 constant
+    write_constant(&mut w, &SigmaType::SHeader, &header_val).unwrap();
+    w.put_u8(0x73); // body: ConstPlaceholder
+    w.put_u8(0x00); // index 0
+    let tree = w.result();
+
+    // Pre-v3: rejected even with NO substitution (the parsed template SHeader
+    // constant materializes a header under a pre-v3 context).
+    let err = subst_constants(&tree, &[], &[], false).unwrap_err();
+    assert!(
+        matches!(err, EvalError::RuntimeException(_)),
+        "pre-v3 SHeader template constant must error, got {err:?}",
+    );
+    // v3+: accepted; with no substitution the tree round-trips unchanged.
+    let (out, n) = subst_constants(&tree, &[], &[], true).expect("v3+ accepts SHeader constant");
+    assert_eq!(out, tree, "no substitution must return the tree unchanged");
+    assert_eq!(n, 1);
+}
+
 // Regression pin: a `map` whose first result element is `None`
 // must still produce a `CollGeneric` carrier tagged with the
 // concrete element type — `infer_collection` prefers the mapper-
