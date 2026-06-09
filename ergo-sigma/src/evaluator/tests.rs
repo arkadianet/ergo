@@ -2378,6 +2378,37 @@ fn opcode_decode_point() {
     }
 }
 
+#[test]
+fn opcode_decode_point_rejects_off_curve() {
+    // 0x04 (uncompressed) prefix with only 33 bytes is an invalid SEC1
+    // encoding; BouncyCastle/k256 reject it, so Scala errors. We previously
+    // accepted it verbatim as a GroupElement (accept-invalid SECURITY bug).
+    let mut b = vec![0u8; 33];
+    b[0] = 0x04;
+    let expr = op(0xEE, Payload::One(Box::new(const_bytes(b))));
+    assert!(
+        matches!(run_eval_err(&expr), EvalError::TypeError { .. }),
+        "off-curve / malformed SEC1 point must error",
+    );
+}
+
+#[test]
+fn opcode_decode_point_zero_lead_canonicalizes_to_identity() {
+    // Leading 0x00 -> infinity; the canonical encoding is 33 zero bytes and any
+    // trailing X bytes are discarded (CryptoContext.default.infinity).
+    let mut b = vec![0u8; 40];
+    b[1..].fill(0xAB); // non-zero trailing, must be dropped
+    let expr = op(0xEE, Payload::One(Box::new(const_bytes(b))));
+    assert_eq!(run_eval(&expr), Value::GroupElement([0u8; 33]));
+}
+
+#[test]
+fn opcode_decode_point_wrong_length_errors() {
+    // < 33 bytes: Scala's getBytes(33) underflows -> error.
+    let expr = op(0xEE, Payload::One(Box::new(const_bytes(vec![0x02; 32]))));
+    assert!(matches!(run_eval_err(&expr), EvalError::TypeError { .. }));
+}
+
 /// SGroupElement.exp(unsigned) (MethodCall 7/6, EIP-50 v6 method)
 /// is the unsigned-carrier twin of inline opcode 0x9F Exponentiate.
 /// Both reduce the scalar mod the secp256k1 group order via
