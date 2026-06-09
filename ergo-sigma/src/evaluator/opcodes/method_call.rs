@@ -729,10 +729,24 @@ pub(in crate::evaluator) fn eval_method_call(
                 }),
             }
         }
-        // SHeader(104).checkPow(16) is a zero-arg method emitted as a 0xDB
-        // PropertyCall; it lives in the shared `eval_no_arg_method` table
-        // (property_call.rs), which this arm's catch-all delegates to. No 0xDC
-        // arm here — a no-arg method has no MethodCall-specific behavior.
+        // SHeader(104).checkPow(16): zero-arg, normally emitted as a 0xDB
+        // PropertyCall and handled by the shared `eval_no_arg_method` table.
+        // A 0xDC MethodCall form must reject extra args on ARITY *before* the
+        // table runs the expensive Autolykos PoW (the catch-all checks arity
+        // only after the handler returns). Guard arity, then delegate to the
+        // same handler so the cost/value stay identical to the 0xDB path.
+        (104, 16) => {
+            check_arity(args, 0)?;
+            match super::property_call::eval_no_arg_method(
+                type_id, method_id, &obj_val, cx.ctx, cx.cost,
+            )? {
+                Some(v) => Ok(v),
+                None => Err(EvalError::TypeError {
+                    expected: "supported MethodCall",
+                    got: format!("type_id={type_id}, method_id={method_id}"),
+                }),
+            }
+        }
         // SGlobal(106).xor(2, left: Coll[Byte], right: Coll[Byte]) -> Coll[Byte]
         // V5+ method (predates EIP-50). Element-wise XOR, truncates to
         // `min(left.len, right.len)` per Scala
