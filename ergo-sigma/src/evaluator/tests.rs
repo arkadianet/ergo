@@ -1839,6 +1839,126 @@ fn opcode_by_index_out_of_range_no_default() {
     assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
 }
 
+// ── ByIndex default: eager pre-v3, lazy v3+ (Scala ByIndex.eval) ─
+//
+// Scala `ByIndex.eval` (transformers.scala): with a default present,
+// a pre-v3 tree evaluates the default eagerly after the index — its
+// cost (and any error) lands even when the index is in bounds. A v3+
+// tree (`isV3OrLaterErgoTreeVersion`) evaluates the default lazily,
+// only on an out-of-bounds index. Pinned by the
+// Coll_getOrElse_method_equivalence vector (v5: uniform cost across
+// hit and miss entries) and Coll_getOrElse_with_lazy_default (v6).
+
+fn by_index_with_default(coll: Expr, idx: i32, default: Expr) -> Expr {
+    op(
+        0xB2,
+        Payload::ByIndex {
+            input: Box::new(coll),
+            index: Box::new(const_int(idx)),
+            default: Some(Box::new(default)),
+        },
+    )
+}
+
+/// Default whose evaluation carries its own opcode cost (SizeOf).
+fn costed_default() -> Expr {
+    op(0xB1, Payload::One(Box::new(const_coll_int(vec![7, 8]))))
+}
+
+/// Default whose evaluation errors (ByIndex out of range, no default).
+fn erroring_default() -> Expr {
+    op(
+        0xB2,
+        Payload::ByIndex {
+            input: Box::new(const_coll_int(vec![])),
+            index: Box::new(const_int(0)),
+            default: None,
+        },
+    )
+}
+
+fn ctx_with_tree_version(version: u8) -> ReductionContext<'static> {
+    ReductionContext {
+        ergo_tree_version: version,
+        ..ReductionContext::minimal(500_000, 0)
+    }
+}
+
+fn eval_value_and_cost(expr: &Expr, ctx: &ReductionContext<'_>) -> (Result<Value, EvalError>, u64) {
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut cost = CostAccumulator::recording_only();
+    let mut trace = None;
+    let res = eval_expr(expr, ctx, &[], &mut env, &mut depth, &mut cost, &mut trace);
+    (res, cost.total().value())
+}
+
+#[test]
+fn by_index_default_pre_v3_eager_uniform_cost() {
+    // Pre-v3: the default is evaluated on hit AND miss, so total cost
+    // is identical across the two — exactly what the v5 vector pins
+    // (uniform 162 across all entries).
+    let ctx = ctx_with_tree_version(2);
+    let hit = by_index_with_default(const_coll_int(vec![10, 20, 30]), 1, costed_default());
+    let miss = by_index_with_default(const_coll_int(vec![10, 20, 30]), 5, costed_default());
+    let (hit_val, hit_cost) = eval_value_and_cost(&hit, &ctx);
+    let (miss_val, miss_cost) = eval_value_and_cost(&miss, &ctx);
+    assert_eq!(hit_val.unwrap(), Value::Int(20));
+    assert_eq!(miss_val.unwrap(), Value::Int(2)); // SizeOf(Coll(7,8))
+    assert_eq!(
+        hit_cost, miss_cost,
+        "pre-v3 hit must include the default's eval cost"
+    );
+}
+
+#[test]
+fn by_index_default_pre_v3_eager_error_fires_on_hit() {
+    // Pre-v3: an erroring default poisons the whole node even when the
+    // index is in bounds.
+    let ctx = ctx_with_tree_version(2);
+    let hit = by_index_with_default(const_coll_int(vec![10, 20, 30]), 1, erroring_default());
+    let (val, _) = eval_value_and_cost(&hit, &ctx);
+    assert!(
+        matches!(val, Err(EvalError::TypeError { .. })),
+        "got {val:?}"
+    );
+}
+
+#[test]
+fn by_index_default_v3_lazy_skips_default_on_hit() {
+    // V3+: the default is not evaluated on hit — neither its error
+    // nor its cost lands.
+    let ctx = ctx_with_tree_version(3);
+    let hit_err = by_index_with_default(const_coll_int(vec![10, 20, 30]), 1, erroring_default());
+    let (val, _) = eval_value_and_cost(&hit_err, &ctx);
+    assert_eq!(val.unwrap(), Value::Int(20));
+
+    let hit = by_index_with_default(const_coll_int(vec![10, 20, 30]), 1, costed_default());
+    let miss = by_index_with_default(const_coll_int(vec![10, 20, 30]), 5, costed_default());
+    let (_, hit_cost) = eval_value_and_cost(&hit, &ctx);
+    let (_, miss_cost) = eval_value_and_cost(&miss, &ctx);
+    assert!(
+        hit_cost < miss_cost,
+        "v3 hit ({hit_cost}) must not pay the default's cost ({miss_cost})"
+    );
+}
+
+#[test]
+fn by_index_default_pre_v3_miss_evaluates_default_once() {
+    // The pre-v3 eager value is handed to the miss path — NOT
+    // re-evaluated. Totals across versions must agree on a miss
+    // (identical component set: input + index + default + ByIndex).
+    let miss = by_index_with_default(const_coll_int(vec![10, 20, 30]), 5, costed_default());
+    let (v2_val, v2_cost) = eval_value_and_cost(&miss, &ctx_with_tree_version(2));
+    let (v3_val, v3_cost) = eval_value_and_cost(&miss, &ctx_with_tree_version(3));
+    assert_eq!(v2_val.unwrap(), Value::Int(2));
+    assert_eq!(v3_val.unwrap(), Value::Int(2));
+    assert_eq!(
+        v2_cost, v3_cost,
+        "pre-v3 miss must charge the default exactly once"
+    );
+}
+
 #[test]
 fn opcode_append_bytes() {
     let a = const_bytes(vec![1, 2]);

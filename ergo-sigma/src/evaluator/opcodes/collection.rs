@@ -68,7 +68,6 @@ pub(in crate::evaluator) fn eval_by_index(
     default: Option<&Expr>,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xB2)?;
     let coll = cx.eval_expr(input)?;
     let idx = cx.eval_expr(index)?;
     let idx = match idx {
@@ -80,6 +79,18 @@ pub(in crate::evaluator) fn eval_by_index(
             })
         }
     };
+    // Scala ByIndex.eval (transformers.scala): pre-v3 trees evaluate the
+    // default eagerly after the index — its cost (and any error) lands even
+    // when the index is in bounds. V3+ trees (isV3OrLaterErgoTreeVersion)
+    // evaluate it lazily, only on an out-of-bounds index.
+    let mut eager_default = match default {
+        Some(d) if !cx.ctx.is_v3_ergo_tree() => Some(cx.eval_expr(d)?),
+        _ => None,
+    };
+    // Charge sequencing per Scala ByIndex.eval: input, index, and the
+    // pre-v3 eager default all evaluate BEFORE the ByIndex fixed charge;
+    // the element access / lazy default come after it.
+    add_cost(cx.cost, 0xB2)?;
     match coll {
         Value::BoxCollection(src) => {
             let len = match src {
@@ -93,7 +104,7 @@ pub(in crate::evaluator) fn eval_by_index(
                     index: idx,
                 })
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid box index",
@@ -109,7 +120,7 @@ pub(in crate::evaluator) fn eval_by_index(
                     Value::Long(*amount as i64),
                 ]))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid token index",
@@ -123,7 +134,7 @@ pub(in crate::evaluator) fn eval_by_index(
                 // typed-carrier invariant pinned by the parity tests.
                 Ok(Value::Byte(bytes[idx] as i8))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid byte index",
@@ -135,7 +146,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < ints.len() {
                 Ok(Value::Int(ints[idx]))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid int index",
@@ -147,7 +158,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < longs.len() {
                 Ok(Value::Long(longs[idx]))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid long index",
@@ -159,7 +170,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < shorts.len() {
                 Ok(Value::Short(shorts[idx]))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid short index",
@@ -171,7 +182,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < props.len() {
                 Ok(Value::SigmaProp(props[idx].clone()))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid sigmaprop index",
@@ -183,7 +194,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < bools.len() {
                 Ok(Value::Bool(bools[idx]))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid bool index",
@@ -195,7 +206,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < items.len() {
                 Ok(items[idx].clone())
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid box index",
@@ -207,7 +218,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < headers.len() {
                 Ok(Value::Header(Box::new(headers[idx].clone())))
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid header index",
@@ -223,7 +234,7 @@ pub(in crate::evaluator) fn eval_by_index(
             if idx < items.len() {
                 Ok(items[idx].clone())
             } else if let Some(d) = default {
-                cx.eval_expr(d)
+                take_default(d, &mut eager_default, cx)
             } else {
                 Err(EvalError::TypeError {
                     expected: "valid collection index",
@@ -235,6 +246,19 @@ pub(in crate::evaluator) fn eval_by_index(
             expected: "indexed collection",
             got: format!("{coll:?}"),
         }),
+    }
+}
+
+// Out-of-bounds ByIndex default: hand back the pre-v3 eagerly evaluated
+// value, or evaluate lazily (v3+ trees only evaluate the default on a miss).
+fn take_default(
+    d: &Expr,
+    eager: &mut Option<Value>,
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    match eager.take() {
+        Some(v) => Ok(v),
+        None => cx.eval_expr(d),
     }
 }
 
