@@ -815,6 +815,16 @@ pub(in crate::evaluator) fn eval_method_call(
                     got: format!("ergo_tree_version {}", cx.ctx.ergo_tree_version),
                 });
             }
+            // `DataSerializer.serialize(SOption)` is gated identically (matches
+            // SOption only at isV3OrLaterErgoTreeVersion, else throws). A pre-v3
+            // tree building an Option via some/none and serializing it must be
+            // rejected. Value-based: an empty Coll[Option] is accepted.
+            if sv.contains_option() && !cx.ctx.is_v3_ergo_tree() {
+                return Err(EvalError::TypeError {
+                    expected: "ErgoTree version >= 3 for SOption serialization",
+                    got: format!("ergo_tree_version {}", cx.ctx.ergo_tree_version),
+                });
+            }
             // Charged before producing the bytes (Scala charges
             // StartWriterCost up front, then per-put during the write; the
             // total on success is identical). `try_from_jit` is panic-safe.

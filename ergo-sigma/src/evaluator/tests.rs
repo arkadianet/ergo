@@ -2912,6 +2912,44 @@ fn sheader_gate_is_value_based_not_type_based() {
     );
 }
 
+/// SOption materialization mirrors the SHeader gate: `sigma_to_value_versioned`
+/// is the shared boundary for register values (ExtractRegisterAs), context vars,
+/// plain constants and `deserializeTo`, so a materialized Option on a v<3 tree
+/// is rejected there (matching `CoreDataSerializer`'s v3-gated `SOption` case
+/// and the reference's pre-v3 register/context rejection). The gate is
+/// value-based: an empty `Coll[Option[T]]` materializes none and is accepted.
+#[test]
+fn soption_materialization_gate_is_value_based_not_type_based() {
+    let ctx_v2 = ReductionContext {
+        ergo_tree_version: 2,
+        ..ReductionContext::minimal(0, 0)
+    };
+    // Empty Coll[Option[Int]] on a v<3 tree: NOT gated (no Option materialized).
+    let empty = SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Values(vec![]));
+    let t = SigmaType::SColl(Box::new(SigmaType::SOption(Box::new(SigmaType::SInt))));
+    assert!(
+        crate::evaluator::helpers::sigma_to_value_versioned(&t, &empty, &ctx_v2).is_ok(),
+        "empty Coll[Option] must not be gated on a v<3 tree"
+    );
+    // A materialized Some(5) on a v<3 tree IS gated, on the bare boundary that
+    // registers / context vars / deserializeTo all funnel through.
+    let some = SigmaValue::Opt(Some(Box::new(SigmaValue::Int(5))));
+    let ot = SigmaType::SOption(Box::new(SigmaType::SInt));
+    assert!(
+        crate::evaluator::helpers::sigma_to_value_versioned(&ot, &some, &ctx_v2).is_err(),
+        "a materialized Option value must be gated on a v<3 tree"
+    );
+    // And on a v3 tree it is accepted (CoreDataSerializer matches SOption at v3+).
+    let ctx_v3 = ReductionContext {
+        ergo_tree_version: 3,
+        ..ReductionContext::minimal(0, 0)
+    };
+    assert!(
+        crate::evaluator::helpers::sigma_to_value_versioned(&ot, &some, &ctx_v3).is_ok(),
+        "a materialized Option value must be accepted on a v3 tree"
+    );
+}
+
 /// EIP-50 v6 `SGlobal.fromBigEndianBytes[T]` (MethodCall 106, 5) —
 /// big-endian signed decode into the requested numeric type. Length
 /// must match the target's byte width: 1/2/4/8 for Byte/Short/Int/
@@ -8421,8 +8459,12 @@ fn subst_constants_none_preserves_template_option_type() {
         tpe: SigmaType::SSigmaProp,
         val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
     };
+    // ErgoTree version 3: SOption *data constants* are gated on
+    // isV3OrLaterErgoTreeVersion (Scala CoreDataSerializer), so a pre-v3 tree
+    // carrying an Option constant is rejected at parse (see
+    // SOption.pre_v3_data_constant). v3 is the valid version for this fixture.
     let template = ErgoTree {
-        version: 0,
+        version: 3,
         has_size: false,
         constant_segregation: true,
         constants: vec![(

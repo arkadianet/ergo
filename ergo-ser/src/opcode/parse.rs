@@ -13,12 +13,17 @@ use super::types::{
 /// `tree_version` is the ErgoTree header version byte (`0..=3` in
 /// real-world chains), threaded through the whole expression walk the
 /// way Scala's `SigmaByteReader` exposes the version context to every
-/// serializer. No current body-wire rule consults it: the `MethodCall`
+/// serializer. No body-wire SHAPE rule consults it: the `MethodCall`
 /// explicit-type-args bytes are keyed on `(type_id, method_id)` alone
 /// (see [`method_explicit_type_args_count`]), so callers without a
 /// surrounding tree header (registers,
 /// `DeserializeContext`/`DeserializeRegister` payloads) pass `0` and
-/// still parse v6 method calls correctly.
+/// still parse v6 method calls correctly without desyncing the stream.
+/// It IS consulted for VALIDATION: pre-v3 inline `SHeader`/`SOption`
+/// constants are rejected (see [`parse_expr`]); the version-0 sentinel
+/// those headerless callers pass makes that rejection fire, which is
+/// correct — the reference also rejects such values there (the constant
+/// path via the v3 data gate, register/context vars via `CheckV6Type`).
 pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError> {
     parse_expr(r, 0, tree_version)
 }
@@ -51,6 +56,22 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         if _tree_version < 3 && val.contains_header() {
             return Err(ReadError::InvalidData(format!(
                 "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
+            )));
+        }
+        // SOption data is likewise gated on isV3OrLaterErgoTreeVersion
+        // (CoreDataSerializer matches `SOption` only when v3+, otherwise falls
+        // through to CheckSerializableTypeCode and throws — for Some AND None).
+        // This is the PARSE-TIME companion to the value-materialization gate in
+        // `ergo-sigma` (`sigma_to_value_versioned`): here it rejects a
+        // materialized Option constant that appears INLINE in the parsed tree
+        // body, which carries the real tree version, so a pre-v3 (version < 3)
+        // tree is rejected exactly as the reference rejects it. Plain register /
+        // context-var constants do NOT reach this path (they are read via
+        // `read_constant`); those are gated at materialization instead. An empty
+        // Coll[Option] materializes no Option and is accepted here.
+        if _tree_version < 3 && val.contains_option() {
+            return Err(ReadError::InvalidData(format!(
+                "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
             )));
         }
         return Ok(Expr::Const { tpe, val });
@@ -416,4 +437,54 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         opcode: first,
         payload,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `SOption[SInt]` Some(5) inline constant: type code 0x28
+    // (OPTION_CODE 0x24 + SInt 0x04), option tag 0x01 (Some), zig-zag SInt 0x0a
+    // (= 5). This is the inline (non-segregated) form of the value carried by
+    // the segregated `SOption.pre_v3_data_constant` conformance vector.
+    const INLINE_SOME_INT: &[u8] = &[0x28, 0x01, 0x0a];
+
+    #[test]
+    fn inline_option_constant_rejected_in_pre_v3_tree_body() {
+        // Tree-body inline constants are parsed with the real tree version, so
+        // a materialized Option in a version-2 tree must be rejected exactly as
+        // the reference rejects it (CoreDataSerializer falls through the v3-gated
+        // SOption case to CheckSerializableTypeCode and throws). This is the
+        // escape that the segregated-only `ergo_tree.rs` gate does NOT cover.
+        for version in 0u8..3 {
+            let mut r = VlqReader::new(INLINE_SOME_INT);
+            let err = parse_expr(&mut r, 0, version).expect_err("pre-v3 inline Option must reject");
+            assert!(
+                matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")),
+                "version {version}: unexpected error {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_option_constant_accepted_in_v3_tree_body() {
+        let mut r = VlqReader::new(INLINE_SOME_INT);
+        let expr = parse_expr(&mut r, 0, 3).expect("v3 inline Option must parse");
+        match expr {
+            Expr::Const { val, .. } => assert!(val.contains_option()),
+            other => panic!("expected Const, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_option_constant_rejected_on_headerless_sentinel_path() {
+        // Expression-form headerless payloads (Deserialize* / expression-form
+        // register values) reach parse_expr with the version-0 sentinel; an
+        // inline Option constant nested there is rejected (< 3). Plain register
+        // constants do not reach this path — they go through `read_constant`
+        // and are gated at materialization by `sigma_to_value_versioned`.
+        let mut r = VlqReader::new(INLINE_SOME_INT);
+        let err = parse_expr(&mut r, 0, 0).expect_err("headerless Option must reject");
+        assert!(matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")));
+    }
 }

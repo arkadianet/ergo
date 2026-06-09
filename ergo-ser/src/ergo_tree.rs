@@ -227,6 +227,14 @@ fn parse_body(
                     "SHeader value requires ErgoTree version >= 3 (got {version})"
                 )));
             }
+            // SOption data is gated on isV3OrLaterErgoTreeVersion too
+            // (CheckSerializableTypeCode rejects SOption pre-v3, Some AND None);
+            // a segregated Option constant in a pre-v3 tree is rejected.
+            if version < 3 && val.contains_option() {
+                return Err(ReadError::InvalidData(format!(
+                    "SOption value requires ErgoTree version >= 3 (got {version})"
+                )));
+            }
             consts.push((tpe, val));
         }
         consts
