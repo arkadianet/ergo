@@ -104,6 +104,18 @@ pub(super) fn eval_no_arg_method(
                 Ok(Some(Value::Int(idx as i32)))
             }
         }
+        // SContext(101).LastBlockUtxoRootHash(9) -> AvlTree    cost: 15
+        // Scala LastBlockUtxoRootHash.costKind = FixedCost(JitCost(15))
+        // (values.scala:1495). Emitted as a 0xDB PropertyCall, so it belongs in
+        // the no-arg table; mirrors the inline 0xA6 LastBlockUtxoRootHash arm.
+        (101, 9) => {
+            add_method_cost(cost, 15)?;
+            let avl = ctx
+                .last_block_utxo_root
+                .clone()
+                .ok_or(EvalError::EmptyHeaderWindow)?;
+            Ok(Some(Value::AvlTree(avl)))
+        }
         // SContext(101).minerPubKey(10) -> Coll[Byte]         cost: 20
         (101, 10) => {
             add_method_cost(cost, 20)?;
@@ -149,6 +161,28 @@ pub(super) fn eval_no_arg_method(
                 15 => Value::CollBytes(h.votes.to_vec()),
                 _ => unreachable!(),
             }))
+        }
+        // SHeader(104).checkPow(16) -> Boolean. EIP-50 v6 method.
+        // FixedCost(JitCost(700)) (methods.scala). Re-verifies Autolykos PoW on
+        // the carried header. Emitted as a zero-arg 0xDB PropertyCall, so it
+        // belongs in this shared no-arg table (16 is outside the 1..=15 arm
+        // above, so no match-order hazard). The v6 soft-fork gate is applied by
+        // the dispatcher before this point.
+        (104, 16) => {
+            add_method_cost(cost, 700)?;
+            let eh = match obj_val {
+                Value::Header(h) => h,
+                other => {
+                    return Err(EvalError::TypeError {
+                        expected: "Header for SHeader.checkPow",
+                        got: format!("{other:?}"),
+                    })
+                }
+            };
+            let header = eh.to_header();
+            Ok(Some(Value::Bool(
+                ergo_crypto::pow::verify_pow_solution(&header).is_ok(),
+            )))
         }
         // SPreHeader(105) property methods 1-7                cost: 10
         (105, 1) => {
