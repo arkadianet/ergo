@@ -10604,3 +10604,58 @@ fn methodcall_global_serialize_box_value_and_cost() {
     assert_eq!(v, Value::CollBytes(bytes));
     assert_eq!(acc.total().value(), 80);
 }
+
+// ── Coll.flatMap cost = PerItemCost(60,10,8) over OUTPUT length ──────────────
+// Scala flatMap_eval (methods.scala) charges FlatMapMethod_CostKind =
+// PerItemCost(base=60, perChunk=10, chunkSize=8) over res.length — the OUTPUT
+// (flattened) length — via addSeqCost. Our arm previously charged a flat
+// bogus 0xDC=4 + a bogus 10/input and NO output cost. This pins the missing
+// output-length term: two flatMaps differing ONLY in output length must differ
+// in total cost by exactly FlatMap.cost(big) - FlatMap.cost(small). The lambda
+// body is a constant Coll[Byte] (Expr::Const = fixed 5 regardless of length),
+// so per-input cost and framing are identical across the two — only outLen
+// (= n_in * body_len) differs.
+#[test]
+fn flatmap_charges_peritemcost_over_output_length() {
+    fn mk(body_len: usize) -> Expr {
+        let coll = const_coll_int(vec![1, 2]); // n_in = 2
+        let func = op(
+            0xD9,
+            Payload::FuncValue {
+                args: vec![(1, Some(SigmaType::SInt))],
+                body: Box::new(const_bytes(vec![7u8; body_len])),
+            },
+        );
+        op(
+            0xDC,
+            Payload::MethodCall {
+                type_id: 12,
+                method_id: 15,
+                obj: Box::new(coll),
+                args: vec![func],
+                type_args: vec![],
+            },
+        )
+    }
+    fn cost_of(e: &Expr) -> u64 {
+        let cx = ReductionContext::minimal(0, 0);
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut acc = CostAccumulator::recording_only();
+        let mut trace = None;
+        eval_expr(e, &cx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
+        acc.total().value()
+    }
+    // small: outLen = 2*2  = 4  -> chunks((4-1)/8+1)=1  -> FlatMap.cost = 70
+    // big:   outLen = 2*18 = 36 -> chunks((36-1)/8+1)=5 -> FlatMap.cost = 110
+    // difference attributable solely to the output-length cost = 40.
+    let small = cost_of(&mk(2));
+    let big = cost_of(&mk(18));
+    assert_eq!(
+        big - small,
+        40,
+        "flatMap must charge PerItemCost(60,10,8) over the OUTPUT length \
+         (got diff {} between outLen 36 and 4)",
+        big - small,
+    );
+}
