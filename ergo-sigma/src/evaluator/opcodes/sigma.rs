@@ -372,7 +372,12 @@ pub(in crate::evaluator) fn eval_sigma_and_collection(
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     add_cost_per_item(cx.cost, 0xEA, items.len() as u32)?;
-    let mut real_children = Vec::new();
+    // Scala SigmaAnd.eval evaluates EVERY operand (charging each) BEFORE
+    // collapsing — a sigma conjunction is not a boolean short-circuit. The
+    // collapse (FalseProp is absorbing, TrueProp is the identity) is cost-free
+    // and happens only after all children are evaluated. Returning early on a
+    // trivial operand (as before) skipped a later operand's eval cost.
+    let mut children = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let val = cx.eval_expr(item)?;
         if let Some(t) = cx.trace.as_mut() {
@@ -382,11 +387,7 @@ pub(in crate::evaluator) fn eval_sigma_and_collection(
             });
         }
         match val {
-            Value::SigmaProp(SigmaBoolean::TrivialProp(true)) => {} // identity in AND
-            Value::SigmaProp(SigmaBoolean::TrivialProp(false)) => {
-                return Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(false)));
-            }
-            Value::SigmaProp(sb) => real_children.push(sb),
+            Value::SigmaProp(sb) => children.push(sb),
             _ => {
                 return Err(EvalError::TypeError {
                     expected: "SigmaProp",
@@ -395,6 +396,18 @@ pub(in crate::evaluator) fn eval_sigma_and_collection(
             }
         }
     }
+    // Cost-free collapse: FalseProp anywhere absorbs to FalseProp; TrueProp
+    // operands are dropped (identity).
+    if children
+        .iter()
+        .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(false)))
+    {
+        return Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(false)));
+    }
+    let real_children: Vec<SigmaBoolean> = children
+        .into_iter()
+        .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(true)))
+        .collect();
     Ok(Value::SigmaProp(match real_children.len() {
         0 => SigmaBoolean::TrivialProp(true),
         1 => real_children.into_iter().next().unwrap(),
@@ -408,7 +421,11 @@ pub(in crate::evaluator) fn eval_sigma_or_collection(
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     add_cost_per_item(cx.cost, 0xEB, items.len() as u32)?;
-    let mut real_children = Vec::new();
+    // Scala SigmaOr.eval evaluates EVERY operand (charging each) BEFORE
+    // collapsing (TrueProp is absorbing, FalseProp is the identity); the
+    // collapse is cost-free. Returning early on a trivial operand skipped a
+    // later operand's eval cost.
+    let mut children = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let val = cx.eval_expr(item)?;
         if let Some(t) = cx.trace.as_mut() {
@@ -418,11 +435,7 @@ pub(in crate::evaluator) fn eval_sigma_or_collection(
             });
         }
         match val {
-            Value::SigmaProp(SigmaBoolean::TrivialProp(true)) => {
-                return Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(true)));
-            }
-            Value::SigmaProp(SigmaBoolean::TrivialProp(false)) => {} // identity in OR
-            Value::SigmaProp(sb) => real_children.push(sb),
+            Value::SigmaProp(sb) => children.push(sb),
             _ => {
                 return Err(EvalError::TypeError {
                     expected: "SigmaProp",
@@ -431,6 +444,18 @@ pub(in crate::evaluator) fn eval_sigma_or_collection(
             }
         }
     }
+    // Cost-free collapse: TrueProp anywhere absorbs to TrueProp; FalseProp
+    // operands are dropped (identity).
+    if children
+        .iter()
+        .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(true)))
+    {
+        return Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(true)));
+    }
+    let real_children: Vec<SigmaBoolean> = children
+        .into_iter()
+        .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(false)))
+        .collect();
     Ok(Value::SigmaProp(match real_children.len() {
         0 => SigmaBoolean::TrivialProp(false),
         1 => real_children.into_iter().next().unwrap(),

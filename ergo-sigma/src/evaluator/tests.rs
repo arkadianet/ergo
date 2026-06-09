@@ -2365,6 +2365,58 @@ fn opcode_sigma_or_one_true() {
 }
 
 #[test]
+fn sigma_and_or_evaluate_all_operands_no_short_circuit() {
+    // Scala SigmaAnd/SigmaOr evaluate EVERY operand (charging each) before the
+    // trivial collapse — they are not boolean short-circuits. So an absorbing
+    // first operand (FalseProp for AND, TrueProp for OR) must NOT skip the
+    // later operands' evaluation. (This is the +15 cost divergence the fix
+    // closes; it also corrects the value/error on a later erroring operand.)
+    // FalseProp && <Int> must EVALUATE the Int (erroring on its type), not
+    // short-circuit to FalseProp.
+    let and = op(
+        0xEA,
+        Payload::SigmaCollection {
+            items: vec![
+                op(0xD1, Payload::One(Box::new(const_bool(false)))),
+                const_int(5),
+            ],
+        },
+    );
+    assert!(
+        matches!(run_eval_err(&and), EvalError::TypeError { .. }),
+        "SigmaAnd must evaluate all operands (no short-circuit)",
+    );
+    // TrueProp || <Int> — symmetric.
+    let or = op(
+        0xEB,
+        Payload::SigmaCollection {
+            items: vec![
+                op(0xD1, Payload::One(Box::new(const_bool(true)))),
+                const_int(5),
+            ],
+        },
+    );
+    assert!(
+        matches!(run_eval_err(&or), EvalError::TypeError { .. }),
+        "SigmaOr must evaluate all operands (no short-circuit)",
+    );
+    // Collapse value is unchanged: FalseProp && TrueProp -> FalseProp.
+    let collapse = op(
+        0xEA,
+        Payload::SigmaCollection {
+            items: vec![
+                op(0xD1, Payload::One(Box::new(const_bool(false)))),
+                op(0xD1, Payload::One(Box::new(const_bool(true)))),
+            ],
+        },
+    );
+    assert!(matches!(
+        run_eval(&collapse),
+        Value::SigmaProp(SigmaBoolean::TrivialProp(false))
+    ));
+}
+
+#[test]
 fn opcode_decode_point() {
     let g: Vec<u8> = vec![
         0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
