@@ -1900,7 +1900,11 @@ pub(in crate::evaluator) fn eval_method_call(
             values_to_collection(kind, items, elem_type)
         }
         // SOption(36).map(7) -> Option[B]
-        // Scala: opt.map(f) â€” apply f to value if Some, return None if None
+        // Scala: opt.map(f) â€” apply f to value if Some, return None if None.
+        // `SOption.MapMethod.costKind = FixedCost(JitCost(20))`; applying the
+        // lambda to a Some value additionally charges AddToEnv(5) when the
+        // argument is bound (same per-application overhead as every other HOF
+        // lambda invocation, e.g. MapCollection). None applies no lambda.
         (36, 7) => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -1908,7 +1912,7 @@ pub(in crate::evaluator) fn eval_method_call(
                     got: args.len(),
                 });
             }
-            add_method_cost(cx.cost, 10)?;
+            add_method_cost(cx.cost, 20)?;
             let func_val = cx.eval_expr(&args[0])?;
             match obj_val {
                 Value::Opt(None) => Ok(Value::Opt(None)),
@@ -1919,6 +1923,9 @@ pub(in crate::evaluator) fn eval_method_call(
                         param_types: _,
                         body,
                     } => {
+                        cx.cost.add(JitCost::from_jit(5))?;
+                        #[cfg(feature = "cost-trace")]
+                        crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
                         let mut call_env = (*captured_env).clone();
                         if let Some(param_id) = params.first() {
                             call_env.insert(*param_id, *inner);
