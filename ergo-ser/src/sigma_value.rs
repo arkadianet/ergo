@@ -145,6 +145,23 @@ impl SigmaValue {
             _ => false,
         }
     }
+
+    /// Whether this value materializes an `Option` anywhere within it. Scala
+    /// gates `SOption` data (de)serialization on `isV3OrLaterErgoTreeVersion`
+    /// (`CoreDataSerializer` → `CheckSerializableTypeCode` throws on
+    /// `SOption.OptionTypeCode` pre-v3) — for BOTH `Some` and `None`. So a
+    /// materialized `Option` constant (either variant) is rejected on a pre-v3
+    /// tree; an empty `Coll[Option[T]]` materializes none and is accepted. Used
+    /// by the pre-v3 constant gates alongside [`contains_header`].
+    pub fn contains_option(&self) -> bool {
+        match self {
+            SigmaValue::Opt(_) => true,
+            SigmaValue::Coll(CollValue::Values(vs)) | SigmaValue::Tuple(vs) => {
+                vs.iter().any(SigmaValue::contains_option)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Element-type-specialised collection storage. The bool and byte

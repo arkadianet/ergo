@@ -1117,6 +1117,15 @@ pub(crate) fn subst_constants(
                     "substConstants: SHeader constant requires ErgoTree version >= 3",
                 ));
             }
+            // SOption is gated identically to SHeader (CoreDataSerializer matches
+            // SOption only at isV3OrLaterErgoTreeVersion); a pre-v3 tree carrying
+            // a materialized Option constant in crafted scriptBytes is rejected.
+            // Value-based: an empty Coll[Option] materializes none and is accepted.
+            if !is_v3_ergo_tree && val.contains_option() {
+                return Err(EvalError::RuntimeException(
+                    "substConstants: SOption constant requires ErgoTree version >= 3",
+                ));
+            }
             constants.push((tpe, val));
         }
     }
@@ -1162,6 +1171,14 @@ pub(crate) fn subst_constants(
                     "substConstants: SHeader substitution requires ErgoTree version >= 3",
                 ));
             }
+            // Same v3 gate for a substituted Option value
+            // (DataSerializer.serialize(SOption) throws pre-v3) — covers e.g. a
+            // non-empty Coll[Option] replacement of an empty (accepted) template.
+            if sv.contains_option() && !is_v3_ergo_tree {
+                return Err(EvalError::RuntimeException(
+                    "substConstants: SOption substitution requires ErgoTree version >= 3",
+                ));
+            }
             // Serialize with the TEMPLATE type (== the new value's type by the
             // check above), matching Scala and preserving the template's
             // concrete descriptor where our recovery would degrade to
@@ -1188,18 +1205,30 @@ pub(crate) fn subst_constants(
 /// Convert a typed SigmaValue to a runtime Value.
 ///
 /// Shared lowering path for constants (ConstPlaceholder), register values
-/// (ExtractRegisterAs), and any other typed sigma data entering the evaluator.
-/// [`sigma_to_value`] with the v6 SHeader gate. Scala materializes an
-/// `SHeader` value (constant, context var, register, deserializeTo) only when
-/// `VersionContext.isV3OrLaterErgoTreeVersion` — a pre-v3 ErgoTree carrying an
-/// SHeader value is rejected by `DataSerializer`. Mirror that here so we never
-/// accept input the reference node rejects (accept-invalid fork hazard).
+/// (ExtractRegisterAs), context-var extensions (GetVar) and `deserializeTo`
+/// — every boundary that turns a typed `SigmaValue` into a runtime `Value`.
+/// [`sigma_to_value`] plus the v6-type gates. Scala materializes an `SHeader`
+/// or `SOption` value only when `VersionContext.isV3OrLaterErgoTreeVersion`
+/// (`CoreDataSerializer` matches each only at ergoTreeVersion>=3, else falls
+/// through and throws) — so a pre-v3 ErgoTree carrying either is rejected.
+/// Mirror that here so we never accept input the reference node rejects
+/// (accept-invalid fork hazard). This is the VALUE-materialization companion
+/// to the parse-time constant gates in `ergo-ser` (`contains_header` /
+/// `contains_option`), and it is what gates register / context-var / plain-
+/// constant payloads that bypass `parse_expr`.
 ///
-/// The gate keys on whether the VALUE actually contains a header (Scala gates
-/// per materialized header, not per static type): an empty `Coll[Header]`
-/// materializes no header and is accepted on any version, matching the
-/// reference. Use this at every evaluator boundary that turns a `SigmaValue`
-/// into a `Value`.
+/// The gates key on whether the VALUE actually materializes a header / option
+/// (Scala gates per materialized value, not per static type): an empty
+/// `Coll[Header]` / `Coll[Option[T]]` materializes none and is accepted on any
+/// version, matching the reference.
+///
+/// NOTE: registers and context vars are additionally subject to the reference's
+/// `CheckV6Type`, which rejects Option/Header/UnsignedBigInt-typed values
+/// UNCONDITIONALLY (at every activated version, not just pre-v3). The
+/// version-conditional gate below matches the reference pre-v3 (and for
+/// constants/`deserializeTo` at all versions); the unconditional v3+
+/// register/context rejection is a separate, pre-existing gap shared with the
+/// SHeader gate, tracked with the Box-register-access work.
 pub(crate) fn sigma_to_value_versioned(
     tpe: &SigmaType,
     val: &SigmaValue,
@@ -1208,6 +1237,12 @@ pub(crate) fn sigma_to_value_versioned(
     if !ctx.is_v3_ergo_tree() && val.contains_header() {
         return Err(EvalError::TypeError {
             expected: "ErgoTree version >= 3 for an SHeader value (isV3OrLaterErgoTreeVersion)",
+            got: format!("ergoTreeVersion={}", ctx.ergo_tree_version),
+        });
+    }
+    if !ctx.is_v3_ergo_tree() && val.contains_option() {
+        return Err(EvalError::TypeError {
+            expected: "ErgoTree version >= 3 for an SOption value (isV3OrLaterErgoTreeVersion)",
             got: format!("ergoTreeVersion={}", ctx.ergo_tree_version),
         });
     }
