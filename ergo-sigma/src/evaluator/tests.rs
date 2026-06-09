@@ -10150,3 +10150,330 @@ fn unpack_collection_accepts_native_coll_header() {
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|v| matches!(v, Value::Header(_))));
 }
+
+// ════════════════════ SGlobal.serialize(Box) — EIP-50 v6 ════════════════════
+// SBox serialize: `value_to_typed_sigma(InlineBox)` surfaces
+// `(SBox, OpaqueBoxBytes(raw))` and `serialize_put_cost(SBox)` re-parses those
+// bytes to charge the exact `SigmaByteWriter` put-cost sequence
+// `ErgoBox.sigmaSerializer` emits (Scala oracle:
+// `ErgoBoxCandidate.serializeBodyWithIndexedDigests` + `ErgoBox.sigmaSerializer`):
+//   putULong(value)=3, putBytes(tree)=chunk(treeLen), putUInt(height)=0,
+//   putUByte(nTokens)=1, per-token putBytes(32)+putULong = chunk(32)+3 = 38,
+//   putUByte(nRegs)=1, per-register putValue, putBytes(txId)=chunk(32)=35,
+//   putUShort(index)=3.  chunk(n) = 3 + n.
+// Register putValue (ValueSerializer): Constant -> type_enc_bytes(tpe) (1/byte)
+// + DataSerializer cost; CreateTuple(0x86) -> put(opcode)=1 + putUByte(count)=1
+// + Σ item putValue.
+
+/// Scala-6.1.2 sizeless v6 proposition tree (10 bytes); parses via the
+/// `read_ergo_box` full-walk so `read_ergo_box_candidate` finds the boundary.
+fn ser_box_tree() -> Vec<u8> {
+    hex::decode("1000d1efe6db6a0add04").unwrap()
+}
+
+/// Assemble standalone box bytes (candidate body + 32-byte txId + VLQ index)
+/// from parts. `reg_section` is the verbatim register block (count byte +
+/// entries) so const-vs-expr register encodings round-trip byte-exact.
+fn build_box(
+    value: u64,
+    tree: &[u8],
+    height: u32,
+    tokens: &[([u8; 32], u64)],
+    reg_section: &[u8],
+    txid: &[u8; 32],
+    index: u16,
+) -> Vec<u8> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_u64(value);
+    w.put_bytes(tree);
+    w.put_u32(height);
+    w.put_u8(tokens.len() as u8);
+    for (id, amt) in tokens {
+        w.put_bytes(id);
+        w.put_u64(*amt);
+    }
+    w.put_bytes(reg_section);
+    w.put_bytes(txid);
+    w.put_u16(index);
+    w.result()
+}
+
+/// Register block with zero registers (the bare count byte).
+fn reg_none() -> Vec<u8> {
+    vec![0u8]
+}
+
+/// Register block: a single R4 written in CONSTANT form (type code <= 0x70
+/// followed by data). Tuple constants (quad code 0x54, tuple-n code 0x60) are
+/// detected as constants by `read_register_value` and cost
+/// type_enc_bytes(tpe) + DataSerializer cost.
+fn reg_const(tpe: &SigmaType, val: &SigmaValue) -> Vec<u8> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_u8(1);
+    ergo_ser::sigma_value::write_constant(&mut w, tpe, val).unwrap();
+    w.result()
+}
+
+/// Register block from structured `AdditionalRegisters` — `write_registers`
+/// emits tuples in the CreateTuple (0x86) EXPRESSION form, which costs
+/// 1(opcode) + 1(count) + Σ item putValue.
+fn reg_from_registers(regs: ergo_ser::register::AdditionalRegisters) -> Vec<u8> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::register::write_registers(&mut w, &regs).unwrap();
+    w.result()
+}
+
+fn ser_box_cost(bytes: Vec<u8>) -> u64 {
+    crate::evaluator::opcodes::method_call::serialize_put_cost(
+        &SigmaType::SBox,
+        &SigmaValue::OpaqueBoxBytes(bytes),
+    )
+    .unwrap()
+}
+
+#[test]
+fn serialize_put_cost_box_minimal() {
+    // 3(value) + chunk(10)=13(tree) + 0(height) + 1(nTok) + 1(nRegs)
+    // + 35(txId) + 3(index) = 56.
+    let b = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(b), 56);
+}
+
+#[test]
+fn serialize_put_cost_box_with_tokens() {
+    // Each token adds chunk(32)+putULong = 35 + 3 = 38.
+    let one = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[([0x11; 32], 1000)],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(one), 56 + 38);
+    let two = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[([0x11; 32], 1000), ([0x22; 32], 5)],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(two), 56 + 76);
+}
+
+#[test]
+fn serialize_put_cost_box_with_int_register() {
+    // R4 = Int(42) CONSTANT: type_enc(SInt)=1 + DataSerializer(SInt)=3 = 4.
+    let reg = reg_const(&SigmaType::SInt, &SigmaValue::Int(42));
+    let b = build_box(1_000_000, &ser_box_tree(), 100, &[], &reg, &[0xAB; 32], 7);
+    assert_eq!(ser_box_cost(b), 56 + 4);
+}
+
+#[test]
+fn serialize_put_cost_box_with_const_tuple_registers() {
+    // R4 = 4-tuple of Byte CONSTANT: type_enc(quad)=5 + data(4) = 9.
+    let tpe4 = SigmaType::STuple(vec![SigmaType::SByte; 4]);
+    let val4 = SigmaValue::Tuple((1u8..=4).map(|n| SigmaValue::Byte(n as i8)).collect());
+    let b4 = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_const(&tpe4, &val4),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(b4), 56 + 9);
+
+    // R4 = 5-tuple of Byte CONSTANT: type_enc(tuple5)=7 + data(5) = 12.
+    let tpe5 = SigmaType::STuple(vec![SigmaType::SByte; 5]);
+    let val5 = SigmaValue::Tuple((1u8..=5).map(|n| SigmaValue::Byte(n as i8)).collect());
+    let b5 = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_const(&tpe5, &val5),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(b5), 56 + 12);
+}
+
+#[test]
+fn serialize_put_cost_box_with_expr_tuple_register() {
+    // R4 = (Byte, Byte) as CreateTuple(0x86) EXPRESSION:
+    // 1(opcode) + 1(count) + 2 * [type_enc(SByte)=1 + data=1] = 6.
+    use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    let regs = AdditionalRegisters {
+        registers: vec![RegisterValue {
+            tpe: SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte]),
+            value: SigmaValue::Tuple(vec![SigmaValue::Byte(102), SigmaValue::Byte(99)]),
+        }],
+    };
+    let b = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_from_registers(regs),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(b), 56 + 6);
+}
+
+#[test]
+fn serialize_put_cost_nested_box_int_tuple() {
+    // serialize((box, Int)) costs serialize(box) + DataSerializer(SInt)=3,
+    // exercising the STuple -> SBox recursion in serialize_put_cost.
+    use crate::evaluator::opcodes::method_call::serialize_put_cost;
+    let b = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    let tpe = SigmaType::STuple(vec![SigmaType::SBox, SigmaType::SInt]);
+    let val = SigmaValue::Tuple(vec![SigmaValue::OpaqueBoxBytes(b), SigmaValue::Int(7)]);
+    assert_eq!(serialize_put_cost(&tpe, &val).unwrap(), 56 + 3);
+}
+
+#[test]
+fn serialize_put_cost_box_with_nested_expr_tuple_register() {
+    // R4 = ((Byte,Byte),(Byte,Byte)) as nested CreateTuple(0x86) expressions
+    // (write_registers emits the expression form recursively). Outer putValue =
+    // 1(opcode)+1(count) + 2 * inner; inner putValue = 1(opcode)+1(count) +
+    // 2*[type_enc(SByte)=1 + data=1] = 6. So register cost = 2 + 2*6 = 14.
+    use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    let inner_t = SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte]);
+    let inner_v = || SigmaValue::Tuple(vec![SigmaValue::Byte(1), SigmaValue::Byte(2)]);
+    let regs = AdditionalRegisters {
+        registers: vec![RegisterValue {
+            tpe: SigmaType::STuple(vec![inner_t.clone(), inner_t]),
+            value: SigmaValue::Tuple(vec![inner_v(), inner_v()]),
+        }],
+    };
+    let b = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_from_registers(regs),
+        &[0xAB; 32],
+        7,
+    );
+    assert_eq!(ser_box_cost(b), 56 + 14);
+}
+
+#[test]
+fn serialize_put_cost_box_with_concrete_collection_register() {
+    // R4 = Coll[Int](1, 2) stored as a ConcreteCollection(0x83) EXPRESSION (a
+    // valid register EvaluatedValue). putValue cost = 1(opcode) + 3(putUShort
+    // size) + type_enc(SInt elem)=1 + 2 * [type_enc(SInt)=1 + DataSerializer=3]
+    // = 5 + 8 = 13. Anchored to ConcreteCollectionSerializer.serialize.
+    use ergo_ser::opcode::{write_expr, Expr as SerExpr, IrNode as SerNode, Payload as SerPayload};
+    let cc = SerExpr::Op(SerNode {
+        opcode: 0x83,
+        payload: SerPayload::ConcreteCollection {
+            elem_type: SigmaType::SInt,
+            items: vec![
+                SerExpr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(1),
+                },
+                SerExpr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(2),
+                },
+            ],
+        },
+    });
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_u8(1); // register count
+    write_expr(&mut w, &cc, false).unwrap();
+    let reg = w.result();
+    let b = build_box(1_000_000, &ser_box_tree(), 100, &[], &reg, &[0xAB; 32], 7);
+    assert_eq!(ser_box_cost(b), 56 + 13);
+}
+
+#[test]
+fn value_to_typed_sigma_inline_box_surfaces_opaque_bytes() {
+    // The InlineBox carrier (a decoded SBox) serializes back via its verbatim
+    // raw_bytes: value_to_typed_sigma yields (SBox, OpaqueBoxBytes(raw)) and the
+    // raw bytes round-trip the canonical box bytes byte-for-byte.
+    let bytes = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    let v = sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(bytes.clone())).unwrap();
+    assert!(matches!(v, Value::InlineBox(_)));
+    let (t, sv) = value_to_typed_sigma(&v).unwrap();
+    assert_eq!(t, SigmaType::SBox);
+    match sv {
+        SigmaValue::OpaqueBoxBytes(raw) => assert_eq!(raw, bytes),
+        other => panic!("expected OpaqueBoxBytes, got {other:?}"),
+    }
+}
+
+#[test]
+fn methodcall_global_serialize_box_value_and_cost() {
+    // End-to-end: SGlobal.serialize(box constant) -> Coll[Byte] equal to the
+    // box bytes (verbatim raw_bytes), AND the total JitCost = 80:
+    //   14 shared MethodCall framing (SGlobal receiver 0xDD + 0xDC dispatch +
+    //      the SBox arg const) — the same 14 documented in
+    //      methodcall_deserialize_to_cost_matches_v6_0_2
+    //   + StartWriterCost(10) + serialize_put_cost(SBox minimal)=56
+    //   (56 is pinned independently by serialize_put_cost_box_minimal).
+    let bytes = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    let sbox = Expr::Const {
+        tpe: SigmaType::SBox,
+        val: SigmaValue::OpaqueBoxBytes(bytes.clone()),
+    };
+    let ser = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 106,
+            method_id: 3,
+            obj: Box::new(op(0xDD, Payload::Zero)),
+            args: vec![sbox],
+            type_args: vec![],
+        },
+    );
+    let mut cx = ReductionContext::minimal(0, 0);
+    cx.activated_script_version = 3;
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut acc = CostAccumulator::recording_only();
+    let mut trace = None;
+    let v = eval_expr(&ser, &cx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
+    assert_eq!(v, Value::CollBytes(bytes));
+    assert_eq!(acc.total().value(), 80);
+}

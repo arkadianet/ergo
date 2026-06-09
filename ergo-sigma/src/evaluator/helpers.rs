@@ -1002,13 +1002,24 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
                 SigmaValue::Coll(CollValue::Values(vals)),
             ))
         }
+        // SBox: the InlineBox carrier holds the verbatim serialized box bytes
+        // (`raw_bytes` == Scala serialize(box), byte-identical — the parser
+        // preserves the tree and register bytes verbatim). DataSerializer
+        // routes SBox to `ErgoBox.sigmaSerializer`; hand the cached bytes to
+        // `write_value(SBox, OpaqueBoxBytes)` (-> put_bytes), and
+        // `serialize_put_cost(SBox)` re-parses them for the put-cost sum.
+        // SelfBox / BoxRef would need context resolution to a concrete box; no
+        // SANTA vector exercises a top-level serialize(SELF)/serialize(INPUTS),
+        // so they stay in the catch-all below.
+        Value::InlineBox(eb) => Ok((
+            SigmaType::SBox,
+            SigmaValue::OpaqueBoxBytes(eb.raw_bytes.clone()),
+        )),
         // Catch-all rejects the remaining non-serializable runtime carriers
-        // (BoxCollection / SelfBox / BoxRef / InlineBox / Func / Global / Opt
-        // / Tokens / PreHeader / CollBox). These either lack a public
-        // SigmaValue counterpart or have no Scala-anchored bytes for the
-        // SubstConstants/SGlobal.serialize boundary. (SBox serialize is a
-        // separate follow-up needing the structured box for its register/token
-        // cost recursion.)
+        // (BoxCollection / SelfBox / BoxRef / Func / Global / Opt / Tokens /
+        // PreHeader / CollBox). These either lack a public SigmaValue
+        // counterpart or have no Scala-anchored bytes for the
+        // SubstConstants/SGlobal.serialize boundary.
         other => Err(EvalError::TypeError {
             expected: "serializable value for SubstConstants",
             got: format!("{other:?}"),

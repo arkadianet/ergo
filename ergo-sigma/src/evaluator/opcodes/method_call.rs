@@ -2738,6 +2738,48 @@ pub(in crate::evaluator) fn serialize_put_cost(
             };
             c
         }
+        // ErgoBox.sigmaSerializer (= ErgoBoxCandidate.
+        // serializeBodyWithIndexedDigests + the 32-byte txId and
+        // putUShort(index) tail). Mirrors the SigmaByteWriter put-cost
+        // sequence exactly (chunk(n) = 3 + n; putULong/putUShort = 3;
+        // putUInt = 0; putUByte = 1):
+        //   putULong(value)=3 + putBytes(ergoTree)=chunk(treeLen)
+        //   + putUInt(height)=0 + putUByte(nTokens)=1
+        //   + Σ_tokens [putBytes(id 32)=35 + putULong(amount)=3]
+        //   + putUByte(nRegs)=1 + Σ_regs putValue
+        //   + putBytes(txId 32)=35 + putUShort(index)=3.
+        // The box bytes carried by `OpaqueBoxBytes` are byte-identical to
+        // Scala serialize(box) (the InlineBox carrier preserves the verbatim
+        // tree and register bytes), so re-parsing recovers the exact structure
+        // Scala costs. `read_ergo_box_candidate` leaves txId+index trailing,
+        // which the formula charges explicitly.
+        (T::SBox, Sv::OpaqueBoxBytes(bytes)) => {
+            let chunk = |n: usize| 3 + n as u64;
+            let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+            let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut r).map_err(|e| {
+                EvalError::TypeError {
+                    expected: "parseable SBox bytes for SGlobal.serialize cost",
+                    got: format!("box parse error: {e}"),
+                }
+            })?;
+            let mut c = 3; // putULong(value)
+            c += chunk(candidate.ergo_tree_bytes().len()); // putBytes(ergoTree)
+                                                           // putUInt(height) = 0
+            c += 1; // putUByte(nTokens)
+            c += candidate.tokens.len() as u64 * (chunk(32) + 3); // per token
+            c += 1; // putUByte(nRegs)
+            let reg_slices = ergo_ser::register::split_register_bytes(candidate.register_bytes())
+                .map_err(|e| EvalError::TypeError {
+                expected: "parseable SBox register bytes for SGlobal.serialize cost",
+                got: format!("register split error: {e}"),
+            })?;
+            for slice in &reg_slices {
+                c += register_put_value_cost(slice)?;
+            }
+            c += chunk(32); // putBytes(txId)
+            c += 3; // putUShort(index)
+            c
+        }
         _ => {
             return Err(EvalError::TypeError {
                 expected: "DataSerializer-serializable value for SGlobal.serialize",
@@ -2746,6 +2788,87 @@ pub(in crate::evaluator) fn serialize_put_cost(
         }
     };
     Ok(cost)
+}
+
+/// JitCost of `TypeSerializer.serialize(tpe)`. Scala writes a serialized type
+/// only via `w.put`/`w.putUByte` (each `PutByteCost` = 1), so the cost equals
+/// the serialized type's byte length. `ergo_ser::sigma_type::write_type` IS the
+/// TypeSerializer encoder, so serialize-and-count is exact for every type
+/// (including the pair/triple/quad/tuple-n encodings).
+fn type_enc_bytes(tpe: &ergo_ser::sigma_type::SigmaType) -> u64 {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::sigma_type::write_type(&mut w, tpe);
+    w.result().len() as u64
+}
+
+/// JitCost of `SigmaByteWriter.putValue(v)` for a box register value, mirroring
+/// `ValueSerializer.serialize`. The register's ORIGINAL bytes decide the
+/// encoding — a tuple value can be stored EITHER as a Constant (leading type
+/// code <= 0x70) OR as a CreateTuple expression (0x86), and the normalized
+/// parsed value loses that distinction — so cost is derived structurally from
+/// the parsed expression (`parse_expr` round-trips both forms).
+fn register_put_value_cost(bytes: &[u8]) -> Result<u64, EvalError> {
+    let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+    // Box registers parse with tree_version 0 (`read_register_value`), so a box
+    // that already materialized as a value carries registers this parser
+    // accepts; re-parsing here cannot spuriously reject.
+    let expr = ergo_ser::opcode::parse_expr(&mut r, 0, 0).map_err(|e| EvalError::TypeError {
+        expected: "parseable register value for SGlobal.serialize cost",
+        got: format!("register parse error: {e}"),
+    })?;
+    expr_put_value_cost(&expr)
+}
+
+/// Recursive `putValue` cost over a parsed register expression. The valid
+/// register `EvaluatedValue` forms (Scala: `Constant`, `Tuple`,
+/// `ConcreteCollection`) each cost their `ValueSerializer.serialize` puts:
+///   - Constant: `ValueSerializer` takes the constant path (no opCode byte) ->
+///     `ConstantSerializer` = `putType` + `DataSerializer` =
+///     `type_enc_bytes(tpe)` + `serialize_put_cost(tpe, value)`.
+///   - CreateTuple (0x86): `put(opCode)` = 1, then `TupleSerializer` writes
+///     `putUByte(count)` = 1 and `putValue` per item.
+///   - ConcreteCollection (0x83): `put(opCode)` = 1, then
+///     `ConcreteCollectionSerializer` writes `putUShort(size)` = 3,
+///     `putType(elemType)`, and `putValue` per item.
+///
+/// All recurse, so nested constants / tuples / collections are costed exactly.
+fn expr_put_value_cost(expr: &Expr) -> Result<u64, EvalError> {
+    use ergo_ser::opcode::{IrNode, Payload};
+    match expr {
+        Expr::Const { tpe, val } => Ok(type_enc_bytes(tpe) + serialize_put_cost(tpe, val)?),
+        Expr::Op(IrNode {
+            opcode: 0x86,
+            payload: Payload::Tuple { items },
+        }) => {
+            let mut c = 1 + 1; // put(opCode) + putUByte(count)
+            for item in items {
+                c += expr_put_value_cost(item)?;
+            }
+            Ok(c)
+        }
+        // ConcreteCollection is a valid register `EvaluatedValue`
+        // (`ConcreteCollection extends EvaluatedCollection extends
+        // EvaluatedValue`), so a collection-valued register must be costed, not
+        // rejected. `read_register_value` admits only the 0x83 form here (the
+        // 0x85 boolean-packed variant is rejected upstream during box parse, so
+        // it never reaches this cost path).
+        Expr::Op(IrNode {
+            opcode: 0x83,
+            payload: Payload::ConcreteCollection { elem_type, items },
+        }) => {
+            // put(opCode)=1 + putUShort(size)=3 + putType(elemType)
+            let mut c = 1 + 3 + type_enc_bytes(elem_type);
+            for item in items {
+                c += expr_put_value_cost(item)?;
+            }
+            Ok(c)
+        }
+        Expr::Op(IrNode { opcode, .. }) => Err(EvalError::TypeError {
+            expected:
+                "Constant, CreateTuple, or ConcreteCollection register value for SGlobal.serialize",
+            got: format!("register opcode 0x{opcode:02X}"),
+        }),
+    }
 }
 
 /// Per-put JitCost for serializing a `SigmaBoolean` via Scala's
