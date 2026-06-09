@@ -112,10 +112,13 @@ pub fn opcode_cost(opcode: u8) -> Result<CostKind, EvalError> {
         // constant-encoding path. The parser rejects 0xDF.
 
         // Sigma props
-        0xD1 => fixed(15),          // BoolToSigmaProp
-        0xCD => fixed(10),          // ProveDlog
-        0xCE => fixed(20),          // ProveDHTuple
-        0x98 => per_item(10, 2, 1), // AtLeast (k-of-n threshold)
+        0xD1 => fixed(15), // BoolToSigmaProp
+        0xCD => fixed(10), // ProveDlog
+        0xCE => fixed(20), // ProveDHTuple
+        // AtLeast (k-of-n threshold): Scala `sigma.ast.AtLeast.costKind`
+        // = PerItemCost(baseCost=20, perChunkCost=3, chunkSize=5), charged
+        // via addSeqCost over the number of children.
+        0x98 => per_item(20, 3, 5),
         0xEA => per_item(10, 2, 1), // SigmaAnd
         0xEB => per_item(10, 2, 1), // SigmaOr
         0xD0 => per_item(35, 6, 1), // SigmaPropBytes

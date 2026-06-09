@@ -9286,6 +9286,60 @@ fn coll_short_map_per_item_delta_matches_coll_int() {
     );
 }
 
+// ---- AtLeast (0x98) cost: Scala PerItemCost(base=20, perChunk=3, chunkSize=5) ----
+// `sigma.ast.AtLeast.costKind` is charged via `addSeqCost(costKind,
+// props.length)`. Scala `chunks(n) = (n-1)/chunkSize + 1` with JVM
+// truncation toward zero, so for chunkSize=5: chunks(0)=1 (-1/5=0), and
+// cost(n) = 20 + 3*chunks(n): cost(0..=5)=23, cost(6..=10)=26, ...
+
+#[test]
+fn atleast_cost_kind_matches_scala_peritem_20_3_5() {
+    let ck = crate::cost_table::opcode_cost(0x98).unwrap();
+    for (n, want) in [
+        (0u32, 23u64),
+        (1, 23),
+        (2, 23),
+        (5, 23),
+        (6, 26),
+        (10, 26),
+        (11, 29),
+    ] {
+        assert_eq!(
+            ck.compute(n).unwrap().value(),
+            want,
+            "AtLeast PerItemCost(20,3,5).cost(n={n})",
+        );
+    }
+}
+
+#[test]
+fn atleast_eval_total_cost_matches_scala() {
+    // AtLeast(Int 2, Coll[SigmaProp]([true, true])): one bound constant (5),
+    // one collection constant (5), and the AtLeast PerItemCost(20,3,5).cost(2)
+    // = 23 — total 33.
+    use ergo_ser::sigma_value::CollValue;
+    let bound = const_int(2);
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+        ])),
+    };
+    let expr = op(0x98, Payload::Two(Box::new(bound), Box::new(items)));
+    let cx = ReductionContext::minimal(500_000, 0);
+    let mut cost = CostAccumulator::recording_only();
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut trace = None;
+    eval_expr(&expr, &cx, &[], &mut env, &mut depth, &mut cost, &mut trace).unwrap();
+    assert_eq!(
+        cost.total().value(),
+        33,
+        "AtLeast(2, [true,true]) total cost: 5 (bound) + 5 (coll) + 23 (AtLeast)",
+    );
+}
+
 // ---- v6 UnsignedBigInt arithmetic (ArithOp on SUnsignedBigInt) ----
 //
 // SUnsignedBigInt is NOT SBigInt, so ArithOp's TypeBasedCost
