@@ -9960,35 +9960,75 @@ fn serialize_avltree_and_header_eval_total_and_bytes() {
     );
 }
 
-#[test]
-fn serialize_header_rejected_pre_v3_ergo_tree() {
-    // Scala DataSerializer.serialize(SHeader) is gated on
-    // isV3OrLaterErgoTreeVersion. The v6 method gate only checks
-    // activatedScriptVersion, so a tree with ergo_tree_version < 3 (spent
-    // post-activation) must still reject serializing a Header.
-    let mut cx = ReductionContext::minimal(500_000, 0);
-    cx.activated_script_version = 3; // method gate satisfied
-    cx.ergo_tree_version = 2; // but the ErgoTree is pre-v3
-    let h = test_eval_header_v2().to_header();
-    let expr = op(
+// CONTEXT.headers(idx) — a RUNTIME-sourced header, materialized from
+// ctx.last_headers rather than a constant. A const Header (Expr::Const) would
+// be rejected by the const/value-decoder SHeader gate
+// (sigma_to_value_versioned) BEFORE reaching the (106,3) serialize gate, so
+// these gate tests must use a runtime source to prove the serialize gate
+// itself (per CodeRabbit on PR #38).
+fn ctx_headers_index(idx: i32) -> Expr {
+    op(
+        0xB2,
+        Payload::ByIndex {
+            input: Box::new(op(
+                0xDB,
+                Payload::MethodCall {
+                    type_id: 101, // SContext.headers
+                    method_id: 2,
+                    obj: Box::new(op(0xFE, Payload::Zero)),
+                    args: vec![],
+                    type_args: vec![],
+                },
+            )),
+            index: Box::new(const_int(idx)),
+            default: None,
+        },
+    )
+}
+
+fn serialize_call_expr(arg: Expr) -> Expr {
+    op(
         0xDC,
         Payload::MethodCall {
             type_id: 106,
             method_id: 3,
             obj: Box::new(op(0xDD, Payload::Zero)),
-            args: vec![Expr::Const {
-                tpe: SigmaType::SHeader,
-                val: SigmaValue::Header(Box::new(h)),
-            }],
+            args: vec![arg],
             type_args: vec![],
         },
-    );
+    )
+}
+
+#[test]
+fn serialize_header_rejected_pre_v3_ergo_tree() {
+    // Scala DataSerializer.serialize(SHeader) is gated on
+    // isV3OrLaterErgoTreeVersion. The v6 method gate only checks
+    // activatedScriptVersion, so a tree with ergo_tree_version < 3 (spent
+    // post-activation) must still reject serializing a Header. Use a
+    // RUNTIME header (CONTEXT.headers(0)) so this exercises the (106,3) gate,
+    // not the const-decoder gate.
+    let headers = vec![test_eval_header_v2()];
+    let mut cx = ReductionContext::minimal(500_000, 0);
+    cx.activated_script_version = 3; // method gate satisfied
+    cx.ergo_tree_version = 2; // but the ErgoTree is pre-v3
+    cx.last_headers = &headers;
+    let expr = serialize_call_expr(ctx_headers_index(0));
     assert!(
         matches!(
             eval_to_value(&expr, &cx, &[]),
             Err(EvalError::TypeError { .. })
         ),
-        "serialize(Header) must reject at ergo_tree_version < 3",
+        "serialize(runtime Header) must reject at ergo_tree_version < 3",
+    );
+    // Sanity: the SAME expression succeeds once the ErgoTree is v3, proving
+    // the rejection above is the version gate (not an unrelated failure).
+    let mut cx_v3 = ReductionContext::minimal(500_000, 0);
+    cx_v3.activated_script_version = 3;
+    cx_v3.ergo_tree_version = 3;
+    cx_v3.last_headers = &headers;
+    assert!(
+        matches!(eval_to_value(&expr, &cx_v3, &[]), Ok(Value::CollBytes(_))),
+        "serialize(runtime Header) succeeds at ergo_tree_version >= 3",
     );
 }
 
@@ -10056,45 +10096,41 @@ fn serialize_coll_header_native_carrier() {
 fn serialize_coll_header_v3_gate() {
     // Non-empty Coll[Header] is rejected on a pre-v3 ErgoTree (per
     // materialized header); an EMPTY Coll[Header] is accepted (no header
-    // materialized) — matching the value-based contains_header gate.
-    let serialize_coll_header = |headers: Vec<EvalHeader>| {
-        use ergo_ser::sigma_value::CollValue;
-        op(
-            0xDC,
-            Payload::MethodCall {
-                type_id: 106,
-                method_id: 3,
-                obj: Box::new(op(0xDD, Payload::Zero)),
-                args: vec![Expr::Const {
-                    tpe: SigmaType::SColl(Box::new(SigmaType::SHeader)),
-                    val: SigmaValue::Coll(CollValue::Values(
-                        headers
-                            .iter()
-                            .map(|h| SigmaValue::Header(Box::new(h.to_header())))
-                            .collect(),
-                    )),
-                }],
-                type_args: vec![],
-            },
-        )
-    };
+    // materialized) — matching the value-based contains_header gate. Uses the
+    // RUNTIME CONTEXT.headers carrier (Value::CollHeader), which bypasses the
+    // const-decoder gate, so this proves the (106,3) serialize gate.
+    let expr = serialize_call_expr(op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 101, // SContext.headers
+            method_id: 2,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    ));
+    // Non-empty headers, pre-v3 ErgoTree -> reject.
+    let headers = vec![test_eval_header_v2()];
     let mut cx = ReductionContext::minimal(500_000, 0);
     cx.activated_script_version = 3;
-    cx.ergo_tree_version = 2; // pre-v3 ErgoTree
+    cx.ergo_tree_version = 2;
+    cx.last_headers = &headers;
     assert!(
         matches!(
-            eval_to_value(
-                &serialize_coll_header(vec![test_eval_header_v2()]),
-                &cx,
-                &[]
-            ),
+            eval_to_value(&expr, &cx, &[]),
             Err(EvalError::TypeError { .. })
         ),
         "non-empty Coll[Header] serialize must reject at ergo_tree_version < 3",
     );
+    // Empty headers, pre-v3 -> accepted (no materialized header).
+    let empty: Vec<EvalHeader> = vec![];
+    let mut cx_empty = ReductionContext::minimal(500_000, 0);
+    cx_empty.activated_script_version = 3;
+    cx_empty.ergo_tree_version = 2;
+    cx_empty.last_headers = &empty;
     assert!(
         matches!(
-            eval_to_value(&serialize_coll_header(vec![]), &cx, &[]),
+            eval_to_value(&expr, &cx_empty, &[]),
             Ok(Value::CollBytes(_))
         ),
         "empty Coll[Header] serialize is accepted even pre-v3",
