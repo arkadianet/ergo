@@ -62,13 +62,15 @@ pub(in crate::evaluator) fn eval_upcast(
         (Value::Long(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
         // BigInt → BigInt (identity)
         (Value::BigInt(n), SigmaType::SBigInt) => Ok(Value::BigInt(n)),
-        // {Byte, Short, Int, Long, UnsignedBigInt} → UnsignedBigInt (v6).
-        // A negative source rejects (unsigned cannot represent it).
+        // {Byte, Short, Int, Long} → UnsignedBigInt (v6): a negative source
+        // rejects (unsigned cannot represent it).
         (Value::Byte(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
         (Value::Short(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
         (Value::Int(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
         (Value::Long(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
-        (Value::UnsignedBigInt(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n),
+        // UnsignedBigInt → UnsignedBigInt (identity; the value is already
+        // non-negative, so no re-check — mirrors the BigInt identity arm).
+        (Value::UnsignedBigInt(n), SigmaType::SUnsignedBigInt) => Ok(Value::UnsignedBigInt(n)),
         (v, _) => Err(EvalError::TypeError {
             expected: "numeric value for Upcast",
             got: format!("{v:?}"),
