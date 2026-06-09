@@ -806,6 +806,20 @@ pub(in crate::evaluator) fn eval_method_call(
             check_arity(args, 1)?;
             let v = cx.eval_expr(&args[0])?;
             let (target_type, sv) = super::super::helpers::value_to_typed_sigma(&v)?;
+            // Scala `DataSerializer.serialize(SHeader)` is gated on
+            // `isV3OrLaterErgoTreeVersion` PER materialized header — and the
+            // v6 method gate only checks `activatedScriptVersion`, so a tree
+            // with `ergo_tree_version < 3` spent post-activation must still
+            // reject any header-carrying value here (mirrors the
+            // deserializeTo[SHeader] gate, GHSA-hfj8-hjph-7r78). An empty
+            // Coll[Header] (no materialized header) is accepted. SAvlTree and
+            // the primitives are NOT ergo-tree-version gated.
+            if sv.contains_header() && !cx.ctx.is_v3_ergo_tree() {
+                return Err(EvalError::TypeError {
+                    expected: "ErgoTree version >= 3 for SHeader serialization",
+                    got: format!("ergo_tree_version {}", cx.ctx.ergo_tree_version),
+                });
+            }
             // Charged before producing the bytes (Scala charges
             // StartWriterCost up front, then per-put during the write; the
             // total on success is identical). `try_from_jit` is panic-safe.
@@ -2612,11 +2626,12 @@ fn expect_bigint<'a>(
 /// `DataSerializer.serialize(value, tpe, w)` emits. The caller adds
 /// `StartWriterCost` (= 10) on top. Per-put cost model (v6.0.2
 /// `SigmaByteWriter`): put(Byte)/putBoolean/putOption-tag = 1;
-/// putShort/putInt/putLong = 3; putUShort = 3; putBytes(n)/putBits(n) =
-/// `PerItemCost(3,1,1).cost(n)` = 3 + n (and 3 for n = 0). Only the value
-/// carriers `value_to_typed_sigma` can produce reach here; SBox / SAvlTree
-/// / SString / SHeader serialize values error earlier in
-/// `value_to_typed_sigma`, so they are intentionally not modelled.
+/// putShort/putInt/putLong = 3; putUShort/putULong = 3; putUInt = 0;
+/// putBytes(n)/putBits(n) = `PerItemCost(3,1,1).cost(n)` = 3 + n (for every
+/// n, since chunks(0) = 0). SAvlTree and SHeader are modelled here (their
+/// `value_to_typed_sigma` arms produce the carriers); SBox serialize is a
+/// separate follow-up. `value_to_typed_sigma` still rejects any value with no
+/// Scala-anchored serialize bytes, so unsupported carriers never reach here.
 pub(in crate::evaluator) fn serialize_put_cost(
     tpe: &ergo_ser::sigma_type::SigmaType,
     sv: &ergo_ser::sigma_value::SigmaValue,
@@ -2677,9 +2692,52 @@ pub(in crate::evaluator) fn serialize_put_cost(
             }
             s
         }
-        // NOTE: SHeader serialize is deferred — value_to_typed_sigma rejects
-        // Value::Header, so this arm is unreachable until the DynamicCost is
-        // reconciled to the reference (a focused follow-up).
+        // AvlTreeData.serializer (mirrors ergo_ser::write_avl_tree):
+        //   putBytes(digest 33) = chunk(33)=36 + putUByte(flags)=1
+        //   + putUInt(keyLength)=0 + putOption(valueLengthOpt) tag=1
+        //   (+ if Some: inner putUInt=0).
+        // Constant 38 regardless of flags / keyLength / Some-vs-None, because
+        // putUInt costs 0 and the option tag byte is always written.
+        (T::SAvlTree, Sv::AvlTree(avl)) => (3 + avl.digest.as_bytes().len() as u64) + 1 + 1,
+        // ErgoHeader.sigmaSerializer = HeaderWithoutPowSerializer +
+        // AutolykosSolution.sigmaSerializer (mirrors ergo_ser::write_header +
+        // write_solution). chunk(n) = 3 + n. put_u8 = 1; put_u64(timestamp) =
+        // putULong = 3; put_u32(height) = putUInt = 0 (NOT 3); write_nbits =
+        // putBytes(4) = chunk(4). The version>1 block adds putUByte(len)=1 +
+        // chunk(unparsedLen). V2 PoW = chunk(pk 33) + chunk(nonce 8); V1 PoW =
+        // chunk(pk 33) + chunk(w 33) + chunk(nonce 8) + putUByte(dLen)=1 +
+        // chunk(dLen). Charges exactly what write_header/write_solution emit,
+        // so cost == bytes for every header version.
+        (T::SHeader, Sv::Header(h)) => {
+            let chunk = |n: usize| 3 + n as u64;
+            let mut c = 1; // put_u8(version)
+            c += chunk(h.parent_id.as_bytes().len());
+            c += chunk(h.ad_proofs_root.as_bytes().len());
+            c += chunk(h.transactions_root.as_bytes().len());
+            c += chunk(h.state_root.as_bytes().len());
+            c += 3; // put_u64(timestamp) = putULong
+            c += chunk(h.extension_root.as_bytes().len());
+            c += chunk(4); // write_nbits — 4-byte compact difficulty
+                           // put_u32(height) = putUInt = 0 (no charge)
+            c += chunk(h.votes.len());
+            if h.version > ergo_ser::header::INITIAL_VERSION {
+                c += 1; // put_u8(unparsed_bytes.len())
+                c += chunk(h.unparsed_bytes.len());
+            }
+            c += match &h.solution {
+                ergo_ser::autolykos::AutolykosSolution::V2 { pk, nonce } => {
+                    chunk(pk.as_bytes().len()) + chunk(nonce.len())
+                }
+                ergo_ser::autolykos::AutolykosSolution::V1 { pk, w, nonce, d } => {
+                    chunk(pk.as_bytes().len())
+                        + chunk(w.as_bytes().len())
+                        + chunk(nonce.len())
+                        + 1 // put_u8(d.len())
+                        + chunk(d.len())
+                }
+            };
+            c
+        }
         _ => {
             return Err(EvalError::TypeError {
                 expected: "DataSerializer-serializable value for SGlobal.serialize",

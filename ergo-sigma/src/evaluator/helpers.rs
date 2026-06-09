@@ -815,6 +815,10 @@ pub(crate) fn unpack_collection(val: Value) -> Result<Vec<Value>, EvalError> {
         // real STuple is not a collection, so accept only the
         // boxed-element coll carrier here.
         Value::CollGeneric(items, _) => Ok(items),
+        // Native Coll[Header] carrier (e.g. CONTEXT.headers used as
+        // substitution values). Yields Header elements so the
+        // subst_constants header v3 gate + value_to_typed_sigma run.
+        Value::CollHeader(v) => Ok(v.into_iter().map(|h| Value::Header(Box::new(h))).collect()),
         other => Err(EvalError::TypeError {
             expected: "collection for SubstConstants values",
             got: format!("{other:?}"),
@@ -953,17 +957,58 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
                 SigmaValue::Coll(CollValue::Values(sigma_vals)),
             ))
         }
-        // NOTE: Value::Header is intentionally NOT serialized here yet.
-        // serialize[SHeader] needs a Scala-exact DynamicCost (the
-        // SigmaByteWriter per-put model for ErgoHeader.sigmaSerializer); that
-        // cost could not be reconciled to the reference and is a focused
-        // follow-up. The READ side (deserializeTo[SHeader]) is complete.
-        // Catch-all rejects non-serializable runtime carriers
-        // (BoxCollection / SelfBox / BoxRef / InlineBox / Func /
-        // Global / Opt / Tokens / Header / AvlTree / PreHeader /
-        // CollBox / CollHeader). These either lack a public
-        // SigmaValue counterpart or have no Scala-anchored bytes
-        // for the SubstConstants/SGlobal.serialize boundary.
+        // AvlTree: inverse of sigma_to_value's SAvlTree arm. The carrier
+        // already holds the wire-shaped `AvlTreeData`, so serialize-back is a
+        // direct hand-off to `write_avl_tree` (DataSerializer SAvlTree case).
+        // Scala writes keyLength / valueLengthOpt with `putUInt`, which throws
+        // on a negative value. `read_avl_tree` deliberately preserves a length
+        // above i32::MAX as a wrapped-negative i32 ("succeeds with invalid
+        // AvlTreeData"); serializing such a tree must error rather than cast to
+        // u32 and emit bytes the reference would reject.
+        Value::AvlTree(avl) => {
+            if avl.key_length < 0 || avl.value_length_opt.is_some_and(|v| v < 0) {
+                return Err(EvalError::TypeError {
+                    expected: "non-negative AvlTree keyLength/valueLengthOpt for serialize",
+                    got: format!(
+                        "keyLength={}, valueLengthOpt={:?}",
+                        avl.key_length, avl.value_length_opt
+                    ),
+                });
+            }
+            Ok((SigmaType::SAvlTree, SigmaValue::AvlTree(avl.clone())))
+        }
+        // Header: DataSerializer routes SHeader to ErgoHeader.sigmaSerializer
+        // (gated on isV3OrLaterErgoTreeVersion — already enforced upstream by
+        // the v6 method gate on SGlobal.serialize). `to_header` rebuilds the
+        // wire `Header` from the eval carrier; `write_header` emits the bytes
+        // and `serialize_put_cost(SHeader)` charges the matching put costs.
+        Value::Header(h) => Ok((
+            SigmaType::SHeader,
+            SigmaValue::Header(Box::new(h.to_header())),
+        )),
+        // Native `Coll[Header]` carrier (e.g. CONTEXT.headers) — the standard
+        // runtime source of header collections. Convert each element to the
+        // wire `Header` so `serialize` / `SubstConstants` can consume it (a
+        // bare `CollGeneric` only covers hand-built header colls). The v3 gate
+        // is value-based via `contains_header`, so a non-empty Coll[Header] is
+        // rejected on a pre-v3 tree while an empty one is accepted.
+        Value::CollHeader(headers) => {
+            let vals = headers
+                .iter()
+                .map(|h| SigmaValue::Header(Box::new(h.to_header())))
+                .collect();
+            Ok((
+                SigmaType::SColl(Box::new(SigmaType::SHeader)),
+                SigmaValue::Coll(CollValue::Values(vals)),
+            ))
+        }
+        // Catch-all rejects the remaining non-serializable runtime carriers
+        // (BoxCollection / SelfBox / BoxRef / InlineBox / Func / Global / Opt
+        // / Tokens / PreHeader / CollBox). These either lack a public
+        // SigmaValue counterpart or have no Scala-anchored bytes for the
+        // SubstConstants/SGlobal.serialize boundary. (SBox serialize is a
+        // separate follow-up needing the structured box for its register/token
+        // cost recursion.)
         other => Err(EvalError::TypeError {
             expected: "serializable value for SubstConstants",
             got: format!("{other:?}"),
@@ -997,6 +1042,7 @@ pub(crate) fn subst_constants(
     script_bytes: &[u8],
     positions: &[i32],
     new_values: &[Value],
+    is_v3_ergo_tree: bool,
 ) -> Result<(Vec<u8>, usize), EvalError> {
     use ergo_primitives::reader::VlqReader;
     use ergo_primitives::writer::VlqWriter;
@@ -1022,6 +1068,15 @@ pub(crate) fn subst_constants(
         }
         let template_type = new_constants[pos].0.clone();
         let (_, sv) = value_to_typed_sigma(&new_values[i])?;
+        // Re-serializing a Header constant goes through the same
+        // version-gated DataSerializer.serialize(SHeader); a pre-v3 executing
+        // ErgoTree must reject it (matches SGlobal.serialize[SHeader]).
+        if sv.contains_header() && !is_v3_ergo_tree {
+            return Err(EvalError::TypeError {
+                expected: "ErgoTree version >= 3 for SHeader in SubstConstants",
+                got: "pre-v3 ErgoTree".to_string(),
+            });
+        }
         new_constants[pos] = (template_type, sv);
     }
 

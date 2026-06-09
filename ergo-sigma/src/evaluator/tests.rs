@@ -8355,7 +8355,7 @@ fn subst_constants_none_preserves_template_option_type() {
     write_ergo_tree(&mut w, &template).expect("template write");
     let template_bytes = w.result();
     // Substitute the constant at index 0 with Value::Opt(None).
-    let (new_bytes, _) = subst_constants(&template_bytes, &[0], &[Value::Opt(None)])
+    let (new_bytes, _) = subst_constants(&template_bytes, &[0], &[Value::Opt(None)], true)
         .expect("subst_constants succeeds");
     // The rewritten tree must keep the template's declared
     // `SOption(SColl(SByte))` type descriptor on the slot — NOT
@@ -9804,4 +9804,349 @@ fn coll_update_many_rejects_mismatched_value_type() {
         ),
         Err(EvalError::RuntimeException(_))
     ));
+}
+
+// ---- Global.serialize for AvlTree + Header (DynamicCost = StartWriterCost(10)
+//      + DataSerializer put-op sum). chunk(n) = 3 + n. Costs verified against
+//      the SANTA vectors: AvlTree total 127 (= 79 framing + 10 + 38), Header
+//      specFixture total 333 (= 79 + 10 + 244). ----
+
+fn test_avl_tree(value_length: Option<i32>) -> ergo_ser::sigma_value::AvlTreeData {
+    ergo_ser::sigma_value::AvlTreeData {
+        digest: ergo_primitives::digest::ADDigest::from_bytes([0u8; 33]),
+        insert_allowed: true,
+        update_allowed: false,
+        remove_allowed: true,
+        key_length: 32,
+        value_length_opt: value_length,
+    }
+}
+
+fn test_eval_header_v2() -> EvalHeader {
+    EvalHeader {
+        id: [0xAA; 32],
+        version: 2,
+        parent_id: [0xBB; 32],
+        ad_proofs_root: [0; 32],
+        state_root: [0; 33],
+        transactions_root: [0; 32],
+        timestamp: 1_600_000_000_000,
+        n_bits: 0x0100_0000,
+        height: 500_000,
+        extension_root: [0; 32],
+        miner_pk: [0x02; 33],
+        pow_onetime_pk: [0x03; 33],
+        pow_nonce: [0xFF; 8],
+        pow_distance: num_bigint::BigInt::from(0),
+        votes: [0, 0, 0],
+        unparsed_bytes: Vec::new(),
+    }
+}
+
+#[test]
+fn serialize_put_cost_avltree_is_constant_38() {
+    use ergo_ser::sigma_type::SigmaType as T;
+    use ergo_ser::sigma_value::SigmaValue as Sv;
+    // 38 = chunk(33) digest (36) + putUByte flags (1) + putUInt keyLength (0)
+    //      + putOption tag (1) [+ Some: inner putUInt 0].
+    for vlen in [None, Some(64), Some(1)] {
+        let avl = test_avl_tree(vlen);
+        assert_eq!(
+            crate::evaluator::opcodes::method_call::serialize_put_cost(
+                &T::SAvlTree,
+                &Sv::AvlTree(avl)
+            )
+            .unwrap(),
+            38,
+            "AvlTree serialize put-cost is the constant 38 (vlen={vlen:?})",
+        );
+    }
+}
+
+#[test]
+fn serialize_put_cost_header_v2_is_244() {
+    use ergo_ser::sigma_type::SigmaType as T;
+    use ergo_ser::sigma_value::SigmaValue as Sv;
+    let h = test_eval_header_v2().to_header();
+    // 244 = 1(version) + 35*3(parent/adProofs/txRoot) + 36(stateRoot) +
+    //       3(timestamp) + 35(extensionRoot) + 7(nBits) + 0(height) + 6(votes)
+    //       + 1(unparsedLen) + 3(chunk(0)) + 36(pk) + 11(nonce).
+    assert_eq!(
+        crate::evaluator::opcodes::method_call::serialize_put_cost(
+            &T::SHeader,
+            &Sv::Header(Box::new(h))
+        )
+        .unwrap(),
+        244,
+        "Header(v2, unparsed empty) serialize put-cost is 244",
+    );
+}
+
+#[test]
+fn serialize_put_cost_header_v1_is_283() {
+    use ergo_ser::sigma_type::SigmaType as T;
+    use ergo_ser::sigma_value::SigmaValue as Sv;
+    // Version 1 header -> Autolykos V1 PoW (pk + w + nonce + d) and NO
+    // unparsed-bytes block (version > 1 is false). pow_distance 0x010203 ->
+    // d = to_signed_bytes_be() = [1,2,3] (len 3). 283 = 1(version) + 35*3 +
+    // 36(stateRoot) + 3(timestamp) + 35(extensionRoot) + 7(nBits) + 0(height)
+    // + 6(votes) + [36(pk)+36(w)+11(nonce)+1(dLen)+6(chunk(3))]. Pins the V1
+    // PoW path (also validated end-to-end by the Global.deserializeTo_header#1
+    // roundtrip vector, a real v1 header).
+    let mut eh = test_eval_header_v2();
+    eh.version = 1;
+    eh.pow_distance = num_bigint::BigInt::from(0x01_02_03);
+    let h = eh.to_header();
+    assert_eq!(
+        crate::evaluator::opcodes::method_call::serialize_put_cost(
+            &T::SHeader,
+            &Sv::Header(Box::new(h))
+        )
+        .unwrap(),
+        283,
+        "Header(v1, d=[1,2,3]) serialize put-cost is 283",
+    );
+}
+
+#[test]
+fn serialize_avltree_and_header_eval_total_and_bytes() {
+    // Global.serialize(value): obj = Global (0xDD=5), args[0] = the value
+    // const (5), MethodCall (0xDC=4), then StartWriterCost(10) + put-ops.
+    let mut cx = ReductionContext::minimal(500_000, 0);
+    cx.activated_script_version = 3;
+    cx.ergo_tree_version = 3;
+    let serialize_call = |tpe: SigmaType, val: SigmaValue| {
+        op(
+            0xDC,
+            Payload::MethodCall {
+                type_id: 106,
+                method_id: 3,
+                obj: Box::new(op(0xDD, Payload::Zero)),
+                args: vec![Expr::Const { tpe, val }],
+                type_args: vec![],
+            },
+        )
+    };
+    let eval_cost = |expr: &Expr| -> (Value, u64) {
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        let v = eval_expr(expr, &cx, &[], &mut env, &mut depth, &mut cost, &mut trace).unwrap();
+        (v, cost.total().value())
+    };
+    // AvlTree: 4 + 5 + 5 + 10 + 38 = 62; output bytes = 36 (digest 33 + flags 1
+    // + keyLen VLQ 1 + option-None 1).
+    let avl = test_avl_tree(None);
+    let (v, total) = eval_cost(&serialize_call(
+        SigmaType::SAvlTree,
+        SigmaValue::AvlTree(avl),
+    ));
+    assert_eq!(total, 62, "serialize(AvlTree) total");
+    match v {
+        Value::CollBytes(b) => assert_eq!(b.len(), 36, "AvlTree serialize output length"),
+        other => panic!("expected CollBytes, got {other:?}"),
+    }
+    // Header: 4 + 5 + 5 + 10 + 244 = 268.
+    let h = test_eval_header_v2().to_header();
+    let (v, total) = eval_cost(&serialize_call(
+        SigmaType::SHeader,
+        SigmaValue::Header(Box::new(h)),
+    ));
+    assert_eq!(total, 268, "serialize(Header) total");
+    assert!(
+        matches!(v, Value::CollBytes(_)),
+        "Header serialize -> CollBytes"
+    );
+}
+
+// CONTEXT.headers(idx) — a RUNTIME-sourced header, materialized from
+// ctx.last_headers rather than a constant. A const Header (Expr::Const) would
+// be rejected by the const/value-decoder SHeader gate
+// (sigma_to_value_versioned) BEFORE reaching the (106,3) serialize gate, so
+// these gate tests must use a runtime source to prove the serialize gate
+// itself (per CodeRabbit on PR #38).
+fn ctx_headers_index(idx: i32) -> Expr {
+    op(
+        0xB2,
+        Payload::ByIndex {
+            input: Box::new(op(
+                0xDB,
+                Payload::MethodCall {
+                    type_id: 101, // SContext.headers
+                    method_id: 2,
+                    obj: Box::new(op(0xFE, Payload::Zero)),
+                    args: vec![],
+                    type_args: vec![],
+                },
+            )),
+            index: Box::new(const_int(idx)),
+            default: None,
+        },
+    )
+}
+
+fn serialize_call_expr(arg: Expr) -> Expr {
+    op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 106,
+            method_id: 3,
+            obj: Box::new(op(0xDD, Payload::Zero)),
+            args: vec![arg],
+            type_args: vec![],
+        },
+    )
+}
+
+#[test]
+fn serialize_header_rejected_pre_v3_ergo_tree() {
+    // Scala DataSerializer.serialize(SHeader) is gated on
+    // isV3OrLaterErgoTreeVersion. The v6 method gate only checks
+    // activatedScriptVersion, so a tree with ergo_tree_version < 3 (spent
+    // post-activation) must still reject serializing a Header. Use a
+    // RUNTIME header (CONTEXT.headers(0)) so this exercises the (106,3) gate,
+    // not the const-decoder gate.
+    let headers = vec![test_eval_header_v2()];
+    let mut cx = ReductionContext::minimal(500_000, 0);
+    cx.activated_script_version = 3; // method gate satisfied
+    cx.ergo_tree_version = 2; // but the ErgoTree is pre-v3
+    cx.last_headers = &headers;
+    let expr = serialize_call_expr(ctx_headers_index(0));
+    assert!(
+        matches!(
+            eval_to_value(&expr, &cx, &[]),
+            Err(EvalError::TypeError { .. })
+        ),
+        "serialize(runtime Header) must reject at ergo_tree_version < 3",
+    );
+    // Sanity: the SAME expression succeeds once the ErgoTree is v3, proving
+    // the rejection above is the version gate (not an unrelated failure).
+    let mut cx_v3 = ReductionContext::minimal(500_000, 0);
+    cx_v3.activated_script_version = 3;
+    cx_v3.ergo_tree_version = 3;
+    cx_v3.last_headers = &headers;
+    assert!(
+        matches!(eval_to_value(&expr, &cx_v3, &[]), Ok(Value::CollBytes(_))),
+        "serialize(runtime Header) succeeds at ergo_tree_version >= 3",
+    );
+}
+
+#[test]
+fn serialize_avltree_rejects_negative_lengths() {
+    // read_avl_tree preserves an out-of-i32-range keyLength/valueLengthOpt as
+    // a wrapped-negative i32; Scala's putUInt throws on negative, so serialize
+    // must error rather than emit u32-cast bytes.
+    let mut cx = ReductionContext::minimal(500_000, 0);
+    cx.activated_script_version = 3;
+    cx.ergo_tree_version = 3;
+    let serialize_avl = |avl: ergo_ser::sigma_value::AvlTreeData| {
+        op(
+            0xDC,
+            Payload::MethodCall {
+                type_id: 106,
+                method_id: 3,
+                obj: Box::new(op(0xDD, Payload::Zero)),
+                args: vec![Expr::Const {
+                    tpe: SigmaType::SAvlTree,
+                    val: SigmaValue::AvlTree(avl),
+                }],
+                type_args: vec![],
+            },
+        )
+    };
+    let mut bad_key = test_avl_tree(None);
+    bad_key.key_length = -1;
+    assert!(
+        matches!(
+            eval_to_value(&serialize_avl(bad_key), &cx, &[]),
+            Err(EvalError::TypeError { .. })
+        ),
+        "serialize(AvlTree) must reject negative keyLength",
+    );
+    let bad_vlen = test_avl_tree(Some(-5));
+    assert!(
+        matches!(
+            eval_to_value(&serialize_avl(bad_vlen), &cx, &[]),
+            Err(EvalError::TypeError { .. })
+        ),
+        "serialize(AvlTree) must reject negative valueLengthOpt",
+    );
+}
+
+#[test]
+fn serialize_coll_header_native_carrier() {
+    // The native Coll[Header] carrier (CONTEXT.headers) must serialize:
+    // value_to_typed_sigma -> SColl(SHeader) with SigmaValue::Header elements.
+    use ergo_ser::sigma_type::SigmaType as T;
+    use ergo_ser::sigma_value::{CollValue, SigmaValue as Sv};
+    let coll = Value::CollHeader(vec![test_eval_header_v2(), test_eval_header_v2()]);
+    let (t, sv) = value_to_typed_sigma(&coll).unwrap();
+    assert_eq!(t, T::SColl(Box::new(T::SHeader)));
+    assert!(matches!(&sv, Sv::Coll(CollValue::Values(v)) if v.len() == 2));
+    // Cost = putUShort(len)=3 + 2 * Header(v2)=244 = 491.
+    assert_eq!(
+        crate::evaluator::opcodes::method_call::serialize_put_cost(&t, &sv).unwrap(),
+        3 + 244 + 244,
+        "Coll[Header] of 2 v2 headers: 3 + 244*2",
+    );
+}
+
+#[test]
+fn serialize_coll_header_v3_gate() {
+    // Non-empty Coll[Header] is rejected on a pre-v3 ErgoTree (per
+    // materialized header); an EMPTY Coll[Header] is accepted (no header
+    // materialized) — matching the value-based contains_header gate. Uses the
+    // RUNTIME CONTEXT.headers carrier (Value::CollHeader), which bypasses the
+    // const-decoder gate, so this proves the (106,3) serialize gate.
+    let expr = serialize_call_expr(op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 101, // SContext.headers
+            method_id: 2,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    ));
+    // Non-empty headers, pre-v3 ErgoTree -> reject.
+    let headers = vec![test_eval_header_v2()];
+    let mut cx = ReductionContext::minimal(500_000, 0);
+    cx.activated_script_version = 3;
+    cx.ergo_tree_version = 2;
+    cx.last_headers = &headers;
+    assert!(
+        matches!(
+            eval_to_value(&expr, &cx, &[]),
+            Err(EvalError::TypeError { .. })
+        ),
+        "non-empty Coll[Header] serialize must reject at ergo_tree_version < 3",
+    );
+    // Empty headers, pre-v3 -> accepted (no materialized header).
+    let empty: Vec<EvalHeader> = vec![];
+    let mut cx_empty = ReductionContext::minimal(500_000, 0);
+    cx_empty.activated_script_version = 3;
+    cx_empty.ergo_tree_version = 2;
+    cx_empty.last_headers = &empty;
+    assert!(
+        matches!(
+            eval_to_value(&expr, &cx_empty, &[]),
+            Ok(Value::CollBytes(_))
+        ),
+        "empty Coll[Header] serialize is accepted even pre-v3",
+    );
+}
+
+#[test]
+fn unpack_collection_accepts_native_coll_header() {
+    // SubstConstants unpacks replacement values via unpack_collection before
+    // value_to_typed_sigma; the native Coll[Header] carrier (CONTEXT.headers)
+    // must unpack to Header elements rather than erroring.
+    let items = unpack_collection(Value::CollHeader(vec![
+        test_eval_header_v2(),
+        test_eval_header_v2(),
+    ]))
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|v| matches!(v, Value::Header(_))));
 }
