@@ -1711,6 +1711,79 @@ fn opcode_extract_register_r6_none() {
     assert_eq!(run_eval_ctx(&expr, &ctx), Value::Opt(None));
 }
 
+// ── ExtractRegisterAs requested-type check (Scala CBox.getReg) ───
+//
+// Scala `CBox.getReg[T]` compares the stored register type against the
+// requested `T`: a PRESENT register of a different type throws
+// `InvalidType` — it does NOT degrade to `None`. Absent registers
+// return `None` without a type check. Mandatory R0-R3 carry fixed
+// types and are checked the same way. Pinned by the v5 vectors
+// Advanced_Box_test (`x.R4[Byte].get` on an Int register → error) and
+// Conditional_access_to_registers (`x.R5[Short]` on an Int register
+// → error even before `.isDefined`).
+
+fn extract_register_as(reg_id: u8, tpe: SigmaType) -> Expr {
+    op(
+        0xC6,
+        Payload::ExtractRegisterAs {
+            input: Box::new(op(0xA7, Payload::Zero)),
+            reg_id,
+            tpe,
+        },
+    )
+}
+
+#[test]
+fn extract_register_requested_type_mismatch_errors() {
+    // R4 stores Int(42); reading it as Long must error, not None.
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let err = run_eval_ctx_err(&extract_register_as(4, SigmaType::SLong), &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+#[test]
+fn extract_register_absent_skips_type_check() {
+    // R6 is absent; ANY requested type yields None — the type check
+    // only applies to present registers.
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let expr = extract_register_as(6, SigmaType::SColl(Box::new(SigmaType::SByte)));
+    assert_eq!(run_eval_ctx(&expr, &ctx), Value::Opt(None));
+}
+
+#[test]
+fn extract_register_mandatory_r0_type_checked() {
+    // R0 (box.value) is fixed at Long: reading as Long succeeds,
+    // reading as Int errors (Scala stores it as a typed CAnyValue).
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    assert_eq!(
+        run_eval_ctx(&extract_register_as(0, SigmaType::SLong), &ctx),
+        Value::Opt(Some(Box::new(Value::Long(1_000_000_000))))
+    );
+    let err = run_eval_ctx_err(&extract_register_as(0, SigmaType::SInt), &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+#[test]
+fn extract_register_mandatory_r3_creation_info_type() {
+    // R3 (creationInfo) is fixed at (Int, Coll[Byte]).
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let good = SigmaType::STuple(vec![
+        SigmaType::SInt,
+        SigmaType::SColl(Box::new(SigmaType::SByte)),
+    ]);
+    assert!(matches!(
+        run_eval_ctx(&extract_register_as(3, good), &ctx),
+        Value::Opt(Some(_))
+    ));
+    let bad = SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SLong]);
+    let err = run_eval_ctx_err(&extract_register_as(3, bad), &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
 /// EIP-50 v6 `SBox.getReg[T]` (MethodCall 99, 19) is the method-call
 /// twin of inline opcode `0xC6 ExtractRegisterAs`. Both call into
 /// `read_register_option`, so on the same box + register id they
@@ -1781,6 +1854,40 @@ fn methodcall_box_getreg_v6_matches_inline_extract_register_as() {
         run_eval_ctx(&method_none, &ctx),
         "v6 SBox.getReg[T] must match inline ExtractRegisterAs on an empty register",
     );
+}
+
+#[test]
+fn methodcall_box_getreg_v6_requested_type_mismatch_errors() {
+    // v6 `SBox.getReg[T]` (99, 19) carries the explicit `[T]` in
+    // type_args[0]; Scala resolves it into CBox.getReg(i)(tT), so a
+    // present register of a different stored type errors on this path
+    // exactly like the inline 0xC6 form (vector: Box.getReg_dynamic_index
+    // reject-wrong-type#1).
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let getreg = |type_arg: SigmaType| {
+        Expr::Op(IrNode {
+            opcode: 0xDC,
+            payload: Payload::MethodCall {
+                type_id: 99,
+                method_id: 19,
+                obj: Box::new(op(0xA7, Payload::Zero)),
+                args: vec![Expr::Const {
+                    tpe: SigmaType::SByte,
+                    val: SigmaValue::Byte(4),
+                }],
+                type_args: vec![type_arg],
+            },
+        })
+    };
+    // R4 stores Int(42): matching [Int] succeeds...
+    assert_eq!(
+        run_eval_ctx(&getreg(SigmaType::SInt), &ctx),
+        Value::Opt(Some(Box::new(Value::Int(42))))
+    );
+    // ...mismatching [Long] errors (no None degradation).
+    let err = run_eval_ctx_err(&getreg(SigmaType::SLong), &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
 }
 
 #[test]
