@@ -855,6 +855,19 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route(
             "/utils/ergoTreeToAddress",
             post(crate::utils::ergo_tree_to_address_post_handler),
+        )
+        // `/script/*` decode endpoints (Scala ScriptApiRoute) — same
+        // `NetworkPrefix`-only state as the `/utils` address routes. The
+        // compile-requiring members (p2sAddress / p2shAddress /
+        // executeWithContext) are intentionally absent: they compile ErgoScript
+        // source, and this node ships no compiler (see `crate::utils`).
+        .route(
+            "/script/addressToTree/:address",
+            get(crate::utils::script_address_to_tree_handler),
+        )
+        .route(
+            "/script/addressToBytes/:address",
+            get(crate::utils::script_address_to_bytes_handler),
         );
     let operator = operator.merge(utils_routes.with_state(network));
 

@@ -1,10 +1,10 @@
-//! `/utils/*` — Scala-compat stateless helper endpoints.
+//! `/utils/*` (Scala `ErgoUtilsApiRoute`) + the two decode-only members of
+//! `/script/*` (Scala `ScriptApiRoute`) — Scala-compat stateless helper
+//! endpoints.
 //!
-//! Mirrors Scala `ErgoUtilsApiRoute` (`org.ergoplatform.http.api.
-//! ErgoUtilsApiRoute`). All routes here are pure functions of input —
-//! no node state, no DB reads, no chain query trait dependency.
-//! `NetworkPrefix` is the only piece of operator config the address
-//! routes need.
+//! All routes here are pure functions of input — no node state, no DB reads,
+//! no chain query trait dependency. `NetworkPrefix` is the only piece of
+//! operator config the address routes need.
 //!
 //! Routes (response shapes match Scala JsonCodecs exactly):
 //!
@@ -19,6 +19,12 @@
 //! | `POST` | `/utils/address` | (same as GET) |
 //! | `GET`  | `/utils/ergoTreeToAddress/{hex}` | `{"address": "..."}` |
 //! | `POST` | `/utils/ergoTreeToAddress` | (same as GET) |
+//! | `GET`  | `/script/addressToTree/{address}` | `{"tree": "<ergoTree hex>"}` |
+//! | `GET`  | `/script/addressToBytes/{address}` | `{"bytes": "<Coll[Byte] const hex>"}` |
+//!
+//! `/script/*`'s compile-requiring members (`p2sAddress`, `p2shAddress`,
+//! `executeWithContext`) are not implemented — they compile ErgoScript source,
+//! and this node ships no compiler.
 
 use axum::{
     body::Bytes,
@@ -29,8 +35,8 @@ use axum::{
 };
 use ergo_primitives::digest::blake2b256;
 use ergo_ser::address::{
-    decode_address_content_bytes, encode_address_from_tree_bytes, encode_p2pk_from_pubkey,
-    AddressDecodeError, NetworkPrefix,
+    decode_address_content_bytes, decode_address_to_tree_bytes, encode_address_from_tree_bytes,
+    encode_p2pk_from_pubkey, AddressDecodeError, NetworkPrefix,
 };
 use rand::RngCore;
 use serde_json::{json, Value as JsonValue};
@@ -217,4 +223,108 @@ fn decode_error_message(e: &AddressDecodeError) -> String {
     // the same envelope but preserve the variant in the detail for
     // operator telemetry. The format string is the Display impl.
     format!("{e}")
+}
+
+// ----- /script/* address-conversion endpoints (Scala ScriptApiRoute) -----
+//
+// The two decode-only members of Scala's `/script` family. The rest of that
+// route — `p2sAddress` / `p2shAddress` / `executeWithContext` — compiles
+// ErgoScript *source* (the request body carries a `source` + `treeVersion`),
+// which needs an ErgoScript compiler this node deliberately does not ship
+// (it is an interpreter, not a compiler). Those stay unimplemented; these two
+// need only the address decoder, which already backs the `/utils` and
+// `/blockchain` address routes.
+//
+// P2PK and P2S addresses are supported; a P2SH address decodes to
+// `UnsupportedType` (a 400) — the same boundary `decode_address_to_tree_bytes`
+// already imposes on every other tree-decoding route (`/blockchain/balance`,
+// `byAddress`), so this adds no new asymmetry. Scala DOES answer P2SH here,
+// returning a *synthetic* P2SH script (the deserialize-and-hash-check wrapper
+// with the 24-byte hash embedded); we deliberately do not, because that
+// template lives nowhere in the workspace and P2SH is a deprecated address
+// class (see `ergo_ser::address`'s module doc). Supporting it is a separate
+// feature, not a tweak to these decode routes. A wrong-network address is a
+// 400 (`NetworkMismatch`), matching Scala's "Trying to decode testnet address
+// in mainnet".
+
+/// Pure core of `/script/addressToTree`: `{"tree": "<ergoTree hex>"}`.
+fn address_to_tree_json(
+    address: &str,
+    network: NetworkPrefix,
+) -> Result<JsonValue, AddressDecodeError> {
+    let tree = decode_address_to_tree_bytes(address, network)?;
+    Ok(json!({ "tree": hex::encode(tree) }))
+}
+
+/// Pure core of `/script/addressToBytes`: the ErgoTree serialized AS a
+/// `Coll[Byte]` constant — type code `0x0e`, VLQ length, then the tree bytes.
+/// Scala emits e.g. `0e24…` for a 36-byte P2PK tree (`0x24` == 36).
+fn address_to_bytes_json(
+    address: &str,
+    network: NetworkPrefix,
+) -> Result<JsonValue, AddressDecodeError> {
+    let tree = decode_address_to_tree_bytes(address, network)?;
+    let mut out = Vec::with_capacity(1 + 5 + tree.len());
+    out.push(0x0e); // SColl[SByte] type code
+    ergo_primitives::vlq::encode_vlq_into(tree.len() as u64, &mut out);
+    out.extend_from_slice(&tree);
+    Ok(json!({ "bytes": hex::encode(out) }))
+}
+
+/// `GET /script/addressToTree/{address}`
+pub async fn script_address_to_tree_handler(
+    State(network): State<NetworkPrefix>,
+    Path(address): Path<String>,
+) -> Response {
+    match address_to_tree_json(&address, network) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => bad_request(decode_error_message(&e)),
+    }
+}
+
+/// `GET /script/addressToBytes/{address}`
+pub async fn script_address_to_bytes_handler(
+    State(network): State<NetworkPrefix>,
+    Path(address): Path<String>,
+) -> Response {
+    match address_to_bytes_json(&address, network) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => bad_request(decode_error_message(&e)),
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+
+    // Oracle vectors captured from the live Scala mainnet node (`:9053`):
+    //   GET /script/addressToTree/<ADDR>  -> {"tree":"0008cd03…068df"}
+    //   GET /script/addressToBytes/<ADDR> -> {"bytes":"0e240008cd03…068df"}
+    // ADDR is a real mainnet P2PK address read off a live box.
+    const ADDR: &str = "9gZyL9m7J9eJv7h6gvxurbD986nWkw44NmHBgMkcxGezesPiETp";
+    const TREE: &str = "0008cd030e0048c32f4c804c809edfdff3f3fb70154e5066d0c4e04a767bb5bd149068df";
+
+    #[test]
+    fn address_to_tree_matches_scala_oracle() {
+        let v = address_to_tree_json(ADDR, NetworkPrefix::Mainnet).expect("decode");
+        assert_eq!(v["tree"], TREE);
+    }
+
+    #[test]
+    fn address_to_bytes_wraps_tree_as_coll_byte_constant() {
+        // 0x0e (Coll[Byte] type) + 0x24 (VLQ length 36) + the 36-byte tree.
+        let v = address_to_bytes_json(ADDR, NetworkPrefix::Mainnet).expect("decode");
+        assert_eq!(v["bytes"], format!("0e24{TREE}"));
+    }
+
+    #[test]
+    fn wrong_network_is_rejected() {
+        // The mainnet vector decoded as Testnet must fail with NetworkMismatch
+        // — parity with Scala's "Trying to decode testnet address in mainnet".
+        let err = address_to_tree_json(ADDR, NetworkPrefix::Testnet).unwrap_err();
+        assert!(
+            matches!(err, AddressDecodeError::NetworkMismatch { .. }),
+            "expected NetworkMismatch, got {err:?}",
+        );
+    }
 }
