@@ -4251,6 +4251,33 @@ fn opcode_sheader_properties() {
         run_eval_ctx(&votes_expr, &ctx),
         Value::CollBytes(vec![1, 2, 3])
     );
+
+    // .stateRoot (method 5): Scala CHeader.stateRoot wraps the digest
+    // via AvlTreeData.avlTreeFromDigest — ALL operations enabled
+    // (serialized treeFlags 0x07), keyLength 32, no value length.
+    // Pinned by Header.property_accessors.json :: h.stateRoot#nominal
+    // (flags byte 0x07 vs 0x00 was a one-byte value divergence).
+    let sr_expr = op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 104,
+            method_id: 5,
+            obj: Box::new(get_header.clone()),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    assert_eq!(
+        run_eval_ctx(&sr_expr, &ctx),
+        Value::AvlTree(ergo_ser::sigma_value::AvlTreeData {
+            digest: vec![0xDD; 33],
+            insert_allowed: true,
+            update_allowed: true,
+            remove_allowed: true,
+            key_length: 32,
+            value_length_opt: None,
+        })
+    );
 }
 
 // SubstConstants (0x74) — substitute a constant in a serialized ErgoTree

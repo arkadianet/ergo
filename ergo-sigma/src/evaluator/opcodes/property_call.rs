@@ -139,11 +139,16 @@ pub(super) fn eval_no_arg_method(
                 3 => Value::CollBytes(h.parent_id.to_vec()),
                 4 => Value::CollBytes(h.ad_proofs_root.to_vec()),
                 5 => {
+                    // Scala CHeader.stateRoot =
+                    // CAvlTree(AvlTreeData.avlTreeFromDigest(digest)):
+                    // ALL operations enabled (insert/update/remove →
+                    // serialized treeFlags 0x07), keyLength 32, no
+                    // value length.
                     let avl = ergo_ser::sigma_value::AvlTreeData {
                         digest: h.state_root.to_vec(),
-                        insert_allowed: false,
-                        update_allowed: false,
-                        remove_allowed: false,
+                        insert_allowed: true,
+                        update_allowed: true,
+                        remove_allowed: true,
                         key_length: 32,
                         value_length_opt: None,
                     };
