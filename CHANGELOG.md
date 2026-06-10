@@ -16,38 +16,87 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-10
+
+A large consensus-behaviour release. It closes the SANTA conformance effort —
+the ErgoTree interpreter and serializer now match the Scala
+`sigmastate-interpreter` reference bug-for-bug across the suite (`{value, cost,
+error}`) — hardens the mining candidate path, and carries a security fix. As
+always for this node: re-verify its verdicts against the Scala reference node
+before relying on it for funds.
+
+### Security
+
+- **`SHeader` value support + ErgoTree-version threading
+  (GHSA-hfj8-hjph-7r78).** Header values reaching script evaluation are now
+  modelled and version-gated correctly (#31).
+
 ### Added
 
 - **Scala-compat `GET /emission/at/{blockHeight}`** — per-height emission
   schedule data: `{height, minerReward, totalCoinsIssued, totalRemainCoins,
-  reemitted}`, EIP-27-aware (mirrors `EmissionApiRoute.emissionInfoAtHeight`:
-  once reemission activates, the charge moves out of `minerReward` and shows
-  up as `reemitted`). Public route — no `api_key`, mounted in every node
-  mode; the schedule is static per-network math. The cumulative-issuance
-  primitives (`issued_coins_after_height`, `coins_and_blocks_total`,
-  `emission_info_at_height`) join `ergo-mining::emission_rules`,
-  differential-tested against 17 vectors captured from a live Scala mainnet
-  node (`test-vectors/api/emission/`). `GET /emission/scripts` remains
-  unimplemented — the emission/reemission contract-tree predefs aren't
-  exposed in the workspace yet; its oracle capture ships at
-  `test-vectors/api/emission/scripts.json` for whoever picks it up.
+  reemitted}`, EIP-27-aware (mirrors `EmissionApiRoute.emissionInfoAtHeight`).
+  Public route, mounted in every node mode; the cumulative-issuance primitives
+  join `ergo-mining::emission_rules`, differential-tested against 17 vectors
+  captured from a live Scala mainnet node. `GET /emission/scripts` remains
+  unimplemented (its oracle capture ships for whoever picks it up) (#15).
+- **Node mode identity on the overview page + real mining flag** (#11).
 
 ### Fixed
 
-- **Unknown paths no longer answer `403 invalid.api-key` when the API key
-  gate is configured.** The `api_key` (and indexer status-gate) middleware
-  was attached with `Router::layer`, which also wraps the subtree's implicit
-  fallback; `Router::merge` then propagates that wrapped fallback
-  router-wide, so every unmatched path — including not-yet-implemented
-  Scala-compat routes like `/emission/at` — rejected with 403 instead of
-  404, masquerading as an auth problem. All route middleware now mounts via
-  `route_layer` (matched routes only) and unmatched paths answer a plain,
-  ungated 404. Scala's whole-prefix gating semantics survive through
-  explicit catch-all routes: unknown `/wallet/*` and `/node/*` subpaths
-  still reject on the key first (parity with Scala's
-  `pathPrefix(...) & withAuth`), then 404 once the key passes. The public
-  `/wallet/ui` static routes are unaffected (exact-path routes outrank the
-  gated wildcard).
+- **ErgoTree interpreter & serializer — consensus parity with the Scala
+  reference (SANTA conformance).** ~40 bug-for-bug `{value, cost, error}`
+  fixes across the sigma evaluator and `ergo-ser`, verified against the SANTA
+  vector suite and the `sigmastate-interpreter` source. Highlights:
+  - Numeric arithmetic — Int/Long overflow + div/mod, Byte/Short wrap, BigInt
+    256-bit bounds + modulus, out-of-range v6 shift counts, pre-v3 mixed-kind
+    operand auto-upcast, get/encode/negate/cast costs (#17, #19, #20, #21,
+    #30, #54).
+  - UnsignedBigInt carrier — arithmetic, `fromBigEndianBytes`, upcast,
+    ordering (#34, #44).
+  - AVL tree — graceful bad-proof outcomes for lookup + mutating ops,
+    keyLength/valueLength signed-i32 wrap + allowed-op accessors,
+    `updateDigest`/`updateOperations`, Scala cost models (#25, #28, #29, #42).
+  - Equality & collection cost models — EQ/NEQ + indexOf, SigmaProp equality,
+    SigmaAnd/Or evaluate-all-before-collapse, flatMap / indices / updateMany /
+    Option.map (#30, #33, #36, #37, #41, #46).
+  - `Global.serialize` for Box / AvlTree / Header, `substConstants`,
+    DecodePoint curve validation + identity canonicalization (#38, #39, #40,
+    #43).
+  - Box / Header / register access — SBox value + real txid/index, register
+    reads enforce the requested type, `getReg` dynamic index + getRegV5
+    reject, `Header.stateRoot` AvlTree flags, zero-arg v6 method dispatch
+    (#23, #32, #45, #49, #50, #51).
+  - SOption — requires ErgoTree v≥3, any nonzero discriminant is `Some`
+    (#24, #47).
+  - Other opcode semantics — ByIndex eager (pre-v3) / lazy (v3+) default,
+    CreateTuple arity≠2 reject, HOF function values + `hasDeserialize`
+    reduction fork, canonical `0x0c0c` prefix for `Coll[Coll[..]]` (#18, #22,
+    #48, #52).
+- **`atLeast` with a trivial-prop child no longer panics the verifier** — it
+  now folds trivial children per Scala `AtLeast.reduce`. Was a reachable
+  consensus-path panic + divergence on a crafted-but-plausible spend (#53).
+- **Soft-fork-disabled validation rule 215 (unknown header votes) honored**
+  (#16).
+- **Unknown paths answer a plain `404`, not `403 invalid.api-key`.** Route
+  middleware now mounts via `route_layer` (matched routes only); Scala's
+  whole-prefix key gating survives via explicit `/wallet/*` and `/node/*`
+  catch-alls.
+- **Digest-mode (Mode 5/6) survival** — no longer crashes on the first
+  `sync_tick`, handshake, or API seam (#8); P2P delivery-tracker type-shadow
+  bound (#6).
+
+### Performance
+
+- **Mining candidate generation — from ~seconds to near-instant on the hot
+  path.** A per-tip pristine AVL base cache + single-step incremental advance
+  + minimal-first publish collapse the candidate dry-run, and the cold /
+  cache-miss rehydrate now streams `AVL_NODES` sequentially (readahead-
+  friendly) instead of pointer-chasing. With `[mining] candidate_base_cache =
+  true`, same-tip / mempool-driven rebuilds reuse the resident tree — a
+  multi-GB full rehydrate (minutes under memory pressure, which starved
+  external miners with `/mining/candidate` 503s) becomes a ~16 ms reuse
+  (#7, #9, #12, #55).
 
 ## [0.3.0] - 2026-06-03
 
