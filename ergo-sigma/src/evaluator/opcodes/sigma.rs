@@ -308,12 +308,109 @@ pub(in crate::evaluator) fn eval_xor(
     }
 }
 
-// 0x98 AtLeast(bound, children) -> SigmaProp
-// k-of-n threshold: returns CTHRESHOLD(k, sigma_1, ..., sigma_n).
-// Normalize per Scala AtLeast.reduce:
-//   k <= 0 → true, k > n → false
-//   k == 1 → COR(children), k == n → CAND(children)
-//   otherwise → CTHRESHOLD(k, children)
+/// `sigma.data.COR.normalized`: a TrueProp child makes the whole OR true;
+/// FalseProp children drop; empty → FalseProp; a lone survivor collapses to
+/// itself. Shared by the SigmaOr collapse and the AtLeast reducer so trivial
+/// folding is identical everywhere a disjunction is normalized.
+fn cor_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
+    if children
+        .iter()
+        .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(true)))
+    {
+        return SigmaBoolean::TrivialProp(true);
+    }
+    let real: Vec<SigmaBoolean> = children
+        .into_iter()
+        .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(false)))
+        .collect();
+    match real.len() {
+        0 => SigmaBoolean::TrivialProp(false),
+        1 => real.into_iter().next().unwrap(),
+        _ => SigmaBoolean::Cor(real),
+    }
+}
+
+/// `sigma.data.CAND.normalized`: a FalseProp child makes the whole AND false;
+/// TrueProp children drop; empty → TrueProp; a lone survivor collapses to
+/// itself. Mirror of [`cor_normalized`] for conjunctions.
+fn cand_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
+    if children
+        .iter()
+        .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(false)))
+    {
+        return SigmaBoolean::TrivialProp(false);
+    }
+    let real: Vec<SigmaBoolean> = children
+        .into_iter()
+        .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(true)))
+        .collect();
+    match real.len() {
+        0 => SigmaBoolean::TrivialProp(true),
+        1 => real.into_iter().next().unwrap(),
+        _ => SigmaBoolean::Cand(real),
+    }
+}
+
+/// Port of Scala `sigma.ast.AtLeast.reduce` (trees.scala). Folds trivial
+/// children out and adjusts the bound so the result NEVER carries a nested
+/// TrivialProp — the proof verifier (`verify::parse_and_compute_challenges`)
+/// relies on that invariant and rejects any tree that violates it. A TrueProp
+/// child satisfies one slot for free (drop it, bound −= 1); a FalseProp child
+/// is dead weight (drop it); survivors collapse to COR / CAND / CTHRESHOLD via
+/// the same normalization as SigmaOr / SigmaAnd.
+///
+/// Kept structurally identical to the Scala loop ("HOTSPOT: don't beautify
+/// this code") so it stays auditable line-for-line against the reference. The
+/// per-item AtLeast cost is charged on the full pre-fold child count by the
+/// caller, before this runs.
+fn at_least_reduce(bound: i32, children: Vec<SigmaBoolean>) -> SigmaBoolean {
+    let n_children = children.len();
+    if bound <= 0 {
+        return SigmaBoolean::TrivialProp(true);
+    }
+    if bound as usize > n_children {
+        return SigmaBoolean::TrivialProp(false);
+    }
+    let mut cur_bound = bound as usize;
+    let mut children_left = n_children;
+    let mut sigmas: Vec<SigmaBoolean> = Vec::with_capacity(n_children);
+    let mut iter = children.into_iter();
+    loop {
+        if cur_bound == 1 {
+            sigmas.extend(iter);
+            return cor_normalized(sigmas);
+        }
+        if cur_bound == children_left {
+            sigmas.extend(iter);
+            return cand_normalized(sigmas);
+        }
+        match iter.next() {
+            Some(SigmaBoolean::TrivialProp(true)) => {
+                children_left -= 1;
+                cur_bound -= 1;
+            }
+            Some(SigmaBoolean::TrivialProp(false)) => {
+                children_left -= 1;
+            }
+            Some(other) => sigmas.push(other),
+            None => break,
+        }
+    }
+    if cur_bound == 1 {
+        return cor_normalized(sigmas);
+    }
+    if cur_bound == children_left {
+        return cand_normalized(sigmas);
+    }
+    SigmaBoolean::Cthreshold {
+        k: cur_bound as u8,
+        children: sigmas,
+    }
+}
+
+// 0x98 AtLeast(bound, children) -> SigmaProp. k-of-n threshold; folds trivial
+// children and collapses to COR / CAND / CTHRESHOLD per Scala AtLeast.reduce
+// (see at_least_reduce). Cost is per-item on the pre-fold child count.
 pub(in crate::evaluator) fn eval_at_least(
     bound_expr: &Expr,
     children_expr: &Expr,
@@ -340,30 +437,7 @@ pub(in crate::evaluator) fn eval_at_least(
         }
     };
     add_cost_per_item(cx.cost, 0x98, sigma_props.len() as u32)?;
-    if k <= 0 {
-        Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(true)))
-    } else if k as usize > sigma_props.len() {
-        Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(false)))
-    } else if k == 1 {
-        // Normalize: COR with 1 child = just the child
-        Ok(Value::SigmaProp(if sigma_props.len() == 1 {
-            sigma_props.into_iter().next().unwrap()
-        } else {
-            SigmaBoolean::Cor(sigma_props)
-        }))
-    } else if k as usize == sigma_props.len() {
-        // Normalize: CAND with 1 child = just the child
-        Ok(Value::SigmaProp(if sigma_props.len() == 1 {
-            sigma_props.into_iter().next().unwrap()
-        } else {
-            SigmaBoolean::Cand(sigma_props)
-        }))
-    } else {
-        Ok(Value::SigmaProp(SigmaBoolean::Cthreshold {
-            k: k as u8,
-            children: sigma_props,
-        }))
-    }
+    Ok(Value::SigmaProp(at_least_reduce(k, sigma_props)))
 }
 
 // 0xEA SigmaAnd (collection form) — short-circuit on TrivialFalse.
@@ -396,23 +470,9 @@ pub(in crate::evaluator) fn eval_sigma_and_collection(
             }
         }
     }
-    // Cost-free collapse: FalseProp anywhere absorbs to FalseProp; TrueProp
-    // operands are dropped (identity).
-    if children
-        .iter()
-        .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(false)))
-    {
-        return Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(false)));
-    }
-    let real_children: Vec<SigmaBoolean> = children
-        .into_iter()
-        .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(true)))
-        .collect();
-    Ok(Value::SigmaProp(match real_children.len() {
-        0 => SigmaBoolean::TrivialProp(true),
-        1 => real_children.into_iter().next().unwrap(),
-        _ => SigmaBoolean::Cand(real_children),
-    }))
+    // Cost-free collapse via the shared CAND normalization (FalseProp absorbs,
+    // TrueProp drops) — the identical fold AtLeast applies to its children.
+    Ok(Value::SigmaProp(cand_normalized(children)))
 }
 
 // 0xEB SigmaOr (collection form) — short-circuit on TrivialTrue.
@@ -444,23 +504,9 @@ pub(in crate::evaluator) fn eval_sigma_or_collection(
             }
         }
     }
-    // Cost-free collapse: TrueProp anywhere absorbs to TrueProp; FalseProp
-    // operands are dropped (identity).
-    if children
-        .iter()
-        .any(|sb| matches!(sb, SigmaBoolean::TrivialProp(true)))
-    {
-        return Ok(Value::SigmaProp(SigmaBoolean::TrivialProp(true)));
-    }
-    let real_children: Vec<SigmaBoolean> = children
-        .into_iter()
-        .filter(|sb| !matches!(sb, SigmaBoolean::TrivialProp(false)))
-        .collect();
-    Ok(Value::SigmaProp(match real_children.len() {
-        0 => SigmaBoolean::TrivialProp(false),
-        1 => real_children.into_iter().next().unwrap(),
-        _ => SigmaBoolean::Cor(real_children),
-    }))
+    // Cost-free collapse via the shared COR normalization (TrueProp absorbs,
+    // FalseProp drops).
+    Ok(Value::SigmaProp(cor_normalized(children)))
 }
 
 // 0x74 SubstConstants(script_bytes, positions, new_values).

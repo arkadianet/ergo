@@ -41,6 +41,16 @@ pub fn extract_proof_leaves(
     proposition: &SigmaBoolean,
     proof_bytes: &[u8],
 ) -> Result<Vec<ProofLeaf>, SigmaVerifyError> {
+    // A trivial ROOT proposition has no cryptographic leaves to extract, so
+    // short-circuit before parsing — mirroring verify_sigma_proof's root
+    // handling. Only a NESTED trivial child signals the reduction-invariant
+    // violation that `parse_and_compute_challenges` rejects. A trivially
+    // reduced input (e.g. a script reducing to `sigmaProp(true)`) reaches here
+    // via the wallet's `bag_for_transaction`; it must yield an empty bag, not
+    // an error that would break hint extraction for the whole transaction.
+    if matches!(proposition, SigmaBoolean::TrivialProp(_)) {
+        return Ok(Vec::new());
+    }
     let mut offset = 0;
     let unchecked = parse_and_compute_challenges(proposition, proof_bytes, &mut offset, None)?;
     let with_commits = compute_commitments(unchecked)?;
@@ -227,6 +237,13 @@ pub enum SigmaVerifyError {
     /// proof is structurally invalid.
     #[error("empty children in conjecture")]
     EmptyChildren,
+    /// A `TrivialProp` appeared as a conjecture child during proof parsing.
+    /// Reduction (`AtLeast.reduce`, `SigmaOr` / `SigmaAnd`) must fold these
+    /// out before verification; reaching the parser means that invariant was
+    /// violated. Rejected rather than panicked because this runs on the
+    /// consensus transaction-verification path.
+    #[error("unexpected trivial proposition as conjecture child")]
+    UnexpectedTrivialChild,
 }
 
 /// Verify a sigma proof against a proposition and message.
@@ -283,9 +300,13 @@ fn parse_and_compute_challenges(
     };
 
     match prop {
-        SigmaBoolean::TrivialProp(true) | SigmaBoolean::TrivialProp(false) => {
-            // Trivial props should be caught before proof parsing
-            unreachable!("trivial propositions should not reach proof parsing")
+        SigmaBoolean::TrivialProp(_) => {
+            // A reduced tree must not carry a nested TrivialProp child:
+            // AtLeast.reduce / SigmaOr / SigmaAnd fold them out. Reaching here
+            // means an upstream reduction invariant broke — reject, never
+            // panic (this runs on the consensus verification path, with no
+            // catch_unwind above it).
+            Err(SigmaVerifyError::UnexpectedTrivialChild)
         }
         SigmaBoolean::ProveDlog(ge) => {
             // Scala reads z with getBytesUnsafe — accepts fewer bytes than GROUP_SIZE
@@ -576,5 +597,78 @@ fn read_bytes_padded(proof: &[u8], offset: &mut usize, n: usize) -> Vec<u8> {
 fn xor_bytes(buf: &mut [u8], other: &[u8]) {
     for (a, b) in buf.iter_mut().zip(other.iter()) {
         *a ^= *b;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_primitives::group_element::GroupElement;
+
+    // A reduced sigma tree must never carry a nested TrivialProp child —
+    // `AtLeast.reduce` / `SigmaOr` / `SigmaAnd` fold them out before proof
+    // parsing. If one reaches the parser anyway (e.g. a future reduction
+    // bug), the verifier must REJECT, not panic: this runs on the consensus
+    // transaction-validation path with no `catch_unwind` above it. Regression
+    // guard for the AtLeast trivial-fold fix.
+    #[test]
+    fn cthreshold_with_trivial_child_rejects_not_panics() {
+        let prop = SigmaBoolean::Cthreshold {
+            k: 2,
+            children: vec![
+                SigmaBoolean::TrivialProp(true),
+                SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])),
+                SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33])),
+            ],
+        };
+        // Non-empty proof so we pass the empty-proof early return in
+        // verify_sigma_proof and actually reach the parser.
+        let proof = vec![0u8; 64];
+        let result = verify_sigma_proof(&prop, &proof, b"msg");
+        assert!(
+            matches!(result, Err(SigmaVerifyError::UnexpectedTrivialChild)),
+            "trivial child must be rejected with UnexpectedTrivialChild, not panic; got {result:?}"
+        );
+    }
+
+    // A TRIVIAL ROOT proposition has no cryptographic leaves to extract —
+    // mirror verify_sigma_proof's root short-circuit and return an empty bag,
+    // NOT an error. A trivially-reduced input (e.g. a script reducing to
+    // `sigmaProp(true)`) reaches extract_proof_leaves through the wallet's
+    // bag_for_transaction; erroring there would break hint extraction for the
+    // whole transaction.
+    #[test]
+    fn extract_proof_leaves_trivial_root_returns_empty() {
+        for root in [
+            SigmaBoolean::TrivialProp(true),
+            SigmaBoolean::TrivialProp(false),
+        ] {
+            let leaves = extract_proof_leaves(&root, &[]);
+            assert!(
+                matches!(&leaves, Ok(v) if v.is_empty()),
+                "trivial root must yield an empty leaf set, got {leaves:?}"
+            );
+        }
+    }
+
+    // The root fast path must NOT mask a NESTED trivial child — that is the
+    // reduction-invariant violation the parser rejects (paired with the
+    // AtLeast fold). extract_proof_leaves must still surface it as an error.
+    #[test]
+    fn extract_proof_leaves_nested_trivial_child_rejects() {
+        let prop = SigmaBoolean::Cthreshold {
+            k: 2,
+            children: vec![
+                SigmaBoolean::TrivialProp(true),
+                SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])),
+                SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33])),
+            ],
+        };
+        let proof = vec![0u8; 64];
+        let result = extract_proof_leaves(&prop, &proof);
+        assert!(
+            matches!(result, Err(SigmaVerifyError::UnexpectedTrivialChild)),
+            "nested trivial child must still be rejected, got {result:?}"
+        );
     }
 }

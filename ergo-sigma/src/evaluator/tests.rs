@@ -4063,14 +4063,13 @@ fn opcode_atleast_all_trivial_true() {
         ])),
     };
     let expr = op(0x98, Payload::Two(Box::new(bound), Box::new(items)));
+    // Scala AtLeast.reduce folds TrueProp children out and decrements the
+    // bound: the first two satisfy bound=2, so the whole threshold collapses
+    // to TrivialProp(true). It must NOT stay a Cthreshold carrying TrivialProp
+    // children — that shape later panics the proof verifier (verify.rs).
     match run_eval(&expr) {
-        // k <= count(true_children) → TrivialProp(true) OR Cthreshold with all-true children
         Value::SigmaProp(SigmaBoolean::TrivialProp(true)) => {}
-        Value::SigmaProp(SigmaBoolean::Cthreshold { k, children }) => {
-            assert_eq!(k, 2);
-            assert_eq!(children.len(), 3);
-        }
-        other => panic!("expected threshold-true result, got {other:?}"),
+        other => panic!("expected TrivialProp(true), got {other:?}"),
     }
 }
 
@@ -4088,6 +4087,116 @@ fn opcode_atleast_bound_exceeds_count() {
     match run_eval(&expr) {
         Value::SigmaProp(SigmaBoolean::TrivialProp(false)) => {}
         other => panic!("expected TrivialProp(false), got {other:?}"),
+    }
+}
+
+// AtLeast trivial-child folding (Scala `AtLeast.reduce`). A `Coll[SigmaProp]`
+// can carry runtime trivial props (e.g. `sigmaProp(HEIGHT > x)` reduces to
+// TrivialProp), so the reducer MUST fold them out — otherwise the result is a
+// conjecture with a nested TrivialProp child, which the proof verifier rejects
+// (and previously panicked on). See verify.rs and the fix in eval_at_least.
+
+#[test]
+fn opcode_atleast_folds_true_child() {
+    // atLeast(2, [TrivialTrue, dlog, dlog]): the TrueProp satisfies one slot
+    // for free → "1 of {dlog, dlog}" = COR(dlog, dlog). No trivial may survive.
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::CollValue;
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33]))),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33]))),
+        ])),
+    };
+    let expr = op(0x98, Payload::Two(Box::new(const_int(2)), Box::new(items)));
+    match run_eval(&expr) {
+        Value::SigmaProp(SigmaBoolean::Cor(children)) => {
+            assert_eq!(children.len(), 2, "TrueProp child must be folded out");
+            assert!(
+                children
+                    .iter()
+                    .all(|c| matches!(c, SigmaBoolean::ProveDlog(_))),
+                "no trivial child may survive, got {children:?}"
+            );
+        }
+        other => panic!("expected COR(dlog, dlog), got {other:?}"),
+    }
+}
+
+#[test]
+fn opcode_atleast_folds_false_child() {
+    // atLeast(2, [TrivialFalse, dlog, dlog]): the FalseProp is dead weight →
+    // "2 of {dlog, dlog}" = CAND(dlog, dlog). No trivial may survive.
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::CollValue;
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(false)),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33]))),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33]))),
+        ])),
+    };
+    let expr = op(0x98, Payload::Two(Box::new(const_int(2)), Box::new(items)));
+    match run_eval(&expr) {
+        Value::SigmaProp(SigmaBoolean::Cand(children)) => {
+            assert_eq!(children.len(), 2, "FalseProp child must be folded out");
+            assert!(children
+                .iter()
+                .all(|c| matches!(c, SigmaBoolean::ProveDlog(_))));
+        }
+        other => panic!("expected CAND(dlog, dlog), got {other:?}"),
+    }
+}
+
+#[test]
+fn opcode_atleast_folds_to_single_dlog() {
+    // atLeast(2, [TrivialTrue, dlog]): TrueProp drops, bound→1 over a single
+    // real child → the bare ProveDlog (no COR/CAND wrapper, no trivial).
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::CollValue;
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([7u8; 33]))),
+        ])),
+    };
+    let expr = op(0x98, Payload::Two(Box::new(const_int(2)), Box::new(items)));
+    match run_eval(&expr) {
+        Value::SigmaProp(SigmaBoolean::ProveDlog(ge)) => {
+            assert_eq!(ge.as_bytes(), &[7u8; 33]);
+        }
+        other => panic!("expected bare ProveDlog, got {other:?}"),
+    }
+}
+
+#[test]
+fn opcode_atleast_no_trivial_stays_threshold() {
+    // Regression guard: a genuine 2-of-3 with no trivial children must stay a
+    // CTHRESHOLD(2, [dlog, dlog, dlog]) — the fold must not disturb this path.
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::CollValue;
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33]))),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33]))),
+            SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([4u8; 33]))),
+        ])),
+    };
+    let expr = op(0x98, Payload::Two(Box::new(const_int(2)), Box::new(items)));
+    match run_eval(&expr) {
+        Value::SigmaProp(SigmaBoolean::Cthreshold { k, children }) => {
+            assert_eq!(k, 2);
+            assert_eq!(children.len(), 3);
+            assert!(children
+                .iter()
+                .all(|c| matches!(c, SigmaBoolean::ProveDlog(_))));
+        }
+        other => panic!("expected CTHRESHOLD(2, 3 dlogs), got {other:?}"),
     }
 }
 
