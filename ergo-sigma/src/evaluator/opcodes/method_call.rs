@@ -25,6 +25,7 @@ use super::super::helpers::{
     values_to_collection, CollKind,
 };
 use super::super::types::{EvalError, Value};
+use super::binding::check_closure_param_types;
 
 pub(in crate::evaluator) fn eval_method_call(
     type_id: u8,
@@ -1391,13 +1392,16 @@ pub(in crate::evaluator) fn eval_method_call(
                 Value::Func {
                     captured_env,
                     params,
-                    param_types: _,
+                    param_types,
                     body,
                 } => {
                     // Collect all inner collections, preserving the raw Value form
                     // so we can reassemble the correct output type.
                     let mut inner_colls: Vec<Value> = Vec::new();
                     for item in items {
+                        // Scala closure invocation: Value.checkType runs
+                        // before the AddToEnvironment charge.
+                        check_closure_param_types(&param_types)?;
                         let mut call_env = (*captured_env).clone();
                         if let Some(param_id) = params.first() {
                             // Scala FuncValue closure binds its argument on each
@@ -2090,9 +2094,12 @@ pub(in crate::evaluator) fn eval_method_call(
                     Value::Func {
                         captured_env,
                         params,
-                        param_types: _,
+                        param_types,
                         body,
                     } => {
+                        // Scala closure invocation: Value.checkType runs
+                        // before the AddToEnvironment charge.
+                        check_closure_param_types(&param_types)?;
                         cx.cost.add(JitCost::from_jit(5))?;
                         #[cfg(feature = "cost-trace")]
                         crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -2138,9 +2145,11 @@ pub(in crate::evaluator) fn eval_method_call(
                     Value::Func {
                         captured_env,
                         params,
-                        param_types: _,
+                        param_types,
                         body,
                     } => {
+                        // Scala closure invocation runs Value.checkType.
+                        check_closure_param_types(&param_types)?;
                         let mut call_env = (*captured_env).clone();
                         if let Some(param_id) = params.first() {
                             call_env.insert(*param_id, *inner.clone());

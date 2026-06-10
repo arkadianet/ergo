@@ -94,9 +94,24 @@ fn write_payload(
             write_expr(w, rhs, cseg)?;
         }
 
-        Payload::FunDef { id, rhs, .. } => {
+        Payload::FunDef {
+            id, tpe_args, rhs, ..
+        } => {
             w.put_u32(*id);
-            // Type is never written (see parse comment above).
+            // Scala ValDefSerializer writes the tpeArgs block for the
+            // FunDef opcode: count byte + STypeVar types, then the rhs.
+            // Count is a single unsigned byte; a programmatic FunDef
+            // with > 255 type args would wrap the count and desync the
+            // stream from the written types (same guard as SFunc).
+            assert!(
+                tpe_args.len() <= u8::MAX as usize,
+                "FunDef tpeArgs count too large for Scala wire format: {} (max 255)",
+                tpe_args.len()
+            );
+            w.put_u8(tpe_args.len() as u8);
+            for t in tpe_args {
+                crate::sigma_type::write_type(w, t);
+            }
             write_expr(w, rhs, cseg)?;
         }
 

@@ -99,6 +99,188 @@ pub fn reduce_expr_traced_with_cost(
 }
 
 #[inline(never)]
+/// Deep walk: does the expression contain a `DeserializeContext` (0xD4)
+/// or `DeserializeRegister` (0xD5) node anywhere? Mirrors Scala
+/// `Value.hasDeserialize` (counts exactly those two node classes).
+/// Exhaustive over `Payload` — no wildcard arm, so a future variant
+/// with children cannot silently escape the walk.
+fn expr_has_deserialize(expr: &Expr) -> bool {
+    let node = match expr {
+        Expr::Const { .. } => return false,
+        Expr::Op(node) => node,
+    };
+    match &node.payload {
+        Payload::DeserializeContext { .. } | Payload::DeserializeRegister { .. } => true,
+        Payload::Zero
+        | Payload::ValUse { .. }
+        | Payload::ConstPlaceholder { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::NoneValue { .. } => false,
+        Payload::One(a) => expr_has_deserialize(a),
+        Payload::Two(a, b) => expr_has_deserialize(a) || expr_has_deserialize(b),
+        Payload::Three(a, b, c) => {
+            expr_has_deserialize(a) || expr_has_deserialize(b) || expr_has_deserialize(c)
+        }
+        Payload::Four(a, b, c, d) => {
+            expr_has_deserialize(a)
+                || expr_has_deserialize(b)
+                || expr_has_deserialize(c)
+                || expr_has_deserialize(d)
+        }
+        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => expr_has_deserialize(rhs),
+        Payload::BlockValue { items, result } => {
+            items.iter().any(expr_has_deserialize) || expr_has_deserialize(result)
+        }
+        Payload::FuncValue { body, .. } => expr_has_deserialize(body),
+        Payload::MethodCall { obj, args, .. } => {
+            expr_has_deserialize(obj) || args.iter().any(expr_has_deserialize)
+        }
+        Payload::ConcreteCollection { items, .. }
+        | Payload::Tuple { items }
+        | Payload::SigmaCollection { items } => items.iter().any(expr_has_deserialize),
+        Payload::SelectField { input, .. }
+        | Payload::ExtractRegisterAs { input, .. }
+        | Payload::NumericCast { input, .. } => expr_has_deserialize(input),
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => {
+            expr_has_deserialize(input)
+                || expr_has_deserialize(index)
+                || default.as_deref().is_some_and(expr_has_deserialize)
+        }
+        Payload::FuncApply { func, args } => {
+            expr_has_deserialize(func) || args.iter().any(expr_has_deserialize)
+        }
+    }
+}
+
+/// Structural rebuild replacing every `ConstPlaceholder { index }` with
+/// the corresponding inline `Expr::Const` from the segregated constant
+/// table. Out-of-range indexes are left as placeholders — they error at
+/// evaluation exactly like the placeholder path. Exhaustive over
+/// `Payload` (no wildcard) for the same reason as
+/// [`expr_has_deserialize`].
+fn inline_placeholders(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Expr {
+    let node = match expr {
+        Expr::Const { .. } => return expr.clone(),
+        Expr::Op(node) => node,
+    };
+    let sub = |e: &Expr| inline_placeholders(e, constants);
+    let sub_box = |e: &Expr| Box::new(inline_placeholders(e, constants));
+    let payload = match &node.payload {
+        Payload::ConstPlaceholder { index } => match constants.get(*index as usize) {
+            Some((tpe, val)) => {
+                return Expr::Const {
+                    tpe: tpe.clone(),
+                    val: val.clone(),
+                }
+            }
+            None => Payload::ConstPlaceholder { index: *index },
+        },
+        p @ (Payload::Zero
+        | Payload::ValUse { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::NoneValue { .. }
+        | Payload::DeserializeContext { .. }) => p.clone(),
+        Payload::One(a) => Payload::One(sub_box(a)),
+        Payload::Two(a, b) => Payload::Two(sub_box(a), sub_box(b)),
+        Payload::Three(a, b, c) => Payload::Three(sub_box(a), sub_box(b), sub_box(c)),
+        Payload::Four(a, b, c, d) => Payload::Four(sub_box(a), sub_box(b), sub_box(c), sub_box(d)),
+        Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
+            id: *id,
+            tpe: tpe.clone(),
+            rhs: sub_box(rhs),
+        },
+        Payload::FunDef {
+            id,
+            tpe,
+            tpe_args,
+            rhs,
+        } => Payload::FunDef {
+            id: *id,
+            tpe: tpe.clone(),
+            tpe_args: tpe_args.clone(),
+            rhs: sub_box(rhs),
+        },
+        Payload::BlockValue { items, result } => Payload::BlockValue {
+            items: items.iter().map(sub).collect(),
+            result: sub_box(result),
+        },
+        Payload::FuncValue { args, body } => Payload::FuncValue {
+            args: args.clone(),
+            body: sub_box(body),
+        },
+        Payload::MethodCall {
+            type_id,
+            method_id,
+            obj,
+            args,
+            type_args,
+        } => Payload::MethodCall {
+            type_id: *type_id,
+            method_id: *method_id,
+            obj: sub_box(obj),
+            args: args.iter().map(sub).collect(),
+            type_args: type_args.clone(),
+        },
+        Payload::ConcreteCollection { elem_type, items } => Payload::ConcreteCollection {
+            elem_type: elem_type.clone(),
+            items: items.iter().map(sub).collect(),
+        },
+        Payload::Tuple { items } => Payload::Tuple {
+            items: items.iter().map(sub).collect(),
+        },
+        Payload::SigmaCollection { items } => Payload::SigmaCollection {
+            items: items.iter().map(sub).collect(),
+        },
+        Payload::SelectField { input, field_idx } => Payload::SelectField {
+            input: sub_box(input),
+            field_idx: *field_idx,
+        },
+        Payload::ExtractRegisterAs { input, reg_id, tpe } => Payload::ExtractRegisterAs {
+            input: sub_box(input),
+            reg_id: *reg_id,
+            tpe: tpe.clone(),
+        },
+        Payload::DeserializeRegister {
+            reg_id,
+            tpe,
+            default,
+        } => Payload::DeserializeRegister {
+            reg_id: *reg_id,
+            tpe: tpe.clone(),
+            default: default.as_deref().map(sub_box),
+        },
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => Payload::ByIndex {
+            input: sub_box(input),
+            index: sub_box(index),
+            default: default.as_deref().map(sub_box),
+        },
+        Payload::NumericCast { input, tpe } => Payload::NumericCast {
+            input: sub_box(input),
+            tpe: tpe.clone(),
+        },
+        Payload::FuncApply { func, args } => Payload::FuncApply {
+            func: sub_box(func),
+            args: args.iter().map(sub).collect(),
+        },
+    };
+    Expr::Op(IrNode {
+        opcode: node.opcode,
+        payload,
+    })
+}
+
 pub(in crate::evaluator) fn eval_expr(
     expr: &Expr,
     ctx: &ReductionContext<'_>,
@@ -108,6 +290,29 @@ pub(in crate::evaluator) fn eval_expr(
     cost: &mut CostAccumulator,
     trace: &mut Option<Vec<TraceEntry>>,
 ) -> Result<Value, EvalError> {
+    // Scala `Interpreter.fullReduction` forks on `ErgoTree.hasDeserialize`:
+    // a tree containing DeserializeContext/DeserializeRegister goes
+    // through `propositionFromErgoTree` →
+    // `toProposition(isConstantSegregation)` — segregated constants are
+    // INLINED into the proposition — and `reduceToCryptoJITC` then
+    // evaluates with `EmptyConstants`. An inline `Constant` charges
+    // `Constant.costKind` (5 jit) where a `ConstantPlaceholder` charges
+    // 1, so the reduction cost of a deserialize-carrying segregated
+    // tree differs from the placeholder path even when no deserialize
+    // node is ever evaluated (vector:
+    // DeserializeContext_over_absent_wrong_typed_var dead-branch
+    // entries, +4 per segregated constant).
+    //
+    // Root-gated at depth 0, which holds at every public entry
+    // (`reduce_expr_with_cost`, test-only `eval_to_value`, the
+    // conformance hook) and never mid-evaluation (the counter is
+    // incremented before any child dispatch). The recursive call passes
+    // empty constants — mirroring Scala's `EmptyConstants` and making
+    // the gate non-reentrant.
+    if *depth == 0 && !constants.is_empty() && expr_has_deserialize(expr) {
+        let inlined = inline_placeholders(expr, constants);
+        return eval_expr(&inlined, ctx, &[], env, depth, cost, trace);
+    }
     *depth += 1;
     if *depth > MAX_EVAL_DEPTH {
         return Err(EvalError::DepthLimitExceeded(*depth));
@@ -160,10 +365,11 @@ fn eval_op(
             opcodes::binding::eval_block_value(items, result, &mut cx)
         }
 
-        // ValDef — bind a value to an id in the environment
-        (0xD6, Payload::ValDef { id, rhs, .. }) => {
-            opcodes::binding::eval_val_def(*id, rhs, &mut cx)
-        }
+        // ValDef — standalone reject. Binding happens ONLY inside the
+        // BlockValue item loop (Scala BlockValue.eval binds items
+        // inline; the ValDef node itself has no eval and a bare
+        // occurrence hits notSupportedError).
+        (0xD6, _) => opcodes::errors::eval_val_def_standalone(),
 
         // True constant
         (0x7F, Payload::Zero) => opcodes::constants::eval_true(cost),
@@ -694,6 +900,9 @@ fn eval_op(
         (0xF7, _) => opcodes::errors::eval_bit_shift_left(cost),
         (0xF8, _) => opcodes::errors::eval_bit_shift_right_zeroed(cost),
         (0xCF, _) => opcodes::errors::eval_sigma_prop_is_proven(),
+
+        // FunDef — standalone reject, same rule as ValDef above:
+        // binding happens only inside the BlockValue item loop.
         (0xD7, _) => opcodes::errors::eval_fun_def_standalone(),
         (0xE7, _) => opcodes::errors::eval_mod_q_e7(),
         (0xE8, _) => opcodes::errors::eval_mod_q_e8(),

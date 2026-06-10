@@ -182,6 +182,70 @@ fn roundtrip_valdef_cseg() {
     roundtrip(&body, true);
 }
 
+/// FunDef (0xD7) wire format per Scala `ValDefSerializer`: between the
+/// id and the rhs sits `nTpeArgs(u8)` + that many STypeVar types —
+/// always present, possibly empty. Skipping it (the old behavior)
+/// misreads the count byte as the rhs opcode and the whole body parse
+/// derails, so every tree containing a polymorphic FunDef was falsely
+/// rejected. Byte-identical reserialization pins both directions.
+#[test]
+fn roundtrip_fun_def_with_tpe_args() {
+    let lambda = Expr::Op(IrNode {
+        opcode: 0xD9,
+        payload: Payload::FuncValue {
+            args: vec![(2, Some(SigmaType::STypeVar("T".into())))],
+            body: Box::new(Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 2 },
+            })),
+        },
+    });
+    let body = Expr::Op(IrNode {
+        opcode: 0xD7,
+        payload: Payload::FunDef {
+            id: 1,
+            tpe: None,
+            tpe_args: vec![SigmaType::STypeVar("T".into())],
+            rhs: Box::new(lambda),
+        },
+    });
+    roundtrip(&body, false);
+}
+
+/// A FunDef with an empty tpeArgs block still carries the count byte.
+#[test]
+fn roundtrip_fun_def_empty_tpe_args() {
+    let body = Expr::Op(IrNode {
+        opcode: 0xD7,
+        payload: Payload::FunDef {
+            id: 1,
+            tpe: None,
+            tpe_args: vec![],
+            rhs: Box::new(Expr::Op(IrNode {
+                opcode: 0xA3,
+                payload: Payload::Zero,
+            })),
+        },
+    });
+    roundtrip(&body, false);
+}
+
+/// A non-STypeVar type in the FunDef tpeArgs position fails the parse
+/// (Scala: `r.getType().asInstanceOf[STypeVar]` ClassCastException).
+#[test]
+fn fun_def_non_type_var_tpe_arg_rejected() {
+    let mut w = VlqWriter::new();
+    // 0xD7 FunDef, id=1, nTpeArgs=1, then SInt (0x04) — not a typevar.
+    w.put_u8(0xD7);
+    w.put_u32(1);
+    w.put_u8(1);
+    w.put_u8(0x04);
+    w.put_u8(0xA3); // rhs: Height (never reached)
+    let data = w.result();
+    let mut r = VlqReader::new(&data);
+    assert!(parse_body(&mut r, 3).is_err());
+}
+
 #[test]
 fn roundtrip_block_value() {
     let def = Expr::Op(IrNode {

@@ -25,6 +25,7 @@ use super::super::helpers::{
     values_to_collection,
 };
 use super::super::types::{BoxSource, EvalError, Value};
+use super::binding::check_closure_param_types;
 
 // 0xB1 SizeOf
 pub(in crate::evaluator) fn eval_size_of(
@@ -277,10 +278,13 @@ pub(in crate::evaluator) fn eval_forall(
         Value::Func {
             captured_env,
             params,
-            param_types: _,
+            param_types,
             body,
         } => {
             for item in items {
+                // Scala closure invocation: Value.checkType runs before
+                // the AddToEnvironment charge (see check_closure_param_types).
+                check_closure_param_types(&param_types)?;
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -336,11 +340,14 @@ pub(in crate::evaluator) fn eval_filter(
         Value::Func {
             captured_env,
             params,
-            param_types: _,
+            param_types,
             body,
         } => {
             let mut result = Vec::new();
             for item in items {
+                // Scala closure invocation: Value.checkType runs before
+                // the AddToEnvironment charge (see check_closure_param_types).
+                check_closure_param_types(&param_types)?;
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -387,10 +394,13 @@ pub(in crate::evaluator) fn eval_fold(
         Value::Func {
             captured_env,
             params,
-            param_types: _,
+            param_types,
             body,
         } => {
             for item in items {
+                // Scala closure invocation: Value.checkType runs before
+                // the AddToEnvironment charge (see check_closure_param_types).
+                check_closure_param_types(&param_types)?;
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -443,6 +453,9 @@ pub(in crate::evaluator) fn eval_map_collection(
         } => {
             let mut result = Vec::new();
             for item in items {
+                // Scala closure invocation: Value.checkType runs before
+                // the AddToEnvironment charge (see check_closure_param_types).
+                check_closure_param_types(&param_types)?;
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -498,10 +511,13 @@ pub(in crate::evaluator) fn eval_exists(
         Value::Func {
             captured_env,
             params,
-            param_types: _,
+            param_types,
             body,
         } => {
             for item in items {
+                // Scala closure invocation: Value.checkType runs before
+                // the AddToEnvironment charge (see check_closure_param_types).
+                check_closure_param_types(&param_types)?;
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());

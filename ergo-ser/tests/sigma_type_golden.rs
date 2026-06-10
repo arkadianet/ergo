@@ -278,22 +278,26 @@ fn golden_quad() {
 
 #[test]
 fn golden_func_int_to_long() {
-    // 0x70, VLQ 1, SInt, SLong
+    // 0x70, count 1, SInt, SLong, tpeParams count 0 — Scala
+    // TypeSerializer always writes the trailing tpeParams count byte
+    // (`w.putUByte(tpeParams.length)`, TypeSerializer.scala:117-119).
     let t = SigmaType::SFunc {
         t_dom: vec![SigmaType::SInt],
         t_range: Box::new(SigmaType::SLong),
+        tpe_params: vec![],
     };
-    assert_eq!(encode(&t), [0x70, 0x01, 0x04, 0x05]);
+    assert_eq!(encode(&t), [0x70, 0x01, 0x04, 0x05, 0x00]);
 }
 
 #[test]
 fn golden_func_two_domain() {
-    // 0x70, VLQ 2, SInt, SLong, SBoolean
+    // 0x70, count 2, SInt, SLong, SBoolean, tpeParams count 0
     let t = SigmaType::SFunc {
         t_dom: vec![SigmaType::SInt, SigmaType::SLong],
         t_range: Box::new(SigmaType::SBoolean),
+        tpe_params: vec![],
     };
-    assert_eq!(encode(&t), [0x70, 0x02, 0x04, 0x05, 0x01]);
+    assert_eq!(encode(&t), [0x70, 0x02, 0x04, 0x05, 0x01, 0x00]);
 }
 
 // -- New predefined types (SString, SGlobal) --
@@ -393,6 +397,7 @@ fn sfunc_dom_count_above_127_uses_single_count_byte() {
     let t = SigmaType::SFunc {
         t_dom,
         t_range: Box::new(SigmaType::SUnit),
+        tpe_params: vec![],
     };
     let bytes = encode(&t);
     assert_eq!(bytes[0], 0x70, "FUNC_CODE = 0x70");

@@ -112,6 +112,11 @@ pub enum SigmaType {
         t_dom: Vec<SigmaType>,
         /// Range (return) type.
         t_range: Box<SigmaType>,
+        /// Type-variable parameters of a generic function type. Scala
+        /// `TypeSerializer` writes `nTpeParams(u8)` + that many
+        /// `STypeVar` idents after the range type — always present on
+        /// the wire (usually 0).
+        tpe_params: Vec<SigmaType>,
     },
 }
 
@@ -187,15 +192,24 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) {
         // quads (constrId 7 primId=0), and general (TUPLE_CODE for 5+)
         SigmaType::STuple(elems) => write_tuple(w, elems),
 
-        // SFunc: FUNC_CODE + 1-byte domain count + domain types + range type.
-        // Domain count is a single unsigned byte to match Scala
-        // (`w.putUByte(tDom.length)` / `r.getUByte()` at
-        // TypeSerializer.scala:212).
-        SigmaType::SFunc { t_dom, t_range } => {
+        // SFunc: FUNC_CODE + 1-byte domain count + domain types + range
+        // type + 1-byte tpeParams count + STypeVar idents. Counts are
+        // single unsigned bytes to match Scala (`w.putUByte` /
+        // `r.getUByte()` at TypeSerializer.scala:112-119).
+        SigmaType::SFunc {
+            t_dom,
+            t_range,
+            tpe_params,
+        } => {
             assert!(
                 t_dom.len() <= u8::MAX as usize,
                 "SFunc domain count too large for Scala wire format: {} (max 255)",
                 t_dom.len()
+            );
+            assert!(
+                tpe_params.len() <= u8::MAX as usize,
+                "SFunc tpeParams count too large for Scala wire format: {} (max 255)",
+                tpe_params.len()
             );
             w.put_u8(FUNC_CODE);
             w.put_u8(t_dom.len() as u8);
@@ -203,6 +217,10 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) {
                 write_type(w, d);
             }
             write_type(w, t_range);
+            w.put_u8(tpe_params.len() as u8);
+            for p in tpe_params {
+                write_type(w, p);
+            }
         }
     }
 }
@@ -401,8 +419,11 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
             Ok(SigmaType::STuple(elems))
         }
 
-        // SFunc: 0x70 + 1-byte domain count + domain types + range type.
-        // Scala TypeSerializer.scala:212 reads count as unsigned byte.
+        // SFunc: 0x70 + 1-byte domain count + domain types + range type
+        // + 1-byte tpeParams count + STypeVar idents. Scala
+        // TypeSerializer.scala:212-224 reads counts as unsigned bytes
+        // and requires each tpeParam ident to be an STypeVar
+        // (`require(ident.isInstanceOf[STypeVar])`).
         FUNC_CODE => {
             let dom_count = r.get_u8()? as usize;
             let mut t_dom = Vec::with_capacity(dom_count);
@@ -410,9 +431,21 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
                 t_dom.push(read_type_at_depth(r, next)?);
             }
             let t_range = read_type_at_depth(r, next)?;
+            let params_count = r.get_u8()? as usize;
+            let mut tpe_params = Vec::with_capacity(params_count);
+            for _ in 0..params_count {
+                let ident = read_type_at_depth(r, next)?;
+                if !matches!(ident, SigmaType::STypeVar(_)) {
+                    return Err(ReadError::InvalidData(format!(
+                        "SFunc tpeParam must be an STypeVar, got {ident:?}"
+                    )));
+                }
+                tpe_params.push(ident);
+            }
             Ok(SigmaType::SFunc {
                 t_dom,
                 t_range: Box::new(t_range),
+                tpe_params,
             })
         }
 
@@ -728,15 +761,24 @@ mod tests {
         roundtrip(&SigmaType::SFunc {
             t_dom: vec![SigmaType::SInt],
             t_range: Box::new(SigmaType::SLong),
+            tpe_params: vec![],
         });
         roundtrip(&SigmaType::SFunc {
             t_dom: vec![SigmaType::SInt, SigmaType::SLong],
             t_range: Box::new(SigmaType::SBoolean),
+            tpe_params: vec![],
         });
         // Non-embeddable domain
         roundtrip(&SigmaType::SFunc {
             t_dom: vec![SigmaType::SBox],
             t_range: Box::new(SigmaType::SInt),
+            tpe_params: vec![],
+        });
+        // Generic function type: tpeParams carried after the range.
+        roundtrip(&SigmaType::SFunc {
+            t_dom: vec![SigmaType::STypeVar("T".into())],
+            t_range: Box::new(SigmaType::STypeVar("T".into())),
+            tpe_params: vec![SigmaType::STypeVar("T".into())],
         });
     }
 
@@ -852,6 +894,7 @@ mod tests {
         let t = SigmaType::SFunc {
             t_dom,
             t_range: Box::new(SigmaType::SUnit),
+            tpe_params: vec![],
         };
         let _ = encode(&t);
     }
