@@ -227,6 +227,13 @@ pub enum SigmaVerifyError {
     /// proof is structurally invalid.
     #[error("empty children in conjecture")]
     EmptyChildren,
+    /// A `TrivialProp` appeared as a conjecture child during proof parsing.
+    /// Reduction (`AtLeast.reduce`, `SigmaOr` / `SigmaAnd`) must fold these
+    /// out before verification; reaching the parser means that invariant was
+    /// violated. Rejected rather than panicked because this runs on the
+    /// consensus transaction-verification path.
+    #[error("unexpected trivial proposition as conjecture child")]
+    UnexpectedTrivialChild,
 }
 
 /// Verify a sigma proof against a proposition and message.
@@ -283,9 +290,13 @@ fn parse_and_compute_challenges(
     };
 
     match prop {
-        SigmaBoolean::TrivialProp(true) | SigmaBoolean::TrivialProp(false) => {
-            // Trivial props should be caught before proof parsing
-            unreachable!("trivial propositions should not reach proof parsing")
+        SigmaBoolean::TrivialProp(_) => {
+            // A reduced tree must not carry a nested TrivialProp child:
+            // AtLeast.reduce / SigmaOr / SigmaAnd fold them out. Reaching here
+            // means an upstream reduction invariant broke — reject, never
+            // panic (this runs on the consensus verification path, with no
+            // catch_unwind above it).
+            Err(SigmaVerifyError::UnexpectedTrivialChild)
         }
         SigmaBoolean::ProveDlog(ge) => {
             // Scala reads z with getBytesUnsafe — accepts fewer bytes than GROUP_SIZE
@@ -576,5 +587,37 @@ fn read_bytes_padded(proof: &[u8], offset: &mut usize, n: usize) -> Vec<u8> {
 fn xor_bytes(buf: &mut [u8], other: &[u8]) {
     for (a, b) in buf.iter_mut().zip(other.iter()) {
         *a ^= *b;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_primitives::group_element::GroupElement;
+
+    // A reduced sigma tree must never carry a nested TrivialProp child —
+    // `AtLeast.reduce` / `SigmaOr` / `SigmaAnd` fold them out before proof
+    // parsing. If one reaches the parser anyway (e.g. a future reduction
+    // bug), the verifier must REJECT, not panic: this runs on the consensus
+    // transaction-validation path with no `catch_unwind` above it. Regression
+    // guard for the AtLeast trivial-fold fix.
+    #[test]
+    fn cthreshold_with_trivial_child_rejects_not_panics() {
+        let prop = SigmaBoolean::Cthreshold {
+            k: 2,
+            children: vec![
+                SigmaBoolean::TrivialProp(true),
+                SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])),
+                SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33])),
+            ],
+        };
+        // Non-empty proof so we pass the empty-proof early return in
+        // verify_sigma_proof and actually reach the parser.
+        let proof = vec![0u8; 64];
+        let result = verify_sigma_proof(&prop, &proof, b"msg");
+        assert!(
+            matches!(result, Err(SigmaVerifyError::UnexpectedTrivialChild)),
+            "trivial child must be rejected with UnexpectedTrivialChild, not panic; got {result:?}"
+        );
     }
 }
