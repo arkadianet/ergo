@@ -269,8 +269,8 @@ fn eval_op(
         (0xC5, Payload::One(input)) => opcodes::box_context::eval_extract_id(input, &mut cx),
 
         // ExtractRegisterAs(box, reg_id, tpe) -> Option[T] for R0..R9.
-        (0xC6, Payload::ExtractRegisterAs { input, reg_id, .. }) => {
-            opcodes::box_context::eval_extract_register_as(input, *reg_id, &mut cx)
+        (0xC6, Payload::ExtractRegisterAs { input, reg_id, tpe }) => {
+            opcodes::box_context::eval_extract_register_as(input, *reg_id, tpe, &mut cx)
         }
 
         // INPUTS

@@ -71,41 +71,88 @@ pub(in crate::evaluator) fn eval_extract_id(
 pub(in crate::evaluator) fn eval_extract_register_as(
     input: &Expr,
     reg_id: u8,
+    tpe: &SigmaType,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     add_cost(cx.cost, 0xC6)?;
     let box_val = cx.eval_expr(input)?;
     let b = resolve_box(&box_val, cx.ctx)?;
-    read_register_option(b, reg_id, 0xC6, cx.ctx)
+    read_register_option(b, reg_id, 0xC6, Some(tpe), cx.ctx)
+}
+
+/// Scala `CBox.getReg[T]`: a PRESENT register whose stored type differs
+/// from the requested type `T` throws `InvalidType` — it does NOT
+/// degrade to `None`. Absent registers return `None` without any type
+/// check. Mandatory registers R0-R3 carry fixed types and are checked
+/// the same way (`CBox.regs` stores them as typed `CAnyValue`s).
+fn check_requested_type(
+    requested: Option<&SigmaType>,
+    stored: &SigmaType,
+    reg_id: u8,
+) -> Result<(), EvalError> {
+    match requested {
+        Some(req) if req != stored => Err(EvalError::TypeError {
+            expected: "register value of the requested type (Scala CBox.getReg InvalidType)",
+            got: format!("R{reg_id}: stored {stored:?}, requested {req:?}"),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Shared register-read helper: resolves register `reg_id` on a
-/// box to `Option[T]` per Scala's `ErgoBox.get(reg_id): Option[Value[_]]`
+/// box to `Option[T]` per Scala's `CBox.getReg(reg_id)(tT)`
 /// (R0-R3 mandatory, R4-R9 additional). Used by both the inline
 /// `0xC6 ExtractRegisterAs` opcode and the v6 `SBox.getReg[T]`
-/// MethodCall (type_id=99, method_id=7). `unsupported_opcode` is
-/// the opcode byte to report if `reg_id` is out of the 0..=9 range
-/// — kept distinct between callers so the surface error names the
-/// right opcode.
+/// MethodCall (type_id=99, method_id=7). `requested` is the static
+/// type the register is read at (`T`); `None` skips the type check
+/// (MethodCall call sites that carry no recoverable type argument).
+/// `unsupported_opcode` is the opcode byte to report if `reg_id` is
+/// out of the 0..=9 range — kept distinct between callers so the
+/// surface error names the right opcode.
 pub(in crate::evaluator) fn read_register_option(
     b: &EvalBox,
     reg_id: u8,
     unsupported_opcode: u8,
+    requested: Option<&SigmaType>,
     ctx: &ReductionContext<'_>,
 ) -> Result<Value, EvalError> {
     match reg_id {
         // R0: box.value (Long)
-        0 => Ok(Value::Opt(Some(Box::new(Value::Long(b.value))))),
+        0 => {
+            check_requested_type(requested, &SigmaType::SLong, 0)?;
+            Ok(Value::Opt(Some(Box::new(Value::Long(b.value)))))
+        }
         // R1: box.propositionBytes (Coll[Byte])
-        1 => Ok(Value::Opt(Some(Box::new(Value::CollBytes(
-            b.script_bytes.clone(),
-        ))))),
+        1 => {
+            check_requested_type(requested, &SigmaType::SColl(Box::new(SigmaType::SByte)), 1)?;
+            Ok(Value::Opt(Some(Box::new(Value::CollBytes(
+                b.script_bytes.clone(),
+            )))))
+        }
         // R2: box.tokens (Coll[(Coll[Byte], Long)])
-        2 => Ok(Value::Opt(Some(Box::new(Value::Tokens(b.tokens.clone()))))),
+        2 => {
+            check_requested_type(
+                requested,
+                &SigmaType::SColl(Box::new(SigmaType::STuple(vec![
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                    SigmaType::SLong,
+                ]))),
+                2,
+            )?;
+            Ok(Value::Opt(Some(Box::new(Value::Tokens(b.tokens.clone())))))
+        }
         // R3: box.creationInfo ((Int, Coll[Byte]))
         // Scala: (creationHeight, transactionId.toBytes ++ Shorts.toByteArray(index))
         // = 34 bytes: 32-byte txId + 2-byte big-endian output index
         3 => {
+            check_requested_type(
+                requested,
+                &SigmaType::STuple(vec![
+                    SigmaType::SInt,
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                ]),
+                3,
+            )?;
             let mut ref_bytes = Vec::with_capacity(34);
             ref_bytes.extend_from_slice(&b.transaction_id);
             ref_bytes.extend_from_slice(&b.output_index.to_be_bytes());
@@ -119,6 +166,7 @@ pub(in crate::evaluator) fn read_register_option(
             let reg_idx = (reg_id - 4) as usize;
             match &b.registers[reg_idx] {
                 Some(rv) => {
+                    check_requested_type(requested, &rv.tpe, reg_id)?;
                     let val = sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?;
                     Ok(Value::Opt(Some(Box::new(val))))
                 }

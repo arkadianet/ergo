@@ -546,7 +546,13 @@ pub(in crate::evaluator) fn eval_method_call(
             // JIT cost parity tests green.
             add_cost(cx.cost, 0xC6)?;
             let b = super::super::helpers::resolve_box(&obj_val, cx.ctx)?;
-            super::box_context::read_register_option(b, reg_id, 0xDC, cx.ctx)
+            // v6 id 19 carries the explicit `[T]` in `type_args[0]`
+            // (hasExplicitTypeArgs) — Scala resolves it through the
+            // typeSubst into `CBox.getReg(i)(tT)`, so the requested-type
+            // check applies on this path too. v5 id 7 parses no explicit
+            // type args, so `first()` is None and the check is skipped
+            // (its live-eval reject is a separate root cause).
+            super::box_context::read_register_option(b, reg_id, 0xDC, type_args.first(), cx.ctx)
         }
         // SContext.getVar (101, 11) is intentionally NOT handled here:
         // it falls through to the catch-all "unsupported MethodCall"
