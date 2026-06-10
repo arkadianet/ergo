@@ -63,6 +63,18 @@ async fn address_to_bytes_route_serves_coll_byte_constant() {
 
 #[tokio::test]
 async fn invalid_address_is_bad_request() {
-    let (status, _) = get_json("/script/addressToTree/not-a-real-address").await;
+    let (status, body) = get_json("/script/addressToTree/not-a-real-address").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Pin the error envelope, not just the status: `{error, reason, detail}`
+    // is the contract every route in this API shares (`bad_request`).
+    assert_eq!(body["error"], 400);
+    assert_eq!(body["reason"], "bad-request");
+    // `detail`'s prefix is OUR AddressDecodeError variant ("invalid base58");
+    // the remainder is the bs58 crate's message — deliberately not pinned so
+    // a dependency bump can't break the test.
+    let detail = body["detail"].as_str().expect("detail is a string");
+    assert!(
+        detail.starts_with("invalid base58"),
+        "detail should name the decode failure, got: {detail}"
+    );
 }
