@@ -1283,11 +1283,15 @@ components:
         - $ref: '#/components/schemas/ScanningPredicate'
         - type: object
         - required:
-            - bytes
+            - value
         - properties:
             register:
               type: string
-            bytes:
+            # `value` is the serialized EvaluatedValue hex, per EIP-1 and the
+            # Scala `ScanningPredicateJsonCodecs` encoder/decoder. (Upstream
+            # Scala swagger documents `bytes`, which has drifted from its own
+            # codec — real nodes accept/emit `value`.)
+            value:
               type: string
 
     EqualsPredicate:
@@ -1295,11 +1299,11 @@ components:
         - $ref: '#/components/schemas/ScanningPredicate'
         - type: object
         - required:
-            - bytes
+            - value
         - properties:
             register:
               type: string
-            bytes:
+            value:
               type: string
 
     ContainsAssetPredicate:
