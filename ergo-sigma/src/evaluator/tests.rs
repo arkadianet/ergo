@@ -7188,6 +7188,131 @@ fn block_value_binding_does_not_leak_past_block() {
     assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
 }
 
+// ── pre-v3 numeric auto-upcast (DeserializationSigmaBuilder) ─────
+//
+// Scala's DeserializationSigmaBuilder.applyUpcast
+// (SigmaBuilder.scala:741-756) auto-inserts an Upcast node on the
+// narrower operand of mixed-kind numeric two-operand ops at
+// DESERIALIZATION for pre-v3 trees ("since v3 trees, Upcast nodes are
+// not inserted automatically"). Routed families: arithOp
+// (Plus/Minus/Multiply/Divide/Modulo/Min/Max), comparisonOp
+// (GT/GE/LT/LE), equalityOp (EQ/NEQ). We apply the equivalent at eval
+// time, charging the Upcast NumericCastCostKind (10; 30 for a BigInt
+// target) once. Pinned by ArithOp.numeric_kind_mismatch.json
+// int_long_coerced#0 (Plus(Int 1, Long 2) at tree v0 → Long 3, cost
+// 35 = Const 5 + Upcast 10 + Const 5 + Plus 15).
+
+fn const_bigint(n: i64) -> Expr {
+    Expr::Const {
+        tpe: SigmaType::SBigInt,
+        val: SigmaValue::BigInt(n.into()),
+    }
+}
+
+fn binop(opcode: u8, l: Expr, r: Expr) -> Expr {
+    op(opcode, Payload::Two(Box::new(l), Box::new(r)))
+}
+
+#[test]
+fn pre_v3_plus_mixed_kinds_auto_upcasts() {
+    let expr = binop(0x9A, const_int(1), const_long(2));
+    let (val, _) = eval_value_and_cost(&expr, &ctx_with_tree_version(0));
+    assert_eq!(val.unwrap(), Value::Long(3));
+    // v3+ trees: no auto-upcast — mixed kinds stay a type error.
+    let (val, _) = eval_value_and_cost(&expr, &ctx_with_tree_version(3));
+    assert!(
+        matches!(val, Err(EvalError::TypeError { .. })),
+        "got {val:?}"
+    );
+}
+
+#[test]
+fn pre_v3_auto_upcast_charges_numeric_cast_cost() {
+    let ctx = ctx_with_tree_version(0);
+    // Fixed-width target: +10 over the matched-kind twin.
+    let mixed = binop(0x9A, const_int(1), const_long(2));
+    let matched = binop(0x9A, const_long(1), const_long(2));
+    let (_, mixed_cost) = eval_value_and_cost(&mixed, &ctx);
+    let (_, matched_cost) = eval_value_and_cost(&matched, &ctx);
+    assert_eq!(
+        mixed_cost,
+        matched_cost + 10,
+        "Upcast to a fixed-width target charges NumericCastCostKind 10"
+    );
+    // BigInt target: +30 (NumericCastCostKind case SBigInt). The
+    // matched twin is BigInt+BigInt so the ArithOp BigInt rate cancels.
+    let mixed_big = binop(0x9A, const_int(1), const_bigint(2));
+    let matched_big = binop(0x9A, const_bigint(1), const_bigint(2));
+    let (val, mixed_big_cost) = eval_value_and_cost(&mixed_big, &ctx);
+    assert_eq!(val.unwrap(), Value::BigInt(3.into()));
+    let (_, matched_big_cost) = eval_value_and_cost(&matched_big, &ctx);
+    assert_eq!(
+        mixed_big_cost,
+        matched_big_cost + 30,
+        "Upcast to a BigInt target charges NumericCastCostKind 30"
+    );
+}
+
+#[test]
+fn pre_v3_comparison_mixed_kinds_auto_upcasts() {
+    // GT(Long 2, Int 1): the RIGHT operand is the narrower one — covers
+    // the r-side widening branch.
+    let expr = binop(0x91, const_long(2), const_int(1));
+    let (val, _) = eval_value_and_cost(&expr, &ctx_with_tree_version(0));
+    assert_eq!(val.unwrap(), Value::Bool(true));
+    let (val, _) = eval_value_and_cost(&expr, &ctx_with_tree_version(3));
+    assert!(
+        matches!(val, Err(EvalError::TypeError { .. })),
+        "got {val:?}"
+    );
+}
+
+#[test]
+fn pre_v3_equality_mixed_kinds_auto_upcasts() {
+    // EQ(Int 7, Long 7) pre-v3 → upcast → true (without the upcast the
+    // carriers differ and PartialEq's catch-all would yield false).
+    let eq = binop(0x93, const_int(7), const_long(7));
+    let (val, _) = eval_value_and_cost(&eq, &ctx_with_tree_version(0));
+    assert_eq!(val.unwrap(), Value::Bool(true));
+    let neq = binop(0x94, const_int(7), const_long(8));
+    let (val, _) = eval_value_and_cost(&neq, &ctx_with_tree_version(0));
+    assert_eq!(val.unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn pre_v3_min_mixed_kinds_auto_upcasts() {
+    // Min(Int 5, Long 3) → upcast left → Long(3) at the WIDER kind.
+    let expr = binop(0xA1, const_int(5), const_long(3));
+    let (val, _) = eval_value_and_cost(&expr, &ctx_with_tree_version(0));
+    assert_eq!(val.unwrap(), Value::Long(3));
+}
+
+#[test]
+fn v3_equality_mixed_numeric_kinds_rejects() {
+    // At v3+ no auto-upcast happens and Scala's equalityOp fails
+    // SameTypeConstrain (tree rejected at deserialization there;
+    // rejected at evaluation here). Without the guard, PartialEq's
+    // catch-all would return false — and NEQ would return TRUE,
+    // validating a script Scala rejects.
+    let ctx = ctx_with_tree_version(3);
+    let eq = binop(0x93, const_int(7), const_long(7));
+    let (val, _) = eval_value_and_cost(&eq, &ctx);
+    assert!(
+        matches!(val, Err(EvalError::TypeError { .. })),
+        "got {val:?}"
+    );
+    let neq = binop(0x94, const_int(7), const_long(8));
+    let (val, _) = eval_value_and_cost(&neq, &ctx);
+    assert!(
+        matches!(val, Err(EvalError::TypeError { .. })),
+        "got {val:?}"
+    );
+    // Matched kinds keep working at v3+.
+    let same = binop(0x93, const_long(7), const_long(7));
+    let (val, _) = eval_value_and_cost(&same, &ctx);
+    assert_eq!(val.unwrap(), Value::Bool(true));
+}
+
 // ── closure param checkType fires on EVERY invocation path ──────
 //
 // Scala's FuncValue.eval closure runs Value.checkType per invocation

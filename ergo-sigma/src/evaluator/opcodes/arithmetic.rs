@@ -40,6 +40,7 @@ use num_traits::{Signed, Zero};
 use super::super::cost::{add_arith_cost, add_cost, add_cost_per_item};
 use super::super::eval_ctx::EvalCtx;
 use super::super::types::{EvalError, Value};
+use super::cast::apply_pre_v3_auto_upcast;
 
 /// Scala `Extensions.fitsIn256Bits` = `bitLength() <= 255`, i.e. the value
 /// fits a signed 256-bit two's-complement representation: `x ∈ [-2^255,
@@ -78,6 +79,7 @@ pub(in crate::evaluator) fn eval_minus(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0x99, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         (Value::Byte(a), Value::Byte(b)) => a
@@ -131,6 +133,7 @@ pub(in crate::evaluator) fn eval_plus(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0x9A, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         (Value::Byte(a), Value::Byte(b)) => a
@@ -184,6 +187,7 @@ pub(in crate::evaluator) fn eval_multiply(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0x9C, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         (Value::Byte(a), Value::Byte(b)) => a
@@ -237,6 +241,7 @@ pub(in crate::evaluator) fn eval_division(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0x9D, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         // Zero divisor is a runtime arithmetic error (Scala/Java throw
@@ -290,6 +295,7 @@ pub(in crate::evaluator) fn eval_modulo(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0x9E, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         // Zero divisor is a runtime arithmetic error (Scala/Java throw
@@ -357,6 +363,7 @@ pub(in crate::evaluator) fn eval_min(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0xA1, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         (Value::Byte(a), Value::Byte(b)) => Ok(Value::Byte(a.min(b))),
@@ -380,6 +387,7 @@ pub(in crate::evaluator) fn eval_max(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left)?;
     let r = cx.eval_expr(right)?;
+    let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     add_arith_cost(cx.cost, 0xA2, matches!(&l, Value::BigInt(_)))?;
     match (l, r) {
         (Value::Byte(a), Value::Byte(b)) => Ok(Value::Byte(a.max(b))),
