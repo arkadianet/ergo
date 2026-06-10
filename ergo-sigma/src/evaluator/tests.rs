@@ -1787,11 +1787,11 @@ fn extract_register_mandatory_r3_creation_info_type() {
 /// EIP-50 v6 `SBox.getReg[T]` (MethodCall 99, 19) is the method-call
 /// twin of inline opcode `0xC6 ExtractRegisterAs`. Both call into
 /// `read_register_option`, so on the same box + register id they
-/// must produce byte-identical `Option[T]` values. The wire layer
-/// reads the explicit `[T]` byte and the evaluator carries it on
-/// `Payload::MethodCall.type_args`, but (per Scala's runtime
-/// behaviour) lifts to the register's actual stored type rather than
-/// coercing to `T`.
+/// must produce byte-identical `Option[T]` values. The method takes
+/// an INT index (Scala `SFunc(Array(SBox, SInt), SOption(tT))`) and
+/// the wire layer reads the explicit `[T]` byte into
+/// `Payload::MethodCall.type_args`, which `read_register_option`
+/// enforces against the stored register type.
 #[test]
 fn methodcall_box_getreg_v6_matches_inline_extract_register_as() {
     let b = make_test_box();
@@ -1807,17 +1807,13 @@ fn methodcall_box_getreg_v6_matches_inline_extract_register_as() {
         },
     );
     // v6 MethodCall path — `box.getReg[Int](4)`.
-    let byte_4 = Expr::Const {
-        tpe: SigmaType::SByte,
-        val: SigmaValue::Byte(4),
-    };
     let method_some = Expr::Op(IrNode {
         opcode: 0xDC,
         payload: Payload::MethodCall {
             type_id: 99,
             method_id: 19,
             obj: Box::new(op(0xA7, Payload::Zero)),
-            args: vec![byte_4],
+            args: vec![const_int(4)],
             type_args: vec![SigmaType::SInt],
         },
     });
@@ -1835,17 +1831,13 @@ fn methodcall_box_getreg_v6_matches_inline_extract_register_as() {
             tpe: SigmaType::SInt,
         },
     );
-    let byte_6 = Expr::Const {
-        tpe: SigmaType::SByte,
-        val: SigmaValue::Byte(6),
-    };
     let method_none = Expr::Op(IrNode {
         opcode: 0xDC,
         payload: Payload::MethodCall {
             type_id: 99,
             method_id: 19,
             obj: Box::new(op(0xA7, Payload::Zero)),
-            args: vec![byte_6],
+            args: vec![const_int(6)],
             type_args: vec![SigmaType::SInt],
         },
     });
@@ -1872,10 +1864,7 @@ fn methodcall_box_getreg_v6_requested_type_mismatch_errors() {
                 type_id: 99,
                 method_id: 19,
                 obj: Box::new(op(0xA7, Payload::Zero)),
-                args: vec![Expr::Const {
-                    tpe: SigmaType::SByte,
-                    val: SigmaValue::Byte(4),
-                }],
+                args: vec![const_int(4)],
                 type_args: vec![type_arg],
             },
         })
@@ -1888,6 +1877,106 @@ fn methodcall_box_getreg_v6_requested_type_mismatch_errors() {
     // ...mismatching [Long] errors (no None degradation).
     let err = run_eval_ctx_err(&getreg(SigmaType::SLong), &ctx);
     assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+// ── SBox.getReg dynamic index (Scala CBox.getReg + SBoxMethods) ──
+//
+// `getRegMethodV6` (99, 19) is `SFunc(Array(SBox, SInt), SOption(tT))`
+// — an INT index. Scala `CBox.getReg(i)` returns None for
+// `i < 0 || i >= 10` (out-of-range is not an error on this path).
+// `getRegMethodV5` (99, 7) deserializes at all versions but ALWAYS
+// throws on live evaluation (no reflection target for "getRegV5" on
+// Box). Pinned by Box.getReg_dynamic_index.json and
+// Box.getReg_adversarial.json.
+
+/// `SELF.getReg[Int](idx)` as a v6 MethodCall with an Int index const.
+fn getreg_v6_int_index(idx: i32) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 99,
+            method_id: 19,
+            obj: Box::new(op(0xA7, Payload::Zero)),
+            args: vec![const_int(idx)],
+            type_args: vec![SigmaType::SInt],
+        },
+    })
+}
+
+#[test]
+fn methodcall_box_getreg_v6_out_of_range_index_none() {
+    // CBox.getReg: i < 0 || i >= 10 → None (no error, no type check).
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    assert_eq!(
+        run_eval_ctx(&getreg_v6_int_index(10), &ctx),
+        Value::Opt(None)
+    );
+    assert_eq!(
+        run_eval_ctx(&getreg_v6_int_index(-1), &ctx),
+        Value::Opt(None)
+    );
+}
+
+#[test]
+fn methodcall_box_getreg_v6_non_int_index_errors() {
+    // The method signature takes SInt; a Byte index is a type error
+    // (Scala would fail the reflective invoke).
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let expr = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 99,
+            method_id: 19,
+            obj: Box::new(op(0xA7, Payload::Zero)),
+            args: vec![Expr::Const {
+                tpe: SigmaType::SByte,
+                val: SigmaValue::Byte(4),
+            }],
+            type_args: vec![SigmaType::SInt],
+        },
+    });
+    let err = run_eval_ctx_err(&expr, &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+#[test]
+fn methodcall_box_getreg_v6_rejected_in_pre_v3_tree() {
+    // Method id 19 exists only in SBoxMethods.v6Methods, selected on
+    // isV3OrLaterErgoTreeVersion — the TREE version. A v2 tree with a
+    // live (99, 19) call errors even when activated >= 3 (vector:
+    // Box.getReg_adversarial getReg-v6-method-in-v2-tree-reject#2).
+    let b = make_test_box();
+    let ctx = ReductionContext {
+        ergo_tree_version: 2,
+        ..ctx_with_self_box(&b)
+    };
+    let err = run_eval_ctx_err(&getreg_v6_int_index(4), &ctx);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+#[test]
+fn methodcall_box_getregv5_live_eval_errors() {
+    // getRegV5 (99, 7) has no runtime implementation in Scala v6.0.x:
+    // SMethod.javaMethod falls back to Box.getMethod("getRegV5", Int)
+    // → NoSuchMethodException. Args evaluate first; the reject fires
+    // even with a perfectly valid index (vector:
+    // Box.getReg_adversarial getRegV5-live-reject#0).
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let expr = Expr::Op(IrNode {
+        opcode: 0xDC,
+        payload: Payload::MethodCall {
+            type_id: 99,
+            method_id: 7,
+            obj: Box::new(op(0xA7, Payload::Zero)),
+            args: vec![const_int(4)],
+            type_args: vec![],
+        },
+    });
+    let err = run_eval_ctx_err(&expr, &ctx);
+    assert!(matches!(err, EvalError::RuntimeException(_)), "got {err:?}");
 }
 
 #[test]

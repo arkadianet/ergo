@@ -504,55 +504,80 @@ pub(in crate::evaluator) fn eval_method_call(
                 }),
             }
         }
-        // SBox(99).getReg (v5 id 7, v6 id 19; regId: Byte) -> Option[T]
-        // Scala v6.0.2 keeps both: getRegMethodV5(7) with no explicit
-        // type arg, and getRegMethodV6(19) with hasExplicitTypeArgs.
-        // Both share this eval (the explicit `[T]` is parsed at the wire
-        // for id 19 but ignored at runtime — see below). v6 id 19 is the
-        // soft-fork-gated slot; id 7 is V5+ and ungated.
-        // EIP-50 v6 variant of the inline `0xC6 ExtractRegisterAs`.
-        // Scala's `SBoxMethods.getRegMethodV6` carries
-        // `hasExplicitTypeArgs = Seq(tT)` â€” the type byte parsed at
-        // the wire layer is in `type_args[0]` but the
-        // evaluator follows the register's actual stored type via
-        // `sigma_to_value`, matching Scala's runtime behaviour
-        // (the explicit `[T]` is a compile-time hint, not a runtime
-        // coercion). Same `Option[T]` shape: R0-R3 mandatory
-        // (always Some); R4-R9 additional (may be None).
-        (99, 7) | (99, 19) => {
+        // SBox(99).getRegV5 (id 7; regId: Int) — deserializable at all
+        // versions (it sits in `SBoxMethods.commonBoxMethods`), but live
+        // evaluation ALWAYS throws in Scala v6.0.x: the descriptor is
+        // named "getRegV5" and carries no `javaMethodOf`/reflection
+        // registration, so `SMethod.javaMethod` falls back to
+        // `Box.getMethod("getRegV5", Int)` → NoSuchMethodException.
+        // A dead-branch occurrence parses and reduces fine; only an
+        // evaluated call errors. Scala `MethodCall.eval` evaluates the
+        // args before the invoke, so arg-eval errors fire first, and
+        // `addFixedCost` charges the method's `ExtractRegisterAs`
+        // costKind BEFORE running the invoke block
+        // (CErgoTreeEvaluator.addFixedCost: coster.add, then block) —
+        // the charge lands even though the reflective lookup throws.
+        (99, 7) => {
             check_arity(args, 1)?;
-            let reg_val = cx.eval_expr(&args[0])?;
-            let reg_id = match reg_val {
-                Value::Byte(b) => {
-                    if b < 0 {
-                        return Err(EvalError::TypeError {
-                            expected: "Byte in [0, 9] for SBox.getReg register id",
-                            got: format!("{b}"),
-                        });
-                    }
-                    b as u8
-                }
+            let _ = cx.eval_expr(&args[0])?;
+            add_cost(cx.cost, 0xC6)?;
+            Err(EvalError::RuntimeException(
+                "SBox.getRegV5 (99, 7) has no runtime implementation \
+                 (Scala NoSuchMethodException on Box.getRegV5)",
+            ))
+        }
+        // SBox(99).getReg (v6 id 19; regId: Int) -> Option[T]
+        // EIP-50 v6 variant of the inline `0xC6 ExtractRegisterAs`,
+        // with a DYNAMIC index: `SFunc(Array(SBox, SInt), SOption(tT))`
+        // — the index is an Int expression, and Scala `CBox.getReg`
+        // returns None when `i < 0 || i >= 10` (out-of-range is NOT an
+        // error on this path, unlike the inline form whose register id
+        // is validated at the wire). The explicit `[T]` arrives in
+        // `type_args[0]` (hasExplicitTypeArgs) and is enforced by
+        // `read_register_option` per Scala's typeSubst resolution into
+        // `CBox.getReg(i)(tT)`.
+        //
+        // Version gate: id 19 exists only in `SBoxMethods.v6Methods`,
+        // selected by `isV3OrLaterErgoTreeVersion` — the TREE version,
+        // not the activated version. Scala rejects a pre-v3 tree at
+        // spend-time DESERIALIZATION (`SMethod.fromIds` →
+        // `getMethodById` → CheckAndGetMethod ValidationException);
+        // our wire layer must stay version-independent because real
+        // 6.x-compiled trees carry v6 method calls under v0 headers
+        // and outputs paying to them must decode (PR #13/#14 oracle
+        // vectors), so the reject lands here on the evaluation path.
+        // KNOWN RESIDUAL (pre-existing): a DEAD-BRANCH (99, 19) in a
+        // pre-v3 tree evaluates past this gate while Scala fails the
+        // whole tree at parse — needs a spend-path AST pre-walk.
+        (99, 19) => {
+            if !cx.ctx.is_v3_ergo_tree() {
+                return Err(EvalError::TypeError {
+                    expected: "ErgoTree version >= 3 for SBox.getReg (99, 19) \
+                               (Scala v6Methods is keyed on isV3OrLaterErgoTreeVersion)",
+                    got: format!("ergoTreeVersion={}", cx.ctx.ergo_tree_version),
+                });
+            }
+            check_arity(args, 1)?;
+            let idx_val = cx.eval_expr(&args[0])?;
+            let idx = match idx_val {
+                Value::Int(i) => i,
                 other => {
                     return Err(EvalError::TypeError {
-                        expected: "Byte register id for SBox.getReg",
+                        expected: "Int register index for SBox.getReg",
                         got: format!("{other:?}"),
                     })
                 }
             };
             // Cost mirrors the inline `0xC6 ExtractRegisterAs`
-            // dispatch (`add_cost(cx.cost, 0xC6)`) â€” the v6 method
-            // variant is the same evaluator work behind a different
-            // call site, so charging through the same row keeps the
-            // JIT cost parity tests green.
+            // dispatch (`add_cost(cx.cost, 0xC6)`) — Scala charges the
+            // method's `ExtractRegisterAs.costKind` around the invoke,
+            // so the None returns inside `CBox.getReg` cost the same.
             add_cost(cx.cost, 0xC6)?;
             let b = super::super::helpers::resolve_box(&obj_val, cx.ctx)?;
-            // v6 id 19 carries the explicit `[T]` in `type_args[0]`
-            // (hasExplicitTypeArgs) — Scala resolves it through the
-            // typeSubst into `CBox.getReg(i)(tT)`, so the requested-type
-            // check applies on this path too. v5 id 7 parses no explicit
-            // type args, so `first()` is None and the check is skipped
-            // (its live-eval reject is a separate root cause).
-            super::box_context::read_register_option(b, reg_id, 0xDC, type_args.first(), cx.ctx)
+            if !(0..=9).contains(&idx) {
+                return Ok(Value::Opt(None));
+            }
+            super::box_context::read_register_option(b, idx as u8, 0xDC, type_args.first(), cx.ctx)
         }
         // SContext.getVar (101, 11) is intentionally NOT handled here:
         // it falls through to the catch-all "unsupported MethodCall"
