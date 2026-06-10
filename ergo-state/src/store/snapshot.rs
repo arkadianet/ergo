@@ -34,7 +34,7 @@ use ergo_ser::transaction::Transaction;
 use ergo_validation::{
     ActiveProtocolParameters, CheckedTransaction, ErgoValidationSettings, UtxoView,
 };
-use redb::{Database, ReadTransaction};
+use redb::{Database, ReadTransaction, ReadableTable};
 
 use super::meta::StateMeta;
 use super::{
@@ -353,13 +353,49 @@ impl CommittedSnapshot {
         }
         let height = self.state_meta.tree_height;
         let nodes = self.txn.open_table(AVL_NODES)?;
+
+        // Sequential preload, then build from RAM. The structural hydrate below
+        // (`hydrate_tree_from_fetch`) is a root-to-leaf DFS keyed by child
+        // NodeId, and NodeIds are NOT tree-local — so fetching each node
+        // straight from redb is a random B-tree point lookup. That pointer-chase
+        // is fine when the AVL pages are warm, but under memory pressure the
+        // pages are cold and each lookup faults one scattered 4 KiB read from
+        // swap; a full hydrate then degrades from ~seconds to minutes (observed
+        // ~500 major faults/s on the mainnet archival node). Instead we stream
+        // the whole `AVL_NODES` table once in key order — a single sequential,
+        // readahead-friendly scan — into a map, then build the tree from RAM
+        // with no further disk I/O.
+        //
+        // Memory: a `BTreeMap`, NOT a `HashMap`, is load-bearing here. `remove`
+        // hands each node to the tree as it is consumed (every node is hydrated
+        // exactly once — this is a tree, not a DAG), and a `BTreeMap` frees its
+        // internal B-tree node allocations as it shrinks, so the map drains
+        // while the Oracle tree fills and peak stays near one tree's worth. A
+        // `HashMap` would instead retain its full bucket array (sized for every
+        // node, never shrunk by `remove`) until it dropped, stacking a transient
+        // ~1x of the whole UTXO node set on top of the hydrated tree — a
+        // multi-GB RSS spike in exactly the memory-pressure path this preload is
+        // meant to relieve. Insertion is from the already-sorted scan, so the
+        // tree stays cheap to build. This runs only on the cold path (no base
+        // cache, a cache miss, or a multi-block jump); the per-build steady
+        // state goes through the base cache's incremental advance and never
+        // lands here.
+        let mut node_map: std::collections::BTreeMap<NodeId, AvlNode> =
+            std::collections::BTreeMap::new();
+        for entry in nodes.iter()? {
+            let (k, v) = entry?;
+            node_map.insert(k.value(), super::node_from_bytes(v.value())?);
+        }
+        let node_map = std::cell::RefCell::new(node_map);
         let fetch = |id: NodeId| -> Result<AvlNode, StateError> {
-            let guard = nodes.get(id)?.ok_or_else(|| StateError::DbCorruption {
-                table: "avl_nodes",
-                key: hex::encode(id.to_be_bytes()),
-                reason: format!("missing node id {id} during snapshot hydrate"),
-            })?;
-            super::node_from_bytes(guard.value())
+            node_map
+                .borrow_mut()
+                .remove(&id)
+                .ok_or_else(|| StateError::DbCorruption {
+                    table: "avl_nodes",
+                    key: hex::encode(id.to_be_bytes()),
+                    reason: format!("missing node id {id} during snapshot hydrate"),
+                })
         };
         let tree = hydrate_tree_from_fetch(root_id, height, &fetch)?;
         Ok((tree, height))
