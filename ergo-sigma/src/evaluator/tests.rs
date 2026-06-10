@@ -6696,6 +6696,436 @@ fn func_apply_args_resolve_in_caller_env() {
     );
 }
 
+// ── FunDef tpeArgs + SFunc-as-value (Scala ValDefSerializer /
+//    FuncValue.eval / isValueOfType) ─────────────────────────────
+//
+// FunDef (0xD7) carries `nTpeArgs(u8) + STypeVar types` on the wire
+// and binds exactly like ValDef (Scala BlockValue.eval casts items
+// asInstanceOf[ValDef]). Type-variable enforcement happens at
+// APPLICATION: the closure built by FuncValue.eval runs
+// Value.checkType(argTpe, vArg) and SType.isValueOfType has no
+// STypeVar case (sys.error "Unknown type"). Pinned by
+// HOF_FunDef_type_var_body / HOF_FunDef_polymorphic_identity /
+// HOF_function_in_Coll_of_SFunc / higher_order_lambdas.
+
+/// `val id[T] = {(x: <param_tpe>) => <body>}` as a FunDef block item.
+fn fun_def_t(param_tpe: SigmaType, body: Expr) -> Expr {
+    op(
+        0xD7,
+        Payload::FunDef {
+            id: 1,
+            tpe: None,
+            tpe_args: vec![SigmaType::STypeVar("T".into())],
+            rhs: Box::new(op(
+                0xD9,
+                Payload::FuncValue {
+                    args: vec![(2, Some(param_tpe))],
+                    body: Box::new(body),
+                },
+            )),
+        },
+    )
+}
+
+#[test]
+fn fun_def_polymorphic_binds_without_application() {
+    // { val id[T] = {(x: T) => x}; 5 } — never applied → accepts.
+    let block = op(
+        0xD8,
+        Payload::BlockValue {
+            items: vec![fun_def_t(
+                SigmaType::STypeVar("T".into()),
+                op(0x72, Payload::ValUse { id: 2 }),
+            )],
+            result: Box::new(const_int(5)),
+        },
+    );
+    assert_eq!(run_eval(&block), Value::Int(5));
+}
+
+#[test]
+fn fun_def_polymorphic_apply_rejects_type_var_param() {
+    // { val id[T] = {(x: T) => x}; id(7) } — applying a closure whose
+    // param type is a type VARIABLE errors regardless of body.
+    let block = op(
+        0xD8,
+        Payload::BlockValue {
+            items: vec![fun_def_t(
+                SigmaType::STypeVar("T".into()),
+                op(0x72, Payload::ValUse { id: 2 }),
+            )],
+            result: Box::new(op(
+                0xDA,
+                Payload::FuncApply {
+                    func: Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                    args: vec![const_int(7)],
+                },
+            )),
+        },
+    );
+    let err = run_eval_err(&block);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+#[test]
+fn fun_def_type_args_with_concrete_param_applies() {
+    // { val id[T] = {(x: Int) => x}; id(7) } — tpeArgs on the FunDef
+    // but a CONCRETE lambda param type → applies fine (vector:
+    // HOF_FunDef_polymorphic_identity v3#0).
+    let block = op(
+        0xD8,
+        Payload::BlockValue {
+            items: vec![fun_def_t(
+                SigmaType::SInt,
+                op(0x72, Payload::ValUse { id: 2 }),
+            )],
+            result: Box::new(op(
+                0xDA,
+                Payload::FuncApply {
+                    func: Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                    args: vec![const_int(7)],
+                },
+            )),
+        },
+    );
+    assert_eq!(run_eval(&block), Value::Int(7));
+}
+
+#[test]
+fn coll_of_sfunc_index_then_apply() {
+    // { Coll({(x:Int)=>x+1}, {(x:Int)=>x*2})(0)(5) } == 6 — functions
+    // flow through the generic collection carrier, ByIndex hands the
+    // Func back, FuncApply invokes it.
+    let inc = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(op(
+                0x9A,
+                Payload::Two(
+                    Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                    Box::new(const_int(1)),
+                ),
+            )),
+        },
+    );
+    let dbl = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(2, Some(SigmaType::SInt))],
+            body: Box::new(op(
+                0x9C,
+                Payload::Two(
+                    Box::new(op(0x72, Payload::ValUse { id: 2 })),
+                    Box::new(const_int(2)),
+                ),
+            )),
+        },
+    );
+    let sfunc = SigmaType::SFunc {
+        t_dom: vec![SigmaType::SInt],
+        t_range: Box::new(SigmaType::SInt),
+        tpe_params: vec![],
+    };
+    let coll = op(
+        0x83,
+        Payload::ConcreteCollection {
+            elem_type: sfunc,
+            items: vec![inc, dbl],
+        },
+    );
+    let indexed = op(
+        0xB2,
+        Payload::ByIndex {
+            input: Box::new(coll),
+            index: Box::new(const_int(0)),
+            default: None,
+        },
+    );
+    let applied = op(
+        0xDA,
+        Payload::FuncApply {
+            func: Box::new(indexed),
+            args: vec![const_int(5)],
+        },
+    );
+    assert_eq!(run_eval(&applied), Value::Int(6));
+}
+
+#[test]
+fn func_in_tuple_select_then_apply() {
+    // (({(x:Int)=>x+1}, 5))._1 applied to ._2 — functions flow through
+    // tuple carriers and SelectField (higher_order_lambdas shape).
+    let inc = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(op(
+                0x9A,
+                Payload::Two(
+                    Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                    Box::new(const_int(1)),
+                ),
+            )),
+        },
+    );
+    let pair = op(
+        0x86,
+        Payload::Tuple {
+            items: vec![inc, const_int(5)],
+        },
+    );
+    let block = op(
+        0xD8,
+        Payload::BlockValue {
+            items: vec![op(
+                0xD6,
+                Payload::ValDef {
+                    id: 3,
+                    tpe: None,
+                    rhs: Box::new(pair),
+                },
+            )],
+            result: Box::new(op(
+                0xDA,
+                Payload::FuncApply {
+                    func: Box::new(op(
+                        0x8C,
+                        Payload::SelectField {
+                            input: Box::new(op(0x72, Payload::ValUse { id: 3 })),
+                            field_idx: 1,
+                        },
+                    )),
+                    args: vec![op(
+                        0x8C,
+                        Payload::SelectField {
+                            input: Box::new(op(0x72, Payload::ValUse { id: 3 })),
+                            field_idx: 2,
+                        },
+                    )],
+                },
+            )),
+        },
+    );
+    assert_eq!(run_eval(&block), Value::Int(6));
+}
+
+// ── hasDeserialize inline-constants fork (Scala fullReduction) ───
+//
+// A tree containing DeserializeContext/DeserializeRegister reduces
+// through Scala's reductionWithDeserialize: segregated constants are
+// INLINED (toProposition(isConstantSegregation)) and evaluation runs
+// with EmptyConstants — an inline Constant charges 5 jit where a
+// ConstantPlaceholder charges 1. Pinned by
+// DeserializeContext_over_absent_wrong_typed_var dead-branch entries
+// (+4 per evaluated segregated constant).
+
+fn eval_value_and_cost_consts(
+    expr: &Expr,
+    constants: &[(SigmaType, SigmaValue)],
+) -> (Result<Value, EvalError>, u64) {
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut cost = CostAccumulator::recording_only();
+    let mut trace = None;
+    let res = eval_expr(
+        expr, &ctx, constants, &mut env, &mut depth, &mut cost, &mut trace,
+    );
+    (res, cost.total().value())
+}
+
+#[test]
+fn deserialize_dead_branch_inlines_segregated_constants() {
+    // Twin trees: { if (true) true else <else-branch> } over two
+    // segregated Boolean constants. The deserialize twin must cost
+    // exactly +4 per evaluated constant (2 here) over the plain twin —
+    // placeholders are inlined to Constant nodes (5 jit vs 1).
+    let constants = vec![
+        (SigmaType::SBoolean, SigmaValue::Boolean(true)),
+        (SigmaType::SBoolean, SigmaValue::Boolean(true)),
+    ];
+    let if_tree = |else_branch: Expr| {
+        op(
+            0x95,
+            Payload::Three(
+                Box::new(op(0x73, Payload::ConstPlaceholder { index: 0 })),
+                Box::new(op(0x73, Payload::ConstPlaceholder { index: 1 })),
+                Box::new(else_branch),
+            ),
+        )
+    };
+    let with_deser = if_tree(op(
+        0xD4,
+        Payload::DeserializeContext {
+            id: 0,
+            tpe: SigmaType::SBoolean,
+        },
+    ));
+    let plain = if_tree(const_bool(false));
+
+    let (deser_val, deser_cost) = eval_value_and_cost_consts(&with_deser, &constants);
+    let (plain_val, plain_cost) = eval_value_and_cost_consts(&plain, &constants);
+    assert_eq!(deser_val.unwrap(), Value::Bool(true));
+    assert_eq!(plain_val.unwrap(), Value::Bool(true));
+    assert_eq!(
+        deser_cost,
+        plain_cost + 2 * 4,
+        "hasDeserialize tree must charge inline-Constant (5) instead of placeholder (1) per evaluated constant"
+    );
+}
+
+// ── ValDef/FunDef bind ONLY inside BlockValue (Scala BlockValue.eval) ─
+//
+// The ValDef/FunDef NODES have no eval override in Scala — a bare
+// occurrence at any live expression position hits Value.eval's
+// notSupportedError. Only the BlockValue item loop binds them
+// (asInstanceOf[ValDef] + inline env update).
+
+#[test]
+fn val_def_standalone_rejects() {
+    let bare = op(
+        0xD6,
+        Payload::ValDef {
+            id: 1,
+            tpe: None,
+            rhs: Box::new(const_bool(true)),
+        },
+    );
+    let err = run_eval_err(&bare);
+    assert!(
+        matches!(err, EvalError::InternalOpcode(0xD6, _)),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn fun_def_standalone_rejects() {
+    let bare = fun_def_t(SigmaType::SInt, op(0x72, Payload::ValUse { id: 2 }));
+    let err = run_eval_err(&bare);
+    assert!(
+        matches!(err, EvalError::InternalOpcode(0xD7, _)),
+        "got {err:?}"
+    );
+}
+
+// ── BlockValue bindings are scoped to the block (Scala curEnv) ───
+//
+// Scala BlockValue.eval threads a LOCAL immutable `curEnv`: bindings
+// are visible to later items and the result, but the caller's env is
+// untouched once the block returns.
+
+fn val_def_item(id: u32, rhs: Expr) -> Expr {
+    op(
+        0xD6,
+        Payload::ValDef {
+            id,
+            tpe: None,
+            rhs: Box::new(rhs),
+        },
+    )
+}
+
+fn block(items: Vec<Expr>, result: Expr) -> Expr {
+    op(
+        0xD8,
+        Payload::BlockValue {
+            items,
+            result: Box::new(result),
+        },
+    )
+}
+
+#[test]
+fn block_value_shadowed_binding_restored_after_block() {
+    // { val 1 = 10; ({ val 1 = 20; ValUse(1) }, ValUse(1)) }
+    // The inner block sees its own 20; the second tuple item evaluates
+    // AFTER the inner block returned and must see the OUTER 10 again.
+    let inner = block(
+        vec![val_def_item(1, const_int(20))],
+        op(0x72, Payload::ValUse { id: 1 }),
+    );
+    let outer = block(
+        vec![val_def_item(1, const_int(10))],
+        op(
+            0x86,
+            Payload::Tuple {
+                items: vec![inner, op(0x72, Payload::ValUse { id: 1 })],
+            },
+        ),
+    );
+    assert_eq!(
+        run_eval(&outer),
+        Value::Tuple(vec![Value::Int(20), Value::Int(10)]),
+        "shadowed outer binding must reappear after the inner block"
+    );
+}
+
+#[test]
+fn block_value_binding_does_not_leak_past_block() {
+    // ({ val 2 = 7; true }, ValUse(2)) — id 2 is bound only inside the
+    // block; the second tuple item must NOT see it (Scala: unbound
+    // variable error, not a leaked 7).
+    let expr = op(
+        0x86,
+        Payload::Tuple {
+            items: vec![
+                block(vec![val_def_item(2, const_int(7))], const_bool(true)),
+                op(0x72, Payload::ValUse { id: 2 }),
+            ],
+        },
+    );
+    let err = run_eval_err(&expr);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+// ── closure param checkType fires on EVERY invocation path ──────
+//
+// Scala's FuncValue.eval closure runs Value.checkType per invocation
+// — from direct Apply AND from every HOF loop. A polymorphic lambda
+// over an EMPTY collection never invokes the closure, so it must NOT
+// error (the check sits inside the per-element loop, not before it).
+
+fn poly_identity_lambda() -> Expr {
+    op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::STypeVar("T".into())))],
+            body: Box::new(op(0x72, Payload::ValUse { id: 1 })),
+        },
+    )
+}
+
+#[test]
+fn polymorphic_lambda_through_map_rejects() {
+    let expr = op(
+        0xAD,
+        Payload::Two(
+            Box::new(const_coll_int(vec![1, 2])),
+            Box::new(poly_identity_lambda()),
+        ),
+    );
+    let err = run_eval_err(&expr);
+    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+}
+
+#[test]
+fn polymorphic_lambda_over_empty_coll_accepts() {
+    // Zero elements → zero closure invocations → no checkType → Ok.
+    let expr = op(
+        0xAD,
+        Payload::Two(
+            Box::new(const_coll_int(vec![])),
+            Box::new(poly_identity_lambda()),
+        ),
+    );
+    match run_eval(&expr) {
+        Value::CollInt(v) => assert!(v.is_empty()),
+        Value::CollGeneric(v, _) => assert!(v.is_empty()),
+        other => panic!("expected empty collection, got {other:?}"),
+    }
+}
+
 /// MapCollection (0xAD) — element binding does not bleed into the
 /// caller's env. After the map runs with closure param id=1, an
 /// outer `ValUse(1)` still sees the caller's `val 1 = 999`.

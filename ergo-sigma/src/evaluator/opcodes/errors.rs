@@ -88,11 +88,18 @@ pub(in crate::evaluator) fn eval_sigma_prop_is_proven() -> Result<Value, EvalErr
 }
 
 // 0xD7 FunDef standalone — zero-cost reject.
-// `values.scala:940-948` `costKind = notSupportedError`. FunDef is only
-// valid *inside* BlockValue (handled at the BlockValue arm); a bare
-// 0xD7 at the dispatch position should not occur in a valid tree.
+// ValDef/FunDef have no `eval` override in Scala — a bare node at any
+// live expression position hits `Value.eval`'s default
+// `notSupportedError`. Items are bound ONLY by the BlockValue item
+// loop (`BlockValue.eval` casts `asInstanceOf[ValDef]` and binds
+// inline, never dispatching the node).
 pub(in crate::evaluator) fn eval_fun_def_standalone() -> Result<Value, EvalError> {
     Err(EvalError::InternalOpcode(0xD7, "FunDef standalone"))
+}
+
+// 0xD6 ValDef standalone — zero-cost reject (same rule as FunDef).
+pub(in crate::evaluator) fn eval_val_def_standalone() -> Result<Value, EvalError> {
+    Err(EvalError::InternalOpcode(0xD6, "ValDef standalone"))
 }
 
 // 0xE7/E8/E9 ModQ family — zero-cost reject.

@@ -82,6 +82,11 @@ pub enum Payload {
         id: u32,
         /// Declared function type, if present.
         tpe: Option<SigmaType>,
+        /// Type-variable parameters of a polymorphic `FunDef`. Scala
+        /// `ValDefSerializer` writes `nTpeArgs(u8)` + that many
+        /// `STypeVar` types between the id and the rhs for the FunDef
+        /// opcode (0xD7) — always present on the wire, possibly empty.
+        tpe_args: Vec<SigmaType>,
         /// Function body (typically a `FuncValue`).
         rhs: Box<Expr>,
     },

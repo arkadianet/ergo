@@ -15,7 +15,7 @@
 //! so depth accounting stays in one place.
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
-use ergo_ser::opcode::Expr;
+use ergo_ser::opcode::{Expr, Payload};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::SigmaValue;
 
@@ -52,17 +52,77 @@ pub(in crate::evaluator) fn eval_val_use(
     })
 }
 
-// 0xD8 BlockValue — evaluate ValDefs then return result
+// 0xD8 BlockValue — bind ValDef/FunDef items then return result.
+//
+// Scala `BlockValue.eval` casts every item `asInstanceOf[ValDef]`
+// (FunDef IS a ValDef with non-empty tpeArgs) and binds it inline —
+// the ValDef/FunDef NODES are never dispatched (they have no eval
+// override; see the standalone reject arms in dispatch). A non-ValDef
+// item fails the cast (ClassCastException → script error).
+//
+// SCOPING: Scala threads a LOCAL `curEnv` (immutable map) — item
+// bindings are visible to later items and to `result`, but the
+// caller's env is untouched once the block returns. Bindings must not
+// leak past the block, and a shadowed outer id must reappear
+// afterwards (an expression evaluated after the block sees the
+// PRE-block env). Mirrored with a block-local clone; closures created
+// inside the block capture the block env, exactly like Scala's
+// FuncValue capturing `curEnv`.
 pub(in crate::evaluator) fn eval_block_value(
     items: &[Expr],
     result: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     add_cost_per_item(cx.cost, 0xD8, items.len() as u32)?;
+    let mut block_env = cx.env.clone();
     for item in items {
-        cx.eval_expr(item)?;
+        match item {
+            Expr::Op(node) => match &node.payload {
+                Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
+                    let val = eval_expr(
+                        rhs,
+                        cx.ctx,
+                        cx.constants,
+                        &mut block_env,
+                        cx.depth,
+                        cx.cost,
+                        cx.trace,
+                    )?;
+                    // AddToEnvironment — Scala charges it AFTER the rhs
+                    // eval (addFixedCost wraps only the env update).
+                    add_cost(cx.cost, 0xD6)?;
+                    if let Some(t) = cx.trace.as_mut() {
+                        t.push(TraceEntry {
+                            label: format!("ValDef({id})"),
+                            value: trace_val(&val),
+                        });
+                    }
+                    block_env.insert(*id, val);
+                }
+                _ => {
+                    return Err(EvalError::TypeError {
+                        expected: "ValDef/FunDef as BlockValue item (Scala asInstanceOf[ValDef])",
+                        got: format!("opcode 0x{:02X}", node.opcode),
+                    })
+                }
+            },
+            Expr::Const { .. } => {
+                return Err(EvalError::TypeError {
+                    expected: "ValDef/FunDef as BlockValue item (Scala asInstanceOf[ValDef])",
+                    got: "inline constant".to_string(),
+                })
+            }
+        }
     }
-    let result_val = cx.eval_expr(result)?;
+    let result_val = eval_expr(
+        result,
+        cx.ctx,
+        cx.constants,
+        &mut block_env,
+        cx.depth,
+        cx.cost,
+        cx.trace,
+    )?;
     if let Some(t) = cx.trace.as_mut() {
         t.push(TraceEntry {
             label: "BlockValue result".into(),
@@ -70,24 +130,6 @@ pub(in crate::evaluator) fn eval_block_value(
         });
     }
     Ok(result_val)
-}
-
-// 0xD6 ValDef — bind a value to an id in the environment
-pub(in crate::evaluator) fn eval_val_def(
-    id: u32,
-    rhs: &Expr,
-    cx: &mut EvalCtx<'_>,
-) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xD6)?;
-    let val = cx.eval_expr(rhs)?;
-    if let Some(t) = cx.trace.as_mut() {
-        t.push(TraceEntry {
-            label: format!("ValDef({id})"),
-            value: trace_val(&val),
-        });
-    }
-    cx.env.insert(id, val.clone());
-    Ok(val)
 }
 
 // 0x95 If(condition, then_branch, else_branch)
@@ -187,6 +229,33 @@ pub(in crate::evaluator) fn eval_func_value(
     })
 }
 
+/// Scala `FuncValue.eval` closures run `Value.checkType(argTpe, vArg)`
+/// on EVERY invocation. `SType.isValueOfType` is SHALLOW — a `Coll[T]`
+/// parameter accepts any `Coll` value (`case _: SCollectionType[_] =>
+/// x.isInstanceOf[Coll[_]]`, no element recursion) — but it has NO
+/// case for a top-level `STypeVar` and falls through to
+/// `sys.error("Unknown type")`. So a polymorphic lambda
+/// `(x: T) => ...` CREATES fine but ALWAYS errors when invoked, from
+/// any call path: direct `FuncApply` and every HOF loop
+/// (map/filter/forall/exists/fold/flatMap). Called per invocation so
+/// a HOF over an EMPTY collection never errors (Scala never enters
+/// the closure). Vector: HOF_FunDef_type_var_body
+/// identity-applied-reject.
+pub(in crate::evaluator) fn check_closure_param_types(
+    param_types: &[(u32, Option<SigmaType>)],
+) -> Result<(), EvalError> {
+    for (_, tpe) in param_types {
+        if let Some(SigmaType::STypeVar(name)) = tpe {
+            return Err(EvalError::TypeError {
+                expected:
+                    "concrete lambda parameter type (Scala isValueOfType has no STypeVar case)",
+                got: format!("STypeVar({name})"),
+            });
+        }
+    }
+    Ok(())
+}
+
 // 0xDA FuncApply — closure invocation. Charges AddToEnv (5 jit) per call.
 pub(in crate::evaluator) fn eval_func_apply(
     func: &Expr,
@@ -199,7 +268,7 @@ pub(in crate::evaluator) fn eval_func_apply(
         Value::Func {
             captured_env,
             params,
-            param_types: _,
+            param_types,
             body,
         } => {
             if params.len() != arg_exprs.len() {
@@ -208,15 +277,24 @@ pub(in crate::evaluator) fn eval_func_apply(
                     got: arg_exprs.len(),
                 });
             }
-            // AddToEnvironment — charged per closure invocation
-            cx.cost.add(JitCost::from_jit(5))?;
-            #[cfg(feature = "cost-trace")]
-            crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
             let mut call_env = (*captured_env).clone();
             for (param_id, arg_expr) in params.iter().zip(arg_exprs.iter()) {
                 let arg_val = cx.eval_expr(arg_expr)?;
+                check_closure_param_types(&param_types)?;
                 call_env.insert(*param_id, arg_val);
             }
+            // AddToEnvironment — charged once per invocation, AFTER
+            // arg evaluation and checkType: Scala's closure runs
+            // checkType first and only then addFixedCost(AddToEnv)
+            // around the env update, so a polymorphic reject must not
+            // pay this charge. (Scala closures are always 1-arg —
+            // multi-param creation errors there — so the single
+            // post-loop charge is exact for every Scala-reachable
+            // shape and keeps the per-invocation convention for the
+            // multi-arg extension.)
+            cx.cost.add(JitCost::from_jit(5))?;
+            #[cfg(feature = "cost-trace")]
+            crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
             // Body evaluates with a fresh `call_env`, not the caller's env.
             // Direct call to the free function so we can swap envs without
             // disturbing `cx.env`.

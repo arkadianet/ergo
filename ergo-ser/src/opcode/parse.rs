@@ -149,10 +149,27 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 
         ArgPattern::FunDef => {
             let id = r.get_u32_exact()?;
+            // Scala ValDefSerializer: the FunDef opcode (0xD7) carries
+            // `nTpeArgs(u8)` + that many types between the id and the
+            // rhs; each must be an STypeVar
+            // (`r.getType().asInstanceOf[STypeVar]` — a non-typevar
+            // type fails the cast and the whole parse).
+            let n_tpe_args = r.get_u8()? as usize;
+            let mut tpe_args = Vec::with_capacity(n_tpe_args);
+            for _ in 0..n_tpe_args {
+                let t = read_type(r)?;
+                if !matches!(t, SigmaType::STypeVar(_)) {
+                    return Err(ReadError::InvalidData(format!(
+                        "FunDef tpeArg must be an STypeVar, got {t:?}"
+                    )));
+                }
+                tpe_args.push(t);
+            }
             let rhs = parse_expr(r, next, _tree_version)?;
             Payload::FunDef {
                 id,
                 tpe: None,
+                tpe_args,
                 rhs: Box::new(rhs),
             }
         }
