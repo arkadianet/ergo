@@ -468,6 +468,19 @@ pub(super) async fn run_mining_engine(
             } else {
                 BuildMode::Minimal
             };
+            // Build-start marker, paired with the build-complete line below. A
+            // start with no timely complete is the signature of a stuck/slow
+            // build starving the served cache — visible at the log's default
+            // level (the complete line is already WARN when slow), so an
+            // operator can spot starvation without correlating against an
+            // external clock.
+            info!(
+                reason = ?intent.reason,
+                ?mode,
+                attempts,
+                expected_height = intent.expected_height,
+                "mining engine: build start",
+            );
             // Dispatch the build to the worker and await its reply. `build_ms`
             // times the request→reply round-trip — the wall time of the build
             // itself (the worker runs it synchronously and replies immediately),
