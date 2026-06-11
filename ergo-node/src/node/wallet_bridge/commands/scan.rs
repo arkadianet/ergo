@@ -471,32 +471,38 @@ pub(crate) fn scan_transactions_impl(
         Err(e) => return Err(internal(e)),
     };
 
-    // Table order is (height, tx_id) ascending; filter by membership, then
-    // paginate over the filtered set.
-    let mut matching: Vec<ScanTxRecord> = Vec::new();
+    // Table order is (height, tx_id) ascending. Single pass: count every
+    // membership match for `total`, but materialize entries only inside the
+    // page window — `total` needs the full scan anyway (Scala likewise
+    // filters its whole wallet-tx set), but out-of-window rows are dropped
+    // without buffering or hex-rendering.
+    let offset = page.offset as usize;
+    let limit = page.limit as usize;
+    let mut match_count: usize = 0;
+    let mut items = Vec::new();
     for item in table.iter().map_err(internal)? {
         let (_, value) = item.map_err(internal)?;
         let rec: ScanTxRecord = bincode::deserialize(&value.value()).map_err(internal)?;
-        if rec.scan_ids.contains(&scan_id) {
-            matching.push(rec);
+        if !rec.scan_ids.contains(&scan_id) {
+            continue;
+        }
+        let in_window = match_count >= offset && items.len() < limit;
+        match_count += 1;
+        if in_window {
+            items.push(ergo_api::wallet::types::WalletTransactionEntry {
+                tx_id: hex::encode(rec.tx_id),
+                block_height: rec.block_height,
+                block_id: hex::encode(rec.block_id),
+                wallet_outputs: rec.created.iter().map(hex::encode).collect(),
+                wallet_inputs: rec.spent.iter().map(hex::encode).collect(),
+                scan_ids: rec.scan_ids,
+            });
         }
     }
-
-    let total = matching.len() as u32;
-    let items = matching
-        .into_iter()
-        .skip(page.offset as usize)
-        .take(page.limit as usize)
-        .map(|rec| ergo_api::wallet::types::WalletTransactionEntry {
-            tx_id: hex::encode(rec.tx_id),
-            block_height: rec.block_height,
-            block_id: hex::encode(rec.block_id),
-            wallet_outputs: rec.created.iter().map(hex::encode).collect(),
-            wallet_inputs: rec.spent.iter().map(hex::encode).collect(),
-            scan_ids: rec.scan_ids,
-        })
-        .collect();
-    Ok(ergo_api::wallet::types::WalletTransactionsPage { total, items })
+    Ok(ergo_api::wallet::types::WalletTransactionsPage {
+        total: match_count as u32,
+        items,
+    })
 }
 
 pub(crate) async fn unspent_boxes(

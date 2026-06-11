@@ -120,10 +120,11 @@ pub trait WalletAdmin: Send + Sync {
     ) -> Result<Option<types::WalletTransactionEntry>, WalletAdminError>;
 
     /// Wallet transactions filtered by scan id (spec §B-3).
-    /// Only the default payments-scan id is supported; other ids
-    /// return 404 from the handler. The trait returns Ok(empty) for
-    /// the default id with no matches; Ok(filled) for matches; the
-    /// handler maps `scan_id != default` to 404.
+    /// `WalletAdmin::transactions_by_scan_id` serves the default payments
+    /// scan (10, the wallet's own listing) AND user scan ids (transactions
+    /// tagged at block apply). Unknown / deregistered scan ids return
+    /// `Ok` with an empty page — the handler no longer maps them to 404
+    /// (the pre-scan-subsystem behavior).
     async fn transactions_by_scan_id(
         &self,
         scan_id: u32,

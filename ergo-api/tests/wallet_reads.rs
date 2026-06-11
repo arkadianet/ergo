@@ -21,7 +21,12 @@ use tower::ServiceExt;
 
 // ----- helpers -----
 
-struct StubAdmin;
+#[derive(Default)]
+struct StubAdmin {
+    /// Last scan id received by `transactions_by_scan_id` — lets the
+    /// forwarding test pin that the path id reaches the admin verbatim.
+    last_scan_id: std::sync::Mutex<Option<u32>>,
+}
 
 #[async_trait::async_trait]
 impl WalletAdmin for StubAdmin {
@@ -79,9 +84,10 @@ impl WalletAdmin for StubAdmin {
     }
     async fn transactions_by_scan_id(
         &self,
-        _: u32,
+        scan_id: u32,
         _: Page,
     ) -> Result<WalletTransactionsPage, WalletAdminError> {
+        *self.last_scan_id.lock().unwrap() = Some(scan_id);
         Ok(WalletTransactionsPage::default())
     }
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
@@ -179,7 +185,7 @@ impl WalletAdmin for StubAdmin {
 }
 
 fn app() -> axum::Router {
-    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin);
+    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin::default());
     ergo_api::wallet::router_with_security(admin, None) // read smoke test; auth gate not exercised
 }
 
@@ -319,8 +325,12 @@ async fn transactions_by_scan_id_with_payments_id_returns_200() {
 async fn transactions_by_scan_id_forwards_user_scan_ids() {
     // User scan ids are no longer 404-gated at the HTTP edge: they forward to
     // the admin (which serves scan-tx rows; unknown/deregistered scans yield
-    // an empty page, matching Scala's filter-by-membership `[]`).
-    let resp = app()
+    // an empty page, matching Scala's filter-by-membership `[]`). Hold the
+    // concrete admin so the recorder can pin that the path id arrives verbatim.
+    let admin = Arc::new(StubAdmin::default());
+    let router =
+        ergo_api::wallet::router_with_security(admin.clone() as Arc<dyn WalletAdmin>, None);
+    let resp = router
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -335,4 +345,9 @@ async fn transactions_by_scan_id_forwards_user_scan_ids() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["total"], 0);
     assert!(body["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        *admin.last_scan_id.lock().unwrap(),
+        Some(99),
+        "path scan id forwarded to the admin verbatim"
+    );
 }

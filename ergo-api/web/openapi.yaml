@@ -1425,24 +1425,22 @@ components:
         - walletInputs
       properties:
         txId:
-          type: string
-          description: Hex transaction id.
+          $ref: '#/components/schemas/TransactionId'
         blockHeight:
           type: integer
           format: int32
           description: Inclusion height.
         blockId:
-          type: string
-          description: Hex id of the including block.
+          $ref: '#/components/schemas/ModifierId'
         walletOutputs:
           type: array
           items:
-            type: string
+            $ref: '#/components/schemas/TransactionBoxId'
           description: Box ids this tx created that are wallet/scan-relevant.
         walletInputs:
           type: array
           items:
-            type: string
+            $ref: '#/components/schemas/TransactionBoxId'
           description: Box ids this tx spent that were wallet/scan-tracked.
         scanIds:
           type: array
