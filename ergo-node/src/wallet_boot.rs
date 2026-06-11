@@ -104,9 +104,13 @@ impl WalletBootService {
             Self::backfill_change_address(storage, state, db, network)?;
         }
 
-        // Step 6: Change-address validation per spec §7.4.
+        // Step 6: Change-address validation per spec §7.4. (The change
+        // address is persisted as a pubkey and re-rendered with the
+        // current network prefix at hydrate, so the decoder's network
+        // check always passes here; it is load-bearing only on the
+        // user-supplied-string paths.)
         if let Some(addr_str) = state.change_address() {
-            match ergo_ser::address::decode_p2pk_address(addr_str) {
+            match ergo_ser::address::decode_p2pk_address(addr_str, network) {
                 Ok(pk) => {
                     if !state
                         .cached_pubkeys()
