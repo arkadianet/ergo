@@ -356,3 +356,60 @@ async fn spent_boxes_route_is_mounted() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn box_routes_reject_out_of_range_filters() {
+    // Per the OpenAPI / Scala swagger: limit ∈ 1..=2500, offset ≥ 0,
+    // minInclusionHeight ≥ 0, minConfirmations ≥ -1. Out-of-range query params
+    // are a client error (400), validated at the HTTP edge before dispatch
+    // (the mock admin's box methods are never reached).
+    for q in [
+        "limit=0",
+        "limit=2501",
+        "limit=-1",
+        "offset=-1",
+        "minInclusionHeight=-1",
+        "minConfirmations=-2",
+    ] {
+        let (status, _) = json(
+            app(),
+            Method::GET,
+            &format!("/scan/unspentBoxes/11?{q}"),
+            b"",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "unspentBoxes expected 400 for {q}"
+        );
+        let (status, _) = json(app(), Method::GET, &format!("/scan/spentBoxes/11?{q}"), b"").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "spentBoxes expected 400 for {q}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn box_routes_accept_boundary_filters() {
+    // Boundaries are valid: limit=1, limit=2500, offset=0, minConfirmations=-1
+    // ("-1 = include unconfirmed"), maxConfirmations=-1 ("unbounded").
+    for q in [
+        "limit=1",
+        "limit=2500",
+        "offset=0",
+        "minConfirmations=-1",
+        "maxConfirmations=-1",
+    ] {
+        let (status, _) = json(
+            app(),
+            Method::GET,
+            &format!("/scan/unspentBoxes/11?{q}"),
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "expected 200 for {q}");
+    }
+}

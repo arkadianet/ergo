@@ -170,6 +170,7 @@ impl StateStore {
                     cached_pubkeys: pubkeys,
                     block_txs_owned: owned,
                     scan_matches,
+                    has_registered_scans: scan_count > 0,
                 })
             }
         } else {

@@ -169,6 +169,7 @@ pub mod test_helpers {
                 cached_pubkeys: pubkeys,
                 block_txs_owned: owned,
                 scan_matches: Vec::new(),
+                has_registered_scans: false,
             };
             self.apply_checked_transactions(
                 height,

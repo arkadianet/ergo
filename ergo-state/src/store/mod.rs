@@ -544,8 +544,18 @@ pub(crate) struct WalletApplyPayload {
     /// Computed on the main thread (where the `ergo-wallet` matcher is reachable
     /// via the hook) and carried as owned data so it crosses the persist-worker
     /// boundary; `ergo-state` persists it atomically in the chain write-txn.
-    /// Empty when no scans are registered.
+    /// Empty when no scans are registered — and ALSO empty for a block that only
+    /// spends (no new matches), which is why the scan-apply gate uses
+    /// `has_registered_scans` below, not `scan_matches.is_empty()`.
     pub scan_matches: Vec<ScanMatchRecord>,
+    /// True iff ≥1 scan was registered at payload-build time
+    /// (`registered_scan_count() > 0`). Gates `apply_block_to_scans`: when no
+    /// scans exist the scan tables are never opened/created and the per-input
+    /// spend-index probe is skipped — the `scan_count == 0` fast path, made
+    /// complete at the apply site (not just at payload build). Must NOT be
+    /// derived from `scan_matches.is_empty()`: a registered scan still needs
+    /// phase-2 spend transitions on a block that produced no new matches.
+    pub has_registered_scans: bool,
 }
 
 impl WalletApplyPayload {
@@ -4641,21 +4651,23 @@ impl StateStore {
                     },
                 )?;
             }
-            // Scan tracking lands in the same atomic write-txn regardless of
-            // wallet-key tracking. `scan_matches` is empty when no scans are
-            // registered, but phase 2 still probes the spend index per input
-            // (and the scan tables get created on first touch) — both cheap.
-            crate::wallet::apply::apply_block_to_scans(
-                &write_txn,
-                &payload.scan_matches,
-                &btxs,
-                height,
-            )
-            .map_err(|e| StateError::WalletApply {
-                what: "scan apply (atomic)",
-                height,
-                source: Box::new(e),
-            })?;
+            // Scan tracking lands in the same atomic write-txn, independent of
+            // wallet-key tracking — but only when scans are actually registered.
+            // With no scans, skipping avoids opening/creating the scan tables and
+            // the per-input spend-index probe (the scan_count==0 fast path).
+            if payload.has_registered_scans {
+                crate::wallet::apply::apply_block_to_scans(
+                    &write_txn,
+                    &payload.scan_matches,
+                    &btxs,
+                    height,
+                )
+                .map_err(|e| StateError::WalletApply {
+                    what: "scan apply (atomic)",
+                    height,
+                    source: Box::new(e),
+                })?;
+            }
         }
 
         let t0 = std::time::Instant::now();
@@ -5382,6 +5394,7 @@ mod tests {
     ) -> WalletApplyPayload {
         WalletApplyPayload {
             tracked_p2pk_trees: trees,
+            has_registered_scans: !scan_matches.is_empty(),
             cached_pubkeys: pubkeys,
             block_txs_owned: Vec::new(),
             scan_matches,

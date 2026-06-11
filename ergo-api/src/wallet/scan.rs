@@ -133,12 +133,50 @@ fn default_limit() -> i32 {
     500
 }
 
+impl ScanBoxFilter {
+    /// Enforce the OpenAPI / Scala-swagger query-param bounds: `limit ∈ 1..=2500`,
+    /// `offset ≥ 0`, `minInclusionHeight ≥ 0`, `minConfirmations ≥ -1` (`-1` =
+    /// "include unconfirmed"). The `max*` bounds carry no lower limit (`-1` =
+    /// unbounded). Out-of-range values are a client error (HTTP 400), matching
+    /// Scala's parameter rejection rather than silently clamping — note `limit`
+    /// has no "-1 = unbounded" form; `-1` is simply below the minimum.
+    pub(crate) fn validate(&self) -> Result<(), super::WalletAdminError> {
+        use super::WalletAdminError::BadRequest;
+        if self.limit < 1 || self.limit > 2500 {
+            return Err(BadRequest(format!(
+                "limit must be in 1..=2500, got {}",
+                self.limit
+            )));
+        }
+        if self.offset < 0 {
+            return Err(BadRequest(format!(
+                "offset must be >= 0, got {}",
+                self.offset
+            )));
+        }
+        if self.min_inclusion_height < 0 {
+            return Err(BadRequest(format!(
+                "minInclusionHeight must be >= 0, got {}",
+                self.min_inclusion_height
+            )));
+        }
+        if self.min_confirmations < -1 {
+            return Err(BadRequest(format!(
+                "minConfirmations must be >= -1, got {}",
+                self.min_confirmations
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// `GET /scan/unspentBoxes/{scanId}` — unspent boxes tracked by the scan.
 pub(crate) async fn unspent_boxes(
     State(admin): State<Arc<dyn WalletAdmin>>,
     Path(scan_id): Path<u16>,
     Query(filter): Query<ScanBoxFilter>,
 ) -> Result<Json<Vec<ScanBoxEntry>>, (StatusCode, Json<serde_json::Value>)> {
+    filter.validate().map_err(map_err)?;
     let boxes = admin
         .scan_unspent_boxes(scan_id, filter)
         .await
@@ -152,6 +190,7 @@ pub(crate) async fn spent_boxes(
     Path(scan_id): Path<u16>,
     Query(filter): Query<ScanBoxFilter>,
 ) -> Result<Json<Vec<ScanBoxEntry>>, (StatusCode, Json<serde_json::Value>)> {
+    filter.validate().map_err(map_err)?;
     let boxes = admin
         .scan_spent_boxes(scan_id, filter)
         .await

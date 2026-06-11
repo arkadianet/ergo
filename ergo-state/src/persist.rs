@@ -886,13 +886,17 @@ impl PersistPipeline {
                     crate::wallet::maturity::promote_matured_boxes(&write_txn, job.height)
                         .map_err(|e| format!("wallet maturity at h={}: {e}", job.height))?;
                 }
-                crate::wallet::apply::apply_block_to_scans(
-                    &write_txn,
-                    &payload.scan_matches,
-                    &btxs,
-                    job.height,
-                )
-                .map_err(|e| format!("scan apply at h={}: {e}", job.height))?;
+                // Only when scans are registered — skips opening/creating the
+                // scan tables and the per-input spend-index probe otherwise.
+                if payload.has_registered_scans {
+                    crate::wallet::apply::apply_block_to_scans(
+                        &write_txn,
+                        &payload.scan_matches,
+                        &btxs,
+                        job.height,
+                    )
+                    .map_err(|e| format!("scan apply at h={}: {e}", job.height))?;
+                }
             }
         }
 
@@ -1017,6 +1021,7 @@ mod tests {
             cached_pubkeys: std::collections::BTreeMap::new(),
             block_txs_owned: vec![tx],
             scan_matches: Vec::new(),
+            has_registered_scans: false,
         });
         j
     }
