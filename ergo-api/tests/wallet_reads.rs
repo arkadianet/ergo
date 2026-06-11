@@ -2,7 +2,8 @@
 //!
 //! Each route gets one test asserting 200 OK with the expected JSON shape.
 //! The `transaction_by_id` test asserts 404 (admin returns None).
-//! The `transactionsByScanId` tests assert 200 for id=10 and 404 for id=99.
+//! The `transactionsByScanId` tests assert 200 for id=10 and that user scan
+//! ids forward to the admin (empty page for unknown scans, not 404).
 
 use std::sync::Arc;
 
@@ -66,6 +67,7 @@ impl WalletAdmin for StubAdmin {
                 block_id: "ef".repeat(32),
                 wallet_outputs: vec!["ab".repeat(32)],
                 wallet_inputs: vec![],
+                scan_ids: vec![],
             }],
         })
     }
@@ -313,10 +315,11 @@ async fn transactions_by_scan_id_with_payments_id_returns_200() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-// ----- error paths -----
-
 #[tokio::test]
-async fn transactions_by_scan_id_with_unknown_id_returns_404() {
+async fn transactions_by_scan_id_forwards_user_scan_ids() {
+    // User scan ids are no longer 404-gated at the HTTP edge: they forward to
+    // the admin (which serves scan-tx rows; unknown/deregistered scans yield
+    // an empty page, matching Scala's filter-by-membership `[]`).
     let resp = app()
         .oneshot(
             Request::builder()
@@ -327,8 +330,9 @@ async fn transactions_by_scan_id_with_unknown_id_returns_404() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["reason"], "scan_not_found");
+    assert_eq!(body["total"], 0);
+    assert!(body["items"].as_array().unwrap().is_empty());
 }

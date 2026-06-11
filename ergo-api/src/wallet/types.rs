@@ -83,4 +83,11 @@ pub struct WalletTransactionEntry {
     pub block_id: String,
     pub wallet_outputs: Vec<String>,
     pub wallet_inputs: Vec<String>,
+    /// Scans this tx is associated with (the Scala `WalletTransaction.scanIds`
+    /// class field; Scala's wire key is `scans` — this lean shape uses
+    /// `scanIds`). Filled by `/wallet/transactionsByScanId` for user scans;
+    /// omitted on the wallet's own tx listings (whose rows carry no scan
+    /// tagging), keeping their wire shape unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub scan_ids: Vec<u16>,
 }

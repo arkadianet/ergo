@@ -30,7 +30,6 @@ pub(crate) fn map_err(e: super::WalletAdminError) -> (StatusCode, Json<serde_jso
             "wallet_restore_pruning_unsupported",
         ),
         E::ChangeAddressUntracked => (StatusCode::BAD_REQUEST, "change_address_untracked"),
-        E::ScanNotFound => (StatusCode::NOT_FOUND, "scan_not_found"),
         E::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
         E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),

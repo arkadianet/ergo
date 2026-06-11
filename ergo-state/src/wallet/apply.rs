@@ -17,7 +17,8 @@
 use crate::store::ScanMatchRecord;
 use crate::wallet::tables::*;
 use crate::wallet::types::{
-    BoxProvenance, BoxStatus, ScanBoxStatus, ScanTrackedBox, WalletBox, WalletTransaction,
+    BoxProvenance, BoxStatus, ScanBoxStatus, ScanTrackedBox, ScanTxRecord, WalletBox,
+    WalletTransaction,
 };
 use redb::{ReadableTable, WriteTransaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -461,6 +462,7 @@ pub(crate) fn apply_block_to_scans(
     scan_matches: &[ScanMatchRecord],
     txs: &[BlockTx<'_>],
     block_height: u32,
+    block_id: &[u8; 32],
 ) -> Result<(), redb::Error> {
     let mut boxes_tbl = txn.open_table(WALLET_SCAN_BOXES)?;
     let mut index_tbl = txn.open_table(WALLET_SCAN_BOX_INDEX)?;
@@ -492,14 +494,24 @@ pub(crate) fn apply_block_to_scans(
         }
     }
 
+    // Created-box lookup for phase 3: box_id -> the scans that matched it.
+    let matched_by_box: std::collections::BTreeMap<[u8; 32], &Vec<u16>> = scan_matches
+        .iter()
+        .map(|rec| (rec.box_id, &rec.scan_ids))
+        .collect();
+
     // Phase 2: mark spends. Each input that hits a tracked box transitions it
-    // Unspent → Spent for every scan that tracks it.
-    for tx in txs {
+    // Unspent → Spent for every scan that tracks it. Per-tx spend hits are
+    // collected for phase 3's per-tx scan-id union.
+    let mut spent_hits: Vec<(Vec<[u8; 32]>, Vec<u16>)> = vec![(Vec::new(), Vec::new()); txs.len()];
+    for (ti, tx) in txs.iter().enumerate() {
         for input_box_id in tx.inputs {
             let ids = match index_tbl.get(*input_box_id)? {
                 Some(g) => scan_de_ids(&g.value())?,
                 None => continue,
             };
+            spent_hits[ti].0.push(*input_box_id);
+            spent_hits[ti].1.extend(ids.iter().copied());
             for sid in ids {
                 let key = scan_box_key(sid, input_box_id);
                 let raw = match boxes_tbl.get(key)? {
@@ -516,6 +528,36 @@ pub(crate) fn apply_block_to_scans(
                 }
             }
         }
+    }
+
+    // Phase 3: per-tx scan tagging (Scala `WalletScanLogic`: a tx is stored
+    // with the union of scan ids over its spent + created scan-relevant
+    // boxes). One `ScanTxRecord` per tx with a non-empty union — backs
+    // `/wallet/transactionsByScanId` for user scans.
+    let mut txs_tbl = txn.open_table(WALLET_SCAN_TXS)?;
+    for (ti, tx) in txs.iter().enumerate() {
+        let (spent, mut union) = std::mem::take(&mut spent_hits[ti]);
+        let mut created: Vec<[u8; 32]> = Vec::new();
+        for output in tx.outputs {
+            if let Some(ids) = matched_by_box.get(&output.box_id) {
+                created.push(output.box_id);
+                union.extend(ids.iter().copied());
+            }
+        }
+        if union.is_empty() {
+            continue;
+        }
+        union.sort_unstable();
+        union.dedup();
+        let rec = ScanTxRecord {
+            tx_id: tx.tx_id,
+            block_height,
+            block_id: *block_id,
+            scan_ids: union,
+            created,
+            spent,
+        };
+        txs_tbl.insert(wallet_tx_key(block_height, &tx.tx_id), scan_ser(&rec)?)?;
     }
     Ok(())
 }
@@ -535,8 +577,12 @@ pub(crate) fn rollback_scans_from_block(
 ) -> Result<(), redb::Error> {
     let mut boxes_tbl = txn.open_table(WALLET_SCAN_BOXES)?;
     let mut index_tbl = txn.open_table(WALLET_SCAN_BOX_INDEX)?;
+    let mut txs_tbl = txn.open_table(WALLET_SCAN_TXS)?;
 
     for tx in txs.iter().rev() {
+        // Remove this tx's scan-tx row (if present) — mirror of phase 3.
+        txs_tbl.remove(wallet_tx_key(block_height, &tx.tx_id))?;
+
         // Un-spend inputs spent at this height by this tx.
         for input_box_id in tx.inputs {
             let ids = match index_tbl.get(*input_box_id)? {
@@ -589,6 +635,8 @@ pub(crate) fn clear_scan_tracking(txn: &WriteTransaction) -> Result<(), redb::Er
         .map_err(redb::Error::from)?;
     txn.delete_table(WALLET_SCAN_BOX_INDEX)
         .map_err(redb::Error::from)?;
+    txn.delete_table(WALLET_SCAN_TXS)
+        .map_err(redb::Error::from)?;
     Ok(())
 }
 
@@ -624,10 +672,27 @@ mod scan_tests {
         }
     }
 
+    /// Fixed block id for all scan-test applies (the record's `block_id`
+    /// field is asserted against this).
+    const TEST_BLOCK_ID: [u8; 32] = [0xE0; 32];
+
     fn apply(db: &redb::Database, matches: &[ScanMatchRecord], txs: &[BlockTx<'_>], h: u32) {
         let w = db.begin_write().unwrap();
-        apply_block_to_scans(&w, matches, txs, h).unwrap();
+        apply_block_to_scans(&w, matches, txs, h, &TEST_BLOCK_ID).unwrap();
         w.commit().unwrap();
+    }
+
+    /// Every `WALLET_SCAN_TXS` row, in table (height, tx_id) order.
+    fn scan_txs(db: &redb::Database) -> Vec<ScanTxRecord> {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_TXS) {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        t.iter()
+            .unwrap()
+            .map(|e| bincode::deserialize(&e.unwrap().1.value()).unwrap())
+            .collect()
     }
 
     fn rollback(db: &redb::Database, txs: &[BlockTx<'_>], h: u32) {
@@ -897,5 +962,164 @@ mod scan_tests {
         set_scan_height(&db, 50);
         rollback_wallet(&db, 100);
         assert_eq!(read_scan_height(&db), Some(50), "rollback never raises");
+    }
+
+    // ----- WALLET_SCAN_TXS (per-tx scan tagging, Scala WalletScanLogic) -----
+
+    #[test]
+    fn apply_records_scan_tx_with_union_of_created_and_spent_scans() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+
+        // Block 100: tx1 creates A (scans 11+12); tx2 has no scan involvement.
+        let outs_a = vec![out(0xA1, &tree)];
+        let outs_n = vec![out(0xD0, &tree)];
+        let no_in: Vec<[u8; 32]> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11, 12], 100)],
+            &[
+                BlockTx {
+                    tx_id: [1u8; 32],
+                    inputs: &no_in,
+                    outputs: &outs_a,
+                },
+                BlockTx {
+                    tx_id: [2u8; 32],
+                    inputs: &no_in,
+                    outputs: &outs_n,
+                },
+            ],
+            100,
+        );
+        let rows = scan_txs(&db);
+        assert_eq!(rows.len(), 1, "only the scan-involved tx gets a row");
+        assert_eq!(rows[0].tx_id, [1u8; 32]);
+        assert_eq!(rows[0].block_height, 100);
+        assert_eq!(rows[0].block_id, TEST_BLOCK_ID);
+        assert_eq!(rows[0].scan_ids, vec![11, 12]);
+        assert_eq!(rows[0].created, vec![[0xA1; 32]]);
+        assert!(rows[0].spent.is_empty());
+
+        // Block 101: tx3 spends A AND creates C (scan 13) — the row carries
+        // the UNION over spent + created (Scala WalletScanLogic:157).
+        let outs_c = vec![out(0xC1, &tree)];
+        let in_a: Vec<[u8; 32]> = vec![[0xA1; 32]];
+        apply(
+            &db,
+            &[match_rec(0xC1, vec![13], 101)],
+            &[BlockTx {
+                tx_id: [3u8; 32],
+                inputs: &in_a,
+                outputs: &outs_c,
+            }],
+            101,
+        );
+        let rows = scan_txs(&db);
+        assert_eq!(rows.len(), 2);
+        let tx3 = &rows[1]; // (height, tx_id) order: block 101 row is second
+        assert_eq!(tx3.tx_id, [3u8; 32]);
+        assert_eq!(tx3.scan_ids, vec![11, 12, 13], "union, ascending, deduped");
+        assert_eq!(tx3.created, vec![[0xC1; 32]]);
+        assert_eq!(tx3.spent, vec![[0xA1; 32]]);
+    }
+
+    #[test]
+    fn same_block_create_then_spend_tags_both_txs() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs_a = vec![out(0xA1, &tree)];
+        let no_in: Vec<[u8; 32]> = vec![];
+        let in_a: Vec<[u8; 32]> = vec![[0xA1; 32]];
+        let no_out: Vec<BlockOutput<'_>> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11], 100)],
+            &[
+                BlockTx {
+                    tx_id: [1u8; 32],
+                    inputs: &no_in,
+                    outputs: &outs_a,
+                },
+                BlockTx {
+                    tx_id: [2u8; 32],
+                    inputs: &in_a,
+                    outputs: &no_out,
+                },
+            ],
+            100,
+        );
+        let rows = scan_txs(&db);
+        assert_eq!(rows.len(), 2, "creator and same-block spender both tagged");
+        assert_eq!(rows[0].created, vec![[0xA1; 32]]);
+        assert_eq!(rows[1].spent, vec![[0xA1; 32]]);
+        assert_eq!(rows[1].scan_ids, vec![11]);
+    }
+
+    #[test]
+    fn rollback_removes_scan_tx_rows_at_that_height_only() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs_a = vec![out(0xA1, &tree)];
+        let outs_b = vec![out(0xB1, &tree)];
+        let no_in: Vec<[u8; 32]> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11], 100)],
+            &[BlockTx {
+                tx_id: [1u8; 32],
+                inputs: &no_in,
+                outputs: &outs_a,
+            }],
+            100,
+        );
+        apply(
+            &db,
+            &[match_rec(0xB1, vec![11], 101)],
+            &[BlockTx {
+                tx_id: [2u8; 32],
+                inputs: &no_in,
+                outputs: &outs_b,
+            }],
+            101,
+        );
+        assert_eq!(scan_txs(&db).len(), 2);
+
+        rollback(
+            &db,
+            &[BlockTx {
+                tx_id: [2u8; 32],
+                inputs: &no_in,
+                outputs: &outs_b,
+            }],
+            101,
+        );
+        let rows = scan_txs(&db);
+        assert_eq!(rows.len(), 1, "only the rolled-back height's row removed");
+        assert_eq!(rows[0].block_height, 100);
+    }
+
+    #[test]
+    fn clear_scan_tracking_drops_scan_tx_rows() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs = vec![out(0xA1, &tree)];
+        let no_in: Vec<[u8; 32]> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11], 100)],
+            &[BlockTx {
+                tx_id: [1u8; 32],
+                inputs: &no_in,
+                outputs: &outs,
+            }],
+            100,
+        );
+        assert_eq!(scan_txs(&db).len(), 1);
+
+        let w = db.begin_write().unwrap();
+        clear_scan_tracking(&w).unwrap();
+        w.commit().unwrap();
+        assert!(scan_txs(&db).is_empty(), "scan-tx rows cleared");
     }
 }

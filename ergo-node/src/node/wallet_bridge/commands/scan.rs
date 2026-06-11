@@ -21,8 +21,9 @@ use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDt
 use ergo_api::wallet::WalletAdminError;
 use ergo_state::wallet::tables::{
     scan_box_key, WALLET_LAST_USED_SCAN_ID, WALLET_SCANS, WALLET_SCAN_BOXES, WALLET_SCAN_BOX_INDEX,
+    WALLET_SCAN_TXS,
 };
-use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox};
+use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
 use ergo_wallet::scan::{
     Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
     MAX_SCAN_NAME_LENGTH, PAYMENTS_SCAN_ID,
@@ -182,8 +183,7 @@ pub(crate) async fn deregister(
 fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminError> {
     let mut registry = load_registry(db)?;
     // Scala `removeScan` is not idempotent: a missing id is a failure. The
-    // `/scan/deregister` route maps that to HTTP 400 (BadRequest), distinct
-    // from the 404 `ScanNotFound` used by `transactionsByScanId`.
+    // `/scan/deregister` route maps that to HTTP 400 (BadRequest).
     registry
         .deregister(scan_id)
         .map_err(|_| WalletAdminError::BadRequest(format!("no scan with id {scan_id}")))?;
@@ -445,6 +445,60 @@ pub(crate) async fn p2s_rule(
     let _ = reply.send(p2s_rule_impl(ctx.db, ctx.cfg.network, &p2s));
 }
 
+/// Transactions associated with a user scan, from `WALLET_SCAN_TXS` —
+/// Scala's `getScanTransactions` filters all wallet txs by scan-id membership;
+/// here the rows are pre-tagged at block apply and filtered the same way.
+/// Unregistered / deregistered user scans read as empty (hide-on-read, parity
+/// with the box endpoints).
+///
+/// Deliberate divergence: reserved ids read as empty here — the matcher tags
+/// only registered user scans (≥ 11), while Scala serves mining-scan txs at
+/// id 9 from its unified store. (Id 10 is the wallet's own listing at the
+/// dispatch layer and never reaches here.)
+pub(crate) fn scan_transactions_impl(
+    db: &redb::Database,
+    scan_id: u16,
+    page: ergo_api::wallet::types::Page,
+) -> Result<ergo_api::wallet::types::WalletTransactionsPage, WalletAdminError> {
+    if scan_id > PAYMENTS_SCAN_ID && load_registry(db)?.get(scan_id).is_none() {
+        return Ok(Default::default());
+    }
+
+    let read = db.begin_read().map_err(internal)?;
+    let table = match read.open_table(WALLET_SCAN_TXS) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Default::default()),
+        Err(e) => return Err(internal(e)),
+    };
+
+    // Table order is (height, tx_id) ascending; filter by membership, then
+    // paginate over the filtered set.
+    let mut matching: Vec<ScanTxRecord> = Vec::new();
+    for item in table.iter().map_err(internal)? {
+        let (_, value) = item.map_err(internal)?;
+        let rec: ScanTxRecord = bincode::deserialize(&value.value()).map_err(internal)?;
+        if rec.scan_ids.contains(&scan_id) {
+            matching.push(rec);
+        }
+    }
+
+    let total = matching.len() as u32;
+    let items = matching
+        .into_iter()
+        .skip(page.offset as usize)
+        .take(page.limit as usize)
+        .map(|rec| ergo_api::wallet::types::WalletTransactionEntry {
+            tx_id: hex::encode(rec.tx_id),
+            block_height: rec.block_height,
+            block_id: hex::encode(rec.block_id),
+            wallet_outputs: rec.created.iter().map(hex::encode).collect(),
+            wallet_inputs: rec.spent.iter().map(hex::encode).collect(),
+            scan_ids: rec.scan_ids,
+        })
+        .collect();
+    Ok(ergo_api::wallet::types::WalletTransactionsPage { total, items })
+}
+
 pub(crate) async fn unspent_boxes(
     ctx: &WriterContext<'_>,
     scan_id: u16,
@@ -580,6 +634,7 @@ fn read_scan_boxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_state::wallet::tables::wallet_tx_key;
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
         let dir = tempfile::tempdir().unwrap();
@@ -1276,6 +1331,108 @@ mod tests {
         ));
         // Nothing registered by the rejected calls.
         assert!(list_impl(&db).unwrap().is_empty());
+    }
+
+    // ----- transactionsByScanId (scan-tx reads) -----
+
+    fn put_scan_tx(
+        db: &redb::Database,
+        height: u32,
+        tx_fill: u8,
+        scan_ids: Vec<u16>,
+        created_fill: Option<u8>,
+        spent_fill: Option<u8>,
+    ) {
+        let rec = ScanTxRecord {
+            tx_id: [tx_fill; 32],
+            block_height: height,
+            block_id: [0xE0; 32],
+            scan_ids,
+            created: created_fill.map(|f| vec![[f; 32]]).unwrap_or_default(),
+            spent: spent_fill.map(|f| vec![[f; 32]]).unwrap_or_default(),
+        };
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_SCAN_TXS).unwrap();
+            t.insert(
+                wallet_tx_key(height, &[tx_fill; 32]),
+                bincode::serialize(&rec).unwrap(),
+            )
+            .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    fn page(offset: u32, limit: u32) -> ergo_api::wallet::types::Page {
+        ergo_api::wallet::types::Page { offset, limit }
+    }
+
+    #[test]
+    fn scan_transactions_filters_by_membership_and_renders_entries() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // 11
+        register_impl(&db, req("b", 0x22)).unwrap(); // 12
+        put_scan_tx(&db, 100, 0x01, vec![11], Some(0xA1), None);
+        put_scan_tx(&db, 101, 0x02, vec![11, 12], None, Some(0xA1));
+        put_scan_tx(&db, 102, 0x03, vec![12], Some(0xB1), None);
+
+        let p = scan_transactions_impl(&db, 11, page(0, 50)).unwrap();
+        assert_eq!(p.total, 2, "txs tagged with 11 only");
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(p.items[0].tx_id, hex::encode([0x01u8; 32]));
+        assert_eq!(p.items[0].block_height, 100);
+        assert_eq!(p.items[0].block_id, hex::encode([0xE0u8; 32]));
+        assert_eq!(p.items[0].wallet_outputs, vec![hex::encode([0xA1u8; 32])]);
+        assert!(p.items[0].wallet_inputs.is_empty());
+        assert_eq!(p.items[0].scan_ids, vec![11]);
+        assert_eq!(p.items[1].tx_id, hex::encode([0x02u8; 32]));
+        assert_eq!(p.items[1].scan_ids, vec![11, 12]);
+        assert_eq!(p.items[1].wallet_inputs, vec![hex::encode([0xA1u8; 32])]);
+
+        // Pagination applies AFTER the membership filter.
+        let p = scan_transactions_impl(&db, 11, page(1, 50)).unwrap();
+        assert_eq!(p.total, 2);
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(p.items[0].tx_id, hex::encode([0x02u8; 32]));
+
+        // The discriminating case: scan 12 matches tx2 (table position 2) and
+        // tx3 (position 3). offset=1 over the FILTERED set yields exactly
+        // [tx3]; a paginate-then-filter bug would yield [tx2, tx3] (offset
+        // consumed by non-matching tx1 instead).
+        let p = scan_transactions_impl(&db, 12, page(1, 50)).unwrap();
+        assert_eq!(p.total, 2);
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(p.items[0].tx_id, hex::encode([0x03u8; 32]));
+    }
+
+    #[test]
+    fn scan_transactions_hides_unregistered_user_scans() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // 11
+        put_scan_tx(&db, 100, 0x01, vec![11], Some(0xA1), None);
+
+        // Registered: visible.
+        assert_eq!(
+            scan_transactions_impl(&db, 11, page(0, 50)).unwrap().total,
+            1
+        );
+
+        // Deregistered: rows linger but reads hide them (hide-on-read parity
+        // with the box endpoints).
+        deregister_impl(&db, 11).unwrap();
+        let p = scan_transactions_impl(&db, 11, page(0, 50)).unwrap();
+        assert_eq!(p.total, 0);
+        assert!(p.items.is_empty());
+
+        // Never-registered user id and reserved id (9): empty, not an error.
+        assert_eq!(
+            scan_transactions_impl(&db, 99, page(0, 50)).unwrap().total,
+            0
+        );
+        assert_eq!(
+            scan_transactions_impl(&db, 9, page(0, 50)).unwrap().total,
+            0
+        );
     }
 
     #[test]

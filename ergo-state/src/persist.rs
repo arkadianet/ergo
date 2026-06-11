@@ -894,6 +894,7 @@ impl PersistPipeline {
                         &payload.scan_matches,
                         &btxs,
                         job.height,
+                        &job.header_id,
                     )
                     .map_err(|e| format!("scan apply at h={}: {e}", job.height))?;
                 }

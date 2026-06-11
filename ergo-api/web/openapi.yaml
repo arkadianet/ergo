@@ -1409,6 +1409,47 @@ components:
         scanId:
           type: integer
 
+    WalletTransactionEntry:
+      description: >-
+        A wallet/scan-related transaction reference. Node-native lean shape
+        (not the full Scala `WalletTransaction`): box-id references instead of
+        embedded transaction bytes. `scanIds` is present on scan listings
+        (`/wallet/transactionsByScanId` for user scans) and omitted on the
+        wallet's own listings.
+      type: object
+      required:
+        - txId
+        - blockHeight
+        - blockId
+        - walletOutputs
+        - walletInputs
+      properties:
+        txId:
+          type: string
+          description: Hex transaction id.
+        blockHeight:
+          type: integer
+          format: int32
+          description: Inclusion height.
+        blockId:
+          type: string
+          description: Hex id of the including block.
+        walletOutputs:
+          type: array
+          items:
+            type: string
+          description: Box ids this tx created that are wallet/scan-relevant.
+        walletInputs:
+          type: array
+          items:
+            type: string
+          description: Box ids this tx spent that were wallet/scan-tracked.
+        scanIds:
+          type: array
+          items:
+            type: integer
+          description: Scans this transaction is associated with.
+
     ScanBox:
       description: >-
         A box tracked by a scan. Node-native lean shape (not the full Scala
@@ -5033,48 +5074,35 @@ paths:
   /wallet/transactionsByScanId/{scanId}:
     parameters:
       - in: query
-        name: minInclusionHeight
+        name: offset
         required: false
-        description: Minimal tx inclusion height
+        description: The number of items in list to skip
         schema:
           type: integer
           format: int32
           minimum: 0
+          default: 0
       - in: query
-        name: maxInclusionHeight
+        name: limit
         required: false
-        description: Maximal tx inclusion height
+        description: The number of items in list to return
         schema:
           type: integer
           format: int32
-          minimum: 0
-      - in: query
-        name: minConfirmations
-        required: false
-        description: Minimal confirmations number
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - in: query
-        name: maxConfirmations
-        required: false
-        description: Maximal confirmations number
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - in: query
-        name: includeUnconfirmed
-        required: false
-        description: Include transactions from mempool
-        schema:
-          type: boolean
-          default: false
+          default: 50
     get:
       security:
         - ApiKeyAuth: [ api_key ]
       summary: Get scan-related transactions by scan id
+      description: >-
+        Scan 10 (payments) returns the wallet's own transaction listing; user
+        scan ids return transactions tagged at block apply (created or spent a
+        box the scan tracks). Unknown / deregistered scans return an empty
+        page, not 404 (Scala's filter-by-membership likewise yields an empty
+        list). Divergences: lean paged shape, not Scala's full-transaction
+        array; Scala's height/confirmation filters and mempool inclusion
+        (includeUnconfirmed) are not supported on this route; the mining scan
+        (id 9) reads empty here, where Scala serves mining-related txs.
       operationId: walletTransactionsByScanId
       tags:
         - wallet
@@ -5088,19 +5116,23 @@ paths:
             format: int32
       responses:
         '200':
-          description: Scan-related transactions
+          description: Scan-related transactions (paged)
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/WalletTransaction'
-        '404':
-          description: Transactions with related scan id not found in wallet
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
+                type: object
+                required:
+                  - total
+                  - items
+                properties:
+                  total:
+                    type: integer
+                    format: int32
+                    description: Matching transactions before pagination.
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WalletTransactionEntry'
         default:
           description: Error
           content:
