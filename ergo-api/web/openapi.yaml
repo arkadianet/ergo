@@ -18,11 +18,6 @@ info:
     deferred items are listed with their status; off-spec items
     are not on our roadmap.
 
-    **Scan API (not implemented — no equivalent in this build):**
-
-    - `/scan/*` (all 9 routes — register / unspentBoxes / addBox /
-      p2sRule / etc.)
-
     **Script execution (deferred — `ergo-sigma` exposes the
     primitives, no REST wrapper yet):**
 
@@ -74,6 +69,20 @@ info:
     locked / initialized state — read-only mirrors return the zero-state
     status, not `404`. A self-contained browser wallet UI is served at
     **`/wallet/ui`**.
+
+    The full `/scan/*` surface (register / deregister / listAll /
+    unspentBoxes / spentBoxes / stopTracking / addBox / p2sRule) is
+    mounted under the same key gate. Documented divergences from
+    Scala: scan box reads return the lean `ScanBox` shape (not
+    `WalletBox`); deregistered scans stop serving their boxes;
+    reserved scan ids (1–10) are rejected by `addBox` /
+    `stopTracking`, and `stopTracking` 400s for boxes known only to
+    the wallet (the wallet's own boxes are not managed via `/scan`
+    here); `stopTracking` leaves the box's other scans untouched
+    (Scala rebuilds their rows as fresh-unspent — an upstream
+    accident not replicated); `addBox` reports validation failures
+    as 400 (Scala always replies 200) and requires its scan ids to
+    be registered; `p2sRule` rejects P2SH addresses.
 
     ## Rust-exclusive additions
 
@@ -6509,7 +6518,11 @@ paths:
     post:
       security:
         - ApiKeyAuth: [api_key]
-      summary: Adds a box to scans, writes box to database if it is not there. You can use scan number 10 to add a box to the wallet.
+      summary: >-
+        Adds a box to scans, writes box to database if it is not there.
+        Scan ids must be registered user scans (ids 1-10 are reserved and
+        rejected in this build; the wallet's own boxes are not managed via
+        /scan).
       operationId: addBox
       tags:
         - scan

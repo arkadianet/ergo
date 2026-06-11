@@ -94,6 +94,39 @@ impl WalletAdmin for ScanAdmin {
         Ok(vec![])
     }
 
+    async fn scan_stop_tracking(
+        &self,
+        scan_id: u16,
+        box_id: String,
+    ) -> Result<(), WalletAdminError> {
+        if scan_id == 11 && box_id == "ab".repeat(32) {
+            Ok(())
+        } else {
+            Err(WalletAdminError::BadRequest("no such box".to_string()))
+        }
+    }
+
+    async fn scan_add_box(
+        &self,
+        scan_ids: Vec<u16>,
+        box_json: serde_json::Value,
+    ) -> Result<String, WalletAdminError> {
+        // Echo-check the wiring: envelope parsed, box carried opaquely.
+        if scan_ids == vec![11] && box_json["value"] == 5 {
+            Ok("cd".repeat(32))
+        } else {
+            Err(WalletAdminError::BadRequest("bad add".to_string()))
+        }
+    }
+
+    async fn scan_p2s_rule(&self, p2s: String) -> Result<u16, WalletAdminError> {
+        if p2s == "4MQyML64GnzMxZgm" {
+            Ok(11)
+        } else {
+            Err(WalletAdminError::BadRequest("can't parse".to_string()))
+        }
+    }
+
     // ----- unused by the scan routes -----
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
         unimplemented!()
@@ -355,6 +388,72 @@ async fn spent_boxes_route_is_mounted() {
     let (status, body) = json(app(), Method::GET, "/scan/spentBoxes/11", b"").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stop_tracking_route_echoes_request_and_maps_400() {
+    let body: &'static [u8] =
+        Box::leak(format!("{{\"scanId\":11,\"boxId\":\"{}\"}}", "ab".repeat(32)).into_boxed_str())
+            .as_bytes();
+    let (status, resp) = json(app(), Method::POST, "/scan/stopTracking", body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["scanId"], 11);
+    assert_eq!(resp["boxId"], "ab".repeat(32));
+
+    // Admin-layer rejection maps to 400.
+    let (status, _) = json(
+        app(),
+        Method::POST,
+        "/scan/stopTracking",
+        b"{\"scanId\":99,\"boxId\":\"00\"}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn add_box_route_returns_box_id_string() {
+    let (status, resp) = json(
+        app(),
+        Method::POST,
+        "/scan/addBox",
+        b"{\"scanIds\":[11],\"box\":{\"value\":5}}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp, serde_json::json!("cd".repeat(32)));
+
+    let (status, _) = json(
+        app(),
+        Method::POST,
+        "/scan/addBox",
+        b"{\"scanIds\":[12],\"box\":{\"value\":5}}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn p2s_rule_route_accepts_plain_and_json_string_bodies() {
+    // Plain-text body (Scala `fromJsonOrPlain`).
+    let (status, resp) = json(app(), Method::POST, "/scan/p2sRule", b"4MQyML64GnzMxZgm").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["scanId"], 11);
+
+    // The same address as a JSON string.
+    let (status, resp) = json(
+        app(),
+        Method::POST,
+        "/scan/p2sRule",
+        b"\"4MQyML64GnzMxZgm\"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["scanId"], 11);
+
+    // Unparseable address -> 400.
+    let (status, _) = json(app(), Method::POST, "/scan/p2sRule", b"nope").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

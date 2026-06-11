@@ -70,7 +70,7 @@ pub(crate) async fn register(
 /// `POST /scan/deregister` — remove a scan registration (storage + wallet
 /// vars). A missing id is a 400 (Scala parity), echoed back as the removed id
 /// on success. (Per-box untracking is the separate `/scan/stopTracking`
-/// endpoint, a later slice.)
+/// endpoint.)
 pub(crate) async fn deregister(
     State(admin): State<Arc<dyn WalletAdmin>>,
     Json(body): Json<ScanIdJson>,
@@ -87,6 +87,70 @@ pub(crate) async fn list_all(
 ) -> Result<Json<Vec<ScanDto>>, (StatusCode, Json<serde_json::Value>)> {
     let scans = admin.list_scans().await.map_err(map_err)?;
     Ok(Json(scans))
+}
+
+/// The `{ "scanId": <int>, "boxId": <hex> }` wire object (Scala `ScanIdBoxId`)
+/// — the `stopTracking` request, echoed back on success.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub struct ScanIdBoxIdDto {
+    #[serde(rename = "scanId")]
+    pub scan_id: u16,
+    #[serde(rename = "boxId")]
+    pub box_id: String,
+}
+
+/// `POST /scan/stopTracking` — stop a scan from tracking a box. Echoes the
+/// request on success (Scala `ApiResponse(scanIdBoxId)`).
+pub(crate) async fn stop_tracking(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    Json(body): Json<ScanIdBoxIdDto>,
+) -> Result<Json<ScanIdBoxIdDto>, (StatusCode, Json<serde_json::Value>)> {
+    admin
+        .scan_stop_tracking(body.scan_id, body.box_id.clone())
+        .await
+        .map_err(map_err)?;
+    Ok(Json(body))
+}
+
+/// `POST /scan/addBox` body (Scala `BoxWithScanIds` / openapi `ScanIdsBox`).
+/// The box is the standard `ErgoTransactionOutput` JSON plus `transactionId` +
+/// `index`; carried opaquely (`ergo-api` does not depend on the box codecs) —
+/// `ergo-node` parses and validates it.
+#[derive(serde::Deserialize)]
+pub struct AddBoxRequestDto {
+    #[serde(rename = "scanIds")]
+    pub scan_ids: Vec<u16>,
+    #[serde(rename = "box")]
+    pub box_json: serde_json::Value,
+}
+
+/// `POST /scan/addBox` — manually attach a box to scans. Responds with the
+/// box id as a bare JSON string (Scala `ApiResponse(box.id)`).
+pub(crate) async fn add_box(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    Json(body): Json<AddBoxRequestDto>,
+) -> Result<Json<String>, (StatusCode, Json<serde_json::Value>)> {
+    let box_id = admin
+        .scan_add_box(body.scan_ids, body.box_json)
+        .await
+        .map_err(map_err)?;
+    Ok(Json(box_id))
+}
+
+/// `POST /scan/p2sRule` — register an `equals` scan for an address. The body
+/// is either a plain-text address or a JSON string (Scala `fromJsonOrPlain`);
+/// responds `{ "scanId": <id> }`.
+pub(crate) async fn p2s_rule(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    body: String,
+) -> Result<Json<ScanIdJson>, (StatusCode, Json<serde_json::Value>)> {
+    // Plain-body fallback trims surrounding whitespace — slightly more
+    // permissive than Scala's `fromJsonOrPlain` (which only strips paired
+    // quotes), so a curl-style trailing newline doesn't 400. Base58 has no
+    // whitespace alphabet, so this can't change which address is parsed.
+    let p2s = serde_json::from_str::<String>(&body).unwrap_or_else(|_| body.trim().to_string());
+    let scan_id = admin.scan_p2s_rule(p2s).await.map_err(map_err)?;
+    Ok(Json(ScanIdJson { scan_id }))
 }
 
 /// A box tracked by a scan — the `/scan/unspentBoxes` / `/scan/spentBoxes`

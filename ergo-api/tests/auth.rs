@@ -123,6 +123,51 @@ async fn wallet_status_returns_403_not_404_to_avoid_route_leak() {
     assert_ne!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+// ----- /scan surface gating (Scala `pathPrefix("scan") & withAuth`) -----
+
+#[tokio::test]
+async fn scan_routes_are_key_gated() {
+    // Pin the whole mounted /scan surface behind the key: every route 403s
+    // without it and stops 403ing with it (the Noop admin then answers 500
+    // from the trait defaults — the point is the gate, not the handler).
+    let routes: [(&str, &str); 8] = [
+        ("POST", "/scan/register"),
+        ("POST", "/scan/deregister"),
+        ("GET", "/scan/listAll"),
+        ("GET", "/scan/unspentBoxes/11"),
+        ("GET", "/scan/spentBoxes/11"),
+        ("POST", "/scan/stopTracking"),
+        ("POST", "/scan/addBox"),
+        ("POST", "/scan/p2sRule"),
+    ];
+    for (method, path) in routes {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = wallet_app_gated().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {path} must 403 without the key"
+        );
+
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(API_KEY_HEADER, PLAINTEXT_KEY)
+            .body(Body::empty())
+            .unwrap();
+        let resp = wallet_app_gated().oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {path} must pass the gate with the key"
+        );
+    }
+}
+
 // ----- header-name regression (Scala parity) -----
 
 #[tokio::test]

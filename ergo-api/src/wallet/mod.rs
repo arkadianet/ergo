@@ -267,6 +267,37 @@ pub trait WalletAdmin: Send + Sync {
             "scan_spent_boxes not implemented".to_string(),
         ))
     }
+
+    /// Stop a scan from tracking a box (Scala `/scan/stopTracking`).
+    async fn scan_stop_tracking(
+        &self,
+        _scan_id: u16,
+        _box_id: String,
+    ) -> Result<(), WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "scan_stop_tracking not implemented".to_string(),
+        ))
+    }
+
+    /// Manually add a box to scans (Scala `/scan/addBox`); returns the box id
+    /// hex. The box is carried opaquely as JSON — `ergo-node` parses it.
+    async fn scan_add_box(
+        &self,
+        _scan_ids: Vec<u16>,
+        _box_json: serde_json::Value,
+    ) -> Result<String, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "scan_add_box not implemented".to_string(),
+        ))
+    }
+
+    /// Register an `equals(R1, <address script>)` scan for an address
+    /// (Scala `/scan/p2sRule`); returns the new scan id.
+    async fn scan_p2s_rule(&self, _p2s: String) -> Result<u16, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "scan_p2s_rule not implemented".to_string(),
+        ))
+    }
 }
 
 /// Errors the admin trait can return. Maps to HTTP responses in
@@ -375,15 +406,16 @@ pub fn router_with_security(
             "/wallet/getPrivateKey",
             post(admin_advanced::get_private_key),
         )
-        // Scan registry routes (Scala `ScanApiRoute`). Share the wallet
-        // admin state + auth route-layer; the remaining scan endpoints
-        // (unspent/spent boxes, stopTracking, addBox, p2sRule) land in
-        // later slices and are gated by the `/scan` catch-all until then.
+        // Scan routes (Scala `ScanApiRoute`, full surface). Share the wallet
+        // admin state + auth route-layer.
         .route("/scan/register", post(scan::register))
         .route("/scan/deregister", post(scan::deregister))
         .route("/scan/listAll", get(scan::list_all))
         .route("/scan/unspentBoxes/:scan_id", get(scan::unspent_boxes))
         .route("/scan/spentBoxes/:scan_id", get(scan::spent_boxes))
+        .route("/scan/stopTracking", post(scan::stop_tracking))
+        .route("/scan/addBox", post(scan::add_box))
+        .route("/scan/p2sRule", post(scan::p2s_rule))
         // Whole-prefix gate parity (Scala `pathPrefix("scan") & withAuth`):
         // real catch-all routes (not a fallback) so the `route_layer`
         // below covers unknown `/scan/*` on the key, same as `/wallet`.
