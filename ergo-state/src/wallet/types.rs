@@ -65,6 +65,43 @@ pub struct WalletBox {
     pub provenance: BoxProvenance,
 }
 
+/// Spend status of a scan-tracked box. Simpler than [`BoxStatus`]: scans
+/// track any matching box regardless of ownership/maturity, so there is no
+/// `Immature`/provenance dimension — just unspent vs spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanBoxStatus {
+    /// The box has not been spent (still in the UTXO set).
+    Unspent,
+    /// A later input consumed the box. The row is kept (not deleted) so
+    /// `/scan/spentBoxes` can still surface it.
+    Spent {
+        spent_in_tx: [u8; 32],
+        spent_at: u32,
+    },
+}
+
+/// A box matched + tracked by a registered scan. Stored in
+/// `WALLET_SCAN_BOXES` keyed by `(scan_id, box_id)`.
+///
+/// Carries the full serialized `ErgoBox` (`box_bytes`) so that a spent box —
+/// which has left the UTXO set — can still be rendered by `/scan/spentBoxes`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanTrackedBox {
+    /// The scan that matched this box.
+    pub scan_id: u16,
+    /// Box id (32 bytes); duplicated from the key for ergonomics.
+    pub box_id: [u8; 32],
+    /// Block height the creating tx was included in (for confirmation filters).
+    pub inclusion_height: u32,
+    /// Output index of the box within its creating tx.
+    pub creation_out_index: u16,
+    /// Full serialized `ErgoBox` bytes — value, ergo tree, assets, registers,
+    /// creation height, tx id, index — enough to render the box at read time.
+    pub box_bytes: Vec<u8>,
+    /// Spend status.
+    pub status: ScanBoxStatus,
+}
+
 /// Wallet-tracked transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletTransaction {
@@ -139,6 +176,31 @@ mod tests {
             BoxStatus::Immature { matures_at: 1720 }
         ));
         assert!(matches!(parsed.provenance, BoxProvenance::MinerReward));
+    }
+
+    #[test]
+    fn scan_tracked_box_round_trips_through_bincode() {
+        let original = ScanTrackedBox {
+            scan_id: 11,
+            box_id: [0xAA; 32],
+            inclusion_height: 1000,
+            creation_out_index: 2,
+            box_bytes: vec![0x01, 0x02, 0x03],
+            status: ScanBoxStatus::Spent {
+                spent_in_tx: [0xBB; 32],
+                spent_at: 1005,
+            },
+        };
+        let bytes = bincode::serialize(&original).expect("serialize");
+        let parsed: ScanTrackedBox = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(parsed.scan_id, 11);
+        assert_eq!(parsed.box_id, [0xAA; 32]);
+        assert_eq!(parsed.inclusion_height, 1000);
+        assert_eq!(parsed.box_bytes, vec![0x01, 0x02, 0x03]);
+        assert!(matches!(
+            parsed.status,
+            ScanBoxStatus::Spent { spent_at: 1005, .. }
+        ));
     }
 
     #[test]

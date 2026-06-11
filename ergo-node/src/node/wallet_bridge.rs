@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
-use ergo_api::wallet::scan::{ScanDto, ScanRequestDto};
+use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
 use ergo_api::wallet::sending::PaymentRequestDto;
 use ergo_api::wallet::sending::{
     BoxesCollectRequest, BoxesCollectResponse, TransactionGenerateRequest,
@@ -195,6 +195,16 @@ pub enum WalletCommand {
     },
     ListScans {
         reply: oneshot::Sender<Result<Vec<ScanDto>, WalletAdminError>>,
+    },
+    ScanUnspentBoxes {
+        scan_id: u16,
+        filter: ScanBoxFilter,
+        reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
+    },
+    ScanSpentBoxes {
+        scan_id: u16,
+        filter: ScanBoxFilter,
+        reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
     },
 }
 
@@ -445,6 +455,32 @@ impl WalletAdmin for NodeWalletAdmin {
     async fn list_scans(&self) -> Result<Vec<ScanDto>, WalletAdminError> {
         self.send_cmd(|reply| WalletCommand::ListScans { reply })
             .await
+    }
+
+    async fn scan_unspent_boxes(
+        &self,
+        scan_id: u16,
+        filter: ScanBoxFilter,
+    ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::ScanUnspentBoxes {
+            scan_id,
+            filter,
+            reply,
+        })
+        .await
+    }
+
+    async fn scan_spent_boxes(
+        &self,
+        scan_id: u16,
+        filter: ScanBoxFilter,
+    ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::ScanSpentBoxes {
+            scan_id,
+            filter,
+            reply,
+        })
+        .await
     }
 }
 
@@ -767,6 +803,9 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 /// single delayed apply per admin operation.
 pub struct WalletStateHook {
     pub wallet: Arc<RwLock<ergo_wallet::state::WalletState>>,
+    /// Shared redb handle — used to read the registered scans for block-apply
+    /// matching (the scans live in redb, not `WalletState`).
+    pub db: Arc<redb::Database>,
 }
 
 impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
@@ -786,6 +825,42 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         }
         let state = self.wallet.read();
         state.cached_pubkeys().clone()
+    }
+
+    fn registered_scan_count(&self) -> usize {
+        // Cheap per-block gate: count rows in WALLET_SCANS. Scan tracking is
+        // independent of the wallet-pubkey rescan, so (unlike the methods above)
+        // it is NOT skipped while a rescan is in progress. A read error skips
+        // scan work for this block (logged) rather than aborting chain apply.
+        use redb::ReadableTableMetadata;
+        let count = self.db.begin_read().ok().and_then(|r| {
+            match r.open_table(ergo_state::wallet::tables::WALLET_SCANS) {
+                Ok(t) => t.len().ok().map(|n| n as usize),
+                Err(redb::TableError::TableDoesNotExist(_)) => Some(0),
+                Err(_) => None,
+            }
+        });
+        match count {
+            Some(n) => n,
+            None => {
+                tracing::error!("scan apply: WALLET_SCANS count read failed; skipping this block");
+                0
+            }
+        }
+    }
+
+    fn match_boxes(&self, boxes: &[ergo_ser::ergo_box::ErgoBox]) -> Vec<Vec<u16>> {
+        // Load the registry once for the whole block, then match each box.
+        match commands::scan::load_registry(&self.db) {
+            Ok(registry) => boxes
+                .iter()
+                .map(|b| registry.matching_scan_ids(b))
+                .collect(),
+            Err(e) => {
+                tracing::error!(error = %e, "scan apply: registry load failed; no matches this block");
+                vec![Vec::new(); boxes.len()]
+            }
+        }
     }
 }
 
@@ -916,6 +991,16 @@ pub async fn run_wallet_writer(
                 commands::scan::deregister(&ctx, scan_id, reply).await
             }
             WalletCommand::ListScans { reply } => commands::scan::list(&ctx, reply).await,
+            WalletCommand::ScanUnspentBoxes {
+                scan_id,
+                filter,
+                reply,
+            } => commands::scan::unspent_boxes(&ctx, scan_id, filter, reply).await,
+            WalletCommand::ScanSpentBoxes {
+                scan_id,
+                filter,
+                reply,
+            } => commands::scan::spent_boxes(&ctx, scan_id, filter, reply).await,
         }
     }
 }

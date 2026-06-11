@@ -14,8 +14,11 @@
 
 #![allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
 
+use crate::store::ScanMatchRecord;
 use crate::wallet::tables::*;
-use crate::wallet::types::{BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
+use crate::wallet::types::{
+    BoxProvenance, BoxStatus, ScanBoxStatus, ScanTrackedBox, WalletBox, WalletTransaction,
+};
 use redb::{ReadableTable, WriteTransaction};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -396,8 +399,503 @@ pub fn rollback_block_from_wallet(
         }
     }
 
-    // Roll back scan height.
+    // Roll back scan height — but only LOWER an existing row, never create or
+    // raise one. A keyless / scan-only wallet never advanced WALLET_SCAN_HEIGHT
+    // at apply (the `has_wallet_tracking` gate), so a reorg must not conjure a
+    // bogus height for it (which `/wallet/status` + `/wallet/balances` would
+    // then report as `walletHeight`). And a wallet frozen behind the tip
+    // (e.g. mid-rescan) must not be dragged forward by a rollback.
+    let target = block_height.saturating_sub(1);
     let mut scan_height_tbl = txn.open_table(WALLET_SCAN_HEIGHT)?;
-    scan_height_tbl.insert((), block_height.saturating_sub(1))?;
+    let current = scan_height_tbl.get(())?.map(|g| g.value());
+    if let Some(current) = current {
+        if current > target {
+            scan_height_tbl.insert((), target)?;
+        }
+    }
     Ok(())
+}
+
+// ---- `/scan/*` block-apply tracking ----
+//
+// Independent of the pubkey-wallet hook above and of the
+// `WALLET_SCAN_INVALIDATED` flag (which governs wallet-pubkey rescan, not
+// scans): registered scans track every applied block forward. Matching itself
+// runs on the main thread via the hook (the `ergo-wallet` matcher); here we
+// only persist the pre-computed match records + spend transitions, atomically
+// in the chain write-txn.
+
+fn scan_ser<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, redb::Error> {
+    bincode::serialize(v)
+        .map_err(|e| redb::Error::Io(std::io::Error::other(format!("scan serialize: {e}"))))
+}
+
+fn scan_de_box(raw: &[u8]) -> Result<ScanTrackedBox, redb::Error> {
+    bincode::deserialize(raw).map_err(|e| {
+        redb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("ScanTrackedBox deserialize: {e}"),
+        ))
+    })
+}
+
+fn scan_de_ids(raw: &[u8]) -> Result<Vec<u16>, redb::Error> {
+    bincode::deserialize(raw).map_err(|e| {
+        redb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("scan index deserialize: {e}"),
+        ))
+    })
+}
+
+/// Persist a block's scan matches into the scan-box tables, inside the SAME
+/// write txn as chain apply. Two phases (mirroring the wallet hook): phase 1
+/// creates each matched output as an `Unspent` [`ScanTrackedBox`] (one row per
+/// `(scan, box)`) and unions the scans into the box→scans reverse index; phase
+/// 2 marks any input that spends a scan-tracked box as `Spent`.
+///
+/// A box created AND spent within the same block is handled, because phase 1
+/// runs before phase 2.
+pub(crate) fn apply_block_to_scans(
+    txn: &WriteTransaction,
+    scan_matches: &[ScanMatchRecord],
+    txs: &[BlockTx<'_>],
+    block_height: u32,
+) -> Result<(), redb::Error> {
+    let mut boxes_tbl = txn.open_table(WALLET_SCAN_BOXES)?;
+    let mut index_tbl = txn.open_table(WALLET_SCAN_BOX_INDEX)?;
+
+    // Phase 1: create matched boxes + reverse index.
+    for rec in scan_matches {
+        let mut ids: Vec<u16> = match index_tbl.get(rec.box_id)? {
+            Some(g) => scan_de_ids(&g.value())?,
+            None => Vec::new(),
+        };
+        for &sid in &rec.scan_ids {
+            if !ids.contains(&sid) {
+                ids.push(sid);
+            }
+        }
+        ids.sort_unstable();
+        index_tbl.insert(rec.box_id, scan_ser(&ids)?)?;
+
+        for &sid in &rec.scan_ids {
+            let tb = ScanTrackedBox {
+                scan_id: sid,
+                box_id: rec.box_id,
+                inclusion_height: rec.inclusion_height,
+                creation_out_index: rec.creation_out_index,
+                box_bytes: rec.box_bytes.clone(),
+                status: ScanBoxStatus::Unspent,
+            };
+            boxes_tbl.insert(scan_box_key(sid, &rec.box_id), scan_ser(&tb)?)?;
+        }
+    }
+
+    // Phase 2: mark spends. Each input that hits a tracked box transitions it
+    // Unspent → Spent for every scan that tracks it.
+    for tx in txs {
+        for input_box_id in tx.inputs {
+            let ids = match index_tbl.get(*input_box_id)? {
+                Some(g) => scan_de_ids(&g.value())?,
+                None => continue,
+            };
+            for sid in ids {
+                let key = scan_box_key(sid, input_box_id);
+                let raw = match boxes_tbl.get(key)? {
+                    Some(g) => g.value().to_vec(),
+                    None => continue,
+                };
+                let mut tb = scan_de_box(&raw)?;
+                if matches!(tb.status, ScanBoxStatus::Unspent) {
+                    tb.status = ScanBoxStatus::Spent {
+                        spent_in_tx: tx.tx_id,
+                        spent_at: block_height,
+                    };
+                    boxes_tbl.insert(key, scan_ser(&tb)?)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Roll back a block's scan tracking (mirror of [`apply_block_to_scans`]),
+/// inside the SAME write txn as chain rollback. For each tx in REVERSE order:
+///   - un-spend inputs that were spent AT this height by THIS tx;
+///   - remove output boxes created in this block (looked up via the reverse
+///     index, so the original match records aren't needed at rollback).
+///
+/// Reorg rolls back tip-down, so a box created here but spent in a later block
+/// is first un-spent (that later block's rollback) and then removed here.
+pub(crate) fn rollback_scans_from_block(
+    txn: &WriteTransaction,
+    txs: &[BlockTx<'_>],
+    block_height: u32,
+) -> Result<(), redb::Error> {
+    let mut boxes_tbl = txn.open_table(WALLET_SCAN_BOXES)?;
+    let mut index_tbl = txn.open_table(WALLET_SCAN_BOX_INDEX)?;
+
+    for tx in txs.iter().rev() {
+        // Un-spend inputs spent at this height by this tx.
+        for input_box_id in tx.inputs {
+            let ids = match index_tbl.get(*input_box_id)? {
+                Some(g) => scan_de_ids(&g.value())?,
+                None => continue,
+            };
+            for sid in ids {
+                let key = scan_box_key(sid, input_box_id);
+                let raw = match boxes_tbl.get(key)? {
+                    Some(g) => g.value().to_vec(),
+                    None => continue,
+                };
+                let mut tb = scan_de_box(&raw)?;
+                if let ScanBoxStatus::Spent {
+                    spent_at,
+                    spent_in_tx,
+                } = &tb.status
+                {
+                    if *spent_at == block_height && spent_in_tx == &tx.tx_id {
+                        tb.status = ScanBoxStatus::Unspent;
+                        boxes_tbl.insert(key, scan_ser(&tb)?)?;
+                    }
+                }
+            }
+        }
+        // Remove outputs created by this tx (via the reverse index).
+        for output in tx.outputs {
+            let ids = match index_tbl.get(output.box_id)? {
+                Some(g) => scan_de_ids(&g.value())?,
+                None => continue,
+            };
+            for sid in ids {
+                boxes_tbl.remove(scan_box_key(sid, &output.box_id))?;
+            }
+            index_tbl.remove(output.box_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Drop ALL scan-tracked boxes + the reverse index, inside the chain
+/// write-txn. Called from the reorg paths that cannot replay a block's txs
+/// (pruned / unreadable section) and so can't selectively roll scans back:
+/// rather than leave orphaned-fork boxes visible via `/scan/*Boxes`, we clear
+/// the scan tables so scans re-track forward from the new tip. (Those paths
+/// already force-invalidate the wallet for a full rescan; rebuilding scan
+/// history is a follow-up — there is no scan rescan yet.)
+pub(crate) fn clear_scan_tracking(txn: &WriteTransaction) -> Result<(), redb::Error> {
+    txn.delete_table(WALLET_SCAN_BOXES)
+        .map_err(redb::Error::from)?;
+    txn.delete_table(WALLET_SCAN_BOX_INDEX)
+        .map_err(redb::Error::from)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use crate::store::ScanMatchRecord;
+
+    fn temp_db() -> (tempfile::TempDir, redb::Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("scan.redb")).unwrap();
+        (dir, db)
+    }
+
+    fn match_rec(box_fill: u8, scan_ids: Vec<u16>, h: u32) -> ScanMatchRecord {
+        ScanMatchRecord {
+            box_id: [box_fill; 32],
+            scan_ids,
+            box_bytes: vec![0xAB, 0xCD],
+            inclusion_height: h,
+            creation_out_index: 0,
+        }
+    }
+
+    fn out(box_fill: u8, tree: &[u8]) -> BlockOutput<'_> {
+        BlockOutput {
+            box_id: [box_fill; 32],
+            output_index: 0,
+            ergo_tree_bytes: tree,
+            value: 0,
+            assets: Vec::new(),
+            miner_reward_pubkey: None,
+        }
+    }
+
+    fn apply(db: &redb::Database, matches: &[ScanMatchRecord], txs: &[BlockTx<'_>], h: u32) {
+        let w = db.begin_write().unwrap();
+        apply_block_to_scans(&w, matches, txs, h).unwrap();
+        w.commit().unwrap();
+    }
+
+    fn rollback(db: &redb::Database, txs: &[BlockTx<'_>], h: u32) {
+        let w = db.begin_write().unwrap();
+        rollback_scans_from_block(&w, txs, h).unwrap();
+        w.commit().unwrap();
+    }
+
+    fn tracked(db: &redb::Database, scan_id: u16, box_fill: u8) -> Option<ScanTrackedBox> {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_BOXES) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        t.get(scan_box_key(scan_id, &[box_fill; 32]))
+            .unwrap()
+            .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    #[test]
+    fn apply_creates_one_unspent_row_per_matching_scan() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs = vec![out(0xA1, &tree)];
+        let inputs: Vec<[u8; 32]> = vec![];
+        let txs = vec![BlockTx {
+            tx_id: [1u8; 32],
+            inputs: &inputs,
+            outputs: &outs,
+        }];
+        apply(&db, &[match_rec(0xA1, vec![11, 12], 100)], &txs, 100);
+
+        let b11 = tracked(&db, 11, 0xA1).expect("scan 11 tracks the box");
+        assert!(matches!(b11.status, ScanBoxStatus::Unspent));
+        assert_eq!(b11.inclusion_height, 100);
+        assert!(matches!(
+            tracked(&db, 12, 0xA1).unwrap().status,
+            ScanBoxStatus::Unspent
+        ));
+        assert!(tracked(&db, 13, 0xA1).is_none(), "non-matching scan absent");
+    }
+
+    #[test]
+    fn input_spending_a_tracked_box_marks_it_spent_for_all_scans() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        // Block 100: create box A for scans 11 + 12.
+        let outs1 = vec![out(0xA1, &tree)];
+        let in1: Vec<[u8; 32]> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11, 12], 100)],
+            &[BlockTx {
+                tx_id: [1u8; 32],
+                inputs: &in1,
+                outputs: &outs1,
+            }],
+            100,
+        );
+        // Block 101: a tx spends box A.
+        let in2: Vec<[u8; 32]> = vec![[0xA1; 32]];
+        let outs2: Vec<BlockOutput<'_>> = vec![];
+        apply(
+            &db,
+            &[],
+            &[BlockTx {
+                tx_id: [2u8; 32],
+                inputs: &in2,
+                outputs: &outs2,
+            }],
+            101,
+        );
+
+        for sid in [11u16, 12] {
+            assert!(
+                matches!(
+                    tracked(&db, sid, 0xA1).unwrap().status,
+                    ScanBoxStatus::Spent { spent_at: 101, .. }
+                ),
+                "scan {sid} box marked spent at 101"
+            );
+        }
+    }
+
+    #[test]
+    fn same_block_create_then_spend_ends_spent() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs = vec![out(0xA1, &tree)];
+        // tx1 creates A (matched); tx2 spends A — same block.
+        let in1: Vec<[u8; 32]> = vec![];
+        let in2: Vec<[u8; 32]> = vec![[0xA1; 32]];
+        let empty: Vec<BlockOutput<'_>> = vec![];
+        let txs = vec![
+            BlockTx {
+                tx_id: [1u8; 32],
+                inputs: &in1,
+                outputs: &outs,
+            },
+            BlockTx {
+                tx_id: [2u8; 32],
+                inputs: &in2,
+                outputs: &empty,
+            },
+        ];
+        apply(&db, &[match_rec(0xA1, vec![11], 100)], &txs, 100);
+        assert!(matches!(
+            tracked(&db, 11, 0xA1).unwrap().status,
+            ScanBoxStatus::Spent { spent_at: 100, .. }
+        ));
+    }
+
+    #[test]
+    fn rollback_removes_boxes_created_in_the_block() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs = vec![out(0xA1, &tree)];
+        let inputs: Vec<[u8; 32]> = vec![];
+        let txs = vec![BlockTx {
+            tx_id: [1u8; 32],
+            inputs: &inputs,
+            outputs: &outs,
+        }];
+        apply(&db, &[match_rec(0xA1, vec![11], 100)], &txs, 100);
+        assert!(tracked(&db, 11, 0xA1).is_some());
+
+        rollback(&db, &txs, 100);
+        assert!(tracked(&db, 11, 0xA1).is_none(), "created box removed");
+        // index entry gone too.
+        let r = db.begin_read().unwrap();
+        let idx = r.open_table(WALLET_SCAN_BOX_INDEX).unwrap();
+        assert!(idx.get([0xA1u8; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_scan_tracking_drops_all_scan_rows() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs = vec![out(0xA1, &tree)];
+        let inputs: Vec<[u8; 32]> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11, 12], 100)],
+            &[BlockTx {
+                tx_id: [1u8; 32],
+                inputs: &inputs,
+                outputs: &outs,
+            }],
+            100,
+        );
+        assert!(tracked(&db, 11, 0xA1).is_some());
+
+        let w = db.begin_write().unwrap();
+        clear_scan_tracking(&w).unwrap();
+        w.commit().unwrap();
+
+        assert!(tracked(&db, 11, 0xA1).is_none(), "all scan boxes cleared");
+        assert!(tracked(&db, 12, 0xA1).is_none());
+        // Clearing an already-empty/absent set is a no-op (idempotent).
+        let w = db.begin_write().unwrap();
+        clear_scan_tracking(&w).unwrap();
+        w.commit().unwrap();
+    }
+
+    #[test]
+    fn rollback_unspends_inputs_spent_in_the_block() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        // Block 100 creates A; block 101 spends A.
+        let outs1 = vec![out(0xA1, &tree)];
+        let in1: Vec<[u8; 32]> = vec![];
+        apply(
+            &db,
+            &[match_rec(0xA1, vec![11], 100)],
+            &[BlockTx {
+                tx_id: [1u8; 32],
+                inputs: &in1,
+                outputs: &outs1,
+            }],
+            100,
+        );
+        let in2: Vec<[u8; 32]> = vec![[0xA1; 32]];
+        let empty: Vec<BlockOutput<'_>> = vec![];
+        let txs2 = vec![BlockTx {
+            tx_id: [2u8; 32],
+            inputs: &in2,
+            outputs: &empty,
+        }];
+        apply(&db, &[], &txs2, 101);
+        assert!(matches!(
+            tracked(&db, 11, 0xA1).unwrap().status,
+            ScanBoxStatus::Spent { .. }
+        ));
+
+        // Roll back block 101: A goes back to Unspent (it was created in 100).
+        rollback(&db, &txs2, 101);
+        assert!(
+            matches!(
+                tracked(&db, 11, 0xA1).unwrap().status,
+                ScanBoxStatus::Unspent
+            ),
+            "input un-spent on rollback; box still tracked"
+        );
+    }
+
+    // ----- rollback_block_from_wallet: WALLET_SCAN_HEIGHT regression -----
+
+    struct NoopGuard;
+    impl RescanGuard for NoopGuard {
+        fn abort_in_progress(&self, _txn: &WriteTransaction) -> Result<(), redb::Error> {
+            Ok(())
+        }
+        fn force_invalidate(&self, _txn: &WriteTransaction) -> Result<(), redb::Error> {
+            Ok(())
+        }
+    }
+
+    fn read_scan_height(db: &redb::Database) -> Option<u32> {
+        let r = db.begin_read().unwrap();
+        match r.open_table(WALLET_SCAN_HEIGHT) {
+            Ok(t) => t.get(()).unwrap().map(|g| g.value()),
+            Err(_) => None,
+        }
+    }
+
+    fn set_scan_height(db: &redb::Database, h: u32) {
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_SCAN_HEIGHT).unwrap();
+            t.insert((), h).unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    fn rollback_wallet(db: &redb::Database, h: u32) {
+        let w = db.begin_write().unwrap();
+        let txs: Vec<BlockTx<'_>> = vec![];
+        rollback_block_from_wallet(&w, h, &txs, &NoopGuard).unwrap();
+        w.commit().unwrap();
+    }
+
+    #[test]
+    fn rollback_does_not_create_scan_height_for_keyless_wallet() {
+        // A keyless / scan-only wallet never advanced WALLET_SCAN_HEIGHT at
+        // apply (the has_wallet_tracking gate). A reorg must not conjure a row,
+        // which would make /wallet/status + /wallet/balances report a bogus
+        // walletHeight for a wallet that never scanned anything.
+        let (_d, db) = temp_db();
+        rollback_wallet(&db, 100);
+        assert_eq!(read_scan_height(&db), None, "no scan-height row created");
+    }
+
+    #[test]
+    fn rollback_lowers_existing_scan_height_to_h_minus_1() {
+        // A keyed wallet scanned to 100; rolling back block 100 regresses it.
+        let (_d, db) = temp_db();
+        set_scan_height(&db, 100);
+        rollback_wallet(&db, 100);
+        assert_eq!(read_scan_height(&db), Some(99));
+    }
+
+    #[test]
+    fn rollback_never_raises_scan_height() {
+        // Wallet frozen behind the tip (e.g. mid-rescan) at 50; rolling back a
+        // higher block must not raise its scan height to 99.
+        let (_d, db) = temp_db();
+        set_scan_height(&db, 50);
+        rollback_wallet(&db, 100);
+        assert_eq!(read_scan_height(&db), Some(50), "rollback never raises");
+    }
 }

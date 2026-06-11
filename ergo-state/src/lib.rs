@@ -168,6 +168,8 @@ pub mod test_helpers {
                 tracked_p2pk_trees: trees,
                 cached_pubkeys: pubkeys,
                 block_txs_owned: owned,
+                scan_matches: Vec::new(),
+                has_registered_scans: false,
             };
             self.apply_checked_transactions(
                 height,

@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 
@@ -87,6 +87,115 @@ pub(crate) async fn list_all(
 ) -> Result<Json<Vec<ScanDto>>, (StatusCode, Json<serde_json::Value>)> {
     let scans = admin.list_scans().await.map_err(map_err)?;
     Ok(Json(scans))
+}
+
+/// A box tracked by a scan — the `/scan/unspentBoxes` / `/scan/spentBoxes`
+/// element. Minimal (like `WalletBoxEntry`) plus `bytes`, the full serialized
+/// `ErgoBox` hex, so clients can decode the ergo tree / registers / assets.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanBoxEntry {
+    pub box_id: String,
+    pub value: u64,
+    pub inclusion_height: u32,
+    /// Confirmations at read time (`tip_height - inclusion_height`).
+    pub confirmations_num: i64,
+    pub spent: bool,
+    /// Full serialized `ErgoBox`, hex.
+    pub bytes: String,
+}
+
+/// Filters for the scan box endpoints. Defaults match the Scala swagger:
+/// `minConfirmations=0`, `maxConfirmations=-1` (unlimited), `minInclusionHeight=0`,
+/// `maxInclusionHeight=-1` (unlimited), `limit=500`, `offset=0`. A `-1` max means
+/// "no upper bound".
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanBoxFilter {
+    #[serde(default)]
+    pub min_confirmations: i32,
+    #[serde(default = "neg_one")]
+    pub max_confirmations: i32,
+    #[serde(default)]
+    pub min_inclusion_height: i32,
+    #[serde(default = "neg_one")]
+    pub max_inclusion_height: i32,
+    #[serde(default = "default_limit")]
+    pub limit: i32,
+    #[serde(default)]
+    pub offset: i32,
+}
+
+fn neg_one() -> i32 {
+    -1
+}
+fn default_limit() -> i32 {
+    500
+}
+
+impl ScanBoxFilter {
+    /// Enforce the OpenAPI / Scala-swagger query-param bounds: `limit ∈ 1..=2500`,
+    /// `offset ≥ 0`, `minInclusionHeight ≥ 0`, `minConfirmations ≥ -1` (`-1` =
+    /// "include unconfirmed"). The `max*` bounds carry no lower limit (`-1` =
+    /// unbounded). Out-of-range values are a client error (HTTP 400), matching
+    /// Scala's parameter rejection rather than silently clamping — note `limit`
+    /// has no "-1 = unbounded" form; `-1` is simply below the minimum.
+    pub(crate) fn validate(&self) -> Result<(), super::WalletAdminError> {
+        use super::WalletAdminError::BadRequest;
+        if self.limit < 1 || self.limit > 2500 {
+            return Err(BadRequest(format!(
+                "limit must be in 1..=2500, got {}",
+                self.limit
+            )));
+        }
+        if self.offset < 0 {
+            return Err(BadRequest(format!(
+                "offset must be >= 0, got {}",
+                self.offset
+            )));
+        }
+        if self.min_inclusion_height < 0 {
+            return Err(BadRequest(format!(
+                "minInclusionHeight must be >= 0, got {}",
+                self.min_inclusion_height
+            )));
+        }
+        if self.min_confirmations < -1 {
+            return Err(BadRequest(format!(
+                "minConfirmations must be >= -1, got {}",
+                self.min_confirmations
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `GET /scan/unspentBoxes/{scanId}` — unspent boxes tracked by the scan.
+pub(crate) async fn unspent_boxes(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    Path(scan_id): Path<u16>,
+    Query(filter): Query<ScanBoxFilter>,
+) -> Result<Json<Vec<ScanBoxEntry>>, (StatusCode, Json<serde_json::Value>)> {
+    filter.validate().map_err(map_err)?;
+    let boxes = admin
+        .scan_unspent_boxes(scan_id, filter)
+        .await
+        .map_err(map_err)?;
+    Ok(Json(boxes))
+}
+
+/// `GET /scan/spentBoxes/{scanId}` — spent boxes tracked by the scan.
+pub(crate) async fn spent_boxes(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    Path(scan_id): Path<u16>,
+    Query(filter): Query<ScanBoxFilter>,
+) -> Result<Json<Vec<ScanBoxEntry>>, (StatusCode, Json<serde_json::Value>)> {
+    filter.validate().map_err(map_err)?;
+    let boxes = admin
+        .scan_spent_boxes(scan_id, filter)
+        .await
+        .map_err(map_err)?;
+    Ok(Json(boxes))
 }
 
 #[cfg(test)]

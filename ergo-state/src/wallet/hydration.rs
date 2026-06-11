@@ -52,4 +52,22 @@ pub trait WalletApplyHook: Send + Sync {
     /// (extracts the embedded pubkey from a wrapper-script output and
     /// checks if it's in this map's values).
     fn cached_pubkeys(&self) -> BTreeMap<u64, [u8; 33]>;
+
+    /// Number of registered `/scan/*` scans. The apply path skips ALL scan
+    /// matching when this is 0 (the common case, especially during IBD before
+    /// any scan exists), so it must be cheap. Defaults to 0 so non-scan hook
+    /// impls (e.g. test stubs) need not override it.
+    fn registered_scan_count(&self) -> usize {
+        0
+    }
+
+    /// For each box in `boxes` (a block's outputs), the ids of registered scans
+    /// whose tracking rule matches it — returned in the SAME order as `boxes`.
+    /// Called once per block, ONLY when `registered_scan_count() > 0`. The
+    /// implementor (ergo-node) loads the scan registry once and runs the
+    /// `ergo-wallet` predicate matcher — which is why this lives behind the hook
+    /// rather than in `ergo-state`. Defaults to "nothing matches".
+    fn match_boxes(&self, boxes: &[ergo_ser::ergo_box::ErgoBox]) -> Vec<Vec<u16>> {
+        vec![Vec::new(); boxes.len()]
+    }
 }

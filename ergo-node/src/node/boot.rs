@@ -1147,7 +1147,7 @@ async fn run_inner_with_backend(
                     wallet_rx,
                     wallet_storage,
                     wallet_state,
-                    db_arc,
+                    db_arc.clone(),
                     chain_accessor,
                     writer_cfg,
                     submit_handle,
@@ -1209,6 +1209,7 @@ async fn run_inner_with_backend(
                 );
                 let hook = Arc::new(super::wallet_bridge::WalletStateHook {
                     wallet: wallet_state_for_hook,
+                    db: db_arc.clone(),
                 });
                 (
                     Some(actual),
