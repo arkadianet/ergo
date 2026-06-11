@@ -120,10 +120,11 @@ pub trait WalletAdmin: Send + Sync {
     ) -> Result<Option<types::WalletTransactionEntry>, WalletAdminError>;
 
     /// Wallet transactions filtered by scan id (spec §B-3).
-    /// Only the default payments-scan id is supported; other ids
-    /// return 404 from the handler. The trait returns Ok(empty) for
-    /// the default id with no matches; Ok(filled) for matches; the
-    /// handler maps `scan_id != default` to 404.
+    /// `WalletAdmin::transactions_by_scan_id` serves the default payments
+    /// scan (10, the wallet's own listing) AND user scan ids (transactions
+    /// tagged at block apply). Unknown / deregistered scan ids return
+    /// `Ok` with an empty page — the handler no longer maps them to 404
+    /// (the pre-scan-subsystem behavior).
     async fn transactions_by_scan_id(
         &self,
         scan_id: u32,
@@ -232,7 +233,7 @@ pub trait WalletAdmin: Send + Sync {
 
     /// Deregister a scan by id (Scala `removeScan`). Not idempotent: a missing
     /// id is `WalletAdminError::BadRequest` (HTTP 400), matching the Scala
-    /// route's bad-request mapping (distinct from the 404 `ScanNotFound`).
+    /// route's bad-request mapping.
     async fn deregister_scan(&self, _scan_id: u16) -> Result<(), WalletAdminError> {
         Err(WalletAdminError::Internal(
             "deregister_scan not implemented".to_string(),
@@ -316,8 +317,6 @@ pub enum WalletAdminError {
     RestorePruningUnsupported,
     #[error("change address untracked")]
     ChangeAddressUntracked,
-    #[error("scan not found")]
-    ScanNotFound,
     /// A client-correctable request error — malformed input, insufficient
     /// funds, or a tx that fails structural validation (e.g. a dust output
     /// below the min box value). Maps to HTTP 400 so the caller can fix the

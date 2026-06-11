@@ -30,10 +30,6 @@ pub struct TxIdQuery {
     pub id: String,
 }
 
-/// Only the default payments-scan id is accepted
-/// (`Constants.PaymentsScanId = 10` in Scala). Other scan ids return 404.
-const PAYMENTS_SCAN_ID: u32 = 10;
-
 pub(crate) async fn balances(
     State(admin): State<Arc<dyn WalletAdmin>>,
 ) -> Result<Json<types::WalletBalances>, (StatusCode, Json<serde_json::Value>)> {
@@ -114,20 +110,16 @@ pub(crate) async fn transaction_by_id(
     }
 }
 
+/// `GET /wallet/transactionsByScanId/{scanId}` — transactions associated with
+/// a scan. Scan 10 (payments) is the wallet's own listing; user scans serve
+/// the rows tagged at block apply. Unknown / deregistered scans return an
+/// empty page (Scala's filter-by-membership likewise yields `[]`, despite the
+/// 404 its swagger declares).
 pub(crate) async fn transactions_by_scan_id(
     State(admin): State<Arc<dyn WalletAdmin>>,
     Path(scan_id): Path<u32>,
     Query(page): Query<PageQuery>,
 ) -> Result<Json<types::WalletTransactionsPage>, (StatusCode, Json<serde_json::Value>)> {
-    if scan_id != PAYMENTS_SCAN_ID {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "reason": "scan_not_found",
-                "detail": format!("scan id {PAYMENTS_SCAN_ID} only; multi-scan not yet supported"),
-            })),
-        ));
-    }
     let r = admin
         .transactions_by_scan_id(
             scan_id,

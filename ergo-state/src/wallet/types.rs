@@ -102,6 +102,27 @@ pub struct ScanTrackedBox {
     pub status: ScanBoxStatus,
 }
 
+/// A transaction associated with ≥1 registered scan, stored in
+/// `WALLET_SCAN_TXS` keyed by `(block_height, tx_id)`.
+///
+/// Mirrors Scala's per-tx scan tagging (`WalletScanLogic`): `scan_ids` is the
+/// union over the tx's scan-relevant boxes — scans that matched a created
+/// output plus scans that tracked a spent input. The box-id lists mirror the
+/// wallet's lean `WalletTransaction` shape (references, not full tx bytes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanTxRecord {
+    pub tx_id: [u8; 32],
+    pub block_height: u32,
+    /// Block id this tx was included in.
+    pub block_id: [u8; 32],
+    /// Union of scan ids over `created` + `spent`, ascending, deduped.
+    pub scan_ids: Vec<u16>,
+    /// Outputs of this tx that matched ≥1 scan.
+    pub created: Vec<[u8; 32]>,
+    /// Inputs of this tx that spent a scan-tracked box.
+    pub spent: Vec<[u8; 32]>,
+}
+
 /// Wallet-tracked transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletTransaction {
@@ -201,6 +222,26 @@ mod tests {
             parsed.status,
             ScanBoxStatus::Spent { spent_at: 1005, .. }
         ));
+    }
+
+    #[test]
+    fn scan_tx_record_round_trips_through_bincode() {
+        let original = ScanTxRecord {
+            tx_id: [0x11; 32],
+            block_height: 840,
+            block_id: [0x22; 32],
+            scan_ids: vec![11, 13],
+            created: vec![[0xAA; 32]],
+            spent: vec![[0xBB; 32], [0xCC; 32]],
+        };
+        let bytes = bincode::serialize(&original).expect("serialize");
+        let parsed: ScanTxRecord = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(parsed.tx_id, [0x11; 32]);
+        assert_eq!(parsed.block_height, 840);
+        assert_eq!(parsed.block_id, [0x22; 32]);
+        assert_eq!(parsed.scan_ids, vec![11, 13]);
+        assert_eq!(parsed.created, vec![[0xAA; 32]]);
+        assert_eq!(parsed.spent, vec![[0xBB; 32], [0xCC; 32]]);
     }
 
     #[test]

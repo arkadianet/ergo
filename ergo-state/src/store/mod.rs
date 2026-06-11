@@ -4661,6 +4661,7 @@ impl StateStore {
                     &payload.scan_matches,
                     &btxs,
                     height,
+                    header_id,
                 )
                 .map_err(|e| StateError::WalletApply {
                     what: "scan apply (atomic)",

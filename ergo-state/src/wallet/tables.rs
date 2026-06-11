@@ -121,6 +121,18 @@ pub const WALLET_SCAN_BOXES: TableDefinition<[u8; 34], Vec<u8>> =
 pub const WALLET_SCAN_BOX_INDEX: TableDefinition<[u8; 32], Vec<u8>> =
     TableDefinition::new("wallet_scan_box_index");
 
+/// Transactions associated with registered scans — one row per tx whose
+/// created or spent boxes matched ≥1 scan, tagged with the union of those
+/// scan ids (Scala `WalletScanLogic` stores `WalletTransaction(tx, height,
+/// scanIds)` the same way; this build stores box-id references, not full tx
+/// bytes, mirroring the wallet's lean `WALLET_TXS` shape). Backs
+/// `/wallet/transactionsByScanId/{scanId}` for user scans.
+///
+/// Key: `(block_height: u32 BE, tx_id: [u8; 32])` (see [`wallet_tx_key`]) —
+/// height-ascending iteration order. Value: bincode-serialized `ScanTxRecord`.
+pub const WALLET_SCAN_TXS: TableDefinition<[u8; 36], Vec<u8>> =
+    TableDefinition::new("wallet_scan_txs");
+
 /// Schema version constant for boot-time integrity check. Stored
 /// in its own one-row table; bumped on any breaking change.
 pub const WALLET_SCHEMA_VERSION_TABLE: TableDefinition<(), u32> =

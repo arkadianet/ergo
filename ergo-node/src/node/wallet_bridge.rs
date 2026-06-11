@@ -1977,6 +1977,9 @@ fn wallet_tx_to_entry(wt: ergo_state::wallet::types::WalletTransaction) -> Walle
         block_id: hex::encode(wt.block_id),
         wallet_outputs: wt.wallet_outputs.iter().map(hex::encode).collect(),
         wallet_inputs: wt.wallet_inputs.iter().map(hex::encode).collect(),
+        // Wallet rows carry no scan tagging; empty is omitted from the wire,
+        // keeping the existing wallet listing shape unchanged.
+        scan_ids: Vec::new(),
     }
 }
 

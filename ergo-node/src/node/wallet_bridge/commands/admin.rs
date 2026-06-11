@@ -550,26 +550,37 @@ pub(crate) async fn transaction_by_id(
 
 pub(crate) async fn transactions_by_scan_id(
     ctx: &WriterContext<'_>,
-    _scan_id: u32,
+    scan_id: u32,
     page: Page,
     reply: oneshot::Sender<Result<WalletTransactionsPage, WalletAdminError>>,
 ) {
-    // Only one scan exists (payments-scan, id=10). The API handler
-    // already rejects scan_id != 10 with 404 before reaching the
-    // writer. We forward to the same all-transactions path here
-    // for completeness.
+    // Payments scan (10): the wallet's own transactions, served from
+    // WALLET_TXS. (Approximate Scala parity: Scala filters by per-tx scan
+    // tags, where pure miner-reward receipts carry MiningScanId (9), not 10 —
+    // our wallet rows carry no tags, so the id-10 listing includes them.)
+    // Anything else routes to the scan-tx rows written at block apply (user
+    // scans; reserved 9 + unknown ids read as empty — Scala serves mining-scan
+    // txs at id 9, a documented parity gap).
     let result: Result<WalletTransactionsPage, WalletAdminError> =
-        (|| -> Result<WalletTransactionsPage, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let all = reader
-                .all_transactions()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            Ok(super::paginate_transactions(all, page))
-        })();
+        if scan_id == u32::from(ergo_wallet::scan::PAYMENTS_SCAN_ID) {
+            (|| -> Result<WalletTransactionsPage, WalletAdminError> {
+                let read_txn = ctx
+                    .db
+                    .begin_read()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+                let all = reader
+                    .all_transactions()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                Ok(super::paginate_transactions(all, page))
+            })()
+        } else {
+            match u16::try_from(scan_id) {
+                Ok(id) => super::scan::scan_transactions_impl(ctx.db, id, page),
+                // Scan ids are u16 (Scala Short); anything larger can't match.
+                Err(_) => Ok(WalletTransactionsPage::default()),
+            }
+        };
     let _ = reply.send(result);
 }
 
