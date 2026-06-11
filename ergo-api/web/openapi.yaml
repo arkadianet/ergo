@@ -6402,6 +6402,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ScanIdBoxId'
+        '400':
+          description: >-
+            Bad request — unknown box id, malformed box id hex, or a
+            reserved scan id (1-10).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         default:
           description: Error
           content:
@@ -6424,6 +6432,10 @@ paths:
             schema:
                 type: string
                 example: '4MQyML64GnzMxZgm'
+          text/plain:
+            schema:
+              type: string
+              example: '4MQyML64GnzMxZgm'
       responses:
         '200':
           description: Id of custom scan generated and registered
@@ -6540,6 +6552,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransactionId'
+        '400':
+          description: >-
+            Bad request — malformed box JSON (the box member needs the
+            ErgoTransactionOutput fields plus transactionId and index),
+            unregistered or reserved scan ids, or untracking (empty
+            scanIds) a box that is not tracked. Scala replies 200 even
+            on failure; this build reports validation failures.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         default:
           description: Error
           content:
