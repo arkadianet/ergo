@@ -66,6 +66,34 @@ impl WalletAdmin for ScanAdmin {
         Ok(self.scans.lock().unwrap().clone())
     }
 
+    async fn scan_unspent_boxes(
+        &self,
+        scan_id: u16,
+        filter: ergo_api::wallet::scan::ScanBoxFilter,
+    ) -> Result<Vec<ergo_api::wallet::scan::ScanBoxEntry>, WalletAdminError> {
+        // Echo the parsed filter into the entry so the test can assert the
+        // query params were extracted, and key off scan_id.
+        if scan_id != 11 {
+            return Ok(vec![]);
+        }
+        Ok(vec![ergo_api::wallet::scan::ScanBoxEntry {
+            box_id: "ab".to_string(),
+            value: 1_000_000,
+            inclusion_height: filter.min_inclusion_height.max(0) as u32,
+            confirmations_num: filter.limit as i64,
+            spent: false,
+            bytes: "00".to_string(),
+        }])
+    }
+
+    async fn scan_spent_boxes(
+        &self,
+        _scan_id: u16,
+        _filter: ergo_api::wallet::scan::ScanBoxFilter,
+    ) -> Result<Vec<ergo_api::wallet::scan::ScanBoxEntry>, WalletAdminError> {
+        Ok(vec![])
+    }
+
     // ----- unused by the scan routes -----
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
         unimplemented!()
@@ -285,6 +313,46 @@ async fn deregister_unknown_id_is_bad_request() {
 #[tokio::test]
 async fn list_all_is_empty_on_a_fresh_registry() {
     let (status, body) = json(app(), Method::GET, "/scan/listAll", b"").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unspent_boxes_route_returns_entries_and_parses_query() {
+    // minInclusionHeight + limit are echoed by the mock, proving the Query
+    // extractor + Path(scanId) wiring works end-to-end.
+    let (status, body) = json(
+        app(),
+        Method::GET,
+        "/scan/unspentBoxes/11?minInclusionHeight=50&limit=7",
+        b"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["boxId"], "ab");
+    assert_eq!(arr[0]["value"], 1_000_000);
+    assert_eq!(arr[0]["inclusionHeight"], 50);
+    assert_eq!(arr[0]["confirmationsNum"], 7);
+    assert_eq!(arr[0]["spent"], false);
+}
+
+#[tokio::test]
+async fn unspent_boxes_route_works_with_default_query() {
+    // No query params — defaults apply, route still mounts + returns 200.
+    let (status, body) = json(app(), Method::GET, "/scan/unspentBoxes/11", b"").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    // A different scan id yields an empty list.
+    let (status, body) = json(app(), Method::GET, "/scan/unspentBoxes/99", b"").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn spent_boxes_route_is_mounted() {
+    let (status, body) = json(app(), Method::GET, "/scan/spentBoxes/11", b"").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.as_array().unwrap().is_empty());
 }

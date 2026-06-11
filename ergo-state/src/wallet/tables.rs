@@ -102,6 +102,25 @@ pub const WALLET_SCANS: TableDefinition<u16, Vec<u8>> = TableDefinition::new("wa
 pub const WALLET_LAST_USED_SCAN_ID: TableDefinition<(), u16> =
     TableDefinition::new("wallet_last_used_scan_id");
 
+/// Boxes tracked by registered scans (`/scan/*` block-apply matcher), keyed by
+/// `(scan_id, box_id)` packed as 34 bytes (`scan_id` big-endian first, so
+/// iterating a `scan_id` prefix yields that scan's boxes in box-id order). The
+/// value's `status` field discriminates unspent vs spent.
+///
+/// Key: `(scan_id: u16 BE, box_id: [u8; 32])` (see [`scan_box_key`]).
+/// Value: bincode-serialized `ScanTrackedBox` (see `types.rs`).
+pub const WALLET_SCAN_BOXES: TableDefinition<[u8; 34], Vec<u8>> =
+    TableDefinition::new("wallet_scan_boxes");
+
+/// Reverse index from a box id to the scan ids tracking it, so a spent input
+/// can be marked across all its scans without a full-table scan. A row exists
+/// while a box is tracked by at least one scan; it is removed on rollback of
+/// the box's creation.
+///
+/// Key: 32-byte box id. Value: bincode-serialized `Vec<u16>` of scan ids.
+pub const WALLET_SCAN_BOX_INDEX: TableDefinition<[u8; 32], Vec<u8>> =
+    TableDefinition::new("wallet_scan_box_index");
+
 /// Schema version constant for boot-time integrity check. Stored
 /// in its own one-row table; bumped on any breaking change.
 pub const WALLET_SCHEMA_VERSION_TABLE: TableDefinition<(), u32> =
@@ -152,6 +171,17 @@ pub fn wallet_tx_key(block_height: u32, tx_id: &[u8; 32]) -> [u8; 36] {
     let mut k = [0u8; 36];
     k[..4].copy_from_slice(&block_height.to_be_bytes());
     k[4..].copy_from_slice(tx_id);
+    k
+}
+
+/// Pack `(scan_id, box_id)` for the `WALLET_SCAN_BOXES` key. Big-endian
+/// `scan_id` prefix groups the table by scan, so a range scan over
+/// `[scan_box_key(id, &[0;32]) ..= scan_box_key(id, &[0xff;32])]` yields exactly
+/// that scan's tracked boxes.
+pub fn scan_box_key(scan_id: u16, box_id: &[u8; 32]) -> [u8; 34] {
+    let mut k = [0u8; 34];
+    k[..2].copy_from_slice(&scan_id.to_be_bytes());
+    k[2..].copy_from_slice(box_id);
     k
 }
 
@@ -207,6 +237,25 @@ mod tests {
         assert_eq!(&keys[2][32..], &0u16.to_be_bytes());
         assert_eq!(&keys[3][..32], &tx_b);
         assert_eq!(&keys[3][32..], &99u16.to_be_bytes());
+    }
+
+    #[test]
+    fn scan_box_keys_group_by_scan_then_box_id() {
+        let box_a = [0x01u8; 32];
+        let box_b = [0x02u8; 32];
+        let mut keys = [
+            scan_box_key(12, &box_a),
+            scan_box_key(11, &box_b),
+            scan_box_key(11, &box_a),
+        ];
+        keys.sort();
+        // Expected: (11, box_a), (11, box_b), (12, box_a) — scan id first.
+        let scan_of = |k: &[u8; 34]| u16::from_be_bytes([k[0], k[1]]);
+        assert_eq!(scan_of(&keys[0]), 11);
+        assert_eq!(&keys[0][2..], &box_a);
+        assert_eq!(scan_of(&keys[1]), 11);
+        assert_eq!(&keys[1][2..], &box_b);
+        assert_eq!(scan_of(&keys[2]), 12);
     }
 
     #[test]

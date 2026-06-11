@@ -869,17 +869,30 @@ impl PersistPipeline {
             if let Some(payload) = &job.wallet_payload {
                 let bound = crate::store::owned_to_block_txs(&payload.block_txs_owned);
                 let btxs = bound.as_block_txs();
-                crate::wallet::apply::apply_block_to_wallet(
+                // Scan-only payloads (no tracked trees/pubkeys) bypass wallet
+                // apply + maturity-promotion so they don't advance
+                // WALLET_SCAN_HEIGHT for blocks the wallet never classified
+                // (which would surface as a bogus walletHeight in /wallet/status).
+                if payload.has_wallet_tracking() {
+                    crate::wallet::apply::apply_block_to_wallet(
+                        &write_txn,
+                        &payload.tracked_p2pk_trees,
+                        &payload.cached_pubkeys,
+                        job.height,
+                        &job.header_id,
+                        &btxs,
+                    )
+                    .map_err(|e| format!("wallet apply at h={}: {e}", job.height))?;
+                    crate::wallet::maturity::promote_matured_boxes(&write_txn, job.height)
+                        .map_err(|e| format!("wallet maturity at h={}: {e}", job.height))?;
+                }
+                crate::wallet::apply::apply_block_to_scans(
                     &write_txn,
-                    &payload.tracked_p2pk_trees,
-                    &payload.cached_pubkeys,
-                    job.height,
-                    &job.header_id,
+                    &payload.scan_matches,
                     &btxs,
+                    job.height,
                 )
-                .map_err(|e| format!("wallet apply at h={}: {e}", job.height))?;
-                crate::wallet::maturity::promote_matured_boxes(&write_txn, job.height)
-                    .map_err(|e| format!("wallet maturity at h={}: {e}", job.height))?;
+                .map_err(|e| format!("scan apply at h={}: {e}", job.height))?;
             }
         }
 
@@ -1003,6 +1016,7 @@ mod tests {
             tracked_p2pk_trees: trees,
             cached_pubkeys: std::collections::BTreeMap::new(),
             block_txs_owned: vec![tx],
+            scan_matches: Vec::new(),
         });
         j
     }

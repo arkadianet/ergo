@@ -540,6 +540,49 @@ pub(crate) struct WalletApplyPayload {
     pub tracked_p2pk_trees: std::collections::BTreeSet<Vec<u8>>,
     pub cached_pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
     pub block_txs_owned: Vec<OwnedBlockTxData>,
+    /// One record per block output box that matched ≥1 registered scan.
+    /// Computed on the main thread (where the `ergo-wallet` matcher is reachable
+    /// via the hook) and carried as owned data so it crosses the persist-worker
+    /// boundary; `ergo-state` persists it atomically in the chain write-txn.
+    /// Empty when no scans are registered.
+    pub scan_matches: Vec<ScanMatchRecord>,
+}
+
+impl WalletApplyPayload {
+    /// True when this payload carries wallet-key tracking (tracked P2PK
+    /// trees or cached pubkeys), as opposed to existing solely to carry
+    /// scan matches.
+    ///
+    /// The commit sites gate `apply_block_to_wallet` + `promote_matured_boxes`
+    /// on this: a scan-only payload (built because scans are registered but the
+    /// wallet currently has no keys/trees — e.g. keys not yet loaded, hydration
+    /// failed, or a genuinely keyless node) must NOT run wallet apply, which
+    /// would advance `WALLET_SCAN_HEIGHT` for blocks the wallet never
+    /// classified. Nothing resumes scanning from that height today, so the
+    /// concrete harm is `/wallet/status` + `/wallet/balances` reporting a
+    /// `walletHeight` (and wallet-confirmations base) for work never done.
+    /// Scan tracking (`apply_block_to_scans`) runs regardless.
+    ///
+    /// This reproduces the pre-scan-tracking payload-build gate exactly:
+    /// before scans existed, a payload was built (and wallet apply run) only
+    /// when `!trees.is_empty() || !pubkeys.is_empty()`.
+    pub(crate) fn has_wallet_tracking(&self) -> bool {
+        !self.tracked_p2pk_trees.is_empty() || !self.cached_pubkeys.is_empty()
+    }
+}
+
+/// One scan-matched output box, produced at payload-build time. Carries the
+/// serialized box so the matched box can be persisted (and rendered for
+/// `/scan/spentBoxes` after it leaves the UTXO set).
+#[derive(Clone)]
+pub(crate) struct ScanMatchRecord {
+    pub box_id: [u8; 32],
+    /// Ids of every registered scan whose rule matched this box.
+    pub scan_ids: Vec<u16>,
+    /// Full serialized `ErgoBox` bytes.
+    pub box_bytes: Vec<u8>,
+    pub inclusion_height: u32,
+    pub creation_out_index: u16,
 }
 
 // ---- Persistent state store ----
@@ -4572,25 +4615,46 @@ impl StateStore {
         if let Some(payload) = wallet_payload {
             let bound = crate::store::owned_to_block_txs(&payload.block_txs_owned);
             let btxs = bound.as_block_txs();
-            crate::wallet::apply::apply_block_to_wallet(
-                &write_txn,
-                &payload.tracked_p2pk_trees,
-                &payload.cached_pubkeys,
-                height,
-                header_id,
-                &btxs,
-            )
-            .map_err(|e| StateError::WalletApply {
-                what: "apply hook (atomic)",
-                height,
-                source: Box::new(e),
-            })?;
-            crate::wallet::maturity::promote_matured_boxes(&write_txn, height).map_err(|e| {
-                StateError::WalletApply {
-                    what: "maturity promote (atomic)",
+            // A scan-only payload (no tracked trees/pubkeys) must bypass wallet
+            // apply + maturity-promotion: those advance WALLET_SCAN_HEIGHT for
+            // blocks the wallet never classified, which would then surface as a
+            // bogus walletHeight in /wallet/status + /wallet/balances.
+            if payload.has_wallet_tracking() {
+                crate::wallet::apply::apply_block_to_wallet(
+                    &write_txn,
+                    &payload.tracked_p2pk_trees,
+                    &payload.cached_pubkeys,
+                    height,
+                    header_id,
+                    &btxs,
+                )
+                .map_err(|e| StateError::WalletApply {
+                    what: "apply hook (atomic)",
                     height,
                     source: Box::new(e),
-                }
+                })?;
+                crate::wallet::maturity::promote_matured_boxes(&write_txn, height).map_err(
+                    |e| StateError::WalletApply {
+                        what: "maturity promote (atomic)",
+                        height,
+                        source: Box::new(e),
+                    },
+                )?;
+            }
+            // Scan tracking lands in the same atomic write-txn regardless of
+            // wallet-key tracking. `scan_matches` is empty when no scans are
+            // registered, but phase 2 still probes the spend index per input
+            // (and the scan tables get created on first touch) — both cheap.
+            crate::wallet::apply::apply_block_to_scans(
+                &write_txn,
+                &payload.scan_matches,
+                &btxs,
+                height,
+            )
+            .map_err(|e| StateError::WalletApply {
+                what: "scan apply (atomic)",
+                height,
+                source: Box::new(e),
             })?;
         }
 
@@ -4952,6 +5016,72 @@ pub(crate) fn build_wallet_block_txs_checked(
         .collect()
 }
 
+/// Guard the `match_boxes` hook contract: it must return exactly one result
+/// per box. A mismatch would make `build_scan_match_records`' `zip` silently
+/// drop trailing boxes' scan matches, so treat it as an internal invariant
+/// violation rather than a recoverable condition.
+fn check_match_count(boxes_len: usize, matches_len: usize, height: u32) -> Result<(), StateError> {
+    if matches_len != boxes_len {
+        return Err(StateError::InternalInvariantAt {
+            what: "match_boxes returned wrong result count",
+            height,
+        });
+    }
+    Ok(())
+}
+
+/// Build the scan-match records for a block: one per output box whose
+/// `ErgoBox` matched ≥1 registered scan (via `hook.match_boxes`). Only called
+/// when the hook reports registered scans, so the per-box matcher cost is
+/// never paid on a node with no scans. The full serialized box is captured so
+/// a later-spent box can still be rendered.
+pub(crate) fn build_scan_match_records(
+    txs: &[ergo_validation::CheckedTransaction],
+    block_height: u32,
+    hook: &dyn crate::wallet::WalletApplyHook,
+) -> Result<Vec<ScanMatchRecord>, StateError> {
+    // Collect every output box of the whole block, then match them all in one
+    // hook call so ergo-node loads the scan registry once per block.
+    let mut boxes: Vec<ergo_ser::ergo_box::ErgoBox> = Vec::new();
+    for ct in txs {
+        let modifier_tx_id = ergo_primitives::digest::ModifierId::from_bytes(*ct.tx_id());
+        for (idx, candidate) in ct.transaction().output_candidates.iter().enumerate() {
+            boxes.push(ergo_ser::ergo_box::ErgoBox {
+                candidate: candidate.clone(),
+                transaction_id: modifier_tx_id,
+                index: idx as u16,
+            });
+        }
+    }
+
+    let matches = hook.match_boxes(&boxes);
+    // The hook must return exactly one result per box, in order; the `zip`
+    // below would silently truncate (dropping trailing boxes' matches)
+    // otherwise. Our only hook satisfies this by construction, so a mismatch
+    // is an internal contract violation — surface it, don't swallow it.
+    check_match_count(boxes.len(), matches.len(), block_height)?;
+
+    let mut records = Vec::new();
+    for (ergo_box, scan_ids) in boxes.iter().zip(matches) {
+        if scan_ids.is_empty() {
+            continue;
+        }
+        let box_id = ergo_box
+            .box_id()
+            .map_err(|e| StateError::Serialization(format!("scan box_id: {e}")))?;
+        let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(ergo_box)
+            .map_err(|e| StateError::Serialization(format!("scan box serialize: {e}")))?;
+        records.push(ScanMatchRecord {
+            box_id: *box_id.as_bytes(),
+            scan_ids,
+            box_bytes,
+            inclusion_height: block_height,
+            creation_out_index: ergo_box.index,
+        });
+    }
+    Ok(records)
+}
+
 fn build_owned_tx_data_checked(
     ct: &ergo_validation::CheckedTransaction,
     block_height: u32,
@@ -5241,6 +5371,87 @@ mod tests {
                 .expect("open HEADER_CHAIN_INDEX");
         }
         txn.commit().expect("commit");
+    }
+
+    // ----- WalletApplyPayload::has_wallet_tracking -----
+
+    fn payload_with(
+        trees: std::collections::BTreeSet<Vec<u8>>,
+        pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
+        scan_matches: Vec<ScanMatchRecord>,
+    ) -> WalletApplyPayload {
+        WalletApplyPayload {
+            tracked_p2pk_trees: trees,
+            cached_pubkeys: pubkeys,
+            block_txs_owned: Vec::new(),
+            scan_matches,
+        }
+    }
+
+    fn one_scan_match() -> Vec<ScanMatchRecord> {
+        vec![ScanMatchRecord {
+            box_id: [0xAB; 32],
+            scan_ids: vec![11],
+            box_bytes: vec![0x01, 0x02],
+            inclusion_height: 100,
+            creation_out_index: 0,
+        }]
+    }
+
+    #[test]
+    fn scan_only_payload_is_not_wallet_tracking() {
+        // Empty trees + empty pubkeys, but scan matches present: this
+        // payload exists ONLY to carry scan tracking. It must NOT count
+        // as wallet-active, so the commit sites skip apply_block_to_wallet
+        // / promote_matured_boxes (which would otherwise advance
+        // WALLET_SCAN_HEIGHT past blocks the wallet never classified).
+        let p = payload_with(Default::default(), Default::default(), one_scan_match());
+        assert!(!p.has_wallet_tracking());
+    }
+
+    #[test]
+    fn payload_with_tracked_tree_is_wallet_tracking() {
+        let mut trees = std::collections::BTreeSet::new();
+        trees.insert(vec![0x00, 0x08, 0xcd]);
+        let p = payload_with(trees, Default::default(), one_scan_match());
+        assert!(p.has_wallet_tracking());
+    }
+
+    #[test]
+    fn payload_with_cached_pubkey_is_wallet_tracking() {
+        let mut pubkeys = std::collections::BTreeMap::new();
+        pubkeys.insert(0u64, [0x02; 33]);
+        let p = payload_with(Default::default(), pubkeys, Vec::new());
+        assert!(p.has_wallet_tracking());
+    }
+
+    #[test]
+    fn empty_payload_is_not_wallet_tracking() {
+        let p = payload_with(Default::default(), Default::default(), Vec::new());
+        assert!(!p.has_wallet_tracking());
+    }
+
+    // ----- check_match_count (scan-hook contract guard) -----
+
+    #[test]
+    fn check_match_count_ok_when_lengths_match() {
+        assert!(check_match_count(3, 3, 100).is_ok());
+        assert!(check_match_count(0, 0, 100).is_ok());
+    }
+
+    #[test]
+    fn check_match_count_errors_when_hook_returns_wrong_count() {
+        // A hook returning fewer results than boxes would make the downstream
+        // `zip` silently drop trailing boxes' matches. Fail loud instead.
+        let err = check_match_count(3, 2, 777).unwrap_err();
+        assert!(matches!(
+            err,
+            StateError::InternalInvariantAt {
+                height: 777,
+                what: _
+            }
+        ));
+        assert!(check_match_count(2, 3, 100).is_err());
     }
 
     // ----- happy path -----

@@ -152,14 +152,24 @@ impl StateStore {
         let payload: Option<crate::store::WalletApplyPayload> = if let Some(hook) = wallet_hook {
             let trees = hook.tracked_p2pk_trees();
             let pubkeys = hook.cached_pubkeys();
-            if trees.is_empty() && pubkeys.is_empty() {
+            let scan_count = hook.registered_scan_count();
+            // Build a payload if there is ANY wallet tracking — tracked pubkeys
+            // OR registered scans. Scan matching is gated on `scan_count > 0`
+            // so a node with no scans pays nothing for the per-box matcher.
+            if trees.is_empty() && pubkeys.is_empty() && scan_count == 0 {
                 None
             } else {
                 let owned = build_wallet_block_txs_checked(block.transactions(), height)?;
+                let scan_matches = if scan_count > 0 {
+                    crate::store::build_scan_match_records(block.transactions(), height, hook)?
+                } else {
+                    Vec::new()
+                };
                 Some(crate::store::WalletApplyPayload {
                     tracked_p2pk_trees: trees,
                     cached_pubkeys: pubkeys,
                     block_txs_owned: owned,
+                    scan_matches,
                 })
             }
         } else {

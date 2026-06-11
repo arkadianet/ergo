@@ -28,6 +28,7 @@
 
 use std::collections::BTreeMap;
 
+use ergo_ser::ergo_box::ErgoBox;
 use serde::{Deserialize, Serialize};
 
 use super::predicate::ScanningPredicate;
@@ -204,6 +205,17 @@ impl ScanRegistry {
         self.scans.values().cloned().collect()
     }
 
+    /// The ids of all registered scans whose tracking rule matches `b`,
+    /// ascending by id. The block-apply matcher calls this on each new output
+    /// box to record which scans track it.
+    pub fn matching_scan_ids(&self, b: &ErgoBox) -> Vec<u16> {
+        self.scans
+            .values()
+            .filter(|s| s.tracking_rule.matches(b))
+            .map(|s| s.scan_id)
+            .collect()
+    }
+
     /// Number of registered scans.
     pub fn len(&self) -> usize {
         self.scans.len()
@@ -218,6 +230,14 @@ impl ScanRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::digest::ModifierId;
+    use ergo_ser::ergo_box::ErgoBoxCandidate;
+    use ergo_ser::ergo_tree::ErgoTree;
+    use ergo_ser::opcode::Expr;
+    use ergo_ser::register::AdditionalRegisters;
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::SigmaValue;
+    use ergo_ser::token::{Token, TokenId};
 
     fn req(name: &str) -> ScanRequest {
         ScanRequest {
@@ -228,6 +248,61 @@ mod tests {
             wallet_interaction: None,
             remove_offchain: None,
         }
+    }
+
+    /// A `containsAsset` request for the given fill-byte asset id.
+    fn req_asset(name: &str, fill: u8) -> ScanRequest {
+        ScanRequest {
+            scan_name: name.to_string(),
+            tracking_rule: ScanningPredicate::ContainsAsset {
+                asset_id: [fill; 32],
+            },
+            wallet_interaction: None,
+            remove_offchain: None,
+        }
+    }
+
+    /// An `ErgoBox` carrying a single token with the given fill-byte id.
+    fn box_with_token(fill: u8) -> ErgoBox {
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
+            body: Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            },
+        };
+        let tokens = vec![Token {
+            token_id: TokenId::from_bytes([fill; 32]),
+            amount: 1,
+        }];
+        let cand = ErgoBoxCandidate::new(1_000_000, tree, 1, tokens, AdditionalRegisters::empty())
+            .unwrap();
+        ErgoBox {
+            candidate: cand,
+            transaction_id: ModifierId::from_bytes([7u8; 32]),
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn matching_scan_ids_returns_matching_scans_ascending() {
+        let mut reg = ScanRegistry::new();
+        reg.register(req_asset("a", 0x11)).unwrap(); // 11
+        reg.register(req_asset("b", 0x22)).unwrap(); // 12
+        reg.register(req_asset("c", 0x11)).unwrap(); // 13 (also asset 0x11)
+
+        assert_eq!(
+            reg.matching_scan_ids(&box_with_token(0x11)),
+            vec![11, 13],
+            "ascending ids of every scan whose rule matches"
+        );
+        assert!(
+            reg.matching_scan_ids(&box_with_token(0x99)).is_empty(),
+            "a box matching no scan returns nothing"
+        );
     }
 
     // ----- allocation (Scala parity) -----

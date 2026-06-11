@@ -245,6 +245,28 @@ pub trait WalletAdmin: Send + Sync {
             "list_scans not implemented".to_string(),
         ))
     }
+
+    /// Unspent boxes tracked by a scan, filtered + paginated.
+    async fn scan_unspent_boxes(
+        &self,
+        _scan_id: u16,
+        _filter: scan::ScanBoxFilter,
+    ) -> Result<Vec<scan::ScanBoxEntry>, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "scan_unspent_boxes not implemented".to_string(),
+        ))
+    }
+
+    /// Spent boxes tracked by a scan, filtered + paginated.
+    async fn scan_spent_boxes(
+        &self,
+        _scan_id: u16,
+        _filter: scan::ScanBoxFilter,
+    ) -> Result<Vec<scan::ScanBoxEntry>, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "scan_spent_boxes not implemented".to_string(),
+        ))
+    }
 }
 
 /// Errors the admin trait can return. Maps to HTTP responses in
@@ -360,6 +382,8 @@ pub fn router_with_security(
         .route("/scan/register", post(scan::register))
         .route("/scan/deregister", post(scan::deregister))
         .route("/scan/listAll", get(scan::list_all))
+        .route("/scan/unspentBoxes/:scan_id", get(scan::unspent_boxes))
+        .route("/scan/spentBoxes/:scan_id", get(scan::spent_boxes))
         // Whole-prefix gate parity (Scala `pathPrefix("scan") & withAuth`):
         // real catch-all routes (not a fallback) so the `route_layer`
         // below covers unknown `/scan/*` on the key, same as `/wallet`.

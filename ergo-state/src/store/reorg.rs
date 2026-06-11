@@ -426,6 +426,14 @@ impl StateStore {
                             height: h,
                             source: Box::new(e),
                         })?;
+                        // Scan tracking rolls back in the same write-txn. No-op
+                        // when no scan rows exist for this block's boxes.
+                        crate::wallet::apply::rollback_scans_from_block(&write_txn, &btxs, h)
+                            .map_err(|e| StateError::WalletApply {
+                                what: "scan rollback",
+                                height: h,
+                                source: Box::new(e),
+                            })?;
                     }
                     Ok(None) => {
                         // Block section not available (pruned / not yet downloaded).
@@ -446,6 +454,15 @@ impl StateStore {
                                 source: Box::new(e),
                             }
                         })?;
+                        // Can't replay → can't selectively roll scans back; clear
+                        // the scan tables so no orphaned-fork boxes are served.
+                        crate::wallet::apply::clear_scan_tracking(&write_txn).map_err(|e| {
+                            StateError::WalletApply {
+                                what: "scan clear (invalidate)",
+                                height: h,
+                                source: Box::new(e),
+                            }
+                        })?;
                         break;
                     }
                     Err(e) => {
@@ -457,6 +474,13 @@ impl StateStore {
                         guard.force_invalidate(&write_txn).map_err(|e2| {
                             StateError::WalletApply {
                                 what: "force_invalidate",
+                                height: h,
+                                source: Box::new(e2),
+                            }
+                        })?;
+                        crate::wallet::apply::clear_scan_tracking(&write_txn).map_err(|e2| {
+                            StateError::WalletApply {
+                                what: "scan clear (invalidate)",
                                 height: h,
                                 source: Box::new(e2),
                             }

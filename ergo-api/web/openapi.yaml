@@ -1400,6 +1400,42 @@ components:
         scanId:
           type: integer
 
+    ScanBox:
+      description: >-
+        A box tracked by a scan. Node-native lean shape (not the full Scala
+        `WalletBox`): `bytes` carries the hex-encoded serialized ErgoBox so
+        clients that need the ergo tree / registers / assets can decode it.
+      type: object
+      required:
+        - boxId
+        - value
+        - inclusionHeight
+        - confirmationsNum
+        - spent
+        - bytes
+      properties:
+        boxId:
+          type: string
+          description: Hex box id.
+        value:
+          type: integer
+          format: int64
+        inclusionHeight:
+          type: integer
+          format: int32
+        confirmationsNum:
+          type: integer
+          format: int64
+          description: >-
+            Confirmations at read time (committed chain-tip height minus
+            inclusion height). Uses the live committed tip, not the wallet's
+            rescan-frozen scan height.
+        spent:
+          type: boolean
+        bytes:
+          type: string
+          description: Hex-encoded serialized ErgoBox.
+
     ScanIdBoxId:
       type: object
       required:
@@ -6242,7 +6278,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/WalletBox'
+                  $ref: '#/components/schemas/ScanBox'
         default:
           description: Error
           content:
@@ -6328,7 +6364,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/WalletBox'
+                  $ref: '#/components/schemas/ScanBox'
         default:
           description: Error
           content:

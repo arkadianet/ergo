@@ -32,6 +32,34 @@ pub struct ChainStoreReader {
     db: Arc<Database>,
 }
 
+/// Committed best-full-block tip `(height, id)` decoded from `chain_state_meta`,
+/// read from a caller-supplied snapshot. Returns `None` when no chain has been
+/// written (fresh DB or unmaterialized table).
+///
+/// Lets a caller read the tip from the SAME redb read transaction as other
+/// tables (e.g. wallet/scan boxes), so a value computed against the tip —
+/// confirmations = tip − inclusion_height — uses a consistent snapshot and
+/// can't go negative because a block committed between two separate reads.
+pub fn committed_tip_in(
+    read_txn: &redb::ReadTransaction,
+) -> Result<Option<(u32, [u8; 32])>, StateError> {
+    let table = match read_txn.open_table(CHAIN_STATE_META) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let bytes = match table.get("chain_state")? {
+        Some(g) => g.value().to_vec(),
+        None => return Ok(None),
+    };
+    let meta = ChainStateMeta::deserialize(&bytes).map_err(|e| StateError::DbCorruption {
+        table: "chain_state_meta",
+        key: hex::encode(b"chain_state"),
+        reason: format!("decode: {e}"),
+    })?;
+    Ok(Some((meta.best_full_block_height, meta.best_full_block_id)))
+}
+
 impl ChainStoreReader {
     /// Construct from an `Arc<Database>` shared with the owning
     /// [`crate::store::StateStore`]. Crate-private so external callers
@@ -68,21 +96,7 @@ impl ChainStoreReader {
     /// Used by the indexer's chain-source adapter to drive its tip-poll.
     pub fn committed_tip(&self) -> Result<Option<(u32, [u8; 32])>, StateError> {
         let read_txn = self.db.begin_read()?;
-        let table = match read_txn.open_table(CHAIN_STATE_META) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let bytes = match table.get("chain_state")? {
-            Some(g) => g.value().to_vec(),
-            None => return Ok(None),
-        };
-        let meta = ChainStateMeta::deserialize(&bytes).map_err(|e| StateError::DbCorruption {
-            table: "chain_state_meta",
-            key: hex::encode(b"chain_state"),
-            reason: format!("decode: {e}"),
-        })?;
-        Ok(Some((meta.best_full_block_height, meta.best_full_block_id)))
+        committed_tip_in(&read_txn)
     }
 
     /// Every header id known at a given height — best chain plus any
@@ -662,6 +676,37 @@ mod tests {
             hex::encode(b"chain_state"),
             "truncated at field `best_header_id`",
         );
+    }
+
+    #[test]
+    fn committed_tip_in_reads_height_from_supplied_snapshot() {
+        let (_dir, db) = fresh_db();
+        let meta = crate::chain::ChainStateMeta {
+            best_header_id: [0x01; 32],
+            best_header_height: 130,
+            best_header_score: vec![0x01],
+            best_full_block_id: [0x07; 32],
+            best_full_block_height: 110,
+            header_availability: crate::chain::HeaderAvailability::Dense,
+        };
+        write_chain_state_meta_raw(&db, &meta.serialize());
+
+        // The free fn reads the committed tip from a caller-supplied snapshot,
+        // so a caller can share ONE read-txn across chain meta + other tables.
+        let read = db.begin_read().unwrap();
+        assert_eq!(committed_tip_in(&read).unwrap(), Some((110, [0x07; 32])));
+        drop(read);
+
+        // The method delegates to the same decode.
+        let reader = ChainStoreReader::new(db);
+        assert_eq!(reader.committed_tip().unwrap(), Some((110, [0x07; 32])));
+    }
+
+    #[test]
+    fn committed_tip_in_returns_none_when_unwritten() {
+        let (_dir, db) = fresh_db();
+        let read = db.begin_read().unwrap();
+        assert_eq!(committed_tip_in(&read).unwrap(), None);
     }
 
     #[test]
