@@ -1,10 +1,14 @@
-//! Scan-registry handlers for `WalletCommand` (`/scan/register`,
-//! `/scan/deregister`, `/scan/listAll`).
+//! Scan handlers for `WalletCommand` — the full `/scan/*` surface:
+//! `register` / `deregister` / `listAll` (registry ops), `unspentBoxes` /
+//! `spentBoxes` (tracked-box reads), and `stopTracking` / `addBox` /
+//! `p2sRule` (box-level + address-rule writes).
 //!
 //! The redb tables `WALLET_SCANS` + `WALLET_LAST_USED_SCAN_ID` are the durable
-//! store; each handler loads the tested [`ScanRegistry`] semantic core, applies
-//! the op, and write-throughs the change. The single-writer wallet task
-//! serializes these, so the read-then-write in each handler is race-free.
+//! registry store; `WALLET_SCAN_BOXES` + `WALLET_SCAN_BOX_INDEX` hold the
+//! tracked boxes. Each handler loads the tested [`ScanRegistry`] semantic
+//! core, applies the op, and write-throughs the change. The single-writer
+//! wallet task serializes these, so the read-then-write in each handler is
+//! race-free.
 //!
 //! `ergo-api` can't depend on `ergo-wallet`, so the API carries the predicate
 //! opaquely as JSON ([`ScanRequestDto`] / [`ScanDto`]); the DTO <-> domain
@@ -16,10 +20,13 @@ use tokio::sync::oneshot;
 use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
 use ergo_api::wallet::WalletAdminError;
 use ergo_state::wallet::tables::{
-    scan_box_key, WALLET_LAST_USED_SCAN_ID, WALLET_SCANS, WALLET_SCAN_BOXES,
+    scan_box_key, WALLET_LAST_USED_SCAN_ID, WALLET_SCANS, WALLET_SCAN_BOXES, WALLET_SCAN_BOX_INDEX,
 };
 use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox};
-use ergo_wallet::scan::{Scan, ScanRegistry, ScanRequest, MAX_SCAN_NAME_LENGTH, PAYMENTS_SCAN_ID};
+use ergo_wallet::scan::{
+    Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
+    MAX_SCAN_NAME_LENGTH, PAYMENTS_SCAN_ID,
+};
 
 use super::WriterContext;
 
@@ -27,29 +34,14 @@ fn internal(e: impl std::fmt::Display) -> WalletAdminError {
     WalletAdminError::Internal(e.to_string())
 }
 
-/// Convert the opaque API request to the domain `ScanRequest`, parsing +
-/// validating the `trackingRule` predicate and `walletInteraction` enum. A
-/// malformed predicate / interaction is a client error (HTTP 400).
+/// Convert the opaque API request to the domain `ScanRequest`. A malformed
+/// predicate / interaction is a client error (HTTP 400). Semantic validation
+/// (name length, rule value) happens in [`register_request`], shared with the
+/// `/scan/p2sRule` path.
 fn request_from_dto(dto: ScanRequestDto) -> Result<ScanRequest, WalletAdminError> {
     let value = serde_json::to_value(&dto).map_err(internal)?;
-    let request: ScanRequest = serde_json::from_value(value)
-        .map_err(|e| WalletAdminError::BadRequest(format!("invalid scan request: {e}")))?;
-    // Scala `ScanRequest.toScan` rejects an over-long scan name (> 255 UTF-8
-    // bytes) as a bad request before storing.
-    if request.scan_name.len() > MAX_SCAN_NAME_LENGTH {
-        return Err(WalletAdminError::BadRequest(format!(
-            "scan name too long: {} bytes (max {MAX_SCAN_NAME_LENGTH})",
-            request.scan_name.len()
-        )));
-    }
-    // Reject a structurally-valid rule whose `contains`/`equals` value is not a
-    // serialized constant — Scala rejects these at the registration codec, so a
-    // malformed rule never gets stored (and never silently fails to match).
-    request
-        .tracking_rule
-        .validate()
-        .map_err(|e| WalletAdminError::BadRequest(format!("invalid tracking rule: {e}")))?;
-    Ok(request)
+    serde_json::from_value(value)
+        .map_err(|e| WalletAdminError::BadRequest(format!("invalid scan request: {e}")))
 }
 
 /// Convert a domain `Scan` back to the opaque API DTO.
@@ -104,6 +96,29 @@ pub(crate) async fn register(
 
 fn register_impl(db: &redb::Database, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
     let request = request_from_dto(request)?;
+    register_request(db, request)
+}
+
+/// Validate + allocate + persist a domain `ScanRequest`. Shared by
+/// `/scan/register` (after DTO conversion) and `/scan/p2sRule` (which builds
+/// the request directly from an address).
+fn register_request(db: &redb::Database, request: ScanRequest) -> Result<u16, WalletAdminError> {
+    // Scala `ScanRequest.toScan` rejects an over-long scan name (> 255 UTF-8
+    // bytes) as a bad request before storing.
+    if request.scan_name.len() > MAX_SCAN_NAME_LENGTH {
+        return Err(WalletAdminError::BadRequest(format!(
+            "scan name too long: {} bytes (max {MAX_SCAN_NAME_LENGTH})",
+            request.scan_name.len()
+        )));
+    }
+    // Reject a structurally-valid rule whose `contains`/`equals` value is not a
+    // serialized constant — Scala rejects these at the registration codec, so a
+    // malformed rule never gets stored (and never silently fails to match).
+    request
+        .tracking_rule
+        .validate()
+        .map_err(|e| WalletAdminError::BadRequest(format!("invalid tracking rule: {e}")))?;
+
     let mut registry = load_registry(db)?;
     let scan = registry.register(request).map_err(internal)?;
 
@@ -123,6 +138,37 @@ fn register_impl(db: &redb::Database, request: ScanRequestDto) -> Result<u16, Wa
     }
     write.commit().map_err(internal)?;
     Ok(scan.scan_id)
+}
+
+/// Scala `/scan/p2sRule`: decode the address, register an
+/// `equals(R1, ByteArrayConstant(serialized ErgoTree))` scan named after the
+/// address itself, with `walletInteraction=off` + `removeOffchain=true`.
+///
+/// Address classes: P2PK and P2S decode to their canonical tree bytes; P2SH
+/// is rejected (Scala registers the synthetic P2SH wrapper script — this
+/// build's address path refuses P2SH outright, same posture as the indexer).
+fn p2s_rule_impl(
+    db: &redb::Database,
+    network: ergo_ser::address::NetworkPrefix,
+    p2s: &str,
+) -> Result<u16, WalletAdminError> {
+    let tree_bytes = ergo_ser::address::decode_address_to_tree_bytes(p2s, network)
+        .map_err(|e| WalletAdminError::BadRequest(format!("can't parse {p2s}: {e}")))?;
+    // The equals value is a serialized `Coll[Byte]` constant: type code 0x0e,
+    // VLQ length, then the tree bytes (Scala `ByteArrayConstant`).
+    let mut value = vec![0x0e];
+    ergo_primitives::vlq::encode_vlq_into(tree_bytes.len() as u64, &mut value);
+    value.extend_from_slice(&tree_bytes);
+    let request = ScanRequest {
+        scan_name: p2s.to_string(),
+        tracking_rule: ScanningPredicate::Equals {
+            register: ScanRegister::R1,
+            value,
+        },
+        wallet_interaction: Some(WalletInteraction::Off),
+        remove_offchain: Some(true),
+    };
+    register_request(db, request)
 }
 
 pub(crate) async fn deregister(
@@ -176,6 +222,227 @@ fn list_impl(db: &redb::Database) -> Result<Vec<ScanDto>, WalletAdminError> {
         .iter()
         .map(dto_from_scan)
         .collect()
+}
+
+/// Parse a 32-byte box id from its hex form (client input → 400 on error).
+fn parse_box_id(box_id_hex: &str) -> Result<[u8; 32], WalletAdminError> {
+    let bytes = hex::decode(box_id_hex)
+        .map_err(|e| WalletAdminError::BadRequest(format!("invalid boxId hex: {e}")))?;
+    bytes.try_into().map_err(|v: Vec<u8>| {
+        WalletAdminError::BadRequest(format!("boxId must be 32 bytes, got {}", v.len()))
+    })
+}
+
+/// Reject operations addressed at a reserved scan id. Our scan tables hold
+/// user scans only (Scala's unified TrackedBox store also carries the wallet's
+/// Mining/Payments scans, so its `/scan/addBox` can mutate wallet balance —
+/// deliberately unsupported here; wallet boxes are managed by block apply).
+fn require_user_scan_id(scan_id: u16) -> Result<(), WalletAdminError> {
+    if scan_id <= PAYMENTS_SCAN_ID {
+        return Err(WalletAdminError::BadRequest(format!(
+            "scan id {scan_id} is reserved (1..={PAYMENTS_SCAN_ID}); only user scans can be managed via /scan"
+        )));
+    }
+    Ok(())
+}
+
+/// Scala `WalletRegistry.removeScan` semantics: rewrite the box's scan set
+/// without `scan_id`. Unknown box is a 400; a box the scan wasn't tracking
+/// still succeeds (set-minus no-op); the index row is deleted when the set
+/// empties.
+///
+/// Deliberate divergence: surviving sibling rows are left UNTOUCHED. Scala
+/// routes through `updateScans`, which rebuilds every remaining row as a
+/// fresh unspent `TrackedBox(box, creationHeight, scans)` — so a spent box
+/// "un-spends" for the scans that still track it, an upstream accident we
+/// don't replicate. Documented in the openapi header's scan note.
+fn stop_tracking_impl(
+    db: &redb::Database,
+    scan_id: u16,
+    box_id_hex: &str,
+) -> Result<(), WalletAdminError> {
+    require_user_scan_id(scan_id)?;
+    let box_id = parse_box_id(box_id_hex)?;
+
+    // The single-writer wallet task serializes this read-then-write; the
+    // read happens inside the write txn, so block-apply writes (same redb,
+    // global write lock) can't interleave.
+    let write = db.begin_write().map_err(internal)?;
+    {
+        let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
+        let ids: Vec<u16> = match idx.get(box_id).map_err(internal)? {
+            Some(g) => bincode::deserialize(&g.value()).map_err(internal)?,
+            None => {
+                return Err(WalletAdminError::BadRequest(format!(
+                    "no box with id {box_id_hex} found in the scan database"
+                )))
+            }
+        };
+        let new_ids: Vec<u16> = ids.iter().copied().filter(|&s| s != scan_id).collect();
+        let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
+        boxes
+            .remove(scan_box_key(scan_id, &box_id))
+            .map_err(internal)?;
+        if new_ids.is_empty() {
+            idx.remove(box_id).map_err(internal)?;
+        } else {
+            idx.insert(box_id, bincode::serialize(&new_ids).map_err(internal)?)
+                .map_err(internal)?;
+        }
+    }
+    write.commit().map_err(internal)?;
+    Ok(())
+}
+
+/// The `box` member of a `/scan/addBox` body: the standard
+/// `ErgoTransactionOutput` JSON shape plus `transactionId` + `index`, which
+/// Scala's SDK `ErgoBox` decoder requires (they fix the box id). Reuses the
+/// canonical output decoder for the candidate fields.
+#[derive(serde::Deserialize)]
+struct AddBoxJson {
+    #[serde(flatten)]
+    output: ergo_rest_json::types::ScalaOutputInput,
+    #[serde(rename = "transactionId")]
+    transaction_id: String,
+    index: u16,
+}
+
+fn bad_request(e: impl std::fmt::Display) -> WalletAdminError {
+    WalletAdminError::BadRequest(e.to_string())
+}
+
+/// Scala `/scan/addBox` (`WalletRegistry.updateScans`): REPLACE the box's scan
+/// set with `scan_ids`, writing each as a fresh `Unspent` row at the box's
+/// `creationHeight` — including scans kept across the update (a re-add resets
+/// Spent back to Unspent, exactly as Scala rebuilds the `TrackedBox`). An
+/// empty `scan_ids` untracks the box entirely; empty-on-untracked is Scala's
+/// "can't remove a box which does not exist" error, surfaced as 400 here
+/// (Scala's actor swallows it — an acknowledged `todo` in the reference).
+///
+/// Divergences (documented): scan ids must be registered user scans — adding
+/// to an unregistered id would persist rows invisible to reads (hide-on-read)
+/// forever (ids never reused), and reserved ids (<= 10) address the wallet's
+/// own tables in this build, not the scan tables.
+fn add_box_impl(
+    db: &redb::Database,
+    scan_ids: &[u16],
+    box_json: &serde_json::Value,
+) -> Result<String, WalletAdminError> {
+    // Set semantics (Scala `Set[ScanId]`): dedupe + order-stabilize.
+    let mut new_ids: Vec<u16> = scan_ids.to_vec();
+    new_ids.sort_unstable();
+    new_ids.dedup();
+
+    let registry = load_registry(db)?;
+    for &sid in &new_ids {
+        require_user_scan_id(sid)?;
+        if registry.get(sid).is_none() {
+            return Err(WalletAdminError::BadRequest(format!(
+                "no scan with id {sid} is registered"
+            )));
+        }
+    }
+
+    // Parse the box, then fix its identity. Preserve mode: this attaches a box
+    // that already exists on chain, so soft-fork trees must be accepted and
+    // tree/register wire bytes kept verbatim — Submit-mode re-serialization
+    // could shift the computed box id off its on-chain identity, and then
+    // block-apply spend-marking (keyed by the real id) would never find it.
+    let parsed: AddBoxJson =
+        serde_json::from_value(box_json.clone()).map_err(|e| bad_request(format!("box: {e}")))?;
+    let candidate = ergo_rest_json::decode::decode_output_with_mode(
+        &parsed.output,
+        ergo_rest_json::decode::DecodeMode::Preserve,
+    )
+    .map_err(|(_, d)| bad_request(d))?;
+    let tx_id: [u8; 32] = hex::decode(&parsed.transaction_id)
+        .map_err(|e| bad_request(format!("transactionId hex: {e}")))?
+        .try_into()
+        .map_err(|v: Vec<u8>| {
+            bad_request(format!("transactionId must be 32 bytes, got {}", v.len()))
+        })?;
+    let creation_height = candidate.creation_height;
+    let ergo_box = ergo_ser::ergo_box::ErgoBox {
+        candidate,
+        transaction_id: ergo_primitives::digest::ModifierId::from_bytes(tx_id),
+        index: parsed.index,
+    };
+    let box_id = *ergo_box
+        .box_id()
+        .map_err(|e| bad_request(format!("box id: {e}")))?
+        .as_bytes();
+    let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box)
+        .map_err(|e| bad_request(format!("box serialize: {e}")))?;
+
+    let write = db.begin_write().map_err(internal)?;
+    {
+        let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
+        let old_ids: Vec<u16> = match idx.get(box_id).map_err(internal)? {
+            Some(g) => bincode::deserialize(&g.value()).map_err(internal)?,
+            None => Vec::new(),
+        };
+        if new_ids.is_empty() && old_ids.is_empty() {
+            return Err(WalletAdminError::BadRequest(
+                "can't remove a box which does not exist".to_string(),
+            ));
+        }
+
+        let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
+        // Replace: drop every old row, then write fresh Unspent rows.
+        for sid in old_ids {
+            boxes.remove(scan_box_key(sid, &box_id)).map_err(internal)?;
+        }
+        for &sid in &new_ids {
+            let tb = ScanTrackedBox {
+                scan_id: sid,
+                box_id,
+                inclusion_height: creation_height,
+                creation_out_index: parsed.index,
+                box_bytes: box_bytes.clone(),
+                status: ScanBoxStatus::Unspent,
+            };
+            boxes
+                .insert(
+                    scan_box_key(sid, &box_id),
+                    bincode::serialize(&tb).map_err(internal)?,
+                )
+                .map_err(internal)?;
+        }
+        if new_ids.is_empty() {
+            idx.remove(box_id).map_err(internal)?;
+        } else {
+            idx.insert(box_id, bincode::serialize(&new_ids).map_err(internal)?)
+                .map_err(internal)?;
+        }
+    }
+    write.commit().map_err(internal)?;
+    Ok(hex::encode(box_id))
+}
+
+pub(crate) async fn stop_tracking(
+    ctx: &WriterContext<'_>,
+    scan_id: u16,
+    box_id: String,
+    reply: oneshot::Sender<Result<(), WalletAdminError>>,
+) {
+    let _ = reply.send(stop_tracking_impl(ctx.db, scan_id, &box_id));
+}
+
+pub(crate) async fn add_box(
+    ctx: &WriterContext<'_>,
+    scan_ids: Vec<u16>,
+    box_json: serde_json::Value,
+    reply: oneshot::Sender<Result<String, WalletAdminError>>,
+) {
+    let _ = reply.send(add_box_impl(ctx.db, &scan_ids, &box_json));
+}
+
+pub(crate) async fn p2s_rule(
+    ctx: &WriterContext<'_>,
+    p2s: String,
+    reply: oneshot::Sender<Result<u16, WalletAdminError>>,
+) {
+    let _ = reply.send(p2s_rule_impl(ctx.db, ctx.cfg.network, &p2s));
 }
 
 pub(crate) async fn unspent_boxes(
@@ -632,6 +899,383 @@ mod tests {
         assert!(read_scan_boxes(&db, Some(100), 11, false, &filter())
             .unwrap()
             .is_empty());
+    }
+
+    // ----- stopTracking -----
+
+    /// The tracked row for `(scan_id, box)` if present.
+    fn tracked(db: &redb::Database, scan_id: u16, box_fill: u8) -> Option<ScanTrackedBox> {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_BOXES) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        t.get(scan_box_key(scan_id, &[box_fill; 32]))
+            .unwrap()
+            .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    /// Seed the reverse index row for a box (production invariant: every
+    /// tracked `(scan, box)` row has its box -> scan-ids index entry).
+    fn put_index(db: &redb::Database, box_fill: u8, ids: &[u16]) {
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_SCAN_BOX_INDEX).unwrap();
+            t.insert([box_fill; 32], bincode::serialize(&ids.to_vec()).unwrap())
+                .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    fn index_ids(db: &redb::Database, box_fill: u8) -> Option<Vec<u16>> {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_BOX_INDEX) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        t.get([box_fill; 32])
+            .unwrap()
+            .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    #[test]
+    fn stop_tracking_removes_row_and_index_entry() {
+        let (_d, db) = temp_db();
+        put_tracked_box(&db, 11, 0xA1, 100, 1, false);
+        put_tracked_box(&db, 12, 0xA1, 100, 1, false);
+        put_index(&db, 0xA1, &[11, 12]);
+
+        stop_tracking_impl(&db, 11, &hex::encode([0xA1u8; 32])).unwrap();
+
+        assert!(tracked(&db, 11, 0xA1).is_none(), "scan 11 row removed");
+        assert!(tracked(&db, 12, 0xA1).is_some(), "scan 12 row untouched");
+        assert_eq!(index_ids(&db, 0xA1), Some(vec![12]));
+    }
+
+    #[test]
+    fn stop_tracking_last_scan_deletes_index_row() {
+        let (_d, db) = temp_db();
+        put_tracked_box(&db, 11, 0xA1, 100, 1, false);
+        put_index(&db, 0xA1, &[11]);
+
+        stop_tracking_impl(&db, 11, &hex::encode([0xA1u8; 32])).unwrap();
+
+        assert!(tracked(&db, 11, 0xA1).is_none());
+        assert_eq!(index_ids(&db, 0xA1), None, "empty index row deleted");
+    }
+
+    #[test]
+    fn stop_tracking_unknown_box_is_bad_request() {
+        // Scala WalletRegistry.removeScan fails when the box isn't in the
+        // database at all.
+        let (_d, db) = temp_db();
+        let err = stop_tracking_impl(&db, 11, &hex::encode([0xB9u8; 32])).unwrap_err();
+        assert!(matches!(err, WalletAdminError::BadRequest(_)));
+    }
+
+    #[test]
+    fn stop_tracking_succeeds_when_scan_was_not_tracking_the_box() {
+        // Scala parity: removeScan computes `scans - scanId` and rewrites —
+        // success even if scanId wasn't in the set, as long as the box exists.
+        let (_d, db) = temp_db();
+        put_tracked_box(&db, 12, 0xA1, 100, 1, false);
+        put_index(&db, 0xA1, &[12]);
+
+        stop_tracking_impl(&db, 11, &hex::encode([0xA1u8; 32])).unwrap();
+        assert!(tracked(&db, 12, 0xA1).is_some(), "scan 12 untouched");
+        assert_eq!(index_ids(&db, 0xA1), Some(vec![12]));
+    }
+
+    #[test]
+    fn stop_tracking_rejects_reserved_scan_id_and_bad_box_id() {
+        let (_d, db) = temp_db();
+        // Reserved ids are not managed via /scan in this build.
+        assert!(matches!(
+            stop_tracking_impl(&db, 10, &hex::encode([0xA1u8; 32])).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+        // Malformed box id hex / wrong length.
+        assert!(matches!(
+            stop_tracking_impl(&db, 11, "zz").unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+        assert!(matches!(
+            stop_tracking_impl(&db, 11, "abcd").unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+    }
+
+    // ----- addBox -----
+
+    /// A valid `ErgoTransactionOutput` JSON body: canonical P2PK tree over the
+    /// secp256k1 generator point, no assets/registers.
+    fn box_json(value: u64, creation_height: u32, tx_fill: u8, index: u16) -> serde_json::Value {
+        serde_json::json!({
+            "value": value,
+            "ergoTree": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "assets": [],
+            "creationHeight": creation_height,
+            "additionalRegisters": {},
+            "transactionId": hex::encode([tx_fill; 32]),
+            "index": index,
+        })
+    }
+
+    /// The tracked row for `(scan_id, box_id)` (explicit 32-byte id).
+    fn tracked_id(db: &redb::Database, scan_id: u16, box_id: &[u8; 32]) -> Option<ScanTrackedBox> {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_BOXES) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        t.get(scan_box_key(scan_id, box_id))
+            .unwrap()
+            .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    fn index_ids_id(db: &redb::Database, box_id: &[u8; 32]) -> Option<Vec<u16>> {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_BOX_INDEX) {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        t.get(*box_id)
+            .unwrap()
+            .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    /// Flip an existing tracked row to Spent (simulating a block-apply spend).
+    fn mark_spent(db: &redb::Database, scan_id: u16, box_id: &[u8; 32]) {
+        let mut tb = tracked_id(db, scan_id, box_id).expect("row exists");
+        tb.status = ScanBoxStatus::Spent {
+            spent_in_tx: [9u8; 32],
+            spent_at: 555,
+        };
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_SCAN_BOXES).unwrap();
+            t.insert(
+                scan_box_key(scan_id, box_id),
+                bincode::serialize(&tb).unwrap(),
+            )
+            .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    fn id_from_hex(s: &str) -> [u8; 32] {
+        hex::decode(s).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn add_box_creates_unspent_rows_and_index() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // 11
+        register_impl(&db, req("b", 0x22)).unwrap(); // 12
+
+        let id_hex = add_box_impl(&db, &[11, 12], &box_json(1_000_000, 840, 0x77, 3)).unwrap();
+        let box_id = id_from_hex(&id_hex);
+
+        for sid in [11u16, 12] {
+            let tb = tracked_id(&db, sid, &box_id).expect("row created");
+            assert!(matches!(tb.status, ScanBoxStatus::Unspent));
+            assert_eq!(tb.inclusion_height, 840, "Scala uses box.creationHeight");
+            assert_eq!(tb.creation_out_index, 3);
+            // The serialized box's leading VLQ u64 is the value (read path relies on it).
+            let v = ergo_primitives::reader::VlqReader::new(&tb.box_bytes)
+                .get_u64()
+                .unwrap();
+            assert_eq!(v, 1_000_000);
+        }
+        assert_eq!(index_ids_id(&db, &box_id), Some(vec![11, 12]));
+    }
+
+    #[test]
+    fn add_box_replaces_scan_set() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // 11
+        register_impl(&db, req("b", 0x22)).unwrap(); // 12
+        register_impl(&db, req("c", 0x33)).unwrap(); // 13
+
+        let j = box_json(5, 100, 0x77, 0);
+        let id_hex = add_box_impl(&db, &[11, 12], &j).unwrap();
+        let box_id = id_from_hex(&id_hex);
+
+        // Scala updateScans REPLACES the set: [11,12] -> [12,13].
+        add_box_impl(&db, &[12, 13], &j).unwrap();
+        assert!(tracked_id(&db, 11, &box_id).is_none(), "11 dropped");
+        assert!(tracked_id(&db, 12, &box_id).is_some(), "12 kept");
+        assert!(tracked_id(&db, 13, &box_id).is_some(), "13 added");
+        assert_eq!(index_ids_id(&db, &box_id), Some(vec![12, 13]));
+    }
+
+    #[test]
+    fn add_box_readd_resets_spent_status() {
+        // Scala replaces the whole TrackedBox with a fresh unspent row, even
+        // for scans kept across the update.
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let j = box_json(5, 100, 0x77, 0);
+        let box_id = id_from_hex(&add_box_impl(&db, &[11], &j).unwrap());
+        mark_spent(&db, 11, &box_id);
+
+        add_box_impl(&db, &[11], &j).unwrap();
+        assert!(matches!(
+            tracked_id(&db, 11, &box_id).unwrap().status,
+            ScanBoxStatus::Unspent
+        ));
+    }
+
+    #[test]
+    fn add_box_empty_scan_ids_untracks_box() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let j = box_json(5, 100, 0x77, 0);
+        let box_id = id_from_hex(&add_box_impl(&db, &[11], &j).unwrap());
+
+        // Empty set: Scala updateScans(∅) removes the box entirely.
+        add_box_impl(&db, &[], &j).unwrap();
+        assert!(tracked_id(&db, 11, &box_id).is_none());
+        assert_eq!(index_ids_id(&db, &box_id), None);
+
+        // Empty set on an untracked box: Scala throws ("can't remove a box
+        // which does not exist") — surfaced as 400 here, not swallowed.
+        assert!(matches!(
+            add_box_impl(&db, &[], &j).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+    }
+
+    #[test]
+    fn add_box_rejects_unknown_or_reserved_scan_ids() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let j = box_json(5, 100, 0x77, 0);
+        // Unregistered user id: rows would be invisible to reads (hide-on-read)
+        // and ids are never reused — reject rather than persist orphans.
+        assert!(matches!(
+            add_box_impl(&db, &[99], &j).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+        // Reserved id (wallet/mining scans live in the wallet tables here).
+        assert!(matches!(
+            add_box_impl(&db, &[10], &j).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+        // Nothing persisted by the rejected calls.
+        use redb::ReadableTableMetadata;
+        let r = db.begin_read().unwrap();
+        let empty = match r.open_table(WALLET_SCAN_BOXES) {
+            Ok(t) => t.len().unwrap() == 0,
+            Err(_) => true,
+        };
+        assert!(empty);
+    }
+
+    #[test]
+    fn add_box_accepts_on_chain_soft_fork_tree() {
+        // /scan/addBox attaches a box that already exists on chain, so the
+        // decode must be Preserve-mode: live mainnet h=545684 tx[1] out[0]
+        // carries a version-5 soft-fork tree (`cd07021a8e6f59fd4a`) that
+        // Submit-mode rejects. Preserve also keeps register wire bytes
+        // verbatim, so the computed box id matches the chain and block-apply
+        // spend-marking can find the row.
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let mut j = box_json(5, 100, 0x77, 0);
+        j["ergoTree"] = serde_json::json!("cd07021a8e6f59fd4a");
+
+        let id_hex = add_box_impl(&db, &[11], &j).expect("on-chain soft-fork box accepted");
+        let box_id = id_from_hex(&id_hex);
+        assert!(matches!(
+            tracked_id(&db, 11, &box_id).unwrap().status,
+            ScanBoxStatus::Unspent
+        ));
+    }
+
+    #[test]
+    fn add_box_rejects_malformed_box_json() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+
+        // Bad ergoTree hex.
+        let mut j = box_json(5, 100, 0x77, 0);
+        j["ergoTree"] = serde_json::json!("zz");
+        assert!(matches!(
+            add_box_impl(&db, &[11], &j).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+
+        // Missing transactionId (required to compute the box id).
+        let mut j = box_json(5, 100, 0x77, 0);
+        j.as_object_mut().unwrap().remove("transactionId");
+        assert!(matches!(
+            add_box_impl(&db, &[11], &j).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+    }
+
+    // ----- p2sRule -----
+
+    /// The canonical P2PK tree over the secp256k1 generator (same tree
+    /// `box_json` pays to), as hex.
+    const GEN_P2PK_TREE: &str =
+        "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    #[test]
+    fn p2s_rule_registers_equals_scan_that_matches_the_address() {
+        use ergo_ser::address::NetworkPrefix;
+        let (_d, db) = temp_db();
+        let tree = hex::decode(GEN_P2PK_TREE).unwrap();
+        let addr = ergo_ser::address::encode_address_from_tree_bytes(NetworkPrefix::Mainnet, &tree)
+            .unwrap();
+
+        let id = p2s_rule_impl(&db, NetworkPrefix::Mainnet, &addr).unwrap();
+        assert_eq!(id, 11, "first user scan id");
+
+        // Scala builds ScanRequest(p2s, equals(R1, tree), Off, true).
+        let scans = list_impl(&db).unwrap();
+        assert_eq!(scans[0].scan_name, addr);
+        assert_eq!(scans[0].wallet_interaction, "off");
+        assert!(scans[0].remove_offchain);
+        let rule = &scans[0].tracking_rule;
+        assert_eq!(rule["predicate"], "equals");
+        let mut expected = vec![0x0e];
+        ergo_primitives::vlq::encode_vlq_into(tree.len() as u64, &mut expected);
+        expected.extend_from_slice(&tree);
+        assert_eq!(rule["value"], hex::encode(&expected));
+
+        // Load-bearing property: a box paying to that address MATCHES the scan.
+        let parsed: AddBoxJson = serde_json::from_value(box_json(5, 100, 0x77, 0)).unwrap();
+        let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
+        let b = ergo_ser::ergo_box::ErgoBox {
+            candidate,
+            transaction_id: ergo_primitives::digest::ModifierId::from_bytes([0x77; 32]),
+            index: 0,
+        };
+        assert_eq!(load_registry(&db).unwrap().matching_scan_ids(&b), vec![11]);
+    }
+
+    #[test]
+    fn p2s_rule_rejects_bad_or_wrong_network_address() {
+        use ergo_ser::address::NetworkPrefix;
+        let (_d, db) = temp_db();
+        // Garbage.
+        assert!(matches!(
+            p2s_rule_impl(&db, NetworkPrefix::Mainnet, "not-an-address").unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+        // Valid testnet address presented to a mainnet node.
+        let tree = hex::decode(GEN_P2PK_TREE).unwrap();
+        let testnet =
+            ergo_ser::address::encode_address_from_tree_bytes(NetworkPrefix::Testnet, &tree)
+                .unwrap();
+        assert!(matches!(
+            p2s_rule_impl(&db, NetworkPrefix::Mainnet, &testnet).unwrap_err(),
+            WalletAdminError::BadRequest(_)
+        ));
+        // Nothing registered by the rejected calls.
+        assert!(list_impl(&db).unwrap().is_empty());
     }
 
     #[test]

@@ -206,6 +206,20 @@ pub enum WalletCommand {
         filter: ScanBoxFilter,
         reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
     },
+    ScanStopTracking {
+        scan_id: u16,
+        box_id: String,
+        reply: oneshot::Sender<Result<(), WalletAdminError>>,
+    },
+    ScanAddBox {
+        scan_ids: Vec<u16>,
+        box_json: serde_json::Value,
+        reply: oneshot::Sender<Result<String, WalletAdminError>>,
+    },
+    ScanP2sRule {
+        p2s: String,
+        reply: oneshot::Sender<Result<u16, WalletAdminError>>,
+    },
 }
 
 /// `WalletAdmin` impl backed by a command channel. Constructed by
@@ -481,6 +495,37 @@ impl WalletAdmin for NodeWalletAdmin {
             reply,
         })
         .await
+    }
+
+    async fn scan_stop_tracking(
+        &self,
+        scan_id: u16,
+        box_id: String,
+    ) -> Result<(), WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::ScanStopTracking {
+            scan_id,
+            box_id,
+            reply,
+        })
+        .await
+    }
+
+    async fn scan_add_box(
+        &self,
+        scan_ids: Vec<u16>,
+        box_json: serde_json::Value,
+    ) -> Result<String, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::ScanAddBox {
+            scan_ids,
+            box_json,
+            reply,
+        })
+        .await
+    }
+
+    async fn scan_p2s_rule(&self, p2s: String) -> Result<u16, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::ScanP2sRule { p2s, reply })
+            .await
     }
 }
 
@@ -1001,6 +1046,19 @@ pub async fn run_wallet_writer(
                 filter,
                 reply,
             } => commands::scan::spent_boxes(&ctx, scan_id, filter, reply).await,
+            WalletCommand::ScanStopTracking {
+                scan_id,
+                box_id,
+                reply,
+            } => commands::scan::stop_tracking(&ctx, scan_id, box_id, reply).await,
+            WalletCommand::ScanAddBox {
+                scan_ids,
+                box_json,
+                reply,
+            } => commands::scan::add_box(&ctx, scan_ids, box_json, reply).await,
+            WalletCommand::ScanP2sRule { p2s, reply } => {
+                commands::scan::p2s_rule(&ctx, p2s, reply).await
+            }
         }
     }
 }
