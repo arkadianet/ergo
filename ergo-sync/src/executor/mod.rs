@@ -124,15 +124,16 @@ const LAST_HEADERS_WINDOW: usize = 50;
 /// When total in-flight drops below this many IDs, the executor's
 /// `pipeline_needs_refill` returns true and the node-level event loop
 /// can re-run `request_missing_sections` without waiting for the next
-/// sync tick. Picked conservatively at `MAX_IN_FLIGHT_PER_PEER/6` so
-/// the pipeline refills before it goes fully empty but we don't fire on
-/// every delivery. Kept as an internal constant; promote to a TOML knob
-/// when live-sync evidence justifies operator tuning.
+/// sync tick. Picked conservatively at 64 IDs so the pipeline refills
+/// before it goes fully empty but we don't fire on every delivery.
+/// Kept as an internal constant; promote to a TOML knob when live-sync
+/// evidence justifies operator tuning.
 const DRAIN_WATERMARK: usize = 64;
 /// If the next sequential block's sections have been inflight this long,
 /// early-reassign them to a different peer instead of waiting for the full
-/// 10 s DELIVERY_TIMEOUT. Cuts typical HOL stalls: fires ~2 ticks after
-/// dispatch, well before the timeout prunes the whole batch.
+/// 10 s DELIVERY_TIMEOUT. Cuts typical HOL stalls: fires on the first
+/// 1 s sync tick past the threshold, well before the timeout prunes the
+/// whole batch.
 const HOL_HEDGE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 /// Cap on total buffered orphan headers. Sized for Step D's
 /// anchor-spacing scheduler: with `ANCHOR_SPACING = 4_000` and

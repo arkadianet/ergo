@@ -77,10 +77,9 @@ pub struct SyncState {
     /// disconnect to keep the map bounded by live peers.
     last_sync_sent: HashMap<PeerId, Instant>,
     /// Minimum interval between SyncInfo messages to the same peer.
-    /// Set to 1s (down from 10s global) to feed Invs from many peers
-    /// per sync_tick. Scala's per-peer debounce is 100ms
-    /// (`PerPeerSyncLockTime`); 1s is well above that floor and
-    /// triggers no penalty.
+    /// Set to 100ms to feed Invs from many peers per sync_tick —
+    /// equal to Scala's per-peer debounce (`PerPeerSyncLockTime`),
+    /// so reference-node peers accept the cadence without penalty.
     sync_interval: Duration,
     /// Whether the header chain is synced with the network.
     /// Block section downloads only begin after this flips to true.

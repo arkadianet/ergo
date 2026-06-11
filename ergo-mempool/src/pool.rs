@@ -303,7 +303,8 @@ impl OrderedPool {
         if !self.contains(tx_id) {
             return Vec::new();
         }
-        // Collect descendants BFS-style, capped at `max_depth`.
+        // Collect descendants depth-first (explicit stack), capped at
+        // `max_depth` nodes visited.
         let mut to_visit: Vec<TxId> = vec![*tx_id];
         let mut ordered_ids: Vec<TxId> = Vec::new();
         let mut seen = std::collections::HashSet::new();

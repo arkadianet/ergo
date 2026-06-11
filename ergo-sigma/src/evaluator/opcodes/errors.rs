@@ -7,7 +7,7 @@
 //!   the reject for parity with `Value.eval` default at
 //!   `values.scala:101`. A shared helper would silently lose the
 //!   charge.
-//! - **Zero-cost reject** (`0xCF 0xD7 0xE7 0xE8 0xE9 0xF1 0xB6 0xB7`):
+//! - **Zero-cost reject** (`0xCF 0xD6 0xD7 0xE7 0xE8 0xE9 0xF1 0xB6 0xB7`):
 //!   internal / deprecated / not-executable arms. Scala declares
 //!   `costKind = Value.notSupportedError` and never charges.
 //!

@@ -395,8 +395,10 @@ pub(super) fn eval_no_arg_method(
         // For the signed numeric types these are V5+ (they sit in
         // `SNumericTypeMethods.v5Methods`), reachable on every ErgoTree
         // version and intentionally NOT gated in `is_v6_method`.
-        // SUnsignedBigInt is a v6-only type, so `(9, 6)|(9, 7)` ARE in
-        // `is_v6_method`; the soft-fork gate is applied by the callers.
+        // SUnsignedBigInt's `(9, 6)|(9, 7)` are not listed in
+        // `is_v6_method` either (it gates only `(9, 8..=19)`): the
+        // receiver type is itself v6-only, so these arms are not
+        // reachable pre-v6 through any constructible value.
         (2..=6, 6 | 7) | (9, 6 | 7) => {
             add_method_cost(cost, 5)?;
             let bytes = numeric_big_endian_bytes(obj_val)?;
