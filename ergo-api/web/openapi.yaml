@@ -5085,10 +5085,15 @@ paths:
       - in: query
         name: limit
         required: false
-        description: The number of items in list to return
+        description: >-
+          The number of items in list to return. Unsigned at the wire
+          (negative values are rejected); 0 returns an empty page. No upper
+          bound is enforced on this route (unlike the /scan box endpoints'
+          1..=2500), matching the wallet's other paged listings.
         schema:
           type: integer
           format: int32
+          minimum: 0
           default: 50
     get:
       security:
