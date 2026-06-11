@@ -512,6 +512,10 @@ fn unresolved_input_seeds_unresolved_cache() {
         unr.contains(b"bytes", now),
         "unresolved cache should be seeded so the next try drops earlier"
     );
+    assert!(
+        inv.is_empty(),
+        "unresolved input routes to the unresolved cache, not invalidation"
+    );
 }
 
 #[test]
@@ -624,7 +628,12 @@ fn below_min_fee_drops_without_penalty() {
 }
 
 #[test]
-fn known_invalid_first_hit_drops_without_penalty() {
+fn blacklisted_id_does_not_block_admission_scala_parity() {
+    // Scala's `ErgoMemPool.process` never consults `invalidatedTxIds`;
+    // the set only filters Inv fetches at the network layer. Bytes
+    // that arrive anyway and validate must be admitted — including a
+    // tx whose id was blacklisted by an earlier failure (corrected
+    // proofs, reorg-demoted block txs).
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
@@ -644,27 +653,33 @@ fn known_invalid_first_hit_drops_without_penalty() {
         weight_fn: &w,
     };
     let (out, actions) = process(b"bytes", TxSource::Peer(peer()), now, &mut cx, &v);
-    assert!(matches!(
-        out,
-        AdmissionOutcome::Rejected {
-            reason: RejectReason::KnownInvalid
-        }
-    ));
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+    assert!(pool.contains(&id(1)));
     assert!(!actions
         .iter()
         .any(|a| matches!(a, MempoolAction::Penalize { .. })));
+    // The cache entry stays: it keeps filtering Inv fetches even
+    // though admission ignored it.
+    assert!(inv.contains(&id(1)));
 }
 
 #[test]
-fn known_invalid_repeat_hit_yields_spam_penalty() {
+fn validation_failure_blacklists_by_canonical_tx_id() {
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
     let cfg = default_config();
     let w = ByCost;
-    let v = validator_accepting(b"bytes", id(1), 5_000_000);
-    let t0 = Instant::now();
-    inv.insert(id(1), InvalidationReason::ValidationFailed, t0);
+    // Fee passes the min-fee gate; full validation rejects the scripts.
+    let v = MockValidator::new().plan(
+        b"bytes".to_vec(),
+        MockPlan {
+            result: Err(ValidationErr::ScriptFailed),
+            charge: 10_000,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(id(7)),
+        },
+    );
     let tip = c.view(&utxo);
     let mut cx = AdmissionCtx {
         tip_ctx: &tip,
@@ -675,26 +690,163 @@ fn known_invalid_repeat_hit_yields_spam_penalty() {
         unresolved: &mut unr,
         weight_fn: &w,
     };
-    let _ = process(b"bytes", TxSource::Peer(peer()), t0, &mut cx, &v);
-    let t1 = t0 + Duration::from_millis(100);
-    let tip = c.view(&utxo);
-    let mut cx = AdmissionCtx {
-        tip_ctx: &tip,
-        config: &cfg,
-        pool: &mut pool,
-        budgets: &mut b,
-        invalidated: &mut inv,
-        unresolved: &mut unr,
-        weight_fn: &w,
-    };
-    let (_, actions) = process(b"bytes", TxSource::Peer(peer()), t1, &mut cx, &v);
-    assert!(actions.iter().any(|a| matches!(
-        a,
-        MempoolAction::Penalize {
-            kind: PenaltyKind::Spam,
-            ..
+    let (out, _) = process(
+        b"bytes",
+        TxSource::Peer(peer()),
+        Instant::now(),
+        &mut cx,
+        &v,
+    );
+    assert!(matches!(
+        out,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::ValidationFailed { .. }
         }
-    )));
+    ));
+    // The cache entry must be keyed by the canonical tx_id from peek —
+    // the key the step-5 record_hit and the Inv-skip gate look up —
+    // not by a hash of the wire bytes (which, including proofs, never
+    // equals the proof-excluded tx_id).
+    assert!(
+        inv.contains(&id(7)),
+        "invalidation cache keyed by canonical tx_id"
+    );
+    let bytes_hash = ergo_primitives::digest::blake2b256(b"bytes");
+    assert!(!inv.contains(&bytes_hash), "no bytes-hash proxy entry");
+}
+
+#[test]
+fn failed_then_corrected_resubmission_is_accepted() {
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let w = ByCost;
+    let t0 = Instant::now();
+    // First submission: validation fails → tx_id lands in the cache.
+    let v_fail = MockValidator::new().plan(
+        b"bytes".to_vec(),
+        MockPlan {
+            result: Err(ValidationErr::ScriptFailed),
+            charge: 10_000,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(id(7)),
+        },
+    );
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let _ = process(b"bytes", TxSource::Peer(peer()), t0, &mut cx, &v_fail);
+    assert!(inv.contains(&id(7)), "failure blacklists the canonical id");
+    // Resubmission that now validates (e.g. corrected proofs — same
+    // proof-excluded tx_id) must be ADMITTED: Scala's process never
+    // consults invalidatedTxIds, so a blacklisted-but-now-valid tx is
+    // accepted. The cache continues to filter Inv fetches only.
+    let v_ok = validator_accepting(b"bytes", id(7), 5_000_000);
+    let t1 = t0 + Duration::from_secs(5);
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(b"bytes", TxSource::Peer(peer()), t1, &mut cx, &v_ok);
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+    assert!(pool.contains(&id(7)));
+    assert!(inv.contains(&id(7)), "fetch-filter entry remains");
+}
+
+#[test]
+fn parse_class_failures_do_not_blacklist() {
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let w = ByCost;
+    // NonCanonical: tx parsed (peek produced an id) but bytes are not
+    // the canonical encoding. Blacklisting the id would also damn the
+    // canonical re-encoding of the same tx — Scala skips
+    // invalidatedTxIds for parse-class failures too.
+    let v = MockValidator::new().plan(
+        b"bytes".to_vec(),
+        MockPlan {
+            result: Err(ValidationErr::NonCanonical),
+            charge: 1_000,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(id(8)),
+        },
+    );
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(
+        b"bytes",
+        TxSource::Peer(peer()),
+        Instant::now(),
+        &mut cx,
+        &v,
+    );
+    assert!(matches!(
+        out,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::NonCanonical
+        }
+    ));
+    assert!(inv.is_empty(), "parse-class failure must not blacklist");
+
+    // Deserialize from validate (the validator-disagreement arm —
+    // peek parsed the bytes but validate could not): same rule.
+    let v2 = MockValidator::new().plan(
+        b"bytes2".to_vec(),
+        MockPlan {
+            result: Err(ValidationErr::Deserialize),
+            charge: 1_000,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(id(13)),
+        },
+    );
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(
+        b"bytes2",
+        TxSource::Peer(peer()),
+        Instant::now(),
+        &mut cx,
+        &v2,
+    );
+    assert!(matches!(
+        out,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::Deserialize
+        }
+    ));
+    assert!(inv.is_empty(), "deserialize failure must not blacklist");
 }
 
 #[test]
@@ -1388,7 +1540,7 @@ fn check_seeds_invalidation_cache_on_validation_failure() {
             result: Err(ValidationErr::ScriptFailed),
             charge: 25_000,
             peek_fee: Some(5_000_000),
-            peek_tx_id: None,
+            peek_tx_id: Some(id(9)),
         },
     );
     let now = Instant::now();
@@ -1404,14 +1556,11 @@ fn check_seeds_invalidation_cache_on_validation_failure() {
     };
     let (out, _) = check(b"bytes", &TxSource::Api, now, &mut cx, &v);
     assert!(matches!(out, CheckOutcome::Rejected { .. }));
-    // The validator failed before producing a Validated payload, so
-    // admission keys the cache on blake2b256(tx_bytes) — same as
-    // process. Recomputing here pins the key derivation.
-    let key = ergo_primitives::digest::Digest32::from_bytes(
-        *ergo_primitives::digest::blake2b256(b"bytes").as_bytes(),
-    );
+    // The cache is keyed on the canonical tx_id from the step-3.5
+    // peek — same as process. Looking it up here pins the key
+    // derivation.
     assert!(
-        inv.contains(&key),
+        inv.contains(&id(9)),
         "check must seed the invalidation cache on script failure (parity with process)",
     );
     assert_eq!(pool.len(), 0, "check must never insert into the pool");
@@ -1454,6 +1603,10 @@ fn check_seeds_unresolved_cache_on_unresolved_input() {
     assert!(
         unr.contains(b"bytes", now),
         "check must seed the unresolved-bytes cache (parity with process)",
+    );
+    assert!(
+        inv.is_empty(),
+        "unresolved input routes to the unresolved cache, not invalidation"
     );
     assert_eq!(pool.len(), 0, "check must never insert into the pool");
 }
