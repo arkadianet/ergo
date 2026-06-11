@@ -1283,11 +1283,22 @@ components:
         - $ref: '#/components/schemas/ScanningPredicate'
         - type: object
         - required:
-            - bytes
+            - value
         - properties:
+            # `register` is optional: an omitted field OR an explicit null both
+            # default to "R1" (Scala `register.getOrElse(ErgoBox.R1)`). `null`
+            # is listed in the enum because OpenAPI 3.0 requires it there
+            # alongside `nullable: true` for a null to validate.
             register:
               type: string
-            bytes:
+              enum: [R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, null]
+              nullable: true
+              default: R1
+            # `value` is the serialized EvaluatedValue hex, per EIP-1 and the
+            # Scala `ScanningPredicateJsonCodecs` encoder/decoder. (Upstream
+            # Scala swagger documents `bytes`, which has drifted from its own
+            # codec — real nodes accept/emit `value`.)
+            value:
               type: string
 
     EqualsPredicate:
@@ -1295,11 +1306,15 @@ components:
         - $ref: '#/components/schemas/ScanningPredicate'
         - type: object
         - required:
-            - bytes
+            - value
         - properties:
+            # Optional; omitted or null -> "R1" (see ContainsPredicate.register).
             register:
               type: string
-            bytes:
+              enum: [R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, null]
+              nullable: true
+              default: R1
+            value:
               type: string
 
     ContainsAssetPredicate:
