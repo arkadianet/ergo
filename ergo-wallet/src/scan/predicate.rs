@@ -146,6 +146,38 @@ impl ScanningPredicate {
             ScanningPredicate::Equals { register, value } => equals_filter(*register, value, b),
         }
     }
+
+    /// Validate the rule at registration time, mirroring Scala's decode-time
+    /// check: `ScanningPredicateJsonCodecs` decodes each `contains`/`equals`
+    /// `value` via `ValueSerializer`, so a `value` that is valid hex but not a
+    /// well-formed serialized constant is rejected as a bad request before the
+    /// scan is stored. Our wire decode only hex-decodes into bytes, so we apply
+    /// the same constant check here. Returns the offending kind on failure.
+    ///
+    /// (This is the registration-boundary rejection deferred from the predicate
+    /// PR; without it a malformed value would persist and silently never match.)
+    ///
+    /// Note: [`parse_constant`] requires the whole `value` slice to be consumed,
+    /// so a valid constant followed by trailing bytes is rejected here. Scala's
+    /// registration decode parses a prefix and re-encodes the canonical form, so
+    /// it would accept such input. We are deliberately stricter on this
+    /// degenerate case (real clients never append trailing bytes): accepting it
+    /// without canonicalizing would store a value the full-consumption matcher
+    /// could never match — a silent no-match we prefer to reject up front.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            ScanningPredicate::Contains { value, .. } => parse_constant(value)
+                .map(|_| ())
+                .ok_or("contains value is not a serialized constant"),
+            ScanningPredicate::Equals { value, .. } => parse_constant(value)
+                .map(|_| ())
+                .ok_or("equals value is not a serialized constant"),
+            ScanningPredicate::ContainsAsset { .. } => Ok(()),
+            ScanningPredicate::And { args } | ScanningPredicate::Or { args } => {
+                args.iter().try_for_each(|p| p.validate())
+            }
+        }
+    }
 }
 
 /// Mirror of Scala `EqualsScanningPredicate.filter`.
@@ -697,11 +729,9 @@ mod tests {
     #[test]
     fn malformed_predicate_value_never_matches() {
         // A `value` that is not a well-formed serialized value yields no match
-        // (parse fails -> false), never a spurious hit. Scala rejects such a
-        // value at its `/scan` registration codec; this node's registration
-        // boundary (a later PR) will reject it the same way, so a malformed
-        // rule never reaches the matcher in practice. Pinned here so the
-        // matcher's defensive no-match stays deliberate.
+        // (parse fails -> false), never a spurious hit. Such a value is rejected
+        // earlier, at registration (see `validate` + the `/scan/register`
+        // handler); this pins the matcher's defensive no-match as a backstop.
         let b = box_with(vec![], coll_byte_register(&[0x01, 0x02, 0x03]));
         // 0xFF is neither a valid type code (<=0x70) nor a valid opcode.
         let garbage = vec![0xFF, 0xFF, 0xFF];
@@ -715,5 +745,46 @@ mod tests {
             value: garbage,
         }
         .matches(&b));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_constant_values() {
+        // Well-formed Coll[Byte] constants validate.
+        assert!(ScanningPredicate::Contains {
+            register: ScanRegister::R4,
+            value: coll_byte_const(&[0x01, 0x02]),
+        }
+        .validate()
+        .is_ok());
+        assert!(ScanningPredicate::ContainsAsset {
+            asset_id: [0x11; 32]
+        }
+        .validate()
+        .is_ok());
+
+        // A value that is valid hex but not a serialized constant is rejected
+        // (Scala rejects it at the registration codec).
+        assert!(ScanningPredicate::Equals {
+            register: ScanRegister::R4,
+            value: vec![0x00], // 0x00 is not a valid type code
+        }
+        .validate()
+        .is_err());
+
+        // Nested malformed value inside and/or is rejected (recursion).
+        let nested = ScanningPredicate::And {
+            args: vec![
+                ScanningPredicate::ContainsAsset {
+                    asset_id: [0x11; 32],
+                },
+                ScanningPredicate::Or {
+                    args: vec![ScanningPredicate::Contains {
+                        register: ScanRegister::R4,
+                        value: vec![0xFF, 0xFF],
+                    }],
+                },
+            ],
+        };
+        assert!(nested.validate().is_err());
     }
 }

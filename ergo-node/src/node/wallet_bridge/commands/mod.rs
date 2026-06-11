@@ -45,6 +45,7 @@ pub(super) use super::{
 
 pub(super) mod admin;
 pub(super) mod multisig;
+pub(super) mod scan;
 pub(super) mod send;
 
 /// Borrowed view of the writer-task's captured state. Built once per

@@ -85,6 +85,23 @@ pub const WALLET_VISIBLE_ADDRESSES: TableDefinition<u32, [u8; 33]> =
 pub const WALLET_CHANGE_ADDRESS: TableDefinition<(), [u8; 33]> =
     TableDefinition::new("wallet_change_address");
 
+/// Registered scans (`/scan/*` subsystem), keyed by scan id. Iterating the
+/// table yields scans in ascending-id order (native `u16` redb ordering),
+/// which is the `/scan/listAll` response order.
+///
+/// Key: `scan_id: u16` (>= 11 for user scans; see `ergo_wallet::scan`).
+/// Value: `serde_json`-serialized `ergo_wallet::scan::Scan`. JSON (not
+/// bincode) because the scan's `trackingRule` is an internally-tagged serde
+/// enum, which bincode's non-self-describing format cannot represent.
+pub const WALLET_SCANS: TableDefinition<u16, Vec<u8>> = TableDefinition::new("wallet_scans");
+
+/// The monotonic `lastUsedScanId` counter (one row). Defaults to
+/// `PaymentsScanId` (10) when absent, so the first user scan is id 11. Advanced
+/// on every register and NEVER decremented on deregister — ids are never reused
+/// (Scala `WalletStorage` parity).
+pub const WALLET_LAST_USED_SCAN_ID: TableDefinition<(), u16> =
+    TableDefinition::new("wallet_last_used_scan_id");
+
 /// Schema version constant for boot-time integrity check. Stored
 /// in its own one-row table; bumped on any breaking change.
 pub const WALLET_SCHEMA_VERSION_TABLE: TableDefinition<(), u32> =

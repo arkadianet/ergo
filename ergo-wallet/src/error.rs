@@ -121,4 +121,15 @@ pub enum WalletError {
     /// not been initialized with a master secret.
     #[error("derivation: no derivable head — wallet must be unlocked + initialized")]
     DerivationNoHead,
+
+    /// Deregister/lookup referenced a scan id that is not registered. Scala
+    /// `removeScan` is not idempotent: it fails with "Scan #id not found".
+    #[error("scan #{0} not found")]
+    ScanNotFound(u16),
+
+    /// The monotonic scan-id counter reached `u16::MAX`; no further scan can be
+    /// allocated. Unreachable in practice (65k+ scans), but guarded so the
+    /// counter can never wrap to a reserved/zero id and overwrite a live scan.
+    #[error("scan id space exhausted (u16::MAX reached)")]
+    ScanRegistryFull,
 }
