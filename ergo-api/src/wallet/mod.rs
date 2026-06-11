@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod lock_guard;
 pub mod multi_sig;
 pub mod reads;
+pub mod scan;
 pub mod sending;
 pub mod state_mut;
 pub mod types;
@@ -212,6 +213,38 @@ pub trait WalletAdmin: Send + Sync {
         &self,
         request: admin_advanced::GetPrivateKeyRequest,
     ) -> Result<admin_advanced::GetPrivateKeyResponse, WalletAdminError>;
+
+    // --- scan registry routes ---
+    //
+    // These carry default impls returning `Internal` (a safe 500, never a
+    // panic) so the many test mocks that don't exercise scans need not stub
+    // them. The production `NodeWalletAdmin` overrides all three with the real
+    // channel calls; the scan route tests use a focused mock that overrides
+    // only these.
+
+    /// Register a scan (Scala `addScan`), allocating its id. Returns the
+    /// assigned `scanId`.
+    async fn register_scan(&self, _request: scan::ScanRequestDto) -> Result<u16, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "register_scan not implemented".to_string(),
+        ))
+    }
+
+    /// Deregister a scan by id (Scala `removeScan`). Not idempotent: a missing
+    /// id is `WalletAdminError::BadRequest` (HTTP 400), matching the Scala
+    /// route's bad-request mapping (distinct from the 404 `ScanNotFound`).
+    async fn deregister_scan(&self, _scan_id: u16) -> Result<(), WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "deregister_scan not implemented".to_string(),
+        ))
+    }
+
+    /// All registered scans, ascending by id (Scala `allScans`).
+    async fn list_scans(&self) -> Result<Vec<scan::ScanDto>, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "list_scans not implemented".to_string(),
+        ))
+    }
 }
 
 /// Errors the admin trait can return. Maps to HTTP responses in
@@ -320,10 +353,20 @@ pub fn router_with_security(
             "/wallet/getPrivateKey",
             post(admin_advanced::get_private_key),
         )
-        // Whole-prefix gate parity: real catch-all routes (not a
-        // fallback) so the `route_layer` below covers them.
+        // Scan registry routes (Scala `ScanApiRoute`). Share the wallet
+        // admin state + auth route-layer; the remaining scan endpoints
+        // (unspent/spent boxes, stopTracking, addBox, p2sRule) land in
+        // later slices and are gated by the `/scan` catch-all until then.
+        .route("/scan/register", post(scan::register))
+        .route("/scan/deregister", post(scan::deregister))
+        .route("/scan/listAll", get(scan::list_all))
+        // Whole-prefix gate parity (Scala `pathPrefix("scan") & withAuth`):
+        // real catch-all routes (not a fallback) so the `route_layer`
+        // below covers unknown `/scan/*` on the key, same as `/wallet`.
         .route("/wallet", any(crate::auth::unknown_gated_subpath))
         .route("/wallet/*rest", any(crate::auth::unknown_gated_subpath))
+        .route("/scan", any(crate::auth::unknown_gated_subpath))
+        .route("/scan/*rest", any(crate::auth::unknown_gated_subpath))
         .with_state(admin);
     match security {
         Some(sec) => r.route_layer(axum::middleware::from_fn_with_state(

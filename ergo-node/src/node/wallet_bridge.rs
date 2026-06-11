@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
+use ergo_api::wallet::scan::{ScanDto, ScanRequestDto};
 use ergo_api::wallet::sending::PaymentRequestDto;
 use ergo_api::wallet::sending::{
     BoxesCollectRequest, BoxesCollectResponse, TransactionGenerateRequest,
@@ -182,6 +183,18 @@ pub enum WalletCommand {
         reply: oneshot::Sender<
             Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError>,
         >,
+    },
+    // --- scan registry commands ---
+    RegisterScan {
+        request: ScanRequestDto,
+        reply: oneshot::Sender<Result<u16, WalletAdminError>>,
+    },
+    DeregisterScan {
+        scan_id: u16,
+        reply: oneshot::Sender<Result<(), WalletAdminError>>,
+    },
+    ListScans {
+        reply: oneshot::Sender<Result<Vec<ScanDto>, WalletAdminError>>,
     },
 }
 
@@ -416,6 +429,21 @@ impl WalletAdmin for NodeWalletAdmin {
         request: ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
     ) -> Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::GetPrivateKey { request, reply })
+            .await
+    }
+
+    async fn register_scan(&self, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::RegisterScan { request, reply })
+            .await
+    }
+
+    async fn deregister_scan(&self, scan_id: u16) -> Result<(), WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::DeregisterScan { scan_id, reply })
+            .await
+    }
+
+    async fn list_scans(&self) -> Result<Vec<ScanDto>, WalletAdminError> {
+        self.send_cmd(|reply| WalletCommand::ListScans { reply })
             .await
     }
 }
@@ -881,6 +909,13 @@ pub async fn run_wallet_writer(
             WalletCommand::GetPrivateKey { request, reply } => {
                 commands::multisig::get_private_key(&ctx, request, reply).await
             }
+            WalletCommand::RegisterScan { request, reply } => {
+                commands::scan::register(&ctx, request, reply).await
+            }
+            WalletCommand::DeregisterScan { scan_id, reply } => {
+                commands::scan::deregister(&ctx, scan_id, reply).await
+            }
+            WalletCommand::ListScans { reply } => commands::scan::list(&ctx, reply).await,
         }
     }
 }
