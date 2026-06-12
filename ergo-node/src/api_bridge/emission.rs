@@ -13,11 +13,14 @@ use ergo_chain_spec::{MonetaryParams, ReemissionParams};
 use ergo_mining::emission_rules;
 
 /// Render the chain spec's verified emission-script trees as the
-/// `/emission/scripts` response — three P2S addresses, exactly Scala's
-/// `Pay2SAddress(tree).toString()` (P2S addresses embed the tree bytes
-/// verbatim). `None` where the spec carries no verified trees
-/// (testnet/dev): the route then stays unmounted. Oracle-pinned below
-/// against the live-Scala capture.
+/// `/emission/scripts` response — three P2S addresses embedding the tree
+/// bytes verbatim. (`encode_address_from_tree_bytes` routes like Scala's
+/// `fromProposition`, so a bare `SigmaPropConst(ProveDlog)` tree would
+/// render P2PK where Scala's scripts route always emits P2S — unreachable
+/// for these constants, all of which carry the segregation flag; the
+/// oracle test below proves the P2S byte-for-byte outcome.) `None` where
+/// the spec carries no verified trees (testnet/dev): the route then stays
+/// unmounted.
 pub fn render_emission_scripts(spec: &ergo_chain_spec::ChainSpec) -> Option<EmissionScriptsJson> {
     let trees = spec.emission_script_trees()?;
     let network = spec.network_params.address_prefix;

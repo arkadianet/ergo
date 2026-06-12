@@ -134,10 +134,14 @@ Be aware of these before depending on the node.
   before treating the state as authoritative.
 - **`/emission` surface** — `GET /emission/at/{blockHeight}` is implemented
   (EIP-27-aware, differential-tested against live-Scala vectors at
-  `test-vectors/api/emission/`); `GET /emission/scripts` is not — it needs
-  the emission / reemission / pay2Reemission contract-tree predefs plus P2S
-  address encoding, which the workspace doesn't expose yet. The captured
-  Scala oracle for it ships at `test-vectors/api/emission/scripts.json`.
+  `test-vectors/api/emission/`); `GET /emission/scripts` is implemented on
+  **mainnet** from verified contract-tree constants in `ergo-chain-spec`
+  (oracle-pinned byte-for-byte against the live-Scala capture at
+  `test-vectors/api/emission/scripts.json`; the emission tree cross-checks
+  against the genesis emission box). Divergence: Scala's testnet serves
+  three testnet addresses (its conf retains the reemission settings even
+  though activation is unreachable); this build returns 404 there pending
+  a testnet oracle capture.
 - **NiPoPoW prover/verifier** — the algorithmic core, the serve-side walk,
   and sub-chain / score checks have landed; full Scala-oracle byte parity
   and adversarial-proof edge cases are still open.
@@ -184,5 +188,4 @@ Include the affected version (commit hash), reproduction steps, expected
 versus observed behavior, and — for anything that could split the network —
 whether you have shared the same finding with the Scala reference team.
 Coordinated disclosure across both implementations is the right path for
-any bug that could fork consensus. Full scope, required fields, and
-response targets are in [`SECURITY.md`](../SECURITY.md).
+any bug that could fork consensus. Full scope, required f

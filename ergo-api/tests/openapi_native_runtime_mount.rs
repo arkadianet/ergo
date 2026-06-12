@@ -588,6 +588,43 @@ async fn emission_scripts_serves_three_p2s_addresses_publicly() {
 }
 
 #[tokio::test]
+async fn emission_scripts_mirrors_scala_method_and_subpath_quirk() {
+    // Scala's route is a bare `pathPrefix("scripts")` — no method
+    // directive, no pathEnd — so the live node 200s on POST and on
+    // arbitrary subpaths (probed on the reference node). Mirrored per
+    // the house standard of replicating missing-directive quirks.
+    let mut c = ctx(None);
+    c.emission_scripts = Some(Arc::new(ergo_api::emission::EmissionScriptsJson {
+        emission: "em".to_string(),
+        reemission: "re".to_string(),
+        pay2_reemission: "p2r".to_string(),
+    }));
+    let app = router_with_mempool_and_wallet_and_security(
+        c,
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    );
+    for (method, uri) in [
+        (Method::POST, "/emission/scripts"),
+        (Method::GET, "/emission/scripts/zzz"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
 async fn emission_scripts_unwired_is_404() {
     // Chain specs without verified script constants (testnet/dev) leave
     // the view None → route unmounted → 404, documented in the openapi.

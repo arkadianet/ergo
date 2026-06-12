@@ -602,19 +602,37 @@ impl ChainSpec {
     /// against a live-Scala `/emission/scripts` capture, see
     /// `test-vectors/api/emission/scripts.json`; the emission tree is
     /// additionally cross-checked against the genesis emission box).
-    /// Testnet has no EIP-27 reemission (`reemission: None`, post
-    /// upstream PR #2252) and no captured oracle — `None`, and the REST
-    /// route stays unmounted there.
+    ///
+    /// Testnet returns `None` — a DOCUMENTED DIVERGENCE: Scala's testnet
+    /// serves three testnet addresses (its conf still carries the
+    /// reemission settings; only activation is unreachable post upstream
+    /// PR #2252, which is why this spec models it as `reemission: None`).
+    /// The testnet trees are derivable from `testnet.conf`'s reemission
+    /// NFT id once an oracle capture exists; until then the route stays
+    /// unmounted there rather than serving unverified constants.
     pub fn emission_script_trees(&self) -> Option<EmissionScriptTrees> {
-        match self.network {
-            Network::Mainnet => Some(EmissionScriptTrees {
-                emission: hex::decode(MAINNET_EMISSION_TREE_HEX).expect("const hex"),
-                reemission: hex::decode(MAINNET_REEMISSION_TREE_HEX).expect("const hex"),
-                pay_to_reemission: hex::decode(MAINNET_PAY_TO_REEMISSION_TREE_HEX)
-                    .expect("const hex"),
-            }),
-            Network::Testnet => None,
+        if self.network != Network::Mainnet {
+            return None;
         }
+        // Defensive identity check: the constants are verified against THE
+        // canonical mainnet spec. A hypothetical custom spec tagged
+        // `Mainnet` with different identifying params (no such constructor
+        // exists today — `ChainSpec::for_network` is the only builder) must
+        // not serve them.
+        let canonical_reemission = ReemissionParams::mainnet();
+        let genuine = self
+            .reemission
+            .as_ref()
+            .is_some_and(|r| r.reemission_nft_id == canonical_reemission.reemission_nft_id)
+            && self.genesis.state_digest == GenesisParams::mainnet().state_digest;
+        if !genuine {
+            return None;
+        }
+        Some(EmissionScriptTrees {
+            emission: hex::decode(MAINNET_EMISSION_TREE_HEX).expect("const hex"),
+            reemission: hex::decode(MAINNET_REEMISSION_TREE_HEX).expect("const hex"),
+            pay_to_reemission: hex::decode(MAINNET_PAY_TO_REEMISSION_TREE_HEX).expect("const hex"),
+        })
     }
 }
 
@@ -719,25 +737,51 @@ mod tests {
             .emission_script_trees()
             .expect("mainnet carries verified script trees");
 
-        // The emission tree must be EXACTLY the genesis emission box's
-        // ergoTree (boxes_json[0]) — first-principles provenance.
+        // The emission tree must be EXACTLY the FIRST genesis box's
+        // ergoTree — first-principles provenance. Anchored match (the
+        // key + quoted full value, and it must be the first ergoTree in
+        // the file), not a loose hex-substring scan.
         let boxes_json = GenesisParams::mainnet().boxes_json.unwrap();
-        assert!(
-            boxes_json.contains(&hex::encode(&trees.emission)),
-            "emission tree == genesis emission box ergoTree"
+        let anchored = format!("\"ergoTree\": \"{}\"", hex::encode(&trees.emission));
+        let first_tree_pos = boxes_json
+            .find("\"ergoTree\"")
+            .expect("genesis json has ergoTree keys");
+        assert_eq!(
+            boxes_json.find(&anchored),
+            Some(first_tree_pos),
+            "emission tree == boxes_json[0].ergoTree (anchored, first box)"
         );
 
-        // Both EIP-27 trees embed the reemission NFT id from the spec
-        // (the contracts are parameterized by it).
+        // Both EIP-27 trees embed the reemission NFT id from the spec AS A
+        // Coll[Byte] CONSTANT — anchored on the 0x0e20 (type + 32-byte
+        // length) prefix, not a bare hex substring.
         let nft = hex::encode(ReemissionParams::mainnet().reemission_nft_id.as_bytes());
-        assert!(hex::encode(&trees.reemission).contains(&nft));
-        assert!(hex::encode(&trees.pay_to_reemission).contains(&nft));
+        let pushed_nft = format!("0e20{nft}");
+        assert!(hex::encode(&trees.reemission).contains(&pushed_nft));
+        assert!(hex::encode(&trees.pay_to_reemission).contains(&pushed_nft));
     }
 
     #[test]
     fn emission_script_trees_absent_off_mainnet() {
-        // Testnet (no EIP-27 post PR #2252) has no verified script set.
+        // Documented divergence: Scala's testnet serves three testnet
+        // addresses (settings present, activation unreachable); this build
+        // has no testnet oracle capture, so the spec returns None and the
+        // route stays unmounted there.
         assert!(ChainSpec::testnet().emission_script_trees().is_none());
+    }
+
+    #[test]
+    fn emission_script_trees_refuse_a_tampered_mainnet_spec() {
+        // Defensive identity gate: a spec tagged Mainnet whose identifying
+        // params differ from the canonical constructor must not serve the
+        // verified constants.
+        let mut spec = ChainSpec::mainnet();
+        spec.genesis.state_digest = [0u8; 33];
+        assert!(spec.emission_script_trees().is_none());
+
+        let mut spec = ChainSpec::mainnet();
+        spec.reemission = None;
+        assert!(spec.emission_script_trees().is_none());
     }
 
     #[test]

@@ -6655,8 +6655,11 @@ paths:
         The three emission-related contracts (emission, EIP-27
         re-emission, pay-to-reemission) as P2S addresses. Served from
         oracle-verified per-network constants: mainnet only in this
-        build — testnet (which has no EIP-27 post upstream PR #2252)
-        and dev chains return 404.
+        build. Divergence — Scala's testnet serves three testnet
+        addresses (its conf retains the reemission settings; activation
+        is merely unreachable post upstream PR #2252), while this build
+        returns 404 on testnet and dev chains pending a testnet oracle
+        capture.
       operationId: emissionScripts
       tags:
         - emission

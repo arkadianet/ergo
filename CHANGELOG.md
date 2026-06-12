@@ -16,6 +16,14 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- `GET /emission/scripts` (mainnet): the three emission-related contracts
+  as P2S addresses, served from oracle-verified constants byte-identical
+  to the live-Scala capture. Testnet returns 404 pending an oracle
+  capture (documented divergence — Scala's testnet serves three testnet
+  addresses).
+
 ## [0.4.0] - 2026-06-10
 
 A large consensus-behaviour release. It closes the SANTA conformance effort —
