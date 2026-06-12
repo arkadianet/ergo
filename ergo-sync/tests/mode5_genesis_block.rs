@@ -261,7 +261,7 @@ fn build_genesis_block_fixture() -> GenesisBlockFixture {
 
     let pre_state = genesis_pre_state();
     let (derived_root, proof_bytes) =
-        derive_ad_proofs_over_boxes(&pre_state, &to_remove, &to_insert)
+        derive_ad_proofs_over_boxes(&pre_state, &[], &to_remove, &to_insert)
             .expect("derive genesis-block ADProofs");
     assert_eq!(
         derived_root, height_1_root,
@@ -414,7 +414,7 @@ fn mode5_process_block_genesis_rejects_tampered_state_root() {
         StateStore::build_utxo_changes_raw(&[&tx]).expect("build_utxo_changes_raw");
     let pre_state = genesis_pre_state();
     let (derived_root, proof_bytes) =
-        derive_ad_proofs_over_boxes(&pre_state, &to_remove, &to_insert)
+        derive_ad_proofs_over_boxes(&pre_state, &[], &to_remove, &to_insert)
             .expect("derive genesis-block ADProofs");
     assert_eq!(derived_root, height_1_root);
 
