@@ -5947,10 +5947,13 @@ paths:
     get:
       summary: Get information about locally stored UTXO snapshots
       description: >-
-        This build consumes UTXO snapshots during Mode 2 bootstrap but
-        never creates them, so availableManifests is always empty —
-        matching a Scala UTXO node that has taken no snapshots. Digest
-        backend returns the standard /utxo 503.
+        Serves the node's Mode-2 serve-side snapshot cache — at most one
+        entry, rebuilt at each 52,224-block boundary on UTXO backends and
+        held in memory only (empty at boot until the next boundary). The
+        same view answers the P2P SnapshotsInfo message, so REST and wire
+        always agree. Digest backend returns the standard /utxo 503
+        (Scala answers 404 there — part of the documented /utxo digest
+        divergence).
       operationId: getSnapshotsInfo
       tags:
         - utxo

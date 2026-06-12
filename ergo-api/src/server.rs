@@ -130,7 +130,7 @@ pub struct ServerCtx {
     /// pending an oracle capture). Public like the rest of `/emission`.
     pub emission_scripts: Option<Arc<crate::emission::EmissionScriptsJson>>,
     /// Whether the node's state backend retains UTXO box bytes. When
-    /// `true` (default — Mode 1 UTXO backend), the six `/utxo/*`
+    /// `true` (default — Mode 1 UTXO backend), the seven `/utxo/*`
     /// routes mount the real handlers. When `false` (Mode 5 digest
     /// backend), the routes are replaced with a `503 Service
     /// Unavailable` carrying Scala's "lookup not supported in this
@@ -308,7 +308,7 @@ pub async fn serve(
     Ok((actual, handle))
 }
 
-/// Handler mounted in place of the six live `/utxo/*` Scala-compat
+/// Handler mounted in place of the seven live `/utxo/*` Scala-compat
 /// handlers whenever the node's state backend does not retain UTXO
 /// box bytes. Returns `503 Service Unavailable` with a JSON body
 /// describing the limitation. Mounted by
@@ -331,23 +331,32 @@ async fn utxo_lookup_unsupported_in_digest_mode() -> Response {
         .into_response()
 }
 
-/// Build the Scala-compat `/utxo/*` subtree, typed to match the
-/// surrounding Scala-compat router's state. When the state backend
-/// retains UTXO box bytes (Mode 1), mount the six live handlers.
-/// When it does not (Mode 5 digest backend), mount a single wildcard
-/// returning [`utxo_lookup_unsupported_in_digest_mode`]'s 503. The
-/// 503 handler takes no state, so it sits in the same
-/// `Router<Arc<dyn NodeChainQuery>>` shape as the real handlers and
-/// merges cleanly into the parent without rebinding state.
 /// `GET /utxo/getSnapshotsInfo` — Scala `UtxoApiRoute.getSnapshotsInfo`
-/// serves the locally-stored UTXO snapshot set. This build consumes
-/// snapshots (Mode 2 bootstrap) but never creates them, so the truthful
-/// response is always the empty container — byte-identical to a Scala
-/// UTXO node that has taken no snapshots.
-async fn scala_utxo_snapshots_info_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "availableManifests": {} }))
+/// serves the locally-stored UTXO snapshot set. This build's serve side
+/// caches at most one snapshot (rebuilt at each 52,224-block boundary,
+/// in-memory only — empty at boot and on digest backends); the same
+/// view answers the P2P `SnapshotsInfo` message, so REST and wire can
+/// never disagree — the property Scala gets by reading one SnapshotsDb
+/// from both paths. Value-identical to Scala's envelope
+/// (`{"availableManifests": {height: manifestHex}}`).
+async fn scala_utxo_snapshots_info_handler(
+    State(chain): State<Arc<dyn NodeChainQuery>>,
+) -> Json<serde_json::Value> {
+    let manifests: serde_json::Map<String, serde_json::Value> = chain
+        .snapshots_info()
+        .into_iter()
+        .map(|(h, id)| (h.to_string(), serde_json::Value::String(id)))
+        .collect();
+    Json(serde_json::json!({ "availableManifests": manifests }))
 }
 
+/// Build the Scala-compat `/utxo/*` subtree, typed to match the
+/// surrounding Scala-compat router's state. When the state backend
+/// retains UTXO box bytes (Mode 1), mount the seven live handlers.
+/// When it does not (Mode 5 digest backend), mount the same
+/// path+method shapes with the 503 handler, which takes no state and
+/// so sits in the same `Router<Arc<dyn NodeChainQuery>>` shape and
+/// merges cleanly into the parent without rebinding state.
 fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQuery>> {
     if utxo_reads_supported {
         Router::new()
@@ -374,7 +383,7 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
                 get(scala_utxo_snapshots_info_handler),
             )
     } else {
-        // Mount the SAME six path+method shapes the live router
+        // Mount the SAME seven path+method shapes the live router
         // mounts, but with the 503 handler. This keeps Scala-compat
         // behavior intact for the surface that doesn't exist under
         // the digest backend — unknown paths still get axum's
@@ -403,8 +412,10 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
                 post(utxo_lookup_unsupported_in_digest_mode),
             )
             // getSnapshotsInfo needs no box store, but the digest arm
-            // keeps the whole /utxo surface on one posture (Scala's
-            // digest state likewise has no snapshot persistence).
+            // keeps the whole /utxo surface on one posture. Known Scala
+            // oracle (derivable from source): digest state is not a
+            // UtxoSetSnapshotPersistence, so Scala 404s here — the
+            // blanket 503 is the pre-existing documented divergence.
             .route(
                 "/utxo/getSnapshotsInfo",
                 get(utxo_lookup_unsupported_in_digest_mode),
@@ -961,12 +972,12 @@ pub fn router_with_mempool_and_wallet_and_security(
                 //
                 // `/utxo/*` mounts in one of two shapes depending on
                 // the state backend. Under Mode 1 (UTXO backend) the
-                // six live handlers mount. Under Mode 5 (digest
-                // backend) the same six (path, method) shapes mount
+                // seven live handlers mount. Under Mode 5 (digest
+                // backend) the same seven (path, method) shapes mount
                 // with a 503 handler, so unknown `/utxo/*` paths
                 // still 404 and wrong methods still 405 — the
                 // Scala-compat surface stays intact for everything
-                // outside the six known routes.
+                // outside the seven known routes.
                 .merge(scala_utxo_subtree(utxo_reads_supported))
                 .route("/peers/all", get(scala_peers_all_handler))
                 .route("/peers/connected", get(scala_peers_connected_handler))

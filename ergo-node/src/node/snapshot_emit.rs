@@ -305,6 +305,12 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         recent_blocks,
         max_peer_height,
         mining_enabled: state.mining_enabled,
+        snapshot_manifests: state
+            .snapshot_state
+            .available_manifests()
+            .into_iter()
+            .map(|(h, id)| (h, hex::encode(id)))
+            .collect(),
     };
 
     if let Some(pub_) = state.snapshot_publisher.as_mut() {

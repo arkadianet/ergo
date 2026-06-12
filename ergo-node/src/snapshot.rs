@@ -130,6 +130,13 @@ pub struct NodeSnapshot {
     /// Feeds `/info.isMining` — Scala parity: Scala reports its configured
     /// mining flag here, not liveness of candidate generation.
     pub mining_enabled: bool,
+    /// `(height, hex manifest id)` of the Mode-2 serve-side snapshot
+    /// cache (at most one entry — the latest 52,224-boundary build).
+    /// Mirrored from the action loop's `SnapshotState` each publish so
+    /// REST `/utxo/getSnapshotsInfo` always agrees with the P2P
+    /// `SnapshotsInfo` reply. Empty at boot (cache is in-memory only)
+    /// and on digest backends.
+    pub snapshot_manifests: Vec<(i32, String)>,
 }
 
 /// Public-facing projection of a per-peer SyncInfo observation.
@@ -252,6 +259,7 @@ impl NodeSnapshot {
             recent_blocks: Arc::new(Vec::new()),
             max_peer_height: 0,
             mining_enabled: false,
+            snapshot_manifests: Vec::new(),
         }
     }
 }
@@ -454,6 +462,9 @@ pub struct SnapshotParts<'a> {
     /// Whether the mining engine + wiring are configured on this node.
     /// Feeds `/info.isMining`.
     pub mining_enabled: bool,
+    /// Mode-2 serve-cache manifests `(height, hex id)`; see
+    /// `NodeSnapshot::snapshot_manifests`.
+    pub snapshot_manifests: Vec<(i32, String)>,
 }
 
 fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64) -> NodeSnapshot {
@@ -568,6 +579,7 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         recent_blocks: p.recent_blocks,
         max_peer_height: p.max_peer_height,
         mining_enabled: p.mining_enabled,
+        snapshot_manifests: p.snapshot_manifests,
     }
 }
 
@@ -740,6 +752,7 @@ mod tests {
             recent_blocks: Arc::new(Vec::new()),
             max_peer_height: 0,
             mining_enabled: false,
+            snapshot_manifests: Vec::new(),
         }
     }
 
