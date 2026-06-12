@@ -419,9 +419,14 @@ impl CommittedSnapshot {
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         let (to_remove, to_insert) = StateStore::build_utxo_changes_checked(checked)?;
+        let to_lookup = StateStore::build_data_input_lookups_checked(checked);
         let mut prover = self.hydrate_prover()?;
-        let (new_root, proof) =
-            super::dry_run::apply_change_set_to_prover(&mut prover, &to_remove, &to_insert)?;
+        let (new_root, proof) = super::dry_run::apply_change_set_to_prover(
+            &mut prover,
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+        )?;
         Ok((new_root, proof, self.chain_state.best_full_block_id))
     }
 
@@ -432,12 +437,17 @@ impl CommittedSnapshot {
     #[cfg(test)]
     pub(crate) fn candidate_dry_run_via_changes_for_test(
         &self,
+        to_lookup: &[[u8; 32]],
         to_remove: &super::dry_run::DryRunRemoveMap,
         to_insert: &super::dry_run::DryRunInsertMap,
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         let mut prover = self.hydrate_prover()?;
-        let (new_root, proof) =
-            super::dry_run::apply_change_set_to_prover(&mut prover, to_remove, to_insert)?;
+        let (new_root, proof) = super::dry_run::apply_change_set_to_prover(
+            &mut prover,
+            to_lookup,
+            to_remove,
+            to_insert,
+        )?;
         Ok((new_root, proof, self.chain_state.best_full_block_id))
     }
 
@@ -480,7 +490,14 @@ impl CommittedSnapshot {
         disposition: &mut Option<BaseDisposition>,
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         let (to_remove, to_insert) = StateStore::build_utxo_changes_checked(checked)?;
-        self.candidate_dry_run_cached_with_changes(base, &to_remove, &to_insert, disposition)
+        let to_lookup = StateStore::build_data_input_lookups_checked(checked);
+        self.candidate_dry_run_cached_with_changes(
+            base,
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+            disposition,
+        )
     }
 
     /// Try to advance a stale `DryRunBase` (cached at tip N) by applying
@@ -528,9 +545,17 @@ impl CommittedSnapshot {
             });
         }
 
-        // 4. Build the canonical netting change set from the raw transactions.
+        // 4. Build the canonical netting change set from the raw transactions,
+        //    plus the data-input lookup prefix (digest-neutral — the proof is
+        //    discarded below — but kept so this path runs the identical
+        //    canonical op stream as every other prover consumer).
         let refs: Vec<&Transaction> = bt.transactions.iter().collect();
         let (to_remove, to_insert) = StateStore::build_utxo_changes_raw(&refs)?;
+        let to_lookup: Vec<[u8; 32]> = bt
+            .transactions
+            .iter()
+            .flat_map(|tx| tx.data_inputs.iter().map(|di| *di.box_id.as_bytes()))
+            .collect();
 
         // 5. Wrap the consumed base.tree in a prover, apply the change set
         //    via the shared `apply_change_set_to_prover` path (same
@@ -540,8 +565,12 @@ impl CommittedSnapshot {
         //    full rehydrate. Discard the proof bytes — only the post-op
         //    digest and tree are needed here.
         let mut prover = batch_avl_prover_from_tree(base.tree);
-        let (advanced_digest, _proof) =
-            super::dry_run::apply_change_set_to_prover(&mut prover, &to_remove, &to_insert)?;
+        let (advanced_digest, _proof) = super::dry_run::apply_change_set_to_prover(
+            &mut prover,
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+        )?;
 
         // 6. Mandatory digest check (NOT debug_assert): the advanced digest
         //    must equal the snapshot's committed state_root. Mirrors the live
@@ -585,6 +614,7 @@ impl CommittedSnapshot {
     pub(crate) fn candidate_dry_run_cached_with_changes(
         &self,
         base: &mut Option<DryRunBase>,
+        to_lookup: &[[u8; 32]],
         to_remove: &super::dry_run::DryRunRemoveMap,
         to_insert: &super::dry_run::DryRunInsertMap,
         disposition: &mut Option<BaseDisposition>,
@@ -655,7 +685,12 @@ impl CommittedSnapshot {
         // it. Disarmed only on a fully successful build (proof generated ⇒
         // shared `visited` bits clean).
         let mut guard = PoisonGuard { base: Some(base) };
-        match super::dry_run::apply_change_set_to_prover(&mut prover, to_remove, to_insert) {
+        match super::dry_run::apply_change_set_to_prover(
+            &mut prover,
+            to_lookup,
+            to_remove,
+            to_insert,
+        ) {
             Ok((new_root, proof)) => {
                 // Success: the just-run `generate_proof` cleaned the shared
                 // `visited` bits, so the base stays reusable for the next
@@ -858,14 +893,14 @@ mod tests {
         to_insert.insert(box_id(9), vec![0x99u8; 44]);
 
         // On-loop: hydrate from the live in-memory tree.
-        let oracle =
-            apply_change_set_via_prover(&store.tree, &to_remove, &to_insert).expect("live dry-run");
+        let oracle = apply_change_set_via_prover(&store.tree, &[], &to_remove, &to_insert)
+            .expect("live dry-run");
 
         // Off-loop: hydrate from the committed snapshot's single read txn.
         let snap = store.committed_snapshot().unwrap().expect("snapshot");
         let mut prover = snap.hydrate_prover().expect("snapshot hydrate");
-        let got =
-            apply_change_set_to_prover(&mut prover, &to_remove, &to_insert).expect("snap dry-run");
+        let got = apply_change_set_to_prover(&mut prover, &[], &to_remove, &to_insert)
+            .expect("snap dry-run");
 
         assert_eq!(
             oracle.0, got.0,
@@ -1101,13 +1136,19 @@ mod tests {
             // Fresh uncached oracle each iteration (its own throwaway prover).
             let snap_oracle = store.committed_snapshot().unwrap().expect("snap oracle");
             let oracle = snap_oracle
-                .candidate_dry_run_via_changes_for_test(&to_remove, &to_insert)
+                .candidate_dry_run_via_changes_for_test(&[], &to_remove, &to_insert)
                 .expect("uncached oracle");
 
             let snap = store.committed_snapshot().unwrap().expect("snap cached");
             let mut disp = None;
             let got = snap
-                .candidate_dry_run_cached_with_changes(&mut base, &to_remove, &to_insert, &mut disp)
+                .candidate_dry_run_cached_with_changes(
+                    &mut base,
+                    &[],
+                    &to_remove,
+                    &to_insert,
+                    &mut disp,
+                )
                 .expect("cached dry-run");
 
             assert_eq!(oracle.0, got.0, "call {call}: state_root must match oracle");
@@ -1158,7 +1199,7 @@ mod tests {
         let empty_r: DryRunRemoveMap = BTreeMap::new();
         let empty_i: DryRunInsertMap = BTreeMap::new();
         let snap = store.committed_snapshot().unwrap().expect("snap prime");
-        snap.candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+        snap.candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("prime build");
         assert!(base.is_some(), "base memoized after a clean build");
 
@@ -1167,7 +1208,7 @@ mod tests {
         bad_remove.insert(box_id(0xEE), ());
         let snap = store.committed_snapshot().unwrap().expect("snap err");
         let err = snap
-            .candidate_dry_run_cached_with_changes(&mut base, &bad_remove, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &bad_remove, &empty_i, &mut None)
             .expect_err("removing a missing key must error");
         assert!(
             matches!(err, StateError::CandidateDryRunProverFailed { .. }),
@@ -1184,13 +1225,14 @@ mod tests {
         to_insert.insert(box_id(7), vec![0x77u8; 40]);
         let snap_oracle = store.committed_snapshot().unwrap().expect("snap oracle");
         let oracle = snap_oracle
-            .candidate_dry_run_via_changes_for_test(&empty_r, &to_insert)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &to_insert)
             .expect("uncached oracle");
         let snap = store.committed_snapshot().unwrap().expect("snap recover");
         let mut disp_recover = None;
         let got = snap
             .candidate_dry_run_cached_with_changes(
                 &mut base,
+                &[],
                 &empty_r,
                 &to_insert,
                 &mut disp_recover,
@@ -1338,7 +1380,7 @@ mod tests {
         let empty_i: DryRunInsertMap = BTreeMap::new();
         let snap_n = store.committed_snapshot().unwrap().expect("snap N");
         snap_n
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("seed at N");
         assert_eq!(
             base.as_ref().map(|b| b.tip_id()),
@@ -1387,13 +1429,19 @@ mod tests {
         // Now the advance path should kick in: stale base (tip=N) + snapshot at N+1.
         let oracle_snap = store.committed_snapshot().unwrap().expect("snap oracle");
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle");
 
         let snap_np1 = store.committed_snapshot().unwrap().expect("snap N+1");
         let mut disp_advance = None;
         let got = snap_np1
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp_advance)
+            .candidate_dry_run_cached_with_changes(
+                &mut base,
+                &[],
+                &empty_r,
+                &empty_i,
+                &mut disp_advance,
+            )
             .expect("advance path");
 
         assert_eq!(oracle.0, got.0, "advanced state_root == oracle");
@@ -1419,7 +1467,13 @@ mod tests {
         let snap_np1b = store.committed_snapshot().unwrap().expect("snap N+1 b");
         let mut disp_hit = None;
         let got2 = snap_np1b
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp_hit)
+            .candidate_dry_run_cached_with_changes(
+                &mut base,
+                &[],
+                &empty_r,
+                &empty_i,
+                &mut disp_hit,
+            )
             .expect("second hit");
         assert_eq!(got.0, got2.0, "second hit state_root stable");
         assert_eq!(got.1, got2.1, "second hit proof stable");
@@ -1481,7 +1535,7 @@ mod tests {
         let empty_i: DryRunInsertMap = BTreeMap::new();
         let snap_n = store.committed_snapshot().unwrap().unwrap();
         snap_n
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .unwrap();
 
         // Block N+1: also empty.
@@ -1518,19 +1572,19 @@ mod tests {
         // Advance path: stale base at N, snapshot at N+1.
         let snap_np1 = store.committed_snapshot().unwrap().unwrap();
         let first = snap_np1
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("first run on advanced base");
 
         // Oracle for comparison (fresh rehydrate each time).
         let oracle_snap = store.committed_snapshot().unwrap().unwrap();
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle");
 
         // Second run on same advanced base — must not corrupt visited flags.
         let snap_np1b = store.committed_snapshot().unwrap().unwrap();
         let second = snap_np1b
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("second run on advanced base");
 
         assert_eq!(oracle.0, first.0, "first run state_root == oracle");
@@ -1610,12 +1664,12 @@ mod tests {
 
         let oracle_snap = store.committed_snapshot().unwrap().unwrap();
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle");
 
         let snap = store.committed_snapshot().unwrap().unwrap();
         let got = snap
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("fallback after multi-block jump");
 
         assert_eq!(
@@ -1750,7 +1804,7 @@ mod tests {
         let empty_i: DryRunInsertMap = BTreeMap::new();
         let snap_a = store_a.committed_snapshot().unwrap().unwrap();
         snap_a
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("prime on A");
         assert_eq!(base.as_ref().map(|b| b.tip_id()), Some(tip_a));
 
@@ -1758,12 +1812,12 @@ mod tests {
         // a descendant), falls back to full rehydrate.
         let oracle_b_snap = store_b.committed_snapshot().unwrap().unwrap();
         let oracle_b = oracle_b_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle B");
 
         let snap_b = store_b.committed_snapshot().unwrap().unwrap();
         let got = snap_b
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("fallback on sibling reorg");
 
         assert_eq!(oracle_b.0, got.0, "sibling reorg: state_root == oracle B");
@@ -1816,7 +1870,7 @@ mod tests {
         let mut base: Option<crate::store::snapshot::DryRunBase> = None;
         let snap_n = store.committed_snapshot().unwrap().unwrap();
         snap_n
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .unwrap();
 
         // Block N+1: header stored but NO BlockTransactions section.
@@ -1847,12 +1901,12 @@ mod tests {
 
         let oracle_snap = store.committed_snapshot().unwrap().unwrap();
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle");
 
         let snap_np1 = store.committed_snapshot().unwrap().unwrap();
         let got = snap_np1
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("fallback when BT section absent");
 
         assert_eq!(oracle.0, got.0, "missing section: state_root == oracle");
@@ -1920,7 +1974,7 @@ mod tests {
         let mut base: Option<crate::store::snapshot::DryRunBase> = None;
         let snap_n = store.committed_snapshot().unwrap().unwrap();
         snap_n
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .unwrap();
         assert!(base.is_some(), "base seeded at N");
 
@@ -1996,6 +2050,7 @@ mod tests {
         let got = snap_np1
             .candidate_dry_run_cached_with_changes(
                 &mut base,
+                &[],
                 &empty_r,
                 &empty_i,
                 &mut disp_fallback,
@@ -2004,7 +2059,7 @@ mod tests {
 
         let oracle_snap = store.committed_snapshot().unwrap().unwrap();
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle after recovery");
 
         assert_eq!(oracle.0, got.0, "recovery state_root == oracle");
@@ -2102,6 +2157,7 @@ mod tests {
             let mut prover = snap.hydrate_prover().expect("hydrate for root_after_n");
             let (digest, _) = crate::store::dry_run::apply_change_set_to_prover(
                 &mut prover,
+                &[],
                 &to_remove_n,
                 &to_insert_n,
             )
@@ -2125,7 +2181,7 @@ mod tests {
         let mut base: Option<crate::store::snapshot::DryRunBase> = None;
         let snap_n = store.committed_snapshot().unwrap().expect("snap N");
         snap_n
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("seed base at N");
         assert_eq!(
             base.as_ref().map(|b| b.tip_id()),
@@ -2168,7 +2224,7 @@ mod tests {
         // Oracle: fresh uncached dry-run at N+1.
         let oracle_snap = store.committed_snapshot().unwrap().expect("oracle snap");
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle");
 
         // Advance path: stale base at N (contains N's post-mutation tree),
@@ -2178,7 +2234,7 @@ mod tests {
         let snap_np1 = store.committed_snapshot().unwrap().expect("snap N+1");
         let mut disp = None;
         let got = snap_np1
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut disp)
             .expect("advance path at N+1");
 
         assert_eq!(
@@ -2211,7 +2267,13 @@ mod tests {
         let snap_np1_b = store.committed_snapshot().unwrap().expect("snap N+1 b");
         let mut disp_hit = None;
         let got2 = snap_np1_b
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp_hit)
+            .candidate_dry_run_cached_with_changes(
+                &mut base,
+                &[],
+                &empty_r,
+                &empty_i,
+                &mut disp_hit,
+            )
             .expect("second same-tip hit after non-empty advance");
         assert_eq!(
             oracle.0, got2.0,
@@ -2298,7 +2360,7 @@ mod tests {
         let mut base: Option<crate::store::snapshot::DryRunBase> = None;
         let snap_n = store.committed_snapshot().unwrap().unwrap();
         snap_n
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut None)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
             .expect("seed base at N");
         assert!(base.is_some(), "base seeded at N");
 
@@ -2358,7 +2420,7 @@ mod tests {
         // Oracle: fresh uncached dry-run at N+1.
         let oracle_snap = store.committed_snapshot().unwrap().unwrap();
         let oracle = oracle_snap
-            .candidate_dry_run_via_changes_for_test(&empty_r, &empty_i)
+            .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
             .expect("oracle");
 
         // Advance path: the lying BT section causes a digest mismatch in
@@ -2366,7 +2428,7 @@ mod tests {
         let snap_np1 = store.committed_snapshot().unwrap().unwrap();
         let mut disp = None;
         let got = snap_np1
-            .candidate_dry_run_cached_with_changes(&mut base, &empty_r, &empty_i, &mut disp)
+            .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut disp)
             .expect("fallback after digest mismatch");
 
         assert_eq!(

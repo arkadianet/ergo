@@ -968,8 +968,9 @@ mod tests {
         to_insert.insert(new_a, vec![0x10, 0x11]);
         to_insert.insert(new_b, vec![0x12, 0x13]);
 
-        let (new_root, proof_bytes) = apply_change_set_via_prover(&tree, &to_remove, &to_insert)
-            .expect("producer must succeed");
+        let (new_root, proof_bytes) =
+            apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
+                .expect("producer must succeed");
         let new_root_bytes = *new_root.as_bytes();
 
         let ad_proofs_root = *blake2b256(&proof_bytes).as_bytes();
@@ -1079,8 +1080,9 @@ mod tests {
 
         // Run the production producer to get the canonical
         // witness + post-state.
-        let (new_root, proof_bytes) = apply_change_set_via_prover(&tree, &to_remove, &to_insert)
-            .expect("producer must succeed");
+        let (new_root, proof_bytes) =
+            apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
+                .expect("producer must succeed");
         let new_root_bytes = *new_root.as_bytes();
 
         // Build a Mode 5 view of this block.
@@ -1562,7 +1564,7 @@ mod tests {
 
             // 4. PRODUCER (Mode 1 prover): derive (post-root, witness).
             let (new_root, proof_bytes) =
-                apply_change_set_via_prover(&tree, &to_remove, &to_insert)
+                apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
                     .expect("producer prover");
             let new_root_bytes = *new_root.as_bytes();
             let height_1_pinned = arr33(HEIGHT_1_STATE_DIGEST_HEX);

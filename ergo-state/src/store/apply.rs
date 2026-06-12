@@ -375,6 +375,29 @@ impl StateStore {
         Ok((to_remove, to_insert))
     }
 
+    /// Collect the block's data-input box ids for the canonical AVL
+    /// lookup prefix: TRANSACTION order, duplicates included, NOT
+    /// sorted — Scala `ErgoState.stateChanges` builds
+    /// `toLookup = txs.flatMap(_.dataInputs).map(b => Lookup(b.boxId))`
+    /// and `StateChanges.operations = toLookup ++ toRemove ++ toAppend`.
+    /// Mirrors the verifier-side collection in
+    /// `ergo-sync/src/block_proc.rs` exactly; a divergence between the
+    /// two would make our miner's proofs unverifiable by our own
+    /// verifier (and by the reference).
+    pub(crate) fn build_data_input_lookups_checked(
+        checked: &[CheckedTransaction],
+    ) -> Vec<[u8; 32]> {
+        checked
+            .iter()
+            .flat_map(|c| {
+                c.transaction()
+                    .data_inputs
+                    .iter()
+                    .map(|di| *di.box_id.as_bytes())
+            })
+            .collect()
+    }
+
     /// Build UTXO change maps from raw transactions (recomputes tx_id).
     /// Used by `apply_block_unchecked` for genesis and tests, and by the
     /// Mode 5 digest block-processing path (in `ergo-sync`), which works

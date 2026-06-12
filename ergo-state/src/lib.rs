@@ -286,6 +286,7 @@ pub mod test_helpers {
     /// in BTreeMap-ascending key order, matching `apply_change_set_via_prover`.
     pub fn derive_ad_proofs_over_boxes(
         pre_state: &[([u8; 32], Vec<u8>)],
+        to_lookup: &[[u8; 32]],
         to_remove: &std::collections::BTreeMap<[u8; 32], ()>,
         to_insert: &std::collections::BTreeMap<[u8; 32], Vec<u8>>,
     ) -> Result<([u8; 33], Vec<u8>), StateError> {
@@ -293,7 +294,8 @@ pub mod test_helpers {
         for (id, bytes) in pre_state {
             tree.insert(*id, bytes.clone());
         }
-        let (root, proof) = crate::store::apply_change_set_via_prover(&tree, to_remove, to_insert)?;
+        let (root, proof) =
+            crate::store::apply_change_set_via_prover(&tree, to_lookup, to_remove, to_insert)?;
         Ok((*root.as_bytes(), proof))
     }
 

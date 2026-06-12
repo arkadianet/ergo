@@ -1,15 +1,28 @@
 //! Mining-candidate dry-run: speculative AVL+ apply without persistence.
 //!
 //! `apply_change_set_via_prover` hydrates an `ergo_avltree_rust`
-//! `BatchAVLProver` from the current `AvlTree` state, applies a batch
-//! of (remove, insert) UTXO mutations in the same order as
-//! `apply_mutations` (BTreeMap-ascending removes, then BTreeMap-
-//! ascending inserts), and returns the resulting `(new_state_root,
-//! raw_proof_bytes)`. The caller of [`crate::StateStore::candidate_dry_run`]
-//! later frames the raw proof into a type-104 ADProofs section and
-//! hashes it via `ad_proofs_root = blake2b256(raw_proof_bytes)`
-//! (Phase 1c step c0 resolved — see
-//! `ergo-state/tests/ad_proofs_root_oracle.rs`).
+//! `BatchAVLProver` from the current `AvlTree` state, applies the
+//! CANONICAL operation stream — data-input lookups first (transaction
+//! order, duplicates included), then removes, then inserts (both
+//! BTreeMap-ascending, matching `apply_mutations`) — and returns the
+//! resulting `(new_state_root, raw_proof_bytes)`. The caller of
+//! [`crate::StateStore::candidate_dry_run`] later frames the raw proof
+//! into a type-104 ADProofs section and hashes it via
+//! `ad_proofs_root = blake2b256(raw_proof_bytes)` (Phase 1c step c0
+//! resolved — see `ergo-state/tests/ad_proofs_root_oracle.rs`).
+//!
+//! CONSENSUS — the lookup prefix is part of the canonical stream:
+//! Scala `StateChanges.operations = toLookup ++ toRemove ++ toAppend`,
+//! where `ErgoState.stateChanges` emits one `Lookup` per transaction
+//! data input. Lookups are digest-NEUTRAL but proof-VISIBLE — they
+//! expand visited nodes and direction bits in the proof transcript
+//! without mutating the tree — so omitting them yields a bit-correct
+//! `state_root` with a non-canonical `ad_proofs_root`, and the
+//! reference rejects the mined block with "Regenerated proofHash is
+//! not equal to the declared one" (incident: mainnet block 344f5a2f…
+//! at height 1,805,523; see dev-docs/incident-2026-06-11-adproofs/).
+//! The verifier-side replay (`digest_apply.rs`) has always consumed
+//! the lookup prefix; this module is the generator-side mirror.
 //!
 //! Uses plain `BatchAVLProver`, NEVER `PersistentBatchAVLProver`.
 //! The latter has hidden storage paths that would defeat the
@@ -30,25 +43,30 @@ use crate::store::StateError;
 pub(crate) type DryRunRemoveMap = BTreeMap<[u8; 32], ()>;
 pub(crate) type DryRunInsertMap = BTreeMap<[u8; 32], Vec<u8>>;
 
-/// Hydrate a `BatchAVLProver` from `tree`, apply a batch of removes
-/// then inserts in BTreeMap-ascending key order, and return the
-/// resulting `(new_state_root, raw_proof_bytes)`. Does not mutate
+/// Hydrate a `BatchAVLProver` from `tree`, apply the canonical op
+/// stream (data-input lookups, then removes, then inserts), and return
+/// the resulting `(new_state_root, raw_proof_bytes)`. Does not mutate
 /// `tree` or touch persistent storage.
 ///
-/// Ordering matches `apply_mutations` (`store/mod.rs:apply_mutations`)
-/// exactly: all removes processed before any insert, both maps
-/// iterated in ascending key order via `BTreeMap`. The intra-block
+/// `to_lookup` carries the data-input box ids in TRANSACTION order,
+/// duplicates included, NOT sorted — exactly as the verifier-side
+/// replay consumes them (`digest_apply.rs`) and as Scala's
+/// `ErgoState.stateChanges` emits them. Remove/insert ordering matches
+/// `apply_mutations` (`store/mod.rs:apply_mutations`) exactly: all
+/// removes processed before any insert, both maps iterated in
+/// ascending key order via `BTreeMap`. The intra-block
 /// create-then-spend cancellation that the caller's `BoxChanges`
 /// builder applies (via `to_insert.remove(&box_id)` when a remove
 /// later in the batch references a freshly-inserted box) is already
 /// baked into the input maps — this function trusts them.
 pub(crate) fn apply_change_set_via_prover(
     tree: &AvlTree,
+    to_lookup: &[[u8; 32]],
     to_remove: &DryRunRemoveMap,
     to_insert: &DryRunInsertMap,
 ) -> Result<(ADDigest, Vec<u8>), StateError> {
     let mut prover = hydrate_batch_avl_prover(tree)?;
-    apply_change_set_to_prover(&mut prover, to_remove, to_insert)
+    apply_change_set_to_prover(&mut prover, to_lookup, to_remove, to_insert)
 }
 
 /// Apply a batch of removes then inserts to an already-hydrated
@@ -67,10 +85,29 @@ pub(crate) fn apply_change_set_via_prover(
 /// internal `generate_proof` call, so the tree is pristine for reuse.
 pub(crate) fn apply_change_set_to_prover(
     prover: &mut BatchAVLProver,
+    to_lookup: &[[u8; 32]],
     to_remove: &DryRunRemoveMap,
     to_insert: &DryRunInsertMap,
 ) -> Result<(ADDigest, Vec<u8>), StateError> {
-    // Removes first, BTreeMap-ascending (matches apply_mutations order).
+    // Data-input lookups first, in the given (transaction) order —
+    // Scala `StateChanges.operations = toLookup ++ toRemove ++ toAppend`.
+    // Read-only: never mutates the tree or the digest, but each lookup
+    // marks visited nodes and appends direction bits to the proof, so
+    // the proof bytes are NOT the same without them. A lookup of an
+    // absent key (e.g. a data input on a box created later in this
+    // same block) is valid and yields a non-inclusion path, exactly as
+    // in the reference (lookups precede all removals/insertions).
+    for box_id in to_lookup {
+        prover
+            .perform_one_operation(&Operation::Lookup(Bytes::copy_from_slice(box_id)))
+            .map_err(|e| StateError::CandidateDryRunProverFailed {
+                op: "lookup",
+                box_id: hex::encode(box_id),
+                error: e.to_string(),
+            })?;
+    }
+
+    // Removes next, BTreeMap-ascending (matches apply_mutations order).
     for box_id in to_remove.keys() {
         prover
             .perform_one_operation(&Operation::Remove(Bytes::copy_from_slice(box_id)))
@@ -145,7 +182,7 @@ mod tests {
 
         let to_remove: DryRunRemoveMap = BTreeMap::new();
         let to_insert: DryRunInsertMap = BTreeMap::new();
-        let (after, proof) = apply_change_set_via_prover(&tree, &to_remove, &to_insert)
+        let (after, proof) = apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
             .expect("dry-run empty batch");
 
         assert_eq!(
@@ -184,8 +221,8 @@ mod tests {
         let to_remove: DryRunRemoveMap = BTreeMap::new();
         let mut to_insert: DryRunInsertMap = BTreeMap::new();
         to_insert.insert(new_key, new_val);
-        let (dry_root, _proof) =
-            apply_change_set_via_prover(&shared, &to_remove, &to_insert).expect("dry-run insert");
+        let (dry_root, _proof) = apply_change_set_via_prover(&shared, &[], &to_remove, &to_insert)
+            .expect("dry-run insert");
 
         assert_eq!(
             dry_root.as_bytes(),
@@ -211,8 +248,8 @@ mod tests {
         let mut to_remove: DryRunRemoveMap = BTreeMap::new();
         to_remove.insert(make_key(2), ());
         let to_insert: DryRunInsertMap = BTreeMap::new();
-        let (dry_root, _proof) =
-            apply_change_set_via_prover(&shared, &to_remove, &to_insert).expect("dry-run remove");
+        let (dry_root, _proof) = apply_change_set_via_prover(&shared, &[], &to_remove, &to_insert)
+            .expect("dry-run remove");
 
         assert_eq!(dry_root.as_bytes(), real_root.as_bytes());
     }
@@ -251,8 +288,8 @@ mod tests {
         }
         let real_root = real.root_digest();
 
-        let (dry_root, _proof) =
-            apply_change_set_via_prover(&shared, &to_remove, &to_insert).expect("dry-run mixed");
+        let (dry_root, _proof) = apply_change_set_via_prover(&shared, &[], &to_remove, &to_insert)
+            .expect("dry-run mixed");
         assert_eq!(
             dry_root.as_bytes(),
             real_root.as_bytes(),
@@ -276,8 +313,8 @@ mod tests {
         to_insert.insert(make_key(100), vec![0x42]);
 
         for _ in 0..10 {
-            let _ =
-                apply_change_set_via_prover(&tree, &to_remove, &to_insert).expect("dry-run loop");
+            let _ = apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
+                .expect("dry-run loop");
         }
 
         let after = tree.root_digest();
@@ -285,6 +322,136 @@ mod tests {
             after.as_bytes(),
             before.as_bytes(),
             "tree root must NOT change across repeated dry-runs"
+        );
+    }
+
+    // ----- data-input lookup prefix (h1805523 incident regression) -----
+
+    #[test]
+    fn lookup_prefix_changes_proof_bytes_but_not_digest() {
+        // CONSENSUS regression for the height-1,805,523 incident: the
+        // same change set with and without a data-input lookup prefix
+        // must reach the SAME digest but produce DIFFERENT proof bytes.
+        // Lookups are digest-neutral, proof-visible — omitting them
+        // produced a bit-correct state_root with a non-canonical
+        // ad_proofs_root that the reference rejected.
+        let mut tree = AvlTree::new();
+        for i in 0u8..8 {
+            tree.insert(make_key(i), vec![i]);
+        }
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(make_key(3), ());
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(make_key(50), vec![0xAA]);
+
+        let (root_plain, proof_plain) =
+            apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
+                .expect("lookup-free dry-run");
+        let lookups = [make_key(1), make_key(6)];
+        let (root_lk, proof_lk) =
+            apply_change_set_via_prover(&tree, &lookups, &to_remove, &to_insert)
+                .expect("lookup-prefixed dry-run");
+
+        assert_eq!(
+            root_lk.as_bytes(),
+            root_plain.as_bytes(),
+            "lookups must be digest-neutral"
+        );
+        assert_ne!(
+            proof_lk, proof_plain,
+            "lookups must be proof-visible (h1805523 regression)"
+        );
+    }
+
+    #[test]
+    fn empty_lookup_prefix_is_byte_identical_to_pre_fix_behavior() {
+        // Negative control guarding the 1804848-shaped (no data inputs)
+        // case: an empty lookup slice must not perturb the proof stream
+        // in any way.
+        let mut tree = AvlTree::new();
+        for i in 0u8..8 {
+            tree.insert(make_key(i), vec![i]);
+        }
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(make_key(2), ());
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(make_key(40), vec![0xCC]);
+
+        let (r1, p1) =
+            apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert).expect("first run");
+        let (r2, p2) =
+            apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert).expect("second run");
+        assert_eq!(r1.as_bytes(), r2.as_bytes());
+        assert_eq!(p1, p2, "empty lookup prefix must be a byte-level no-op");
+    }
+
+    #[test]
+    fn lookup_of_absent_key_is_valid_non_inclusion() {
+        // A data input referencing a box created later in the same
+        // block is looked up BEFORE any insert (canonical order:
+        // toLookup ++ toRemove ++ toAppend) — the prover must emit a
+        // non-inclusion path, not fail.
+        let mut tree = AvlTree::new();
+        for i in 0u8..4 {
+            tree.insert(make_key(i), vec![i]);
+        }
+        let absent = make_key(200);
+        let to_remove: DryRunRemoveMap = BTreeMap::new();
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(absent, vec![0x01]);
+        let (root, _proof) = apply_change_set_via_prover(&tree, &[absent], &to_remove, &to_insert)
+            .expect("absent-key lookup must be a valid non-inclusion, not an error");
+        // ...and the insert still landed.
+        let mut twin = AvlTree::new();
+        for i in 0u8..4 {
+            twin.insert(make_key(i), vec![i]);
+        }
+        twin.insert(absent, vec![0x01]);
+        assert_eq!(root.as_bytes(), twin.root_digest().as_bytes());
+    }
+
+    #[test]
+    fn generated_proof_round_trips_through_production_verifier() {
+        // Generator/verifier symmetry: this is the SAME AvlVerifier the
+        // Mode-5 digest apply path (digest_apply.rs) drives against
+        // real mainnet ADProofs — including data-input blocks — so
+        // agreement here transitively pins the generator to the
+        // network's canonical proof format. Replay order matches
+        // digest_apply exactly: lookups (transaction order, duplicates
+        // included) → removes (ascending) → inserts (ascending).
+        let mut tree = AvlTree::new();
+        for i in 0u8..10 {
+            tree.insert(make_key(i), vec![i, i]);
+        }
+        let parent_root = tree.root_digest();
+
+        let lookups = [make_key(2), make_key(7), make_key(2)]; // dup allowed
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(make_key(4), ());
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(make_key(60), vec![0xBE]);
+
+        let (new_root, proof) =
+            apply_change_set_via_prover(&tree, &lookups, &to_remove, &to_insert)
+                .expect("dry-run with lookups");
+
+        let mut verifier =
+            ergo_sigma::avl::AvlVerifier::new(parent_root.as_bytes(), &proof, 32, None)
+                .expect("verifier construction from generated proof");
+        for k in &lookups {
+            verifier.lookup(k).expect("lookup replay");
+        }
+        for k in to_remove.keys() {
+            verifier.remove(k).expect("remove replay");
+        }
+        for (k, v) in &to_insert {
+            verifier.insert(k, v).expect("insert replay");
+        }
+        let vd = verifier.digest().expect("verifier digest");
+        assert_eq!(
+            vd.as_slice(),
+            new_root.as_bytes(),
+            "verifier must reproduce the prover digest from the generated proof"
         );
     }
 
@@ -296,7 +463,7 @@ mod tests {
         let mut to_remove: DryRunRemoveMap = BTreeMap::new();
         to_remove.insert(make_key(99), ()); // never inserted
         let to_insert: DryRunInsertMap = BTreeMap::new();
-        let err = apply_change_set_via_prover(&tree, &to_remove, &to_insert)
+        let err = apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
             .expect_err("removing absent key must fail");
         match err {
             StateError::CandidateDryRunProverFailed { op, box_id, error } => {
