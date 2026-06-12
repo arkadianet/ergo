@@ -1100,8 +1100,10 @@ async fn build_unsigned_tx(
     let payment_reqs: Vec<ergo_wallet::tx_builder::PaymentRequest> = requests
         .iter()
         .map(|r| {
-            let pubkey = ergo_ser::address::decode_p2pk_address(&r.address, network)
-                .map_err(|_| WalletAdminError::Internal(format!("bad address: {}", r.address)))?;
+            let pubkey =
+                ergo_ser::address::decode_p2pk_address(&r.address, network).map_err(|e| {
+                    WalletAdminError::BadRequest(format!("bad address {}: {e}", r.address))
+                })?;
             // Canonical (non-segregated) P2PK tree — matches Scala
             // ErgoAddressEncoder and the wallet's own tracked_p2pk_trees.
             // The segregated build_prove_dlog_ergo_tree would emit a P2S
@@ -3214,8 +3216,10 @@ async fn get_private_key_impl(
     let unlocked = storage_guard.unlocked().ok_or(WalletAdminError::Locked)?;
 
     // Decode address → pubkey.
-    let pubkey = ergo_ser::address::decode_p2pk_address(&request.address, cfg.network)
-        .map_err(|_| WalletAdminError::Internal(format!("bad address: {}", request.address)))?;
+    let pubkey =
+        ergo_ser::address::decode_p2pk_address(&request.address, cfg.network).map_err(|e| {
+            WalletAdminError::BadRequest(format!("bad address {}: {e}", request.address))
+        })?;
 
     // Look up derivation path for this pubkey in WALLET_TRACKED_PUBKEYS.
     let read_txn = db
