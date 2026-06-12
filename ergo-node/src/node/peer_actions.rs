@@ -122,6 +122,32 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     }
 }
 
+/// `POST /peers/connect` (Scala `ConnectTo`): learn the operator-supplied
+/// address with Seed origin — trusted like a bootstrap address, skipping
+/// the routability filter exactly as Scala dials whatever the operator
+/// names — then dial it immediately with the standard dial idiom.
+pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAddr) {
+    use ergo_p2p::peer_manager::PeerOrigin;
+    let now = Instant::now();
+    let _ = state.peer_manager.add_known_address(addr, PeerOrigin::Seed);
+    match state.peer_manager.register_outbound(addr, now) {
+        Ok(()) => {
+            debug!(peer = %addr, "operator /peers/connect dial");
+            tokio::spawn(peer_loop::dial_task(
+                addr,
+                state.magic,
+                state.our_handshake.clone(),
+                state.event_tx.clone(),
+            ));
+        }
+        Err(e) => {
+            // Already connected / already dialing / at capacity — the
+            // route already answered 200 (fire-and-forget, Scala parity).
+            debug!(peer = %addr, error = %e, "operator dial not registered");
+        }
+    }
+}
+
 pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
     let now = Instant::now();
     // Count RequestModifier messages AND their ID payloads

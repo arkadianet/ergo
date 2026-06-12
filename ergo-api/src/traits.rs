@@ -141,6 +141,14 @@ pub trait NodeSubmit: Send + Sync {
 /// the connection refuses.
 pub trait NodeAdmin: Send + Sync {
     fn request_shutdown(&self);
+
+    /// Fire-and-forget dial request for `POST /peers/connect` (Scala
+    /// fires `ConnectTo(PeerInfo.fromAddress(...))` at the network
+    /// controller and answers 200 without waiting for the dial's
+    /// outcome). Default no-op so admin handles that only expose
+    /// shutdown keep compiling; the node wires a real sender into its
+    /// action loop.
+    fn connect_to_peer(&self, _addr: std::net::SocketAddr) {}
 }
 
 /// No-op `NodeAdmin` for tests and configurations that don't expose

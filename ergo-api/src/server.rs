@@ -594,6 +594,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         let admin_routes: Router = Router::new()
             .route("/api/v1/node/shutdown", post(shutdown_handler))
             .route("/node/shutdown", post(shutdown_handler))
+            // Scala `ErgoPeersApiRoute.connect` is the one /peers route
+            // with `withAuth` — it rides the same admin + key gate.
+            .route("/peers/connect", post(peers_connect_handler))
             // Scala gates the whole `node` pathPrefix (probed live:
             // GET /node/zzz on the reference node → 403), so unknown
             // `/node/*` subpaths keep rejecting on the key first. Real
@@ -1799,6 +1802,39 @@ pub(crate) fn map_submit_error(err: SubmitError) -> (StatusCode, ApiSubmitError)
 async fn shutdown_handler(State(admin): State<Arc<dyn NodeAdmin>>) -> (StatusCode, &'static str) {
     admin.request_shutdown();
     (StatusCode::ACCEPTED, "shutdown_requested")
+}
+
+/// `POST /peers/connect` — Scala `ErgoPeersApiRoute.connect`: the body is
+/// a JSON string `"host:port"`; a parse failure is 400; success fires the
+/// dial at the node and answers 200 without waiting for its outcome.
+/// Hostnames resolve asynchronously (Scala uses the equally permissive
+/// `InetAddress.getByName`); the first resolved address wins.
+async fn peers_connect_handler(
+    State(admin): State<Arc<dyn NodeAdmin>>,
+    body: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let bad = |reason: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": 400, "reason": reason })),
+        )
+    };
+    let Ok(addr_str) = serde_json::from_str::<String>(&body) else {
+        return bad("body must be a JSON string \"host:port\"");
+    };
+    // Fast path: literal ip:port. Fallback: async DNS for hostnames.
+    let addr = match addr_str.parse::<SocketAddr>() {
+        Ok(a) => a,
+        Err(_) => match tokio::net::lookup_host(addr_str.as_str()).await {
+            Ok(mut iter) => match iter.next() {
+                Some(a) => a,
+                None => return bad("address resolved to nothing"),
+            },
+            Err(_) => return bad("invalid host:port"),
+        },
+    };
+    admin.connect_to_peer(addr);
+    (StatusCode::OK, Json(serde_json::json!({})))
 }
 
 #[utoipa::path(

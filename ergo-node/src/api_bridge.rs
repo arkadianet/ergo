@@ -118,11 +118,20 @@ fn strip_extended_length_prefix(p: PathBuf) -> PathBuf {
 /// the first signal. Cheap to clone (ref-counted Arc).
 pub struct ShutdownAdmin {
     notify: Arc<Notify>,
+    /// Operator `/peers/connect` dial requests into the action loop.
+    /// `None` for embedders that only expose shutdown.
+    peer_connect_tx: Option<tokio::sync::mpsc::Sender<std::net::SocketAddr>>,
 }
 
 impl ShutdownAdmin {
-    pub fn new(notify: Arc<Notify>) -> Self {
-        Self { notify }
+    pub fn new(
+        notify: Arc<Notify>,
+        peer_connect_tx: Option<tokio::sync::mpsc::Sender<std::net::SocketAddr>>,
+    ) -> Self {
+        Self {
+            notify,
+            peer_connect_tx,
+        }
     }
 
     pub fn into_dyn(self) -> Arc<dyn NodeAdmin> {
@@ -134,6 +143,20 @@ impl NodeAdmin for ShutdownAdmin {
     fn request_shutdown(&self) {
         info!("/node/shutdown received via REST API");
         self.notify.notify_one();
+    }
+
+    fn connect_to_peer(&self, addr: std::net::SocketAddr) {
+        let Some(tx) = &self.peer_connect_tx else {
+            info!(peer = %addr, "/peers/connect ignored: no dial channel wired");
+            return;
+        };
+        // Fire-and-forget (Scala ConnectTo): a full/closed channel just
+        // drops the request — the route has already answered 200.
+        if let Err(e) = tx.try_send(addr) {
+            info!(peer = %addr, error = %e, "/peers/connect dial request dropped");
+        } else {
+            info!(peer = %addr, "/peers/connect dial requested");
+        }
     }
 }
 
