@@ -122,6 +122,36 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     }
 }
 
+/// `POST /peers/connect` (Scala `ConnectTo`): one-shot dial of the
+/// operator-supplied address with the standard dial idiom — and NOTHING
+/// persisted up front. Scala writes no peer record before handshake
+/// success and removes the peer on dial failure; here, success persists
+/// via the normal handshake path and a failed dial leaves no residue
+/// (no address-book entry, no redial schedule). Deliberately NOT
+/// `add_known_address`: a Seed-origin entry would be retained and
+/// re-dialed forever, turning a typo'd address into permanent dial
+/// noise and the endpoint into a (key-gated) address-book poisoning
+/// vector.
+pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAddr) {
+    let now = Instant::now();
+    match state.peer_manager.register_outbound(addr, now) {
+        Ok(()) => {
+            debug!(peer = %addr, "operator /peers/connect dial");
+            tokio::spawn(peer_loop::dial_task(
+                addr,
+                state.magic,
+                state.our_handshake.clone(),
+                state.event_tx.clone(),
+            ));
+        }
+        Err(e) => {
+            // Already connected / already dialing / at capacity — the
+            // route already answered 200 (fire-and-forget, Scala parity).
+            debug!(peer = %addr, error = %e, "operator dial not registered");
+        }
+    }
+}
+
 pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
     let now = Instant::now();
     // Count RequestModifier messages AND their ID payloads

@@ -594,6 +594,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         let admin_routes: Router = Router::new()
             .route("/api/v1/node/shutdown", post(shutdown_handler))
             .route("/node/shutdown", post(shutdown_handler))
+            // Scala `ErgoPeersApiRoute.connect` is the one /peers route
+            // with `withAuth` — it rides the same admin + key gate.
+            .route("/peers/connect", post(peers_connect_handler))
             // Scala gates the whole `node` pathPrefix (probed live:
             // GET /node/zzz on the reference node → 403), so unknown
             // `/node/*` subpaths keep rejecting on the key first. Real
@@ -1799,6 +1802,41 @@ pub(crate) fn map_submit_error(err: SubmitError) -> (StatusCode, ApiSubmitError)
 async fn shutdown_handler(State(admin): State<Arc<dyn NodeAdmin>>) -> (StatusCode, &'static str) {
     admin.request_shutdown();
     (StatusCode::ACCEPTED, "shutdown_requested")
+}
+
+/// `POST /peers/connect` — Scala `ErgoPeersApiRoute.connect`: the body is
+/// a JSON string `"host:port"`; a parse failure is 400; success fires the
+/// dial at the node and answers 200 (the JSON string `"OK"`, Scala's
+/// `ApiResponse.OK`) without waiting for the dial's outcome. Hostnames
+/// resolve asynchronously.
+///
+/// Deliberate divergences (all saner-direction, behind the api key):
+/// Scala 500s on an unresolvable hostname (`InetAddress.getByName`
+/// throws) and on regex-valid ports > 65535 — both are 400 here; Scala's
+/// unanchored regex mis-truncates hyphenated hostnames and accepts
+/// junk-wrapped input — rejected here; IPv6 literals work here, 400 in
+/// Scala.
+async fn peers_connect_handler(
+    State(admin): State<Arc<dyn NodeAdmin>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let addr_str = match crate::utils::parse_json_string_body(&body) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
+    };
+    // Fast path: literal ip:port. Fallback: async DNS for hostnames.
+    let addr = match addr_str.parse::<SocketAddr>() {
+        Ok(a) => a,
+        Err(_) => match tokio::net::lookup_host(addr_str.as_str()).await {
+            Ok(mut iter) => match iter.next() {
+                Some(a) => a,
+                None => return crate::utils::bad_request("address resolved to nothing"),
+            },
+            Err(_) => return crate::utils::bad_request("invalid host:port"),
+        },
+    };
+    admin.connect_to_peer(addr);
+    (StatusCode::OK, Json(serde_json::json!("OK"))).into_response()
 }
 
 #[utoipa::path(

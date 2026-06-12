@@ -24,7 +24,7 @@ use super::mining_dispatch::{
     decide_mining_signal, handle_mining_request, signal_mining_engine, MiningProducerState,
     MiningTipSnapshot, MiningWiring,
 };
-use super::peer_actions::{flush_actions, try_dial_peers};
+use super::peer_actions::{connect_to_address, flush_actions, try_dial_peers};
 use super::sync_tick::handle_sync_tick;
 use super::{NodeError, NodeState};
 
@@ -34,11 +34,14 @@ use ergo_mining::engine::BuildReason;
 /// replaced by a single `shutdown_rx` arm, and the cleanup runs inside
 /// this function so the task's terminal state still closes the store
 /// before yielding.
+#[allow(clippy::too_many_arguments)] // task spawn-point: channels unpacked straight into the select loop
 pub(super) async fn action_loop(
     mut state: NodeState,
     mut event_rx: mpsc::Receiver<PeerEvent>,
     mut submit_rx: mpsc::Receiver<SubmitRequest>,
     mut mining_submit_rx: mpsc::Receiver<crate::mining_bridge::MiningRequest>,
+    // Operator /peers/connect dial requests from the REST admin handle.
+    mut peer_connect_rx: mpsc::Receiver<std::net::SocketAddr>,
     // Mining wiring (handle + off-loop engine intent channel). `Some` exactly
     // when mining is configured on. The loop dispatches mining requests
     // against the handle and publishes a `BuildIntent` on tip change, a
@@ -132,6 +135,9 @@ pub(super) async fn action_loop(
             }
             _ = dial_tick.tick() => {
                 try_dial_peers(&mut state);
+            }
+            Some(addr) = peer_connect_rx.recv() => {
+                connect_to_address(&mut state, addr);
             }
             _ = mempool_tick.tick() => {
                 handle_mempool_tick(&mut state);

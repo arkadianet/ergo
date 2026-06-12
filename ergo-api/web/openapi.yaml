@@ -34,8 +34,6 @@ info:
       `/nipopow/proof/{minChainLength}/{suffixLength}/{headerId}`
       — REST surface for the existing prover (§6.2 prover ✅,
       §6.5 REST mount ❌)
-    - `POST /peers/connect` — deferred pending API-key auth layer
-      (an unauthenticated peer-connect endpoint is a DoS vector)
 
     **Config-gated (not 404 — depend on operator settings):**
 
@@ -4358,6 +4356,12 @@ paths:
       responses:
         '200':
           description: Attempt to connect to the peer
+        '400':
+          description: Bad request — body must be a JSON string "host:port"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         default:
           description: Error
           content:

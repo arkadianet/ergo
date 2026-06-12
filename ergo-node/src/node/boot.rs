@@ -844,6 +844,9 @@ async fn run_inner_with_backend(
     // of 256 absorbs a small burst while staying drainable in well
     // under one tick on a healthy node.
     let (submit_tx, submit_rx) = mpsc::channel::<SubmitRequest>(256);
+    // Operator /peers/connect -> action-loop dial requests. Small bound:
+    // these are manual, rare, and fire-and-forget.
+    let (peer_connect_tx, peer_connect_rx) = mpsc::channel::<std::net::SocketAddr>(16);
 
     // Mining request channel — same shape as submit_rx. Capacity 64 is
     // generous for external-miner polling: typical miners poll the
@@ -1081,7 +1084,11 @@ async fn run_inner_with_backend(
                 // overlay adds no contention with the main loop.
                 let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
                 let admin_handle: Arc<dyn ergo_api::NodeAdmin> =
-                    crate::api_bridge::ShutdownAdmin::new(shutdown_notify.clone()).into_dyn();
+                    crate::api_bridge::ShutdownAdmin::new(
+                        shutdown_notify.clone(),
+                        Some(peer_connect_tx.clone()),
+                    )
+                    .into_dyn();
 
                 // Production wallet admin. Owns the secret storage + wallet
                 // state behind RwLocks; the writer task is a dedicated tokio
@@ -1560,6 +1567,7 @@ async fn run_inner_with_backend(
         event_rx,
         submit_rx,
         mining_submit_rx,
+        peer_connect_rx,
         mining_wiring,
         shutdown_rx,
         mempool_tick_ms,

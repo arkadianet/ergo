@@ -362,6 +362,99 @@ async fn runtime_mount_all_wired_gates_shutdown_on_api_key() {
     );
 }
 
+// ----- POST /peers/connect (admin-wired, api_key-gated, Scala parity) -----
+
+/// Admin recorder: captures the parsed `SocketAddr` handed to
+/// `connect_to_peer` so the route tests can pin body parsing.
+#[derive(Default)]
+struct RecordingAdmin {
+    connected: std::sync::Mutex<Option<std::net::SocketAddr>>,
+}
+
+impl NodeAdmin for RecordingAdmin {
+    fn request_shutdown(&self) {}
+    fn connect_to_peer(&self, addr: std::net::SocketAddr) {
+        *self.connected.lock().unwrap() = Some(addr);
+    }
+}
+
+async fn post_body(
+    app: &axum::Router,
+    path: &str,
+    api_key: Option<&str>,
+    body: &'static str,
+) -> StatusCode {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(key) = api_key {
+        builder = builder.header(API_KEY_HEADER, key);
+    }
+    app.clone()
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn peers_connect_unwired_admin_is_404() {
+    let app = router_with_mempool(ctx(None), None);
+    assert_eq!(
+        post_body(&app, "/peers/connect", None, "\"127.0.0.1:5673\"").await,
+        StatusCode::NOT_FOUND,
+        "connect must 404 when no admin handle is wired",
+    );
+}
+
+#[tokio::test]
+async fn peers_connect_is_api_key_gated_and_records_the_addr() {
+    let recorder = Arc::new(RecordingAdmin::default());
+    let app = router_with_mempool_and_wallet_and_security(
+        ctx(None),
+        Some(recorder.clone() as Arc<dyn NodeAdmin>),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    );
+    // Scala: `connect` carries withAuth — bare requests reject on the key.
+    assert_eq!(
+        post_body(&app, "/peers/connect", None, "\"127.0.0.1:5673\"").await,
+        StatusCode::FORBIDDEN,
+    );
+    // With the key: 200, and the JSON-string body parses to the SocketAddr.
+    assert_eq!(
+        post_body(&app, "/peers/connect", Some("hello"), "\"127.0.0.1:5673\"").await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        *recorder.connected.lock().unwrap(),
+        Some("127.0.0.1:5673".parse().unwrap()),
+        "host:port body forwarded to the admin as a parsed SocketAddr",
+    );
+}
+
+#[tokio::test]
+async fn peers_connect_malformed_body_is_400() {
+    let recorder = Arc::new(RecordingAdmin::default());
+    let app = router_with_mempool_and_wallet_and_security(
+        ctx(None),
+        Some(recorder.clone() as Arc<dyn NodeAdmin>),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    );
+    // Scala: regex mismatch → ApiError.BadRequest. Both a non-address
+    // string and a non-string JSON body reject.
+    for body in ["\"not-an-address\"", "\"1.2.3.4\"", "{\"host\":\"x\"}"] {
+        assert_eq!(
+            post_body(&app, "/peers/connect", Some("hello"), body).await,
+            StatusCode::BAD_REQUEST,
+            "bad body {body} must 400",
+        );
+    }
+    assert_eq!(*recorder.connected.lock().unwrap(), None);
+}
+
 // ----- auth gate vs. router fallback (unknown paths must 404, never 403) -----
 //
 // Regression tests for the `.layer` fallback-capture bug: wrapping a
