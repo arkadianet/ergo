@@ -1878,6 +1878,57 @@ async fn utxo_genesis_returns_array_always_200() {
 }
 
 #[tokio::test]
+async fn utxo_get_snapshots_info_returns_empty_manifests_when_none_cached() {
+    // Scala `UtxoApiRoute.getSnapshotsInfo` serves the locally-stored
+    // snapshot set. This build's serve cache is empty at boot (in-memory
+    // only) and StubCompat carries no snapshot view, so the response is
+    // the empty container — value-identical to a Scala UTXO node that has
+    // taken no snapshots: {"availableManifests": {}}.
+    let (s, v) = json_get(build_compat_app(), "/utxo/getSnapshotsInfo").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, serde_json::json!({ "availableManifests": {} }));
+}
+
+#[tokio::test]
+async fn utxo_get_snapshots_info_renders_the_served_manifest() {
+    // When the bridge exposes a cached serve-side snapshot (the Mode-2
+    // build at a 52,224 boundary), the REST view must report it — the
+    // same data the P2P `SnapshotsInfo` reply serves, so wire and REST
+    // can never disagree.
+    struct SnapshotCompat;
+    impl NodeChainQuery for SnapshotCompat {
+        fn info(&self) -> ergo_api::compat::types::ScalaInfo {
+            StubCompat.info()
+        }
+        fn header_ids_at_height(&self, h: u32) -> Vec<String> {
+            StubCompat.header_ids_at_height(h)
+        }
+        fn full_block_by_id(&self, id: &str) -> Option<ergo_api::compat::types::ScalaFullBlock> {
+            StubCompat.full_block_by_id(id)
+        }
+        fn snapshots_info(&self) -> Vec<(i32, String)> {
+            vec![(52_224, "ab".repeat(32))]
+        }
+    }
+    let compat: Arc<dyn NodeChainQuery> = Arc::new(SnapshotCompat);
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        Some(compat),
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+    let (s, v) = json_get(app, "/utxo/getSnapshotsInfo").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        v,
+        serde_json::json!({ "availableManifests": { "52224": "ab".repeat(32) } }),
+        "height-keyed map, hex manifest id — Scala SnapshotInfoEncoder shape",
+    );
+}
+
+#[tokio::test]
 async fn utxo_routes_404_when_compat_disabled() {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
     let app = router(
@@ -1889,6 +1940,7 @@ async fn utxo_routes_404_when_compat_disabled() {
     );
     for path in [
         "/utxo/genesis",
+        "/utxo/getSnapshotsInfo",
         &format!("/utxo/byId/{}", "cc".repeat(32)),
         &format!("/utxo/byIdBinary/{}", "cc".repeat(32)),
         &format!("/utxo/withPool/byId/{}", "aa".repeat(32)),
@@ -2039,7 +2091,7 @@ async fn utxo_with_pool_by_ids_404s_when_compat_disabled() {
 // ---- /utxo/* mode-aware predicate (Mode 5 digest backend) ----------
 
 /// Build the compat app with the digest backend's
-/// `utxo_reads_supported = false`. The six `/utxo/*` Scala routes
+/// `utxo_reads_supported = false`. The seven `/utxo/*` Scala routes
 /// are replaced with a single wildcard returning
 /// 503 + Scala-parity body.
 fn build_compat_app_digest_backend() -> axum::Router {
@@ -2108,10 +2160,21 @@ async fn non_utxo_routes_still_mount_under_digest_backend() {
 }
 
 #[tokio::test]
+async fn snapshots_info_503s_under_digest_backend() {
+    // Same posture as the rest of the digest /utxo arm. (Known Scala
+    // oracle, derivable from source: digest state isn't a
+    // UtxoSetSnapshotPersistence, so Scala's `case _ => None` becomes a
+    // 404 not-found via ApiResponse — the blanket 503 is the
+    // pre-existing documented /utxo digest divergence.)
+    let (s, _) = json_get(build_compat_app_digest_backend(), "/utxo/getSnapshotsInfo").await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn unknown_utxo_subpath_still_404s_under_digest_backend() {
-    // The digest-backend mount is the SAME six (path, method)
+    // The digest-backend mount is the SAME seven (path, method)
     // shapes as Mode 1, just with the 503 handler. An unknown
-    // `/utxo/...` subpath that doesn't match any of the six routes
+    // `/utxo/...` subpath that doesn't match any of the seven routes
     // must still 404 — not be swallowed by an over-broad wildcard.
     // Mirrors Mode 1 behavior for unknown routes.
     let (s, _) = json_get(build_compat_app_digest_backend(), "/utxo/nonexistent").await;

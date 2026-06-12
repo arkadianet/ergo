@@ -30,6 +30,17 @@ pub trait NodeChainQuery: Send + Sync {
     /// vec if the height is past the tip or no chain has been written.
     fn header_ids_at_height(&self, height: u32) -> Vec<String>;
 
+    /// `(height, hex manifest id)` of the locally-served UTXO snapshot
+    /// set — Scala `UtxoSetSnapshotPersistence.getSnapshotInfo()`, which
+    /// backs BOTH the REST `/utxo/getSnapshotsInfo` route and the P2P
+    /// `SnapshotsInfo` reply, so the two views can never disagree. This
+    /// build holds at most one entry (the latest 52,224-boundary serve
+    /// cache; in-memory only, so empty at boot). Default empty for
+    /// bridges without a snapshot view.
+    fn snapshots_info(&self) -> Vec<(i32, String)> {
+        Vec::new()
+    }
+
     /// `/blocks/{header_id}` — full block reassembly.
     ///
     /// `header_id_hex` is an unprefixed lowercase 64-char hex string; the

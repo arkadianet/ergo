@@ -80,6 +80,13 @@ impl ergo_api::ChainParamsView for ScalaCompatBridge {
 }
 
 impl NodeChainQuery for ScalaCompatBridge {
+    fn snapshots_info(&self) -> Vec<(i32, String)> {
+        // Mirrored into the published snapshot once per sync_tick from the
+        // action loop's Mode-2 serve cache (`SnapshotState`), so this REST
+        // read always agrees with the P2P `SnapshotsInfo` reply.
+        self.handle.load().snapshot_manifests.clone()
+    }
+
     fn info(&self) -> ScalaInfo {
         let snap = self.handle.load();
         let cfg = &self.static_cfg;
