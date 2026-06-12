@@ -12,10 +12,14 @@
 //! hands in an [`EmissionSchedule`] view built over that math.
 //!
 //! `GET /emission/scripts` (emission / reemission / pay2Reemission P2S
-//! addresses) is **not implemented** — the contract-tree predefs aren't
-//! exposed in the workspace yet. The live-Scala oracle for it is already
-//! captured at `test-vectors/api/emission/scripts.json` for whoever
-//! picks that up.
+//! addresses) serves pre-rendered addresses handed in by the node —
+//! verified per-network constants in `ergo-chain-spec`, oracle-pinned in
+//! the node bridge against `test-vectors/api/emission/scripts.json`.
+//! Mainnet only for now: Scala's testnet serves three testnet addresses
+//! (its conf still carries the reemission settings even though
+//! activation is unreachable post upstream PR #2252); this build 404s
+//! there pending a testnet oracle capture — the trees are derivable from
+//! `testnet.conf`'s reemission NFT id when someone captures one.
 
 use std::sync::Arc;
 
@@ -68,4 +72,43 @@ async fn emission_at_handler(
     Path(height): Path<u32>,
 ) -> Json<EmissionInfoJson> {
     Json(view.emission_info_at(height))
+}
+
+/// Wire shape of `GET /emission/scripts` — the three emission-related
+/// contracts as P2S addresses, pre-rendered by the node (the bridge owns
+/// the per-network tree constants + address rendering; the live-Scala
+/// oracle parity test lives there against
+/// `test-vectors/api/emission/scripts.json`). Keys pin the Scala
+/// `EmissionApiRoute.scripts` envelope: `emission`, `reemission`,
+/// `pay2Reemission`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmissionScriptsJson {
+    pub emission: String,
+    pub reemission: String,
+    pub pay2_reemission: String,
+}
+
+/// Build the `/emission/scripts` router. Mounted only when the node's
+/// chain spec carries verified script constants (mainnet; testnet/dev
+/// return 404 pending an oracle capture — documented in the openapi).
+/// Public like the rest of `/emission/*` (no `withAuth` in Scala).
+///
+/// Scala's route is a bare `pathPrefix("scripts")` — no method
+/// directive, no `pathEnd` — so the live node answers POST and
+/// arbitrary subpaths with the same 200 (probed live on the reference
+/// node). Mirrored here with `any()` + a wildcard, per the house
+/// standard of replicating missing-directive quirks.
+pub fn emission_scripts_router(scripts: Arc<EmissionScriptsJson>) -> Router {
+    use axum::routing::any;
+    Router::new()
+        .route("/emission/scripts", any(emission_scripts_handler))
+        .route("/emission/scripts/*rest", any(emission_scripts_handler))
+        .with_state(scripts)
+}
+
+async fn emission_scripts_handler(
+    State(scripts): State<Arc<EmissionScriptsJson>>,
+) -> Json<EmissionScriptsJson> {
+    Json((*scripts).clone())
 }

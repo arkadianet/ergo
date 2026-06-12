@@ -357,6 +357,7 @@ fn build_app_with_mempool(
             chain_params: None,
             mining: None,
             emission: None,
+            emission_scripts: None,
             utxo_reads_supported: true,
         },
         None, // admin — tests don't exercise the shutdown endpoint

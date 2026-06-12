@@ -124,6 +124,11 @@ pub struct ServerCtx {
     /// schedule is static per-network math, valid in every node mode.
     /// Public by Scala parity: never touched by the `api_key` gate.
     pub emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
+    /// Scala-compat `/emission/scripts` — the three emission-related
+    /// contracts as pre-rendered P2S addresses. `None` ⇒ 404 (chain
+    /// specs without verified script constants, i.e. testnet/dev
+    /// pending an oracle capture). Public like the rest of `/emission`.
+    pub emission_scripts: Option<Arc<crate::emission::EmissionScriptsJson>>,
     /// Whether the node's state backend retains UTXO box bytes. When
     /// `true` (default — Mode 1 UTXO backend), the six `/utxo/*`
     /// routes mount the real handlers. When `false` (Mode 5 digest
@@ -186,6 +191,7 @@ pub fn serve_on(
         chain_params: None,
         mining: None,
         emission: None,
+        emission_scripts: None,
         utxo_reads_supported,
     };
     serve_on_with_mempool(ctx, listener, shutdown_rx, None)
@@ -449,6 +455,7 @@ pub fn router_with_wallet(
         chain_params: None,
         mining: None,
         emission: None,
+        emission_scripts: None,
         utxo_reads_supported,
     };
     router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
@@ -498,6 +505,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         chain_params,
         mining,
         emission,
+        emission_scripts,
         utxo_reads_supported,
     } = ctx;
     let operator: Router = Router::new()
@@ -812,6 +820,14 @@ pub fn router_with_mempool_and_wallet_and_security(
     // the gated subtrees.
     let operator = if let Some(em) = emission {
         operator.merge(crate::emission::emission_router(em))
+    } else {
+        operator
+    };
+
+    // `/emission/scripts` mounts when the chain spec carries verified
+    // script constants (mainnet). Same public posture as `/emission/at`.
+    let operator = if let Some(es) = emission_scripts {
+        operator.merge(crate::emission::emission_scripts_router(es))
     } else {
         operator
     };

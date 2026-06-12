@@ -592,7 +592,87 @@ impl ChainSpec {
             Network::Testnet => Self::testnet(),
         }
     }
+
+    /// The three emission-related contract trees (`/emission/scripts`),
+    /// as serialized `ErgoTree` bytes. Scala derives them from monetary
+    /// and reemission settings via `ErgoTreePredef` / `ReemissionContracts`;
+    /// this build carries them as verified per-network constants.
+    ///
+    /// `Some` only where every tree is verified: mainnet (oracle-pinned
+    /// against a live-Scala `/emission/scripts` capture, see
+    /// `test-vectors/api/emission/scripts.json`; the emission tree is
+    /// additionally cross-checked against the genesis emission box).
+    ///
+    /// Testnet returns `None` — a DOCUMENTED DIVERGENCE: Scala's testnet
+    /// serves three testnet addresses (its conf still carries the
+    /// reemission settings; only activation is unreachable post upstream
+    /// PR #2252, which is why this spec models it as `reemission: None`).
+    /// The testnet trees are derivable from `testnet.conf`'s reemission
+    /// NFT id once an oracle capture exists; until then the route stays
+    /// unmounted there rather than serving unverified constants.
+    pub fn emission_script_trees(&self) -> Option<EmissionScriptTrees> {
+        if self.network != Network::Mainnet {
+            return None;
+        }
+        // Defensive identity check: the constants are verified against THE
+        // canonical mainnet spec. A hypothetical custom spec tagged
+        // `Mainnet` with different identifying params (no such constructor
+        // exists today — `ChainSpec::for_network` is the only builder) must
+        // not serve them. `network_params` is pinned too: the bridge renders
+        // P2S addresses with `network_params.address_prefix`, so a tampered
+        // prefix would otherwise serve testnet-form addresses of the
+        // mainnet trees.
+        let canonical_reemission = ReemissionParams::mainnet();
+        let genuine = self.network_params == NetworkParams::MAINNET
+            && self
+                .reemission
+                .as_ref()
+                .is_some_and(|r| r.reemission_nft_id == canonical_reemission.reemission_nft_id)
+            && self.genesis.state_digest == GenesisParams::mainnet().state_digest;
+        if !genuine {
+            return None;
+        }
+        Some(EmissionScriptTrees {
+            emission: hex::decode(MAINNET_EMISSION_TREE_HEX).expect("const hex"),
+            reemission: hex::decode(MAINNET_REEMISSION_TREE_HEX).expect("const hex"),
+            pay_to_reemission: hex::decode(MAINNET_PAY_TO_REEMISSION_TREE_HEX).expect("const hex"),
+        })
+    }
 }
+
+/// Serialized `ErgoTree` bytes of the three emission-related contracts
+/// (see [`ChainSpec::emission_script_trees`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmissionScriptTrees {
+    /// The emission contract (`ErgoTreePredef.emissionBoxProp`) — the
+    /// genesis emission box's proposition.
+    pub emission: Vec<u8>,
+    /// The EIP-27 re-emission contract
+    /// (`ReemissionContracts.reemissionBoxProp`).
+    pub reemission: Vec<u8>,
+    /// The EIP-27 pay-to-reemission contract
+    /// (`ReemissionContracts.payToReemission`).
+    pub pay_to_reemission: Vec<u8>,
+}
+
+/// Mainnet emission contract tree. Identical to the genesis emission
+/// box's `ergoTree` (`test-vectors/mainnet/genesis_boxes.json[0]`,
+/// cross-checked by test) and to the live-Scala `/emission/scripts`
+/// "emission" P2S address payload (`test-vectors/api/emission/`
+/// `scripts.json` — P2S addresses embed the tree bytes verbatim).
+const MAINNET_EMISSION_TREE_HEX: &str = "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f";
+
+/// Mainnet EIP-27 re-emission contract tree. Sourced from the live-Scala
+/// `/emission/scripts` capture ("reemission" P2S address payload);
+/// embeds the mainnet reemission NFT id (cross-checked by test against
+/// [`ReemissionParams::mainnet`]).
+const MAINNET_REEMISSION_TREE_HEX: &str = "19870210040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b80400040004020580dac4090404040004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a70173007301100102040204c080fe010580f882ad160400d196830301938cb2e4c6b2a5730000020c4d0e73010001730293c2a7c2b2a5730300978302019683030191c1b2a5730400c1a790c1b2a5730500730693b1a5730796830501938cc7b2a573080001a39683020193c2b2a573090074730a730b830108cdeeac93a38cc7b2a5730c000192a3730d91a38cc7a70193730e99c1a7c1b2a5730f00";
+
+/// Mainnet EIP-27 pay-to-reemission contract tree. Sourced from the
+/// live-Scala `/emission/scripts` capture ("pay2Reemission" P2S address
+/// payload); embeds the mainnet reemission NFT id (cross-checked by
+/// test).
+const MAINNET_PAY_TO_REEMISSION_TREE_HEX: &str = "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302";
 
 impl BootstrapParams {
     /// Mainnet defaults. Seed peers from `mainnet.conf:129-143`;
@@ -654,6 +734,66 @@ mod tests {
     use super::*;
 
     // ----- happy path -----
+
+    #[test]
+    fn emission_script_trees_mainnet_constants_are_cross_checked() {
+        let trees = ChainSpec::mainnet()
+            .emission_script_trees()
+            .expect("mainnet carries verified script trees");
+
+        // The emission tree must be EXACTLY the FIRST genesis box's
+        // ergoTree — first-principles provenance. Anchored match (the
+        // key + quoted full value, and it must be the first ergoTree in
+        // the file), not a loose hex-substring scan.
+        let boxes_json = GenesisParams::mainnet().boxes_json.unwrap();
+        let anchored = format!("\"ergoTree\": \"{}\"", hex::encode(&trees.emission));
+        let first_tree_pos = boxes_json
+            .find("\"ergoTree\"")
+            .expect("genesis json has ergoTree keys");
+        assert_eq!(
+            boxes_json.find(&anchored),
+            Some(first_tree_pos),
+            "emission tree == boxes_json[0].ergoTree (anchored, first box)"
+        );
+
+        // Both EIP-27 trees embed the reemission NFT id from the spec AS A
+        // Coll[Byte] CONSTANT — anchored on the 0x0e20 (type + 32-byte
+        // length) prefix, not a bare hex substring.
+        let nft = hex::encode(ReemissionParams::mainnet().reemission_nft_id.as_bytes());
+        let pushed_nft = format!("0e20{nft}");
+        assert!(hex::encode(&trees.reemission).contains(&pushed_nft));
+        assert!(hex::encode(&trees.pay_to_reemission).contains(&pushed_nft));
+    }
+
+    #[test]
+    fn emission_script_trees_absent_off_mainnet() {
+        // Documented divergence: Scala's testnet serves three testnet
+        // addresses (settings present, activation unreachable); this build
+        // has no testnet oracle capture, so the spec returns None and the
+        // route stays unmounted there.
+        assert!(ChainSpec::testnet().emission_script_trees().is_none());
+    }
+
+    #[test]
+    fn emission_script_trees_refuse_a_tampered_mainnet_spec() {
+        // Defensive identity gate: a spec tagged Mainnet whose identifying
+        // params differ from the canonical constructor must not serve the
+        // verified constants.
+        let mut spec = ChainSpec::mainnet();
+        spec.genesis.state_digest = [0u8; 33];
+        assert!(spec.emission_script_trees().is_none());
+
+        let mut spec = ChainSpec::mainnet();
+        spec.reemission = None;
+        assert!(spec.emission_script_trees().is_none());
+
+        // network_params is part of the identity: the bridge renders P2S
+        // addresses with its prefix, so a Mainnet-tagged spec carrying the
+        // testnet prefix must not serve the trees either.
+        let mut spec = ChainSpec::mainnet();
+        spec.network_params = NetworkParams::TESTNET;
+        assert!(spec.emission_script_trees().is_none());
+    }
 
     #[test]
     fn network_roundtrips_through_str() {

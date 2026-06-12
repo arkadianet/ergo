@@ -1173,6 +1173,13 @@ async fn run_inner_with_backend(
                         config.chain_spec.monetary,
                         config.chain_spec.reemission.clone(),
                     ))),
+                    // Pre-rendered P2S addresses for /emission/scripts;
+                    // None off-mainnet (no verified tree constants), in
+                    // which case the route stays unmounted (404).
+                    emission_scripts: crate::api_bridge::render_emission_scripts(
+                        &config.chain_spec,
+                    )
+                    .map(Arc::new),
                     // `/utxo/*` mount-vs-503 follows the backend: only
                     // the UTXO backend retains box bytes. The digest
                     // backend's boot dispatch (Mode 5) doesn't reach
