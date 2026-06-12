@@ -427,6 +427,15 @@ impl CommittedSnapshot {
             &to_remove,
             &to_insert,
         )?;
+        // Pre-broadcast self-check (see self_check_candidate_proof).
+        super::dry_run::self_check_candidate_proof(
+            &self.state_root(),
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+            &proof,
+            &new_root,
+        )?;
         Ok((new_root, proof, self.chain_state.best_full_block_id))
     }
 
@@ -692,6 +701,21 @@ impl CommittedSnapshot {
             to_insert,
         ) {
             Ok((new_root, proof)) => {
+                // Pre-broadcast self-check (see self_check_candidate_proof).
+                // Runs BEFORE the guard is disarmed: a failure means the
+                // proof is unservable, and although `generate_proof`
+                // completed (shared `visited` bits are clean), dropping the
+                // base via the armed guard is the conservative choice — the
+                // next build rehydrates from committed state rather than
+                // trusting a base that just produced an unverifiable proof.
+                super::dry_run::self_check_candidate_proof(
+                    &self.state_root(),
+                    to_lookup,
+                    to_remove,
+                    to_insert,
+                    &proof,
+                    &new_root,
+                )?;
                 // Success: the just-run `generate_proof` cleaned the shared
                 // `visited` bits, so the base stays reusable for the next
                 // same-tip build.
