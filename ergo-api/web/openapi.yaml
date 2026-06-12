@@ -36,9 +36,6 @@ info:
       §6.5 REST mount ❌)
     - `/utxo/getSnapshotsInfo` — UTXO snapshot REST (Mode 2
       bootstrap, §2.5 / §8.2 partial)
-    - `/emission/at/{blockHeight}`, `/emission/scripts` — emission
-      info (§10.12 ❌; emission math exists in
-      `ergo_mining::emission_rules`)
     - `POST /peers/connect` — deferred pending API-key auth layer
       (an unauthenticated peer-connect endpoint is a DoS vector)
 
@@ -6654,6 +6651,12 @@ paths:
   /emission/scripts:
     get:
       summary: Print emission-related scripts
+      description: >-
+        The three emission-related contracts (emission, EIP-27
+        re-emission, pay-to-reemission) as P2S addresses. Served from
+        oracle-verified per-network constants: mainnet only in this
+        build — testnet (which has no EIP-27 post upstream PR #2252)
+        and dev chains return 404.
       operationId: emissionScripts
       tags:
         - emission

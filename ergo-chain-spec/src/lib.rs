@@ -592,7 +592,65 @@ impl ChainSpec {
             Network::Testnet => Self::testnet(),
         }
     }
+
+    /// The three emission-related contract trees (`/emission/scripts`),
+    /// as serialized `ErgoTree` bytes. Scala derives them from monetary
+    /// and reemission settings via `ErgoTreePredef` / `ReemissionContracts`;
+    /// this build carries them as verified per-network constants.
+    ///
+    /// `Some` only where every tree is verified: mainnet (oracle-pinned
+    /// against a live-Scala `/emission/scripts` capture, see
+    /// `test-vectors/api/emission/scripts.json`; the emission tree is
+    /// additionally cross-checked against the genesis emission box).
+    /// Testnet has no EIP-27 reemission (`reemission: None`, post
+    /// upstream PR #2252) and no captured oracle — `None`, and the REST
+    /// route stays unmounted there.
+    pub fn emission_script_trees(&self) -> Option<EmissionScriptTrees> {
+        match self.network {
+            Network::Mainnet => Some(EmissionScriptTrees {
+                emission: hex::decode(MAINNET_EMISSION_TREE_HEX).expect("const hex"),
+                reemission: hex::decode(MAINNET_REEMISSION_TREE_HEX).expect("const hex"),
+                pay_to_reemission: hex::decode(MAINNET_PAY_TO_REEMISSION_TREE_HEX)
+                    .expect("const hex"),
+            }),
+            Network::Testnet => None,
+        }
+    }
 }
+
+/// Serialized `ErgoTree` bytes of the three emission-related contracts
+/// (see [`ChainSpec::emission_script_trees`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmissionScriptTrees {
+    /// The emission contract (`ErgoTreePredef.emissionBoxProp`) — the
+    /// genesis emission box's proposition.
+    pub emission: Vec<u8>,
+    /// The EIP-27 re-emission contract
+    /// (`ReemissionContracts.reemissionBoxProp`).
+    pub reemission: Vec<u8>,
+    /// The EIP-27 pay-to-reemission contract
+    /// (`ReemissionContracts.payToReemission`).
+    pub pay_to_reemission: Vec<u8>,
+}
+
+/// Mainnet emission contract tree. Identical to the genesis emission
+/// box's `ergoTree` (`test-vectors/mainnet/genesis_boxes.json[0]`,
+/// cross-checked by test) and to the live-Scala `/emission/scripts`
+/// "emission" P2S address payload (`test-vectors/api/emission/`
+/// `scripts.json` — P2S addresses embed the tree bytes verbatim).
+const MAINNET_EMISSION_TREE_HEX: &str = "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f";
+
+/// Mainnet EIP-27 re-emission contract tree. Sourced from the live-Scala
+/// `/emission/scripts` capture ("reemission" P2S address payload);
+/// embeds the mainnet reemission NFT id (cross-checked by test against
+/// [`ReemissionParams::mainnet`]).
+const MAINNET_REEMISSION_TREE_HEX: &str = "19870210040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b80400040004020580dac4090404040004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a70173007301100102040204c080fe010580f882ad160400d196830301938cb2e4c6b2a5730000020c4d0e73010001730293c2a7c2b2a5730300978302019683030191c1b2a5730400c1a790c1b2a5730500730693b1a5730796830501938cc7b2a573080001a39683020193c2b2a573090074730a730b830108cdeeac93a38cc7b2a5730c000192a3730d91a38cc7a70193730e99c1a7c1b2a5730f00";
+
+/// Mainnet EIP-27 pay-to-reemission contract tree. Sourced from the
+/// live-Scala `/emission/scripts` capture ("pay2Reemission" P2S address
+/// payload); embeds the mainnet reemission NFT id (cross-checked by
+/// test).
+const MAINNET_PAY_TO_REEMISSION_TREE_HEX: &str = "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302";
 
 impl BootstrapParams {
     /// Mainnet defaults. Seed peers from `mainnet.conf:129-143`;
@@ -654,6 +712,33 @@ mod tests {
     use super::*;
 
     // ----- happy path -----
+
+    #[test]
+    fn emission_script_trees_mainnet_constants_are_cross_checked() {
+        let trees = ChainSpec::mainnet()
+            .emission_script_trees()
+            .expect("mainnet carries verified script trees");
+
+        // The emission tree must be EXACTLY the genesis emission box's
+        // ergoTree (boxes_json[0]) — first-principles provenance.
+        let boxes_json = GenesisParams::mainnet().boxes_json.unwrap();
+        assert!(
+            boxes_json.contains(&hex::encode(&trees.emission)),
+            "emission tree == genesis emission box ergoTree"
+        );
+
+        // Both EIP-27 trees embed the reemission NFT id from the spec
+        // (the contracts are parameterized by it).
+        let nft = hex::encode(ReemissionParams::mainnet().reemission_nft_id.as_bytes());
+        assert!(hex::encode(&trees.reemission).contains(&nft));
+        assert!(hex::encode(&trees.pay_to_reemission).contains(&nft));
+    }
+
+    #[test]
+    fn emission_script_trees_absent_off_mainnet() {
+        // Testnet (no EIP-27 post PR #2252) has no verified script set.
+        assert!(ChainSpec::testnet().emission_script_trees().is_none());
+    }
 
     #[test]
     fn network_roundtrips_through_str() {

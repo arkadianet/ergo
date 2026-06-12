@@ -69,3 +69,34 @@ async fn emission_at_handler(
 ) -> Json<EmissionInfoJson> {
     Json(view.emission_info_at(height))
 }
+
+/// Wire shape of `GET /emission/scripts` — the three emission-related
+/// contracts as P2S addresses, pre-rendered by the node (the bridge owns
+/// the per-network tree constants + address rendering; the live-Scala
+/// oracle parity test lives there against
+/// `test-vectors/api/emission/scripts.json`). Keys pin the Scala
+/// `EmissionApiRoute.scripts` envelope: `emission`, `reemission`,
+/// `pay2Reemission`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmissionScriptsJson {
+    pub emission: String,
+    pub reemission: String,
+    pub pay2_reemission: String,
+}
+
+/// Build the `/emission/scripts` router. Mounted only when the node's
+/// chain spec carries verified script constants (mainnet; testnet/dev
+/// return 404 pending an oracle capture — documented in the openapi).
+/// Public like the rest of `/emission/*` (no `withAuth` in Scala).
+pub fn emission_scripts_router(scripts: Arc<EmissionScriptsJson>) -> Router {
+    Router::new()
+        .route("/emission/scripts", get(emission_scripts_handler))
+        .with_state(scripts)
+}
+
+async fn emission_scripts_handler(
+    State(scripts): State<Arc<EmissionScriptsJson>>,
+) -> Json<EmissionScriptsJson> {
+    Json((*scripts).clone())
+}

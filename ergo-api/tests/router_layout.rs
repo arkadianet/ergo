@@ -2057,6 +2057,7 @@ fn build_compat_app_digest_backend() -> axum::Router {
             chain_params: None,
             mining: None,
             emission: None,
+            emission_scripts: None,
             utxo_reads_supported: false,
         },
         None,

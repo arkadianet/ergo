@@ -8,9 +8,29 @@
 //! computed in the constructor and cached for the process lifetime,
 //! mirroring Scala's `EmissionRules.coinsTotal` lazy val.
 
-use ergo_api::emission::{EmissionInfoJson, EmissionSchedule};
+use ergo_api::emission::{EmissionInfoJson, EmissionSchedule, EmissionScriptsJson};
 use ergo_chain_spec::{MonetaryParams, ReemissionParams};
 use ergo_mining::emission_rules;
+
+/// Render the chain spec's verified emission-script trees as the
+/// `/emission/scripts` response — three P2S addresses, exactly Scala's
+/// `Pay2SAddress(tree).toString()` (P2S addresses embed the tree bytes
+/// verbatim). `None` where the spec carries no verified trees
+/// (testnet/dev): the route then stays unmounted. Oracle-pinned below
+/// against the live-Scala capture.
+pub fn render_emission_scripts(spec: &ergo_chain_spec::ChainSpec) -> Option<EmissionScriptsJson> {
+    let trees = spec.emission_script_trees()?;
+    let network = spec.network_params.address_prefix;
+    let render = |tree: &[u8]| {
+        ergo_ser::address::encode_address_from_tree_bytes(network, tree)
+            .expect("verified spec trees parse as ErgoTree")
+    };
+    Some(EmissionScriptsJson {
+        emission: render(&trees.emission),
+        reemission: render(&trees.reemission),
+        pay2_reemission: render(&trees.pay_to_reemission),
+    })
+}
 
 /// See module docs. Construct via [`EmissionScheduleBridge::new`] and
 /// hand into `ServerCtx.emission` as an `Arc<dyn EmissionSchedule>`.
@@ -93,6 +113,35 @@ mod tests {
             (51_000_000_000, 12_000_000_000),
             "h=777_217 (EIP-27 activation: 63 − 12)"
         );
+    }
+
+    // ----- /emission/scripts -----
+
+    /// Live-Scala oracle parity: rendering the mainnet chain-spec trees
+    /// as P2S addresses must reproduce the captured `/emission/scripts`
+    /// response byte-for-byte (`test-vectors/api/emission/scripts.json`).
+    /// This exercises the full path the route serves: verified tree
+    /// constants -> base58 P2S address encoding.
+    #[test]
+    fn mainnet_scripts_match_live_scala_oracle() {
+        let scripts = render_emission_scripts(&ergo_chain_spec::ChainSpec::mainnet())
+            .expect("mainnet has verified script trees");
+
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/api/emission/scripts.json"
+        ))
+        .unwrap();
+        assert_eq!(scripts.emission, oracle["emission"].as_str().unwrap());
+        assert_eq!(scripts.reemission, oracle["reemission"].as_str().unwrap());
+        assert_eq!(
+            scripts.pay2_reemission,
+            oracle["pay2Reemission"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn testnet_scripts_absent() {
+        assert!(render_emission_scripts(&ergo_chain_spec::ChainSpec::testnet()).is_none());
     }
 
     // ----- no-reemission spec -----

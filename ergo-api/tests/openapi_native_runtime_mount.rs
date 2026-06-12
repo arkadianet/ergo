@@ -220,6 +220,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         chain_params: None,
         mining: None,
         emission: None,
+        emission_scripts: None,
         utxo_reads_supported: true,
     }
 }
@@ -540,5 +541,59 @@ async fn emission_unwired_is_404_bare() {
         get_with_key(&app, "/emission/at/1786000", None).await,
         StatusCode::NOT_FOUND,
         "unmounted /emission/at must 404 bare, never 403",
+    );
+}
+
+// ----- /emission/scripts (Scala-compat, public, static) -----
+
+#[tokio::test]
+async fn emission_scripts_serves_three_p2s_addresses_publicly() {
+    // Pre-rendered P2S addresses handed in by the node (the bridge owns
+    // the tree constants + address rendering; the oracle parity test
+    // lives there). Public like /emission/at — no withAuth in Scala.
+    let mut c = ctx(None);
+    c.emission_scripts = Some(Arc::new(ergo_api::emission::EmissionScriptsJson {
+        emission: "em-addr".to_string(),
+        reemission: "re-addr".to_string(),
+        pay2_reemission: "p2r-addr".to_string(),
+    }));
+    let app = router_with_mempool_and_wallet_and_security(
+        c,
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/emission/scripts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "public even with security");
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let got: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        got,
+        serde_json::json!({
+            "emission": "em-addr",
+            "reemission": "re-addr",
+            "pay2Reemission": "p2r-addr",
+        }),
+        "JSON keys must match the Scala EmissionApiRoute.scripts envelope",
+    );
+}
+
+#[tokio::test]
+async fn emission_scripts_unwired_is_404() {
+    // Chain specs without verified script constants (testnet/dev) leave
+    // the view None → route unmounted → 404, documented in the openapi.
+    let app = app_with_emission_and_security();
+    assert_eq!(
+        get_with_key(&app, "/emission/scripts", None).await,
+        StatusCode::NOT_FOUND,
     );
 }

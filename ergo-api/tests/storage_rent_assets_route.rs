@@ -127,6 +127,7 @@ fn build_app(indexer: StubIndexer) -> axum::Router {
         chain_params: Some(Arc::new(StubChainParams) as Arc<dyn ChainParamsView>),
         mining: None,
         emission: None,
+        emission_scripts: None,
         utxo_reads_supported: true,
     };
     router_with_mempool(ctx, None)
