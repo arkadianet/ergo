@@ -243,12 +243,13 @@ impl StateStore {
                 Err(e) => return Err(e.into()),
             };
             // Self-heal: if a snapshot was installed (best_full_block
-            // is set) but no post-install block has been applied yet
-            // (CHAIN_INDEX has no entry at best_full_block_height —
-            // install does not populate it, only apply_block does),
-            // arm the trust flag even if the persisted byte is missing.
-            // Covers data dirs that were installed by older binaries
-            // that did not yet write `MODE2_TRUST_FIRST_EPOCH_KEY`.
+            // is set) but CHAIN_INDEX has no entry at
+            // best_full_block_height, arm the trust flag even if the
+            // persisted byte is missing. Current installs co-commit a
+            // CHAIN_INDEX anchor at the snapshot height (see
+            // `install_snapshot_state`), so a missing entry marks a
+            // data dir installed by an older binary that wrote neither
+            // the anchor nor `MODE2_TRUST_FIRST_EPOCH_KEY`.
             // Cheap and idempotent: a normally-synced node has a
             // chain_index entry at best_full_block_height so this
             // branch never fires for them.

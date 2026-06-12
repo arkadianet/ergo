@@ -257,12 +257,22 @@ pub fn decode_address_content_bytes(
 
 /// Decode a P2PK address string and return the 33-byte compressed
 /// pubkey embedded in it. Returns an error if the address is not
-/// a valid P2PK address (wrong type byte, bad checksum, etc.).
+/// a valid P2PK address (wrong network or type byte, bad checksum,
+/// etc.). The same wallet keys are valid on every network, so without
+/// the network check a testnet address would decode to a tracked
+/// pubkey on a mainnet node; Scala's `ErgoAddressEncoder.fromString`
+/// rejects the mismatch at parse and so do the sibling decoders here.
+/// Remaining gap vs Scala: the 33 bytes are not validated as a curve
+/// point (Scala's `P2PKAddress` parses a `ProveDlog`); see the
+/// curve-dep trade-off note on [`encode_p2pk_from_pubkey`].
 ///
 /// Used by the wallet's `POST /wallet/updateChangeAddress` handler
 /// to validate that the address decodes to a real pubkey before
 /// checking tracked-pubkey membership.
-pub fn decode_p2pk_address(s: &str) -> Result<[u8; 33], AddressDecodeError> {
+pub fn decode_p2pk_address(
+    s: &str,
+    network: NetworkPrefix,
+) -> Result<[u8; 33], AddressDecodeError> {
     let raw = bs58::decode(s)
         .into_vec()
         .map_err(|e| AddressDecodeError::Base58(e.to_string()))?;
@@ -275,6 +285,13 @@ pub fn decode_p2pk_address(s: &str) -> Result<[u8; 33], AddressDecodeError> {
         return Err(AddressDecodeError::BadChecksum);
     }
     let header = raw[0];
+    let net_nibble = header & 0xF0;
+    if net_nibble != network.as_byte() {
+        return Err(AddressDecodeError::NetworkMismatch {
+            expected: network,
+            actual: header,
+        });
+    }
     let type_nibble = header & 0x0F;
     if type_nibble != TYPE_P2PK {
         return Err(AddressDecodeError::UnsupportedType(type_nibble));
@@ -528,6 +545,27 @@ mod tests {
         // equal the apply-path's `tree_hash_from_bytes(box.ergo_tree_bytes)`
         // for any box paying to this address.
         assert_eq!(blake2b256(&recovered), blake2b256(&bytes));
+    }
+
+    #[test]
+    fn decode_p2pk_address_enforces_network_prefix() {
+        let pubkey = [0x02; 33];
+        let testnet_addr =
+            encode_p2pk_from_pubkey(NetworkPrefix::Testnet, &pubkey).expect("encode P2PK");
+        // The same pubkey is a tracked wallet key on both networks, so
+        // the prefix is the only thing distinguishing this from a valid
+        // mainnet change address.
+        assert!(matches!(
+            decode_p2pk_address(&testnet_addr, NetworkPrefix::Mainnet),
+            Err(AddressDecodeError::NetworkMismatch {
+                expected: NetworkPrefix::Mainnet,
+                actual: 0x11,
+            })
+        ));
+        assert_eq!(
+            decode_p2pk_address(&testnet_addr, NetworkPrefix::Testnet).expect("matching network"),
+            pubkey
+        );
     }
 
     #[test]

@@ -227,3 +227,41 @@ fn mempool_process_peer_budget_exhaustion_survives_method_call() {
     );
     assert!(matches!(out3, AdmissionOutcome::Admitted { .. }));
 }
+
+#[test]
+fn failed_admission_populates_is_invalidated_inv_filter() {
+    // The invalidation cache's only consumer is `Mempool::is_invalidated`,
+    // the Inv fetch filter in ergo-node messaging — mirroring Scala's
+    // ErgoNodeViewSynchronizer filter over `invalidatedTxIds`. Pin that
+    // a validation failure makes the tx visible there under the same
+    // key Inv announcements carry: the canonical proof-excluded tx_id.
+    let mut mempool = Mempool::new(MempoolConfig::default(), Box::new(ByCost));
+    let utxo = EmptyUtxo;
+    let ctx = Ctx::new();
+    let peer = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 9000);
+
+    let tx = b"bad".to_vec();
+    let v = MockValidator::new().plan(
+        tx.clone(),
+        MockPlan {
+            result: Err(ergo_mempool::admission::ValidationErr::ScriptFailed),
+            charge: 10_000,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(digest(7)),
+        },
+    );
+    assert!(!mempool.is_invalidated(&digest(7)));
+    let (out, _) = mempool.process(
+        &tx,
+        TxSource::Peer(peer),
+        Instant::now(),
+        &ctx.view(&utxo),
+        &v,
+    );
+    assert!(matches!(out, AdmissionOutcome::Rejected { .. }));
+    assert!(
+        mempool.is_invalidated(&digest(7)),
+        "Inv filter must see the canonical tx_id after a validation failure"
+    );
+    assert!(!mempool.is_invalidated(&digest(8)));
+}

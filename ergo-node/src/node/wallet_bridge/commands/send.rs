@@ -29,6 +29,7 @@ pub(crate) async fn payment_send(
         ctx.db,
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
+        ctx.cfg.network,
     )
     .await;
     let _ = reply.send(result);
@@ -48,6 +49,7 @@ pub(crate) async fn transaction_generate(
         ctx.state,
         ctx.db,
         ctx.chain.as_ref(),
+        ctx.cfg.network,
     )
     .await;
     let _ = reply.send(result.map(|signed_tx_bytes| {
@@ -74,6 +76,7 @@ pub(crate) async fn transaction_generate_unsigned(
         ctx.state,
         ctx.db,
         ctx.chain.as_ref(),
+        ctx.cfg.network,
     )
     .await;
     let _ = reply.send(result.map(|unsigned_tx_bytes| {
@@ -126,6 +129,7 @@ pub(crate) async fn transaction_send(
         ctx.db,
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
+        ctx.cfg.network,
     )
     .await;
     let _ = reply.send(result);

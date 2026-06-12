@@ -1335,11 +1335,12 @@ impl SyncCoordinator {
 
     /// HOL (head-of-line) hedge: if the sections for the next sequential
     /// block have been inflight longer than `hol_threshold`, early-reassign
-    /// them to a different peer without waiting for the full 30 s timeout.
+    /// them to a different peer without waiting for the full 10 s
+    /// `DELIVERY_TIMEOUT`.
     ///
-    /// Called every sync tick (~3 s). With `hol_threshold = 8 s`, a stuck
-    /// HOL section gets reassigned ~3 ticks after crossing the threshold
-    /// rather than after the full DELIVERY_TIMEOUT.
+    /// Called every sync tick (1 s). With `hol_threshold = 5 s`, a stuck
+    /// HOL section gets reassigned on the first tick after crossing the
+    /// threshold — roughly half the full DELIVERY_TIMEOUT.
     ///
     /// Only block-section types (tx, extension) are hedged; headers use
     /// the normal timeout path.

@@ -23,7 +23,7 @@ use ergo_validation::{ProtocolParams, TransactionContext, TxValidationCtx, UtxoV
 use tracing::warn;
 
 use crate::budget::{BudgetVerdict, CostBudgets};
-use crate::invalidation::{InvalidationCache, InvalidationReason, LookupResult};
+use crate::invalidation::{InvalidationCache, InvalidationReason};
 use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
 use crate::pool::{Entry, OrderedPool, PoolError};
 use crate::types::{
@@ -582,38 +582,32 @@ pub fn check<V: Validator>(
             if let (Some(p), Some(k)) = (peer, penalty) {
                 actions.push(MempoolAction::Penalize { peer: p, kind: k });
             }
-            // Record in invalidation cache so a resubmission is spam.
-            // Exception: UnresolvedInput goes to the unresolved-bytes
-            // cache, not invalidation (it may be resolvable later).
+            // Record in invalidation cache so the Inv path skips
+            // re-fetching these bytes from peers (`Mempool::
+            // is_invalidated`). Exception: UnresolvedInput goes to the
+            // unresolved-bytes cache, not invalidation (it may be
+            // resolvable later).
             match &err {
                 ValidationErr::UnresolvedInput | ValidationErr::UnresolvedDataInput => {
                     cx.unresolved.insert(tx_bytes, now);
                 }
+                ValidationErr::Deserialize | ValidationErr::NonCanonical => {
+                    // Parse-class failures are not blacklisted. The only id
+                    // available is computed from the *parsed* form, so a
+                    // cache entry would also damn a canonical re-encoding
+                    // of the same tx. Scala likewise skips invalidatedTxIds
+                    // for re-parse failures (ErgoMemPool.process:
+                    // parseBytesTry Failure returns `this` without
+                    // pool.invalidate).
+                }
                 _ => {
-                    // We need the tx_id to key the invalidation cache.
-                    // For errors pre-dating tx_id computation (deserialize,
-                    // non-canonical) we hash the bytes as a proxy. This
-                    // matches our intent: the same bad bytes should not
-                    // cost us validation cycles again.
-                    let key = match &err {
-                        ValidationErr::Deserialize | ValidationErr::NonCanonical => {
-                            *ergo_primitives::digest::blake2b256(tx_bytes).as_bytes()
-                        }
-                        _ => {
-                            // Post-tx_id errors would ideally use the
-                            // actual tx_id. Validator contract here:
-                            // errors past deserialize carry enough
-                            // data for caller to reconstruct tx_id,
-                            // but since we bail on err without a
-                            // Validated payload, we fall back to
-                            // bytes-hash. Acceptable: worst case a
-                            // different encoding of the same tx with
-                            // different bytes gets validated again.
-                            *ergo_primitives::digest::blake2b256(tx_bytes).as_bytes()
-                        }
-                    };
+                    // Key by the canonical tx_id computed during the
+                    // step-3.5 peek — the same key the step-5 record_hit
+                    // below and the Inv-skip gate in ergo-node messaging
+                    // look up. Mirrors Scala OrderedTxPool.invalidate
+                    // (invalidatedTxIds.put(tx.id), proof-excluded id).
                     cx.invalidated.insert(
-                        ergo_primitives::digest::Digest32::from_bytes(key),
+                        peek_fee_value.tx_id,
                         InvalidationReason::ValidationFailed,
                         now,
                     );
@@ -623,37 +617,19 @@ pub fn check<V: Validator>(
         }
     };
 
-    // ── Step 5 — Invalidation cache (keyed on tx_id, now available) ──
-    match cx.invalidated.record_hit(&validated.tx_id, now) {
-        LookupResult::NotCached => {}
-        LookupResult::FirstHit => {
-            actions.push(MempoolAction::Observe {
-                event: ObservedEvent::DroppedKnownInvalid {
-                    tx_id: validated.tx_id,
-                },
-            });
-            return (
-                CheckOutcome::Rejected {
-                    reason: RejectReason::KnownInvalid,
-                },
-                actions,
-            );
-        }
-        LookupResult::RepeatHit { .. } => {
-            if let Some(p) = peer {
-                actions.push(MempoolAction::Penalize {
-                    peer: p,
-                    kind: PenaltyKind::Spam,
-                });
-            }
-            return (
-                CheckOutcome::Rejected {
-                    reason: RejectReason::KnownInvalid,
-                },
-                actions,
-            );
-        }
-    }
+    // No invalidation-cache check here, deliberately. The cache is a
+    // FETCH filter, consumed only by `Mempool::is_invalidated` on the
+    // Inv path (ergo-node messaging) — exactly Scala's sole use of
+    // `invalidatedTxIds` (`ErgoNodeViewSynchronizer.scala:1119`).
+    // Scala's `ErgoMemPool.process` never consults it: bytes that
+    // arrive anyway are re-validated and accepted if they pass. That
+    // matters for two real flows with the same proof-excluded tx_id:
+    // a tx resubmitted with corrected proofs, and reorg-demoted txs
+    // re-entering via `TxSource::DemotedFromBlock` — both must land
+    // in the pool, not be held out for the cache TTL. It also caps
+    // the proof-malleability poisoning surface: a third party
+    // mangling a victim tx's proofs can suppress our Inv fetch (as
+    // on Scala) but cannot block direct (re)submission.
 
     // ── Step 8 — Duplicate ───────────────────────────────────────────
     if cx.pool.contains(&validated.tx_id) {

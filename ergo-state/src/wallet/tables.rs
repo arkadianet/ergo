@@ -45,8 +45,12 @@ pub const WALLET_BOXES_BY_TX: TableDefinition<[u8; 34], [u8; 32]> =
 /// Value: bincode-serialized `WalletTransaction` (see `types.rs`).
 pub const WALLET_TXS: TableDefinition<[u8; 36], Vec<u8>> = TableDefinition::new("wallet_txs");
 
-/// Next-available derivation-path index for new tracked pubkeys.
-/// On boot, this should equal `MAX(WALLET_TRACKED_PUBKEYS.path_index) + 1`.
+/// Last-issued EIP-3 address index — the `i` in `m/44'/429'/0'/0/i`.
+/// `deriveNextKey` reads this (default 0 when the row is absent; boot
+/// auto-derive of index 0 never writes it) and issues `head + 1`.
+/// Distinct from `WALLET_TRACKED_PUBKEYS`' key index, which is a
+/// sequential insert counter over all tracked keys (root and custom
+/// paths included), not an address index.
 /// Stored as a single-row table for O(1) increment-and-fetch.
 pub const WALLET_DERIVATION_HEAD: TableDefinition<(), u64> =
     TableDefinition::new("wallet_derivation_head");

@@ -235,8 +235,11 @@ pub(crate) async fn update_change_address(
     address: String,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    // Decode address → pubkey; reject if not a valid P2PK address.
-    let pubkey = match ergo_ser::address::decode_p2pk_address(&address) {
+    // Decode address → pubkey; reject if not a valid P2PK address for
+    // this node's network (the same keys are tracked on every network,
+    // so without the prefix check a testnet address would pass the
+    // tracked-pubkey membership test on a mainnet node).
+    let pubkey = match ergo_ser::address::decode_p2pk_address(&address, ctx.cfg.network) {
         Ok(pk) => pk,
         Err(_) => {
             let _ = reply.send(Err(WalletAdminError::ChangeAddressUntracked));

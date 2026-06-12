@@ -1,6 +1,6 @@
 //! Periodic sync-tick driver.
 //!
-//! Fired every 5 s by the action loop. Owns the six-step sync work
+//! Fired every 1 s by the action loop. Owns the six-step sync work
 //! cycle:
 //!
 //! 1. Drain delivery timeouts from the executor.

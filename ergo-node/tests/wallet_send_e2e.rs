@@ -435,7 +435,7 @@ fn send_path_output_trees_are_canonical_p2pk_not_segregated() {
 
     let pk = pubkey_from_scalar(&test_scalar());
     let dest_address = encode_p2pk_from_pubkey(NetworkPrefix::Mainnet, &pk).expect("encode P2PK");
-    let decoded = decode_p2pk_address(&dest_address).expect("decode P2PK");
+    let decoded = decode_p2pk_address(&dest_address, NetworkPrefix::Mainnet).expect("decode P2PK");
     assert_eq!(decoded, pk, "address round-trips to the same pubkey");
 
     // The canonical builder (what the send path now uses) re-encodes to the

@@ -1092,6 +1092,7 @@ async fn build_unsigned_tx(
     state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let state = state.read();
 
@@ -1099,8 +1100,10 @@ async fn build_unsigned_tx(
     let payment_reqs: Vec<ergo_wallet::tx_builder::PaymentRequest> = requests
         .iter()
         .map(|r| {
-            let pubkey = ergo_ser::address::decode_p2pk_address(&r.address)
-                .map_err(|_| WalletAdminError::Internal(format!("bad address: {}", r.address)))?;
+            let pubkey =
+                ergo_ser::address::decode_p2pk_address(&r.address, network).map_err(|e| {
+                    WalletAdminError::BadRequest(format!("bad address {}: {e}", r.address))
+                })?;
             // Canonical (non-segregated) P2PK tree — matches Scala
             // ErgoAddressEncoder and the wallet's own tracked_p2pk_trees.
             // The segregated build_prove_dlog_ergo_tree would emit a P2S
@@ -1135,7 +1138,7 @@ async fn build_unsigned_tx(
     let change_address = state
         .change_address()
         .ok_or_else(|| WalletAdminError::Internal("no change address set".into()))?;
-    let change_pubkey = ergo_ser::address::decode_p2pk_address(change_address)
+    let change_pubkey = ergo_ser::address::decode_p2pk_address(change_address, network)
         .map_err(|_| WalletAdminError::Internal("change address decode failed".into()))?;
     // Canonical (non-segregated) P2PK tree so the change box matches the
     // wallet's own tracked_p2pk_trees and is recognized on the next scan.
@@ -1710,6 +1713,7 @@ async fn payment_send_impl(
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,
+    network: ergo_ser::address::NetworkPrefix,
 ) -> Result<String, WalletAdminError> {
     // Reject immediately with a clean 400 wallet_locked rather than letting
     // the signing path fail deep inside prove_sigma with MissingSecret → 500.
@@ -1725,6 +1729,7 @@ async fn payment_send_impl(
         state,
         db,
         chain,
+        network,
     )
     .await?;
 
@@ -1775,6 +1780,7 @@ async fn transaction_generate_impl(
     state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
     if storage.read().unlocked().is_none() {
         return Err(WalletAdminError::Locked);
@@ -1788,6 +1794,7 @@ async fn transaction_generate_impl(
         state,
         db,
         chain,
+        network,
     )
     .await?;
 
@@ -1822,6 +1829,7 @@ async fn transaction_generate_unsigned_impl(
     state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
     // Require the wallet to be unlocked so change-address is available.
     {
@@ -1835,6 +1843,7 @@ async fn transaction_generate_unsigned_impl(
         state,
         db,
         chain,
+        network,
     )
     .await
 }
@@ -3207,8 +3216,10 @@ async fn get_private_key_impl(
     let unlocked = storage_guard.unlocked().ok_or(WalletAdminError::Locked)?;
 
     // Decode address → pubkey.
-    let pubkey = ergo_ser::address::decode_p2pk_address(&request.address)
-        .map_err(|_| WalletAdminError::Internal(format!("bad address: {}", request.address)))?;
+    let pubkey =
+        ergo_ser::address::decode_p2pk_address(&request.address, cfg.network).map_err(|e| {
+            WalletAdminError::BadRequest(format!("bad address {}: {e}", request.address))
+        })?;
 
     // Look up derivation path for this pubkey in WALLET_TRACKED_PUBKEYS.
     let read_txn = db
