@@ -188,4 +188,5 @@ Include the affected version (commit hash), reproduction steps, expected
 versus observed behavior, and — for anything that could split the network —
 whether you have shared the same finding with the Scala reference team.
 Coordinated disclosure across both implementations is the right path for
-any bug that could fork consensus. Full scope, required f
+any bug that could fork consensus. Full scope, required fields, and
+response targets are in [`SECURITY.md`](../SECURITY.md).

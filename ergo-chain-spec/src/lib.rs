@@ -618,12 +618,16 @@ impl ChainSpec {
         // canonical mainnet spec. A hypothetical custom spec tagged
         // `Mainnet` with different identifying params (no such constructor
         // exists today — `ChainSpec::for_network` is the only builder) must
-        // not serve them.
+        // not serve them. `network_params` is pinned too: the bridge renders
+        // P2S addresses with `network_params.address_prefix`, so a tampered
+        // prefix would otherwise serve testnet-form addresses of the
+        // mainnet trees.
         let canonical_reemission = ReemissionParams::mainnet();
-        let genuine = self
-            .reemission
-            .as_ref()
-            .is_some_and(|r| r.reemission_nft_id == canonical_reemission.reemission_nft_id)
+        let genuine = self.network_params == NetworkParams::MAINNET
+            && self
+                .reemission
+                .as_ref()
+                .is_some_and(|r| r.reemission_nft_id == canonical_reemission.reemission_nft_id)
             && self.genesis.state_digest == GenesisParams::mainnet().state_digest;
         if !genuine {
             return None;
@@ -781,6 +785,13 @@ mod tests {
 
         let mut spec = ChainSpec::mainnet();
         spec.reemission = None;
+        assert!(spec.emission_script_trees().is_none());
+
+        // network_params is part of the identity: the bridge renders P2S
+        // addresses with its prefix, so a Mainnet-tagged spec carrying the
+        // testnet prefix must not serve the trees either.
+        let mut spec = ChainSpec::mainnet();
+        spec.network_params = NetworkParams::TESTNET;
         assert!(spec.emission_script_trees().is_none());
     }
 
