@@ -131,6 +131,16 @@ pub enum StateError {
         box_id: String,
         error: String,
     },
+    /// Pre-broadcast self-check rejected a mined candidate's ADProofs:
+    /// the generated proof bytes could not be verifier-replayed from
+    /// the parent state root to the claimed post-root using the
+    /// canonical operation stream. A remote validator regenerates the
+    /// proof from our transactions and compares digests, so a
+    /// candidate failing this check would be rejected network-wide —
+    /// refusing to serve it is the fail-safe direction (incident:
+    /// mainnet h1,805,523; dev-docs/incident-2026-06-11-adproofs/).
+    #[error("candidate ADProofs self-check failed at {stage}: {detail}")]
+    CandidateProofSelfCheckFailed { stage: &'static str, detail: String },
     /// Background persist worker reported a job failure at the
     /// given block height. The worker converts the underlying
     /// typed error to a `String` before sending it back over the
