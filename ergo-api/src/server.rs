@@ -339,6 +339,15 @@ async fn utxo_lookup_unsupported_in_digest_mode() -> Response {
 /// 503 handler takes no state, so it sits in the same
 /// `Router<Arc<dyn NodeChainQuery>>` shape as the real handlers and
 /// merges cleanly into the parent without rebinding state.
+/// `GET /utxo/getSnapshotsInfo` — Scala `UtxoApiRoute.getSnapshotsInfo`
+/// serves the locally-stored UTXO snapshot set. This build consumes
+/// snapshots (Mode 2 bootstrap) but never creates them, so the truthful
+/// response is always the empty container — byte-identical to a Scala
+/// UTXO node that has taken no snapshots.
+async fn scala_utxo_snapshots_info_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "availableManifests": {} }))
+}
+
 fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQuery>> {
     if utxo_reads_supported {
         Router::new()
@@ -359,6 +368,10 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
             .route(
                 "/utxo/withPool/byIds",
                 post(scala_utxo_with_pool_boxes_by_ids_handler),
+            )
+            .route(
+                "/utxo/getSnapshotsInfo",
+                get(scala_utxo_snapshots_info_handler),
             )
     } else {
         // Mount the SAME six path+method shapes the live router
@@ -388,6 +401,13 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
             .route(
                 "/utxo/withPool/byIds",
                 post(utxo_lookup_unsupported_in_digest_mode),
+            )
+            // getSnapshotsInfo needs no box store, but the digest arm
+            // keeps the whole /utxo surface on one posture (Scala's
+            // digest state likewise has no snapshot persistence).
+            .route(
+                "/utxo/getSnapshotsInfo",
+                get(utxo_lookup_unsupported_in_digest_mode),
             )
     }
 }

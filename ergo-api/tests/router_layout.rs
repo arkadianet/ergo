@@ -1878,6 +1878,18 @@ async fn utxo_genesis_returns_array_always_200() {
 }
 
 #[tokio::test]
+async fn utxo_get_snapshots_info_returns_empty_manifests() {
+    // Scala `UtxoApiRoute.getSnapshotsInfo` serves the locally-stored
+    // snapshot set; this build consumes UTXO snapshots (Mode 2 bootstrap)
+    // but never creates them, so the truthful response is always the
+    // empty container — exactly what a Scala UTXO node that has taken no
+    // snapshots returns: {"availableManifests": {}}.
+    let (s, v) = json_get(build_compat_app(), "/utxo/getSnapshotsInfo").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, serde_json::json!({ "availableManifests": {} }));
+}
+
+#[tokio::test]
 async fn utxo_routes_404_when_compat_disabled() {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
     let app = router(

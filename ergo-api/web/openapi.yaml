@@ -34,8 +34,6 @@ info:
       `/nipopow/proof/{minChainLength}/{suffixLength}/{headerId}`
       — REST surface for the existing prover (§6.2 prover ✅,
       §6.5 REST mount ❌)
-    - `/utxo/getSnapshotsInfo` — UTXO snapshot REST (Mode 2
-      bootstrap, §2.5 / §8.2 partial)
     - `POST /peers/connect` — deferred pending API-key auth layer
       (an unauthenticated peer-connect endpoint is a DoS vector)
 
@@ -220,10 +218,14 @@ components:
         - availableManifests
       properties:
         availableManifests:
-          description: Map of available manifests height -> manifestId
-          type: array
-          items:
-            type: object
+          description: >-
+            Map of available manifests, height -> hex manifest id. (The
+            upstream Scala spec declares an array here, but its runtime
+            encoder serves a JSON object keyed by height — this schema
+            matches the served shape.)
+          type: object
+          additionalProperties:
+            type: string
 
     ErgoTransactionOutput:
       type: object
@@ -5944,6 +5946,11 @@ paths:
   /utxo/getSnapshotsInfo:
     get:
       summary: Get information about locally stored UTXO snapshots
+      description: >-
+        This build consumes UTXO snapshots during Mode 2 bootstrap but
+        never creates them, so availableManifests is always empty —
+        matching a Scala UTXO node that has taken no snapshots. Digest
+        backend returns the standard /utxo 503.
       operationId: getSnapshotsInfo
       tags:
         - utxo
