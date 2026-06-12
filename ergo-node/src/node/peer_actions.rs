@@ -122,14 +122,18 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     }
 }
 
-/// `POST /peers/connect` (Scala `ConnectTo`): learn the operator-supplied
-/// address with Seed origin — trusted like a bootstrap address, skipping
-/// the routability filter exactly as Scala dials whatever the operator
-/// names — then dial it immediately with the standard dial idiom.
+/// `POST /peers/connect` (Scala `ConnectTo`): one-shot dial of the
+/// operator-supplied address with the standard dial idiom — and NOTHING
+/// persisted up front. Scala writes no peer record before handshake
+/// success and removes the peer on dial failure; here, success persists
+/// via the normal handshake path and a failed dial leaves no residue
+/// (no address-book entry, no redial schedule). Deliberately NOT
+/// `add_known_address`: a Seed-origin entry would be retained and
+/// re-dialed forever, turning a typo'd address into permanent dial
+/// noise and the endpoint into a (key-gated) address-book poisoning
+/// vector.
 pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAddr) {
-    use ergo_p2p::peer_manager::PeerOrigin;
     let now = Instant::now();
-    let _ = state.peer_manager.add_known_address(addr, PeerOrigin::Seed);
     match state.peer_manager.register_outbound(addr, now) {
         Ok(()) => {
             debug!(peer = %addr, "operator /peers/connect dial");

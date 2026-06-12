@@ -1806,21 +1806,23 @@ async fn shutdown_handler(State(admin): State<Arc<dyn NodeAdmin>>) -> (StatusCod
 
 /// `POST /peers/connect` — Scala `ErgoPeersApiRoute.connect`: the body is
 /// a JSON string `"host:port"`; a parse failure is 400; success fires the
-/// dial at the node and answers 200 without waiting for its outcome.
-/// Hostnames resolve asynchronously (Scala uses the equally permissive
-/// `InetAddress.getByName`); the first resolved address wins.
+/// dial at the node and answers 200 (the JSON string `"OK"`, Scala's
+/// `ApiResponse.OK`) without waiting for the dial's outcome. Hostnames
+/// resolve asynchronously.
+///
+/// Deliberate divergences (all saner-direction, behind the api key):
+/// Scala 500s on an unresolvable hostname (`InetAddress.getByName`
+/// throws) and on regex-valid ports > 65535 — both are 400 here; Scala's
+/// unanchored regex mis-truncates hyphenated hostnames and accepts
+/// junk-wrapped input — rejected here; IPv6 literals work here, 400 in
+/// Scala.
 async fn peers_connect_handler(
     State(admin): State<Arc<dyn NodeAdmin>>,
-    body: String,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let bad = |reason: &str| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": 400, "reason": reason })),
-        )
-    };
-    let Ok(addr_str) = serde_json::from_str::<String>(&body) else {
-        return bad("body must be a JSON string \"host:port\"");
+    body: axum::body::Bytes,
+) -> Response {
+    let addr_str = match crate::utils::parse_json_string_body(&body) {
+        Ok(s) => s,
+        Err(resp) => return *resp,
     };
     // Fast path: literal ip:port. Fallback: async DNS for hostnames.
     let addr = match addr_str.parse::<SocketAddr>() {
@@ -1828,13 +1830,13 @@ async fn peers_connect_handler(
         Err(_) => match tokio::net::lookup_host(addr_str.as_str()).await {
             Ok(mut iter) => match iter.next() {
                 Some(a) => a,
-                None => return bad("address resolved to nothing"),
+                None => return crate::utils::bad_request("address resolved to nothing"),
             },
-            Err(_) => return bad("invalid host:port"),
+            Err(_) => return crate::utils::bad_request("invalid host:port"),
         },
     };
     admin.connect_to_peer(addr);
-    (StatusCode::OK, Json(serde_json::json!({})))
+    (StatusCode::OK, Json(serde_json::json!("OK"))).into_response()
 }
 
 #[utoipa::path(

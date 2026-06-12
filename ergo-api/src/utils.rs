@@ -46,7 +46,7 @@ use serde_json::{json, Value as JsonValue};
 /// any parse failure. axum's default `Json<String>` extractor returns a
 /// plain-text rejection which drifts from the rest of this API's error
 /// envelope; this helper keeps the shape consistent.
-fn parse_json_string_body(body: &Bytes) -> Result<String, Box<Response>> {
+pub(crate) fn parse_json_string_body(body: &Bytes) -> Result<String, Box<Response>> {
     let value: JsonValue = serde_json::from_slice(body)
         .map_err(|e| Box::new(bad_request(format!("invalid JSON body: {e}"))))?;
     value
@@ -67,7 +67,7 @@ const DEFAULT_SEED_SIZE: usize = 32;
 /// XOF seeds).
 const SEED_LENGTH_CAP: usize = 8192;
 
-fn bad_request(detail: impl Into<String>) -> Response {
+pub(crate) fn bad_request(detail: impl Into<String>) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({
