@@ -220,6 +220,17 @@ pub(in crate::evaluator) fn eval_func_value(
     cost: &mut CostAccumulator,
 ) -> Result<Value, EvalError> {
     add_cost(cost, 0xD9)?;
+    // Scala `FuncValue.eval` (values.scala:1040-1056): after charging the
+    // fixed cost, `if (args.length == 1) <closure> else syntax.error(...)`.
+    // A 0- or multi-arg lambda errors when the node is EVALUATED (created),
+    // before any application — multi-arg functions are not representable in
+    // the evaluator (closures are unary; tuples carry multiple values). A
+    // FuncValue on a dead branch is never evaluated, so it never errors.
+    if args.len() != 1 {
+        return Err(EvalError::RuntimeException(
+            "FuncValue must have exactly 1 argument",
+        ));
+    }
     let params: Vec<u32> = args.iter().map(|(id, _)| *id).collect();
     Ok(Value::Func {
         captured_env: std::rc::Rc::new(env.clone()),

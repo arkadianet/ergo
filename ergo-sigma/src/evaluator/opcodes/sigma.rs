@@ -351,6 +351,12 @@ fn cand_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
     }
 }
 
+/// Scala `SigmaConstants.MaxChildrenCountForAtLeastOp` (255): the maximum
+/// number of children an `AtLeast` (k-of-n threshold) may carry. The
+/// Cthreshold polynomial arithmetic uses single-byte inputs, so more than
+/// 255 children cannot be represented.
+const AT_LEAST_MAX_CHILDREN: usize = 255;
+
 /// Port of Scala `sigma.ast.AtLeast.reduce` (trees.scala). Folds trivial
 /// children out and adjusts the bound so the result NEVER carries a nested
 /// TrivialProp — the proof verifier (`verify::parse_and_compute_challenges`)
@@ -437,6 +443,17 @@ pub(in crate::evaluator) fn eval_at_least(
         }
     };
     add_cost_per_item(cx.cost, 0x98, sigma_props.len() as u32)?;
+    // Scala's eval path runs `CSigmaDslBuilder.atLeast` (CSigmaDslBuilder.scala:103),
+    // which throws when `props.length > MaxChildrenCount` (255) BEFORE
+    // `AtLeast.reduce`. So the cap fires even for a degenerate bound that
+    // reduce would otherwise short-circuit (bound<=0 -> TrueProp,
+    // bound>nChildren -> FalseProp). Cthreshold polynomial arithmetic uses
+    // single-byte inputs, hence the 255 limit.
+    if sigma_props.len() > AT_LEAST_MAX_CHILDREN {
+        return Err(EvalError::RuntimeException(
+            "AtLeast children count exceeds MaxChildrenCount (255)",
+        ));
+    }
     Ok(Value::SigmaProp(at_least_reduce(k, sigma_props)))
 }
 
