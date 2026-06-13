@@ -200,13 +200,16 @@ impl ErgoValidationSettingsUpdate {
         w.result()
     }
 
+    /// Parse an update from `bytes`. Mirrors the JVM
+    /// `ErgoValidationSettingsUpdateSerializer.parse`, which reads exactly
+    /// the declared counts and does NOT assert end-of-input — trailing
+    /// bytes in the surrounding entry-value envelope are ignored. (The
+    /// storage readback in `active_params` frames each update with its own
+    /// length prefix + an outer trailing-bytes check, so dropping the
+    /// inner EOF assertion here does not weaken that path.)
     pub fn deserialize(bytes: &[u8]) -> Result<Self, ValidationSettingsCodecError> {
         let mut r = VlqReader::new(bytes);
-        let v = read_validation_settings_update(&mut r)?;
-        if !r.is_empty() {
-            return Err(ValidationSettingsCodecError::TrailingBytes);
-        }
-        Ok(v)
+        read_validation_settings_update(&mut r)
     }
 }
 
@@ -214,8 +217,6 @@ impl ErgoValidationSettingsUpdate {
 pub enum ValidationSettingsCodecError {
     #[error("validation_settings: read error: {0:?}")]
     Read(ReadError),
-    #[error("validation_settings: trailing bytes after decode")]
-    TrailingBytes,
 }
 
 impl PartialEq for ValidationSettingsCodecError {
@@ -226,8 +227,6 @@ impl PartialEq for ValidationSettingsCodecError {
             // discriminant + Debug-formatted message instead. Acceptable
             // for test assertions; not used on consensus paths.
             (Read(a), Read(b)) => format!("{a:?}") == format!("{b:?}"),
-            (TrailingBytes, TrailingBytes) => true,
-            _ => false,
         }
     }
 }
@@ -267,16 +266,33 @@ pub fn write_validation_settings_update(w: &mut VlqWriter, u: &ErgoValidationSet
     }
 }
 
+/// Scala `0 until n.toInt` collection length: a negative `n` (the
+/// two's-complement wrap of a `getUInt` value above `i32::MAX`) yields an
+/// empty range, i.e. zero entries.
+fn count_to_len(n: i32) -> usize {
+    if n < 0 {
+        0
+    } else {
+        n as usize
+    }
+}
+
 pub fn read_validation_settings_update(
     r: &mut VlqReader<'_>,
 ) -> Result<ErgoValidationSettingsUpdate, ValidationSettingsCodecError> {
-    let disabled_n = r.get_u32_exact()? as usize;
-    let mut rules_to_disable = Vec::with_capacity(disabled_n);
+    // Scala reads both counts as `r.getUInt().toInt` (NOT getUIntExact):
+    // a value above i32::MAX wraps two's-complement negative, and the
+    // subsequent `0 until n` is an empty Range. So 0xFFFFFFFF -> -1 -> 0
+    // entries. Mirror with the wrapping helper + clamp-negative-to-zero.
+    // (Don't pre-size the Vec from the untrusted count — a large positive
+    // count would otherwise force a huge allocation before the read EOFs.)
+    let disabled_n = count_to_len(r.get_uint_to_i32()?);
+    let mut rules_to_disable = Vec::new();
     for _ in 0..disabled_n {
         rules_to_disable.push(r.get_u16()?);
     }
-    let status_n = r.get_u32_exact()? as usize;
-    let mut status_updates = Vec::with_capacity(status_n);
+    let status_n = count_to_len(r.get_uint_to_i32()?);
+    let mut status_updates = Vec::new();
     for _ in 0..status_n {
         let offset = r.get_u16()?;
         let status = read_rule_status(r)?;
@@ -435,12 +451,43 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_rejects_trailing_bytes() {
-        let u = ErgoValidationSettingsUpdate::empty();
-        let mut bytes = u.serialize();
-        bytes.push(0xAB);
-        let err = ErgoValidationSettingsUpdate::deserialize(&bytes).unwrap_err();
-        assert_eq!(err, ValidationSettingsCodecError::TrailingBytes);
+    fn deserialize_ignores_trailing_bytes() {
+        // The JVM ErgoValidationSettingsUpdateSerializer.parse reads exactly
+        // the declared counts and never asserts end-of-input, so trailing
+        // bytes in the surrounding entry-value envelope are ignored (SANTA
+        // chain entry status-trailing-bytes-canonicalized: 016f00deadbeef ->
+        // decodes to a 1-disabled-rule update, deadbeef dropped). Our decoder
+        // previously rejected this (reject-valid).
+        let u = ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![111],
+            status_updates: vec![],
+        };
+        let mut bytes = u.serialize(); // = 016f00
+        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
+            .expect("trailing bytes must be ignored, matching the JVM");
+        assert_eq!(back, u);
+    }
+
+    #[test]
+    fn deserialize_disabled_count_wraps_to_empty() {
+        // disabled_rules_num = 0xFFFFFFFF: JVM getUInt().toInt = -1, `0 until
+        // -1` is empty -> empty update. We previously errored ValueTooLarge
+        // (getUIntExact i32::MAX bound). SANTA: status-count-wrap-rules.
+        let bytes = [0xff, 0xff, 0xff, 0xff, 0x0f, 0x00]; // disabled=0xFFFFFFFF, status=0
+        let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
+            .expect("0xFFFFFFFF count wraps to an empty range, not an error");
+        assert_eq!(back, ErgoValidationSettingsUpdate::empty());
+    }
+
+    #[test]
+    fn deserialize_status_count_wraps_to_empty() {
+        // status_updates_num = 0xFFFFFFFF wraps to -1 -> empty range.
+        // SANTA: status-count-wrap-status (00ffffffff0f).
+        let bytes = [0x00, 0xff, 0xff, 0xff, 0xff, 0x0f]; // disabled=0, status=0xFFFFFFFF
+        let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
+            .expect("0xFFFFFFFF status count wraps to an empty range");
+        assert_eq!(back, ErgoValidationSettingsUpdate::empty());
     }
 
     #[test]
