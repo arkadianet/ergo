@@ -200,16 +200,32 @@ impl ErgoValidationSettingsUpdate {
         w.result()
     }
 
-    /// Parse an update from `bytes`. Mirrors the JVM
-    /// `ErgoValidationSettingsUpdateSerializer.parse`, which reads exactly
-    /// the declared counts and does NOT assert end-of-input — trailing
-    /// bytes in the surrounding entry-value envelope are ignored. (The
-    /// storage readback in `active_params` frames each update with its own
-    /// length prefix + an outer trailing-bytes check, so dropping the
-    /// inner EOF assertion here does not weaken that path.)
+    /// Parse an update from a CONSENSUS value (a block-extension field value).
+    /// Mirrors the JVM `ErgoValidationSettingsUpdateSerializer.parse`, which
+    /// reads exactly the declared counts and does NOT assert end-of-input —
+    /// trailing bytes in the surrounding entry-value envelope are ignored.
+    /// Use [`Self::deserialize_exact`] for our own length-framed STORAGE
+    /// blobs, where trailing bytes inside the declared length signal
+    /// corruption and must be rejected.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, ValidationSettingsCodecError> {
         let mut r = VlqReader::new(bytes);
         read_validation_settings_update(&mut r)
+    }
+
+    /// Strict parse for our own STORAGE format: the input slice must be
+    /// EXACTLY one serialized update with no trailing bytes. `active_params`
+    /// length-frames each persisted update blob, so leftover bytes inside the
+    /// declared length mean a corrupt/noncanonical row — reject them. (The
+    /// JVM has no analog because it never persists these as standalone
+    /// length-prefixed blobs; this is an arkadianet storage-integrity check,
+    /// not a consensus rule.)
+    pub fn deserialize_exact(bytes: &[u8]) -> Result<Self, ValidationSettingsCodecError> {
+        let mut r = VlqReader::new(bytes);
+        let v = read_validation_settings_update(&mut r)?;
+        if !r.is_empty() {
+            return Err(ValidationSettingsCodecError::TrailingBytes);
+        }
+        Ok(v)
     }
 }
 
@@ -217,6 +233,12 @@ impl ErgoValidationSettingsUpdate {
 pub enum ValidationSettingsCodecError {
     #[error("validation_settings: read error: {0:?}")]
     Read(ReadError),
+    /// A length-framed STORAGE blob contained trailing bytes after a complete
+    /// update (corruption). Only [`ErgoValidationSettingsUpdate::deserialize_exact`]
+    /// raises this; the lenient consensus [`ErgoValidationSettingsUpdate::deserialize`]
+    /// ignores trailing bytes (JVM parity).
+    #[error("validation_settings: trailing bytes after decode")]
+    TrailingBytes,
     /// Scala `require(rulesSpec.get(rd).forall(_.mayBeDisabled))`
     /// (`ErgoValidationSettingsUpdate.scala:47-50`): a disable update targets
     /// a known rule whose `mayBeDisabled = false`. Rejected (accept-invalid
@@ -233,6 +255,7 @@ impl PartialEq for ValidationSettingsCodecError {
             // discriminant + Debug-formatted message instead. Acceptable
             // for test assertions; not used on consensus paths.
             (Read(a), Read(b)) => format!("{a:?}") == format!("{b:?}"),
+            (TrailingBytes, TrailingBytes) => true,
             (RuleNotDisableable { rule_id: a }, RuleNotDisableable { rule_id: b }) => a == b,
             _ => false,
         }
@@ -530,6 +553,24 @@ mod tests {
         let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
             .expect("trailing bytes must be ignored, matching the JVM");
         assert_eq!(back, u);
+    }
+
+    #[test]
+    fn deserialize_exact_rejects_trailing_bytes() {
+        // The strict STORAGE path must reject trailing bytes inside a
+        // length-framed blob (corruption), even though the lenient consensus
+        // `deserialize` ignores them.
+        let u = ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![111],
+            status_updates: vec![],
+        };
+        let mut bytes = u.serialize();
+        bytes.extend_from_slice(&[0xde, 0xad]);
+        // lenient: accepts
+        assert!(ErgoValidationSettingsUpdate::deserialize(&bytes).is_ok());
+        // strict: rejects
+        let err = ErgoValidationSettingsUpdate::deserialize_exact(&bytes).unwrap_err();
+        assert_eq!(err, ValidationSettingsCodecError::TrailingBytes);
     }
 
     #[test]

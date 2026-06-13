@@ -341,6 +341,25 @@ pub fn check_votes_number(header: &Header) -> Result<(), HeaderValidationError> 
     Ok(())
 }
 
+/// Rule 212 (`hdrVotesNumber`) gated by its soft-fork deactivation status.
+/// Scala marks this rule `mayBeDisabled = true`, so an activated
+/// `ErgoValidationSettingsUpdate` can switch it off (after which a header
+/// casting three distinct non-soft-fork votes is accepted). When the
+/// activated settings disable the rule, Scala's `ValidationState` never runs
+/// it; we mirror that by skipping the check. `rule_disabled` is supplied by
+/// the caller from `ErgoValidationSettings::is_rule_disabled(212)` — invoked
+/// at block-validation time (`ergo-sync::block_proc`), the same layer that
+/// gates rule 215, because header-only validation cannot see the settings.
+pub fn check_votes_number_active(
+    header: &Header,
+    rule_disabled: bool,
+) -> Result<(), HeaderValidationError> {
+    if rule_disabled {
+        return Ok(());
+    }
+    check_votes_number(header)
+}
+
 /// Scala `Parameters.SoftFork` (`settings/Parameters.scala`): the vote
 /// byte (120) reserved for soft-fork signalling, excluded from the
 /// rule-212 `votesCount`.
@@ -582,13 +601,16 @@ pub fn validate_header_after_pow(
     let PowCheckedHeader { header, header_id } = pow_checked;
     check_parent_id(&header, parent_id)?;
     check_timestamp(&header, parent)?;
-    // Vote checks (rules 212, 213, 214) are self-contained — no clock or
-    // chain context needed. Scala's `validateVotes` runs them in this
-    // order (hdrVotesNumber, then per-vote hdrVotesDuplicates +
-    // hdrVotesContradictory). The future-timestamp check (rule 211)
-    // requires a wall-clock reading and is invoked at the network
-    // ingress site instead; see `check_future_timestamp`.
-    check_votes_number(&header)?;
+    // Vote checks 213 (duplicates) + 214 (contradictions) are
+    // non-deactivatable (`mayBeDisabled = false`) and self-contained — no
+    // clock or chain context — so they run here at header time. Rule 212
+    // (`hdrVotesNumber`) is soft-fork-DEACTIVATABLE (`mayBeDisabled = true`),
+    // so like rule 215 it must be gated on the activated validation settings,
+    // which header-only validation cannot see; it is enforced at block
+    // validation time (`ergo-sync::block_proc`, gated on
+    // `is_rule_disabled(212)`) via [`check_votes_number`]. The
+    // future-timestamp check (rule 211) needs a wall-clock reading and runs
+    // at the network ingress site; see `check_future_timestamp`.
     check_votes_no_duplicates(&header)?;
     check_votes_no_contradictions(&header)?;
     pow::verify_header_difficulty(&header, epoch_headers, config)?;
@@ -872,6 +894,20 @@ mod tests {
         let votes = [(-1i8) as u8, (-2i8) as u8, (-3i8) as u8];
         let err = check_votes_number(&test_header(votes, 0))
             .expect_err("three negative votes also exceed the cap");
+        assert!(matches!(
+            err,
+            HeaderValidationError::VotesNumber { count: 3 }
+        ));
+    }
+
+    #[test]
+    fn votes_number_active_skips_when_rule_212_disabled() {
+        // Rule 212 is soft-fork-deactivatable: when disabled, a header with
+        // three distinct non-soft-fork votes must be ACCEPTED (Scala stops
+        // running the rule); when enabled, it rejects.
+        let three = test_header([1, 2, 3], 0);
+        assert!(check_votes_number_active(&three, true).is_ok());
+        let err = check_votes_number_active(&three, false).unwrap_err();
         assert!(matches!(
             err,
             HeaderValidationError::VotesNumber { count: 3 }
