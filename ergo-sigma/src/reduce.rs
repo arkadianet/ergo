@@ -1,4 +1,4 @@
-use ergo_primitives::cost::{CostAccumulator, JitCost};
+use ergo_primitives::cost::{CostAccumulator, CostError, JitCost};
 use ergo_ser::ergo_tree::ErgoTree;
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
@@ -8,6 +8,32 @@ use thiserror::Error;
 /// Cost of evaluating a SigmaProp constant (trivial reduction path).
 /// Source: sigmastate-interpreter Interpreter.scala:533
 const EVAL_SIGMA_PROP_CONSTANT: JitCost = JitCost::from_jit(50);
+
+/// Scala `Interpreter.CostPerTreeByte` (`Interpreter.scala:88`) — the
+/// per-ergo-tree-byte cost of the deserialize-substitution pass.
+const COST_PER_TREE_BYTE: u64 = 2;
+
+/// Scala `VersionContext.V6SoftForkVersion` (`VersionContext.scala:56`): the
+/// activated-script version at/after which `isV6Activated` is true. Our
+/// `ReductionContext::activated_script_version` is the same quantity
+/// (`Block.headerVersion - 1`), so the deserialize-substitution cost is
+/// charged when `activated_script_version >= V6_SOFT_FORK_VERSION`.
+const V6_SOFT_FORK_VERSION: u8 = 3;
+
+/// Length of the canonical serialized ErgoTree — Scala's
+/// `ergoTree.bytes.length`, used for the deserialize-substitution cost. We
+/// re-serialize the parsed tree (byte-identical for every wire-conformant
+/// tree, which the wire-tier corpus pins); only invoked on the rare
+/// `hasDeserialize` path so the re-serialization is not on the hot path.
+fn serialized_ergo_tree_len(tree: &ErgoTree) -> Result<usize, VerifySpendingError> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::ergo_tree::write_ergo_tree(&mut w, tree).map_err(|_| {
+        VerifySpendingError::Eval(super::evaluator::EvalError::RuntimeException(
+            "ergo tree re-serialization failed while costing deserialize substitution",
+        ))
+    })?;
+    Ok(w.result().len())
+}
 
 /// Failures raised by the trivial-reduction fast path.
 ///
@@ -136,6 +162,29 @@ pub fn verify_spending_proof_with_context_and_cost(
     ctx: &super::evaluator::ReductionContext<'_>,
     cost: &mut CostAccumulator,
 ) -> Result<bool, VerifySpendingError> {
+    // Deserialize-substitution cost (Scala `Interpreter.reductionWithDeserialize`,
+    // Interpreter.scala:240-260): a tree that CONTAINS a DeserializeContext /
+    // DeserializeRegister node adds `ergoTree.bytes.length * CostPerTreeByte(2)`
+    // to `initCost`. It is UNCONDITIONAL on `hasDeserialize` — charged even
+    // when the deserialize node is on a dead branch or its context var is
+    // absent (so it is NOT the per-substitution `deserializeMeasured` cost,
+    // which only fires when a node is actually substituted). Gated on V6
+    // activation (`isV6Activated == activatedVersion >= V6SoftForkVersion(3)`):
+    // pre-V6 the charge was not added (Interpreter.scala:250-259). Block-cost
+    // domain (added to initCost, not JIT-scaled), so charged via
+    // `from_block_cost`. Added before the eval baseline to mirror Scala adding
+    // it to `initCost` ahead of reduction.
+    if ctx.activated_script_version >= V6_SOFT_FORK_VERSION
+        && super::evaluator::expr_has_deserialize(&ergo_tree.body)
+    {
+        let tree_len = serialized_ergo_tree_len(ergo_tree)?;
+        let subst_block_cost = (tree_len as u64).saturating_mul(COST_PER_TREE_BYTE);
+        let subst = JitCost::from_block_cost(subst_block_cost)
+            .map_err(|e| VerifySpendingError::Eval(CostError::from(e).into()))?;
+        cost.add(subst)
+            .map_err(|e| VerifySpendingError::Eval(e.into()))?;
+    }
+
     // Record baseline so we can snap eval cost to block boundary later.
     // Scala's verify() truncates eval_jit via toBlockCost before adding
     // crypto cost (which is also independently truncated to block cost).
@@ -365,5 +414,76 @@ mod tests {
         )));
         assert!(hard_reject(&ReductionError::ConstantIndexOutOfBounds(7)));
         assert!(hard_reject(&ReductionError::MalformedSigmaPropConstant));
+    }
+
+    // ----- deserialize-substitution cost (Scala reductionWithDeserialize) -----
+
+    /// `if(ph0:Bool, ph1:Bool, deserialize[Bool](id 0))` over two segregated
+    /// `Boolean(true)` constants: body type SBoolean reduces to `Bool(true)`
+    /// (the `else` deserialize branch is dead, never evaluated), which the
+    /// evaluator coerces to `TrivialProp(true)`. `hasDeserialize` is true
+    /// (the 0xD4 node is present syntactically), so the V6 substitution cost
+    /// applies even though the node never runs — exactly the block-111927
+    /// dead-branch shape.
+    fn deser_dead_branch_tree() -> ErgoTree {
+        let body = Expr::Op(IrNode {
+            opcode: 0x95, // If
+            payload: Payload::Three(
+                Box::new(Expr::Op(IrNode {
+                    opcode: 0x73,
+                    payload: Payload::ConstPlaceholder { index: 0 },
+                })),
+                Box::new(Expr::Op(IrNode {
+                    opcode: 0x73,
+                    payload: Payload::ConstPlaceholder { index: 1 },
+                })),
+                Box::new(Expr::Op(IrNode {
+                    opcode: 0xD4, // DeserializeContext
+                    payload: Payload::DeserializeContext {
+                        id: 0,
+                        tpe: SigmaType::SBoolean,
+                    },
+                })),
+            ),
+        });
+        ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: true,
+            constants: vec![
+                (SigmaType::SBoolean, SigmaValue::Boolean(true)),
+                (SigmaType::SBoolean, SigmaValue::Boolean(true)),
+            ],
+            body,
+        }
+    }
+
+    fn verify_block_cost(tree: &ErgoTree, activated: u8) -> u64 {
+        let mut ctx = crate::evaluator::ReductionContext::minimal(500_000, 0);
+        ctx.activated_script_version = activated;
+        ctx.ergo_tree_version = tree.version; // 0; keep <= activated
+        let mut cost = CostAccumulator::recording_only();
+        let ok = verify_spending_proof_with_context_and_cost(tree, &[], &[], &ctx, &mut cost)
+            .expect("dead-branch deserialize tree reduces to TrueProp and verifies");
+        assert!(ok, "TrivialProp(true) must verify with an empty proof");
+        cost.total_block_cost()
+    }
+
+    #[test]
+    fn deserialize_substitution_cost_charged_only_at_v6() {
+        // Scala reductionWithDeserialize adds treeBytes * CostPerTreeByte to
+        // initCost, gated on isV6Activated (activatedVersion >= 3). The ONLY
+        // difference between activated 2 and 3 for this tree is that charge,
+        // so the block-cost delta must equal treeBytes * 2 (non-circular).
+        let tree = deser_dead_branch_tree();
+        let len = serialized_ergo_tree_len(&tree).expect("re-serialize") as u64;
+        assert!(len > 0);
+        let cost_v6 = verify_block_cost(&tree, 3);
+        let cost_pre = verify_block_cost(&tree, 2);
+        assert_eq!(
+            cost_v6,
+            cost_pre + len * COST_PER_TREE_BYTE,
+            "V6 must add deserializeSubstitutionCost = treeBytes({len}) * {COST_PER_TREE_BYTE} block units",
+        );
     }
 }

@@ -104,7 +104,7 @@ pub fn reduce_expr_traced_with_cost(
 /// `Value.hasDeserialize` (counts exactly those two node classes).
 /// Exhaustive over `Payload` — no wildcard arm, so a future variant
 /// with children cannot silently escape the walk.
-fn expr_has_deserialize(expr: &Expr) -> bool {
+pub(crate) fn expr_has_deserialize(expr: &Expr) -> bool {
     let node = match expr {
         Expr::Const { .. } => return false,
         Expr::Op(node) => node,
