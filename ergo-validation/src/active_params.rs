@@ -473,7 +473,8 @@ impl ActiveProtocolParameters {
             if trailing.len() < proposed_end + 4 {
                 return Err(ActiveParamsError::UnexpectedEof);
             }
-            let proposed = ErgoValidationSettingsUpdate::deserialize(&trailing[4..proposed_end])?;
+            let proposed =
+                ErgoValidationSettingsUpdate::deserialize_exact(&trailing[4..proposed_end])?;
             let activated_len_offset = proposed_end;
             let activated_len = u32::from_be_bytes(
                 trailing[activated_len_offset..activated_len_offset + 4]
@@ -485,7 +486,7 @@ impl ActiveProtocolParameters {
             if trailing.len() < activated_end {
                 return Err(ActiveParamsError::UnexpectedEof);
             }
-            let activated = ErgoValidationSettingsUpdate::deserialize(
+            let activated = ErgoValidationSettingsUpdate::deserialize_exact(
                 &trailing[activated_start..activated_end],
             )?;
             if trailing.len() != activated_end {

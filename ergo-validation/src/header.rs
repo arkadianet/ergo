@@ -247,6 +247,18 @@ pub enum HeaderValidationError {
         /// Value at the second slot (sign-preserved).
         second_byte: i8,
     },
+
+    /// Scala `hdrVotesNumber` (rule 212). After dropping `NoParameter`
+    /// (0) slots, the count of remaining votes that are not `SoftFork`
+    /// (120) must not exceed `Parameters.ParamVotesCount` (2). A header
+    /// proposing three distinct non-soft-fork parameter changes is
+    /// malformed — the JVM rejects it (`ErgoStateContext.validateVotes`
+    /// `votesCount <= ParamVotesCount`).
+    #[error("header casts {count} non-soft-fork votes, exceeds ParamVotesCount=2 (rule 212)")]
+    VotesNumber {
+        /// Number of non-zero, non-`SoftFork` vote bytes.
+        count: usize,
+    },
 }
 
 /// Scala `Constants.FutureTimestampThreshold` — 20 minutes in
@@ -302,6 +314,61 @@ pub fn check_future_timestamp(header: &Header, now_ms: u64) -> Result<(), Header
     Ok(())
 }
 
+/// Scala `hdrVotesNumber` (rule 212) — reject when a header casts more
+/// than `Parameters.ParamVotesCount` (2) non-`SoftFork` votes.
+///
+/// Mirrors `ErgoStateContext.validateVotes`
+/// (`reference/ergo-core/.../nodeView/state/ErgoStateContext.scala:330-339`):
+/// `votes = header.votes.filter(_ != NoParameter)` (drop 0 slots), then
+/// `votesCount = votes.count(_ != SoftFork)` must be `<= ParamVotesCount`.
+/// `NoParameter = 0`, `SoftFork = 120`, `ParamVotesCount = 2`
+/// (`Parameters.scala`). The header carries only three vote slots, so the
+/// count is at most 3 and only `[a, b, c]` with three distinct non-zero
+/// non-120 bytes can trip it.
+pub fn check_votes_number(header: &Header) -> Result<(), HeaderValidationError> {
+    // Scala: `votes = header.votes.filter(_ != NoParameter)` then
+    // `votesCount = votes.count(_ != SoftFork)`; reject when it exceeds
+    // ParamVotesCount. NoParameter = 0, SoftFork = 120, ParamVotesCount = 2.
+    let count = header
+        .votes
+        .iter()
+        .map(|b| *b as i8)
+        .filter(|v| *v != 0 && *v != SOFT_FORK_VOTE)
+        .count();
+    if count > PARAM_VOTES_COUNT {
+        return Err(HeaderValidationError::VotesNumber { count });
+    }
+    Ok(())
+}
+
+/// Rule 212 (`hdrVotesNumber`) gated by its soft-fork deactivation status.
+/// Scala marks this rule `mayBeDisabled = true`, so an activated
+/// `ErgoValidationSettingsUpdate` can switch it off (after which a header
+/// casting three distinct non-soft-fork votes is accepted). When the
+/// activated settings disable the rule, Scala's `ValidationState` never runs
+/// it; we mirror that by skipping the check. `rule_disabled` is supplied by
+/// the caller from `ErgoValidationSettings::is_rule_disabled(212)` — invoked
+/// at block-validation time (`ergo-sync::block_proc`), the same layer that
+/// gates rule 215, because header-only validation cannot see the settings.
+pub fn check_votes_number_active(
+    header: &Header,
+    rule_disabled: bool,
+) -> Result<(), HeaderValidationError> {
+    if rule_disabled {
+        return Ok(());
+    }
+    check_votes_number(header)
+}
+
+/// Scala `Parameters.SoftFork` (`settings/Parameters.scala`): the vote
+/// byte (120) reserved for soft-fork signalling, excluded from the
+/// rule-212 `votesCount`.
+const SOFT_FORK_VOTE: i8 = 120;
+
+/// Scala `Parameters.ParamVotesCount` (`settings/Parameters.scala`): the
+/// maximum number of non-soft-fork parameter votes a header may cast.
+const PARAM_VOTES_COUNT: usize = 2;
+
 /// Scala `hdrVotesDuplicates` (rule 213) — reject when two non-zero
 /// vote bytes reference the same parameter id in the same direction.
 ///
@@ -338,15 +405,17 @@ pub fn check_votes_no_duplicates(header: &Header) -> Result<(), HeaderValidation
 /// neutral vote that has no effect, which Scala treats as
 /// malformed input rather than silently no-oping).
 ///
-/// Untrusted-input guard: we use `checked_neg` instead of the
-/// raw `-` operator because vote bytes arrive from the network as
-/// `u8` and reinterpret as `i8` includes the value `-128`
-/// (`i8::MIN`). The negation `-(-128_i8)` overflows: debug builds
-/// panic, release builds wrap silently back to `-128`. A
-/// malicious peer sending vote byte `0x80` would either DoS us or
-/// trigger a false negative depending on build profile. The
-/// `checked_neg` branch keeps both profiles consistent and never
-/// panics on adversarial input.
+/// Untrusted-input guard: we use `wrapping_neg` instead of the raw `-`
+/// operator because vote bytes arrive from the network as `u8` and
+/// reinterpret as `i8` includes the value `-128` (`i8::MIN`). The
+/// negation `-(-128_i8)` overflows: debug builds panic, release builds
+/// wrap silently. `wrapping_neg` is exactly the JVM's `(-v).toByte`
+/// (`ErgoStateContext.validateVotes:333`): `wrapping_neg(i8::MIN) ==
+/// i8::MIN`, so a lone `0x80` is its OWN negation — `reverseVotes`
+/// holds `-128` at its own index, `contains(-128)` is true, and rule
+/// 214 REJECTS. The earlier `checked_neg`/`continue` swallowed that
+/// case (accepting a header the JVM rejects); `wrapping_neg` plus the
+/// explicit self-match below restores parity and never panics.
 /// Scala `hdrVotesUnknown` (rule 215) — at an epoch-start header,
 /// every non-zero vote byte must reference an id in
 /// `Parameters.parametersDescs`. Scala source pin:
@@ -438,15 +507,23 @@ pub fn check_votes_no_contradictions(header: &Header) -> Result<(), HeaderValida
         if a == 0 {
             continue;
         }
-        // `a == -b` requires `a.checked_neg()` to step around the
-        // i8::MIN overflow case. If `a` itself is `i8::MIN`, the
-        // negation is undefined under wrapping rules so we cannot
-        // ask "is there a `b` that satisfies `a == -b`?" — only
-        // `b == i8::MIN` does, and that's caught by the
-        // duplicate-check pass instead.
-        let Some(want) = a.checked_neg() else {
-            continue;
-        };
+        // The JVM's `reverseVotes = votes.map(v => (-v).toByte)` then
+        // `!reverseVotes.contains(v)`. `wrapping_neg` IS `(-v).toByte`.
+        let want = a.wrapping_neg();
+        // Self-negation: only `i8::MIN` satisfies `want == a`. The JVM's
+        // `reverseVotes` holds `a` at a's own index, so `contains(a)` is
+        // true -> contradiction. (A non-i8::MIN value never equals its
+        // own wrapping negation, so this arm is exactly the lone-0x80
+        // case the old `checked_neg`/`continue` wrongly accepted.)
+        if want == a {
+            return Err(HeaderValidationError::VotesContradictory {
+                param_id: a.unsigned_abs(),
+                first,
+                first_byte: a,
+                second: first,
+                second_byte: a,
+            });
+        }
         for second in (first + 1)..header.votes.len() {
             let b = header.votes[second] as i8;
             if b != 0 && b == want {
@@ -524,10 +601,16 @@ pub fn validate_header_after_pow(
     let PowCheckedHeader { header, header_id } = pow_checked;
     check_parent_id(&header, parent_id)?;
     check_timestamp(&header, parent)?;
-    // Vote checks (rules 213, 214) are self-contained — no clock or
-    // chain context needed. The future-timestamp check (rule 211)
-    // requires a wall-clock reading and is invoked at the network
-    // ingress site instead; see `check_future_timestamp`.
+    // Vote checks 213 (duplicates) + 214 (contradictions) are
+    // non-deactivatable (`mayBeDisabled = false`) and self-contained — no
+    // clock or chain context — so they run here at header time. Rule 212
+    // (`hdrVotesNumber`) is soft-fork-DEACTIVATABLE (`mayBeDisabled = true`),
+    // so like rule 215 it must be gated on the activated validation settings,
+    // which header-only validation cannot see; it is enforced at block
+    // validation time (`ergo-sync::block_proc`, gated on
+    // `is_rule_disabled(212)`) via [`check_votes_number`]. The
+    // future-timestamp check (rule 211) needs a wall-clock reading and runs
+    // at the network ingress site; see `check_future_timestamp`.
     check_votes_no_duplicates(&header)?;
     check_votes_no_contradictions(&header)?;
     pow::verify_header_difficulty(&header, epoch_headers, config)?;
@@ -739,21 +822,95 @@ mod tests {
     }
 
     #[test]
-    fn votes_no_contradictions_handles_i8_min_without_panicking() {
-        // Vote byte 0x80 reinterprets as `i8::MIN` (-128); negating
-        // it overflows since `-(-128_i8)` has no representable
-        // result. The contradiction check must skip when `a ==
-        // i8::MIN` (via `checked_neg`) and let the duplicate-pass
-        // catch the `i8::MIN`/`i8::MIN` collision instead — a naive
-        // `a == -b` would panic in debug or wrap to -128 in release.
+    fn votes_no_contradictions_rejects_lone_i8_min_self_negation() {
+        // Vote byte 0x80 = i8::MIN (-128) is its own negation under the
+        // wrapping `(-v).toByte` the JVM uses: `reverseVotes` for a lone
+        // -128 is `[-128]`, so `reverseVotes.contains(-128)` is true and
+        // `hdrVotesContradictory` (rule 214) REJECTS. A naive `a == -b`
+        // would panic in debug / wrap silently in release; the impl must
+        // use `wrapping_neg` and treat the self-match as a contradiction.
+        let votes = [0x80_u8, 0u8, 0u8];
+        let err = check_votes_no_contradictions(&test_header(votes, 0))
+            .expect_err("lone 0x80 self-negates -> rule 214 contradiction");
+        assert!(
+            matches!(err, HeaderValidationError::VotesContradictory { .. }),
+            "expected VotesContradictory for lone 0x80, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn votes_no_contradictions_triple_i8_min_does_not_panic() {
+        // [0x80, 0x80, 0x80] must not panic on negation. At the header
+        // level the duplicate pass (rule 213) fires first; the
+        // contradiction pass also flags it (self-negation) but never
+        // panics on the adversarial i8::MIN input.
         let votes = [0x80_u8, 0x80_u8, 0x80_u8];
-        // Contradiction check: i8::MIN has no negation, so no contradiction reported.
-        assert!(check_votes_no_contradictions(&test_header(votes, 0)).is_ok());
-        // Duplicate check picks up the same-byte repeat.
         let dup_err = check_votes_no_duplicates(&test_header(votes, 0)).unwrap_err();
         assert!(matches!(
             dup_err,
             HeaderValidationError::VotesDuplicate { .. }
+        ));
+        // Contradiction pass: no panic (result is Err, the self-negation).
+        let _ = check_votes_no_contradictions(&test_header(votes, 0));
+    }
+
+    // ----- check_votes_number (rule 212) -----
+
+    #[test]
+    fn votes_number_accepts_zero_filled() {
+        assert!(check_votes_number(&test_header([0, 0, 0], 0)).is_ok());
+    }
+
+    #[test]
+    fn votes_number_accepts_two_non_softfork() {
+        // Two distinct parameter votes is the maximum the JVM allows.
+        assert!(check_votes_number(&test_header([3, 5, 0], 0)).is_ok());
+    }
+
+    #[test]
+    fn votes_number_softfork_byte_is_not_counted() {
+        // SoftFork (120) is excluded from votesCount, so [120, 3, 5]
+        // has only TWO counted votes and is accepted.
+        let votes = [120u8, 3u8, 5u8];
+        assert!(check_votes_number(&test_header(votes, 0)).is_ok());
+    }
+
+    #[test]
+    fn votes_number_rejects_three_non_softfork() {
+        // Three distinct non-soft-fork votes: votesCount = 3 > 2 -> the
+        // JVM `hdrVotesNumber` (rule 212) rejects. This is the chain-tier
+        // `count-three-nonfork-reject` coal (we currently ACCEPT it).
+        let err = check_votes_number(&test_header([1, 2, 3], 0))
+            .expect_err("three non-soft-fork votes exceed ParamVotesCount=2");
+        match err {
+            HeaderValidationError::VotesNumber { count } => assert_eq!(count, 3),
+            other => panic!("expected VotesNumber{{count:3}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn votes_number_rejects_three_with_negatives() {
+        // Decrease votes (negative bytes) count too: [-1, -2, -3] -> 3.
+        let votes = [(-1i8) as u8, (-2i8) as u8, (-3i8) as u8];
+        let err = check_votes_number(&test_header(votes, 0))
+            .expect_err("three negative votes also exceed the cap");
+        assert!(matches!(
+            err,
+            HeaderValidationError::VotesNumber { count: 3 }
+        ));
+    }
+
+    #[test]
+    fn votes_number_active_skips_when_rule_212_disabled() {
+        // Rule 212 is soft-fork-deactivatable: when disabled, a header with
+        // three distinct non-soft-fork votes must be ACCEPTED (Scala stops
+        // running the rule); when enabled, it rejects.
+        let three = test_header([1, 2, 3], 0);
+        assert!(check_votes_number_active(&three, true).is_ok());
+        let err = check_votes_number_active(&three, false).unwrap_err();
+        assert!(matches!(
+            err,
+            HeaderValidationError::VotesNumber { count: 3 }
         ));
     }
 

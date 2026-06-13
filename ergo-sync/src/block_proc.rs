@@ -554,6 +554,14 @@ fn process_block_utxo(
     // the activated validation settings so we don't reject canonical
     // blocks the rest of the network accepted.
     let votes_unknown_rule_disabled = store.validation_settings().is_rule_disabled(215);
+    // Rule 212 (`hdrVotesNumber`, ≤2 non-soft-fork votes) is also soft-fork-
+    // deactivatable; honor the activated settings here at block time (the
+    // header pipeline can't see them). 213/214 already ran at header time.
+    ergo_validation::header::check_votes_number_active(
+        checked_header.header(),
+        store.validation_settings().is_rule_disabled(212),
+    )
+    .map_err(ergo_validation::block::BlockValidationError::Header)?;
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: store,
@@ -1037,6 +1045,12 @@ fn process_block_digest(
     // Rule 215 honored against the activated soft-fork settings — see the
     // UTXO-arm context above for the full rationale.
     let votes_unknown_rule_disabled = store.validation_settings().is_rule_disabled(215);
+    // Rule 212 (`hdrVotesNumber`) honored at block time too — see UTXO arm.
+    ergo_validation::header::check_votes_number_active(
+        checked_header.header(),
+        store.validation_settings().is_rule_disabled(212),
+    )
+    .map_err(ergo_validation::block::BlockValidationError::Header)?;
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: &digest_view,

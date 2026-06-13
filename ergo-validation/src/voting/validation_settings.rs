@@ -200,7 +200,26 @@ impl ErgoValidationSettingsUpdate {
         w.result()
     }
 
+    /// Parse an update from a CONSENSUS value (a block-extension field value).
+    /// Mirrors the JVM `ErgoValidationSettingsUpdateSerializer.parse`, which
+    /// reads exactly the declared counts and does NOT assert end-of-input —
+    /// trailing bytes in the surrounding entry-value envelope are ignored.
+    /// Use [`Self::deserialize_exact`] for our own length-framed STORAGE
+    /// blobs, where trailing bytes inside the declared length signal
+    /// corruption and must be rejected.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, ValidationSettingsCodecError> {
+        let mut r = VlqReader::new(bytes);
+        read_validation_settings_update(&mut r)
+    }
+
+    /// Strict parse for our own STORAGE format: the input slice must be
+    /// EXACTLY one serialized update with no trailing bytes. `active_params`
+    /// length-frames each persisted update blob, so leftover bytes inside the
+    /// declared length mean a corrupt/noncanonical row — reject them. (The
+    /// JVM has no analog because it never persists these as standalone
+    /// length-prefixed blobs; this is an arkadianet storage-integrity check,
+    /// not a consensus rule.)
+    pub fn deserialize_exact(bytes: &[u8]) -> Result<Self, ValidationSettingsCodecError> {
         let mut r = VlqReader::new(bytes);
         let v = read_validation_settings_update(&mut r)?;
         if !r.is_empty() {
@@ -214,8 +233,18 @@ impl ErgoValidationSettingsUpdate {
 pub enum ValidationSettingsCodecError {
     #[error("validation_settings: read error: {0:?}")]
     Read(ReadError),
+    /// A length-framed STORAGE blob contained trailing bytes after a complete
+    /// update (corruption). Only [`ErgoValidationSettingsUpdate::deserialize_exact`]
+    /// raises this; the lenient consensus [`ErgoValidationSettingsUpdate::deserialize`]
+    /// ignores trailing bytes (JVM parity).
     #[error("validation_settings: trailing bytes after decode")]
     TrailingBytes,
+    /// Scala `require(rulesSpec.get(rd).forall(_.mayBeDisabled))`
+    /// (`ErgoValidationSettingsUpdate.scala:47-50`): a disable update targets
+    /// a known rule whose `mayBeDisabled = false`. Rejected (accept-invalid
+    /// parity with the JVM `IllegalArgumentException`).
+    #[error("validation_settings: rule {rule_id} may not be disabled")]
+    RuleNotDisableable { rule_id: u16 },
 }
 
 impl PartialEq for ValidationSettingsCodecError {
@@ -227,6 +256,7 @@ impl PartialEq for ValidationSettingsCodecError {
             // for test assertions; not used on consensus paths.
             (Read(a), Read(b)) => format!("{a:?}") == format!("{b:?}"),
             (TrailingBytes, TrailingBytes) => true,
+            (RuleNotDisableable { rule_id: a }, RuleNotDisableable { rule_id: b }) => a == b,
             _ => false,
         }
     }
@@ -267,16 +297,55 @@ pub fn write_validation_settings_update(w: &mut VlqWriter, u: &ErgoValidationSet
     }
 }
 
+/// Rule ids whose `mayBeDisabled = false` in Scala
+/// `ValidationRules.rulesSpec` (ergo-core 6.0.x). A disable update targeting
+/// any of these is rejected (`ErgoValidationSettingsUpdate.scala:47-50`
+/// `require(rulesSpec.get(rd).forall(_.mayBeDisabled))`); ids NOT listed
+/// (the 22 `mayBeDisabled=true` rules + any id unknown to the spec) are
+/// disableable. Mechanically extracted by joining the `val <name>: Short = N`
+/// definitions with each `<name> -> RuleStatus(... mayBeDisabled = false)`
+/// entry in ValidationRules.scala — 42 ids, kept sorted for readability.
+const RULES_NOT_DISABLEABLE: [u16; 42] = [
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 112, 113, 114, 115, 116, 117, 119, 122, 200,
+    201, 203, 204, 205, 206, 207, 208, 209, 210, 211, 213, 214, 216, 300, 301, 302, 303, 304, 305,
+    307, 403, 500, 501,
+];
+
+/// Scala `0 until n.toInt` collection length: a negative `n` (the
+/// two's-complement wrap of a `getUInt` value above `i32::MAX`) yields an
+/// empty range, i.e. zero entries.
+fn count_to_len(n: i32) -> usize {
+    if n < 0 {
+        0
+    } else {
+        n as usize
+    }
+}
+
 pub fn read_validation_settings_update(
     r: &mut VlqReader<'_>,
 ) -> Result<ErgoValidationSettingsUpdate, ValidationSettingsCodecError> {
-    let disabled_n = r.get_u32_exact()? as usize;
-    let mut rules_to_disable = Vec::with_capacity(disabled_n);
+    // Scala reads both counts as `r.getUInt().toInt` (NOT getUIntExact):
+    // a value above i32::MAX wraps two's-complement negative, and the
+    // subsequent `0 until n` is an empty Range. So 0xFFFFFFFF -> -1 -> 0
+    // entries. Mirror with the wrapping helper + clamp-negative-to-zero.
+    // (Don't pre-size the Vec from the untrusted count — a large positive
+    // count would otherwise force a huge allocation before the read EOFs.)
+    let disabled_n = count_to_len(r.get_uint_to_i32()?);
+    let mut rules_to_disable = Vec::new();
     for _ in 0..disabled_n {
         rules_to_disable.push(r.get_u16()?);
     }
-    let status_n = r.get_u32_exact()? as usize;
-    let mut status_updates = Vec::with_capacity(status_n);
+    // Scala reads all disabled ids, then `disabledRules.foreach { rd =>
+    // require(rulesSpec.get(rd).forall(_.mayBeDisabled), ...) }`: reject a
+    // disable of a known non-disableable rule (e.g. 102 txManyInputs).
+    for &rd in &rules_to_disable {
+        if RULES_NOT_DISABLEABLE.contains(&rd) {
+            return Err(ValidationSettingsCodecError::RuleNotDisableable { rule_id: rd });
+        }
+    }
+    let status_n = count_to_len(r.get_uint_to_i32()?);
+    let mut status_updates = Vec::new();
     for _ in 0..status_n {
         let offset = r.get_u16()?;
         let status = read_rule_status(r)?;
@@ -435,12 +504,94 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_rejects_trailing_bytes() {
-        let u = ErgoValidationSettingsUpdate::empty();
-        let mut bytes = u.serialize();
-        bytes.push(0xAB);
+    fn deserialize_rejects_non_disableable_rule() {
+        // Rule 102 (txManyInputs) has mayBeDisabled=false; a disable update
+        // targeting it must be rejected, matching Scala's `require`. SANTA
+        // chain: hostile-mandatory-rule-update (proposed_update 016600).
+        let u = ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![102],
+            status_updates: vec![],
+        };
+        let bytes = u.serialize();
         let err = ErgoValidationSettingsUpdate::deserialize(&bytes).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationSettingsCodecError::RuleNotDisableable { rule_id: 102 }
+        );
+    }
+
+    #[test]
+    fn deserialize_allows_disableable_and_unknown_rules() {
+        // Rule 215 (mayBeDisabled=true) and an unknown rule id are both
+        // accepted (Scala `rulesSpec.get(rd).forall(_.mayBeDisabled)` is true
+        // when the rule is unknown — `forall` on None).
+        for rid in [215u16, 9999u16] {
+            let u = ErgoValidationSettingsUpdate {
+                rules_to_disable: vec![rid],
+                status_updates: vec![],
+            };
+            let bytes = u.serialize();
+            ErgoValidationSettingsUpdate::deserialize(&bytes)
+                .unwrap_or_else(|e| panic!("rule {rid} must be disableable: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn deserialize_ignores_trailing_bytes() {
+        // The JVM ErgoValidationSettingsUpdateSerializer.parse reads exactly
+        // the declared counts and never asserts end-of-input, so trailing
+        // bytes in the surrounding entry-value envelope are ignored (SANTA
+        // chain entry status-trailing-bytes-canonicalized: 016f00deadbeef ->
+        // decodes to a 1-disabled-rule update, deadbeef dropped). Our decoder
+        // previously rejected this (reject-valid).
+        let u = ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![111],
+            status_updates: vec![],
+        };
+        let mut bytes = u.serialize(); // = 016f00
+        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
+            .expect("trailing bytes must be ignored, matching the JVM");
+        assert_eq!(back, u);
+    }
+
+    #[test]
+    fn deserialize_exact_rejects_trailing_bytes() {
+        // The strict STORAGE path must reject trailing bytes inside a
+        // length-framed blob (corruption), even though the lenient consensus
+        // `deserialize` ignores them.
+        let u = ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![111],
+            status_updates: vec![],
+        };
+        let mut bytes = u.serialize();
+        bytes.extend_from_slice(&[0xde, 0xad]);
+        // lenient: accepts
+        assert!(ErgoValidationSettingsUpdate::deserialize(&bytes).is_ok());
+        // strict: rejects
+        let err = ErgoValidationSettingsUpdate::deserialize_exact(&bytes).unwrap_err();
         assert_eq!(err, ValidationSettingsCodecError::TrailingBytes);
+    }
+
+    #[test]
+    fn deserialize_disabled_count_wraps_to_empty() {
+        // disabled_rules_num = 0xFFFFFFFF: JVM getUInt().toInt = -1, `0 until
+        // -1` is empty -> empty update. We previously errored ValueTooLarge
+        // (getUIntExact i32::MAX bound). SANTA: status-count-wrap-rules.
+        let bytes = [0xff, 0xff, 0xff, 0xff, 0x0f, 0x00]; // disabled=0xFFFFFFFF, status=0
+        let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
+            .expect("0xFFFFFFFF count wraps to an empty range, not an error");
+        assert_eq!(back, ErgoValidationSettingsUpdate::empty());
+    }
+
+    #[test]
+    fn deserialize_status_count_wraps_to_empty() {
+        // status_updates_num = 0xFFFFFFFF wraps to -1 -> empty range.
+        // SANTA: status-count-wrap-status (00ffffffff0f).
+        let bytes = [0x00, 0xff, 0xff, 0xff, 0xff, 0x0f]; // disabled=0, status=0xFFFFFFFF
+        let back = ErgoValidationSettingsUpdate::deserialize(&bytes)
+            .expect("0xFFFFFFFF status count wraps to an empty range");
+        assert_eq!(back, ErgoValidationSettingsUpdate::empty());
     }
 
     #[test]
