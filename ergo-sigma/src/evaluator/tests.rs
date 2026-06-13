@@ -12182,9 +12182,11 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
     assert_eq!(cost_of(&uo(-1)), c_uo);
     // Framing is identical (Const obj + MethodCall + Const arg), so the only
     // difference is the method body: updateOperations(45) - updateDigest(40) = 5.
+    // Additive form (not `c_uo - c_ud == 5`) so a cost regression that makes
+    // c_uo < c_ud surfaces as a value mismatch rather than a u64 underflow panic.
     assert_eq!(
-        c_uo - c_ud,
-        5,
+        c_uo,
+        c_ud + 5,
         "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
     );
 }
@@ -12527,15 +12529,17 @@ fn sbox_accessor_method_form_costs() {
         .unwrap();
         cost.total().value()
     };
-    // envelope(4) + body; subtract SELF visit + envelope to recover the body.
+    // total = SELF visit + envelope(4) + body. Additive form (not
+    // `cost_of - self_only - 4`) so a regression surfaces as a value mismatch
+    // rather than a u64 underflow panic.
     assert_eq!(
-        cost_of(1) - self_only - 4,
-        8,
+        cost_of(1),
+        self_only + 4 + 8,
         "value body = ExtractAmount(8)"
     );
     assert_eq!(
-        cost_of(6) - self_only - 4,
-        16,
+        cost_of(6),
+        self_only + 4 + 16,
         "creationInfo body = ExtractCreationInfo(16)"
     );
 }
