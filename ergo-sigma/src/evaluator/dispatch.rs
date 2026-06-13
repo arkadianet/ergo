@@ -158,6 +158,46 @@ pub(crate) fn expr_has_deserialize(expr: &Expr) -> bool {
     }
 }
 
+/// Validate every `GroupElement` constant in the segregated constant table the
+/// way Scala's `GroupElementSerializer.parse` does at deserialize time: a
+/// non-zero lead byte must encode a point on SecP256K1, so an off-curve
+/// constant errors EVEN WHEN the live evaluation path never reads it (it sits
+/// in a dead `if`-branch). A lead-`0x00` (identity) encoding is accepted with
+/// its trailing bytes discarded — only non-zero leads curve-validate. GE values
+/// nested inside `Coll`/`Tuple`/`Option` constants are walked too.
+fn validate_group_element_constants(
+    constants: &[(SigmaType, SigmaValue)],
+) -> Result<(), EvalError> {
+    fn walk(v: &SigmaValue) -> Result<(), EvalError> {
+        match v {
+            SigmaValue::GroupElement(ge) => {
+                opcodes::sigma::canonicalize_group_element(*ge.as_bytes())?;
+                Ok(())
+            }
+            SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Values(vs))
+            | SigmaValue::Tuple(vs) => vs.iter().try_for_each(walk),
+            SigmaValue::Opt(Some(inner)) => walk(inner),
+            _ => Ok(()),
+        }
+    }
+    constants.iter().try_for_each(|(_, val)| walk(val))
+}
+
+/// Reject a ContextExtension whose variable-id key has the high bit set
+/// (>= 0x80). Scala stores extension keys as signed `Byte` and `toSigmaContext`
+/// materializes a dense `Array(maxKey + 1)` indexed by that key — a key >= 0x80
+/// is negative as a `Byte`, so the array build throws BEFORE any bytecode runs
+/// and the spend fails regardless of whether the script reads the extension.
+/// (Our map stores keys as unsigned `u8`; `k as i8 < 0` is the same domain.)
+fn check_extension_key_domain(ctx: &ReductionContext<'_>) -> Result<(), EvalError> {
+    if ctx.extension.keys().any(|&k| (k as i8) < 0) {
+        return Err(EvalError::RuntimeException(
+            "ContextExtension variable id with the high bit set (>= 0x80) is invalid",
+        ));
+    }
+    Ok(())
+}
+
 /// Structural rebuild replacing every `ConstPlaceholder { index }` with
 /// the corresponding inline `Expr::Const` from the segregated constant
 /// table. Out-of-range indexes are left as placeholders — they error at
@@ -309,6 +349,21 @@ pub(in crate::evaluator) fn eval_expr(
     // incremented before any child dispatch). The recursive call passes
     // empty constants — mirroring Scala's `EmptyConstants` and making
     // the gate non-reentrant.
+    if *depth == 0 {
+        // Two whole-tree checks Scala performs at context/deserialize time,
+        // BEFORE any bytecode runs — so they fire even when the live path never
+        // reaches the offending value:
+        // (1) `GroupElementSerializer.parse` curve-validates every GroupElement
+        //     constant up front, so an off-curve constant errors even on a dead
+        //     branch (a non-canonical *identity* lead-0x00 encoding still parses);
+        // (2) `toSigmaContext` builds a dense `new Array(maxKey+1)` from the
+        //     ContextExtension indexed by the signed Byte key, throwing for any
+        //     key with the high bit set (>= 0x80, i.e. negative as i8).
+        // Run once at the shared depth-0 entry (real reduce path, test-only
+        // `eval_to_value`, and the conformance hook all funnel here at depth 0).
+        validate_group_element_constants(constants)?;
+        check_extension_key_domain(ctx)?;
+    }
     if *depth == 0 && !constants.is_empty() && expr_has_deserialize(expr) {
         let inlined = inline_placeholders(expr, constants);
         return eval_expr(&inlined, ctx, &[], env, depth, cost, trace);

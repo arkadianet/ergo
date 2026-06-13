@@ -12188,3 +12188,89 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
         "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
     );
 }
+
+// ---- Cluster A: whole-tree pre-eval checks (Scala parity, SANTA eval tier) ----
+
+/// An off-curve GroupElement *constant* in the tree's constant segment is
+/// rejected at deserialize even when the live path never reads it — Scala's
+/// `GroupElementSerializer.parse` curve-validates every GE constant up front,
+/// so `if (true) 5 else <off-curve GE>` errors despite the dead else-branch.
+#[test]
+fn ge_offcurve_constant_errors_even_when_unused() {
+    let mut bytes = [0xffu8; 33];
+    bytes[0] = 0x02; // x = 0xff*32 is not a valid SecP256K1 field element
+    let constants = vec![(
+        SigmaType::SGroupElement,
+        SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
+            bytes,
+        )),
+    )];
+    // HEIGHT — never references the GE constant (it stays on a dead path).
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let ctx = ReductionContext::minimal(200_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert!(
+        result.is_err(),
+        "off-curve GE constant must error even unused, got {result:?}"
+    );
+}
+
+/// A non-canonical *identity* GE constant (lead byte 0x00, trailing garbage)
+/// parses fine — only a non-zero lead triggers curve validation — so a tree
+/// carrying it on a dead branch still evaluates normally.
+#[test]
+fn ge_identity_garbage_constant_accepted() {
+    let mut bytes = [0xaau8; 33];
+    bytes[0] = 0x00; // identity encoding: trailing bytes discarded at parse
+    let constants = vec![(
+        SigmaType::SGroupElement,
+        SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
+            bytes,
+        )),
+    )];
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let ctx = ReductionContext::minimal(200_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert_eq!(result.unwrap(), Value::Int(200_000));
+}
+
+/// A ContextExtension carrying a key with the high bit set (>= 0x80) makes
+/// Scala's `toSigmaContext` build a `new Array(maxKey+1)` indexed by the
+/// signed-negative Byte key and throw before any bytecode runs — the spend
+/// fails regardless of whether the script reads the extension.
+#[test]
+fn extension_key_high_bit_errors() {
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let mut ctx = ReductionContext::minimal(200_000, 0);
+    ctx.extension
+        .insert(128, (SigmaType::SInt, SigmaValue::Int(42)));
+    let result = eval_to_value(&expr, &ctx, &[]);
+    assert!(
+        result.is_err(),
+        "extension key 0x80 must error before eval, got {result:?}"
+    );
+}
+
+/// Key 0x7f (127) is the inclusive max signed-positive Byte — the context
+/// builds and the script evaluates normally (the accept boundary).
+#[test]
+fn extension_key_max_signed_accepted() {
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let mut ctx = ReductionContext::minimal(200_000, 0);
+    ctx.extension
+        .insert(127, (SigmaType::SInt, SigmaValue::Int(42)));
+    let result = eval_to_value(&expr, &ctx, &[]);
+    assert_eq!(result.unwrap(), Value::Int(200_000));
+}
