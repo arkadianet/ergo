@@ -872,7 +872,10 @@ mod tests {
         let votes = [(-1i8) as u8, (-2i8) as u8, (-3i8) as u8];
         let err = check_votes_number(&test_header(votes, 0))
             .expect_err("three negative votes also exceed the cap");
-        assert!(matches!(err, HeaderValidationError::VotesNumber { count: 3 }));
+        assert!(matches!(
+            err,
+            HeaderValidationError::VotesNumber { count: 3 }
+        ));
     }
 
     #[test]
