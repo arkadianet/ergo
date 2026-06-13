@@ -199,8 +199,16 @@ pub(in crate::evaluator) fn eval_extract_bytes(
     Ok(Value::CollBytes(b.raw_bytes.clone()))
 }
 
-// 0xC4 ExtractBytesWithNoRef(box) — candidate bytes (raw_bytes minus
-// last 32-byte txId + VLQ-encoded output_index).
+// 0xC4 ExtractBytesWithNoRef(box) — CANONICAL candidate bytes.
+//
+// Scala `ErgoBox.bytesWithNoRef` re-serializes the candidate from its parsed
+// structure (`ErgoBoxCandidate.serializer`), so any non-canonical wire encoding
+// is normalized away — notably a register holding the IDENTITY GroupElement
+// written as a lead-0x00 byte with trailing garbage (`00 aa..aa`) re-emits as
+// the canonical 33 zero bytes (the trailing bytes are discarded at parse).
+// This is distinct from `.bytes`/`.id` (0xC3/0xC5), which Scala surfaces from
+// the RETAINED original bytes (garbage preserved) — so do NOT touch raw_bytes
+// or the box id here.
 pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
     input: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -208,12 +216,81 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
     add_cost(cx.cost, 0xC4)?;
     let box_val = cx.eval_expr(input)?;
     let b = resolve_box(&box_val, cx.ctx)?;
-    // Candidate bytes = raw_bytes minus last 34 bytes (32 txId + 2 index)
-    // But index is VLQ-encoded (1 byte for values < 128, 2 for >= 128).
-    // Use the known txId+index to compute the suffix length.
-    let suffix_len = 32 + ergo_primitives::vlq::encode_vlq(b.output_index as u64).len();
-    let end = b.raw_bytes.len().saturating_sub(suffix_len);
-    Ok(Value::CollBytes(b.raw_bytes[..end].to_vec()))
+    Ok(Value::CollBytes(box_candidate_bytes_canonical(b)?))
+}
+
+/// Canonical candidate serialization (`bytesWithNoRef`): value, script, height,
+/// tokens, then the registers re-serialized from their PARSED values with every
+/// `GroupElement` canonicalized (identity garbage normalized; non-identity
+/// points curve-validated). Mirrors `write_ergo_box_candidate` exactly except
+/// the register block is emitted from `additionalRegisters` rather than copied
+/// verbatim from the retained wire bytes — which is what normalizes the
+/// encoding. For a canonically-encoded box this reproduces `raw_bytes` minus the
+/// 32-byte txId + VLQ index suffix byte-for-byte.
+pub(in crate::evaluator) fn box_candidate_bytes_canonical(
+    b: &EvalBox,
+) -> Result<Vec<u8>, EvalError> {
+    use ergo_ser::register::{write_registers, AdditionalRegisters, RegisterValue};
+
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_u64(b.value as u64);
+    w.put_bytes(&b.script_bytes);
+    w.put_u32(b.creation_height);
+    w.put_u8(b.tokens.len() as u8);
+    for (id, amount) in &b.tokens {
+        w.put_bytes(id);
+        w.put_u64(*amount);
+    }
+    let registers: Vec<RegisterValue> = b
+        .registers
+        .iter()
+        .flatten()
+        .map(|r| {
+            Ok(RegisterValue {
+                tpe: r.tpe.clone(),
+                value: canonicalize_group_elements(&r.value)?,
+            })
+        })
+        .collect::<Result<_, EvalError>>()?;
+    write_registers(&mut w, &AdditionalRegisters { registers }).map_err(|e| {
+        EvalError::TypeError {
+            expected: "serializable box registers",
+            got: format!("register re-serialization failed: {e}"),
+        }
+    })?;
+    Ok(w.result())
+}
+
+/// Return a copy of `v` with every `GroupElement` canonicalized (recursing
+/// through `Coll`/`Tuple`/`Option`). A lead-0x00 identity encoding normalizes to
+/// 33 zero bytes; a non-identity point is curve-validated (and propagates an
+/// error if off-curve, matching Scala's parse-time reject).
+fn canonicalize_group_elements(
+    v: &ergo_ser::sigma_value::SigmaValue,
+) -> Result<ergo_ser::sigma_value::SigmaValue, EvalError> {
+    use ergo_ser::sigma_value::{CollValue, SigmaValue};
+    Ok(match v {
+        SigmaValue::GroupElement(ge) => {
+            let canon = super::sigma::canonicalize_group_element(*ge.as_bytes())?;
+            SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
+                canon,
+            ))
+        }
+        SigmaValue::Coll(CollValue::Values(vs)) => SigmaValue::Coll(CollValue::Values(
+            vs.iter()
+                .map(canonicalize_group_elements)
+                .collect::<Result<_, _>>()?,
+        )),
+        SigmaValue::Tuple(vs) => SigmaValue::Tuple(
+            vs.iter()
+                .map(canonicalize_group_elements)
+                .collect::<Result<_, _>>()?,
+        ),
+        SigmaValue::Opt(Some(inner)) => {
+            SigmaValue::Opt(Some(Box::new(canonicalize_group_elements(inner)?)))
+        }
+        other => other.clone(),
+    })
 }
 
 // 0xE3 GetVar(var_id, type) -> Option[T]

@@ -184,7 +184,21 @@ pub(in crate::evaluator) fn eval_tuple(
     add_cost(cx.cost, 0x86)?;
     let mut values = Vec::with_capacity(items.len());
     for item in items {
-        values.push(cx.eval_expr(item)?);
+        let v = cx.eval_expr(item)?;
+        // Scala `Tuple.eval` runs `Value.checkType(item, itemV)` per item;
+        // `SType.isValueOfType` then `sys.error("Unsupported tuple type")` for
+        // any item whose type is a tuple of arity != 2 — only pairs are a valid
+        // runtime tuple representation. A nested *pair* item is fine. The check
+        // is shallow (the item's own arity), mirroring the per-item checkType.
+        if let Value::Tuple(inner) = &v {
+            if inner.len() != 2 {
+                return Err(EvalError::TypeError {
+                    expected: "pair (arity-2) tuple item",
+                    got: format!("tuple item of arity {}", inner.len()),
+                });
+            }
+        }
+        values.push(v);
     }
     Ok(Value::Tuple(values))
 }

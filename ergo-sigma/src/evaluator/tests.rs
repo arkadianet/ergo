@@ -2771,6 +2771,51 @@ fn opcode_decode_point_zero_lead_canonicalizes_to_identity() {
 }
 
 #[test]
+fn canonicalize_group_element_helper() {
+    use super::opcodes::sigma::canonicalize_group_element;
+    // Valid compressed generator -> itself (already canonical).
+    let g: [u8; 33] = [
+        0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
+        0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16,
+        0xF8, 0x17, 0x98,
+    ];
+    assert_eq!(canonicalize_group_element(g).unwrap(), g);
+    // 0x00-lead (with garbage trailing) -> canonical identity (33 zeros).
+    let mut z = [0u8; 33];
+    z[1..].fill(0xAA);
+    assert_eq!(canonicalize_group_element(z).unwrap(), [0u8; 33]);
+    // Off-curve / malformed SEC1 -> error.
+    let mut bad = [0u8; 33];
+    bad[0] = 0x04;
+    assert!(canonicalize_group_element(bad).is_err());
+}
+
+#[test]
+fn group_element_constant_materialization_canonicalizes() {
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::SigmaValue as SV;
+    // A 0x00-lead GroupElement CONSTANT materializes to the canonical identity
+    // (sigma_to_value applies the GroupElementSerializer.parse canonicalization,
+    // not just decodePoint).
+    let mut garbage = [0u8; 33];
+    garbage[1..].fill(0xAA);
+    let c = Expr::Const {
+        tpe: SigmaType::SGroupElement,
+        val: SV::GroupElement(GroupElement::from_bytes(garbage)),
+    };
+    assert_eq!(run_eval(&c), Value::GroupElement([0u8; 33]));
+    // An off-curve GE constant errors at materialization (even though Scala/our
+    // wire parse stores it raw — the value-basis check fires when materialized).
+    let mut bad = [0u8; 33];
+    bad[0] = 0x04;
+    let c_bad = Expr::Const {
+        tpe: SigmaType::SGroupElement,
+        val: SV::GroupElement(GroupElement::from_bytes(bad)),
+    };
+    assert!(matches!(run_eval_err(&c_bad), EvalError::TypeError { .. }));
+}
+
+#[test]
 fn opcode_decode_point_wrong_length_errors() {
     // < 33 bytes: Scala's getBytes(33) underflows -> error.
     let expr = op(0xEE, Payload::One(Box::new(const_bytes(vec![0x02; 32]))));
@@ -12137,9 +12182,364 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
     assert_eq!(cost_of(&uo(-1)), c_uo);
     // Framing is identical (Const obj + MethodCall + Const arg), so the only
     // difference is the method body: updateOperations(45) - updateDigest(40) = 5.
+    // Additive form (not `c_uo - c_ud == 5`) so a cost regression that makes
+    // c_uo < c_ud surfaces as a value mismatch rather than a u64 underflow panic.
     assert_eq!(
-        c_uo - c_ud,
-        5,
+        c_uo,
+        c_ud + 5,
         "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
+    );
+}
+
+// ---- Cluster A: whole-tree pre-eval checks (Scala parity, SANTA eval tier) ----
+
+/// An off-curve GroupElement *constant* in the tree's constant segment is
+/// rejected at deserialize even when the live path never reads it — Scala's
+/// `GroupElementSerializer.parse` curve-validates every GE constant up front,
+/// so `if (true) 5 else <off-curve GE>` errors despite the dead else-branch.
+#[test]
+fn ge_offcurve_constant_errors_even_when_unused() {
+    let mut bytes = [0xffu8; 33];
+    bytes[0] = 0x02; // x = 0xff*32 is not a valid SecP256K1 field element
+    let constants = vec![(
+        SigmaType::SGroupElement,
+        SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
+            bytes,
+        )),
+    )];
+    // HEIGHT — never references the GE constant (it stays on a dead path).
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let ctx = ReductionContext::minimal(200_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert!(
+        result.is_err(),
+        "off-curve GE constant must error even unused, got {result:?}"
+    );
+}
+
+/// A non-canonical *identity* GE constant (lead byte 0x00, trailing garbage)
+/// parses fine — only a non-zero lead triggers curve validation — so a tree
+/// carrying it on a dead branch still evaluates normally.
+#[test]
+fn ge_identity_garbage_constant_accepted() {
+    let mut bytes = [0xaau8; 33];
+    bytes[0] = 0x00; // identity encoding: trailing bytes discarded at parse
+    let constants = vec![(
+        SigmaType::SGroupElement,
+        SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
+            bytes,
+        )),
+    )];
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let ctx = ReductionContext::minimal(200_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert_eq!(result.unwrap(), Value::Int(200_000));
+}
+
+/// A ContextExtension carrying a key with the high bit set (>= 0x80) makes
+/// Scala's `toSigmaContext` build a `new Array(maxKey+1)` indexed by the
+/// signed-negative Byte key and throw before any bytecode runs — the spend
+/// fails regardless of whether the script reads the extension.
+#[test]
+fn extension_key_high_bit_errors() {
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let mut ctx = ReductionContext::minimal(200_000, 0);
+    ctx.extension
+        .insert(128, (SigmaType::SInt, SigmaValue::Int(42)));
+    let result = eval_to_value(&expr, &ctx, &[]);
+    assert!(
+        result.is_err(),
+        "extension key 0x80 must error before eval, got {result:?}"
+    );
+}
+
+/// Key 0x7f (127) is the inclusive max signed-positive Byte — the context
+/// builds and the script evaluates normally (the accept boundary).
+#[test]
+fn extension_key_max_signed_accepted() {
+    let expr = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let mut ctx = ReductionContext::minimal(200_000, 0);
+    ctx.extension
+        .insert(127, (SigmaType::SInt, SigmaValue::Int(42)));
+    let result = eval_to_value(&expr, &ctx, &[]);
+    assert_eq!(result.unwrap(), Value::Int(200_000));
+}
+
+// ---- Cluster: Tuple.checkType — non-pair tuple as a tuple item (Scala parity) ----
+
+/// Scala `Tuple.eval` runs `Value.checkType(item, itemV)` on each of the two
+/// items; `SType.isValueOfType` then `sys.error("Unsupported tuple type")` for
+/// any item whose type is a tuple of arity != 2. So constructing `Tuple(t3, 1)`
+/// where `t3` is a 3-tuple errors — at both the inline-constant and the
+/// ConstantPlaceholder seam (both arrive as item0 of the outer `Tuple` op).
+#[test]
+fn tuple_item_three_tuple_errors() {
+    let constants = vec![
+        (
+            SigmaType::STuple(vec![
+                SigmaType::SBoolean,
+                SigmaType::SBoolean,
+                SigmaType::SBoolean,
+            ]),
+            SigmaValue::Tuple(vec![
+                SigmaValue::Boolean(true),
+                SigmaValue::Boolean(true),
+                SigmaValue::Boolean(true),
+            ]),
+        ),
+        (SigmaType::SInt, SigmaValue::Int(1)),
+    ];
+    let item0 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 0 },
+    });
+    let item1 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 1 },
+    });
+    let expr = Expr::Op(IrNode {
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![item0, item1],
+        },
+    });
+    let ctx = ReductionContext::minimal(100_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert!(
+        result.is_err(),
+        "a 3-tuple as a tuple item must error (checkType), got {result:?}"
+    );
+}
+
+/// A nested *pair* item is fine: `Tuple( (a,b), c )` — item0 is an arity-2
+/// tuple, which `isValueOfType` accepts — so the construction succeeds.
+#[test]
+fn tuple_item_nested_pair_ok() {
+    let constants = vec![
+        (
+            SigmaType::STuple(vec![SigmaType::SBoolean, SigmaType::SBoolean]),
+            SigmaValue::Tuple(vec![SigmaValue::Boolean(true), SigmaValue::Boolean(false)]),
+        ),
+        (SigmaType::SInt, SigmaValue::Int(1)),
+    ];
+    let item0 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 0 },
+    });
+    let item1 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 1 },
+    });
+    let expr = Expr::Op(IrNode {
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![item0, item1],
+        },
+    });
+    let ctx = ReductionContext::minimal(100_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert!(
+        result.is_ok(),
+        "a nested pair item is valid, got {result:?}"
+    );
+}
+
+// ---- Cluster: ExtractBytesWithNoRef canonicalizes register GE garbage ----
+
+/// A box carrying a non-canonical *identity* GroupElement register (lead 0x00
+/// with trailing garbage) must surface `bytesWithoutRef` (0xC4) CANONICALLY:
+/// Scala re-serializes the candidate from its parsed structure, where the
+/// identity point re-emits as 33 zero bytes (the trailing garbage is dropped at
+/// parse). `.bytes`/`.id` stay garbage-retained; only `bytesWithoutRef`
+/// normalizes. Build a self-consistent box whose raw_bytes carry the garbage.
+#[test]
+fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
+    let ge_garbage = {
+        let mut g = [0xaau8; 33];
+        g[0] = 0x00; // identity lead: bytes 1..32 are discarded at parse
+        g
+    };
+    // raw_bytes = canonical-prefix ++ garbage register ++ txId(32) ++ index VLQ(0)
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&[0xE8, 0x07]); // value 1000 (VLQ u64)
+    raw.extend_from_slice(&[0x10, 0x00]); // script_bytes (opaque here)
+    raw.push(0x00); // creation height 0
+    raw.push(0x00); // token count 0
+    raw.push(0x01); // register count 1
+    raw.push(0x07); // R4 type = SGroupElement
+    raw.extend_from_slice(&ge_garbage); // R4 value, garbage-retained
+    raw.extend_from_slice(&[0x11; 32]); // transaction id
+    raw.push(0x00); // output index VLQ(0)
+
+    let b = EvalBox {
+        creation_height: 0,
+        script_bytes: vec![0x10, 0x00],
+        value: 1000,
+        id: [0u8; 32],
+        transaction_id: [0x11; 32],
+        output_index: 0,
+        registers: [
+            Some(ergo_ser::register::RegisterValue {
+                tpe: SigmaType::SGroupElement,
+                value: SigmaValue::GroupElement(
+                    ergo_primitives::group_element::GroupElement::from_bytes(ge_garbage),
+                ),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        tokens: Vec::new(),
+        raw_bytes: raw,
+    };
+    let ctx = ctx_with_self_box(&b);
+    let expr = op(0xC4, Payload::One(Box::new(op(0xA7, Payload::Zero))));
+    let out = match run_eval_ctx(&expr, &ctx) {
+        Value::CollBytes(v) => v,
+        other => panic!("expected CollBytes, got {other:?}"),
+    };
+    // The garbage 0xAA bytes must be gone (canonical re-serialization).
+    assert!(
+        !out.contains(&0xAA),
+        "bytesWithoutRef must normalize the identity-GE garbage, got {out:?}"
+    );
+    // The tail is the R4 register: type 0x07 then the canonical identity GE
+    // (33 zero bytes). No txId/index follows (bytesWithoutRef excludes the ref).
+    let mut expected_tail = vec![0x07u8];
+    expected_tail.extend_from_slice(&[0x00; 33]);
+    assert_eq!(
+        &out[out.len() - 34..],
+        expected_tail.as_slice(),
+        "register tail must be canonical identity GE"
+    );
+}
+
+// ---- Cluster: SBox accessor method-forms (PropertyCall 99:1..6) ----
+
+/// The box accessors have a method-form (`PropertyCall(99, n)`) in addition to
+/// their dedicated opcode (ExtractAmount, ...). Scala dispatches both to the
+/// same logic. Add the no-arg SBox arms 1..6 so the method-form returns the
+/// same values: value, propositionBytes, bytes (retained), bytesWithoutRef
+/// (canonical), id, creationInfo.
+#[test]
+fn sbox_accessor_method_forms() {
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let pc = |mid: u8| {
+        op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 99,
+                method_id: mid,
+                obj: Box::new(op(0xA7, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    };
+    assert_eq!(run_eval_ctx(&pc(1), &ctx), Value::Long(1_000_000_000));
+    assert_eq!(
+        run_eval_ctx(&pc(2), &ctx),
+        Value::CollBytes(vec![0x00, 0x08, 0xCD])
+    );
+    assert_eq!(
+        run_eval_ctx(&pc(3), &ctx),
+        Value::CollBytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+    );
+    assert_eq!(run_eval_ctx(&pc(5), &ctx), Value::CollBytes(b.id.to_vec()));
+    let mut ref_bytes = b.transaction_id.to_vec();
+    ref_bytes.extend_from_slice(&b.output_index.to_be_bytes());
+    assert_eq!(
+        run_eval_ctx(&pc(6), &ctx),
+        Value::Tuple(vec![Value::Int(500_000), Value::CollBytes(ref_bytes)])
+    );
+    // bytesWithoutRef: canonical re-serialization (own dedicated test covers
+    // the GE normalization); here just assert it dispatches to CollBytes.
+    match run_eval_ctx(&pc(4), &ctx) {
+        Value::CollBytes(v) => assert!(!v.is_empty(), "bytesWithoutRef must be non-empty"),
+        other => panic!("expected CollBytes for bytesWithoutRef, got {other:?}"),
+    }
+}
+
+/// The method-form cost matches the opcode-form: envelope (PropertyCall 0xDB =
+/// 4) + the extract method body equal to the dedicated opcode's cost. e.g.
+/// value = 4 + ExtractAmount(8); creationInfo = 4 + ExtractCreationInfo(16).
+#[test]
+fn sbox_accessor_method_form_costs() {
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let cost_of = |mid: u8| {
+        let expr = op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 99,
+                method_id: mid,
+                obj: Box::new(op(0xA7, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        eval_expr(
+            &expr,
+            &ctx,
+            &[],
+            &mut env,
+            &mut depth,
+            &mut cost,
+            &mut trace,
+        )
+        .unwrap();
+        cost.total().value()
+    };
+    // SELF(0xA7) cost is the same constant for every call, so the deltas are
+    // purely the per-method extract body: 8/10/12/12/12/16.
+    let self_only = {
+        let expr = op(0xA7, Payload::Zero);
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        eval_expr(
+            &expr,
+            &ctx,
+            &[],
+            &mut env,
+            &mut depth,
+            &mut cost,
+            &mut trace,
+        )
+        .unwrap();
+        cost.total().value()
+    };
+    // total = SELF visit + envelope(4) + body. Additive form (not
+    // `cost_of - self_only - 4`) so a regression surfaces as a value mismatch
+    // rather than a u64 underflow panic.
+    assert_eq!(
+        cost_of(1),
+        self_only + 4 + 8,
+        "value body = ExtractAmount(8)"
+    );
+    assert_eq!(
+        cost_of(6),
+        self_only + 4 + 16,
+        "creationInfo body = ExtractCreationInfo(16)"
     );
 }

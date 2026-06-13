@@ -5,6 +5,14 @@ use crate::zigzag;
 pub struct VlqReader<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Optional absolute byte position the reader must not begin a read past.
+    /// `None` (the default) means unbounded. Mirrors Scala's
+    /// `Reader.positionLimit` + `CheckPositionLimit` (validation rule 1014):
+    /// each consuming read checks `position <= positionLimit` BEFORE advancing,
+    /// so a single read may overrun the limit but the NEXT read past it fails.
+    /// Set only for scoped sub-parses (e.g. an SBox candidate body bounded to
+    /// `start + MaxBoxSize`); leaves all other parsing unaffected.
+    position_limit: Option<usize>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -38,11 +46,43 @@ impl<'a> VlqReader<'a> {
     /// Wrap a byte slice for sequential decoding. The reader borrows `data`
     /// for its full lifetime.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            position_limit: None,
+        }
     }
 
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Current position limit (`None` = unbounded). Save before setting a scoped
+    /// limit so it can be restored afterwards (Scala `previousPositionLimit`).
+    pub fn position_limit(&self) -> Option<usize> {
+        self.position_limit
+    }
+
+    /// Set (or clear with `None`) the absolute position limit. Each consuming
+    /// read then errors if it would BEGIN past this position.
+    pub fn set_position_limit(&mut self, limit: Option<usize>) {
+        self.position_limit = limit;
+    }
+
+    /// Scala `CheckPositionLimit`: error if the cursor is already past the
+    /// limit before a read begins (strict `>`; a read starting exactly at the
+    /// limit is allowed and may overrun it).
+    #[inline]
+    fn check_position_limit(&self) -> Result<(), ReadError> {
+        if let Some(limit) = self.position_limit {
+            if self.pos > limit {
+                return Err(ReadError::InvalidData(format!(
+                    "position {} exceeds limit {limit} (CheckPositionLimit, rule 1014)",
+                    self.pos
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn remaining(&self) -> usize {
@@ -70,6 +110,7 @@ impl<'a> VlqReader<'a> {
     }
 
     pub fn get_u8(&mut self) -> Result<u8, ReadError> {
+        self.check_position_limit()?;
         if self.pos >= self.data.len() {
             return Err(ReadError::UnexpectedEnd {
                 pos: self.pos,
@@ -83,6 +124,7 @@ impl<'a> VlqReader<'a> {
 
     /// Consume `n` raw bytes and return them as a borrowed slice.
     pub fn get_bytes(&mut self, n: usize) -> Result<&'a [u8], ReadError> {
+        self.check_position_limit()?;
         if self.pos + n > self.data.len() {
             return Err(ReadError::UnexpectedEnd {
                 pos: self.pos,
@@ -125,6 +167,7 @@ impl<'a> VlqReader<'a> {
     /// (mirroring Scala's `getUInt -> Long`), call [`Self::get_u64`]
     /// directly and keep the value at the wider type.
     pub fn get_u32_exact(&mut self) -> Result<u32, ReadError> {
+        self.check_position_limit()?;
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
         if val > i32::MAX as u64 {
             return Err(ReadError::ValueTooLarge {
@@ -147,6 +190,7 @@ impl<'a> VlqReader<'a> {
     /// does for `AvlTreeData.{keyLength, valueLengthOpt}` ("the deserializer
     /// succeeds with invalid AvlTreeData" when those wrap negative).
     pub fn get_uint_to_i32(&mut self) -> Result<i32, ReadError> {
+        self.check_position_limit()?;
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
         if val > u32::MAX as u64 {
             return Err(ReadError::ValueTooLarge {
@@ -159,18 +203,21 @@ impl<'a> VlqReader<'a> {
     }
 
     pub fn get_u64(&mut self) -> Result<u64, ReadError> {
+        self.check_position_limit()?;
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
         self.pos += consumed;
         Ok(val)
     }
 
     pub fn get_i32(&mut self) -> Result<i32, ReadError> {
+        self.check_position_limit()?;
         let (val, consumed) = zigzag::decode_signed_i32(&self.data[self.pos..])?;
         self.pos += consumed;
         Ok(val)
     }
 
     pub fn get_i64(&mut self) -> Result<i64, ReadError> {
+        self.check_position_limit()?;
         let (val, consumed) = zigzag::decode_signed_i64(&self.data[self.pos..])?;
         self.pos += consumed;
         Ok(val)
@@ -181,6 +228,7 @@ impl<'a> VlqReader<'a> {
     /// not fit in `u16` — matches Scala `getUShortExact` and
     /// sigma-rust `u16::try_from(u64)`.
     pub fn get_u16(&mut self) -> Result<u16, ReadError> {
+        self.check_position_limit()?;
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
         let narrowed = u16::try_from(val).map_err(|_| ReadError::ValueTooLarge {
             type_name: "u16",

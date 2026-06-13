@@ -162,6 +162,17 @@ pub fn verify_spending_proof_with_context_and_cost(
     ctx: &super::evaluator::ReductionContext<'_>,
     cost: &mut CostAccumulator,
 ) -> Result<bool, VerifySpendingError> {
+    // Whole-tree, pre-reduction parity checks Scala performs at context build /
+    // deserialize (ContextExtension key domain via `toSigmaContext`; every
+    // GroupElement constant on-curve via `GroupElementSerializer.parse`). These
+    // fire BEFORE the trivial-reduction fast path below — which never enters the
+    // evaluator's `eval_expr` (where the same checks also live) — so a bare P2PK
+    // spend with a high-bit extension key or an off-curve GE constant is rejected
+    // exactly as the reference node does, not silently accepted. Run before any
+    // cost is charged, mirroring the throw happening ahead of reduction.
+    super::evaluator::pre_reduction_checks(ctx, &ergo_tree.constants)
+        .map_err(VerifySpendingError::Eval)?;
+
     // Deserialize-substitution cost (Scala `Interpreter.reductionWithDeserialize`,
     // Interpreter.scala:240-260): a tree that CONTAINS a DeserializeContext /
     // DeserializeRegister node adds `ergoTree.bytes.length * CostPerTreeByte(2)`
@@ -484,6 +495,93 @@ mod tests {
             cost_v6,
             cost_pre + len * COST_PER_TREE_BYTE,
             "V6 must add deserializeSubstitutionCost = treeBytes({len}) * {COST_PER_TREE_BYTE} block units",
+        );
+    }
+}
+
+#[cfg(test)]
+mod pre_reduction_check_tests {
+    use super::*;
+
+    fn p2pk_trivial() -> SigmaValue {
+        SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true))
+    }
+
+    fn inline_sigmaprop_tree() -> ErgoTree {
+        ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            constants: Vec::new(),
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: p2pk_trivial(),
+            },
+        }
+    }
+
+    /// A trivially-reducible (P2PK-shaped) tree still verifies cleanly under a
+    /// well-formed context — the new pre-reduction checks must not break the
+    /// fast path.
+    #[test]
+    fn trivial_p2pk_clean_ctx_verifies() {
+        let tree = inline_sigmaprop_tree();
+        let ctx = crate::evaluator::ReductionContext::minimal(500_000, 0);
+        let mut cost = CostAccumulator::recording_only();
+        let ok = verify_spending_proof_with_context_and_cost(&tree, &[], b"msg", &ctx, &mut cost)
+            .expect("trivial P2PK verifies under a clean context");
+        assert!(ok);
+    }
+
+    /// A ContextExtension key with the high bit set (>= 0x80) must reject the
+    /// spend BEFORE the trivial-reduction fast path — Scala `toSigmaContext`
+    /// throws at context build, so even a bare P2PK input fails. (Regression
+    /// guard: the depth-0 eval_expr check is bypassed by trivial_reduce.)
+    #[test]
+    fn trivial_p2pk_extension_key_high_bit_rejects() {
+        let tree = inline_sigmaprop_tree();
+        let mut ctx = crate::evaluator::ReductionContext::minimal(500_000, 0);
+        ctx.extension
+            .insert(128, (SigmaType::SInt, SigmaValue::Int(42)));
+        let mut cost = CostAccumulator::recording_only();
+        let res = verify_spending_proof_with_context_and_cost(&tree, &[], b"msg", &ctx, &mut cost);
+        assert!(
+            res.is_err(),
+            "extension key 0x80 must reject even a trivial P2PK spend, got {res:?}"
+        );
+    }
+
+    /// An off-curve GroupElement constant in the segregated table must reject a
+    /// trivially-reducible spend, even though the live (trivial) path never
+    /// reads it — Scala curve-validates every GE constant at deserialize.
+    #[test]
+    fn trivial_p2pk_offcurve_ge_constant_rejects() {
+        let mut ge = [0xffu8; 33];
+        ge[0] = 0x02; // off-curve x
+        let tree = ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: true,
+            constants: vec![
+                (SigmaType::SSigmaProp, p2pk_trivial()),
+                (
+                    SigmaType::SGroupElement,
+                    SigmaValue::GroupElement(
+                        ergo_primitives::group_element::GroupElement::from_bytes(ge),
+                    ),
+                ),
+            ],
+            body: Expr::Op(IrNode {
+                opcode: 0x73,
+                payload: Payload::ConstPlaceholder { index: 0 },
+            }),
+        };
+        let ctx = crate::evaluator::ReductionContext::minimal(500_000, 0);
+        let mut cost = CostAccumulator::recording_only();
+        let res = verify_spending_proof_with_context_and_cost(&tree, &[], b"msg", &ctx, &mut cost);
+        assert!(
+            res.is_err(),
+            "off-curve GE constant must reject even a trivial spend, got {res:?}"
         );
     }
 }
