@@ -245,6 +245,57 @@ pub(super) fn eval_no_arg_method(
             add_method_cost(cost, 5)?;
             Ok(Some(Value::Opt(None)))
         }
+        // SBox(99) accessor method-forms 1..6 — the PropertyCall twins of the
+        // dedicated extract opcodes, dispatched to the same logic. The per-method
+        // cost equals the opcode's cost (the 0xDB envelope (4) and the receiver
+        // visit are charged by the caller). Extract bodies are inlined here
+        // rather than delegating to the box_context opcodes, which would
+        // re-evaluate the receiver and double-charge it.
+        // SBox(99).value(1) -> Long                            cost: 8 (ExtractAmount)
+        (99, 1) => {
+            add_method_cost(cost, 8)?;
+            let b = resolve_box(obj_val, ctx)?;
+            Ok(Some(Value::Long(b.value)))
+        }
+        // SBox(99).propositionBytes(2) -> Coll[Byte]           cost: 10 (ExtractScriptBytes)
+        (99, 2) => {
+            add_method_cost(cost, 10)?;
+            let b = resolve_box(obj_val, ctx)?;
+            Ok(Some(Value::CollBytes(b.script_bytes.clone())))
+        }
+        // SBox(99).bytes(3) -> Coll[Byte] (retained)           cost: 12 (ExtractBytes)
+        (99, 3) => {
+            add_method_cost(cost, 12)?;
+            let b = resolve_box(obj_val, ctx)?;
+            Ok(Some(Value::CollBytes(b.raw_bytes.clone())))
+        }
+        // SBox(99).bytesWithoutRef(4) -> Coll[Byte] (canonical) cost: 12 (ExtractBytesWithNoRef)
+        (99, 4) => {
+            add_method_cost(cost, 12)?;
+            let b = resolve_box(obj_val, ctx)?;
+            Ok(Some(Value::CollBytes(
+                super::box_context::box_candidate_bytes_canonical(b)?,
+            )))
+        }
+        // SBox(99).id(5) -> Coll[Byte]                         cost: 12 (ExtractId)
+        (99, 5) => {
+            add_method_cost(cost, 12)?;
+            let b = resolve_box(obj_val, ctx)?;
+            Ok(Some(Value::CollBytes(b.id.to_vec())))
+        }
+        // SBox(99).creationInfo(6) -> (Int, Coll[Byte])        cost: 16 (ExtractCreationInfo)
+        // 34-byte ref = 32-byte txId ++ 2-byte big-endian output index.
+        (99, 6) => {
+            add_method_cost(cost, 16)?;
+            let b = resolve_box(obj_val, ctx)?;
+            let mut ref_bytes = Vec::with_capacity(34);
+            ref_bytes.extend_from_slice(&b.transaction_id);
+            ref_bytes.extend_from_slice(&b.output_index.to_be_bytes());
+            Ok(Some(Value::Tuple(vec![
+                Value::Int(b.creation_height as i32),
+                Value::CollBytes(ref_bytes),
+            ])))
+        }
         // SBox(99).tokens(8) -> Coll[(Coll[Byte], Long)]      cost: 15
         (99, 8) => {
             add_method_cost(cost, 15)?;

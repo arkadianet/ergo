@@ -12425,3 +12425,117 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         "register tail must be canonical identity GE"
     );
 }
+
+// ---- Cluster: SBox accessor method-forms (PropertyCall 99:1..6) ----
+
+/// The box accessors have a method-form (`PropertyCall(99, n)`) in addition to
+/// their dedicated opcode (ExtractAmount, ...). Scala dispatches both to the
+/// same logic. Add the no-arg SBox arms 1..6 so the method-form returns the
+/// same values: value, propositionBytes, bytes (retained), bytesWithoutRef
+/// (canonical), id, creationInfo.
+#[test]
+fn sbox_accessor_method_forms() {
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let pc = |mid: u8| {
+        op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 99,
+                method_id: mid,
+                obj: Box::new(op(0xA7, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    };
+    assert_eq!(run_eval_ctx(&pc(1), &ctx), Value::Long(1_000_000_000));
+    assert_eq!(
+        run_eval_ctx(&pc(2), &ctx),
+        Value::CollBytes(vec![0x00, 0x08, 0xCD])
+    );
+    assert_eq!(
+        run_eval_ctx(&pc(3), &ctx),
+        Value::CollBytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+    );
+    assert_eq!(run_eval_ctx(&pc(5), &ctx), Value::CollBytes(b.id.to_vec()));
+    let mut ref_bytes = b.transaction_id.to_vec();
+    ref_bytes.extend_from_slice(&b.output_index.to_be_bytes());
+    assert_eq!(
+        run_eval_ctx(&pc(6), &ctx),
+        Value::Tuple(vec![Value::Int(500_000), Value::CollBytes(ref_bytes)])
+    );
+    // bytesWithoutRef: canonical re-serialization (own dedicated test covers
+    // the GE normalization); here just assert it dispatches to CollBytes.
+    match run_eval_ctx(&pc(4), &ctx) {
+        Value::CollBytes(v) => assert!(!v.is_empty(), "bytesWithoutRef must be non-empty"),
+        other => panic!("expected CollBytes for bytesWithoutRef, got {other:?}"),
+    }
+}
+
+/// The method-form cost matches the opcode-form: envelope (PropertyCall 0xDB =
+/// 4) + the extract method body equal to the dedicated opcode's cost. e.g.
+/// value = 4 + ExtractAmount(8); creationInfo = 4 + ExtractCreationInfo(16).
+#[test]
+fn sbox_accessor_method_form_costs() {
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+    let cost_of = |mid: u8| {
+        let expr = op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 99,
+                method_id: mid,
+                obj: Box::new(op(0xA7, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        eval_expr(
+            &expr,
+            &ctx,
+            &[],
+            &mut env,
+            &mut depth,
+            &mut cost,
+            &mut trace,
+        )
+        .unwrap();
+        cost.total().value()
+    };
+    // SELF(0xA7) cost is the same constant for every call, so the deltas are
+    // purely the per-method extract body: 8/10/12/12/12/16.
+    let self_only = {
+        let expr = op(0xA7, Payload::Zero);
+        let mut cost = CostAccumulator::recording_only();
+        let mut env = Env::new();
+        let mut depth = 0usize;
+        let mut trace = None;
+        eval_expr(
+            &expr,
+            &ctx,
+            &[],
+            &mut env,
+            &mut depth,
+            &mut cost,
+            &mut trace,
+        )
+        .unwrap();
+        cost.total().value()
+    };
+    // envelope(4) + body; subtract SELF visit + envelope to recover the body.
+    assert_eq!(
+        cost_of(1) - self_only - 4,
+        8,
+        "value body = ExtractAmount(8)"
+    );
+    assert_eq!(
+        cost_of(6) - self_only - 4,
+        16,
+        "creationInfo body = ExtractCreationInfo(16)"
+    );
+}
