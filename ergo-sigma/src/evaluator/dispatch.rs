@@ -198,6 +198,22 @@ fn check_extension_key_domain(ctx: &ReductionContext<'_>) -> Result<(), EvalErro
     Ok(())
 }
 
+/// Whole-tree checks Scala performs at context-build / deserialize time, BEFORE
+/// any reduction runs (trivial or full): the ContextExtension key domain
+/// (`toSigmaContext`) and every GroupElement constant on-curve
+/// (`GroupElementSerializer.parse`). Exposed for the verifier so the
+/// trivial-reduction fast path (`reduce::trivial_reduce`, which never enters
+/// [`eval_expr`]) enforces them too — otherwise a bare P2PK spend with a
+/// malformed context/constant would be accepted where Scala rejects.
+pub(crate) fn pre_reduction_checks(
+    ctx: &ReductionContext<'_>,
+    constants: &[(SigmaType, SigmaValue)],
+) -> Result<(), EvalError> {
+    validate_group_element_constants(constants)?;
+    check_extension_key_domain(ctx)?;
+    Ok(())
+}
+
 /// Structural rebuild replacing every `ConstPlaceholder { index }` with
 /// the corresponding inline `Expr::Const` from the segregated constant
 /// table. Out-of-range indexes are left as placeholders — they error at
@@ -350,19 +366,16 @@ pub(in crate::evaluator) fn eval_expr(
     // empty constants — mirroring Scala's `EmptyConstants` and making
     // the gate non-reentrant.
     if *depth == 0 {
-        // Two whole-tree checks Scala performs at context/deserialize time,
-        // BEFORE any bytecode runs — so they fire even when the live path never
-        // reaches the offending value:
-        // (1) `GroupElementSerializer.parse` curve-validates every GroupElement
-        //     constant up front, so an off-curve constant errors even on a dead
-        //     branch (a non-canonical *identity* lead-0x00 encoding still parses);
-        // (2) `toSigmaContext` builds a dense `new Array(maxKey+1)` from the
-        //     ContextExtension indexed by the signed Byte key, throwing for any
-        //     key with the high bit set (>= 0x80, i.e. negative as i8).
-        // Run once at the shared depth-0 entry (real reduce path, test-only
+        // Whole-tree checks Scala performs at context/deserialize time, BEFORE
+        // any bytecode runs — so they fire even when the live path never reaches
+        // the offending value (off-curve GE constant on a dead branch; a
+        // high-bit ContextExtension key with the script never reading it). Run
+        // once at the shared depth-0 entry (real reduce path, test-only
         // `eval_to_value`, and the conformance hook all funnel here at depth 0).
-        validate_group_element_constants(constants)?;
-        check_extension_key_domain(ctx)?;
+        // The verifier ALSO runs these before its trivial-reduction fast path
+        // (which bypasses this function); re-running here is cheap and keeps the
+        // non-verifier entries covered.
+        pre_reduction_checks(ctx, constants)?;
     }
     if *depth == 0 && !constants.is_empty() && expr_has_deserialize(expr) {
         let inlined = inline_placeholders(expr, constants);
