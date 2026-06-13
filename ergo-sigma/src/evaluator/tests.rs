@@ -4090,6 +4090,101 @@ fn opcode_atleast_bound_exceeds_count() {
     }
 }
 
+#[test]
+fn opcode_atleast_children_cap_errors_over_255() {
+    use ergo_ser::sigma_value::CollValue;
+    // 256 trivial-true children. Scala's eval path goes through
+    // CSigmaDslBuilder.atLeast, which throws when props.length >
+    // MaxChildrenCount(255) BEFORE AtLeast.reduce — so even a degenerate
+    // bound (<=0, which reduce would short-circuit to TrueProp) errors.
+    // SANTA: atLeast.children_cap.
+    let children: Vec<SigmaValue> = (0..256)
+        .map(|_| SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)))
+        .collect();
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(children)),
+    };
+    // Valid bound: would reduce, but the cap fires first.
+    let valid = op(
+        0x98,
+        Payload::Two(Box::new(const_int(2)), Box::new(items.clone())),
+    );
+    assert!(
+        matches!(run_eval_err(&valid), EvalError::RuntimeException(_)),
+        "256 children + valid bound must error on the MaxChildrenCount cap",
+    );
+    // Degenerate bound (0): the cap STILL overrides (it precedes the
+    // bound<=0 -> TrueProp short-circuit in the eval/builder path).
+    let degenerate = op(0x98, Payload::Two(Box::new(const_int(0)), Box::new(items)));
+    assert!(
+        matches!(run_eval_err(&degenerate), EvalError::RuntimeException(_)),
+        "256 children + degenerate bound must STILL error (cap before reduce)",
+    );
+}
+
+#[test]
+fn opcode_atleast_255_children_accepted() {
+    use ergo_ser::sigma_value::CollValue;
+    // Exactly MaxChildrenCount (255) is the boundary — accepted; bound 2 over
+    // 255 trivial-true children folds to TrivialProp(true).
+    let children: Vec<SigmaValue> = (0..255)
+        .map(|_| SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)))
+        .collect();
+    let items = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SSigmaProp)),
+        val: SigmaValue::Coll(CollValue::Values(children)),
+    };
+    let expr = op(0x98, Payload::Two(Box::new(const_int(2)), Box::new(items)));
+    assert!(matches!(
+        run_eval(&expr),
+        Value::SigmaProp(SigmaBoolean::TrivialProp(true))
+    ));
+}
+
+#[test]
+fn func_value_non_unary_arity_errors() {
+    // Scala FuncValue.eval (values.scala:1040-1056): addCost, then
+    // `if (args.length == 1) <closure> else syntax.error(...)`. A 0- or
+    // 2-arg lambda errors when the FuncValue node is evaluated (created),
+    // even before any application. SANTA: FuncValue.non_unary_arity.
+    let two_arg = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt)), (2, Some(SigmaType::SInt))],
+            body: Box::new(const_int(5)),
+        },
+    );
+    assert!(
+        matches!(run_eval_err(&two_arg), EvalError::RuntimeException(_)),
+        "2-arg lambda must error at creation",
+    );
+    let zero_arg = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![],
+            body: Box::new(const_int(5)),
+        },
+    );
+    assert!(
+        matches!(run_eval_err(&zero_arg), EvalError::RuntimeException(_)),
+        "0-arg lambda must error at creation",
+    );
+}
+
+#[test]
+fn func_value_unary_arity_creates_func() {
+    // The unary case is the only legal one — creates a closure value.
+    let one_arg = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(const_int(5)),
+        },
+    );
+    assert!(matches!(run_eval(&one_arg), Value::Func { .. }));
+}
+
 // AtLeast trivial-child folding (Scala `AtLeast.reduce`). A `Coll[SigmaProp]`
 // can carry runtime trivial props (e.g. `sigmaProp(HEIGHT > x)` reduces to
 // TrivialProp), so the reducer MUST fold them out — otherwise the result is a
@@ -10290,21 +10385,33 @@ fn coll_short_forall_returns_true_when_all_match() {
 
 #[test]
 fn coll_short_fold_accumulates_acc() {
-    // Fold with body `(acc, _) => acc` over a length-3 coll: zero
-    // remains zero. Pin both the iteration count (visible via cost
-    // tests above) and the value reduction.
+    // Fold with body `t => t._1` (acc) over a length-3 coll: zero remains
+    // zero. Uses the CANONICAL 1-arg-tuple combiner — Scala fold ops are
+    // unary lambdas over an (acc, elem) tuple; a multi-arg FuncValue now
+    // errors at creation (FuncValue.eval: `if args.length == 1 ... else
+    // syntax.error`), so the previous 2-arg shorthand is no longer legal.
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(
+                1,
+                Some(SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SShort])),
+            )],
+            body: Box::new(op(
+                0x8C,
+                Payload::SelectField {
+                    input: Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                    field_idx: 1, // _1 = acc
+                },
+            )),
+        },
+    );
     let fold = op(
         0xB0,
         Payload::Three(
             Box::new(const_coll_short(vec![10, 20, 30])),
             Box::new(const_int(7)),
-            Box::new(op(
-                0xD9,
-                Payload::FuncValue {
-                    args: vec![(1, Some(SigmaType::SInt)), (2, Some(SigmaType::SShort))],
-                    body: Box::new(op(0x72, Payload::ValUse { id: 1 })),
-                },
-            )),
+            Box::new(func),
         ),
     );
     assert_eq!(run_eval(&fold), Value::Int(7));
@@ -10461,14 +10568,23 @@ fn coll_short_forall_cost_matches_coll_int_layer() {
 /// rate.
 #[test]
 fn coll_short_fold_cost_matches_coll_int_layer() {
-    // 2-arg fold body: (acc: Int, elem: T) => acc. T differs per
-    // carrier but is unused; body cost is the ValUse(1) load.
+    // Canonical 1-arg-tuple fold body: (t: (Int, T)) => t._1 (= acc). T
+    // differs per carrier but is unused; body cost is the SelectField load.
+    // (A 2-arg lambda now errors at creation — see func_value_non_unary_arity
+    // — so it must be the unary tuple form to actually execute the fold loop
+    // and exercise the per-item AddToEnv + body cost this test isolates.)
     let fold_body = |elem_ty: SigmaType| {
         op(
             0xD9,
             Payload::FuncValue {
-                args: vec![(1, Some(SigmaType::SInt)), (2, Some(elem_ty))],
-                body: Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                args: vec![(1, Some(SigmaType::STuple(vec![SigmaType::SInt, elem_ty])))],
+                body: Box::new(op(
+                    0x8C,
+                    Payload::SelectField {
+                        input: Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                        field_idx: 1,
+                    },
+                )),
             },
         )
     };
