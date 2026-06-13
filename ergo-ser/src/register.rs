@@ -122,9 +122,33 @@ pub fn read_registers(r: &mut VlqReader) -> Result<AdditionalRegisters, ReadErro
     let mut registers = Vec::with_capacity(count);
     for _ in 0..count {
         let (tpe, value) = read_register_value(r)?;
+        // Scala `CheckV6Type` (rule 1019, ValidationRules.scala:165-186): a
+        // register value's type must not contain a v6.0-only type — SOption,
+        // SHeader, or SUnsignedBigInt — at ANY nesting depth (recursing
+        // STuple/SColl). Version-INDEPENDENT (the JVM rejects at all ErgoTree
+        // versions; the check is unconditional, not gated on isV6).
+        if type_has_v6_register_type(&tpe) {
+            return Err(ReadError::InvalidData(format!(
+                "register type {tpe:?} contains a v6 type (Option / Header / \
+                 UnsignedBigInt) — rule 1019 CheckV6Type"
+            )));
+        }
         registers.push(RegisterValue { tpe, value });
     }
     Ok(AdditionalRegisters { registers })
+}
+
+/// Scala `CheckV6Type.step` + `v6TypeCheck` (ValidationRules.scala:172-186):
+/// true when `tpe` IS — or (recursing `STuple`/`SColl`) CONTAINS — a v6.0-only
+/// type that may not appear in a register or context-var extension: `SOption`,
+/// `SHeader`, or `SUnsignedBigInt`.
+fn type_has_v6_register_type(tpe: &SigmaType) -> bool {
+    match tpe {
+        SigmaType::SOption(_) | SigmaType::SHeader | SigmaType::SUnsignedBigInt => true,
+        SigmaType::STuple(items) => items.iter().any(type_has_v6_register_type),
+        SigmaType::SColl(elem) => type_has_v6_register_type(elem),
+        _ => false,
+    }
 }
 
 /// Read a single register value. Handles both plain Constants (type <= 0x70)
@@ -472,6 +496,65 @@ mod tests {
             msg.contains("max"),
             "message should name the cap, got: {msg}"
         );
+    }
+
+    // ----- rule 1019 CheckV6Type on register types -----
+
+    #[test]
+    fn v6_type_check_recurses_tuple_and_coll() {
+        use SigmaType::*;
+        // Direct v6 types.
+        assert!(type_has_v6_register_type(&SOption(Box::new(SInt))));
+        assert!(type_has_v6_register_type(&SHeader));
+        assert!(type_has_v6_register_type(&SUnsignedBigInt));
+        // Nested inside Tuple / Coll (any depth).
+        assert!(type_has_v6_register_type(&STuple(vec![
+            SInt,
+            SOption(Box::new(SByte))
+        ])));
+        assert!(type_has_v6_register_type(&SColl(Box::new(SUnsignedBigInt))));
+        assert!(type_has_v6_register_type(&SColl(Box::new(STuple(vec![
+            SByte, SHeader
+        ])))));
+        // Non-v6 types pass.
+        assert!(!type_has_v6_register_type(&SInt));
+        assert!(!type_has_v6_register_type(&STuple(vec![SInt, SByte])));
+        assert!(!type_has_v6_register_type(&SColl(Box::new(SByte))));
+    }
+
+    #[test]
+    fn read_rejects_register_with_option_type() {
+        // SANTA: Rule1019_check_v6_type (box R4 = Option[Int] -> errored).
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SOption(Box::new(SigmaType::SInt)),
+                value: SigmaValue::Opt(Some(Box::new(SigmaValue::Int(5)))),
+            }],
+        };
+        let mut w = VlqWriter::new();
+        write_registers(&mut w, &regs).expect("write option register");
+        let bytes = w.result();
+        let mut r = VlqReader::new(&bytes);
+        let err = read_registers(&mut r).expect_err("Option register must be rejected (rule 1019)");
+        assert!(
+            matches!(&err, ReadError::InvalidData(m) if m.contains("1019")),
+            "expected rule-1019 error, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn read_accepts_plain_int_register() {
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SInt,
+                value: SigmaValue::Int(42),
+            }],
+        };
+        let mut w = VlqWriter::new();
+        write_registers(&mut w, &regs).unwrap();
+        let bytes = w.result();
+        let mut r = VlqReader::new(&bytes);
+        assert!(read_registers(&mut r).is_ok());
     }
 
     // ----- oracle parity -----
