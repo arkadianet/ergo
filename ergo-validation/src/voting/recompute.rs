@@ -127,6 +127,13 @@ fn update_fork(
     let prev_collected = prev.soft_fork_votes_collected().unwrap_or(0);
     let votes = votes_in_prev_epoch + prev_collected;
 
+    // Scala reads `softForkStartingHeight` from the INPUT `parametersTable`
+    // once and every trigger keys on that original value — never on the
+    // mutated output table. Re-reading the height a prior trigger just
+    // wrote (e.g. Trigger 3 starting a new round) makes Trigger 4's
+    // `height <= startingHeight + L*votingEpochs` spuriously true and
+    // clobbers the fresh `votesCollected = 0` with this epoch's tally — a
+    // reject-valid divergence on every soft-fork round start/restart.
     let starting_height_opt = prev.soft_fork_starting_height();
 
     // Trigger 1: successful voting cleanup.
@@ -140,8 +147,8 @@ fn update_fork(
         }
     }
 
-    // Trigger 2: unsuccessful voting cleanup.
-    let starting_height_opt = next.soft_fork_starting_height(); // re-read after trigger 1
+    // Trigger 2: unsuccessful voting cleanup. (Keyed on the original
+    // `starting_height_opt`, like Scala — not the post-Trigger-1 table.)
     if let Some(starting_height) = starting_height_opt {
         if height as i32 == starting_height + voting_epoch_length * (voting_epochs + 1)
             && !vs.soft_fork_approved(votes)
@@ -152,7 +159,6 @@ fn update_fork(
     }
 
     // Trigger 3: new voting starts.
-    let starting_height_opt = next.soft_fork_starting_height();
     let starts_new = if fork_vote {
         match starting_height_opt {
             None => height.is_multiple_of(vs.voting_length),
@@ -174,8 +180,11 @@ fn update_fork(
         next = upsert_extra(&next, SOFT_FORK_VOTES_COLLECTED_ID, 0);
     }
 
-    // Trigger 4: vote tallying during active voting.
-    let starting_height_opt = next.soft_fork_starting_height();
+    // Trigger 4: vote tallying during active voting. Keyed on the ORIGINAL
+    // starting height: if Trigger 3 just opened a new round, the original
+    // was either empty (fresh start) or an older, now-cleaned round whose
+    // tally window has passed — so this trigger correctly does NOT re-tally
+    // and the round's `votesCollected` stays 0.
     if let Some(starting_height) = starting_height_opt {
         if (height as i32) <= starting_height + voting_epoch_length * voting_epochs {
             next = upsert_extra(&next, SOFT_FORK_VOTES_COLLECTED_ID, votes);
@@ -183,7 +192,6 @@ fn update_fork(
     }
 
     // Trigger 5: activation.
-    let starting_height_opt = next.soft_fork_starting_height();
     if let Some(starting_height) = starting_height_opt {
         if height as i32
             == starting_height + voting_epoch_length * (voting_epochs + activation_epochs)
@@ -556,6 +564,63 @@ mod tests {
             &vs(),
         );
         assert_eq!(next.soft_fork_votes_collected(), Some(150));
+    }
+
+    #[test]
+    fn fork_trigger_4_skipped_when_round_just_started() {
+        // A soft-fork round STARTS this epoch (no prior round). Trigger 3
+        // sets startingHeight=height, votesCollected=0. Scala's trigger-4
+        // condition reads the ORIGINAL softForkStartingHeight (None here),
+        // so trigger 4 is SKIPPED and votesCollected stays 0. Re-reading
+        // the just-written height (the bug) makes `height <= height + L*32`
+        // true and clobbers 0 with the tally. SANTA: softfork-round-start.
+        let prev = launch_at(0); // no soft-fork keys
+        let votes = vec![(SOFT_FORK_ID, 50)];
+        let (next, _) = update_fork(
+            &prev,
+            true, /* fork_vote */
+            &votes,
+            &ErgoValidationSettingsUpdate::empty(),
+            1024,
+            &vs(),
+        );
+        assert_eq!(next.soft_fork_starting_height(), Some(1024));
+        assert_eq!(
+            next.soft_fork_votes_collected(),
+            Some(0),
+            "votesCollected must reset to 0 on round start, not carry the tally",
+        );
+    }
+
+    #[test]
+    fn fork_trigger_4_skipped_on_failed_restart() {
+        // Old round failed; this epoch is the failed-cleanup point AND a
+        // new round restarts (trigger 2 cleans, trigger 3 restarts). The
+        // restart height is `old + L*(votingEpochs+1)` which is strictly
+        // greater than `old + L*votingEpochs`, so Scala's trigger-4
+        // (keyed on the ORIGINAL starting height) is skipped → collected 0.
+        // SANTA: softfork-round-failed-restart.
+        let l = vs().voting_length as i32;
+        let start = l; // 1024
+        let mut prev = launch_at(0);
+        prev = upsert_extra(&prev, SOFT_FORK_STARTING_HEIGHT_ID, start);
+        prev = upsert_extra(&prev, SOFT_FORK_VOTES_COLLECTED_ID, 100); // not approved
+        let height = (start + l * (vs().soft_fork_epochs as i32 + 1)) as u32;
+        let votes = vec![(SOFT_FORK_ID, 10)]; // votes = 10 + 100 = 110, not approved
+        let (next, _) = update_fork(
+            &prev,
+            true,
+            &votes,
+            &ErgoValidationSettingsUpdate::empty(),
+            height,
+            &vs(),
+        );
+        assert_eq!(next.soft_fork_starting_height(), Some(height as i32));
+        assert_eq!(
+            next.soft_fork_votes_collected(),
+            Some(0),
+            "votesCollected must reset to 0 on failed-restart, not carry 110",
+        );
     }
 
     #[test]
