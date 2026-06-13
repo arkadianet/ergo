@@ -12353,3 +12353,75 @@ fn tuple_item_nested_pair_ok() {
         "a nested pair item is valid, got {result:?}"
     );
 }
+
+// ---- Cluster: ExtractBytesWithNoRef canonicalizes register GE garbage ----
+
+/// A box carrying a non-canonical *identity* GroupElement register (lead 0x00
+/// with trailing garbage) must surface `bytesWithoutRef` (0xC4) CANONICALLY:
+/// Scala re-serializes the candidate from its parsed structure, where the
+/// identity point re-emits as 33 zero bytes (the trailing garbage is dropped at
+/// parse). `.bytes`/`.id` stay garbage-retained; only `bytesWithoutRef`
+/// normalizes. Build a self-consistent box whose raw_bytes carry the garbage.
+#[test]
+fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
+    let ge_garbage = {
+        let mut g = [0xaau8; 33];
+        g[0] = 0x00; // identity lead: bytes 1..32 are discarded at parse
+        g
+    };
+    // raw_bytes = canonical-prefix ++ garbage register ++ txId(32) ++ index VLQ(0)
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&[0xE8, 0x07]); // value 1000 (VLQ u64)
+    raw.extend_from_slice(&[0x10, 0x00]); // script_bytes (opaque here)
+    raw.push(0x00); // creation height 0
+    raw.push(0x00); // token count 0
+    raw.push(0x01); // register count 1
+    raw.push(0x07); // R4 type = SGroupElement
+    raw.extend_from_slice(&ge_garbage); // R4 value, garbage-retained
+    raw.extend_from_slice(&[0x11; 32]); // transaction id
+    raw.push(0x00); // output index VLQ(0)
+
+    let b = EvalBox {
+        creation_height: 0,
+        script_bytes: vec![0x10, 0x00],
+        value: 1000,
+        id: [0u8; 32],
+        transaction_id: [0x11; 32],
+        output_index: 0,
+        registers: [
+            Some(ergo_ser::register::RegisterValue {
+                tpe: SigmaType::SGroupElement,
+                value: SigmaValue::GroupElement(
+                    ergo_primitives::group_element::GroupElement::from_bytes(ge_garbage),
+                ),
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        tokens: Vec::new(),
+        raw_bytes: raw,
+    };
+    let ctx = ctx_with_self_box(&b);
+    let expr = op(0xC4, Payload::One(Box::new(op(0xA7, Payload::Zero))));
+    let out = match run_eval_ctx(&expr, &ctx) {
+        Value::CollBytes(v) => v,
+        other => panic!("expected CollBytes, got {other:?}"),
+    };
+    // The garbage 0xAA bytes must be gone (canonical re-serialization).
+    assert!(
+        !out.contains(&0xAA),
+        "bytesWithoutRef must normalize the identity-GE garbage, got {out:?}"
+    );
+    // The tail is the R4 register: type 0x07 then the canonical identity GE
+    // (33 zero bytes). No txId/index follows (bytesWithoutRef excludes the ref).
+    let mut expected_tail = vec![0x07u8];
+    expected_tail.extend_from_slice(&[0x00; 33]);
+    assert_eq!(
+        &out[out.len() - 34..],
+        expected_tail.as_slice(),
+        "register tail must be canonical identity GE"
+    );
+}
