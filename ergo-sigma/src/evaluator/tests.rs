@@ -2771,6 +2771,51 @@ fn opcode_decode_point_zero_lead_canonicalizes_to_identity() {
 }
 
 #[test]
+fn canonicalize_group_element_helper() {
+    use super::opcodes::sigma::canonicalize_group_element;
+    // Valid compressed generator -> itself (already canonical).
+    let g: [u8; 33] = [
+        0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
+        0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16,
+        0xF8, 0x17, 0x98,
+    ];
+    assert_eq!(canonicalize_group_element(g).unwrap(), g);
+    // 0x00-lead (with garbage trailing) -> canonical identity (33 zeros).
+    let mut z = [0u8; 33];
+    z[1..].fill(0xAA);
+    assert_eq!(canonicalize_group_element(z).unwrap(), [0u8; 33]);
+    // Off-curve / malformed SEC1 -> error.
+    let mut bad = [0u8; 33];
+    bad[0] = 0x04;
+    assert!(canonicalize_group_element(bad).is_err());
+}
+
+#[test]
+fn group_element_constant_materialization_canonicalizes() {
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::SigmaValue as SV;
+    // A 0x00-lead GroupElement CONSTANT materializes to the canonical identity
+    // (sigma_to_value applies the GroupElementSerializer.parse canonicalization,
+    // not just decodePoint).
+    let mut garbage = [0u8; 33];
+    garbage[1..].fill(0xAA);
+    let c = Expr::Const {
+        tpe: SigmaType::SGroupElement,
+        val: SV::GroupElement(GroupElement::from_bytes(garbage)),
+    };
+    assert_eq!(run_eval(&c), Value::GroupElement([0u8; 33]));
+    // An off-curve GE constant errors at materialization (even though Scala/our
+    // wire parse stores it raw — the value-basis check fires when materialized).
+    let mut bad = [0u8; 33];
+    bad[0] = 0x04;
+    let c_bad = Expr::Const {
+        tpe: SigmaType::SGroupElement,
+        val: SV::GroupElement(GroupElement::from_bytes(bad)),
+    };
+    assert!(matches!(run_eval_err(&c_bad), EvalError::TypeError { .. }));
+}
+
+#[test]
 fn opcode_decode_point_wrong_length_errors() {
     // < 33 bytes: Scala's getBytes(33) underflows -> error.
     let expr = op(0xEE, Payload::One(Box::new(const_bytes(vec![0x02; 32]))));

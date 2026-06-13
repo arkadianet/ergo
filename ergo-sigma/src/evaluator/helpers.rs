@@ -1276,7 +1276,15 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
         (SigmaType::SBoolean, SigmaValue::Boolean(b)) => Ok(Value::Bool(*b)),
         (SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb)) => Ok(Value::SigmaProp(sb.clone())),
         (SigmaType::SGroupElement, SigmaValue::GroupElement(ge)) => {
-            Ok(Value::GroupElement(*ge.as_bytes()))
+            // Scala validates + canonicalizes a GroupElement when it is
+            // deserialized (GroupElementSerializer.parse): 0x00-lead encodings
+            // become the canonical identity (33 zeros) and non-0x00 encodings
+            // are decoded on-curve (off-curve rejected). Apply the same here so
+            // a register / constant / context-var GE value is canonical and
+            // validated, matching `decodePoint`.
+            Ok(Value::GroupElement(
+                super::opcodes::sigma::canonicalize_group_element(*ge.as_bytes())?,
+            ))
         }
         (SigmaType::SColl(inner), SigmaValue::Coll(coll)) => {
             match (inner.as_ref(), coll) {

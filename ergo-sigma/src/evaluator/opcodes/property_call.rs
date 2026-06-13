@@ -159,8 +159,18 @@ pub(super) fn eval_no_arg_method(
                 8 => Value::Long(h.n_bits as i64),
                 9 => Value::Int(h.height as i32),
                 10 => Value::CollBytes(h.extension_root.to_vec()),
-                11 => Value::GroupElement(h.miner_pk),
-                12 => Value::GroupElement(h.pow_onetime_pk),
+                // header.minerPk — canonicalize+validate the materialized GE
+                // (Scala returns a decoded EcPoint; a 0x00-lead encoding is the
+                // identity, an off-curve encoding errors), matching the GE
+                // value basis the rest of the evaluator now uses.
+                11 => Value::GroupElement(super::sigma::canonicalize_group_element(h.miner_pk)?),
+                // header.powOnetimePk — same GE value basis (v2 sets it to the
+                // generator, v1 to the solution's `w`; both on-curve for real
+                // headers, so canonicalization only affects crafted SHeader
+                // values, matching Scala GroupElementSerializer.parse).
+                12 => {
+                    Value::GroupElement(super::sigma::canonicalize_group_element(h.pow_onetime_pk)?)
+                }
                 13 => Value::CollBytes(h.pow_nonce.to_vec()),
                 14 => Value::BigInt(h.pow_distance.clone()),
                 15 => Value::CollBytes(h.votes.to_vec()),

@@ -113,6 +113,28 @@ pub(in crate::evaluator) fn eval_prove_dh_tuple(
 //     which REJECTS off-curve points, wrong prefixes, and non-square X.
 // Our prior code copied the raw 33 bytes with no validation (accept-invalid
 // for off-curve inputs, and raw bytes — not 33 zeros — for zero-lead inputs).
+/// Canonicalize + validate a 33-byte SEC1 GroupElement encoding, mirroring
+/// Scala `GroupElementSerializer.parse` (the same rule `decodePoint` applies):
+///   - leading `0x00` ⇒ the canonical identity (33 zero bytes); any non-zero
+///     trailing bytes are discarded (`CryptoContext.default.infinity`);
+///   - otherwise ⇒ decode on-curve (k256, == the JVM's BouncyCastle SEC1
+///     validation), rejecting off-curve points / bad prefixes / non-square X.
+///     A valid `0x02`/`0x03` compressed point is already its own canonical form.
+///
+/// Applied wherever a `GroupElement` VALUE is materialized from wire/register
+/// bytes, so a garbage-identity encoding compares/encodes as the canonical
+/// identity and an off-curve encoding errors — not just inside `decodePoint`.
+pub(in crate::evaluator) fn canonicalize_group_element(
+    bytes: [u8; 33],
+) -> Result<[u8; 33], EvalError> {
+    if bytes[0] == 0x00 {
+        Ok([0u8; 33])
+    } else {
+        decode_group_element(&bytes)?;
+        Ok(bytes)
+    }
+}
+
 pub(in crate::evaluator) fn eval_decode_point(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -123,16 +145,7 @@ pub(in crate::evaluator) fn eval_decode_point(
         Value::CollBytes(b) if b.len() >= 33 => {
             let mut arr = [0u8; 33];
             arr.copy_from_slice(&b[..33]);
-            if arr[0] == 0x00 {
-                // Identity canonicalizes to 33 zeros (discards trailing bytes).
-                Ok(Value::GroupElement([0u8; 33]))
-            } else {
-                // Reject off-curve / malformed encodings (k256, same SEC1
-                // validation the JVM's BouncyCastle applies). A valid 0x02/0x03
-                // compressed point is already its own canonical encoding.
-                decode_group_element(&arr)?;
-                Ok(Value::GroupElement(arr))
-            }
+            Ok(Value::GroupElement(canonicalize_group_element(arr)?))
         }
         _ => Err(EvalError::TypeError {
             expected: "Coll[Byte] of length >= 33",
