@@ -45,6 +45,22 @@ pub use ergo_chain_spec::VotingParams as VotingSettings;
 pub enum RecomputeError {
     #[error("recompute called for non-epoch-start height {0}")]
     NotEpochStart(u32),
+
+    /// Scala `parametersTable(SoftForkVotesCollected)` (`Parameters.scala:108`)
+    /// is a `Map.apply` that throws `NoSuchElementException` when the
+    /// soft-fork starting-height (id 122) is set but votes-collected (id 121)
+    /// is absent and a trigger evaluates the `votes` tally. Honest voting
+    /// always co-writes 121 with 122 (Trigger 3); this fires only on a
+    /// hostile/malformed table — accept-invalid parity with the JVM throw.
+    #[error("soft-fork votes-collected (id 121) missing while starting-height (id 122) is set")]
+    SoftForkVotesCollectedMissing,
+
+    /// Scala `parametersTable(paramIdAbs)` (`Parameters.scala:167`) is a
+    /// `Map.apply` that throws when an *approved* vote targets a parameter id
+    /// absent from the active table. Honest votes never target unknown ids;
+    /// this fires only on a hostile table — accept-invalid parity.
+    #[error("approved vote for parameter id {id} absent from the active table")]
+    ApprovedVoteForUnknownParam { id: u8 },
 }
 
 // ----- Public entry point -----
@@ -79,10 +95,10 @@ pub fn compute_next_params(
         proposed_update,
         height,
         voting_settings,
-    );
+    )?;
 
     // Stage 2: updateParams.
-    let after_params = update_params(&after_fork, epoch_votes, voting_settings);
+    let after_params = update_params(&after_fork, epoch_votes, voting_settings)?;
 
     // Stage 3: 6.0 / v4 subblocks injection.
     let final_params = apply_subblocks_injection(after_params, &activated_update);
@@ -111,7 +127,7 @@ fn update_fork(
     proposed_update: &ErgoValidationSettingsUpdate,
     height: u32,
     vs: &VotingSettings,
-) -> (ActiveProtocolParameters, ErgoValidationSettingsUpdate) {
+) -> Result<(ActiveProtocolParameters, ErgoValidationSettingsUpdate), RecomputeError> {
     let mut next = prev.clone();
     let mut activated = ErgoValidationSettingsUpdate::empty();
 
@@ -119,13 +135,25 @@ fn update_fork(
     let voting_epochs = vs.soft_fork_epochs as i32;
     let activation_epochs = vs.activation_epochs as i32;
 
-    // Soft-fork accumulator state.
+    // Soft-fork accumulator state. Scala's `votes` is a LAZY val
+    // `votesInPrevEpoch + parametersTable(SoftForkVotesCollected)`
+    // (`Parameters.scala:108`): the `Map.apply` THROWS when id 121 is absent,
+    // but only if `votes` is actually evaluated by a firing trigger (all
+    // votes-reading triggers are guarded by `softForkStartingHeight.nonEmpty`
+    // / a height equality). We mirror the laziness with a closure called
+    // `votes()?` at exactly those sites — faulting (accept-invalid parity)
+    // on a hostile 122-without-121 table, while a table that never reaches a
+    // votes-reading trigger (the common 122-absent case) never faults.
     let votes_in_prev_epoch = epoch_votes
         .iter()
         .find_map(|(id, n)| (*id == SOFT_FORK_ID).then_some(*n))
         .unwrap_or(0);
-    let prev_collected = prev.soft_fork_votes_collected().unwrap_or(0);
-    let votes = votes_in_prev_epoch + prev_collected;
+    let collected = prev.soft_fork_votes_collected();
+    let votes = || -> Result<i32, RecomputeError> {
+        collected
+            .map(|c| votes_in_prev_epoch + c)
+            .ok_or(RecomputeError::SoftForkVotesCollectedMissing)
+    };
 
     // Scala reads `softForkStartingHeight` from the INPUT `parametersTable`
     // once and every trigger keys on that original value — never on the
@@ -140,7 +168,7 @@ fn update_fork(
     if let Some(starting_height) = starting_height_opt {
         if height as i32
             == starting_height + voting_epoch_length * (voting_epochs + activation_epochs + 1)
-            && vs.soft_fork_approved(votes)
+            && vs.soft_fork_approved(votes()?)
         {
             next = remove_extra(&next, SOFT_FORK_STARTING_HEIGHT_ID);
             next = remove_extra(&next, SOFT_FORK_VOTES_COLLECTED_ID);
@@ -151,7 +179,7 @@ fn update_fork(
     // `starting_height_opt`, like Scala — not the post-Trigger-1 table.)
     if let Some(starting_height) = starting_height_opt {
         if height as i32 == starting_height + voting_epoch_length * (voting_epochs + 1)
-            && !vs.soft_fork_approved(votes)
+            && !vs.soft_fork_approved(votes()?)
         {
             next = remove_extra(&next, SOFT_FORK_STARTING_HEIGHT_ID);
             next = remove_extra(&next, SOFT_FORK_VOTES_COLLECTED_ID);
@@ -168,7 +196,7 @@ fn update_fork(
                         + voting_epoch_length * (voting_epochs + activation_epochs + 1);
                 let post_failed = height as i32
                     == starting_height + voting_epoch_length * (voting_epochs + 1)
-                    && !vs.soft_fork_approved(votes);
+                    && !vs.soft_fork_approved(votes()?);
                 post_activation || post_failed
             }
         }
@@ -187,7 +215,7 @@ fn update_fork(
     // and the round's `votesCollected` stays 0.
     if let Some(starting_height) = starting_height_opt {
         if (height as i32) <= starting_height + voting_epoch_length * voting_epochs {
-            next = upsert_extra(&next, SOFT_FORK_VOTES_COLLECTED_ID, votes);
+            next = upsert_extra(&next, SOFT_FORK_VOTES_COLLECTED_ID, votes()?);
         }
     }
 
@@ -195,7 +223,7 @@ fn update_fork(
     if let Some(starting_height) = starting_height_opt {
         if height as i32
             == starting_height + voting_epoch_length * (voting_epochs + activation_epochs)
-            && vs.soft_fork_approved(votes)
+            && vs.soft_fork_approved(votes()?)
         {
             next.block_version = next.block_version.saturating_add(1);
             activated = proposed_update.clone();
@@ -212,7 +240,7 @@ fn update_fork(
         }
     }
 
-    (next, activated)
+    Ok((next, activated))
 }
 
 // ----- Stage 2: updateParams -----
@@ -227,7 +255,7 @@ fn update_params(
     prev: &ActiveProtocolParameters,
     epoch_votes: &[(i8, i32)],
     vs: &VotingSettings,
-) -> ActiveProtocolParameters {
+) -> Result<ActiveProtocolParameters, RecomputeError> {
     let mut next = prev.clone();
     for &(param_id, count) in epoch_votes {
         if param_id == SOFT_FORK_ID {
@@ -249,9 +277,13 @@ fn update_params(
         } else {
             param_id as u8
         };
+        // Scala `parametersTable(paramIdAbs)` (Parameters.scala:167) is a
+        // Map.apply INSIDE the `if (changeApproved)` branch: an APPROVED vote
+        // for an id absent from the table throws (accept-invalid parity).
+        // Honest votes never target unknown ids.
         let current_value = match read_param_by_id(prev, param_id_abs) {
             Some(v) => v,
-            None => continue, // unknown id — skip
+            None => return Err(RecomputeError::ApprovedVoteForUnknownParam { id: param_id_abs }),
         };
         let max_value = max_value_for(param_id_abs, current_value);
         let min_value = min_value_for(param_id_abs);
@@ -269,7 +301,7 @@ fn update_params(
         };
         write_param_by_id(&mut next, param_id_abs, new_value);
     }
-    next
+    Ok(next)
 }
 
 // ----- Stage 3: subblocks injection -----
@@ -459,7 +491,7 @@ mod tests {
     fn update_params_increments_when_above_threshold() {
         let prev = launch_at(0); // input_cost = 2000
         let votes = vec![(6, 600)]; // +id 6, count > 512
-        let next = update_params(&prev, &votes, &vs());
+        let next = update_params(&prev, &votes, &vs()).unwrap();
         assert_eq!(next.input_cost, 2000 + 20); // step = max(1, 2000/100) = 20
     }
 
@@ -467,7 +499,7 @@ mod tests {
     fn update_params_skips_when_below_threshold() {
         let prev = launch_at(0);
         let votes = vec![(6, 100)];
-        let next = update_params(&prev, &votes, &vs());
+        let next = update_params(&prev, &votes, &vs()).unwrap();
         assert_eq!(next.input_cost, prev.input_cost);
     }
 
@@ -475,7 +507,7 @@ mod tests {
     fn update_params_decrements_negative_id() {
         let prev = launch_at(0);
         let votes = vec![(-6, 600)];
-        let next = update_params(&prev, &votes, &vs());
+        let next = update_params(&prev, &votes, &vs()).unwrap();
         assert_eq!(next.input_cost, 2000 - 20);
     }
 
@@ -484,7 +516,7 @@ mod tests {
         let mut prev = launch_at(0);
         prev.storage_fee_factor = 2_500_000; // == max
         let votes = vec![(1, 600)];
-        let next = update_params(&prev, &votes, &vs());
+        let next = update_params(&prev, &votes, &vs()).unwrap();
         assert_eq!(next.storage_fee_factor, 2_500_000); // unchanged
     }
 
@@ -493,7 +525,7 @@ mod tests {
         let mut prev = launch_at(0);
         prev.min_value_per_byte = 0; // == min
         let votes = vec![(-2, 600)];
-        let next = update_params(&prev, &votes, &vs());
+        let next = update_params(&prev, &votes, &vs()).unwrap();
         assert_eq!(next.min_value_per_byte, 0);
     }
 
@@ -501,7 +533,7 @@ mod tests {
     fn update_params_filters_softfork_id_120() {
         let prev = launch_at(0);
         let votes = vec![(SOFT_FORK_ID, 30_000)]; // tallied but not for params
-        let next = update_params(&prev, &votes, &vs());
+        let next = update_params(&prev, &votes, &vs()).unwrap();
         // No param is updated.
         assert_eq!(next, prev);
     }
@@ -517,12 +549,12 @@ mod tests {
         // Order [+3, -3]: +3 writes 524_288 + 5242, then -3 writes
         // 524_288 - 5242. Final: 519_046.
         let votes_a = vec![(3, 600), (-3, 600)];
-        let next_a = update_params(&prev, &votes_a, &vs());
+        let next_a = update_params(&prev, &votes_a, &vs()).unwrap();
         assert_eq!(next_a.max_block_size, 524_288 - step);
 
         // Order [-3, +3]: reversed. Final: 529_530.
         let votes_b = vec![(-3, 600), (3, 600)];
-        let next_b = update_params(&prev, &votes_b, &vs());
+        let next_b = update_params(&prev, &votes_b, &vs()).unwrap();
         assert_eq!(next_b.max_block_size, 524_288 + step);
     }
 
@@ -539,7 +571,8 @@ mod tests {
             &ErgoValidationSettingsUpdate::empty(),
             height,
             &vs(),
-        );
+        )
+        .unwrap();
         assert_eq!(next.soft_fork_starting_height(), Some(1024));
         assert_eq!(next.soft_fork_votes_collected(), Some(0));
         assert!(activated.rules_to_disable.is_empty());
@@ -562,7 +595,8 @@ mod tests {
             &ErgoValidationSettingsUpdate::empty(),
             height,
             &vs(),
-        );
+        )
+        .unwrap();
         assert_eq!(next.soft_fork_votes_collected(), Some(150));
     }
 
@@ -583,7 +617,8 @@ mod tests {
             &ErgoValidationSettingsUpdate::empty(),
             1024,
             &vs(),
-        );
+        )
+        .unwrap();
         assert_eq!(next.soft_fork_starting_height(), Some(1024));
         assert_eq!(
             next.soft_fork_votes_collected(),
@@ -614,7 +649,8 @@ mod tests {
             &ErgoValidationSettingsUpdate::empty(),
             height,
             &vs(),
-        );
+        )
+        .unwrap();
         assert_eq!(next.soft_fork_starting_height(), Some(height as i32));
         assert_eq!(
             next.soft_fork_votes_collected(),
@@ -637,7 +673,7 @@ mod tests {
         };
         // Activation height: starting_height + 1024 * (32+32) = 1024 + 65536 = 66560
         let height = 66560;
-        let (next, activated) = update_fork(&prev, false, &[], &proposed, height, &vs());
+        let (next, activated) = update_fork(&prev, false, &[], &proposed, height, &vs()).unwrap();
         assert_eq!(next.block_version, 4);
         assert_eq!(activated, proposed);
     }
@@ -656,7 +692,8 @@ mod tests {
             &ErgoValidationSettingsUpdate::empty(),
             height,
             &vs(),
-        );
+        )
+        .unwrap();
         assert_eq!(next.block_version, 2);
         assert!(activated.rules_to_disable.is_empty());
     }
@@ -675,8 +712,77 @@ mod tests {
             &ErgoValidationSettingsUpdate::empty(),
             height,
             &vs(),
-        );
+        )
+        .unwrap();
         assert_eq!(next.block_version, 2); // unchanged
+    }
+
+    // ----- hostile-table eager-throw parity (accept-invalid) -----
+
+    #[test]
+    fn update_fork_faults_when_122_present_121_absent() {
+        // Hostile table: soft-fork starting height (122) set but
+        // votes-collected (121) absent. When a votes-reading trigger fires
+        // (here Trigger 4, the active-voting tally window), Scala's
+        // parametersTable(121) Map.apply throws; we must fault, not
+        // unwrap_or(0). SANTA chain: hostile-122-without-121.
+        let mut prev = launch_at(0);
+        prev = upsert_extra(&prev, SOFT_FORK_STARTING_HEIGHT_ID, 1024);
+        // deliberately NOT writing id 121
+        let votes = vec![(SOFT_FORK_ID, 50)];
+        let height = 2048; // <= 1024 + L*32 -> Trigger 4 reads votes
+        let err = update_fork(
+            &prev,
+            false,
+            &votes,
+            &ErgoValidationSettingsUpdate::empty(),
+            height,
+            &vs(),
+        )
+        .unwrap_err();
+        assert_eq!(err, RecomputeError::SoftForkVotesCollectedMissing);
+    }
+
+    #[test]
+    fn update_fork_no_fault_when_122_absent() {
+        // No soft-fork round (122 absent): no trigger reads `votes`, so the
+        // missing 121 must NOT fault — faulting here would be reject-valid on
+        // the overwhelmingly common case. (Guards against an eager fault.)
+        let prev = launch_at(0); // no 121/122
+        let votes = vec![(SOFT_FORK_ID, 50)];
+        let (next, _) = update_fork(
+            &prev,
+            false,
+            &votes,
+            &ErgoValidationSettingsUpdate::empty(),
+            1024,
+            &vs(),
+        )
+        .expect("122 absent must not fault on missing 121");
+        assert_eq!(next.soft_fork_votes_collected(), None);
+    }
+
+    #[test]
+    fn update_params_faults_on_approved_vote_for_unknown_id() {
+        // An APPROVED vote (count > threshold) for an id absent from the
+        // table: Scala parametersTable(id) Map.apply throws. SANTA chain:
+        // hostile-unknown-id-approved.
+        let prev = launch_at(0);
+        let votes = vec![(10i8, 600)]; // id 10 not in table, 600 > 512 -> approved
+        let err = update_params(&prev, &votes, &vs()).unwrap_err();
+        assert_eq!(err, RecomputeError::ApprovedVoteForUnknownParam { id: 10 });
+    }
+
+    #[test]
+    fn update_params_unapproved_unknown_id_does_not_fault() {
+        // An UNAPPROVED vote (below threshold) for an unknown id must NOT
+        // fault — Scala reads parametersTable only inside the changeApproved
+        // branch. (Guards the throw to the exact JVM condition.)
+        let prev = launch_at(0);
+        let votes = vec![(10i8, 100)]; // 100 < 512 -> not approved
+        let next =
+            update_params(&prev, &votes, &vs()).expect("unapproved unknown id must not fault");
+        assert_eq!(next, prev);
     }
 
     // ----- Subblocks injection -----

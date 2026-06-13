@@ -217,6 +217,12 @@ impl ErgoValidationSettingsUpdate {
 pub enum ValidationSettingsCodecError {
     #[error("validation_settings: read error: {0:?}")]
     Read(ReadError),
+    /// Scala `require(rulesSpec.get(rd).forall(_.mayBeDisabled))`
+    /// (`ErgoValidationSettingsUpdate.scala:47-50`): a disable update targets
+    /// a known rule whose `mayBeDisabled = false`. Rejected (accept-invalid
+    /// parity with the JVM `IllegalArgumentException`).
+    #[error("validation_settings: rule {rule_id} may not be disabled")]
+    RuleNotDisableable { rule_id: u16 },
 }
 
 impl PartialEq for ValidationSettingsCodecError {
@@ -227,6 +233,8 @@ impl PartialEq for ValidationSettingsCodecError {
             // discriminant + Debug-formatted message instead. Acceptable
             // for test assertions; not used on consensus paths.
             (Read(a), Read(b)) => format!("{a:?}") == format!("{b:?}"),
+            (RuleNotDisableable { rule_id: a }, RuleNotDisableable { rule_id: b }) => a == b,
+            _ => false,
         }
     }
 }
@@ -266,6 +274,20 @@ pub fn write_validation_settings_update(w: &mut VlqWriter, u: &ErgoValidationSet
     }
 }
 
+/// Rule ids whose `mayBeDisabled = false` in Scala
+/// `ValidationRules.rulesSpec` (ergo-core 6.0.x). A disable update targeting
+/// any of these is rejected (`ErgoValidationSettingsUpdate.scala:47-50`
+/// `require(rulesSpec.get(rd).forall(_.mayBeDisabled))`); ids NOT listed
+/// (the 22 `mayBeDisabled=true` rules + any id unknown to the spec) are
+/// disableable. Mechanically extracted by joining the `val <name>: Short = N`
+/// definitions with each `<name> -> RuleStatus(... mayBeDisabled = false)`
+/// entry in ValidationRules.scala — 42 ids, kept sorted for readability.
+const RULES_NOT_DISABLEABLE: [u16; 42] = [
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 112, 113, 114, 115, 116, 117, 119, 122, 200,
+    201, 203, 204, 205, 206, 207, 208, 209, 210, 211, 213, 214, 216, 300, 301, 302, 303, 304, 305,
+    307, 403, 500, 501,
+];
+
 /// Scala `0 until n.toInt` collection length: a negative `n` (the
 /// two's-complement wrap of a `getUInt` value above `i32::MAX`) yields an
 /// empty range, i.e. zero entries.
@@ -290,6 +312,14 @@ pub fn read_validation_settings_update(
     let mut rules_to_disable = Vec::new();
     for _ in 0..disabled_n {
         rules_to_disable.push(r.get_u16()?);
+    }
+    // Scala reads all disabled ids, then `disabledRules.foreach { rd =>
+    // require(rulesSpec.get(rd).forall(_.mayBeDisabled), ...) }`: reject a
+    // disable of a known non-disableable rule (e.g. 102 txManyInputs).
+    for &rd in &rules_to_disable {
+        if RULES_NOT_DISABLEABLE.contains(&rd) {
+            return Err(ValidationSettingsCodecError::RuleNotDisableable { rule_id: rd });
+        }
     }
     let status_n = count_to_len(r.get_uint_to_i32()?);
     let mut status_updates = Vec::new();
@@ -448,6 +478,39 @@ mod tests {
         let bytes = u.serialize();
         let back = ErgoValidationSettingsUpdate::deserialize(&bytes).unwrap();
         assert_eq!(u, back);
+    }
+
+    #[test]
+    fn deserialize_rejects_non_disableable_rule() {
+        // Rule 102 (txManyInputs) has mayBeDisabled=false; a disable update
+        // targeting it must be rejected, matching Scala's `require`. SANTA
+        // chain: hostile-mandatory-rule-update (proposed_update 016600).
+        let u = ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![102],
+            status_updates: vec![],
+        };
+        let bytes = u.serialize();
+        let err = ErgoValidationSettingsUpdate::deserialize(&bytes).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationSettingsCodecError::RuleNotDisableable { rule_id: 102 }
+        );
+    }
+
+    #[test]
+    fn deserialize_allows_disableable_and_unknown_rules() {
+        // Rule 215 (mayBeDisabled=true) and an unknown rule id are both
+        // accepted (Scala `rulesSpec.get(rd).forall(_.mayBeDisabled)` is true
+        // when the rule is unknown — `forall` on None).
+        for rid in [215u16, 9999u16] {
+            let u = ErgoValidationSettingsUpdate {
+                rules_to_disable: vec![rid],
+                status_updates: vec![],
+            };
+            let bytes = u.serialize();
+            ErgoValidationSettingsUpdate::deserialize(&bytes)
+                .unwrap_or_else(|e| panic!("rule {rid} must be disableable: {e:?}"));
+        }
     }
 
     #[test]
