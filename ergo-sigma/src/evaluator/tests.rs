@@ -12274,3 +12274,82 @@ fn extension_key_max_signed_accepted() {
     let result = eval_to_value(&expr, &ctx, &[]);
     assert_eq!(result.unwrap(), Value::Int(200_000));
 }
+
+// ---- Cluster: Tuple.checkType — non-pair tuple as a tuple item (Scala parity) ----
+
+/// Scala `Tuple.eval` runs `Value.checkType(item, itemV)` on each of the two
+/// items; `SType.isValueOfType` then `sys.error("Unsupported tuple type")` for
+/// any item whose type is a tuple of arity != 2. So constructing `Tuple(t3, 1)`
+/// where `t3` is a 3-tuple errors — at both the inline-constant and the
+/// ConstantPlaceholder seam (both arrive as item0 of the outer `Tuple` op).
+#[test]
+fn tuple_item_three_tuple_errors() {
+    let constants = vec![
+        (
+            SigmaType::STuple(vec![
+                SigmaType::SBoolean,
+                SigmaType::SBoolean,
+                SigmaType::SBoolean,
+            ]),
+            SigmaValue::Tuple(vec![
+                SigmaValue::Boolean(true),
+                SigmaValue::Boolean(true),
+                SigmaValue::Boolean(true),
+            ]),
+        ),
+        (SigmaType::SInt, SigmaValue::Int(1)),
+    ];
+    let item0 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 0 },
+    });
+    let item1 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 1 },
+    });
+    let expr = Expr::Op(IrNode {
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![item0, item1],
+        },
+    });
+    let ctx = ReductionContext::minimal(100_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert!(
+        result.is_err(),
+        "a 3-tuple as a tuple item must error (checkType), got {result:?}"
+    );
+}
+
+/// A nested *pair* item is fine: `Tuple( (a,b), c )` — item0 is an arity-2
+/// tuple, which `isValueOfType` accepts — so the construction succeeds.
+#[test]
+fn tuple_item_nested_pair_ok() {
+    let constants = vec![
+        (
+            SigmaType::STuple(vec![SigmaType::SBoolean, SigmaType::SBoolean]),
+            SigmaValue::Tuple(vec![SigmaValue::Boolean(true), SigmaValue::Boolean(false)]),
+        ),
+        (SigmaType::SInt, SigmaValue::Int(1)),
+    ];
+    let item0 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 0 },
+    });
+    let item1 = Expr::Op(IrNode {
+        opcode: 0x73,
+        payload: Payload::ConstPlaceholder { index: 1 },
+    });
+    let expr = Expr::Op(IrNode {
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![item0, item1],
+        },
+    });
+    let ctx = ReductionContext::minimal(100_000, 0);
+    let result = eval_to_value(&expr, &ctx, &constants);
+    assert!(
+        result.is_ok(),
+        "a nested pair item is valid, got {result:?}"
+    );
+}
