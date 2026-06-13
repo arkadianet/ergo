@@ -528,26 +528,47 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     Ok(())
 }
 
+/// Maximum serialized box size (`SigmaConstants.MaxBoxSize = 4 * 1024`). Scala's
+/// `ErgoBoxCandidate.parseBodyWithIndexedDigests` bounds the candidate body to
+/// `position + MaxBoxSize` via the reader's position limit.
+const MAX_BOX_SIZE: usize = 4 * 1024;
+
 /// Read an inline SBox constant by structurally advancing through the box
 /// fields, then capturing the raw bytes as opaque data for roundtrip fidelity.
+///
+/// The candidate body (value..registers) is bounded to `start + MaxBoxSize`
+/// exactly as Scala's `parseBodyWithIndexedDigests` sets `positionLimit`: a read
+/// that BEGINS past the window trips `CheckPositionLimit` (rule 1014) and the box
+/// parse errors — so e.g. `deserializeTo[Box]` of an over-large token list is
+/// rejected. The limit is restored before the ref tail (txId + index), which
+/// Scala reads after `positionLimit` is reset, so the tail is unbounded.
 fn read_opaque_box(r: &mut VlqReader) -> Result<SigmaValue, ReadError> {
     let start = r.position();
 
-    // value (nanoErgs) - VLQ u64
-    let _ = r.get_u64()?;
-    // ergo tree - skip past without full body parse (for size-delimited trees)
-    skip_ergo_tree(r)?;
-    // creation height - VLQ u32
-    let _ = r.get_u32_exact()?;
-    // token count + tokens (full 32-byte token IDs for inline constants)
-    let tc = r.get_u8()? as usize;
-    for _ in 0..tc {
-        let _ = r.get_bytes(32)?; // token id
-        let _ = r.get_u64()?; // amount
-    }
-    // additional registers
-    let _ = crate::register::read_registers(r)?;
-    // transaction id (32 bytes) + output index (VLQ u16)
+    let previous_limit = r.position_limit();
+    r.set_position_limit(Some(start + MAX_BOX_SIZE));
+    let body = (|| {
+        // value (nanoErgs) - VLQ u64
+        let _ = r.get_u64()?;
+        // ergo tree - skip past without full body parse (for size-delimited trees)
+        skip_ergo_tree(r)?;
+        // creation height - VLQ u32
+        let _ = r.get_u32_exact()?;
+        // token count + tokens (full 32-byte token IDs for inline constants)
+        let tc = r.get_u8()? as usize;
+        for _ in 0..tc {
+            let _ = r.get_bytes(32)?; // token id
+            let _ = r.get_u64()?; // amount
+        }
+        // additional registers
+        let _ = crate::register::read_registers(r)?;
+        Ok::<(), ReadError>(())
+    })();
+    // Restore on both the success and error paths (Scala previousPositionLimit).
+    r.set_position_limit(previous_limit);
+    body?;
+
+    // transaction id (32 bytes) + output index (VLQ u16) — outside the window.
     let _ = r.get_bytes(32)?;
     let _ = r.get_u16()?;
 
@@ -886,6 +907,53 @@ mod tests {
         let mut bytes = [prefix; 33];
         bytes[0] = 0x02; // valid SEC1 compressed prefix
         GroupElement::from_bytes(bytes)
+    }
+
+    /// Full box bytes (candidate ++ txId ++ index) with `n` single-byte-amount
+    /// tokens. candidate length = 3(value)+7(tree)+1(height)+1(tokenCount)
+    /// +33*n+1(regCount); n=124 crosses 4096, n=120 stays under.
+    fn box_bytes_with_tokens(n: usize) -> Vec<u8> {
+        let mut w = VlqWriter::new();
+        w.put_u64(1_000_000); // value
+        w.put_bytes(&[0x10, 0x01, 0x01, 0x01, 0xD1, 0x73, 0x00]); // minimal tree
+        w.put_u32(0); // creation height
+        w.put_u8(n as u8); // token count
+        for i in 0..n {
+            w.put_bytes(&[(i & 0xff) as u8; 32]); // token id
+            w.put_u64(1); // amount
+        }
+        w.put_u8(0); // register count
+        w.put_bytes(&[0x11; 32]); // transaction id
+        w.put_u16(0); // output index
+        w.result()
+    }
+
+    /// Scala `ErgoBoxCandidate.parseBodyWithIndexedDigests` sets
+    /// `positionLimit = position + ErgoBox.MaxBoxSize` (4096) before reading the
+    /// candidate body. A token loop read that BEGINS past 4096 trips
+    /// CheckPositionLimit (rule 1014) and the box parse errors.
+    #[test]
+    fn opaque_box_over_4096_candidate_errors() {
+        let bytes = box_bytes_with_tokens(124); // candidate 4105 > 4096
+        let mut r = VlqReader::new(&bytes);
+        let res = read_value(&mut r, &SigmaType::SBox);
+        assert!(
+            res.is_err(),
+            "124-token box candidate (> 4096) must error, got {res:?}"
+        );
+    }
+
+    /// A candidate at/under the 4096 window parses normally (no read begins past
+    /// the limit).
+    #[test]
+    fn opaque_box_under_4096_candidate_ok() {
+        let bytes = box_bytes_with_tokens(120); // candidate 3973 < 4096
+        let mut r = VlqReader::new(&bytes);
+        let res = read_value(&mut r, &SigmaType::SBox);
+        assert!(
+            res.is_ok(),
+            "120-token box candidate (< 4096) must parse, got {res:?}"
+        );
     }
 
     /// scorex `VLQReader.getOption` reads one discriminant byte and treats
