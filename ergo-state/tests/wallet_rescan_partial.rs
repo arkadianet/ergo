@@ -74,6 +74,7 @@ fn partial_rescan_removes_stale_spent_when_spend_disappears_on_replay() {
         value: 1_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -157,6 +158,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
         value: 67_500_000_000,
         assets: vec![],
         miner_reward_pubkey: Some(tracked_pk()),
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -274,6 +276,7 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
         value: 1_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],

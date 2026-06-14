@@ -26,6 +26,23 @@ pub const WALLET_SCAN_HEIGHT: TableDefinition<(), u32> = TableDefinition::new("w
 /// Value: bincode-serialized `WalletBox` (see `types.rs`).
 pub const WALLET_BOXES: TableDefinition<[u8; 32], Vec<u8>> = TableDefinition::new("wallet_boxes");
 
+/// Full serialized box bytes for the wallet's own boxes, keyed by box id.
+/// Companion to [`WALLET_BOXES`]: `WalletBox` keeps only the structured
+/// fields (value/assets/status/provenance), not the box's ErgoTree or
+/// registers, so the serialized form is stored here for the reserved-scan
+/// reads (`/scan/{unspent,spent}Boxes/9|10`, which surface the wallet's
+/// mining/payment boxes as `ScanBoxEntry` with full `bytes`).
+///
+/// Additive table — boxes created before this table existed simply have no
+/// row (the read degrades to empty bytes until a `/wallet/rescan` backfills
+/// them), so no schema bump / wipe is needed. A missing row is graceful; an
+/// orphaned row (box removed but bytes left) is never read (reads iterate
+/// `WALLET_BOXES` and join here), so it's a harmless reclaim-on-rescan leak.
+///
+/// Key: 32-byte box id. Value: `serialize_ergo_box` bytes (verbatim wire form).
+pub const WALLET_BOX_BYTES: TableDefinition<[u8; 32], Vec<u8>> =
+    TableDefinition::new("wallet_box_bytes");
+
 /// Index from `(tx_id, output_index)` to box id. Used by the
 /// `apply` hook to mark a wallet box as spent when a later tx
 /// references it as an input.

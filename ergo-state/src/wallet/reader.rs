@@ -4,8 +4,17 @@
 //! handlers in `ergo-api`.
 
 use crate::wallet::tables::*;
-use crate::wallet::types::{Balance, BoxStatus, WalletBox, WalletTransaction};
+use crate::wallet::types::{Balance, BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
 use redb::{ReadTransaction, ReadableTable, ReadableTableMetadata};
+
+/// A wallet box surfaced through a reserved scan id (9 mining / 10 payments),
+/// paired with its full serialized bytes for `ScanBoxEntry.bytes`. `box_bytes`
+/// is empty when the box predates the [`WALLET_BOX_BYTES`] table (backfilled by
+/// a `/wallet/rescan`).
+pub struct ReservedScanBox {
+    pub wallet_box: WalletBox,
+    pub box_bytes: Vec<u8>,
+}
 
 /// EIP-3 first-address derivation path with hardened bits set:
 /// `m/44'/429'/0'/0/0`. The exact components the wallet persists for the
@@ -87,6 +96,57 @@ impl<'tx> WalletReader<'tx> {
             .into_iter()
             .filter(|b| matches!(b.status, BoxStatus::Confirmed))
             .collect())
+    }
+
+    /// Wallet boxes surfaced through a reserved scan id, with their serialized
+    /// bytes. `mining = true` selects the Mining scan (id 9 — `MinerReward`
+    /// provenance); `false` selects Payments/default (id 10 — `Owned`). `spent`
+    /// selects `Spent` boxes; otherwise unspent (`Confirmed` or `Immature`).
+    ///
+    /// Provenance-partitioned, which is a documented divergence from Scala:
+    /// Scala migrates a matured mining box from scan 9 → 10, whereas our
+    /// provenance is fixed at creation, so a matured mining box stays under 9
+    /// here. Every wallet box still appears under exactly one of 9/10.
+    #[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
+    pub fn reserved_scan_boxes(
+        &self,
+        mining: bool,
+        spent: bool,
+    ) -> Result<Vec<ReservedScanBox>, redb::Error> {
+        let boxes: Vec<WalletBox> = self
+            .all_boxes()?
+            .into_iter()
+            .filter(|b| {
+                let provenance_ok = if mining {
+                    matches!(b.provenance, BoxProvenance::MinerReward)
+                } else {
+                    matches!(b.provenance, BoxProvenance::Owned)
+                };
+                let status_ok = if spent {
+                    matches!(b.status, BoxStatus::Spent { .. })
+                } else {
+                    matches!(b.status, BoxStatus::Confirmed | BoxStatus::Immature { .. })
+                };
+                provenance_ok && status_ok
+            })
+            .collect();
+        let bytes_tbl = match self.txn.open_table(WALLET_BOX_BYTES) {
+            Ok(t) => Some(t),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::with_capacity(boxes.len());
+        for wb in boxes {
+            let box_bytes = match &bytes_tbl {
+                Some(t) => t.get(wb.box_id)?.map(|g| g.value()).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            out.push(ReservedScanBox {
+                wallet_box: wb,
+                box_bytes,
+            });
+        }
+        Ok(out)
     }
 
     /// Aggregate balance across all `Confirmed` and `Immature` boxes.

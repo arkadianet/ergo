@@ -22,8 +22,8 @@ use crate::wallet::apply::{
 };
 use crate::wallet::maturity::promote_matured_boxes_rescan;
 use crate::wallet::tables::{
-    box_by_tx_key, WALLET_BOXES, WALLET_BOXES_BY_TX, WALLET_SCAN_HEIGHT, WALLET_SCAN_INVALIDATED,
-    WALLET_TXS,
+    box_by_tx_key, WALLET_BOXES, WALLET_BOXES_BY_TX, WALLET_BOX_BYTES, WALLET_SCAN_HEIGHT,
+    WALLET_SCAN_INVALIDATED, WALLET_TXS,
 };
 use crate::wallet::types::WalletBox;
 
@@ -111,12 +111,14 @@ impl WalletScanService {
             }
             {
                 let mut boxes_tbl = txn.open_table(WALLET_BOXES)?;
+                let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
                 let to_remove: Vec<[u8; 32]> = boxes_tbl
                     .iter()?
                     .filter_map(|e| e.ok().map(|(k, _)| k.value()))
                     .collect();
                 for k in to_remove {
                     boxes_tbl.remove(k)?;
+                    box_bytes_tbl.remove(k)?;
                 }
             }
             {
@@ -164,8 +166,10 @@ impl WalletScanService {
             };
             {
                 let mut tbl = txn.open_table(WALLET_BOXES)?;
+                let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
                 for box_id in to_remove {
                     tbl.remove(box_id)?;
+                    box_bytes_tbl.remove(box_id)?;
                 }
             }
 
@@ -359,6 +363,10 @@ impl WalletScanService {
                                     value: o.value,
                                     assets: o.assets.clone(),
                                     miner_reward_pubkey: o.miner_reward_pubkey,
+                                    // The replay/rescan builder serializes the
+                                    // full box, so a `/wallet/rescan` backfills
+                                    // WALLET_BOX_BYTES for boxes that predate it.
+                                    box_bytes: &o.box_bytes,
                                 })
                                 .collect(),
                         })

@@ -78,6 +78,7 @@ fn miner_reward_box_promotes_at_exact_maturity_height() {
         value: 67_500_000_000,
         assets: vec![],
         miner_reward_pubkey: Some(tracked_pk()),
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -138,6 +139,7 @@ fn rollback_unpromotes_box_back_to_immature() {
         value: 67_500_000_000,
         assets: vec![],
         miner_reward_pubkey: Some(tracked_pk()),
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -185,6 +187,7 @@ fn reorg_across_maturity_boundary_removes_box() {
         value: 67_500_000_000,
         assets: vec![],
         miner_reward_pubkey: Some(tracked_pk()),
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -242,6 +245,7 @@ fn reorg_after_spend_returns_box_to_confirmed() {
         value: 67_500_000_000,
         assets: vec![],
         miner_reward_pubkey: Some(tracked_pk()),
+        box_bytes: &[],
     }];
     let txs_create = [BlockTx {
         tx_id: [0xAA; 32],

@@ -5021,14 +5021,19 @@ pub struct OwnedBlockOutput {
     pub value: u64,
     pub assets: Vec<([u8; 32], u64)>,
     pub miner_reward_pubkey: Option<[u8; 33]>,
-    /// Full serialized `ErgoBox` bytes. Populated ONLY by the
-    /// section/replay builder ([`build_wallet_block_txs_from_sections`]),
-    /// which the rescan read path uses to feed registered-scan matching +
-    /// `ScanTrackedBox.box_bytes`. Left EMPTY by the live-apply builder
-    /// ([`build_owned_tx_data_checked`]) — the live wallet/scan paths
-    /// don't read it (scan matching there goes through
-    /// `build_scan_match_records`), so carrying full box bytes in the
-    /// cross-thread `WalletApplyPayload` would only bloat it.
+    /// Full serialized `ErgoBox` bytes. Populated by BOTH builders:
+    /// - the section/replay builder ([`build_wallet_block_txs_from_sections`])
+    ///   feeds the rescan read path's registered-scan matching +
+    ///   `ScanTrackedBox.box_bytes`;
+    /// - the live-apply builder ([`build_owned_tx_data_checked`]) captures it
+    ///   for free by reusing the box-id serialization (the id IS
+    ///   `blake2b256` of these bytes), so the apply hook can store it in
+    ///   `WALLET_BOX_BYTES` for the reserved-scan reads
+    ///   (`/scan/{unspent,spent}Boxes/9|10`).
+    ///
+    /// May still be empty for callers that have no bytes to carry; the apply
+    /// hook then skips the `WALLET_BOX_BYTES` row and the read degrades to
+    /// empty `bytes` until a `/wallet/rescan` backfills it.
     pub box_bytes: Vec<u8>,
 }
 
@@ -5139,9 +5144,13 @@ fn build_owned_tx_data_checked(
                 transaction_id: modifier_tx_id,
                 index: idx as u16,
             };
-            let box_id = ergo_box
-                .box_id()
-                .map_err(|e| StateError::Serialization(format!("box_id: {e}")))?;
+            // Serialize once and reuse for BOTH the box id (blake2b256 of the
+            // canonical box bytes) AND `box_bytes` below — `box_id()` already
+            // serialized internally, so capturing the bytes for the
+            // reserved-scan reads (WALLET_BOX_BYTES) costs no extra encode.
+            let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box)
+                .map_err(|e| StateError::Serialization(format!("box serialize: {e}")))?;
+            let box_id = ergo_primitives::digest::blake2b256(&box_bytes);
             let ergo_tree_bytes = candidate.ergo_tree_bytes().to_vec();
             let value = candidate.value;
             let assets: Vec<([u8; 32], u64)> = candidate
@@ -5158,10 +5167,12 @@ fn build_owned_tx_data_checked(
                 value,
                 assets,
                 miner_reward_pubkey,
-                // Live path: full box bytes are unused here (scan matching
-                // goes through `build_scan_match_records`), so don't pay to
-                // carry them across the persist-worker boundary.
-                box_bytes: Vec::new(),
+                // Captured for free from the box-id serialization above; the
+                // apply hook stores it in WALLET_BOX_BYTES for matched wallet
+                // boxes (reserved-scan reads). The live scan-match path
+                // (`build_scan_match_records`) is separate and re-serializes
+                // its own boxes — it does not read this field.
+                box_bytes,
             })
         })
         .collect::<Result<Vec<_>, StateError>>()?;
@@ -5341,6 +5352,7 @@ pub fn owned_to_block_txs(owned: &[OwnedBlockTxData]) -> BoundBlockTxs<'_> {
                     value: o.value,
                     assets: o.assets.clone(),
                     miner_reward_pubkey: o.miner_reward_pubkey,
+                    box_bytes: &o.box_bytes,
                 })
                 .collect()
         })
