@@ -26,7 +26,7 @@ use ergo_state::wallet::tables::{
 use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
 use ergo_wallet::scan::{
     Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
-    MAX_SCAN_NAME_LENGTH, PAYMENTS_SCAN_ID,
+    MAX_SCAN_NAME_LENGTH, MINING_SCAN_ID, PAYMENTS_SCAN_ID,
 };
 
 use super::WriterContext;
@@ -664,6 +664,21 @@ fn read_scan_boxes(
     want_spent: bool,
     filter: &ScanBoxFilter,
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+    // Reserved scan ids 9 (Mining) / 10 (Payments) surface the wallet's OWN
+    // boxes, which live in WALLET_BOXES — the scan tables only hold user scans.
+    // Bridge them: 9 = `MinerReward` provenance, 10 = `Owned`. Documented
+    // divergence — Scala migrates a matured mining box 9→10, whereas our
+    // provenance is fixed at creation, so matured mining stays under 9.
+    if scan_id == MINING_SCAN_ID || scan_id == PAYMENTS_SCAN_ID {
+        return read_reserved_scan_boxes(
+            db,
+            tip_override,
+            scan_id == MINING_SCAN_ID,
+            want_spent,
+            filter,
+        );
+    }
+
     // Hide boxes belonging to a user scan that isn't currently registered.
     // `/scan/deregister` removes the scan from the registry but leaves its
     // tracked rows in WALLET_SCAN_BOXES (we don't purge on deregister), so a
@@ -753,6 +768,68 @@ fn read_scan_boxes(
             .then_with(|| a.box_id.cmp(&b.box_id))
     });
 
+    let offset = filter.offset.max(0) as usize;
+    let limit = filter.limit.max(0) as usize;
+    Ok(entries.into_iter().skip(offset).take(limit).collect())
+}
+
+/// Reserved-scan-id read bridge: `/scan/{unspent,spent}Boxes/9|10` over the
+/// wallet's own boxes (`WALLET_BOXES` + `WALLET_BOX_BYTES`). `mining` selects
+/// the Mining scan (9 = `MinerReward`); otherwise Payments (10 = `Owned`).
+/// Mirrors [`read_scan_boxes`]'s confirmation/inclusion-height filtering,
+/// height-asc ordering, and pagination — the value comes straight from
+/// `WalletBox.value` and `bytes` from the companion table (empty for boxes that
+/// predate it, until a `/wallet/rescan` backfills them).
+fn read_reserved_scan_boxes(
+    db: &redb::Database,
+    tip_override: Option<u32>,
+    mining: bool,
+    want_spent: bool,
+    filter: &ScanBoxFilter,
+) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+    let read = db.begin_read().map_err(internal)?;
+    let current_height = match tip_override {
+        Some(h) => h,
+        None => ergo_state::reader::committed_tip_in(&read)
+            .map_err(internal)?
+            .map(|(h, _)| h)
+            .unwrap_or(0),
+    };
+    let boxes = ergo_state::wallet::reader::WalletReader::new(&read)
+        .reserved_scan_boxes(mining, want_spent)
+        .map_err(internal)?;
+
+    let mut entries: Vec<ScanBoxEntry> = Vec::new();
+    for rb in boxes {
+        let wb = &rb.wallet_box;
+        let h = wb.creation_height as i64;
+        if h < filter.min_inclusion_height as i64 {
+            continue;
+        }
+        if filter.max_inclusion_height >= 0 && h > filter.max_inclusion_height as i64 {
+            continue;
+        }
+        let confirmations = current_height as i64 - wb.creation_height as i64;
+        if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
+            continue;
+        }
+        if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
+            continue;
+        }
+        entries.push(ScanBoxEntry {
+            box_id: hex::encode(wb.box_id),
+            value: wb.value,
+            inclusion_height: wb.creation_height,
+            confirmations_num: confirmations,
+            spent: want_spent,
+            bytes: hex::encode(&rb.box_bytes),
+        });
+    }
+    entries.sort_by(|a, b| {
+        a.inclusion_height
+            .cmp(&b.inclusion_height)
+            .then_with(|| a.box_id.cmp(&b.box_id))
+    });
     let offset = filter.offset.max(0) as usize;
     let limit = filter.limit.max(0) as usize;
     Ok(entries.into_iter().skip(offset).take(limit).collect())
@@ -1777,5 +1854,123 @@ mod tests {
         assert!(read_scan_boxes(&db, Some(110), 12, false, &filter())
             .unwrap()
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reserved_scan_read_tests {
+    use super::*;
+    use ergo_state::wallet::tables::{WALLET_BOXES, WALLET_BOX_BYTES};
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+
+    fn temp_db() -> (tempfile::TempDir, redb::Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        (dir, db)
+    }
+
+    fn filter() -> ScanBoxFilter {
+        ScanBoxFilter {
+            min_confirmations: 0,
+            max_confirmations: -1,
+            min_inclusion_height: 0,
+            max_inclusion_height: -1,
+            limit: 500,
+            offset: 0,
+        }
+    }
+
+    fn put_wallet_box(
+        db: &redb::Database,
+        fill: u8,
+        value: u64,
+        height: u32,
+        status: BoxStatus,
+        provenance: BoxProvenance,
+    ) {
+        let wb = WalletBox {
+            box_id: [fill; 32],
+            creation_tx_id: [0u8; 32],
+            creation_output_index: 0,
+            creation_height: height,
+            value,
+            assets: Vec::new(),
+            status,
+            provenance,
+        };
+        let w = db.begin_write().unwrap();
+        {
+            w.open_table(WALLET_BOXES)
+                .unwrap()
+                .insert([fill; 32], bincode::serialize(&wb).unwrap())
+                .unwrap();
+            w.open_table(WALLET_BOX_BYTES)
+                .unwrap()
+                .insert([fill; 32], vec![fill, 0xAA])
+                .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    /// Reserved ids 9 (mining = MinerReward) and 10 (payments = Owned) bridge to
+    /// the wallet's own boxes (WALLET_BOXES + WALLET_BOX_BYTES), not the (empty)
+    /// scan tables — splitting by provenance and status.
+    #[test]
+    fn reserved_id_reads_bridge_wallet_boxes() {
+        let (_d, db) = temp_db();
+        // Mining: one Immature (unspent), one Spent.
+        put_wallet_box(
+            &db,
+            0x91,
+            1000,
+            100,
+            BoxStatus::Immature { matures_at: 820 },
+            BoxProvenance::MinerReward,
+        );
+        put_wallet_box(
+            &db,
+            0x92,
+            2000,
+            101,
+            BoxStatus::Spent {
+                spent_in_tx: [9u8; 32],
+                spent_at: 150,
+            },
+            BoxProvenance::MinerReward,
+        );
+        // Payments: one Confirmed (unspent).
+        put_wallet_box(
+            &db,
+            0xA1,
+            3000,
+            102,
+            BoxStatus::Confirmed,
+            BoxProvenance::Owned,
+        );
+
+        let mining_unspent =
+            read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &filter()).unwrap();
+        assert_eq!(mining_unspent.len(), 1);
+        assert_eq!(mining_unspent[0].box_id, hex::encode([0x91u8; 32]));
+        assert_eq!(mining_unspent[0].value, 1000);
+        assert_eq!(mining_unspent[0].inclusion_height, 100);
+        assert_eq!(mining_unspent[0].confirmations_num, 100);
+        assert!(!mining_unspent[0].spent);
+        assert_eq!(mining_unspent[0].bytes, hex::encode([0x91u8, 0xAA]));
+
+        let mining_spent =
+            read_scan_boxes(&db, Some(200), MINING_SCAN_ID, true, &filter()).unwrap();
+        assert_eq!(mining_spent.len(), 1);
+        assert_eq!(mining_spent[0].box_id, hex::encode([0x92u8; 32]));
+        assert!(mining_spent[0].spent);
+
+        let pay_unspent =
+            read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &filter()).unwrap();
+        assert_eq!(pay_unspent.len(), 1);
+        assert_eq!(pay_unspent[0].box_id, hex::encode([0xA1u8; 32]));
+        assert_eq!(pay_unspent[0].value, 3000);
+        // Mining boxes must NOT leak into payments (10).
+        let pay_spent = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, true, &filter()).unwrap();
+        assert!(pay_spent.is_empty());
     }
 }

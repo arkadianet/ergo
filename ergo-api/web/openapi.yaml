@@ -6327,7 +6327,14 @@ paths:
         - in: path
           name: scanId
           required: true
-          description: identifier of a scan
+          description: >-
+            Identifier of a scan. The reserved ids 9 (Mining) and 10 (Payments)
+            are served from the wallet's own boxes rather than the scan tables:
+            9 returns boxes with MinerReward provenance, 10 returns boxes with
+            Owned provenance. Divergence from the Scala node: Scala migrates a
+            matured mining reward from scan 9 to scan 10, so a matured reward
+            appears under 10 there; here provenance is fixed at discovery, so a
+            mining reward always reports under 9 even after it matures.
           schema:
             type: integer
             format: int32
@@ -6413,7 +6420,14 @@ paths:
         - in: path
           name: scanId
           required: true
-          description: identifier of a scan
+          description: >-
+            Identifier of a scan. The reserved ids 9 (Mining) and 10 (Payments)
+            are served from the wallet's own boxes rather than the scan tables:
+            9 returns boxes with MinerReward provenance, 10 returns boxes with
+            Owned provenance. Divergence from the Scala node: Scala migrates a
+            matured mining reward from scan 9 to scan 10, so a matured reward
+            appears under 10 there; here provenance is fixed at discovery, so a
+            mining reward always reports under 9 even after it matures.
           schema:
             type: integer
             format: int32

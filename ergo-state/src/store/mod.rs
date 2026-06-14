@@ -5139,9 +5139,13 @@ fn build_owned_tx_data_checked(
                 transaction_id: modifier_tx_id,
                 index: idx as u16,
             };
-            let box_id = ergo_box
-                .box_id()
-                .map_err(|e| StateError::Serialization(format!("box_id: {e}")))?;
+            // Serialize once and reuse for BOTH the box id (blake2b256 of the
+            // canonical box bytes) AND `box_bytes` below — `box_id()` already
+            // serialized internally, so capturing the bytes for the
+            // reserved-scan reads (WALLET_BOX_BYTES) costs no extra encode.
+            let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box)
+                .map_err(|e| StateError::Serialization(format!("box serialize: {e}")))?;
+            let box_id = ergo_primitives::digest::blake2b256(&box_bytes);
             let ergo_tree_bytes = candidate.ergo_tree_bytes().to_vec();
             let value = candidate.value;
             let assets: Vec<([u8; 32], u64)> = candidate
@@ -5158,10 +5162,11 @@ fn build_owned_tx_data_checked(
                 value,
                 assets,
                 miner_reward_pubkey,
-                // Live path: full box bytes are unused here (scan matching
-                // goes through `build_scan_match_records`), so don't pay to
-                // carry them across the persist-worker boundary.
-                box_bytes: Vec::new(),
+                // Captured for free from the box-id serialization above; the
+                // apply hook stores it in WALLET_BOX_BYTES for matched wallet
+                // boxes (reserved-scan reads), and `build_scan_match_records`
+                // uses it too.
+                box_bytes,
             })
         })
         .collect::<Result<Vec<_>, StateError>>()?;
@@ -5341,6 +5346,7 @@ pub fn owned_to_block_txs(owned: &[OwnedBlockTxData]) -> BoundBlockTxs<'_> {
                     value: o.value,
                     assets: o.assets.clone(),
                     miner_reward_pubkey: o.miner_reward_pubkey,
+                    box_bytes: &o.box_bytes,
                 })
                 .collect()
         })

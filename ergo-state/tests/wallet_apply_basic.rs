@@ -82,6 +82,7 @@ fn apply_block_with_owned_output_records_confirmed_box() {
         value: 1_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -132,6 +133,7 @@ fn apply_block_with_miner_reward_records_immature_with_correct_maturity() {
         value: 67_500_000_000, // 67.5 ERG block reward
         assets: vec![],
         miner_reward_pubkey: Some(tracked_pk()),
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xCC; 32],
@@ -182,6 +184,7 @@ fn miner_reward_to_untracked_pubkey_is_ignored() {
         value: 67_500_000_000,
         assets: vec![],
         miner_reward_pubkey: Some(untracked_pk),
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xCC; 32],
@@ -217,6 +220,7 @@ fn untracked_output_ignored() {
         value: 5_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xEE; 32],
@@ -258,6 +262,7 @@ fn same_block_create_then_spend_box_ends_spent() {
         value: 1_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let inputs_b = [box_id];
     let outputs_b: [BlockOutput; 0] = [];
@@ -317,6 +322,7 @@ fn rollback_after_apply_restores_pre_apply_state() {
         value: 1_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let txs = [BlockTx {
         tx_id: [0xAA; 32],
@@ -359,6 +365,7 @@ fn rollback_after_same_block_spend_restores_pre_apply_state() {
         value: 1_000_000_000,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: &[],
     }];
     let inputs_b = [box_id];
     let outputs_b: [BlockOutput; 0] = [];
@@ -394,6 +401,145 @@ fn rollback_after_same_block_spend_restores_pre_apply_state() {
     );
 }
 
+// ----- box-bytes capture (reserved-id reads) -----
+
+#[test]
+fn apply_populates_box_bytes_table_for_owned_output() {
+    // Reserved-id reads (/scan/{unspent,spent}Boxes/9|10) need the
+    // full serialized box bytes, which WalletBox does not carry. The
+    // apply path captures them into WALLET_BOX_BYTES keyed by box_id.
+    // This pins that an owned output with non-empty box_bytes lands a
+    // row with the EXACT bytes that were passed in.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::create(dir.path().join("test.redb")).unwrap();
+    let wallet = wallet_with_one_tracked();
+    let tree = tracked_tree();
+
+    let serialized_box = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03];
+    let outputs = [BlockOutput {
+        box_id: [0x01; 32],
+        output_index: 0,
+        ergo_tree_bytes: &tree,
+        value: 1_000_000_000,
+        assets: vec![],
+        miner_reward_pubkey: None,
+        box_bytes: &serialized_box,
+    }];
+    let txs = [BlockTx {
+        tx_id: [0xAA; 32],
+        inputs: &[],
+        outputs: &outputs,
+    }];
+
+    let txn = db.begin_write().unwrap();
+    {
+        let (trees, pks) = wallet_data(&wallet);
+        apply_block_to_wallet(&txn, &trees, &pks, 100, &[0xBB; 32], &txs).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let tbl = txn.open_table(WALLET_BOX_BYTES).unwrap();
+    let raw = tbl
+        .get([0x01u8; 32])
+        .unwrap()
+        .expect("box bytes row must exist after apply");
+    assert_eq!(
+        raw.value(),
+        serialized_box,
+        "stored box bytes must match the bytes passed to apply"
+    );
+}
+
+#[test]
+fn apply_skips_box_bytes_row_when_bytes_empty() {
+    // Graceful degradation: an owned output applied with empty
+    // box_bytes (e.g. a code path that has no bytes to capture) must
+    // NOT write a WALLET_BOX_BYTES row — reserved-id reads then fall
+    // back to empty bytes rather than persisting a useless empty row.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::create(dir.path().join("test.redb")).unwrap();
+    let wallet = wallet_with_one_tracked();
+    let tree = tracked_tree();
+
+    let outputs = [BlockOutput {
+        box_id: [0x07; 32],
+        output_index: 0,
+        ergo_tree_bytes: &tree,
+        value: 1_000_000_000,
+        assets: vec![],
+        miner_reward_pubkey: None,
+        box_bytes: &[],
+    }];
+    let txs = [BlockTx {
+        tx_id: [0xAA; 32],
+        inputs: &[],
+        outputs: &outputs,
+    }];
+
+    let txn = db.begin_write().unwrap();
+    {
+        let (trees, pks) = wallet_data(&wallet);
+        apply_block_to_wallet(&txn, &trees, &pks, 100, &[0xBB; 32], &txs).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    // WALLET_BOXES must still record the box...
+    let boxes = txn.open_table(WALLET_BOXES).unwrap();
+    assert!(boxes.get([0x07u8; 32]).unwrap().is_some());
+    // ...but no box-bytes row for it.
+    let tbl = txn.open_table(WALLET_BOX_BYTES).unwrap();
+    assert!(
+        tbl.get([0x07u8; 32]).unwrap().is_none(),
+        "empty box_bytes must not create a WALLET_BOX_BYTES row"
+    );
+}
+
+#[test]
+fn rollback_removes_box_bytes_row() {
+    // The box-bytes row must be cleaned up on rollback alongside the
+    // WALLET_BOXES entry, so a reorg leaves no orphaned bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::create(dir.path().join("test.redb")).unwrap();
+    let wallet = wallet_with_one_tracked();
+    let tree = tracked_tree();
+
+    let serialized_box = vec![0xCA, 0xFE, 0xBA, 0xBE];
+    let outputs = [BlockOutput {
+        box_id: [0x01; 32],
+        output_index: 0,
+        ergo_tree_bytes: &tree,
+        value: 1_000_000_000,
+        assets: vec![],
+        miner_reward_pubkey: None,
+        box_bytes: &serialized_box,
+    }];
+    let txs = [BlockTx {
+        tx_id: [0xAA; 32],
+        inputs: &[],
+        outputs: &outputs,
+    }];
+
+    let txn = db.begin_write().unwrap();
+    {
+        let (trees, pks) = wallet_data(&wallet);
+        apply_block_to_wallet(&txn, &trees, &pks, 100, &[0xBB; 32], &txs).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    rollback_block_from_wallet(&txn, 100, &txs, &NoopRescanGuard).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let tbl = txn.open_table(WALLET_BOX_BYTES).unwrap();
+    assert!(
+        tbl.get([0x01u8; 32]).unwrap().is_none(),
+        "rollback must remove the box-bytes row"
+    );
+}
+
 // ----- atomic-commit guarantee -----
 
 #[test]
@@ -416,6 +562,7 @@ fn mid_apply_failure_leaves_no_partial_write() {
             value: 1_000_000_000,
             assets: vec![],
             miner_reward_pubkey: None,
+            box_bytes: &[],
         }];
         let txs = [BlockTx {
             tx_id: [0xAA; 32],

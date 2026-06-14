@@ -66,6 +66,13 @@ pub struct BlockOutput<'a> {
     /// pubkey is flagged as MinerReward), the consequence is wrong
     /// maturity window — not a spending-correctness break.
     pub miner_reward_pubkey: Option<[u8; 33]>,
+    /// Full serialized box bytes (`serialize_ergo_box`), stored in
+    /// `WALLET_BOX_BYTES` for matched wallet boxes so the reserved-scan reads
+    /// (`/scan/{unspent,spent}Boxes/9|10`) can surface the box. May be empty —
+    /// the live builder reuses the box-id serialization to fill it for free, but
+    /// callers that don't have the bytes pass `&[]`, in which case the read
+    /// degrades to empty `bytes` until a `/wallet/rescan` backfills it.
+    pub box_bytes: &'a [u8],
 }
 
 /// Apply a single full block to the wallet tables. Called inside
@@ -198,6 +205,7 @@ fn apply_outputs(
 ) -> Result<(), redb::Error> {
     let mut boxes_tbl = txn.open_table(WALLET_BOXES)?;
     let mut idx_tbl = txn.open_table(WALLET_BOXES_BY_TX)?;
+    let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
     let mut wallet_outputs: Vec<[u8; 32]> = Vec::new();
 
     for output in tx.outputs {
@@ -239,6 +247,12 @@ fn apply_outputs(
         })?;
         boxes_tbl.insert(output.box_id, bytes)?;
         idx_tbl.insert(box_by_tx_key(&tx.tx_id, output.output_index), output.box_id)?;
+        // Store the full box bytes for the reserved-scan reads (9/10). Skip when
+        // empty (a caller without the bytes) — the read degrades to empty
+        // `bytes` until a rescan backfills it.
+        if !output.box_bytes.is_empty() {
+            box_bytes_tbl.insert(output.box_id, output.box_bytes.to_vec())?;
+        }
         wallet_outputs.push(output.box_id);
     }
 
@@ -336,6 +350,7 @@ pub fn rollback_block_from_wallet(
     rescan_guard.abort_in_progress(txn)?;
     let mut boxes_tbl = txn.open_table(WALLET_BOXES)?;
     let mut idx_tbl = txn.open_table(WALLET_BOXES_BY_TX)?;
+    let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
     let mut txs_tbl = txn.open_table(WALLET_TXS)?;
 
     // Reverse-order pass.
@@ -396,6 +411,7 @@ pub fn rollback_block_from_wallet(
         // Remove outputs that were created in this tx.
         for output in tx.outputs {
             boxes_tbl.remove(output.box_id)?;
+            box_bytes_tbl.remove(output.box_id)?;
             idx_tbl.remove(box_by_tx_key(&tx.tx_id, output.output_index))?;
         }
     }
@@ -669,6 +685,7 @@ mod scan_tests {
             value: 0,
             assets: Vec::new(),
             miner_reward_pubkey: None,
+            box_bytes: &[],
         }
     }
 
