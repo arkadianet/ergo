@@ -5162,12 +5162,7 @@ paths:
       - in: query
         name: minConfirmations
         required: false
-        description: >-
-          Minimal number of confirmations. `-1` considers unconfirmed: on
-          `unspentBoxes` it merges the wallet's matching off-chain (mempool)
-          boxes (rendered with `inclusionHeight`/`confirmationsNum` = null and
-          sorted ahead of confirmed boxes); `spentBoxes` has no off-chain
-          component. `maxInclusionHeight` cannot be combined with `-1`.
+        description: Minimal number of confirmations, -1 means we consider unconfirmed
         schema:
           type: integer
           format: int32
@@ -5277,12 +5272,7 @@ paths:
       - in: query
         name: minConfirmations
         required: false
-        description: >-
-          Minimal number of confirmations. `-1` considers unconfirmed: on
-          `unspentBoxes` it merges the wallet's matching off-chain (mempool)
-          boxes (rendered with `inclusionHeight`/`confirmationsNum` = null and
-          sorted ahead of confirmed boxes); `spentBoxes` has no off-chain
-          component. `maxInclusionHeight` cannot be combined with `-1`.
+        description: Minimal number of confirmations, -1 means we consider unconfirmed
         schema:
           type: integer
           format: int32

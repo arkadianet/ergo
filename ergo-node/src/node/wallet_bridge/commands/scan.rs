@@ -739,10 +739,16 @@ fn read_scan_boxes(
     let hi = scan_box_key(scan_id, &[0xffu8; 32]);
 
     let mut entries: Vec<ScanBoxEntry> = Vec::new();
+    // Every box id this scan knows on-chain, in ANY status and regardless of the
+    // confirmation/height filters — the off-chain overlay dedups against this so
+    // a box that is already on-chain (even one filtered out of `entries`, e.g.
+    // now spent or outside the window) is never re-surfaced as off-chain.
+    let mut on_chain_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(table) = &table_opt {
         for item in table.range(lo..=hi).map_err(internal)? {
             let (_, value) = item.map_err(internal)?;
             let tb: ScanTrackedBox = bincode::deserialize(&value.value()).map_err(internal)?;
+            on_chain_ids.insert(hex::encode(tb.box_id));
 
             let spent = matches!(tb.status, ScanBoxStatus::Spent { .. });
             if spent != want_spent {
@@ -793,8 +799,6 @@ fn read_scan_boxes(
     if !want_spent && filter.min_confirmations == -1 {
         if let Some(mp) = mempool {
             let registry = load_registry(db)?;
-            let on_chain_ids: std::collections::HashSet<String> =
-                entries.iter().map(|e| e.box_id.clone()).collect();
             for (box_id, b) in mp.pool_outputs().iter() {
                 let scan_ids = registry.matching_scan_ids(b);
                 if !scan_ids.contains(&scan_id) {
@@ -926,8 +930,17 @@ fn read_reserved_scan_boxes(
                 .iter()
                 .filter_map(|pk| ergo_ser::address::build_p2pk_tree_bytes(pk).ok())
                 .collect();
+            // Dedup against EVERY wallet box (any provenance/status), not just
+            // the want_spent-filtered `entries`: a box already in WALLET_BOXES
+            // is on-chain and must never be re-surfaced from a stale pool
+            // snapshot as off-chain.
             let on_chain_ids: std::collections::HashSet<String> =
-                entries.iter().map(|e| e.box_id.clone()).collect();
+                ergo_state::wallet::reader::WalletReader::new(&read)
+                    .all_boxes()
+                    .map_err(internal)?
+                    .into_iter()
+                    .map(|wb| hex::encode(wb.box_id))
+                    .collect();
             for (box_id, b) in mp.pool_outputs().iter() {
                 let tree_bytes = b.candidate.ergo_tree_bytes();
                 let matches = if mining {
@@ -1390,6 +1403,53 @@ mod tests {
         let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
         assert_eq!(r.len(), 1, "box already on-chain must not be duplicated");
         assert_eq!(r[0].inclusion_height, Some(100), "on-chain row wins");
+    }
+
+    #[test]
+    fn mempool_overlay_dedups_box_on_chain_even_when_filtered_out() {
+        // A box already on-chain but EXCLUDED from the filtered result (here it
+        // is Spent, so an unspent read drops it) must still dedup against the
+        // pool overlay — otherwise a stale pool snapshot re-surfaces it as
+        // off-chain with null height. Dedup is against ALL scan rows, not just
+        // the filtered `entries`.
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let pbox = pool_box_with_token(0x11, 5_000_000);
+        let pid = pbox.box_id().unwrap();
+        let mut id_arr = [0u8; 32];
+        id_arr.copy_from_slice(pid.as_bytes());
+        {
+            use ergo_primitives::writer::VlqWriter;
+            let mut w = VlqWriter::new();
+            w.put_u64(5_000_000);
+            let tb = ScanTrackedBox {
+                scan_id: 11,
+                box_id: id_arr,
+                inclusion_height: 100,
+                creation_out_index: 0,
+                box_bytes: w.result(),
+                status: ScanBoxStatus::Spent {
+                    spent_in_tx: [9u8; 32],
+                    spent_at: 105,
+                },
+            };
+            let wtxn = db.begin_write().unwrap();
+            {
+                let mut t = wtxn.open_table(WALLET_SCAN_BOXES).unwrap();
+                t.insert(scan_box_key(11, &id_arr), bincode::serialize(&tb).unwrap())
+                    .unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+        let (pool, _) = pool_of(vec![pbox]);
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
+        assert!(
+            r.is_empty(),
+            "a box on-chain (even spent/filtered out) must not be re-surfaced off-chain"
+        );
     }
 
     /// A `containsAsset` scan request with `removeOffchain=false`.
@@ -2246,14 +2306,14 @@ mod reserved_scan_read_tests {
 
     fn put_wallet_box(
         db: &redb::Database,
-        fill: u8,
+        box_id: [u8; 32],
         value: u64,
         height: u32,
         status: BoxStatus,
         provenance: BoxProvenance,
     ) {
         let wb = WalletBox {
-            box_id: [fill; 32],
+            box_id,
             creation_tx_id: [0u8; 32],
             creation_output_index: 0,
             creation_height: height,
@@ -2266,11 +2326,11 @@ mod reserved_scan_read_tests {
         {
             w.open_table(WALLET_BOXES)
                 .unwrap()
-                .insert([fill; 32], bincode::serialize(&wb).unwrap())
+                .insert(box_id, bincode::serialize(&wb).unwrap())
                 .unwrap();
             w.open_table(WALLET_BOX_BYTES)
                 .unwrap()
-                .insert([fill; 32], vec![fill, 0xAA])
+                .insert(box_id, vec![box_id[0], 0xAA])
                 .unwrap();
         }
         w.commit().unwrap();
@@ -2285,7 +2345,7 @@ mod reserved_scan_read_tests {
         // Mining: one Immature (unspent), one Spent.
         put_wallet_box(
             &db,
-            0x91,
+            [0x91; 32],
             1000,
             100,
             BoxStatus::Immature { matures_at: 820 },
@@ -2293,7 +2353,7 @@ mod reserved_scan_read_tests {
         );
         put_wallet_box(
             &db,
-            0x92,
+            [0x92; 32],
             2000,
             101,
             BoxStatus::Spent {
@@ -2305,7 +2365,7 @@ mod reserved_scan_read_tests {
         // Payments: one Confirmed (unspent).
         put_wallet_box(
             &db,
-            0xA1,
+            [0xA1; 32],
             3000,
             102,
             BoxStatus::Confirmed,
@@ -2471,6 +2531,41 @@ mod reserved_scan_read_tests {
         assert!(
             p.is_empty(),
             "reward box must not surface under payments (10)"
+        );
+    }
+
+    #[test]
+    fn reserved_overlay_dedups_box_already_on_chain() {
+        // A wallet box already in WALLET_BOXES (here Spent) must not be
+        // re-surfaced off-chain from a stale pool snapshot, even though an
+        // unspent reserved read filters the spent on-chain row out.
+        let (_d, db) = temp_db();
+        let pk = tracked_pk();
+        track_pubkey(&db, 0, pk);
+        let tree = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
+        let pbox = pool_box_from_tree(&tree, 4_000_000);
+        let pid = pbox.box_id().unwrap();
+        let mut id_arr = [0u8; 32];
+        id_arr.copy_from_slice(pid.as_bytes());
+        put_wallet_box(
+            &db,
+            id_arr,
+            4_000_000,
+            100,
+            BoxStatus::Spent {
+                spent_in_tx: [9u8; 32],
+                spent_at: 105,
+            },
+            BoxProvenance::Owned,
+        );
+        let pool = pool_of(pbox);
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &f, Some(&pool)).unwrap();
+        assert!(
+            r.is_empty(),
+            "a wallet box already on-chain must not re-appear off-chain under 10"
         );
     }
 
