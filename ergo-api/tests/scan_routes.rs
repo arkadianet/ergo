@@ -79,8 +79,8 @@ impl WalletAdmin for ScanAdmin {
         Ok(vec![ergo_api::wallet::scan::ScanBoxEntry {
             box_id: "ab".to_string(),
             value: 1_000_000,
-            inclusion_height: filter.min_inclusion_height.max(0) as u32,
-            confirmations_num: filter.limit as i64,
+            inclusion_height: Some(filter.min_inclusion_height.max(0) as u32),
+            confirmations_num: Some(filter.limit as i64),
             spent: false,
             bytes: "00".to_string(),
         }])

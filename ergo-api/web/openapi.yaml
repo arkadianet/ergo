@@ -1468,13 +1468,18 @@ components:
         inclusionHeight:
           type: integer
           format: int32
+          nullable: true
+          description: >-
+            Block height the box was included at. `null` for off-chain
+            (mempool) boxes, which appear only when `minConfirmations=-1`.
         confirmationsNum:
           type: integer
           format: int64
+          nullable: true
           description: >-
             Confirmations at read time (committed chain-tip height minus
             inclusion height). Uses the live committed tip, not the wallet's
-            rescan-frozen scan height.
+            rescan-frozen scan height. `null` for off-chain (mempool) boxes.
         spent:
           type: boolean
         bytes:
@@ -5157,7 +5162,12 @@ paths:
       - in: query
         name: minConfirmations
         required: false
-        description: Minimal number of confirmations, -1 means we consider unconfirmed
+        description: >-
+          Minimal number of confirmations. `-1` considers unconfirmed: on
+          `unspentBoxes` it merges the wallet's matching off-chain (mempool)
+          boxes (rendered with `inclusionHeight`/`confirmationsNum` = null and
+          sorted ahead of confirmed boxes); `spentBoxes` has no off-chain
+          component. `maxInclusionHeight` cannot be combined with `-1`.
         schema:
           type: integer
           format: int32
@@ -5267,7 +5277,12 @@ paths:
       - in: query
         name: minConfirmations
         required: false
-        description: Minimal number of confirmations, -1 means we consider unconfirmed
+        description: >-
+          Minimal number of confirmations. `-1` considers unconfirmed: on
+          `unspentBoxes` it merges the wallet's matching off-chain (mempool)
+          boxes (rendered with `inclusionHeight`/`confirmationsNum` = null and
+          sorted ahead of confirmed boxes); `spentBoxes` has no off-chain
+          component. `maxInclusionHeight` cannot be combined with `-1`.
         schema:
           type: integer
           format: int32
@@ -6266,7 +6281,12 @@ paths:
       - in: query
         name: minConfirmations
         required: false
-        description: Minimal number of confirmations, -1 means we consider unconfirmed
+        description: >-
+          Minimal number of confirmations. `-1` considers unconfirmed: on
+          `unspentBoxes` it merges the wallet's matching off-chain (mempool)
+          boxes (rendered with `inclusionHeight`/`confirmationsNum` = null and
+          sorted ahead of confirmed boxes); `spentBoxes` has no off-chain
+          component. `maxInclusionHeight` cannot be combined with `-1`.
         schema:
           type: integer
           format: int32
@@ -6359,7 +6379,12 @@ paths:
       - in: query
         name: minConfirmations
         required: false
-        description: Minimal number of confirmations, -1 means we consider unconfirmed
+        description: >-
+          Minimal number of confirmations. `-1` considers unconfirmed: on
+          `unspentBoxes` it merges the wallet's matching off-chain (mempool)
+          boxes (rendered with `inclusionHeight`/`confirmationsNum` = null and
+          sorted ahead of confirmed boxes); `spentBoxes` has no off-chain
+          component. `maxInclusionHeight` cannot be combined with `-1`.
         schema:
           type: integer
           format: int32

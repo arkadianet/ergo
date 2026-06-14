@@ -633,8 +633,16 @@ pub(crate) async fn unspent_boxes(
     reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
 ) {
     // `None` tip: read_scan_boxes derives the committed tip from the SAME redb
-    // snapshot it reads the boxes from (consistent confirmations).
-    let _ = reply.send(read_scan_boxes(ctx.db, None, scan_id, false, &filter));
+    // snapshot it reads the boxes from (consistent confirmations). The live
+    // mempool view feeds the off-chain overlay (minConfirmations=-1).
+    let _ = reply.send(read_scan_boxes(
+        ctx.db,
+        None,
+        scan_id,
+        false,
+        &filter,
+        Some(ctx.mempool.as_ref()),
+    ));
 }
 
 pub(crate) async fn spent_boxes(
@@ -643,7 +651,16 @@ pub(crate) async fn spent_boxes(
     filter: ScanBoxFilter,
     reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
 ) {
-    let _ = reply.send(read_scan_boxes(ctx.db, None, scan_id, true, &filter));
+    // spentBoxes has no off-chain component (Scala `getScanSpentBoxes`), but the
+    // view is threaded through uniformly; the overlay self-gates on want_spent.
+    let _ = reply.send(read_scan_boxes(
+        ctx.db,
+        None,
+        scan_id,
+        true,
+        &filter,
+        Some(ctx.mempool.as_ref()),
+    ));
 }
 
 /// Read a scan's boxes (unspent if `want_spent` is false, spent if true),
@@ -663,6 +680,7 @@ fn read_scan_boxes(
     scan_id: u16,
     want_spent: bool,
     filter: &ScanBoxFilter,
+    mempool: Option<&dyn ergo_api::MempoolView>,
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
     // Reserved scan ids 9 (Mining) / 10 (Payments) surface the wallet's OWN
     // boxes, which live in WALLET_BOXES — the scan tables only hold user scans.
@@ -676,6 +694,7 @@ fn read_scan_boxes(
             scan_id == MINING_SCAN_ID,
             want_spent,
             filter,
+            mempool,
         );
     }
 
@@ -705,9 +724,13 @@ fn read_scan_boxes(
             .map(|(h, _)| h)
             .unwrap_or(0),
     };
-    let table = match read.open_table(WALLET_SCAN_BOXES) {
-        Ok(t) => t,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+    // The scan-boxes table is created lazily on the first tracked-box write, so
+    // a scan whose boxes have only ever been seen off-chain (in the mempool) has
+    // no table yet. Treat a missing table as "no confirmed boxes" and still fall
+    // through to the off-chain overlay below, rather than returning early.
+    let table_opt = match read.open_table(WALLET_SCAN_BOXES) {
+        Ok(t) => Some(t),
+        Err(redb::TableError::TableDoesNotExist(_)) => None,
         Err(e) => return Err(internal(e)),
     };
 
@@ -716,52 +739,107 @@ fn read_scan_boxes(
     let hi = scan_box_key(scan_id, &[0xffu8; 32]);
 
     let mut entries: Vec<ScanBoxEntry> = Vec::new();
-    for item in table.range(lo..=hi).map_err(internal)? {
-        let (_, value) = item.map_err(internal)?;
-        let tb: ScanTrackedBox = bincode::deserialize(&value.value()).map_err(internal)?;
+    if let Some(table) = &table_opt {
+        for item in table.range(lo..=hi).map_err(internal)? {
+            let (_, value) = item.map_err(internal)?;
+            let tb: ScanTrackedBox = bincode::deserialize(&value.value()).map_err(internal)?;
 
-        let spent = matches!(tb.status, ScanBoxStatus::Spent { .. });
-        if spent != want_spent {
-            continue;
-        }
+            let spent = matches!(tb.status, ScanBoxStatus::Spent { .. });
+            if spent != want_spent {
+                continue;
+            }
 
-        // Inclusion-height window. A `-1` max means unbounded.
-        let h = tb.inclusion_height as i64;
-        if h < filter.min_inclusion_height as i64 {
-            continue;
-        }
-        if filter.max_inclusion_height >= 0 && h > filter.max_inclusion_height as i64 {
-            continue;
-        }
+            // Inclusion-height window. A `-1` max means unbounded.
+            let h = tb.inclusion_height as i64;
+            if h < filter.min_inclusion_height as i64 {
+                continue;
+            }
+            if filter.max_inclusion_height >= 0 && h > filter.max_inclusion_height as i64 {
+                continue;
+            }
 
-        // Confirmations window. `-1` bounds are unbounded.
-        let confirmations = current_height as i64 - tb.inclusion_height as i64;
-        if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
-            continue;
-        }
-        if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
-            continue;
-        }
+            // Confirmations window. `-1` bounds are unbounded.
+            let confirmations = current_height as i64 - tb.inclusion_height as i64;
+            if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
+                continue;
+            }
+            if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
+                continue;
+            }
 
-        // `value` is the leading u64 of the serialized box; read just that
-        // rather than parsing the whole box (clients get the full box via `bytes`).
-        let value = ergo_primitives::reader::VlqReader::new(&tb.box_bytes)
-            .get_u64()
-            .map_err(internal)?;
+            // `value` is the leading u64 of the serialized box; read just that
+            // rather than parsing the whole box (clients get the full box via `bytes`).
+            let value = ergo_primitives::reader::VlqReader::new(&tb.box_bytes)
+                .get_u64()
+                .map_err(internal)?;
 
-        entries.push(ScanBoxEntry {
-            box_id: hex::encode(tb.box_id),
-            value,
-            inclusion_height: tb.inclusion_height,
-            confirmations_num: confirmations,
-            spent,
-            bytes: hex::encode(&tb.box_bytes),
-        });
+            entries.push(ScanBoxEntry {
+                box_id: hex::encode(tb.box_id),
+                value,
+                inclusion_height: Some(tb.inclusion_height),
+                confirmations_num: Some(confirmations),
+                spent,
+                bytes: hex::encode(&tb.box_bytes),
+            });
+        }
+    }
+
+    // Off-chain (mempool) overlay. Scala `getScanUnspentBoxes` merges the
+    // off-chain boxes only when `considerUnconfirmed` (minConfirmations == -1),
+    // and only into the UNSPENT list (`getScanSpentBoxes` has no off-chain
+    // component). Off-chain boxes carry no inclusion height / confirmations and
+    // sort to the front (None < Some) before pagination — `(unspent ++
+    // unconfirmed).sortBy(inclusionHeightOpt)`.
+    if !want_spent && filter.min_confirmations == -1 {
+        if let Some(mp) = mempool {
+            let registry = load_registry(db)?;
+            let on_chain_ids: std::collections::HashSet<String> =
+                entries.iter().map(|e| e.box_id.clone()).collect();
+            for (box_id, b) in mp.pool_outputs().iter() {
+                let scan_ids = registry.matching_scan_ids(b);
+                if !scan_ids.contains(&scan_id) {
+                    continue;
+                }
+                let hex_id = hex::encode(box_id.as_bytes());
+                if on_chain_ids.contains(&hex_id) {
+                    continue; // already confirmed on-chain in the read gap — dedup
+                }
+                // removeOffchain retention (Scala `OffChainRegistry.
+                // updateOnTransaction`): a pool-created box spent within the pool
+                // is dropped from the unspent list UNLESS it belongs to >1 scan,
+                // or to a single USER scan (> PaymentsScanId), AND some tracking
+                // scan opted out of off-chain removal (remove_offchain == false).
+                if mp.is_spent_by_pool(box_id) {
+                    let qualifies = scan_ids.len() > 1
+                        || (scan_ids.len() == 1 && scan_ids[0] > PAYMENTS_SCAN_ID);
+                    let leave = qualifies
+                        && scan_ids.iter().any(|sid| {
+                            registry
+                                .get(*sid)
+                                .map(|s| !s.remove_offchain)
+                                .unwrap_or(false)
+                        });
+                    if !leave {
+                        continue;
+                    }
+                }
+                let bytes = ergo_ser::ergo_box::serialize_ergo_box(b).map_err(internal)?;
+                entries.push(ScanBoxEntry {
+                    box_id: hex_id,
+                    value: b.candidate.value,
+                    inclusion_height: None,
+                    confirmations_num: None,
+                    spent: false,
+                    bytes: hex::encode(&bytes),
+                });
+            }
+        }
     }
 
     // Order by inclusion height before paginating, matching Scala
     // `getScanUnspentBoxes`/`...SpentBoxes` (`sortBy(inclusionHeightOpt)`); box
     // id breaks ties deterministically (table order is by box id, not height).
+    // `Option` orders None first, so off-chain boxes lead, matching Scala.
     entries.sort_by(|a, b| {
         a.inclusion_height
             .cmp(&b.inclusion_height)
@@ -786,6 +864,7 @@ fn read_reserved_scan_boxes(
     mining: bool,
     want_spent: bool,
     filter: &ScanBoxFilter,
+    mempool: Option<&dyn ergo_api::MempoolView>,
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
     let read = db.begin_read().map_err(internal)?;
     let current_height = match tip_override {
@@ -819,12 +898,65 @@ fn read_reserved_scan_boxes(
         entries.push(ScanBoxEntry {
             box_id: hex::encode(wb.box_id),
             value: wb.value,
-            inclusion_height: wb.creation_height,
-            confirmations_num: confirmations,
+            inclusion_height: Some(wb.creation_height),
+            confirmations_num: Some(confirmations),
             spent: want_spent,
             bytes: hex::encode(&rb.box_bytes),
         });
     }
+
+    // Off-chain (mempool) overlay for the wallet's OWN boxes, mirroring the
+    // user-scan overlay in [`read_scan_boxes`]. Only the unspent view at
+    // minConfirmations == -1 merges off-chain boxes. The reserved ids aren't
+    // registry rules, so classify each pool box the same way the apply path
+    // does: tree ∈ tracked p2pk trees → Owned (id 10); else an extracted
+    // miner-reward pubkey ∈ tracked pubkeys → MinerReward (id 9). A reserved
+    // box spent within the pool is always dropped from the unspent list (Scala
+    // retains only multi-scan / user-scan boxes).
+    if !want_spent && filter.min_confirmations == -1 {
+        if let Some(mp) = mempool {
+            let tracked_pubkeys: Vec<[u8; 33]> =
+                ergo_state::wallet::reader::WalletReader::new(&read)
+                    .tracked_pubkeys_with_paths()
+                    .map_err(internal)?
+                    .into_iter()
+                    .map(|(_, pk, _)| pk)
+                    .collect();
+            let tracked_trees: std::collections::HashSet<Vec<u8>> = tracked_pubkeys
+                .iter()
+                .filter_map(|pk| ergo_ser::address::build_p2pk_tree_bytes(pk).ok())
+                .collect();
+            let on_chain_ids: std::collections::HashSet<String> =
+                entries.iter().map(|e| e.box_id.clone()).collect();
+            for (box_id, b) in mp.pool_outputs().iter() {
+                let tree_bytes = b.candidate.ergo_tree_bytes();
+                let matches = if mining {
+                    ergo_state::wallet::miner_reward::extract_miner_reward_pubkey(tree_bytes)
+                        .map(|pk| tracked_pubkeys.contains(&pk))
+                        .unwrap_or(false)
+                } else {
+                    tracked_trees.contains(tree_bytes)
+                };
+                if !matches || mp.is_spent_by_pool(box_id) {
+                    continue;
+                }
+                let hex_id = hex::encode(box_id.as_bytes());
+                if on_chain_ids.contains(&hex_id) {
+                    continue; // already confirmed on-chain — dedup
+                }
+                let bytes = ergo_ser::ergo_box::serialize_ergo_box(b).map_err(internal)?;
+                entries.push(ScanBoxEntry {
+                    box_id: hex_id,
+                    value: b.candidate.value,
+                    inclusion_height: None,
+                    confirmations_num: None,
+                    spent: false,
+                    bytes: hex::encode(&bytes),
+                });
+            }
+        }
+    }
+
     entries.sort_by(|a, b| {
         a.inclusion_height
             .cmp(&b.inclusion_height)
@@ -838,6 +970,7 @@ fn read_reserved_scan_boxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
     use ergo_state::wallet::tables::wallet_tx_key;
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
@@ -1086,6 +1219,237 @@ mod tests {
         }
     }
 
+    // ----- mempool (off-chain) overlay -----
+
+    /// A `MempoolView` over a fixed set of pool outputs + spent-input ids,
+    /// for the off-chain overlay tests.
+    struct FakePool {
+        outputs:
+            std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
+        spent: std::collections::HashSet<ergo_primitives::digest::Digest32>,
+    }
+    impl ergo_api::MempoolView for FakePool {
+        fn is_spent_by_pool(&self, box_id: &ergo_primitives::digest::Digest32) -> bool {
+            self.spent.contains(box_id)
+        }
+        fn pool_spending_tx(
+            &self,
+            _box_id: &ergo_primitives::digest::Digest32,
+        ) -> Option<ergo_primitives::digest::Digest32> {
+            None
+        }
+        fn pool_outputs(
+            &self,
+        ) -> std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>
+        {
+            self.outputs.clone()
+        }
+    }
+
+    /// An `ErgoBox` carrying a single token with id `[fill; 32]` — matches a
+    /// `containsAsset` scan registered via `req(_, fill)`.
+    fn pool_box_with_token(fill: u8, value: u64) -> ErgoBox {
+        use ergo_ser::ergo_tree::ErgoTree;
+        use ergo_ser::opcode::Expr;
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::sigma_type::SigmaType;
+        use ergo_ser::sigma_value::SigmaValue;
+        use ergo_ser::token::{Token, TokenId};
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
+            body: Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            },
+        };
+        let tokens = vec![Token {
+            token_id: TokenId::from_bytes([fill; 32]),
+            amount: 1,
+        }];
+        let cand =
+            ErgoBoxCandidate::new(value, tree, 1, tokens, AdditionalRegisters::empty()).unwrap();
+        ErgoBox {
+            candidate: cand,
+            transaction_id: ergo_primitives::digest::ModifierId::from_bytes([7u8; 32]),
+            index: 0,
+        }
+    }
+
+    fn pool_of(boxes: Vec<ErgoBox>) -> (FakePool, Vec<ergo_primitives::digest::Digest32>) {
+        let mut outputs = std::collections::HashMap::new();
+        let mut ids = Vec::new();
+        for b in boxes {
+            let id = b.box_id().unwrap();
+            ids.push(id);
+            outputs.insert(id, b);
+        }
+        (
+            FakePool {
+                outputs: std::sync::Arc::new(outputs),
+                spent: std::collections::HashSet::new(),
+            },
+            ids,
+        )
+    }
+
+    #[test]
+    fn mempool_overlay_includes_matching_offchain_box_when_unconfirmed() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // scan 11, containsAsset 0x11
+        put_tracked_box(&db, 11, 0xA1, 100, 1_000_000, false); // on-chain unspent
+        let (pool, ids) = pool_of(vec![pool_box_with_token(0x11, 5_000_000)]);
+        let pid = ids[0];
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
+
+        assert_eq!(r.len(), 2, "on-chain + off-chain");
+        // Off-chain box sorts FIRST (null inclusion height < Some), per Scala.
+        let off = &r[0];
+        assert_eq!(off.box_id, hex::encode(pid.as_bytes()));
+        assert_eq!(off.inclusion_height, None);
+        assert_eq!(off.confirmations_num, None);
+        assert!(!off.spent);
+        assert_eq!(off.value, 5_000_000);
+    }
+
+    #[test]
+    fn mempool_overlay_gated_off_unless_min_confirmations_neg_one() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        put_tracked_box(&db, 11, 0xA1, 100, 1_000_000, false);
+        let (pool, _) = pool_of(vec![pool_box_with_token(0x11, 5_000_000)]);
+
+        // minConfirmations = 0 (default) must NOT pull off-chain boxes.
+        let r = read_scan_boxes(&db, Some(110), 11, false, &filter(), Some(&pool)).unwrap();
+        assert_eq!(r.len(), 1, "only on-chain at minConfirmations=0");
+    }
+
+    #[test]
+    fn mempool_overlay_never_applies_to_spent_reads() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let (pool, _) = pool_of(vec![pool_box_with_token(0x11, 5_000_000)]);
+
+        // spentBoxes has no off-chain component in Scala, even at -1.
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, true, &f, Some(&pool)).unwrap();
+        assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn mempool_overlay_skips_box_not_matching_scan() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // tracks asset 0x11
+        let (pool, _) = pool_of(vec![pool_box_with_token(0x99, 5_000_000)]); // asset 0x99
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
+        assert_eq!(r.len(), 0, "pool box matches no scan");
+    }
+
+    #[test]
+    fn mempool_overlay_dedups_box_already_on_chain() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let pbox = pool_box_with_token(0x11, 5_000_000);
+        let pid = pbox.box_id().unwrap();
+        // Same box id already recorded on-chain (confirmed in the gap).
+        let mut id_arr = [0u8; 32];
+        id_arr.copy_from_slice(pid.as_bytes());
+        {
+            use ergo_primitives::writer::VlqWriter;
+            let mut w = VlqWriter::new();
+            w.put_u64(5_000_000);
+            let tb = ScanTrackedBox {
+                scan_id: 11,
+                box_id: id_arr,
+                inclusion_height: 100,
+                creation_out_index: 0,
+                box_bytes: w.result(),
+                status: ScanBoxStatus::Unspent,
+            };
+            let wtxn = db.begin_write().unwrap();
+            {
+                let mut t = wtxn.open_table(WALLET_SCAN_BOXES).unwrap();
+                t.insert(scan_box_key(11, &id_arr), bincode::serialize(&tb).unwrap())
+                    .unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+        let (pool, _) = pool_of(vec![pbox]);
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
+        assert_eq!(r.len(), 1, "box already on-chain must not be duplicated");
+        assert_eq!(r[0].inclusion_height, Some(100), "on-chain row wins");
+    }
+
+    /// A `containsAsset` scan request with `removeOffchain=false`.
+    fn req_keep(name: &str, fill: u8) -> ScanRequestDto {
+        ScanRequestDto {
+            scan_name: name.to_string(),
+            tracking_rule: contains_asset_rule(fill),
+            wallet_interaction: None,
+            remove_offchain: Some(false),
+        }
+    }
+
+    fn pool_with_spent(b: ErgoBox) -> FakePool {
+        let id = b.box_id().unwrap();
+        let mut outputs = std::collections::HashMap::new();
+        outputs.insert(id, b);
+        let mut spent = std::collections::HashSet::new();
+        spent.insert(id);
+        FakePool {
+            outputs: std::sync::Arc::new(outputs),
+            spent,
+        }
+    }
+
+    #[test]
+    fn mempool_overlay_default_removeoffchain_drops_pool_spent_box() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // removeOffchain defaults true
+        let pool = pool_with_spent(pool_box_with_token(0x11, 5_000_000));
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
+        assert_eq!(
+            r.len(),
+            0,
+            "a pool-created box spent within the pool is dropped under removeOffchain=true"
+        );
+    }
+
+    #[test]
+    fn mempool_overlay_removeoffchain_false_keeps_pool_spent_user_box() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req_keep("a", 0x11)).unwrap(); // removeOffchain=false
+        let pbox = pool_box_with_token(0x11, 5_000_000);
+        let pid = pbox.box_id().unwrap();
+        let pool = pool_with_spent(pbox);
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(110), 11, false, &f, Some(&pool)).unwrap();
+        assert_eq!(
+            r.len(),
+            1,
+            "removeOffchain=false retains the pool-spent box"
+        );
+        assert_eq!(r[0].box_id, hex::encode(pid.as_bytes()));
+        assert!(!r[0].spent);
+    }
+
     #[test]
     fn read_splits_unspent_and_spent_and_renders_value() {
         let (_d, db) = temp_db();
@@ -1095,15 +1459,15 @@ mod tests {
         put_tracked_box(&db, 11, 0xA2, 101, 2_000_000, true); // spent
         put_tracked_box(&db, 12, 0xB1, 100, 9, false); // other scan
 
-        let unspent = read_scan_boxes(&db, Some(110), 11, false, &filter()).unwrap();
+        let unspent = read_scan_boxes(&db, Some(110), 11, false, &filter(), None).unwrap();
         assert_eq!(unspent.len(), 1);
         assert_eq!(unspent[0].box_id, hex::encode([0xA1u8; 32]));
         assert_eq!(unspent[0].value, 1_000_000);
-        assert_eq!(unspent[0].inclusion_height, 100);
-        assert_eq!(unspent[0].confirmations_num, 10); // 110 - 100
+        assert_eq!(unspent[0].inclusion_height, Some(100));
+        assert_eq!(unspent[0].confirmations_num, Some(10)); // 110 - 100
         assert!(!unspent[0].spent);
 
-        let spent = read_scan_boxes(&db, Some(110), 11, true, &filter()).unwrap();
+        let spent = read_scan_boxes(&db, Some(110), 11, true, &filter(), None).unwrap();
         assert_eq!(spent.len(), 1);
         assert_eq!(spent[0].box_id, hex::encode([0xA2u8; 32]));
         assert!(spent[0].spent);
@@ -1119,17 +1483,17 @@ mod tests {
         // minInclusionHeight = 150 keeps only the height-200 box.
         let mut f = filter();
         f.min_inclusion_height = 150;
-        let r = read_scan_boxes(&db, Some(300), 11, false, &f).unwrap();
+        let r = read_scan_boxes(&db, Some(300), 11, false, &f, None).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].inclusion_height, 200);
+        assert_eq!(r[0].inclusion_height, Some(200));
 
         // maxConfirmations = 150 at tip 300 keeps the height-200 box (conf 100),
         // dropping height-100 (conf 200).
         let mut f = filter();
         f.max_confirmations = 150;
-        let r = read_scan_boxes(&db, Some(300), 11, false, &f).unwrap();
+        let r = read_scan_boxes(&db, Some(300), 11, false, &f, None).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].inclusion_height, 200);
+        assert_eq!(r[0].inclusion_height, Some(200));
     }
 
     #[test]
@@ -1142,7 +1506,7 @@ mod tests {
         let mut f = filter();
         f.offset = 1;
         f.limit = 2;
-        let r = read_scan_boxes(&db, Some(200), 11, false, &f).unwrap();
+        let r = read_scan_boxes(&db, Some(200), 11, false, &f, None).unwrap();
         assert_eq!(r.len(), 2);
         // Boxes iterate ascending by box id; offset 1 skips box 0x00.
         assert_eq!(r[0].box_id, hex::encode([1u8; 32]));
@@ -1155,7 +1519,7 @@ mod tests {
         // Register the scan so the read reaches the (absent) box table rather
         // than short-circuiting on the registration guard.
         register_impl(&db, req("a", 0x11)).unwrap();
-        assert!(read_scan_boxes(&db, Some(100), 11, false, &filter())
+        assert!(read_scan_boxes(&db, Some(100), 11, false, &filter(), None)
             .unwrap()
             .is_empty());
     }
@@ -1835,7 +2199,7 @@ mod tests {
         put_tracked_box(&db, 11, 0xA1, 100, 1_000_000, false);
         // While registered, the box is visible.
         assert_eq!(
-            read_scan_boxes(&db, Some(110), 11, false, &filter())
+            read_scan_boxes(&db, Some(110), 11, false, &filter(), None)
                 .unwrap()
                 .len(),
             1
@@ -1844,14 +2208,14 @@ mod tests {
         // Deregister 11. Its tracked rows linger in WALLET_SCAN_BOXES (we don't
         // purge on deregister), but reads must not surface them.
         deregister_impl(&db, 11).unwrap();
-        assert!(read_scan_boxes(&db, Some(110), 11, false, &filter())
+        assert!(read_scan_boxes(&db, Some(110), 11, false, &filter(), None)
             .unwrap()
             .is_empty());
 
         // A user-range id that was never registered also returns nothing, even
         // with rows seeded directly.
         put_tracked_box(&db, 12, 0xB1, 100, 5, false);
-        assert!(read_scan_boxes(&db, Some(110), 12, false, &filter())
+        assert!(read_scan_boxes(&db, Some(110), 12, false, &filter(), None)
             .unwrap()
             .is_empty());
     }
@@ -1949,28 +2313,185 @@ mod reserved_scan_read_tests {
         );
 
         let mining_unspent =
-            read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &filter()).unwrap();
+            read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &filter(), None).unwrap();
         assert_eq!(mining_unspent.len(), 1);
         assert_eq!(mining_unspent[0].box_id, hex::encode([0x91u8; 32]));
         assert_eq!(mining_unspent[0].value, 1000);
-        assert_eq!(mining_unspent[0].inclusion_height, 100);
-        assert_eq!(mining_unspent[0].confirmations_num, 100);
+        assert_eq!(mining_unspent[0].inclusion_height, Some(100));
+        assert_eq!(mining_unspent[0].confirmations_num, Some(100));
         assert!(!mining_unspent[0].spent);
         assert_eq!(mining_unspent[0].bytes, hex::encode([0x91u8, 0xAA]));
 
         let mining_spent =
-            read_scan_boxes(&db, Some(200), MINING_SCAN_ID, true, &filter()).unwrap();
+            read_scan_boxes(&db, Some(200), MINING_SCAN_ID, true, &filter(), None).unwrap();
         assert_eq!(mining_spent.len(), 1);
         assert_eq!(mining_spent[0].box_id, hex::encode([0x92u8; 32]));
         assert!(mining_spent[0].spent);
 
         let pay_unspent =
-            read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &filter()).unwrap();
+            read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &filter(), None).unwrap();
         assert_eq!(pay_unspent.len(), 1);
         assert_eq!(pay_unspent[0].box_id, hex::encode([0xA1u8; 32]));
         assert_eq!(pay_unspent[0].value, 3000);
         // Mining boxes must NOT leak into payments (10).
-        let pay_spent = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, true, &filter()).unwrap();
+        let pay_spent =
+            read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, true, &filter(), None).unwrap();
         assert!(pay_spent.is_empty());
+    }
+
+    // ----- reserved-id off-chain (mempool) overlay -----
+
+    use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
+
+    /// A `MempoolView` over a fixed pool-output set (no pool spends).
+    struct FakePool {
+        outputs:
+            std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
+    }
+    impl ergo_api::MempoolView for FakePool {
+        fn is_spent_by_pool(&self, _box_id: &ergo_primitives::digest::Digest32) -> bool {
+            false
+        }
+        fn pool_spending_tx(
+            &self,
+            _box_id: &ergo_primitives::digest::Digest32,
+        ) -> Option<ergo_primitives::digest::Digest32> {
+            None
+        }
+        fn pool_outputs(
+            &self,
+        ) -> std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>
+        {
+            self.outputs.clone()
+        }
+    }
+
+    fn pool_of(b: ErgoBox) -> FakePool {
+        let id = b.box_id().unwrap();
+        let mut outputs = std::collections::HashMap::new();
+        outputs.insert(id, b);
+        FakePool {
+            outputs: std::sync::Arc::new(outputs),
+        }
+    }
+
+    /// Build a pool `ErgoBox` whose ErgoTree is exactly `tree_bytes`
+    /// (round-trips through parse → re-serialize in `ErgoBoxCandidate::new`).
+    fn pool_box_from_tree(tree_bytes: &[u8], value: u64) -> ErgoBox {
+        use ergo_ser::register::AdditionalRegisters;
+        let mut r = ergo_primitives::reader::VlqReader::new(tree_bytes);
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r).unwrap();
+        let cand =
+            ErgoBoxCandidate::new(value, tree, 1, vec![], AdditionalRegisters::empty()).unwrap();
+        ErgoBox {
+            candidate: cand,
+            transaction_id: ergo_primitives::digest::ModifierId::from_bytes([7u8; 32]),
+            index: 0,
+        }
+    }
+
+    fn track_pubkey(db: &redb::Database, idx: u64, pk: [u8; 33]) {
+        use ergo_state::wallet::tables::{tracked_pubkey_key, WALLET_TRACKED_PUBKEYS};
+        use ergo_state::wallet::types::TrackedPubkeyMeta;
+        let meta = TrackedPubkeyMeta {
+            derivation_path: Vec::new(),
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        };
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_TRACKED_PUBKEYS).unwrap();
+            t.insert(
+                tracked_pubkey_key(idx, &pk),
+                bincode::serialize(&meta).unwrap(),
+            )
+            .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    fn tracked_pk() -> [u8; 33] {
+        hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn reserved_payments_overlay_includes_owned_pool_box() {
+        let (_d, db) = temp_db();
+        let pk = tracked_pk();
+        track_pubkey(&db, 0, pk);
+        let tree = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
+        let pbox = pool_box_from_tree(&tree, 4_000_000);
+        let pid = pbox.box_id().unwrap();
+        let pool = pool_of(pbox);
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &f, Some(&pool)).unwrap();
+        assert_eq!(r.len(), 1, "Owned pool box surfaces under payments (10)");
+        assert_eq!(r[0].box_id, hex::encode(pid.as_bytes()));
+        assert_eq!(r[0].inclusion_height, None);
+        assert_eq!(r[0].confirmations_num, None);
+        assert_eq!(r[0].value, 4_000_000);
+
+        // An Owned box must NOT appear under mining (9).
+        let m = read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &f, Some(&pool)).unwrap();
+        assert!(m.is_empty(), "Owned box must not surface under mining (9)");
+    }
+
+    #[test]
+    fn reserved_mining_overlay_includes_reward_pool_box() {
+        let (_d, db) = temp_db();
+        // Canonical mainnet miner-reward tree (54 bytes) with its embedded pk.
+        let reward_tree = hex::decode(
+            "100204a00b08cd0274e729bb6615cbda94d9d176a2f1525068f12b330e38bbbf387232797dfd891fea02d192a39a8cc7a70173007301",
+        )
+        .unwrap();
+        let reward_pk: [u8; 33] =
+            hex::decode("0274e729bb6615cbda94d9d176a2f1525068f12b330e38bbbf387232797dfd891f")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        track_pubkey(&db, 0, reward_pk);
+        let pbox = pool_box_from_tree(&reward_tree, 67_500_000_000);
+        let pid = pbox.box_id().unwrap();
+        let pool = pool_of(pbox);
+
+        let mut f = filter();
+        f.min_confirmations = -1;
+        let r = read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &f, Some(&pool)).unwrap();
+        assert_eq!(r.len(), 1, "reward pool box surfaces under mining (9)");
+        assert_eq!(r[0].box_id, hex::encode(pid.as_bytes()));
+        assert_eq!(r[0].inclusion_height, None);
+
+        // A reward box (wrapper tree, not a bare p2pk) must NOT appear under 10.
+        let p = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &f, Some(&pool)).unwrap();
+        assert!(
+            p.is_empty(),
+            "reward box must not surface under payments (10)"
+        );
+    }
+
+    #[test]
+    fn reserved_overlay_gated_off_unless_unconfirmed() {
+        let (_d, db) = temp_db();
+        let pk = tracked_pk();
+        track_pubkey(&db, 0, pk);
+        let tree = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
+        let pool = pool_of(pool_box_from_tree(&tree, 4_000_000));
+
+        // minConfirmations = 0 (default) must NOT pull off-chain boxes for 9/10.
+        let r = read_scan_boxes(
+            &db,
+            Some(200),
+            PAYMENTS_SCAN_ID,
+            false,
+            &filter(),
+            Some(&pool),
+        )
+        .unwrap();
+        assert!(r.is_empty());
     }
 }

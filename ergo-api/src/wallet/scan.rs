@@ -161,9 +161,12 @@ pub(crate) async fn p2s_rule(
 pub struct ScanBoxEntry {
     pub box_id: String,
     pub value: u64,
-    pub inclusion_height: u32,
-    /// Confirmations at read time (`tip_height - inclusion_height`).
-    pub confirmations_num: i64,
+    /// On-chain boxes carry the block height; off-chain (mempool) boxes have no
+    /// height and serialize `null` (Scala `inclusionHeightOpt`).
+    pub inclusion_height: Option<u32>,
+    /// Confirmations at read time (`tip_height - inclusion_height`). `null` for
+    /// off-chain (mempool) boxes (Scala `confirmationsNum`).
+    pub confirmations_num: Option<i64>,
     pub spent: bool,
     /// Full serialized `ErgoBox`, hex.
     pub bytes: String,
@@ -230,6 +233,16 @@ impl ScanBoxFilter {
                 self.min_confirmations
             )));
         }
+        // Scala `isLegalBoxParamCombination`: an explicit maxInclusionHeight is
+        // meaningless together with the unconfirmed view (minConfirmations=-1),
+        // since off-chain boxes have no inclusion height. Reject the combination
+        // rather than silently ignoring one of the two.
+        if self.min_confirmations == -1 && self.max_inclusion_height != -1 {
+            return Err(BadRequest(
+                "maxInclusionHeight cannot be specified when minConfirmations=-1 (unconfirmed)"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -275,6 +288,68 @@ mod tests {
         assert_eq!(dto.wallet_interaction, None);
         assert_eq!(dto.remove_offchain, None);
         assert_eq!(dto.tracking_rule["predicate"], "containsAsset");
+    }
+
+    fn base_filter() -> ScanBoxFilter {
+        ScanBoxFilter {
+            min_confirmations: 0,
+            max_confirmations: -1,
+            min_inclusion_height: 0,
+            max_inclusion_height: -1,
+            limit: 500,
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_max_inclusion_height_with_unconfirmed() {
+        // Scala `isLegalBoxParamCombination`: maxInclusionHeight is meaningless
+        // with the unconfirmed view (minConfirmations=-1).
+        let mut f = base_filter();
+        f.min_confirmations = -1;
+        f.max_inclusion_height = 200;
+        assert!(f.validate().is_err());
+
+        // -1 alone (unbounded maxInclusionHeight) is fine.
+        let mut f = base_filter();
+        f.min_confirmations = -1;
+        assert!(f.validate().is_ok());
+
+        // maxInclusionHeight with a normal minConfirmations is fine.
+        let mut f = base_filter();
+        f.max_inclusion_height = 200;
+        assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn scan_box_entry_offchain_serializes_null_height_and_confirmations() {
+        // Off-chain (mempool) boxes carry no inclusion height; Scala's WalletBox
+        // emits `confirmationsNum: null` and `inclusionHeight: null` for them
+        // (Option[Int].asJson). On-chain boxes serialize concrete numbers, so
+        // the wire is unchanged for them.
+        let offchain = ScanBoxEntry {
+            box_id: "ab".to_string(),
+            value: 1_000_000,
+            inclusion_height: None,
+            confirmations_num: None,
+            spent: false,
+            bytes: "00".to_string(),
+        };
+        let s = serde_json::to_string(&offchain).unwrap();
+        assert!(s.contains(r#""inclusionHeight":null"#), "got {s}");
+        assert!(s.contains(r#""confirmationsNum":null"#), "got {s}");
+
+        let onchain = ScanBoxEntry {
+            box_id: "cd".to_string(),
+            value: 2_000_000,
+            inclusion_height: Some(100),
+            confirmations_num: Some(10),
+            spent: false,
+            bytes: "00".to_string(),
+        };
+        let s = serde_json::to_string(&onchain).unwrap();
+        assert!(s.contains(r#""inclusionHeight":100"#), "got {s}");
+        assert!(s.contains(r#""confirmationsNum":10"#), "got {s}");
     }
 
     #[test]
