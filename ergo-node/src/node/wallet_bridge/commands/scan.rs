@@ -279,9 +279,7 @@ fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminE
         // Purge the scan's tracked-box rows and prune the reverse index, in the
         // same txn. Without this the rows are only hidden-on-read; since scan ids
         // are never reused they would accumulate forever. A box still tracked by
-        // a surviving scan keeps its row and a pruned index entry. (Per-tx scan
-        // tags in `WALLET_SCAN_TXS` stay hidden-on-read — keyed by height/tx, not
-        // scan id, so purging them is a full-table scan left out of scope here.)
+        // a surviving scan keeps its row and a pruned index entry.
         let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
         let box_ids: Vec<[u8; 32]> = boxes
             .range(scan_box_key(scan_id, &[0u8; 32])..=scan_box_key(scan_id, &[0xffu8; 32]))
@@ -312,6 +310,36 @@ fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminE
                 idx.insert(*box_id, bincode::serialize(&remaining).map_err(internal)?)
                     .map_err(internal)?;
             }
+        }
+
+        // Purge the deregistered id from per-tx scan tags. WALLET_SCAN_TXS is
+        // keyed by (height, tx_id), not scan id, so this is a full-table scan:
+        // strip the id from each record's `scan_ids`, deleting records that
+        // empty out. The `created`/`spent` box-id lists are a cross-scan union
+        // the schema doesn't attribute per scan, so they're left as-is — they
+        // were already the union shown to every member scan, and a deregistered
+        // id's txs are hidden-on-read regardless.
+        let mut txs = write.open_table(WALLET_SCAN_TXS).map_err(internal)?;
+        let mut tx_updates: Vec<([u8; 36], Vec<u8>)> = Vec::new();
+        let mut tx_deletes: Vec<[u8; 36]> = Vec::new();
+        for item in txs.iter().map_err(internal)? {
+            let (k, v) = item.map_err(internal)?;
+            let mut rec: ScanTxRecord = bincode::deserialize(&v.value()).map_err(internal)?;
+            if !rec.scan_ids.contains(&scan_id) {
+                continue;
+            }
+            rec.scan_ids.retain(|&s| s != scan_id);
+            if rec.scan_ids.is_empty() {
+                tx_deletes.push(k.value());
+            } else {
+                tx_updates.push((k.value(), bincode::serialize(&rec).map_err(internal)?));
+            }
+        }
+        for (k, v) in tx_updates {
+            txs.insert(k, v).map_err(internal)?;
+        }
+        for k in tx_deletes {
+            txs.remove(k).map_err(internal)?;
         }
     }
     write.commit().map_err(internal)?;
@@ -2278,6 +2306,46 @@ mod tests {
         assert!(read_scan_boxes(&db, Some(110), 12, false, &filter(), None)
             .unwrap()
             .is_empty());
+    }
+
+    fn scan_tx_records(db: &redb::Database) -> Vec<ScanTxRecord> {
+        let read = db.begin_read().unwrap();
+        let t = read.open_table(WALLET_SCAN_TXS).unwrap();
+        t.iter()
+            .unwrap()
+            .map(|e| {
+                let (_, v) = e.unwrap();
+                bincode::deserialize::<ScanTxRecord>(&v.value()).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn deregister_strips_scan_id_from_tx_tags_and_deletes_emptied_records() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // 11
+        register_impl(&db, req("b", 0x22)).unwrap(); // 12
+        put_scan_tx(&db, 100, 0x01, vec![11], Some(0xA1), None); // 11 only
+        put_scan_tx(&db, 101, 0x02, vec![11, 12], None, Some(0xA1)); // shared
+        put_scan_tx(&db, 102, 0x03, vec![12], Some(0xB1), None); // 12 only
+
+        deregister_impl(&db, 11).unwrap();
+
+        let recs = scan_tx_records(&db);
+        // The 11-only record is deleted; the shared record drops 11; 12-only stays.
+        assert_eq!(recs.len(), 2, "the 11-only tag record was deleted");
+        assert!(
+            !recs.iter().any(|r| r.tx_id == [0x01; 32]),
+            "11-only record removed"
+        );
+        let shared = recs.iter().find(|r| r.tx_id == [0x02; 32]).unwrap();
+        assert_eq!(
+            shared.scan_ids,
+            vec![12],
+            "11 stripped from the shared record"
+        );
+        let only12 = recs.iter().find(|r| r.tx_id == [0x03; 32]).unwrap();
+        assert_eq!(only12.scan_ids, vec![12], "12-only record untouched");
     }
 }
 
