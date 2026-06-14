@@ -83,18 +83,23 @@ impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
     }
 }
 
-/// Build a rescan scan-matcher snapshot iff ≥1 user scan is registered;
-/// otherwise `None` (a node with no scans does no scan rescan). A registry-load
-/// error degrades to `None` + log so the wallet rescan still proceeds without
-/// touching the scan tables.
-pub(crate) fn build_rescan_matcher(db: &redb::Database) -> Option<RescanScanMatcher> {
-    match load_registry(db) {
-        Ok(registry) if !registry.list().is_empty() => Some(RescanScanMatcher { registry }),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::error!(error = %e, "scan rescan: registry load failed; scans not rebuilt");
-            None
-        }
+/// Build a rescan scan-matcher snapshot: `Ok(Some)` iff ≥1 user scan is
+/// registered, `Ok(None)` for a node with no scans (no scan rescan needed).
+///
+/// A registry-load error is propagated as `Err`, NOT collapsed to `None`: the
+/// caller must refuse the rescan in that case. A full rescan ends by clearing
+/// `WALLET_SCAN_INVALIDATED`, but a rescan can't rebuild scans from a registry
+/// it can't read — treating the error as "no scans" would clear the flag and
+/// falsely report a healthy wallet while the registry is still corrupt and the
+/// dropped block's scan matches were never rebuilt.
+pub(crate) fn build_rescan_matcher(
+    db: &redb::Database,
+) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
+    let registry = load_registry(db)?;
+    if registry.list().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(RescanScanMatcher { registry }))
     }
 }
 
@@ -2121,7 +2126,9 @@ mod tests {
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap(); // scan 11: containsAsset [0x11;32]
 
-        let matcher = build_rescan_matcher(&db).expect("≥1 scan ⇒ matcher built");
+        let matcher = build_rescan_matcher(&db)
+            .unwrap()
+            .expect("≥1 scan ⇒ matcher built");
 
         // A box carrying token 0x11 matches scan 11; a no-asset box matches
         // nothing. The result is one entry per input box, in the same order —
@@ -2137,7 +2144,7 @@ mod tests {
         use ergo_state::wallet::scan::ScanRescanMatcher;
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap();
-        let matcher = build_rescan_matcher(&db).unwrap();
+        let matcher = build_rescan_matcher(&db).unwrap().unwrap();
 
         // Garbage bytes can't be a box: degrade that slot to "no match" rather
         // than abort the whole rescan. Result count still matches input count.
@@ -2148,10 +2155,27 @@ mod tests {
     }
 
     #[test]
+    fn build_rescan_matcher_errors_on_unreadable_registry() {
+        // A corrupt WALLET_SCANS row makes load_registry fail. build_rescan_matcher
+        // must surface that as Err (not collapse to Ok(None)) so the rescan command
+        // refuses rather than clearing WALLET_SCAN_INVALIDATED without rebuilding.
+        let (_d, db) = temp_db();
+        {
+            let w = db.begin_write().unwrap();
+            w.open_table(WALLET_SCANS)
+                .unwrap()
+                .insert(11u16, vec![0xFFu8, 0x00])
+                .unwrap();
+            w.commit().unwrap();
+        }
+        assert!(build_rescan_matcher(&db).is_err());
+    }
+
+    #[test]
     fn build_rescan_matcher_is_none_without_scans() {
         let (_d, db) = temp_db();
         assert!(
-            build_rescan_matcher(&db).is_none(),
+            build_rescan_matcher(&db).unwrap().is_none(),
             "a node with no registered scans does no scan rescan"
         );
     }

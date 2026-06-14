@@ -133,18 +133,46 @@ pub(crate) async fn rescan(
         let _ = reply.send(Err(WalletAdminError::RestorePruningUnsupported));
         return;
     }
-    // Refuse if a rescan is already in flight.
+    let tip_h = ctx.chain.tip_height();
+    let start_h = from_height.min(tip_h);
+    // Snapshot the registered scans for the rebuild. Scan rebuild is a
+    // full-rebuild operation only (start_h == 0); a partial wallet rescan
+    // leaves the scan tables untouched. `None` when no scans are registered.
+    //
+    // Run this fallible preflight BEFORE arming RESCAN_IN_PROGRESS: it can
+    // refuse (unreadable registry), and once that flag is set the live apply
+    // hook returns empty tracked keys — a block committed in the refuse window
+    // would skip wallet classification with no rescan to backfill it.
+    let scan_matcher = if start_h == 0 {
+        match super::scan::build_rescan_matcher(ctx.db) {
+            Ok(m) => m,
+            Err(e) => {
+                // The scan registry is unreadable, so this rescan can't rebuild
+                // scans. Refuse rather than run a rebuild that ends by clearing
+                // WALLET_SCAN_INVALIDATED and falsely reporting a healthy wallet
+                // while the registry is still corrupt. The flag stays set; the
+                // operator must repair / re-register the scans first. (No guard
+                // reset needed — RESCAN_IN_PROGRESS isn't armed yet.)
+                let _ = reply.send(Err(WalletAdminError::Internal(format!(
+                    "scan registry unreadable; cannot rebuild scans \
+                     (repair or re-register scans, then rescan): {e}"
+                ))));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    // Refuse if a rescan is already in flight; this also arms the live-apply
+    // guard (the hook returns empty tracked keys while it is set).
     if crate::wallet_boot::RESCAN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
         let _ = reply.send(Err(WalletAdminError::Internal(
             "rescan already in progress".to_string(),
         )));
         return;
     }
-    // Snapshot trees + pubkeys BEFORE setting the flag so the
-    // live apply hook (which returns empty during rescan) doesn't
-    // clobber the rebuild.
-    let tip_h = ctx.chain.tip_height();
-    let start_h = from_height.min(tip_h);
+    // Snapshot trees + pubkeys AFTER arming the flag so a concurrent live apply
+    // (which returns empty during rescan) can't clobber the rebuild.
     let (trees, pks) = {
         let s = ctx.state.read();
         (
@@ -155,18 +183,17 @@ pub(crate) async fn rescan(
             s.cached_pubkeys().clone(),
         )
     };
-    // Snapshot the registered scans for the rebuild. Scan rebuild is a
-    // full-rebuild operation only (start_h == 0); a partial wallet rescan
-    // leaves the scan tables untouched. `None` when no scans are registered.
-    let scan_matcher = if start_h == 0 {
-        super::scan::build_rescan_matcher(ctx.db)
-    } else {
-        None
-    };
-    // Quiesce live scan apply for the rebuild's duration (only when a full
-    // rebuild will actually touch the scan tables). Set BEFORE the spawn so
-    // it is active before the rebuild's first clear; cleared at task end.
-    crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(scan_matcher.is_some(), Ordering::SeqCst);
+    // Quiesce live scan apply + reject scan mutations for the whole duration of
+    // ANY full rescan (start_h == 0), not only when scans exist at start. A full
+    // rescan sets WALLET_SCAN_INVALIDATED, which makes live apply_block_to_scans
+    // no-op; if a scan were registered mid-rescan (when start_h == 0 but no scans
+    // existed, so the matcher is None and won't rebuild them), its live matches
+    // would be dropped and never backfilled. Gating on start_h == 0 makes
+    // registered_scan_count return 0 (so apply_block_to_scans isn't called) and
+    // makes reject_during_scan_rebuild refuse /scan/register for the rescan's
+    // duration. Set BEFORE the spawn so it's active before the first clear;
+    // cleared at task end.
+    crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(start_h == 0, Ordering::SeqCst);
     let db_bg = ctx.db.clone();
     let chain_bg = ctx.chain.clone();
     tokio::spawn(async move {
