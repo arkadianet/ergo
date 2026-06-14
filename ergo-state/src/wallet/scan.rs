@@ -289,6 +289,56 @@ impl WalletScanService {
                     Some(b) => b,
                     None => continue,
                 };
+                // Precompute registered-scan matches OUTSIDE the write txn: the
+                // predicate-match pass only READS block data, so running it here
+                // (instead of inside the per-block txn below) keeps the redb
+                // writer lock unheld during matching. Only `apply_block_to_scans`
+                // (inside the txn) mutates. `None` when no rebuild is active or
+                // the matcher returned the wrong cardinality (a matcher bug:
+                // skip scan apply for this block + mark the rebuild incomplete so
+                // the final WALLET_SCAN_INVALIDATED clear is suppressed).
+                let scan_records: Option<Vec<crate::store::ScanMatchRecord>> =
+                    if let Some(matcher) = scan_matcher.filter(|_| scan_rebuild) {
+                        let mut box_refs: Vec<&[u8]> = Vec::new();
+                        let mut box_meta: Vec<([u8; 32], u16)> = Vec::new();
+                        for tx in &block.txs {
+                            for o in &tx.outputs {
+                                box_refs.push(&o.box_bytes);
+                                box_meta.push((o.box_id, o.output_index));
+                            }
+                        }
+                        let matches = matcher.match_boxes(&box_refs);
+                        if matches.len() == box_refs.len() {
+                            Some(
+                                box_meta
+                                    .into_iter()
+                                    .zip(matches)
+                                    .zip(box_refs)
+                                    .filter(|((_, scan_ids), _)| !scan_ids.is_empty())
+                                    .map(|(((box_id, out_idx), scan_ids), bytes)| {
+                                        crate::store::ScanMatchRecord {
+                                            box_id,
+                                            scan_ids,
+                                            box_bytes: bytes.to_vec(),
+                                            inclusion_height: h,
+                                            creation_out_index: out_idx,
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            scan_rebuild_complete = false;
+                            tracing::error!(
+                                height = h,
+                                got = matches.len(),
+                                want = box_refs.len(),
+                                "scan rescan: matcher returned wrong result count; skipping block"
+                            );
+                            None
+                        }
+                    } else {
+                        None
+                    };
                 let txn = crate::begin_write_qr(db)?;
                 {
                     // Convert RescanBlock → per-tx owned structs so BlockOutput<'_>
@@ -332,54 +382,12 @@ impl WalletScanService {
                     promote_matured_boxes_rescan(&txn, h)?;
 
                     // Registered-scan rebuild, in the SAME per-block txn so
-                    // chain + scan state regress together. Mirrors the live
-                    // `build_scan_match_records` + `apply_block_to_scans` path:
-                    // match every output box, then persist matches + spends.
-                    if let Some(matcher) = scan_matcher.filter(|_| scan_rebuild) {
-                        // All output box bytes in block order across txs, with
-                        // their (box_id, output_index) for record construction.
-                        let mut box_refs: Vec<&[u8]> = Vec::new();
-                        let mut box_meta: Vec<([u8; 32], u16)> = Vec::new();
-                        for tx in &block.txs {
-                            for o in &tx.outputs {
-                                box_refs.push(&o.box_bytes);
-                                box_meta.push((o.box_id, o.output_index));
-                            }
-                        }
-                        let matches = matcher.match_boxes(&box_refs);
-                        // The matcher MUST return one result per box (trait
-                        // contract). A mismatch is a matcher bug: skip scan
-                        // apply for this block rather than mis-zip, and mark
-                        // the rebuild incomplete so the final
-                        // WALLET_SCAN_INVALIDATED clear is suppressed (the
-                        // operator must rescan again rather than trust a
-                        // silently-truncated scan set).
-                        if matches.len() == box_refs.len() {
-                            let records: Vec<crate::store::ScanMatchRecord> = box_meta
-                                .into_iter()
-                                .zip(matches)
-                                .zip(box_refs)
-                                .filter(|((_, scan_ids), _)| !scan_ids.is_empty())
-                                .map(|(((box_id, out_idx), scan_ids), bytes)| {
-                                    crate::store::ScanMatchRecord {
-                                        box_id,
-                                        scan_ids,
-                                        box_bytes: bytes.to_vec(),
-                                        inclusion_height: h,
-                                        creation_out_index: out_idx,
-                                    }
-                                })
-                                .collect();
-                            apply_block_to_scans(&txn, &records, &btxs, h, &block.block_id)?;
-                        } else {
-                            scan_rebuild_complete = false;
-                            tracing::error!(
-                                height = h,
-                                got = matches.len(),
-                                want = box_refs.len(),
-                                "scan rescan: matcher returned wrong result count; skipping block"
-                            );
-                        }
+                    // chain + scan state regress together. The match pass was
+                    // precomputed above (outside the txn); here we only persist
+                    // matches + spends. `None` = no rebuild active or a matcher
+                    // cardinality bug (already logged + rebuild marked incomplete).
+                    if let Some(records) = &scan_records {
+                        apply_block_to_scans(&txn, records, &btxs, h, &block.block_id)?;
                     }
                 }
                 txn.commit()?;

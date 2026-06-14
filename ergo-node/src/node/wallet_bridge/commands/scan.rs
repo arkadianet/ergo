@@ -35,6 +35,23 @@ fn internal(e: impl std::fmt::Display) -> WalletAdminError {
     WalletAdminError::Internal(e.to_string())
 }
 
+/// Refuse a `/scan/*` mutation while a full `/wallet/rescan` scan rebuild is in
+/// flight. The rebuild snapshots the scan registry up front and repopulates the
+/// scan tables block-by-block in a background task; a registry mutation
+/// committed mid-rebuild (a new scan never backfilled, or a deregister/manual
+/// row resurrected by later replay) would leave the registry and scan tables
+/// out of sync. Reject for the rebuild window — the caller retries once it
+/// completes. (`Ordering::SeqCst` matches the rebuild's flag set in
+/// `admin.rs`.)
+fn reject_during_scan_rebuild() -> Result<(), WalletAdminError> {
+    if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(WalletAdminError::BadRequest(
+            "scan rebuild in progress (full /wallet/rescan); retry after it completes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Owns a registry snapshot for a `/wallet/rescan`, implementing ergo-state's
 /// `ScanRescanMatcher`: it parses each serialized output box and matches it
 /// against the registered scan rules — the rescan analog of
@@ -138,6 +155,10 @@ pub(crate) async fn register(
     request: ScanRequestDto,
     reply: oneshot::Sender<Result<u16, WalletAdminError>>,
 ) {
+    if let Err(e) = reject_during_scan_rebuild() {
+        let _ = reply.send(Err(e));
+        return;
+    }
     let _ = reply.send(register_impl(ctx.db, request));
 }
 
@@ -223,6 +244,10 @@ pub(crate) async fn deregister(
     scan_id: u16,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
+    if let Err(e) = reject_during_scan_rebuild() {
+        let _ = reply.send(Err(e));
+        return;
+    }
     let _ = reply.send(deregister_impl(ctx.db, scan_id));
 }
 
@@ -471,6 +496,10 @@ pub(crate) async fn stop_tracking(
     box_id: String,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
+    if let Err(e) = reject_during_scan_rebuild() {
+        let _ = reply.send(Err(e));
+        return;
+    }
     let _ = reply.send(stop_tracking_impl(ctx.db, scan_id, &box_id));
 }
 
@@ -480,6 +509,10 @@ pub(crate) async fn add_box(
     box_json: serde_json::Value,
     reply: oneshot::Sender<Result<String, WalletAdminError>>,
 ) {
+    if let Err(e) = reject_during_scan_rebuild() {
+        let _ = reply.send(Err(e));
+        return;
+    }
     let _ = reply.send(add_box_impl(ctx.db, &scan_ids, &box_json));
 }
 
@@ -488,6 +521,10 @@ pub(crate) async fn p2s_rule(
     p2s: String,
     reply: oneshot::Sender<Result<u16, WalletAdminError>>,
 ) {
+    if let Err(e) = reject_during_scan_rebuild() {
+        let _ = reply.send(Err(e));
+        return;
+    }
     let _ = reply.send(p2s_rule_impl(ctx.db, ctx.cfg.network, &p2s));
 }
 
@@ -1507,6 +1544,24 @@ mod tests {
 
         // Flag cleared: live apply sees the scan again.
         assert_eq!(hook.registered_scan_count(), 1);
+    }
+
+    #[test]
+    fn scan_mutation_guard_rejects_during_rebuild() {
+        use std::sync::atomic::Ordering;
+        // Guard passes when no rebuild is in flight...
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        assert!(reject_during_scan_rebuild().is_ok());
+        // ...and rejects scan mutations while a rebuild snapshot is live.
+        // Capture under the flag, then reset BEFORE asserting so a failure
+        // can't leak the flag to sibling tests (same discipline as above).
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(true, Ordering::SeqCst);
+        let gated = reject_during_scan_rebuild();
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        assert!(
+            matches!(gated, Err(WalletAdminError::BadRequest(_))),
+            "scan mutation must be rejected during rebuild, got {gated:?}"
+        );
     }
 
     // ----- transactionsByScanId (scan-tx reads) -----
