@@ -5021,14 +5021,19 @@ pub struct OwnedBlockOutput {
     pub value: u64,
     pub assets: Vec<([u8; 32], u64)>,
     pub miner_reward_pubkey: Option<[u8; 33]>,
-    /// Full serialized `ErgoBox` bytes. Populated ONLY by the
-    /// section/replay builder ([`build_wallet_block_txs_from_sections`]),
-    /// which the rescan read path uses to feed registered-scan matching +
-    /// `ScanTrackedBox.box_bytes`. Left EMPTY by the live-apply builder
-    /// ([`build_owned_tx_data_checked`]) — the live wallet/scan paths
-    /// don't read it (scan matching there goes through
-    /// `build_scan_match_records`), so carrying full box bytes in the
-    /// cross-thread `WalletApplyPayload` would only bloat it.
+    /// Full serialized `ErgoBox` bytes. Populated by BOTH builders:
+    /// - the section/replay builder ([`build_wallet_block_txs_from_sections`])
+    ///   feeds the rescan read path's registered-scan matching +
+    ///   `ScanTrackedBox.box_bytes`;
+    /// - the live-apply builder ([`build_owned_tx_data_checked`]) captures it
+    ///   for free by reusing the box-id serialization (the id IS
+    ///   `blake2b256` of these bytes), so the apply hook can store it in
+    ///   `WALLET_BOX_BYTES` for the reserved-scan reads
+    ///   (`/scan/{unspent,spent}Boxes/9|10`).
+    ///
+    /// May still be empty for callers that have no bytes to carry; the apply
+    /// hook then skips the `WALLET_BOX_BYTES` row and the read degrades to
+    /// empty `bytes` until a `/wallet/rescan` backfills it.
     pub box_bytes: Vec<u8>,
 }
 
@@ -5164,8 +5169,9 @@ fn build_owned_tx_data_checked(
                 miner_reward_pubkey,
                 // Captured for free from the box-id serialization above; the
                 // apply hook stores it in WALLET_BOX_BYTES for matched wallet
-                // boxes (reserved-scan reads), and `build_scan_match_records`
-                // uses it too.
+                // boxes (reserved-scan reads). The live scan-match path
+                // (`build_scan_match_records`) is separate and re-serializes
+                // its own boxes — it does not read this field.
                 box_bytes,
             })
         })
