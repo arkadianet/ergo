@@ -275,6 +275,44 @@ fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminE
         counter
             .insert((), registry.last_used_scan_id())
             .map_err(internal)?;
+
+        // Purge the scan's tracked-box rows and prune the reverse index, in the
+        // same txn. Without this the rows are only hidden-on-read; since scan ids
+        // are never reused they would accumulate forever. A box still tracked by
+        // a surviving scan keeps its row and a pruned index entry. (Per-tx scan
+        // tags in `WALLET_SCAN_TXS` stay hidden-on-read — keyed by height/tx, not
+        // scan id, so purging them is a full-table scan left out of scope here.)
+        let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
+        let box_ids: Vec<[u8; 32]> = boxes
+            .range(scan_box_key(scan_id, &[0u8; 32])..=scan_box_key(scan_id, &[0xffu8; 32]))
+            .map_err(internal)?
+            .map(|item| {
+                let (k, _) = item.map_err(internal)?;
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&k.value()[2..]);
+                Ok::<[u8; 32], WalletAdminError>(id)
+            })
+            .collect::<Result<_, _>>()?;
+        let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
+        for box_id in &box_ids {
+            boxes
+                .remove(scan_box_key(scan_id, box_id))
+                .map_err(internal)?;
+            let remaining: Vec<u16> = match idx.get(box_id).map_err(internal)? {
+                Some(g) => bincode::deserialize::<Vec<u16>>(&g.value())
+                    .map_err(internal)?
+                    .into_iter()
+                    .filter(|&s| s != scan_id)
+                    .collect(),
+                None => Vec::new(),
+            };
+            if remaining.is_empty() {
+                idx.remove(box_id).map_err(internal)?;
+            } else {
+                idx.insert(*box_id, bincode::serialize(&remaining).map_err(internal)?)
+                    .map_err(internal)?;
+            }
+        }
     }
     write.commit().map_err(internal)?;
     Ok(())
@@ -1080,6 +1118,53 @@ mod tests {
         t.get([box_fill; 32])
             .unwrap()
             .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    fn box_row_exists(db: &redb::Database, scan_id: u16, box_fill: u8) -> bool {
+        let r = db.begin_read().unwrap();
+        let t = match r.open_table(WALLET_SCAN_BOXES) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        t.get(scan_box_key(scan_id, &[box_fill; 32]))
+            .unwrap()
+            .is_some()
+    }
+
+    /// Deregistering a scan must PURGE its tracked-box rows (and prune the
+    /// reverse index), not just hide them on read — otherwise orphaned
+    /// `WALLET_SCAN_BOXES` rows accumulate forever (scan ids are never reused).
+    /// A box still tracked by a surviving scan must keep its row + index entry.
+    #[test]
+    fn deregister_purges_orphaned_scan_box_rows() {
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // scan 11
+        register_impl(&db, req("b", 0x22)).unwrap(); // scan 12
+                                                     // A1/A2: tracked only by 11; B1: only by 12; C1: shared by 11 & 12.
+        put_tracked_box(&db, 11, 0xA1, 100, 1, false);
+        put_tracked_box(&db, 11, 0xA2, 100, 1, false);
+        put_tracked_box(&db, 12, 0xB1, 100, 1, false);
+        put_tracked_box(&db, 11, 0xC1, 100, 1, false);
+        put_tracked_box(&db, 12, 0xC1, 100, 1, false);
+        put_index(&db, 0xA1, &[11]);
+        put_index(&db, 0xA2, &[11]);
+        put_index(&db, 0xB1, &[12]);
+        put_index(&db, 0xC1, &[11, 12]);
+
+        deregister_impl(&db, 11).unwrap();
+
+        // scan-11 rows purged.
+        assert!(!box_row_exists(&db, 11, 0xA1), "A1 row should be purged");
+        assert!(!box_row_exists(&db, 11, 0xA2), "A2 row should be purged");
+        assert!(!box_row_exists(&db, 11, 0xC1), "C1@11 row should be purged");
+        // scan-12 rows survive.
+        assert!(box_row_exists(&db, 12, 0xB1), "B1 row must survive");
+        assert!(box_row_exists(&db, 12, 0xC1), "C1@12 row must survive");
+        // reverse index: 11-only boxes removed; shared box keeps 12 only.
+        assert_eq!(index_ids(&db, 0xA1), None);
+        assert_eq!(index_ids(&db, 0xA2), None);
+        assert_eq!(index_ids(&db, 0xB1), Some(vec![12]));
+        assert_eq!(index_ids(&db, 0xC1), Some(vec![12]));
     }
 
     #[test]
