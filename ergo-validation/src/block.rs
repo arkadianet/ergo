@@ -468,7 +468,14 @@ pub fn check_fork_vote_votes_collected_present(
     header: &Header,
     soft_fork_starting_height: Option<i32>,
     soft_fork_votes_collected: Option<i32>,
+    rule_407_disabled: bool,
 ) -> Result<(), BlockValidationError> {
+    if rule_407_disabled {
+        // Scala enforces this via `validateNoThrow(exCheckForkVote, ...)`, which
+        // is disableable: a disabled rule 407 skips `checkForkVote` entirely, so
+        // the `softForkVotesCollected.get` throw is never evaluated.
+        return Ok(());
+    }
     const SOFT_FORK_VOTE_BYTE: u8 = 120;
     if !header.votes.contains(&SOFT_FORK_VOTE_BYTE) {
         // Scala only evaluates `checkForkVote` `if (forkVote)`.
@@ -2326,7 +2333,7 @@ mod interlinks_tests {
         // before the prohibited-window check).
         let mut h = test_header(2_000, 0x20000000);
         h.votes = [120, 0, 0];
-        let err = check_fork_vote_votes_collected_present(&h, Some(100), None).unwrap_err();
+        let err = check_fork_vote_votes_collected_present(&h, Some(100), None, false).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2337,12 +2344,22 @@ mod interlinks_tests {
     }
 
     #[test]
+    fn fork_vote_votes_collected_missing_disabled_rule_passes() {
+        // Rule 407 disabled by an activated settings update: Scala's
+        // `validateNoThrow(exCheckForkVote, ...)` skips `checkForkVote` entirely,
+        // so the hostile table is accepted even with the SoftFork vote.
+        let mut h = test_header(2_000, 0x20000000);
+        h.votes = [120, 0, 0];
+        check_fork_vote_votes_collected_present(&h, Some(100), None, true).unwrap();
+    }
+
+    #[test]
     fn fork_vote_votes_collected_missing_without_softfork_vote_passes() {
         // Same hostile table but the header does NOT cast the SoftFork vote: Scala
         // only runs `checkForkVote` `if (forkVote)`, so no throw.
         let mut h = test_header(2_000, 0x20000000);
         h.votes = [0, 0, 0];
-        check_fork_vote_votes_collected_present(&h, Some(100), None).unwrap();
+        check_fork_vote_votes_collected_present(&h, Some(100), None, false).unwrap();
     }
 
     #[test]
@@ -2351,7 +2368,7 @@ mod interlinks_tests {
         // is false, so `checkForkVote` does nothing -> pass even with vote 120.
         let mut h = test_header(2_000, 0x20000000);
         h.votes = [120, 0, 0];
-        check_fork_vote_votes_collected_present(&h, None, None).unwrap();
+        check_fork_vote_votes_collected_present(&h, None, None, false).unwrap();
     }
 
     #[test]
@@ -2360,7 +2377,7 @@ mod interlinks_tests {
         // prohibited-window decision belongs to `validate_fork_vote`.
         let mut h = test_header(2_000, 0x20000000);
         h.votes = [120, 0, 0];
-        check_fork_vote_votes_collected_present(&h, Some(100), Some(0)).unwrap();
+        check_fork_vote_votes_collected_present(&h, Some(100), Some(0), false).unwrap();
     }
 
     #[test]
