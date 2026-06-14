@@ -87,7 +87,12 @@ fn encode_p2pk(network: NetworkPrefix, pubkey: &GroupElement) -> String {
     bs58::encode(&buf).into_string()
 }
 
-fn encode_p2s(network: NetworkPrefix, ergo_tree_bytes: &[u8]) -> String {
+/// Encode arbitrary bytes as a P2S Ergo address (header ++ bytes ++ checksum).
+/// Does NOT validate that `ergo_tree_bytes` is a parseable ErgoTree — the caller
+/// owns that. Useful for re-encoding already-validated tree bytes without a
+/// re-parse, and for tests that need a P2S address over a deliberately
+/// malformed script.
+pub fn encode_p2s(network: NetworkPrefix, ergo_tree_bytes: &[u8]) -> String {
     let header = network.as_byte() | TYPE_P2S;
     let mut buf = Vec::with_capacity(1 + ergo_tree_bytes.len() + CHECKSUM_LEN);
     buf.push(header);
