@@ -89,6 +89,26 @@ fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteE
 /// Matches Scala's VersionContext.MaxSupportedScriptVersion = 3.
 const MAX_SUPPORTED_TREE_VERSION: u8 = 3;
 
+/// Scala `CheckHeaderSizeBit` (validation rule 1012, in `deserializeErgoTree`
+/// via `deserializeHeaderAndSize`): a non-zero ErgoTree version REQUIRES the
+/// size bit, so an old node can skip an unknown-version tree by its declared
+/// byte length. A `version != 0` tree with the size bit clear is rejected with a
+/// hard `SerializerException`. Version-0 trees legitimately carry no size bit.
+///
+/// [`read_ergo_tree`] is intentionally LENIENT about this (the SANTA conformance
+/// hook feeds it size-stripped trees, and higher-version soft-fork trees parse
+/// opaquely), so the consensus box-script readers enforce the rule AFTER parsing
+/// — boxes are the consensus-reachable deserialization path for ErgoTrees.
+pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
+    if tree.version != 0 && !tree.has_size {
+        return Err(ReadError::InvalidData(format!(
+            "ErgoTree version {} requires the size bit (CheckHeaderSizeBit, rule 1012)",
+            tree.version
+        )));
+    }
+    Ok(())
+}
+
 pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     let (tree, _was_wrapped) = read_ergo_tree_tracking_wrap(r)?;
     Ok(tree)

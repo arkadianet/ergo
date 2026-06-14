@@ -136,6 +136,9 @@ impl ErgoBoxCandidate {
         let mut tr = VlqReader::new(&ergo_tree_bytes);
         let parsed_tree = read_ergo_tree(&mut tr)
             .map_err(|e| WriteError::InvalidData(format!("ergo_tree_bytes do not parse: {e}")))?;
+        crate::ergo_tree::check_header_size_bit(&parsed_tree).map_err(|e| {
+            WriteError::InvalidData(format!("ergo_tree_bytes fail CheckHeaderSizeBit: {e}"))
+        })?;
         if !tr.is_empty() {
             return Err(WriteError::InvalidData(
                 "ergo_tree_bytes have trailing content after parse".into(),
@@ -263,6 +266,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
+    crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
     let creation_height = r.get_u32_exact()?;
@@ -339,6 +343,7 @@ pub fn read_ergo_box_candidate_indexed(
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
+    crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
@@ -456,6 +461,7 @@ pub fn parse_ergo_box_bytes(
     // Parse the tree structure from the known bytes
     let mut tree_reader = VlqReader::new(ergo_tree_bytes);
     let ergo_tree = read_ergo_tree(&mut tree_reader)?;
+    crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
 
     let creation_height = r.get_u32_exact()?;
     let token_count = r.get_u8()? as usize;
@@ -534,6 +540,39 @@ mod tests {
 
     fn make_token_id(fill: u8) -> TokenId {
         TokenId::from_bytes([fill; 32])
+    }
+
+    // ----- CheckHeaderSizeBit (rule 1012) on box scripts -----
+
+    /// A box candidate whose script is a version-3 ErgoTree with the size bit
+    /// CLEAR must be REJECTED: Scala `CheckHeaderSizeBit` (rule 1012, in
+    /// `deserializeErgoTree`) requires the size bit for any non-zero version, so
+    /// old nodes can skip an unknown tree by its declared length. `read_ergo_tree`
+    /// stays lenient (the conformance hook feeds it size-stripped trees), so the
+    /// box-candidate reader enforces it. Bytes: value(VLQ 1000) ++ tree
+    /// `03 05 01` (v3, no-size, body Const(SLong,-1)) ++ height(0) ++ 0 tokens ++
+    /// 0 regs — which currently parses end-to-end (accept-invalid).
+    #[test]
+    fn box_candidate_v3_script_without_size_bit_rejected() {
+        let bytes = [0xE8u8, 0x07, 0x03, 0x05, 0x01, 0x00, 0x00, 0x00];
+        let mut r = VlqReader::new(&bytes);
+        let res = read_ergo_box_candidate(&mut r);
+        assert!(
+            res.is_err(),
+            "v3-no-size box script must be rejected (CheckHeaderSizeBit), got {res:?}"
+        );
+    }
+
+    /// A version-0 script with no size bit is the COMMON, valid case (P2PK etc.) —
+    /// CheckHeaderSizeBit only requires the bit for version != 0, so it must parse.
+    #[test]
+    fn box_candidate_v0_script_without_size_bit_ok() {
+        // value(VLQ 1000) ++ tree `00 05 01` (v0, no-size, body Const(SLong,-1))
+        // ++ height(0) ++ 0 tokens ++ 0 regs.
+        let bytes = [0xE8u8, 0x07, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00];
+        let mut r = VlqReader::new(&bytes);
+        let res = read_ergo_box_candidate(&mut r);
+        assert!(res.is_ok(), "v0-no-size box script must parse, got {res:?}");
     }
 
     // ----- round-trips -----
