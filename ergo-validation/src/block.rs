@@ -315,8 +315,8 @@ pub enum BlockValidationError {
     },
 
     /// Scala `exCheckForkVote` (rule 407) — a hostile parameter table carries a
-    /// soft-fork *starting height* (`softForkStartingHeight`, id 121) but NO
-    /// *votes-collected* entry (`softForkVotesCollected`, id 122). Scala
+    /// soft-fork *starting height* (`softForkStartingHeight`, id 122) but NO
+    /// *votes-collected* entry (`softForkVotesCollected`, id 121). Scala
     /// `checkForkVote` reads `softForkVotesCollected.get` after
     /// `softForkStartingHeight.nonEmpty`, so the missing entry throws
     /// `NoSuchElementException`, surfaced as a rule-407 reject — but only when the
@@ -454,8 +454,8 @@ pub(crate) fn check_block_transactions_size(
 /// trivial pass.
 /// Scala `ErgoStateContext.checkForkVote` reads `softForkVotesCollected.get`
 /// immediately after `softForkStartingHeight.nonEmpty`. A hostile parameter
-/// table carrying a soft-fork *start height* (id 121) but NO *votes-collected*
-/// entry (id 122) makes that `.get` throw `NoSuchElementException`, which
+/// table carrying a soft-fork *start height* (id 122) but NO *votes-collected*
+/// entry (id 121) makes that `.get` throw `NoSuchElementException`, which
 /// `validateNoThrow(exCheckForkVote, ...)` surfaces as a rule-407 reject — but
 /// ONLY when the header casts the SoftFork vote (Scala runs `checkForkVote`
 /// `if (forkVote)`). The `Option<SoftForkState>` handed to [`validate_fork_vote`]
@@ -2326,8 +2326,8 @@ mod interlinks_tests {
 
     #[test]
     fn fork_vote_hostile_votes_collected_missing_rejects() {
-        // Hostile parameter table: soft-fork START height present (id 121) but NO
-        // votes-collected (id 122). Scala `checkForkVote` reads
+        // Hostile parameter table: soft-fork START height present (id 122) but NO
+        // votes-collected (id 121). Scala `checkForkVote` reads
         // `softForkVotesCollected.get` -> NoSuchElementException -> rule-407 reject,
         // when the header casts the SoftFork vote. Height-independent (the throw is
         // before the prohibited-window check).
@@ -2364,7 +2364,7 @@ mod interlinks_tests {
 
     #[test]
     fn fork_vote_no_starting_height_passes_even_missing_votes() {
-        // No soft-fork start height (id 121 absent): `softForkStartingHeight.nonEmpty`
+        // No soft-fork start height (id 122 absent): `softForkStartingHeight.nonEmpty`
         // is false, so `checkForkVote` does nothing -> pass even with vote 120.
         let mut h = test_header(2_000, 0x20000000);
         h.votes = [120, 0, 0];
