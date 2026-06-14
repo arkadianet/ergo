@@ -101,6 +101,7 @@ fn owned_block_txs_apply_then_rollback_roundtrip() {
             value: 5_000_000_000,
             assets: vec![],
             miner_reward_pubkey: None,
+            box_bytes: Vec::new(),
         }],
     }];
 
@@ -173,6 +174,7 @@ fn owned_to_block_txs_multi_tx_structure() {
                 value: 1_000,
                 assets: vec![],
                 miner_reward_pubkey: None,
+                box_bytes: Vec::new(),
             }],
         },
         OwnedBlockTxData {
@@ -186,6 +188,7 @@ fn owned_to_block_txs_multi_tx_structure() {
                     value: 2_000,
                     assets: vec![],
                     miner_reward_pubkey: None,
+                    box_bytes: Vec::new(),
                 },
                 OwnedBlockOutput {
                     box_id: [0xA3u8; 32],
@@ -194,6 +197,7 @@ fn owned_to_block_txs_multi_tx_structure() {
                     value: 3_000,
                     assets: vec![],
                     miner_reward_pubkey: None,
+                    box_bytes: Vec::new(),
                 },
             ],
         },
@@ -246,6 +250,7 @@ fn untracked_output_not_recorded() {
             value: 1_000_000,
             assets: vec![],
             miner_reward_pubkey: None,
+            box_bytes: Vec::new(),
         }],
     }];
 

@@ -5021,6 +5021,15 @@ pub struct OwnedBlockOutput {
     pub value: u64,
     pub assets: Vec<([u8; 32], u64)>,
     pub miner_reward_pubkey: Option<[u8; 33]>,
+    /// Full serialized `ErgoBox` bytes. Populated ONLY by the
+    /// section/replay builder ([`build_wallet_block_txs_from_sections`]),
+    /// which the rescan read path uses to feed registered-scan matching +
+    /// `ScanTrackedBox.box_bytes`. Left EMPTY by the live-apply builder
+    /// ([`build_owned_tx_data_checked`]) — the live wallet/scan paths
+    /// don't read it (scan matching there goes through
+    /// `build_scan_match_records`), so carrying full box bytes in the
+    /// cross-thread `WalletApplyPayload` would only bloat it.
+    pub box_bytes: Vec<u8>,
 }
 
 /// Owned per-tx data for the wallet hook.
@@ -5149,6 +5158,10 @@ fn build_owned_tx_data_checked(
                 value,
                 assets,
                 miner_reward_pubkey,
+                // Live path: full box bytes are unused here (scan matching
+                // goes through `build_scan_match_records`), so don't pay to
+                // carry them across the persist-worker boundary.
+                box_bytes: Vec::new(),
             })
         })
         .collect::<Result<Vec<_>, StateError>>()?;
@@ -5248,6 +5261,15 @@ pub(crate) fn build_wallet_block_txs_from_sections(
                         .collect();
                     let miner_reward_pubkey =
                         crate::wallet::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
+                    // Replay/rescan path: carry the full box so the rescan
+                    // scan-matcher can re-derive scan membership and so
+                    // `ScanTrackedBox.box_bytes` can be reconstructed. The
+                    // box is already built (for box_id) — serializing it is
+                    // near-free.
+                    let box_bytes =
+                        ergo_ser::ergo_box::serialize_ergo_box(&ergo_box).map_err(|e| {
+                            StateError::Serialization(format!("box serialize in replay: {e}"))
+                        })?;
                     Ok(OwnedBlockOutput {
                         box_id: *box_id.as_bytes(),
                         output_index: idx as u16,
@@ -5255,6 +5277,7 @@ pub(crate) fn build_wallet_block_txs_from_sections(
                         value,
                         assets,
                         miner_reward_pubkey,
+                        box_bytes,
                     })
                 })
                 .collect::<Result<Vec<_>, StateError>>()?;

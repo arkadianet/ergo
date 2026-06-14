@@ -4828,6 +4828,12 @@ paths:
       security:
         - ApiKeyAuth: [api_key]
       summary: Rescan wallet (all the available full blocks). When fromHeight is set wallet would not see any boxes below it.
+      description: >-
+        A full rescan (fromHeight omitted or 0) replays every available full block and rebuilds
+        wallet box tracking from scratch; it also clears and rebuilds any registered /scan tracking
+        from the replayed chain, so scans registered after their boxes were created pick up the
+        historical matches. A height-scoped rescan (fromHeight > 0) rewinds and replays only the
+        wallet's own box tracking from that height and leaves registered scans untouched.
       operationId: walletRescan
       tags:
         - wallet

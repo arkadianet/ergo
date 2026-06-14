@@ -1015,6 +1015,7 @@ mod tests {
                 value: output_value,
                 assets: Vec::new(),
                 miner_reward_pubkey: None,
+                box_bytes: Vec::new(),
             }],
         };
         j.wallet_payload = Some(crate::store::WalletApplyPayload {
