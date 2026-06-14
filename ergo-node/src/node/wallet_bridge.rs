@@ -901,6 +901,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
             Some(n) => n,
             None => {
                 tracing::error!("scan apply: WALLET_SCANS count read failed; skipping this block");
+                mark_scan_invalidated(&self.db);
                 0
             }
         }
@@ -921,10 +922,44 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
                 .collect(),
             Err(e) => {
                 tracing::error!(error = %e, "scan apply: registry load failed; no matches this block");
+                mark_scan_invalidated(&self.db);
                 vec![Vec::new(); boxes.len()]
             }
         }
     }
+}
+
+/// Best-effort: flip `WALLET_SCAN_INVALIDATED` after a scan-registry read
+/// failure silently dropped a block's matches, so `/wallet/status` surfaces
+/// `scan_invalidated` and the operator runs a `/wallet/rescan` (the contract
+/// that clears it). "Best-effort": the same redb fault that broke the read may
+/// also break this write, in which case it's only logged; a recoverable failure
+/// (e.g. one corrupt `WALLET_SCANS` row) does get flagged.
+///
+/// Deliberately reuses the wallet-wide flag rather than adding a scan-specific
+/// one: a registry read failure during apply is a corruption/IO-class event
+/// whose recovery contract is already a full rescan, so pausing all wallet apply
+/// (`apply_block_to_wallet` no-ops while set) is the correct fail-closed posture
+/// — an availability cost on an exceptional path, not a correctness risk. Runs
+/// during payload build (no chain write txn is open on this thread yet), so the
+/// short write txn here can't deadlock — at worst it briefly waits on an
+/// in-flight persist-pipeline write.
+fn mark_scan_invalidated(db: &redb::Database) {
+    if let Err(e) = try_mark_scan_invalidated(db) {
+        tracing::error!(error = %e, "scan apply: failed to set scan-invalidated flag after a registry read failure");
+    }
+}
+
+#[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
+fn try_mark_scan_invalidated(db: &redb::Database) -> Result<(), redb::Error> {
+    // Quick-repair commit (see ergo_state::begin_write_qr): a single
+    // non-quick-repair commit can force an O(file-size) repair on the next
+    // unclean restart, so route this production write through the helper.
+    let w = ergo_state::begin_write_qr(db)?;
+    w.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)?
+        .insert((), true)?;
+    w.commit()?;
+    Ok(())
 }
 
 /// Pruning + network + operator-flag config supplied at boot.
@@ -3271,4 +3306,59 @@ async fn get_private_key_impl(
     let w = hex::encode(scalar_bytes);
 
     Ok(GetPrivateKeyResponse { w })
+}
+
+#[cfg(test)]
+mod scan_invalidation_tests {
+    use super::*;
+    use ergo_state::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
+
+    fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        (dir, Arc::new(db))
+    }
+
+    fn flag_set(db: &redb::Database) -> bool {
+        let r = db.begin_read().unwrap();
+        match r.open_table(WALLET_SCAN_INVALIDATED) {
+            Ok(t) => t.get(()).unwrap().map(|g| g.value()).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn mark_scan_invalidated_sets_the_flag() {
+        let (_d, db) = temp_db();
+        assert!(!flag_set(&db), "flag starts clear");
+        mark_scan_invalidated(&db);
+        assert!(flag_set(&db), "flag set after mark");
+    }
+
+    #[test]
+    fn match_boxes_registry_load_failure_invalidates_for_rescan() {
+        let (_d, db) = temp_db();
+        // A corrupt WALLET_SCANS row (not valid Scan JSON) makes load_registry
+        // fail when match_boxes loads it for the block.
+        {
+            let w = db.begin_write().unwrap();
+            w.open_table(WALLET_SCANS)
+                .unwrap()
+                .insert(11u16, vec![0xFFu8, 0x00])
+                .unwrap();
+            w.commit().unwrap();
+        }
+        let hook = WalletStateHook {
+            wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
+            db: db.clone(),
+        };
+        // match_boxes loads the registry first (regardless of the box slice), so
+        // the corrupt row trips the Err branch even with no boxes.
+        let out = ergo_state::wallet::WalletApplyHook::match_boxes(&hook, &[]);
+        assert!(out.is_empty());
+        assert!(
+            flag_set(&db),
+            "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
+        );
+    }
 }

@@ -18,7 +18,8 @@ use std::sync::Arc;
 use redb::{Database, ReadableTable};
 
 use crate::wallet::apply::{
-    apply_block_to_scans, apply_block_to_wallet_rescan, clear_scan_tracking, BlockOutput, BlockTx,
+    apply_block_to_scans_rescan, apply_block_to_wallet_rescan, clear_scan_tracking, BlockOutput,
+    BlockTx,
 };
 use crate::wallet::maturity::promote_matured_boxes_rescan;
 use crate::wallet::tables::{
@@ -395,7 +396,10 @@ impl WalletScanService {
                     // matches + spends. `None` = no rebuild active or a matcher
                     // cardinality bug (already logged + rebuild marked incomplete).
                     if let Some(records) = &scan_records {
-                        apply_block_to_scans(&txn, records, &btxs, h, &block.block_id)?;
+                        // Privileged variant: the rescan runs WITH
+                        // WALLET_SCAN_INVALIDATED set (it is the recovery path),
+                        // so it must bypass the live-apply gate.
+                        apply_block_to_scans_rescan(&txn, records, &btxs, h, &block.block_id)?;
                     }
                 }
                 txn.commit()?;

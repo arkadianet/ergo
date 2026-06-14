@@ -465,6 +465,26 @@ fn scan_de_ids(raw: &[u8]) -> Result<Vec<u16>, redb::Error> {
     })
 }
 
+/// Live chain-apply variant: skips ALL scan-table writes while
+/// `WALLET_SCAN_INVALIDATED` is set (a scan-registry read failure, or a
+/// non-replayable reorg), mirroring [`apply_block_to_wallet`] /
+/// [`promote_matured_boxes`]. Otherwise a block whose match pass failed (empty
+/// matches) would still mutate the scan tables, and tracking would keep
+/// advancing while `/wallet/status` reports `scan_invalidated`. A
+/// `/wallet/rescan` (which calls [`apply_block_to_scans_rescan`]) rebuilds them.
+pub(crate) fn apply_block_to_scans(
+    txn: &WriteTransaction,
+    scan_matches: &[ScanMatchRecord],
+    txs: &[BlockTx<'_>],
+    block_height: u32,
+    block_id: &[u8; 32],
+) -> Result<(), redb::Error> {
+    if is_scan_invalidated(txn)? {
+        return Ok(());
+    }
+    apply_block_to_scans_rescan(txn, scan_matches, txs, block_height, block_id)
+}
+
 /// Persist a block's scan matches into the scan-box tables, inside the SAME
 /// write txn as chain apply. Two phases (mirroring the wallet hook): phase 1
 /// creates each matched output as an `Unspent` [`ScanTrackedBox`] (one row per
@@ -473,7 +493,10 @@ fn scan_de_ids(raw: &[u8]) -> Result<Vec<u16>, redb::Error> {
 ///
 /// A box created AND spent within the same block is handled, because phase 1
 /// runs before phase 2.
-pub(crate) fn apply_block_to_scans(
+///
+/// Privileged: bypasses the `WALLET_SCAN_INVALIDATED` check (the rescan IS the
+/// recovery path), so the rescan rebuild calls this directly.
+pub(crate) fn apply_block_to_scans_rescan(
     txn: &WriteTransaction,
     scan_matches: &[ScanMatchRecord],
     txs: &[BlockTx<'_>],
@@ -727,6 +750,50 @@ mod scan_tests {
         t.get(scan_box_key(scan_id, &[box_fill; 32]))
             .unwrap()
             .map(|g| bincode::deserialize(&g.value()).unwrap())
+    }
+
+    #[test]
+    fn live_scan_apply_skips_while_invalidated_but_rescan_does_not() {
+        let (_d, db) = temp_db();
+        let tree = Vec::new();
+        let outs = vec![out(0xA1, &tree)];
+        let no_in: Vec<[u8; 32]> = vec![];
+        let txs = vec![BlockTx {
+            tx_id: [1u8; 32],
+            inputs: &no_in,
+            outputs: &outs,
+        }];
+        let matches = [match_rec(0xA1, vec![11], 100)];
+
+        // Mark the wallet invalidated (a scan-registry read failure / reorg).
+        {
+            let w = db.begin_write().unwrap();
+            w.open_table(WALLET_SCAN_INVALIDATED)
+                .unwrap()
+                .insert((), true)
+                .unwrap();
+            w.commit().unwrap();
+        }
+        // Live apply must be a no-op while invalidated (mirrors apply_block_to_wallet).
+        {
+            let w = db.begin_write().unwrap();
+            apply_block_to_scans(&w, &matches, &txs, 100, &TEST_BLOCK_ID).unwrap();
+            w.commit().unwrap();
+        }
+        assert!(
+            tracked(&db, 11, 0xA1).is_none(),
+            "live scan apply skipped while invalidated"
+        );
+        // The privileged rescan variant writes regardless of the flag.
+        {
+            let w = db.begin_write().unwrap();
+            apply_block_to_scans_rescan(&w, &matches, &txs, 100, &TEST_BLOCK_ID).unwrap();
+            w.commit().unwrap();
+        }
+        assert!(
+            tracked(&db, 11, 0xA1).is_some(),
+            "rescan variant bypasses the invalidated gate"
+        );
     }
 
     #[test]
