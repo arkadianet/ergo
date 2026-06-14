@@ -691,6 +691,8 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
                         value: o.value,
                         assets: o.assets,
                         miner_reward_pubkey: o.miner_reward_pubkey,
+                        // Carried for the rescan scan-matcher + ScanTrackedBox.
+                        box_bytes: o.box_bytes,
                     })
                     .collect(),
             })
@@ -873,10 +875,20 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn registered_scan_count(&self) -> usize {
+        // Skip live scan apply while a full rescan is rebuilding the scan
+        // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
+        // block, so a concurrent live write would race it (miss a spend
+        // against the cleared reverse index, or stale that index). Mirrors
+        // how the pubkey path skips during RESCAN_IN_PROGRESS. A PARTIAL
+        // rescan does not set this flag, so live scan tracking continues
+        // across it (scans have no range-rewind rebuild).
+        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+            return 0;
+        }
         // Cheap per-block gate: count rows in WALLET_SCANS. Scan tracking is
         // independent of the wallet-pubkey rescan, so (unlike the methods above)
-        // it is NOT skipped while a rescan is in progress. A read error skips
-        // scan work for this block (logged) rather than aborting chain apply.
+        // it is NOT skipped while a *partial* rescan is in progress. A read error
+        // skips scan work for this block (logged) rather than aborting chain apply.
         use redb::ReadableTableMetadata;
         let count = self.db.begin_read().ok().and_then(|r| {
             match r.open_table(ergo_state::wallet::tables::WALLET_SCANS) {
@@ -895,6 +907,12 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn match_boxes(&self, boxes: &[ergo_ser::ergo_box::ErgoBox]) -> Vec<Vec<u16>> {
+        // Quiesced during a scan rebuild (see `registered_scan_count`). The
+        // count gate already returns 0 then, so this is defense in depth —
+        // mirrors the pubkey path gating both of its hook methods.
+        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+            return vec![Vec::new(); boxes.len()];
+        }
         // Load the registry once for the whole block, then match each box.
         match commands::scan::load_registry(&self.db) {
             Ok(registry) => boxes

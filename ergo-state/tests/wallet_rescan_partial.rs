@@ -125,6 +125,7 @@ fn partial_rescan_removes_stale_spent_when_spend_disappears_on_replay() {
         read_block,
         read_tip,
         is_cancelled,
+        None,
     )
     .unwrap();
 
@@ -202,6 +203,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
             read_block,
             read_tip,
             is_cancelled,
+            None,
         )
         .unwrap();
     }
@@ -241,6 +243,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
             read_block,
             read_tip,
             is_cancelled,
+            None,
         )
         .unwrap();
     }
@@ -327,6 +330,7 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
         read_block,
         read_tip,
         is_cancelled,
+        None,
     )
     .unwrap();
 
@@ -350,5 +354,6 @@ fn _use_owned_block_output() {
         value: 0,
         assets: vec![],
         miner_reward_pubkey: None,
+        box_bytes: vec![],
     };
 }

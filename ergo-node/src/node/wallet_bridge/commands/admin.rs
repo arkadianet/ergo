@@ -155,6 +155,18 @@ pub(crate) async fn rescan(
             s.cached_pubkeys().clone(),
         )
     };
+    // Snapshot the registered scans for the rebuild. Scan rebuild is a
+    // full-rebuild operation only (start_h == 0); a partial wallet rescan
+    // leaves the scan tables untouched. `None` when no scans are registered.
+    let scan_matcher = if start_h == 0 {
+        super::scan::build_rescan_matcher(ctx.db)
+    } else {
+        None
+    };
+    // Quiesce live scan apply for the rebuild's duration (only when a full
+    // rebuild will actually touch the scan tables). Set BEFORE the spawn so
+    // it is active before the rebuild's first clear; cleared at task end.
+    crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(scan_matcher.is_some(), Ordering::SeqCst);
     let db_bg = ctx.db.clone();
     let chain_bg = ctx.chain.clone();
     tokio::spawn(async move {
@@ -166,6 +178,9 @@ pub(crate) async fn rescan(
         let read_tip = move || -> Result<u32, redb::Error> { Ok(chain_tip.tip_height()) };
         let is_cancelled =
             || -> bool { !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) };
+        let scan_matcher_dyn = scan_matcher
+            .as_ref()
+            .map(|m| m as &dyn ergo_state::wallet::scan::ScanRescanMatcher);
         if let Err(e) = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
             &db_bg,
             trees,
@@ -175,10 +190,13 @@ pub(crate) async fn rescan(
             read_block,
             read_tip,
             is_cancelled,
+            scan_matcher_dyn,
         ) {
             tracing::error!("background rescan failed: {e}");
         }
         crate::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
+        // Resume live scan apply (no-op if it was never set).
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
     });
     let _ = reply.send(Ok(()));
 }

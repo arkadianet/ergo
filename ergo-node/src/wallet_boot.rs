@@ -14,6 +14,21 @@ use redb::{Database, ReadableTableMetadata, WriteTransaction};
 pub static RESCAN_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Scan-rebuild-in-progress flag. Set by the Rescan dispatch ONLY for a
+/// full rebuild (`fromHeight == 0`) that rebuilds the registered `/scan/*`
+/// tables; read by the chain-apply hook's scan path (`registered_scan_count`
+/// / `match_boxes`), which no-ops while it is set. This quiesces live scan
+/// apply for the rebuild's duration: the rebuild clears and repopulates the
+/// scan tables block-by-block, so a concurrent live write would race it
+/// (miss a spend against the cleared reverse index, or stale that index).
+///
+/// Distinct from [`RESCAN_IN_PROGRESS`] on purpose: a PARTIAL rescan
+/// (`fromHeight > 0`) sets `RESCAN_IN_PROGRESS` but does NOT rebuild scans,
+/// so live scan tracking must keep running across it. Cleared when the
+/// rescan task finishes (process-local; reads `false` after a restart).
+pub static SCAN_REBUILD_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Test-only fault-injection flag for the atomic-commit test.
 /// When `true`, `unlock_and_sync` panics AFTER inserting the
 /// `WALLET_TRACKED_PUBKEYS` rows but BEFORE inserting the

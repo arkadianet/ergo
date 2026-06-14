@@ -35,6 +35,52 @@ fn internal(e: impl std::fmt::Display) -> WalletAdminError {
     WalletAdminError::Internal(e.to_string())
 }
 
+/// Owns a registry snapshot for a `/wallet/rescan`, implementing ergo-state's
+/// `ScanRescanMatcher`: it parses each serialized output box and matches it
+/// against the registered scan rules — the rescan analog of
+/// `WalletStateHook::match_boxes`, reusing the same
+/// `ScanRegistry::matching_scan_ids`, so a rescan reproduces live scan
+/// tracking exactly.
+pub(crate) struct RescanScanMatcher {
+    registry: ScanRegistry,
+}
+
+impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
+        boxes
+            .iter()
+            .map(|bytes| {
+                let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+                match ergo_ser::ergo_box::read_ergo_box(&mut r) {
+                    Ok(b) => self.registry.matching_scan_ids(&b),
+                    // On-chain boxes were already validated, so a parse failure
+                    // here is a serializer fault, not bad input — surface it and
+                    // degrade that box to "no match" rather than abort the rescan.
+                    Err(e) => {
+                        tracing::error!(error = %e, "scan rescan: output box parse failed; no match");
+                        Vec::new()
+                    }
+                }
+            })
+            .collect()
+    }
+}
+
+/// Build a rescan scan-matcher snapshot iff ≥1 user scan is registered;
+/// otherwise `None` (a node with no scans does no scan rescan). A registry-load
+/// error degrades to `None` + log so the wallet rescan still proceeds without
+/// touching the scan tables.
+pub(crate) fn build_rescan_matcher(db: &redb::Database) -> Option<RescanScanMatcher> {
+    match load_registry(db) {
+        Ok(registry) if !registry.list().is_empty() => Some(RescanScanMatcher { registry }),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::error!(error = %e, "scan rescan: registry load failed; scans not rebuilt");
+            None
+        }
+    }
+}
+
 /// Convert the opaque API request to the domain `ScanRequest`. A malformed
 /// predicate / interaction is a client error (HTTP 400). Semantic validation
 /// (name length, rule value) happens in [`register_request`], shared with the
@@ -1337,6 +1383,130 @@ mod tests {
         ));
         // Nothing registered by the rejected calls.
         assert!(list_impl(&db).unwrap().is_empty());
+    }
+
+    // ----- RescanScanMatcher (scan participation in /wallet/rescan) -----
+
+    /// `box_json` plus a single `assets` entry, so a `containsAsset` scan rule
+    /// over `[token_fill; 32]` matches the box.
+    fn box_json_with_asset(token_fill: u8) -> serde_json::Value {
+        let mut j = box_json(1_000_000, 100, 0x77, 0);
+        j["assets"] = serde_json::json!([
+            { "tokenId": hex::encode([token_fill; 32]), "amount": 1u64 }
+        ]);
+        j
+    }
+
+    /// Serialize an `ErgoTransactionOutput` JSON body to its on-chain box
+    /// bytes — exactly what the rescan replay hands the matcher.
+    fn serialize_box_json(j: &serde_json::Value) -> Vec<u8> {
+        let parsed: AddBoxJson = serde_json::from_value(j.clone()).unwrap();
+        let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
+        let b = ergo_ser::ergo_box::ErgoBox {
+            candidate,
+            transaction_id: ergo_primitives::digest::ModifierId::from_bytes(id_from_hex(
+                &parsed.transaction_id,
+            )),
+            index: parsed.index,
+        };
+        ergo_ser::ergo_box::serialize_ergo_box(&b).unwrap()
+    }
+
+    #[test]
+    fn rescan_matcher_routes_serialized_boxes_through_the_registry() {
+        use ergo_state::wallet::scan::ScanRescanMatcher;
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // scan 11: containsAsset [0x11;32]
+
+        let matcher = build_rescan_matcher(&db).expect("≥1 scan ⇒ matcher built");
+
+        // A box carrying token 0x11 matches scan 11; a no-asset box matches
+        // nothing. The result is one entry per input box, in the same order —
+        // the contract `rescan_full_rebuild` relies on.
+        let hit = serialize_box_json(&box_json_with_asset(0x11));
+        let miss = serialize_box_json(&box_json(5, 100, 0x77, 0));
+        let out = matcher.match_boxes(&[hit.as_slice(), miss.as_slice()]);
+        assert_eq!(out, vec![vec![11u16], vec![]]);
+    }
+
+    #[test]
+    fn rescan_matcher_degrades_unparseable_box_to_no_match() {
+        use ergo_state::wallet::scan::ScanRescanMatcher;
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let matcher = build_rescan_matcher(&db).unwrap();
+
+        // Garbage bytes can't be a box: degrade that slot to "no match" rather
+        // than abort the whole rescan. Result count still matches input count.
+        let good = serialize_box_json(&box_json_with_asset(0x11));
+        let bad: &[u8] = &[0xFF, 0xFF, 0xFF];
+        let out = matcher.match_boxes(&[bad, good.as_slice()]);
+        assert_eq!(out, vec![vec![], vec![11u16]]);
+    }
+
+    #[test]
+    fn build_rescan_matcher_is_none_without_scans() {
+        let (_d, db) = temp_db();
+        assert!(
+            build_rescan_matcher(&db).is_none(),
+            "a node with no registered scans does no scan rescan"
+        );
+    }
+
+    #[test]
+    fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
+        // While a full rescan rebuilds the scan tables, the live block-apply
+        // scan path must no-op so it doesn't race the rebuild's block-by-block
+        // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
+        // `registered_scan_count` (the load-bearing gate that skips
+        // `apply_block_to_scans`) and `match_boxes` both honor the flag.
+        use ergo_state::wallet::WalletApplyHook;
+        use std::sync::atomic::Ordering;
+
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap(); // 1 registered scan, token 0x11
+
+        // A box carrying token 0x11 matches scan 11.
+        let parsed: AddBoxJson = serde_json::from_value(box_json_with_asset(0x11)).unwrap();
+        let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
+        let b = ergo_ser::ergo_box::ErgoBox {
+            candidate,
+            transaction_id: ergo_primitives::digest::ModifierId::from_bytes(id_from_hex(
+                &parsed.transaction_id,
+            )),
+            index: parsed.index,
+        };
+
+        let hook = crate::node::wallet_bridge::WalletStateHook {
+            wallet: std::sync::Arc::new(parking_lot::RwLock::new(
+                ergo_wallet::state::WalletState::empty(false),
+            )),
+            db: std::sync::Arc::new(db),
+        };
+
+        // Baseline (flag clear): the scan is live and the box matches.
+        assert_eq!(hook.registered_scan_count(), 1);
+        assert_eq!(
+            hook.match_boxes(std::slice::from_ref(&b)),
+            vec![vec![11u16]]
+        );
+
+        // Flag set: both hook methods quiesce. Capture under the flag, then
+        // reset BEFORE asserting so a failure can't leak the flag to siblings.
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(true, Ordering::SeqCst);
+        let gated_count = hook.registered_scan_count();
+        let gated_match = hook.match_boxes(std::slice::from_ref(&b));
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+        assert_eq!(gated_count, 0, "live scan count gated to 0 during rebuild");
+        assert_eq!(
+            gated_match,
+            vec![Vec::<u16>::new()],
+            "live match suppressed during rebuild (one empty result per box)"
+        );
+
+        // Flag cleared: live apply sees the scan again.
+        assert_eq!(hook.registered_scan_count(), 1);
     }
 
     // ----- transactionsByScanId (scan-tx reads) -----
