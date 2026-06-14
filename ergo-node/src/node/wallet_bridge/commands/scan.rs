@@ -222,6 +222,25 @@ fn p2s_rule_impl(
 ) -> Result<u16, WalletAdminError> {
     let tree_bytes = ergo_ser::address::decode_address_to_tree_bytes(p2s, network)
         .map_err(|e| WalletAdminError::BadRequest(format!("can't parse {p2s}: {e}")))?;
+    // Scala `addressEncoder.fromString` parses the P2S script (and 400s if it
+    // can't). Our `decode_address_to_tree_bytes` only base58/checksum-decodes
+    // and returns P2S content verbatim, so reject a payload that isn't EXACTLY
+    // one ErgoTree here rather than registering an `equals(R1, <garbage>)` scan
+    // that can never match a real box. Two failure modes:
+    //   - the bytes don't parse as an ErgoTree at all; or
+    //   - they parse as a tree PREFIX with trailing bytes — a real box's R1 is
+    //     the exact tree bytes, so the over-long payload would never match.
+    {
+        let mut r = ergo_primitives::reader::VlqReader::new(&tree_bytes);
+        ergo_ser::ergo_tree::read_ergo_tree(&mut r)
+            .map_err(|e| WalletAdminError::BadRequest(format!("can't parse {p2s} script: {e}")))?;
+        if r.remaining() != 0 {
+            return Err(WalletAdminError::BadRequest(format!(
+                "{p2s} script has {} trailing byte(s) after the ErgoTree",
+                r.remaining()
+            )));
+        }
+    }
     // The equals value is a serialized `Coll[Byte]` constant: type code 0x0e,
     // VLQ length, then the tree bytes (Scala `ByteArrayConstant`).
     let mut value = vec![0x0e];
@@ -2006,6 +2025,39 @@ mod tests {
         ));
         // Nothing registered by the rejected calls.
         assert!(list_impl(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn p2s_rule_rejects_address_with_unparseable_script() {
+        use ergo_ser::address::NetworkPrefix;
+        let (_d, db) = temp_db();
+        // A well-formed P2S address (valid base58 + checksum + network) whose
+        // payload is NOT a parseable ErgoTree (`0x00` = v0 header, no body).
+        // Scala's addressEncoder.fromString parses the script and 400s here; we
+        // must too, rather than registering an un-decodable scan.
+        let addr = ergo_ser::address::encode_p2s(NetworkPrefix::Mainnet, &[0x00]);
+        assert!(
+            matches!(
+                p2s_rule_impl(&db, NetworkPrefix::Mainnet, &addr).unwrap_err(),
+                WalletAdminError::BadRequest(_)
+            ),
+            "an unparseable P2S script must be rejected, not registered"
+        );
+
+        // A valid ErgoTree PREFIX followed by trailing bytes parses Ok but isn't
+        // a whole tree — a real box's R1 is exact tree bytes, so it can't match.
+        let mut prefix_plus = hex::decode(GEN_P2PK_TREE).unwrap();
+        prefix_plus.push(0xFF);
+        let trailing = ergo_ser::address::encode_p2s(NetworkPrefix::Mainnet, &prefix_plus);
+        assert!(
+            matches!(
+                p2s_rule_impl(&db, NetworkPrefix::Mainnet, &trailing).unwrap_err(),
+                WalletAdminError::BadRequest(_)
+            ),
+            "a P2S payload with trailing bytes after the tree must be rejected"
+        );
+
+        assert!(list_impl(&db).unwrap().is_empty(), "nothing registered");
     }
 
     // ----- RescanScanMatcher (scan participation in /wallet/rescan) -----
