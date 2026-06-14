@@ -156,6 +156,87 @@ pub(crate) fn apply_change_set_to_prover(
     Ok((new_root, proof))
 }
 
+/// Pre-broadcast self-check of a candidate's generated ADProofs.
+///
+/// Replays `proof` through the production verifier
+/// (`ergo_sigma::avl::AvlVerifier` — the same type the Mode-5 digest
+/// path drives against real network ADProofs) seeded with
+/// `parent_root`, performing the canonical operation stream (lookups
+/// in transaction order, removes ascending, inserts ascending), and
+/// requires the verifier's final digest to equal `expected_root`.
+///
+/// A reference validator regenerates the proof from our transactions
+/// and compares digests (`UtxoState`: "Regenerated proofHash is not
+/// equal to the declared one"), so a candidate whose proof fails this
+/// replay would be invalidated network-wide — the h1,805,523 incident
+/// shipped exactly because no such check existed. Fail-safe direction:
+/// a false failure only withholds a candidate (the miner keeps working
+/// on the previous one); it can never cause an invalid broadcast.
+///
+/// Construction is wrapped in `catch_unwind`, mirroring
+/// `digest_apply.rs`: the upstream crate has a known deterministic
+/// panic site on malformed proof envelopes, and the mining loop must
+/// never crash on a self-generated artifact — a panic is reported as a
+/// self-check failure instead.
+pub(crate) fn self_check_candidate_proof(
+    parent_root: &ADDigest,
+    to_lookup: &[[u8; 32]],
+    to_remove: &DryRunRemoveMap,
+    to_insert: &DryRunInsertMap,
+    proof: &[u8],
+    expected_root: &ADDigest,
+) -> Result<(), StateError> {
+    let fail = |stage: &'static str, detail: String| StateError::CandidateProofSelfCheckFailed {
+        stage,
+        detail,
+    };
+
+    let parent_bytes = parent_root.as_bytes().to_vec();
+    let proof_owned = proof.to_vec();
+    let construct = || ergo_sigma::avl::AvlVerifier::new(&parent_bytes, &proof_owned, 32, None);
+    let verifier_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(construct))
+        .map_err(|panic_payload| {
+            let reason = panic_payload
+                .downcast_ref::<&'static str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "verifier construction panicked".to_string());
+            fail("construct(panic)", reason)
+        })?;
+    let mut verifier = verifier_result.map_err(|e| fail("construct", e))?;
+
+    for key in to_lookup {
+        verifier
+            .lookup(key)
+            .map_err(|()| fail("lookup", hex::encode(key)))?;
+    }
+    for box_id in to_remove.keys() {
+        verifier
+            .remove(box_id)
+            .map_err(|()| fail("remove", hex::encode(box_id)))?;
+    }
+    for (box_id, value) in to_insert {
+        verifier
+            .insert(box_id, value)
+            .map_err(|()| fail("insert", hex::encode(box_id)))?;
+    }
+
+    let verified_digest = verifier
+        .digest()
+        .ok_or_else(|| fail("digest", "verifier returned no digest".to_string()))?;
+    if verified_digest.as_slice() != expected_root.as_bytes() {
+        return Err(fail(
+            "digest-compare",
+            format!(
+                "verifier reproduced {} but candidate claims {}",
+                hex::encode(&verified_digest),
+                hex::encode(expected_root.as_bytes())
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +533,100 @@ mod tests {
             vd.as_slice(),
             new_root.as_bytes(),
             "verifier must reproduce the prover digest from the generated proof"
+        );
+    }
+
+    // ----- pre-broadcast self-check -----
+
+    #[test]
+    fn self_check_passes_on_canonical_proof() {
+        let mut tree = AvlTree::new();
+        for i in 0u8..10 {
+            tree.insert(make_key(i), vec![i]);
+        }
+        let parent_root = tree.root_digest();
+        let lookups = [make_key(3), make_key(8)];
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(make_key(5), ());
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(make_key(70), vec![0x11]);
+
+        let (new_root, proof) =
+            apply_change_set_via_prover(&tree, &lookups, &to_remove, &to_insert).expect("dry-run");
+        self_check_candidate_proof(
+            &parent_root,
+            &lookups,
+            &to_remove,
+            &to_insert,
+            &proof,
+            &new_root,
+        )
+        .expect("canonical proof must pass the self-check");
+    }
+
+    #[test]
+    fn self_check_rejects_missing_lookup_prefix() {
+        // THE h1,805,523 incident, pinned at the self-check layer: a
+        // proof generated WITHOUT the data-input lookups cannot be
+        // verifier-replayed with the canonical stream. Even if the
+        // generator regresses again, this check withholds the
+        // candidate instead of broadcasting an invalid block.
+        let mut tree = AvlTree::new();
+        for i in 0u8..10 {
+            tree.insert(make_key(i), vec![i]);
+        }
+        let parent_root = tree.root_digest();
+        let lookups = [make_key(3)];
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(make_key(5), ());
+        let mut to_insert: DryRunInsertMap = BTreeMap::new();
+        to_insert.insert(make_key(70), vec![0x11]);
+
+        // Buggy generator: no lookup prefix.
+        let (new_root, bad_proof) = apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert)
+            .expect("lookup-free dry-run");
+        let err = self_check_candidate_proof(
+            &parent_root,
+            &lookups,
+            &to_remove,
+            &to_insert,
+            &bad_proof,
+            &new_root,
+        )
+        .expect_err("lookup-free proof must fail the canonical replay");
+        assert!(
+            matches!(err, StateError::CandidateProofSelfCheckFailed { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn self_check_rejects_tampered_proof() {
+        let mut tree = AvlTree::new();
+        for i in 0u8..10 {
+            tree.insert(make_key(i), vec![i]);
+        }
+        let parent_root = tree.root_digest();
+        let mut to_remove: DryRunRemoveMap = BTreeMap::new();
+        to_remove.insert(make_key(2), ());
+        let to_insert: DryRunInsertMap = BTreeMap::new();
+
+        let (new_root, mut proof) =
+            apply_change_set_via_prover(&tree, &[], &to_remove, &to_insert).expect("dry-run");
+        let mid = proof.len() / 2;
+        proof[mid] ^= 0xFF;
+        let err = self_check_candidate_proof(
+            &parent_root,
+            &[],
+            &to_remove,
+            &to_insert,
+            &proof,
+            &new_root,
+        )
+        .expect_err("tampered proof must fail the self-check");
+        assert!(
+            matches!(err, StateError::CandidateProofSelfCheckFailed { .. }),
+            "got {err:?}"
         );
     }
 

@@ -3541,10 +3541,22 @@ impl StateStore {
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         let snapshot_tip_id = self.chain_state.best_full_block_id;
+        let parent_root = self.tree.root_digest();
         let (to_remove, to_insert) = Self::build_utxo_changes_checked(checked)?;
         let to_lookup = Self::build_data_input_lookups_checked(checked);
         let (new_root, proof_bytes) =
             dry_run::apply_change_set_via_prover(&self.tree, &to_lookup, &to_remove, &to_insert)?;
+        // Pre-broadcast self-check: the generated proof must verifier-
+        // replay from the parent root to the claimed post-root, or the
+        // candidate is withheld (see self_check_candidate_proof).
+        dry_run::self_check_candidate_proof(
+            &parent_root,
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+            &proof_bytes,
+            &new_root,
+        )?;
         Ok((new_root, proof_bytes, snapshot_tip_id))
     }
 
