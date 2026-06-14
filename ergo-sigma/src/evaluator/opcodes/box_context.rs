@@ -6,7 +6,7 @@
 //! - 0xC6 ExtractRegisterAs   — register read with R0..R9 dispatch
 //! - 0xC2 ExtractScriptBytes  — box.script_bytes as Coll[Byte]
 //! - 0xC3 ExtractBytes        — full serialized box bytes
-//! - 0xC4 ExtractBytesWithNoRef — candidate bytes (raw_bytes minus 32-byte txId + VLQ index suffix)
+//! - 0xC4 ExtractBytesWithNoRef — CANONICAL candidate bytes (re-serialized from structure)
 //! - 0xE3 GetVar              — context-extension Option lookup with exact-type match
 
 use ergo_primitives::cost::CostAccumulator;

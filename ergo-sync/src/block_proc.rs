@@ -530,23 +530,45 @@ fn process_block_utxo(
     // `softForkVotesCollected` / `softForkStartingHeight`). Only
     // present when there's an in-progress soft-fork; `None` means
     // the rule trivially passes.
-    let soft_fork_state = match (
-        store.active_params().soft_fork_starting_height(),
-        store.active_params().soft_fork_votes_collected(),
-    ) {
-        (Some(starting_height), Some(votes_collected)) if starting_height >= 0 => {
-            let approved = voting_settings.soft_fork_approved(votes_collected);
-            Some(ergo_validation::block::SoftForkState {
-                starting_height: starting_height as u32,
-                votes_collected,
-                voting_length: voting_settings.voting_length,
-                soft_fork_epochs: voting_settings.soft_fork_epochs,
-                activation_epochs: voting_settings.activation_epochs,
-                approved,
-            })
+    let sf_starting_height = store.active_params().soft_fork_starting_height();
+    let sf_votes_collected = store.active_params().soft_fork_votes_collected();
+    // Rule 407 (`exCheckForkVote`) is soft-fork-DISABLEABLE: Scala enforces it
+    // via `validateNoThrow(exCheckForkVote, ...)`, so a disabled rule 407 skips
+    // `checkForkVote` entirely — no prohibited-window reject AND no
+    // `softForkVotesCollected.get` throw. Gate the whole rule here: a disabled
+    // 407 nulls `soft_fork_state` (the window check becomes a no-op) and the
+    // hostile-table guard short-circuits to Ok.
+    let rule_407_disabled = store.validation_settings().is_rule_disabled(407);
+    let soft_fork_state = if rule_407_disabled {
+        None
+    } else {
+        match (sf_starting_height, sf_votes_collected) {
+            (Some(starting_height), Some(votes_collected)) if starting_height >= 0 => {
+                let approved = voting_settings.soft_fork_approved(votes_collected);
+                Some(ergo_validation::block::SoftForkState {
+                    starting_height: starting_height as u32,
+                    votes_collected,
+                    voting_length: voting_settings.voting_length,
+                    soft_fork_epochs: voting_settings.soft_fork_epochs,
+                    activation_epochs: voting_settings.activation_epochs,
+                    approved,
+                })
+            }
+            _ => None,
         }
-        _ => None,
     };
+    // Rule 407 hostile-table guard (Scala `checkForkVote` reads
+    // `softForkVotesCollected.get`): a soft-fork start height with no
+    // votes-collected entry (122-without-121) rejects a SoftFork-voting header.
+    // The `Option<SoftForkState>` above collapses this to `None`
+    // (indistinguishable from "no soft fork"), so enforce it here from the raw
+    // params, before the block validator's prohibited-window check.
+    ergo_validation::block::check_fork_vote_votes_collected_present(
+        checked_header.header(),
+        sf_starting_height,
+        sf_votes_collected,
+        rule_407_disabled,
+    )?;
     // Rule 215 (`hdrVotesUnknown`) is soft-fork-deactivatable. Mainnet's
     // v6.0 activation disabled it (`rules_to_disable = [215, 409]`), so an
     // epoch-start header may legitimately propose downward / new-param
@@ -1025,23 +1047,38 @@ fn process_block_digest(
 
     let voting_settings = store.voting_settings();
     let voting_length = voting_settings.voting_length;
-    let soft_fork_state = match (
-        store.active_params().soft_fork_starting_height(),
-        store.active_params().soft_fork_votes_collected(),
-    ) {
-        (Some(starting_height), Some(votes_collected)) if starting_height >= 0 => {
-            let approved = voting_settings.soft_fork_approved(votes_collected);
-            Some(SoftForkState {
-                starting_height: starting_height as u32,
-                votes_collected,
-                voting_length: voting_settings.voting_length,
-                soft_fork_epochs: voting_settings.soft_fork_epochs,
-                activation_epochs: voting_settings.activation_epochs,
-                approved,
-            })
+    let sf_starting_height = store.active_params().soft_fork_starting_height();
+    let sf_votes_collected = store.active_params().soft_fork_votes_collected();
+    // Rule 407 is disableable — see the UTXO arm. A disabled 407 nulls
+    // soft_fork_state (window check no-op) and short-circuits the hostile guard.
+    let rule_407_disabled = store.validation_settings().is_rule_disabled(407);
+    let soft_fork_state = if rule_407_disabled {
+        None
+    } else {
+        match (sf_starting_height, sf_votes_collected) {
+            (Some(starting_height), Some(votes_collected)) if starting_height >= 0 => {
+                let approved = voting_settings.soft_fork_approved(votes_collected);
+                Some(SoftForkState {
+                    starting_height: starting_height as u32,
+                    votes_collected,
+                    voting_length: voting_settings.voting_length,
+                    soft_fork_epochs: voting_settings.soft_fork_epochs,
+                    activation_epochs: voting_settings.activation_epochs,
+                    approved,
+                })
+            }
+            _ => None,
         }
-        _ => None,
     };
+    // Rule 407 hostile-table guard — see the UTXO arm. Scala `checkForkVote`'s
+    // `softForkVotesCollected.get` throws for a 122-without-121 table when the
+    // header casts the SoftFork vote; enforce it here before the window check.
+    ergo_validation::block::check_fork_vote_votes_collected_present(
+        checked_header.header(),
+        sf_starting_height,
+        sf_votes_collected,
+        rule_407_disabled,
+    )?;
     // Rule 215 honored against the activated soft-fork settings — see the
     // UTXO-arm context above for the full rationale.
     let votes_unknown_rule_disabled = store.validation_settings().is_rule_disabled(215);

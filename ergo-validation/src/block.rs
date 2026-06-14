@@ -314,6 +314,19 @@ pub enum BlockValidationError {
         window_hi: u32,
     },
 
+    /// Scala `exCheckForkVote` (rule 407) — a hostile parameter table carries a
+    /// soft-fork *starting height* (`softForkStartingHeight`, id 122) but NO
+    /// *votes-collected* entry (`softForkVotesCollected`, id 121). Scala
+    /// `checkForkVote` reads `softForkVotesCollected.get` after
+    /// `softForkStartingHeight.nonEmpty`, so the missing entry throws
+    /// `NoSuchElementException`, surfaced as a rule-407 reject — but only when the
+    /// header casts the SoftFork vote (`if (forkVote)`).
+    #[error("fork-vote at height {height} with soft-fork start but no votes-collected entry (rule 407, 122-without-121)")]
+    ForkVoteVotesCollectedMissing {
+        /// Header height casting the vote.
+        height: u32,
+    },
+
     /// Scala `exIlStructure` (rule 402) — the extension's interlinks
     /// don't equal `updateInterlinks(parent_header, parent_interlinks)`.
     /// The interlinks vector is consensus-required to be derived
@@ -439,6 +452,43 @@ pub(crate) fn check_block_transactions_size(
 /// means no fork in progress — Scala's
 /// `softForkStartingHeight.isEmpty` case — and the check is a
 /// trivial pass.
+/// Scala `ErgoStateContext.checkForkVote` reads `softForkVotesCollected.get`
+/// immediately after `softForkStartingHeight.nonEmpty`. A hostile parameter
+/// table carrying a soft-fork *start height* (id 122) but NO *votes-collected*
+/// entry (id 121) makes that `.get` throw `NoSuchElementException`, which
+/// `validateNoThrow(exCheckForkVote, ...)` surfaces as a rule-407 reject — but
+/// ONLY when the header casts the SoftFork vote (Scala runs `checkForkVote`
+/// `if (forkVote)`). The `Option<SoftForkState>` handed to [`validate_fork_vote`]
+/// collapses this case to `None` (indistinguishable from "no soft fork in
+/// progress"), so the block path must enforce it separately, here, from the raw
+/// `softForkStartingHeight` / `softForkVotesCollected` params. Height-independent:
+/// Scala throws at the `.get`, before the prohibited-window check, so the sign of
+/// the starting height is irrelevant (matching `nonEmpty`).
+pub fn check_fork_vote_votes_collected_present(
+    header: &Header,
+    soft_fork_starting_height: Option<i32>,
+    soft_fork_votes_collected: Option<i32>,
+    rule_407_disabled: bool,
+) -> Result<(), BlockValidationError> {
+    if rule_407_disabled {
+        // Scala enforces this via `validateNoThrow(exCheckForkVote, ...)`, which
+        // is disableable: a disabled rule 407 skips `checkForkVote` entirely, so
+        // the `softForkVotesCollected.get` throw is never evaluated.
+        return Ok(());
+    }
+    const SOFT_FORK_VOTE_BYTE: u8 = 120;
+    if !header.votes.contains(&SOFT_FORK_VOTE_BYTE) {
+        // Scala only evaluates `checkForkVote` `if (forkVote)`.
+        return Ok(());
+    }
+    if soft_fork_starting_height.is_some() && soft_fork_votes_collected.is_none() {
+        return Err(BlockValidationError::ForkVoteVotesCollectedMissing {
+            height: header.height,
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_fork_vote(
     header: &Header,
     soft_fork_state: Option<&SoftForkState>,
@@ -2270,6 +2320,64 @@ mod interlinks_tests {
         let mut h = test_header(100, 0x20000000);
         h.votes = [120, 0, 0]; // SoftFork = 120
         validate_fork_vote(&h, None).unwrap();
+    }
+
+    // ---- rule 407: hostile 122-without-121 table (Scala checkForkVote .get) ----
+
+    #[test]
+    fn fork_vote_hostile_votes_collected_missing_rejects() {
+        // Hostile parameter table: soft-fork START height present (id 122) but NO
+        // votes-collected (id 121). Scala `checkForkVote` reads
+        // `softForkVotesCollected.get` -> NoSuchElementException -> rule-407 reject,
+        // when the header casts the SoftFork vote. Height-independent (the throw is
+        // before the prohibited-window check).
+        let mut h = test_header(2_000, 0x20000000);
+        h.votes = [120, 0, 0];
+        let err = check_fork_vote_votes_collected_present(&h, Some(100), None, false).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BlockValidationError::ForkVoteVotesCollectedMissing { height: 2_000 }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fork_vote_votes_collected_missing_disabled_rule_passes() {
+        // Rule 407 disabled by an activated settings update: Scala's
+        // `validateNoThrow(exCheckForkVote, ...)` skips `checkForkVote` entirely,
+        // so the hostile table is accepted even with the SoftFork vote.
+        let mut h = test_header(2_000, 0x20000000);
+        h.votes = [120, 0, 0];
+        check_fork_vote_votes_collected_present(&h, Some(100), None, true).unwrap();
+    }
+
+    #[test]
+    fn fork_vote_votes_collected_missing_without_softfork_vote_passes() {
+        // Same hostile table but the header does NOT cast the SoftFork vote: Scala
+        // only runs `checkForkVote` `if (forkVote)`, so no throw.
+        let mut h = test_header(2_000, 0x20000000);
+        h.votes = [0, 0, 0];
+        check_fork_vote_votes_collected_present(&h, Some(100), None, false).unwrap();
+    }
+
+    #[test]
+    fn fork_vote_no_starting_height_passes_even_missing_votes() {
+        // No soft-fork start height (id 122 absent): `softForkStartingHeight.nonEmpty`
+        // is false, so `checkForkVote` does nothing -> pass even with vote 120.
+        let mut h = test_header(2_000, 0x20000000);
+        h.votes = [120, 0, 0];
+        check_fork_vote_votes_collected_present(&h, None, None, false).unwrap();
+    }
+
+    #[test]
+    fn fork_vote_both_present_defers_to_window_check() {
+        // (Some, Some) is well-formed: this guard passes (no `.get` throw); the
+        // prohibited-window decision belongs to `validate_fork_vote`.
+        let mut h = test_header(2_000, 0x20000000);
+        h.votes = [120, 0, 0];
+        check_fork_vote_votes_collected_present(&h, Some(100), Some(0), false).unwrap();
     }
 
     #[test]
