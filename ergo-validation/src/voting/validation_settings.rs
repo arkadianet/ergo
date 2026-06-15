@@ -58,6 +58,43 @@ pub fn parse_validation_settings_update(
     ErgoValidationSettingsUpdate::deserialize(&buf)
 }
 
+/// Maximum bytes per extension field value — Scala caps `putUByte(length)`
+/// at 255 (`ergo-ser/src/extension.rs`). A cumulative settings blob longer
+/// than this is split across consecutive `0x02` chunk entries.
+const EXTENSION_FIELD_VALUE_MAX: usize = 255;
+
+/// Serialize a cumulative `ErgoValidationSettingsUpdate` into its block-
+/// extension fields — the inverse of [`parse_validation_settings_update`],
+/// mirroring Scala `ErgoValidationSettings.toExtensionCandidate`
+/// (`ErgoValidationSettings.scala:101-109`).
+///
+/// An EMPTY update (no disabled rules, no status updates) yields NO fields —
+/// the absence of any `0x02` entry is how the parser encodes "initial
+/// settings". A non-empty update is serialized to one byte string and split
+/// into `0x02`-prefixed chunks of at most [`EXTENSION_FIELD_VALUE_MAX`] bytes,
+/// keyed by ascending chunk index in `key[1]`. The parser concatenates chunks
+/// in index order before deserializing, so the chunk boundary is not consensus-
+/// relevant — only the concatenation is — but the chunking keeps each field
+/// within the 255-byte wire limit.
+pub fn validation_settings_update_to_extension_fields(
+    update: &ErgoValidationSettingsUpdate,
+) -> Vec<([u8; 2], Vec<u8>)> {
+    if update.rules_to_disable.is_empty() && update.status_updates.is_empty() {
+        return Vec::new();
+    }
+    let bytes = update.serialize();
+    bytes
+        .chunks(EXTENSION_FIELD_VALUE_MAX)
+        .enumerate()
+        .map(|(idx, chunk)| {
+            // Chunk index lives in key[1]; the parser sorts by it. A cumulative
+            // update large enough to exceed 255 chunks (u8 index) cannot occur
+            // for any real validation-settings table, so the cast is safe.
+            ([VALIDATION_RULES_PREFIX, idx as u8], chunk.to_vec())
+        })
+        .collect()
+}
+
 /// Status of a single validation rule. Mirrors sigma's `RuleStatus`
 /// (`sigma/validation/RuleStatus.scala`).
 #[derive(Debug, Clone, PartialEq, Eq)]

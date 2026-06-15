@@ -992,6 +992,7 @@ async fn run_inner_with_backend(
             config.chain_spec.monetary,
             config.chain_spec.reemission.clone(),
             config.chain_spec.difficulty.clone(),
+            config.chain_spec.voting,
         )
         .with_rent_config(
             config.mining_config.claim_storage_rent,

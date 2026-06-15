@@ -1851,6 +1851,7 @@ async fn coordinator_abort_leaves_worker_joinable() {
         MonetarySettings::mainnet(),
         Some(ReemissionSettings::mainnet()),
         DifficultyParams::mainnet(),
+        ergo_validation::VotingSettings::mainnet(),
     );
 
     // No intent is ever sent, so the coordinator parks on the intent channel —
@@ -1955,6 +1956,7 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
         MonetarySettings::mainnet(),
         Some(ReemissionSettings::mainnet()),
         DifficultyParams::mainnet(),
+        ergo_validation::VotingSettings::mainnet(),
     );
 
     // Intent whose expected_parent / expected_height can never become
@@ -2121,6 +2123,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         MonetarySettings::mainnet(),
         Some(ReemissionSettings::mainnet()),
         DifficultyParams::mainnet(),
+        ergo_validation::VotingSettings::mainnet(),
     );
 
     // Step 1 — Intent A: parent [0x42;32], height 5 — commit-visible never

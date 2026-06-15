@@ -973,12 +973,13 @@ mod tests {
         assert!(check_votes_known(&h, 0).is_ok());
     }
 
-    /// SAFETY NET for the candidate-vote selector (PR2): every `[u8;3]`
+    /// SAFETY NET for the candidate-vote selector: every `[u8;3]`
     /// `select_candidate_votes` produces — across diverse operator configs, at
-    /// both off-epoch and epoch-start heights — must PASS the real header-votes
-    /// validators (rules 212/213/214/215, strictest `rule_disabled = false`).
-    /// If the selector ever emitted an invalid vote, our mined block would be
-    /// rejected by peers; this pins that it can't.
+    /// off-epoch and epoch-start heights, under BOTH rule-215 regimes — must
+    /// PASS the real header-votes validators (rules 212/213/214/215). If the
+    /// selector ever emitted a vote the header validator rejects, our mined
+    /// block would be rejected by peers; this pins that it can't, in lockstep
+    /// with the exact rule-215 status the selector was told to assume.
     #[test]
     fn selected_candidate_votes_always_pass_header_validators() {
         use crate::active_params::scala_launch;
@@ -1006,24 +1007,32 @@ mod tests {
 
         for targets in &configs {
             for (height, is_epoch_start) in [(100u32, false), (MAINNET_VOTING_LENGTH, true)] {
-                let votes = select_candidate_votes(&active, targets, is_epoch_start);
-                let h = header_with_height(height, votes);
-                assert!(
-                    check_votes_number_active(&h, false).is_ok(),
-                    "rule 212: votes={votes:?} @ h={height}"
-                );
-                assert!(
-                    check_votes_no_duplicates(&h).is_ok(),
-                    "rule 213: votes={votes:?} @ h={height}"
-                );
-                assert!(
-                    check_votes_no_contradictions(&h).is_ok(),
-                    "rule 214: votes={votes:?} @ h={height}"
-                );
-                assert!(
-                    check_votes_known(&h, MAINNET_VOTING_LENGTH).is_ok(),
-                    "rule 215: votes={votes:?} @ h={height}"
-                );
+                // The selector is handed a rule-215 status; rule 215 must be
+                // checked with that SAME status (`check_votes_known_active`),
+                // since a disabled rule 215 is exactly what makes a decrease /
+                // id-9 vote valid at an epoch start.
+                for rule_215_disabled in [false, true] {
+                    let votes =
+                        select_candidate_votes(&active, targets, is_epoch_start, rule_215_disabled);
+                    let h = header_with_height(height, votes);
+                    assert!(
+                        check_votes_number_active(&h, false).is_ok(),
+                        "rule 212: votes={votes:?} @ h={height} r215d={rule_215_disabled}"
+                    );
+                    assert!(
+                        check_votes_no_duplicates(&h).is_ok(),
+                        "rule 213: votes={votes:?} @ h={height} r215d={rule_215_disabled}"
+                    );
+                    assert!(
+                        check_votes_no_contradictions(&h).is_ok(),
+                        "rule 214: votes={votes:?} @ h={height} r215d={rule_215_disabled}"
+                    );
+                    assert!(
+                        check_votes_known_active(&h, MAINNET_VOTING_LENGTH, rule_215_disabled)
+                            .is_ok(),
+                        "rule 215: votes={votes:?} @ h={height} r215d={rule_215_disabled}"
+                    );
+                }
             }
         }
     }

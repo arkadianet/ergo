@@ -39,7 +39,7 @@ use redb::{Database, ReadTransaction, ReadableTable};
 use super::meta::StateMeta;
 use super::{
     StateError, StateStore, AVL_NODES, BLOCK_SECTIONS, CHAIN_INDEX, CHAIN_STATE_META, HEADERS,
-    HEADER_CHAIN_INDEX, STATE_META,
+    HEADER_CHAIN_INDEX, MODE2_TRUST_FIRST_EPOCH_KEY, STATE_META,
 };
 use crate::active_params;
 use crate::avl::hydrate::{batch_avl_prover_from_tree, hydrate_tree_from_fetch};
@@ -119,6 +119,25 @@ impl CommittedSnapshot {
                          (commit atomicity violated)"
                     .to_string(),
             }),
+        }
+    }
+
+    /// Whether the Mode 2 (UTXO-snapshot) first-epoch trust sentinel is armed
+    /// in this committed view — i.e. the local cumulative validation settings
+    /// are still the launch defaults pending the first trusted post-snapshot
+    /// epoch-boundary apply. Read from the persisted
+    /// `CHAIN_STATE_META[MODE2_TRUST_FIRST_EPOCH_KEY]` (first byte `0x01`), so it
+    /// matches the on-loop `StateStore::is_mode2_trust_first_epoch_armed` at the
+    /// same committed point. The candidate builder refuses epoch-boundary mining
+    /// while armed, since it cannot yet serialize the real cumulative settings.
+    pub fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+        match self.txn.open_table(CHAIN_STATE_META) {
+            Ok(t) => Ok(t
+                .get(MODE2_TRUST_FIRST_EPOCH_KEY)?
+                .map(|g| g.value().first().copied() == Some(0x01))
+                .unwrap_or(false)),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -895,6 +914,37 @@ mod tests {
             ])
             .unwrap();
         (dir, store)
+    }
+
+    /// The off-loop `CommittedSnapshot` must report the Mode 2 first-epoch trust
+    /// sentinel identically to the on-loop `StateStore` at the same committed
+    /// point — they read the SAME persisted/in-memory flag. The candidate
+    /// builder refuses epoch-boundary mining while armed, so a disagreement
+    /// between the two build paths could let the off-loop path emit an invalid
+    /// boundary extension. This pins their agreement.
+    #[test]
+    fn committed_snapshot_mode2_trust_matches_on_loop() {
+        let (_dir, mut store) = genesis_store();
+        // Fresh store: not armed, and the off-loop view agrees.
+        assert!(!store.is_mode2_trust_first_epoch_armed());
+        let snap = store.committed_snapshot().unwrap().expect("snapshot");
+        assert!(
+            !snap.mode2_trust_first_epoch_armed().unwrap(),
+            "off-loop must match on-loop (not armed)"
+        );
+        drop(snap);
+
+        // Arm the sentinel (persists to CHAIN_STATE_META + sets the in-memory
+        // mirror), as a UTXO-snapshot install would.
+        store.arm_mode2_trust_first_epoch_internal().unwrap();
+        assert!(store.is_mode2_trust_first_epoch_armed(), "on-loop armed");
+
+        // A fresh snapshot reads the persisted sentinel — off-loop agrees.
+        let snap2 = store.committed_snapshot().unwrap().expect("snapshot2");
+        assert!(
+            snap2.mode2_trust_first_epoch_armed().unwrap(),
+            "off-loop must see the armed persisted sentinel"
+        );
     }
 
     // ----- oracle parity -----

@@ -24,6 +24,7 @@ use std::sync::{Arc, RwLock};
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_state::store::StateStore;
 use ergo_state::wallet::RewardKeyResolution;
+use ergo_validation::VotingSettings;
 
 use crate::candidate::Candidate;
 use crate::emission_rules::MonetarySettings;
@@ -108,6 +109,11 @@ pub struct MiningHandle {
     /// the reemission tx path and builds a pre-EIP-27 emission tx.
     reemission: Option<Arc<ReemissionSettings>>,
     chain_config: Arc<DifficultyParams>,
+    /// Per-network voting-epoch settings (length, soft-fork thresholds). Needed
+    /// at an epoch-boundary candidate to run `compute_next_params` and to detect
+    /// the boundary, exactly as the block validator does. Mainnet:
+    /// `voting_length = 1024`.
+    voting_settings: Arc<VotingSettings>,
     /// Whether to sweep storage-rent-eligible boxes into a pinned zero-fee
     /// self-claim. Off by default; set via [`MiningHandle::with_rent_config`].
     claim_storage_rent: bool,
@@ -131,12 +137,14 @@ impl MiningHandle {
         monetary: MonetarySettings,
         reemission: Option<ReemissionSettings>,
         chain_config: DifficultyParams,
+        voting_settings: VotingSettings,
     ) -> Self {
         Self::with_reward_key(
             RewardKeySource::Pinned(miner_pk),
             monetary,
             reemission,
             chain_config,
+            voting_settings,
         )
     }
 
@@ -148,6 +156,7 @@ impl MiningHandle {
         monetary: MonetarySettings,
         reemission: Option<ReemissionSettings>,
         chain_config: DifficultyParams,
+        voting_settings: VotingSettings,
     ) -> Self {
         Self {
             cache: Arc::new(RwLock::new(MiningCache::default())),
@@ -156,6 +165,7 @@ impl MiningHandle {
             monetary: Arc::new(monetary),
             reemission: reemission.map(Arc::new),
             chain_config: Arc::new(chain_config),
+            voting_settings: Arc::new(voting_settings),
             claim_storage_rent: false,
             max_storage_rent_claims: 0,
             voting_targets: Arc::new(std::collections::BTreeMap::new()),
@@ -403,6 +413,7 @@ impl MiningHandle {
             MonetarySettings::mainnet(),
             Some(ReemissionSettings::mainnet()),
             DifficultyParams::mainnet(),
+            VotingSettings::mainnet(),
         )
     }
 
@@ -464,6 +475,12 @@ impl MiningHandle {
     /// EIP-37 / 1024-block epochs, testnet uses 128-block epochs).
     pub fn chain_config(&self) -> &ergo_crypto::difficulty::DifficultyParams {
         &self.chain_config
+    }
+
+    /// Per-network voting-epoch settings forwarded to the candidate builder for
+    /// epoch-boundary detection and the next-epoch parameter recompute.
+    pub fn voting_settings(&self) -> &VotingSettings {
+        &self.voting_settings
     }
 
     /// Resolve the reward pubkey as hex against current state. Unlike the old
@@ -607,6 +624,7 @@ mod tests {
             MonetarySettings::mainnet(),
             Some(ReemissionSettings::mainnet()),
             DifficultyParams::mainnet(),
+            VotingSettings::mainnet(),
         );
         assert_eq!(h.reward_key, RewardKeySource::Wallet);
     }

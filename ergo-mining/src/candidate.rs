@@ -17,9 +17,13 @@
 //! - Mainnet post-EIP-27 emission only. Pre-activation and at-activation
 //!   paths exist in `reemission` for completeness but mainnet is far past
 //!   activation.
-//! - Non-epoch-boundary heights only. Epoch-boundary candidate
-//!   construction is deferred (the proposed-update + validation-settings
-//!   extension encoding isn't implemented).
+//! - Epoch-boundary heights are supported: the candidate runs the SAME
+//!   `compute_next_params` the block validator runs, serializes the recomputed
+//!   parameter map + cumulative validation settings into the extension, and
+//!   uses the recomputed `block_version` in the header — so a peer accepts the
+//!   block by construction. The genesis-era first boundary
+//!   (`active_params.epoch_start_height == 0`) is the one exception (Scala's
+//!   genesis bypass path is not reproduced); a live node is always past it.
 
 use ergo_crypto::difficulty::{
     epoch_length_for_height, get_target, next_n_bits, previous_heights_for_recalculation,
@@ -35,22 +39,30 @@ use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockT
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::{read_header, serialize_header_without_pow, Header};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
+use ergo_validation::active_params::active_params_to_extension_fields;
 use ergo_validation::popow::algos::unpack_interlinks;
+use ergo_validation::voting::validation_settings::validation_settings_update_to_extension_fields;
 use ergo_validation::{
-    validate_transaction_parsed,
+    compute_epoch_votes, compute_next_params, validate_transaction_parsed,
     voting::{derive_activated_script_version, select_candidate_votes},
-    CheckedTransaction, CostAccumulator, JitCost, ProtocolParams, TransactionContext,
-    TxValidationCtx, UtxoView,
+    ActiveProtocolParameters, ChainHeaderReader, ChainHeaderReaderError, CheckedTransaction,
+    CostAccumulator, ErgoValidationSettings, ErgoValidationSettingsUpdate, HeaderView, JitCost,
+    ProtocolParams, TransactionContext, TxValidationCtx, UtxoView, VotingSettings,
 };
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
+
+/// Rule 215 (`hdrVotesUnknown`). When this rule is soft-fork-disabled (mainnet
+/// 6.0 carries `rules_to_disable=[215,409]`) an epoch-start header may seed
+/// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
+const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
 use crate::candidate_selection::{select_user_txs, CandidateOverlay};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
 use crate::emission_rules::MonetarySettings;
 use crate::error::MiningError;
-use crate::extension_builder::{build_candidate_extension_fields, is_epoch_boundary_mainnet};
+use crate::extension_builder::build_candidate_extension_fields;
 use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
 use crate::state_view::CandidateStateView;
 use crate::storage_rent_claim::build_budget_bounded_rent_claim;
@@ -154,6 +166,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     chain_config: &DifficultyParams,
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &BTreeMap<u8, i64>,
+    voting_settings: &VotingSettings,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
@@ -162,13 +175,6 @@ pub fn generate_candidate<V: CandidateStateView>(
     let parent_height = view.best_full_block_height();
     let candidate_height = parent_height + 1;
     let mut timings = PhaseTimings::default();
-
-    if is_epoch_boundary_mainnet(candidate_height) {
-        return Err(MiningError::InvalidConfig(format!(
-            "epoch-boundary candidate at h={candidate_height} not supported in v1 \
-             (proposed-update + validation-settings encoding deferred)"
-        )));
-    }
 
     let parent_header_bytes = view
         .get_header_bytes(&parent_id)
@@ -192,20 +198,83 @@ pub fn generate_candidate<V: CandidateStateView>(
     let (active_params, validation_settings) = view.tip_snapshot_params().map_err(state_err)?;
     let last_headers = view.last_applied_chain_window_10().map_err(state_err)?;
 
-    // 2b. Reduce the operator's configured voting targets to the header-votes
-    //     triple. Pure + consensus-safe: `select_candidate_votes` only ever
-    //     emits a combination that passes the header-votes validator (rules
-    //     212/213/214/215). Epoch-start awareness is tied to the SAME period
-    //     the rest of the builder uses (`is_epoch_boundary_mainnet`, the
-    //     `MAINNET_VOTING_LENGTH` the extension encoder + the epoch refusal at
-    //     the top of this fn key on): at an epoch start, rule 215 admits only
-    //     known increases, so the selector drops decreases + id 9 there. In
-    //     practice this is always `false` at this point — an epoch-boundary
-    //     candidate already early-returned above — but deriving it (rather than
-    //     hardcoding `false`) keeps the votes safe-by-construction if that
-    //     refusal is ever lifted. Empty targets ⇒ `[0,0,0]`.
-    let is_epoch_start = is_epoch_boundary_mainnet(candidate_height);
-    let candidate_votes = select_candidate_votes(&active_params, voting_targets, is_epoch_start);
+    // 2b. Epoch-boundary recompute. At a voting-epoch start the candidate's
+    //     extension must carry the recomputed parameter map + cumulative
+    //     validation settings, and its header version is the RECOMPUTED version
+    //     (exBlockVersion, rule 410). We run the SAME `compute_next_params` the
+    //     block validator runs (`block_proc.rs`), so a peer re-running it accepts
+    //     the block by construction. Off-boundary ⇒ `None`, version unchanged.
+    //     NB: the block's transactions still validate under the PREVIOUS epoch's
+    //     params (`active_params`) — Scala applies the recomputed set only from
+    //     the next block — so tx selection below is unaffected.
+    let is_epoch_start =
+        candidate_height > 0 && candidate_height.is_multiple_of(voting_settings.voting_length);
+    let epoch_payload = if is_epoch_start {
+        // Mode 2 (UTXO-snapshot) bootstrap: until the first post-snapshot
+        // boundary block is APPLIED, the view's cumulative validation settings
+        // are still launch defaults (the validator accepts that boundary only
+        // via its one-shot trust path). If THIS node were to mine that boundary,
+        // it would serialize an empty/partial `0x02` block omitting the real
+        // pre-snapshot rules (e.g. mainnet 215/409), which full-history peers
+        // reject on `exMatchValidationSettings`. Refuse the candidate ONLY while
+        // the settings are genuinely untrusted (sentinel armed AND still
+        // launch-empty) — a stale armed sentinel whose settings are already
+        // seeded mines correctly. The engine skips this one block; boundary
+        // mining resumes once the first boundary apply seeds the real settings.
+        let mode2_trust_armed = view.mode2_trust_first_epoch_armed().map_err(state_err)?;
+        if mode2_settings_untrusted(mode2_trust_armed, &validation_settings) {
+            return Err(MiningError::InvalidConfig(format!(
+                "epoch-boundary candidate at h={candidate_height} refused: Mode 2 \
+                 snapshot trust is armed and the local cumulative validation settings \
+                 are not yet established, so the serialized extension would be rejected \
+                 by full-history peers. Boundary mining resumes after the first \
+                 post-snapshot boundary block is applied."
+            )));
+        }
+        // Tally the just-finished epoch's votes exactly as the validator does
+        // (`compute_epoch_votes` over the same canonical headers), then run the
+        // pure recompute.
+        let reader = ViewChainHeaderReader { view };
+        let epoch_votes =
+            compute_epoch_votes(&reader, candidate_height, voting_settings.voting_length).map_err(
+                |e| MiningError::StateRead {
+                    op: "compute_epoch_votes",
+                    reason: e.to_string(),
+                },
+            )?;
+        Some(compute_epoch_payload(
+            &active_params,
+            &validation_settings,
+            &epoch_votes,
+            candidate_height,
+            voting_settings,
+        )?)
+    } else {
+        None
+    };
+    let block_version = epoch_payload
+        .as_ref()
+        .map(|p| p.computed.block_version)
+        .unwrap_or(active_params.block_version);
+
+    // 2c. Operator votes. At an epoch start these SEED the new epoch's ballot
+    //     (so subsequent in-epoch votes for the same id count); off-boundary
+    //     they reinforce an already-seeded id. Votes are selected against the
+    //     table that takes effect for the epoch being voted on — the RECOMPUTED
+    //     set at an epoch start (`vote_selection_params`), so a target the
+    //     just-finished epoch already reached isn't re-voted and a parameter
+    //     that becomes votable only now (e.g. subblocksPerBlock at EIP-37
+    //     activation) can be seeded. `select_candidate_votes` only ever emits a
+    //     triple the header-votes validator accepts; at an epoch start the
+    //     suppression of decreases / id 9 follows the live rule-215 status
+    //     (disabled by mainnet 6.0). Empty targets ⇒ `[0,0,0]`.
+    let rule_215_disabled = validation_settings.is_rule_disabled(RULE_HDR_VOTES_UNKNOWN);
+    let candidate_votes = select_candidate_votes(
+        vote_selection_params(&active_params, epoch_payload.as_ref()),
+        voting_targets,
+        is_epoch_start,
+        rule_215_disabled,
+    );
 
     // 3. Difficulty retarget (or parent's nBits when non-recalc)
     let epoch_len = epoch_length_for_height(candidate_height, chain_config);
@@ -225,9 +294,11 @@ pub fn generate_candidate<V: CandidateStateView>(
         .unwrap_or(parent_header.timestamp + 1);
     let timestamp = std::cmp::max(now_ms, parent_header.timestamp + 1);
 
-    // 5. Build pre-header.
+    // 5. Build pre-header. At an epoch boundary the version is the RECOMPUTED
+    //    one (a soft-fork activation bumps it here); off-boundary it equals
+    //    `active_params.block_version`.
     let pre_header = CandidatePreHeader {
-        version: active_params.block_version,
+        version: block_version,
         parent_id,
         height: candidate_height,
         timestamp,
@@ -247,7 +318,12 @@ pub fn generate_candidate<V: CandidateStateView>(
         last_block_utxo_root,
     };
 
-    // 7. Build extension fields (non-epoch path: interlinks-only).
+    // 7. Build extension fields: interlinks always, plus — at an epoch
+    //    boundary — the recomputed `0x00` parameter map (with the carried-
+    //    forward `proposed_update` at id 124) and the `0x02` cumulative
+    //    validation-settings chunks. Both are the exact inverse of the parser
+    //    the validator runs, so the serialized extension re-parses to the same
+    //    params/settings the validator recomputes.
     let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
     let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
     // A non-genesis parent must carry interlinks; an empty set means its stored
@@ -260,11 +336,16 @@ pub fn generate_candidate<V: CandidateStateView>(
             reason: "non-genesis parent extension carries no interlinks fields".into(),
         });
     }
+    let epoch_boundary_fields = epoch_payload
+        .as_ref()
+        .map(|p| p.extension_fields())
+        .unwrap_or_default();
     let extension_fields = build_candidate_extension_fields(
         &parent_header,
         &parent_interlinks,
         candidate_height,
-        crate::extension_builder::MAINNET_VOTING_LENGTH,
+        voting_settings.voting_length,
+        &epoch_boundary_fields,
     )?;
 
     // 8. Coinbase: emission tx. Three regimes:
@@ -674,6 +755,153 @@ fn state_err(e: ergo_state::store::StateError) -> MiningError {
     }
 }
 
+/// Recomputed data an epoch-boundary candidate must carry: the next-epoch
+/// active parameter set (whose serialized `0x00` fields + `block_version` the
+/// header uses) and the cumulative validation-settings update (`0x02` fields).
+#[derive(Debug)]
+struct EpochBoundaryPayload {
+    /// Next-epoch active params from `compute_next_params` — the SAME value the
+    /// block validator recomputes, so its serialized `0x00` fields satisfy
+    /// `exMatchParameters` and its `block_version` satisfies `exBlockVersion`.
+    computed: ActiveProtocolParameters,
+    /// Cumulative `ErgoValidationSettings.update_from_initial` after applying
+    /// this epoch's `activated_update` — its serialized `0x02` chunks satisfy
+    /// `exMatchValidationSettings`. Empty on chains/heights with no activated
+    /// validation-settings update (e.g. all of mainnet through v3).
+    cumulative: ErgoValidationSettingsUpdate,
+}
+
+impl EpochBoundaryPayload {
+    /// The `0x00` parameter fields + `0x02` validation-settings chunks for the
+    /// extension, in a deterministic order (params then settings) so the
+    /// off-loop and on-loop builds produce byte-identical extensions.
+    fn extension_fields(&self) -> Vec<([u8; 2], Vec<u8>)> {
+        let mut fields = active_params_to_extension_fields(&self.computed);
+        fields.extend(validation_settings_update_to_extension_fields(
+            &self.cumulative,
+        ));
+        fields
+    }
+}
+
+/// [`ChainHeaderReader`] over a [`CandidateStateView`]: resolves a height to its
+/// canonical applied-chain header and projects the `votes` the epoch tally
+/// needs. Used only at an epoch boundary, walking the just-finished epoch.
+struct ViewChainHeaderReader<'a, V: CandidateStateView> {
+    view: &'a V,
+}
+
+impl<V: CandidateStateView> ChainHeaderReader for ViewChainHeaderReader<'_, V> {
+    fn header_at(&self, height: u32) -> Result<HeaderView, ChainHeaderReaderError> {
+        let backend = |msg: String| ChainHeaderReaderError::Backend {
+            height,
+            source: Box::new(std::io::Error::other(msg)),
+        };
+        let id = self
+            .view
+            .header_id_at_height(height)
+            .map_err(|e| backend(format!("header_id_at_height h={height}: {e:?}")))?
+            .ok_or(ChainHeaderReaderError::NotFound(height))?;
+        let bytes = self
+            .view
+            .get_header_bytes(&id)
+            .map_err(|e| backend(format!("get_header_bytes h={height}: {e:?}")))?
+            .ok_or(ChainHeaderReaderError::NotFound(height))?;
+        let mut r = VlqReader::new(&bytes);
+        let hdr =
+            read_header(&mut r).map_err(|e| backend(format!("decode header h={height}: {e:?}")))?;
+        Ok(HeaderView { votes: hdr.votes })
+    }
+}
+
+/// Whether an epoch-boundary candidate must be refused because the local
+/// cumulative validation settings are NOT yet trustworthy — the Mode 2
+/// (UTXO-snapshot) bootstrap window. This mirrors the validator's trust gate
+/// (`validate_epoch_extension` fires its one-shot trust path only when
+/// `prev_settings.update_from_initial == empty()`): refuse ONLY when the Mode 2
+/// sentinel is armed AND the settings are still launch-empty. A STALE armed
+/// sentinel whose settings are already seeded (crash after the trusted boundary
+/// applied but before `consume`, or a best-effort persisted-clear that failed)
+/// can serialize the real `0x02` block correctly, so it is NOT refused; and
+/// legitimately-empty pre-soft-fork settings on a normal node (sentinel not
+/// armed) mine normally.
+fn mode2_settings_untrusted(
+    mode2_trust_armed: bool,
+    validation_settings: &ErgoValidationSettings,
+) -> bool {
+    mode2_trust_armed
+        && validation_settings.update_from_initial == ErgoValidationSettingsUpdate::empty()
+}
+
+/// The active parameter table the operator's votes are selected against. At an
+/// epoch start the votes seed the NEW epoch, whose table is the recomputed
+/// `epoch_payload.computed` set — selecting against it avoids re-voting a target
+/// the just-finished epoch already reached, and lets a parameter that first
+/// becomes present in the new epoch (e.g. `subblocksPerBlock` at EIP-37
+/// activation) be seeded in its first active epoch. Off-boundary,
+/// `active_params` IS the live table.
+fn vote_selection_params<'a>(
+    active_params: &'a ActiveProtocolParameters,
+    epoch_payload: Option<&'a EpochBoundaryPayload>,
+) -> &'a ActiveProtocolParameters {
+    epoch_payload.map(|p| &p.computed).unwrap_or(active_params)
+}
+
+/// Run the next-epoch recompute for an epoch-boundary candidate, mirroring the
+/// block validator (`block_proc.rs` → `validate_epoch_extension` →
+/// `compute_next_params`). Pure (the `epoch_votes` tally is supplied by the
+/// caller). The miner runs the IDENTICAL computation the validator will, so a
+/// peer re-running it accepts the produced block by construction:
+///
+/// * `epoch_votes` is the just-finished epoch's tally, from the SAME
+///   [`compute_epoch_votes`] walk the validator performs over the canonical
+///   chain.
+/// * `proposed_update` is CARRIED FORWARD from the previous epoch
+///   (`active_params.proposed_update`), never reset — resetting would disrupt an
+///   in-progress soft-fork vote. This node never casts a soft-fork (120) vote,
+///   so `fork_vote` is `false`.
+/// * the cumulative validation settings are `prev_settings.updated(activated)`.
+///
+/// The genesis-era first boundary (`active_params.epoch_start_height == 0`)
+/// takes Scala's bypass path, which this does not reproduce; a live node is
+/// always far past it, so that case is refused rather than mis-built.
+fn compute_epoch_payload(
+    active_params: &ActiveProtocolParameters,
+    validation_settings: &ErgoValidationSettings,
+    epoch_votes: &[(i8, i32)],
+    candidate_height: u32,
+    voting_settings: &VotingSettings,
+) -> Result<EpochBoundaryPayload, MiningError> {
+    if active_params.epoch_start_height == 0 {
+        return Err(MiningError::InvalidConfig(format!(
+            "genesis-era epoch-boundary candidate at h={candidate_height} not supported \
+             (the previous epoch starts at genesis; the validator's genesis bypass \
+             path is not reproduced here)"
+        )));
+    }
+    // Carry forward the in-flight proposal; never reset to empty.
+    let proposed = active_params.proposed_update.clone();
+    let (computed, activated_update) = compute_next_params(
+        active_params,
+        epoch_votes,
+        false, // we never emit a soft-fork (120) vote
+        &proposed,
+        candidate_height,
+        voting_settings,
+    )
+    .map_err(|e| MiningError::IdComputation {
+        op: "compute_next_params",
+        reason: e.to_string(),
+    })?;
+    let cumulative = validation_settings
+        .updated(&activated_update)
+        .update_from_initial;
+    Ok(EpochBoundaryPayload {
+        computed,
+        cumulative,
+    })
+}
+
 fn load_epoch_headers<V: CandidateStateView>(
     view: &V,
     needed: &[u32],
@@ -978,6 +1206,213 @@ mod tests {
             recovered, oracle,
             "section-byte parser must recover the same interlinks the \
              unpack_interlinks oracle derives from the captured mainnet fields",
+        );
+    }
+
+    // ----- epoch-boundary payload (self-consistency oracle) -----
+
+    /// Build an `Extension` from the payload's `0x00`/`0x02` fields (the parts
+    /// `validate_epoch_extension` reads — interlinks `0x01` are irrelevant to
+    /// it).
+    fn ext_from_payload(payload: &EpochBoundaryPayload) -> Extension {
+        Extension {
+            header_id: ModifierId::from_bytes([0u8; 32]),
+            fields: payload
+                .extension_fields()
+                .into_iter()
+                .map(|(key, value)| ExtensionField { key, value })
+                .collect(),
+        }
+    }
+
+    fn boundary_header(height: u32, version: u8, votes: [u8; 3]) -> Header {
+        use ergo_primitives::digest::{ADDigest, Digest32};
+        use ergo_primitives::group_element::GroupElement;
+        use ergo_ser::autolykos::AutolykosSolution;
+        Header {
+            version,
+            parent_id: Digest32::from_bytes([0u8; 32]).into(),
+            ad_proofs_root: Digest32::from_bytes([0u8; 32]),
+            transactions_root: Digest32::from_bytes([0u8; 32]),
+            state_root: ADDigest::from_bytes([0u8; 33]),
+            timestamp: 1_700_000_000_000,
+            extension_root: Digest32::from_bytes([0u8; 32]),
+            n_bits: 0x0123_4567,
+            height,
+            votes,
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from([0x02u8; 33]),
+                nonce: [0u8; 8],
+            },
+        }
+    }
+
+    /// THE consensus oracle for epoch-boundary mining: the extension + header an
+    /// epoch-boundary candidate would carry must PASS the real block validator
+    /// (`validate_epoch_extension` — the exact path a peer runs in
+    /// `block_proc.rs`), for the SAME epoch-vote tally the miner used. If it
+    /// passes here, peers accept the mined block. Covered: a quiet epoch (no
+    /// votes) and an approved parameter increase.
+    #[test]
+    fn epoch_boundary_payload_passes_validate_epoch_extension() {
+        use ergo_validation::active_params::scala_launch;
+        use ergo_validation::voting::validate_epoch_extension;
+
+        // Second-epoch boundary: prev epoch started at 1024 (non-genesis), so
+        // the recompute path runs (no genesis bypass). Candidate at h=2048.
+        let mut prev_active = scala_launch();
+        prev_active.epoch_start_height = 1024;
+        let prev_settings = ErgoValidationSettings::empty();
+        let vs = VotingSettings::mainnet();
+        let candidate_height = 2048;
+
+        // (label, tally): quiet epoch, then a MaxBlockSize (+3) increase tallied
+        // above the 1024/2 threshold (513+ approves — see recompute tests).
+        let cases: [(&str, Vec<(i8, i32)>); 2] =
+            [("no votes", vec![]), ("approved +3", vec![(3, 600)])];
+
+        for (label, epoch_votes) in cases {
+            let payload = compute_epoch_payload(
+                &prev_active,
+                &prev_settings,
+                &epoch_votes,
+                candidate_height,
+                &vs,
+            )
+            .unwrap_or_else(|e| panic!("compute_epoch_payload [{label}]: {e:?}"));
+
+            let ext = ext_from_payload(&payload);
+            // Header version = the recomputed block_version (exBlockVersion).
+            let header =
+                boundary_header(candidate_height, payload.computed.block_version, [0u8; 3]);
+
+            let outcome = validate_epoch_extension(
+                &ext,
+                &header,
+                &prev_active,
+                &prev_settings,
+                &epoch_votes,
+                &vs,
+                false,
+            )
+            .unwrap_or_else(|e| {
+                panic!("a peer must accept the mined boundary block [{label}]: {e:?}")
+            });
+            // The validator's recompute must equal the miner's — the block's
+            // next-epoch params are exactly what we serialized.
+            assert_eq!(
+                outcome.computed, payload.computed,
+                "validator-computed params must equal the miner's [{label}]",
+            );
+        }
+    }
+
+    #[test]
+    fn epoch_boundary_approved_increase_moves_the_param() {
+        // Sanity that the "approved +3" case is non-trivial: the recomputed
+        // MaxBlockSize actually rises one step above the previous epoch's value,
+        // so the oracle test above is exercising a real parameter change.
+        use ergo_validation::active_params::scala_launch;
+        let mut prev_active = scala_launch();
+        prev_active.epoch_start_height = 1024;
+        let prev_settings = ErgoValidationSettings::empty();
+        let vs = VotingSettings::mainnet();
+        let payload =
+            compute_epoch_payload(&prev_active, &prev_settings, &[(3, 600)], 2048, &vs).unwrap();
+        assert!(
+            payload.computed.max_block_size > prev_active.max_block_size,
+            "an approved +3 tally must raise MaxBlockSize ({} !> {})",
+            payload.computed.max_block_size,
+            prev_active.max_block_size,
+        );
+    }
+
+    #[test]
+    fn epoch_start_votes_select_against_recomputed_not_stale_params() {
+        // codex P2: at an epoch start the seed votes must compare against the
+        // RECOMPUTED table (which takes effect for the new epoch), not the stale
+        // previous-epoch `active_params`. If the just-finished epoch already
+        // moved a configured parameter to its target, selecting against the
+        // stale table emits a pointless seed vote; selecting against `computed`
+        // correctly emits none.
+        use ergo_validation::active_params::scala_launch;
+        use ergo_validation::voting::select_candidate_votes;
+
+        let mut active = scala_launch();
+        active.epoch_start_height = 1024;
+        active.max_block_size = 524_288; // id 3, below the operator's target
+        let mut computed = active.clone();
+        computed.epoch_start_height = 2048;
+        computed.max_block_size = 600_000; // reached the target this recompute
+        let payload = EpochBoundaryPayload {
+            computed,
+            cumulative: ErgoValidationSettingsUpdate::empty(),
+        };
+        let mut targets = BTreeMap::new();
+        targets.insert(3u8, 600_000i64);
+
+        // The wiring picks the recomputed table at an epoch start.
+        let chosen = vote_selection_params(&active, Some(&payload));
+        assert_eq!(chosen.max_block_size, 600_000, "epoch-start uses computed");
+        let votes = select_candidate_votes(chosen, &targets, true, false);
+        assert_eq!(
+            votes,
+            [0, 0, 0],
+            "target already reached in the recomputed table ⇒ no stale seed vote",
+        );
+
+        // The stale path (the bug codex caught) would re-vote the reached target.
+        assert_eq!(
+            select_candidate_votes(&active, &targets, true, false),
+            [3, 0, 0],
+            "selecting against the stale active table would emit a needless +3",
+        );
+
+        // Off-boundary, the live active table is used.
+        assert_eq!(
+            vote_selection_params(&active, None).max_block_size,
+            524_288,
+            "non-boundary uses active_params",
+        );
+    }
+
+    #[test]
+    fn mode2_boundary_refusal_requires_armed_and_empty_settings() {
+        // codex P2: the Mode 2 boundary refusal must mirror the validator's
+        // trust gate — refuse ONLY when the sentinel is armed AND the cumulative
+        // settings are still launch-empty. A STALE armed sentinel (e.g. a crash
+        // after the trusted boundary applied but before `consume`) with settings
+        // already seeded must NOT block boundary mining, and legitimately-empty
+        // pre-6.0 settings (sentinel not armed) must mine normally.
+        let empty = ErgoValidationSettings::empty();
+        let seeded = ErgoValidationSettings::empty().updated(&ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![215, 409],
+            status_updates: vec![],
+        });
+
+        // Mode 2 bootstrap, untrusted launch-default settings → refuse.
+        assert!(mode2_settings_untrusted(true, &empty));
+        // Stale sentinel but settings already seeded → DO NOT refuse.
+        assert!(!mode2_settings_untrusted(true, &seeded));
+        // Not armed (normal node) → never refuse, regardless of settings.
+        assert!(!mode2_settings_untrusted(false, &empty));
+        assert!(!mode2_settings_untrusted(false, &seeded));
+    }
+
+    #[test]
+    fn epoch_boundary_genesis_era_is_refused() {
+        // The first-ever boundary (prev epoch starts at genesis, epoch_start=0)
+        // takes Scala's bypass path we don't reproduce — refuse, don't mis-build.
+        use ergo_validation::active_params::scala_launch;
+        let prev_active = scala_launch(); // epoch_start_height == 0
+        let prev_settings = ErgoValidationSettings::empty();
+        let vs = VotingSettings::mainnet();
+        let err = compute_epoch_payload(&prev_active, &prev_settings, &[], 1024, &vs)
+            .expect_err("genesis-era boundary must be refused");
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref m) if m.contains("genesis-era")),
+            "got {err:?}",
         );
     }
 }

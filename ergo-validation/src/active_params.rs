@@ -307,6 +307,57 @@ pub fn parse_active_params(
     })
 }
 
+/// Serialize an active parameter set into its block-extension fields — the
+/// exact inverse of [`parse_active_params`], mirroring Scala
+/// `Parameters.toExtensionCandidate` (`Parameters.scala:351-370`).
+///
+/// Emits, with the [`SYSTEM_PARAMETERS_PREFIX`] (`0x00`) prefix:
+/// * the eight required numeric params (ids 1..=8) and `block_version`
+///   (id 123) as 4-byte big-endian `i32`;
+/// * `subblocks_per_block` (id 9) when present (post-EIP37 epochs);
+/// * every `extra` `(id, value)` pair (e.g. soft-fork state ids 121/122);
+/// * `proposed_update` at id 124 ([`SOFT_FORK_DISABLING_RULES_ID`]) as a
+///   serialized `ErgoValidationSettingsUpdate` — ALWAYS present, even when
+///   empty (`0x0000`), matching Scala.
+///
+/// Fields are emitted in a fixed, deterministic order (ids 1..=8, 9, 123,
+/// extras ascending, 124) so two builds of the same epoch produce byte-
+/// identical extensions (required for the off-loop/on-loop candidate parity).
+/// Field order does not affect consensus validity — peers re-parse the set
+/// order-independently — but determinism is required for the parity guarantee.
+pub fn active_params_to_extension_fields(
+    params: &ActiveProtocolParameters,
+) -> Vec<([u8; 2], Vec<u8>)> {
+    let p = SYSTEM_PARAMETERS_PREFIX;
+    let be = |v: i32| v.to_be_bytes().to_vec();
+    let mut out: Vec<([u8; 2], Vec<u8>)> = vec![
+        ([p, ids::STORAGE_FEE_FACTOR], be(params.storage_fee_factor)),
+        ([p, ids::MIN_VALUE_PER_BYTE], be(params.min_value_per_byte)),
+        ([p, ids::MAX_BLOCK_SIZE], be(params.max_block_size)),
+        ([p, ids::MAX_BLOCK_COST], be(params.max_block_cost)),
+        ([p, ids::TOKEN_ACCESS_COST], be(params.token_access_cost)),
+        ([p, ids::INPUT_COST], be(params.input_cost)),
+        ([p, ids::DATA_INPUT_COST], be(params.data_input_cost)),
+        ([p, ids::OUTPUT_COST], be(params.output_cost)),
+    ];
+    if let Some(v) = params.subblocks_per_block {
+        out.push(([p, ids::SUBBLOCKS_PER_BLOCK], be(v)));
+    }
+    out.push(([p, ids::BLOCK_VERSION], be(params.block_version as i32)));
+    // `extra` carries non-numeric-but-i32 keys the parser preserved (soft-fork
+    // state 121/122, any forward-compatible ids). Ascending for determinism.
+    let mut extras = params.extra.clone();
+    extras.sort_by_key(|(id, _)| *id);
+    for (id, value) in extras {
+        out.push(([p, id], be(value)));
+    }
+    out.push((
+        [p, SOFT_FORK_DISABLING_RULES_ID],
+        params.proposed_update.serialize(),
+    ));
+    out
+}
+
 /// `softForkStartingHeight` (id 122) and `softForkVotesCollected` (id
 /// 121) accessors. The soft-fork voting state machine reads these
 /// without lifting them out of `extra`, so the persisted codec stays

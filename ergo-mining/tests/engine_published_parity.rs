@@ -429,6 +429,7 @@ fn handle(regime: &Regime) -> MiningHandle {
         MonetarySettings::mainnet(),
         regime.reemission.clone(),
         DifficultyParams::mainnet(),
+        ergo_validation::VotingSettings::mainnet(),
     )
 }
 
@@ -467,6 +468,7 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("on-loop generate_candidate ok")
     .expect("on-loop candidate is Some");
@@ -801,6 +803,7 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -933,6 +936,7 @@ fn generate_candidate_measures_phase_timings() {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -1026,6 +1030,7 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect_err("non-genesis parent without interlinks must fail the build");
 
@@ -1080,6 +1085,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("minimal generate_candidate ok")
     .expect("minimal candidate is Some");
@@ -1095,6 +1101,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
@@ -1180,6 +1187,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("minimal generate_candidate ok")
     .expect("minimal candidate is Some");
@@ -1195,6 +1203,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
@@ -1279,6 +1288,7 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("off-loop generate_candidate ok")
     .expect("off-loop candidate is Some");
@@ -1403,6 +1413,7 @@ fn generated_candidate_emits_configured_param_votes() {
         &DifficultyParams::mainnet(),
         &[],
         &targets,
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -1431,6 +1442,7 @@ fn generated_candidate_emits_neutral_votes_without_targets() {
         &DifficultyParams::mainnet(),
         &[],
         &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");

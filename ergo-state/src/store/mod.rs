@@ -299,7 +299,7 @@ pub(crate) const DATA_DIR_STATE_TYPE_KEY: &str = "data_dir_state_type";
 /// the chained block carries the pre-snapshot cumulative
 /// validation_settings (mainnet has activated rules 215 + 409 and
 /// status updates for 1007/1008/1011 prior to this snapshot height).
-const MODE2_TRUST_FIRST_EPOCH_KEY: &str = "mode2_trust_first_epoch";
+pub(crate) const MODE2_TRUST_FIRST_EPOCH_KEY: &str = "mode2_trust_first_epoch";
 
 /// Persistent UTXO-bootstrap provenance marker. Written exactly
 /// once during `install_snapshot_state` and NEVER cleared. Distinct
