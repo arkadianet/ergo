@@ -428,6 +428,10 @@ mod tests {
             ValidationErr::Structural
         ));
         assert!(matches!(
+            map_validation_error(ValidationError::NoOutputs),
+            ValidationErr::Structural
+        ));
+        assert!(matches!(
             map_validation_error(ValidationError::DuplicateInput { index: 0 }),
             ValidationErr::Structural
         ));
@@ -457,6 +461,14 @@ mod tests {
         assert!(matches!(
             map_validation_error(ValidationError::InvalidMinting {
                 token_id: "x".into()
+            }),
+            ValidationErr::MonetaryFailed
+        ));
+        assert!(matches!(
+            map_validation_error(ValidationError::NonPositiveTokenAmount {
+                index: 0,
+                token_id: "x".into(),
+                amount: 0
             }),
             ValidationErr::MonetaryFailed
         ));
