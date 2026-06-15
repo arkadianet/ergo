@@ -1852,7 +1852,7 @@ async fn peers_connect_handler(
     responses(
         (status = 200, description = "Node is healthy (synced and connected)",
          body = ApiHealth, content_type = "application/json"),
-        (status = 503, description = "Node is stalled or disconnected",
+        (status = 503, description = "Node is stalled, disconnected, or rejecting blocks",
          body = ApiHealth, content_type = "application/json"),
     ),
 )]
