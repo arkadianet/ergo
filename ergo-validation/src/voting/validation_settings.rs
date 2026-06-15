@@ -89,8 +89,14 @@ pub fn validation_settings_update_to_extension_fields(
         .map(|(idx, chunk)| {
             // Chunk index lives in key[1]; the parser sorts by it. A cumulative
             // update large enough to exceed 255 chunks (u8 index) cannot occur
-            // for any real validation-settings table, so the cast is safe.
-            ([VALIDATION_RULES_PREFIX, idx as u8], chunk.to_vec())
+            // for any real validation-settings table (the table is a handful of
+            // rule rows, far under 255 * EXTENSION_FIELD_VALUE_MAX bytes). Use a
+            // checked conversion rather than a silent `as u8` truncation, which
+            // would otherwise collide chunk keys and produce non-invertible
+            // output: surface the impossible as a panic, never wrong bytes.
+            let key_idx = u8::try_from(idx)
+                .expect("validation-settings chunk index exceeds 255 (unreachable)");
+            ([VALIDATION_RULES_PREFIX, key_idx], chunk.to_vec())
         })
         .collect()
 }

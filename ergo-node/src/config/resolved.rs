@@ -169,8 +169,9 @@ pub struct NodeConfig {
     /// `--mining-public-key`. Validated at startup before the mining
     /// task is spawned so a misconfigured node refuses to start.
     pub mining_config: ergo_mining::MiningConfig,
-    /// `[voting.targets]` resolved to signed-i8 parameter ids (stored as
-    /// `u8`) → operator target values. Empty ⇒ the node mines with neutral
+    /// `[voting.targets]` resolved to votable parameter ids (`u8` — the vote
+    /// *encoding* in the header triple is signed `±id`, but the id itself is
+    /// unsigned) → operator target values. Empty ⇒ the node mines with neutral
     /// votes. Each entry's name was validated against the votable set at
     /// config load; threaded into the `MiningHandle` at boot so the candidate
     /// builder casts at most `ParamVotesCount` (2) votes per block toward

@@ -27,7 +27,12 @@ use ergo_validation::voting::validation_settings::{
 use serde_json::Value;
 
 fn load_fixtures() -> Vec<Value> {
-    let path = "../test-vectors/mainnet/epoch_boundary_extensions.json";
+    // Anchor to the crate dir so the fixture loads regardless of the test
+    // runner's cwd (matches the repo's other vector-loading tests).
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-vectors/mainnet/epoch_boundary_extensions.json"
+    );
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
     serde_json::from_str(&text).expect("parse fixture json")
 }
@@ -108,22 +113,25 @@ fn validation_settings_serializer_reproduces_real_mainnet_settings_fields() {
 
         let mine = validation_settings_update_to_extension_fields(&cumulative);
 
-        // Concatenate both sides' 0x02 chunk values in chunk-index order and
-        // compare — the parser concatenates chunks then deserializes, so the
-        // consensus-relevant artifact is the concatenation.
-        let concat = |fields: &[([u8; 2], Vec<u8>)]| -> Vec<u8> {
-            let mut chunks: Vec<(u8, Vec<u8>)> = fields
+        // Compare the FULL 0x02 (key, value) field set, not just the
+        // concatenation: the extension Merkle root commits to each field
+        // individually, so a chunk-boundary / key[1]-index divergence that
+        // re-concatenates to the same bytes would still produce a different
+        // `extension_root` and be rejected on-chain. Sort by key so field
+        // ordering doesn't matter.
+        let sys_02 = |fields: &[([u8; 2], Vec<u8>)]| -> Vec<([u8; 2], Vec<u8>)> {
+            let mut v: Vec<([u8; 2], Vec<u8>)> = fields
                 .iter()
                 .filter(|(k, _)| k[0] == 0x02)
-                .map(|(k, v)| (k[1], v.clone()))
+                .cloned()
                 .collect();
-            chunks.sort_by_key(|(idx, _)| *idx);
-            chunks.into_iter().flat_map(|(_, v)| v).collect()
+            v.sort_by_key(|(k, _)| *k);
+            v
         };
         assert_eq!(
-            concat(&mine),
-            concat(&real),
-            "0x02 settings bytes must match the real mainnet block at h={height}",
+            sys_02(&mine),
+            sys_02(&real),
+            "0x02 settings (key, value) fields must match the real mainnet block at h={height}",
         );
         // Round-trip: my fields re-parse to the same cumulative update.
         let reparsed = parse_validation_settings_update(&ext_from_fields(&mine)).unwrap();
