@@ -786,7 +786,16 @@ fn handle_inbound_popow_proof(
 
     // Step 3: hand to reducer + verifier.
     let result = match state.popow_bootstrap.as_mut() {
-        Some(popow) => popow.on_proof_received(peer, proof),
+        Some(popow) => match popow.on_proof_received(peer, proof) {
+            Some(r) => r,
+            None => {
+                // Scala parity (ErgoNodeViewSynchronizer.scala:1066): a
+                // duplicate proof from a peer already counted toward quorum
+                // is dropped before the verifier with no penalty.
+                info!(peer = %peer, "NiPoPoW: duplicate proof from already-counted peer, dropping");
+                return Vec::new();
+            }
+        },
         None => return Vec::new(),
     };
 

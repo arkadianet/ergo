@@ -17,7 +17,7 @@ use ergo_ser::ad_proofs::read_ad_proofs;
 use ergo_ser::block_transactions::read_block_transactions;
 use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
-use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS};
+use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS, TYPE_EXTENSION};
 use ergo_state::store::StateStore;
 use ergo_state::{ChainStateRead, DigestStateStore, HeaderSectionStore};
 use ergo_validation::block::{
@@ -518,11 +518,28 @@ fn process_block_utxo(
     let t_parent_ctx = t_parent_ctx_start.elapsed();
 
     // 7. Build validation context.
-    // Parent extension is plumbed through `None` for now; rules
-    // 401/402 (NiPoPoW interlinks) will fire once the store
-    // surfaces a `get_extension(parent_id)` accessor. Matches Scala's
-    // recoverable `exIlUnableToValidate` path when the parent
-    // extension isn't available — non-fatal, validator falls through.
+    // Rules 401/402 (NiPoPoW interlinks): load the parent's extension so the
+    // validator runs the strict Some/Some branch of Scala's
+    // `ExtensionValidator.validateInterlinks`. The parent was applied before
+    // this child, so its extension section is in-store on the normal forward
+    // path. An absent section (pruned, or a deep-reorg parent) falls through to
+    // `None` — Scala's recoverable `exIlUnableToValidate` (rule 413). A PRESENT
+    // but undecodable section is store corruption, surfaced as a hard error,
+    // never silently coerced to `None` (which would mask a real reject).
+    let parent_extension =
+        {
+            let parent_ext_id = compute_section_id(
+                TYPE_EXTENSION,
+                &parent_id,
+                parent_checked.header().extension_root.as_bytes(),
+            );
+            match store.get_block_section(&parent_ext_id)? {
+                Some(bytes) => Some(read_extension(&mut VlqReader::new(&bytes)).map_err(|e| {
+                    BlockProcessError::Deserialize(format!("parent extension: {e:?}"))
+                })?),
+                None => None,
+            }
+        };
     let voting_settings = store.voting_settings();
     let voting_length = voting_settings.voting_length;
     // Rule 407 soft-fork-vote state. Sourced from active_params'
@@ -590,7 +607,7 @@ fn process_block_utxo(
         params,
         voting_length,
         votes_unknown_rule_disabled,
-        parent_extension: None,
+        parent_extension: parent_extension.as_ref(),
         soft_fork_state,
         last_headers,
         script_validation_checkpoint,
@@ -1088,13 +1105,30 @@ fn process_block_digest(
         store.validation_settings().is_rule_disabled(212),
     )
     .map_err(ergo_validation::block::BlockValidationError::Header)?;
+    // Rules 401/402 (NiPoPoW interlinks) — load the parent's extension; see the
+    // UTXO arm for the full rationale. Absent → None (Scala recoverable rule
+    // 413); present-but-undecodable → hard error, never silently None.
+    let parent_extension =
+        {
+            let parent_ext_id = compute_section_id(
+                TYPE_EXTENSION,
+                &parent_id,
+                parent_checked.header().extension_root.as_bytes(),
+            );
+            match store.get_block_section(&parent_ext_id)? {
+                Some(bytes) => Some(read_extension(&mut VlqReader::new(&bytes)).map_err(|e| {
+                    BlockProcessError::Deserialize(format!("parent extension: {e:?}"))
+                })?),
+                None => None,
+            }
+        };
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: &digest_view,
         params,
         voting_length,
         votes_unknown_rule_disabled,
-        parent_extension: None,
+        parent_extension: parent_extension.as_ref(),
         soft_fork_state,
         last_headers,
         script_validation_checkpoint,
