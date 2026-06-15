@@ -1,7 +1,7 @@
 use ergo_primitives::reader::{ReadError, VlqReader};
 
 use crate::sigma_type::{decode_type, read_type, SigmaType};
-use crate::sigma_value::{read_value, SigmaValue};
+use crate::sigma_value::{read_value_at_depth, SigmaValue};
 
 use super::types::{
     method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr, IrNode, Payload,
@@ -50,7 +50,10 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
     if first <= LAST_CONSTANT_CODE {
         // Inline constant: first byte is a type code
         let tpe = decode_type(r, first)?;
-        let val = read_value(r, &tpe)?;
+        // Thread the current expression depth into the constant's value so a
+        // nested SigmaProp continues the shared MaxTreeDepth budget (Scala's
+        // single CoreByteReader.level across expr + value + SigmaBoolean).
+        let val = read_value_at_depth(r, &tpe, depth)?;
         // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
         // (Scala DataSerializer.deserialize(SHeader)). The gate fires PER
         // materialized header, so a constant that actually CARRIES a header
