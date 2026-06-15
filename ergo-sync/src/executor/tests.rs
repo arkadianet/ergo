@@ -124,6 +124,74 @@ fn full_chain_fork_point_detects_best_header_branch_switch() {
     );
 }
 
+// ----- error paths -----
+
+/// RD-02 — a best-header branch that forks more than `ROLLBACK_WINDOW` blocks
+/// below the full-block tip must NOT yield a fork point. The state layer can
+/// only roll back the last `ROLLBACK_WINDOW` blocks (its undo log is pruned
+/// past that), so proposing the genesis fork would hand the executor a
+/// `target_height` whose `rollback_to` is doomed (`StateError::ReorgTooDeep`)
+/// and which it would re-attempt — and re-fail — every tick. The capped walk
+/// declines (`Ok(None)`) instead of walking to genesis and returning
+/// `Some((0, [0; 32]))`.
+#[test]
+fn full_chain_fork_point_caps_at_rollback_window() {
+    use ergo_state::store::ROLLBACK_WINDOW;
+
+    let mut store = open_initialized_store();
+    let depth = ROLLBACK_WINDOW + 2; // 202: just past the window
+
+    // Branch A — the applied full-block chain, tip at `depth`.
+    let mut parent = [0u8; 32];
+    for h in 1..=depth {
+        parent = apply_empty_block(&mut store, h, parent);
+    }
+    assert_eq!(store.chain_state().best_full_block_height, depth);
+
+    // Branch B — a header-only chain forking at genesis, so it diverges from
+    // branch A at every height `1..=depth` (common ancestor = genesis, fork
+    // depth == `depth` > ROLLBACK_WINDOW). Marking its tip best forces the
+    // best-header chain index onto branch B, so `get_header_id_at_height`
+    // resolves to branch B for the whole descent.
+    let b_id = |h: u32| {
+        let mut idb = [0xB0u8; 32];
+        idb[0] = (h >> 8) as u8;
+        idb[1] = h as u8;
+        idb
+    };
+    let mut b_parent = [0u8; 32];
+    for h in 1..=depth {
+        let this = b_id(h);
+        // `new_best = Some(..)` forces the best-header tip unconditionally
+        // (no score comparison), so a trivial score suffices for the tip.
+        let new_best = (h == depth).then(|| (depth, vec![0xFFu8; 8]));
+        store
+            .store_validated_header(
+                &this,
+                &[0xB0; 8],
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: b_parent,
+                    height: h,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: h as u64,
+                },
+                new_best,
+            )
+            .unwrap();
+        b_parent = this;
+    }
+    assert_eq!(store.chain_state().best_header_id, b_id(depth));
+    assert_eq!(store.chain_state().best_full_block_height, depth);
+
+    let executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let store = ergo_state::StateBackendKind::Utxo(store);
+    assert_eq!(executor.full_chain_fork_point(&store).unwrap(), None);
+}
+
 #[test]
 fn full_chain_reorg_rolls_back_without_marking_new_branch_invalid() {
     let mut store = open_initialized_store();
