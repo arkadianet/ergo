@@ -675,8 +675,8 @@ fn error_depth_limit() {
         .unwrap();
     let err = result.unwrap_err();
     assert!(
-        matches!(err, ReadError::InvalidData(ref msg) if msg.contains("depth")),
-        "expected depth error, got: {err:?}"
+        matches!(err, ReadError::DepthLimitExceeded { max } if max == MAX_EXPR_DEPTH),
+        "expected depth-limit error, got: {err:?}"
     );
 }
 

@@ -652,10 +652,13 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
 }
 
 fn read_sigma_boolean_at_depth(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
-    if depth > MAX_SIGMA_TREE_DEPTH {
-        return Err(ReadError::InvalidData(format!(
-            "SigmaBoolean recursion depth exceeds maximum ({MAX_SIGMA_TREE_DEPTH})"
-        )));
+    // `>=`: depth is 0-based (root enters at 0) while Scala increments the
+    // shared reader level BEFORE parsing each nested node, so Rust `depth` ==
+    // Scala `level - 1`; `depth >= MAX` matches Scala's `level > MaxTreeDepth`.
+    if depth >= MAX_SIGMA_TREE_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: MAX_SIGMA_TREE_DEPTH,
+        });
     }
     let tag = r.get_u8()?;
     let next = depth + 1;
@@ -1364,9 +1367,35 @@ mod tests {
         let mut r = VlqReader::new(&data);
         let err = read_value(&mut r, &SigmaType::SSigmaProp).unwrap_err();
         assert!(
-            matches!(err, ReadError::InvalidData(ref m) if m.contains("depth")),
+            matches!(err, ReadError::DepthLimitExceeded { max } if max == MAX_SIGMA_TREE_DEPTH),
             "expected depth-limit error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn read_sigma_boolean_depth_boundary_matches_scala() {
+        // Scala rejects the 110-deep chain (level reaches 111 before the leaf)
+        // and accepts the 109-deep one. With a 0-based counter and `depth >=
+        // MAX`, our leaf sits at depth == (#Cand), so 110 Cands reject and 109
+        // accept — the exact Scala boundary.
+        let chain = |n: usize| {
+            let mut sb = SigmaBoolean::TrivialProp(true);
+            for _ in 0..n {
+                sb = SigmaBoolean::Cand(vec![sb]);
+            }
+            let mut w = VlqWriter::new();
+            write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
+            w.result()
+        };
+        // 109 Cands: accepted.
+        let ok = chain(MAX_SIGMA_TREE_DEPTH - 1);
+        assert!(read_value(&mut VlqReader::new(&ok), &SigmaType::SSigmaProp).is_ok());
+        // 110 Cands: rejected (matches Scala level 111 > MaxTreeDepth).
+        let bad = chain(MAX_SIGMA_TREE_DEPTH);
+        assert!(matches!(
+            read_value(&mut VlqReader::new(&bad), &SigmaType::SSigmaProp).unwrap_err(),
+            ReadError::DepthLimitExceeded { .. }
+        ));
     }
 
     // ===== 3. Collection roundtrips =====

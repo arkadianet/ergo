@@ -36,10 +36,14 @@ pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError
 /// Public so that register values — which are serialized as arbitrary
 /// evaluated expressions, not just plain constants — can be parsed.
 pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<Expr, ReadError> {
-    if depth > MAX_EXPR_DEPTH {
-        return Err(ReadError::InvalidData(format!(
-            "expression depth exceeds maximum ({MAX_EXPR_DEPTH})"
-        )));
+    // `>=`: depth is 0-based here (root enters at 0), while Scala's shared
+    // reader level is incremented BEFORE parsing each nested value, so Rust
+    // `depth` == Scala `level - 1`. Rejecting at `depth >= MAX_EXPR_DEPTH`
+    // therefore matches Scala's `level > MaxTreeDepth` boundary exactly.
+    if depth >= MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: MAX_EXPR_DEPTH,
+        });
     }
     let first = r.get_u8()?;
 
