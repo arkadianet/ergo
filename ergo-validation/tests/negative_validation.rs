@@ -363,6 +363,90 @@ fn reject_token_sum_over_i64_max() {
     assert!(matches!(err, ValidationError::TokenNotConserved { .. }));
 }
 
+// --- Structural: zero outputs (Scala txNoOutputs, rule 101) ---
+
+#[test]
+fn reject_no_outputs() {
+    // Scala rejects a zero-output tx in validateStateless (txNoOutputs). The
+    // wire codec accepts an empty output vector, so without the guard it would
+    // be accepted.
+    let tx = Transaction {
+        inputs: vec![make_input(1)],
+        data_inputs: vec![],
+        output_candidates: vec![], // zero outputs
+    };
+    let tx_bytes = serialize_tx(&tx);
+    let utxo = TestUtxo(HashMap::new());
+    let mut cost = CostAccumulator::recording_only();
+    let ctx = default_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let policy = LocalPolicy::default_policy();
+    let mut tx_cx = ergo_validation::TxValidationCtx {
+        ctx: &ctx,
+        params: &params,
+        cost: &mut cost,
+        last_headers: &[],
+    };
+
+    let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
+    assert!(matches!(err, ValidationError::NoOutputs));
+}
+
+// --- Monetary: non-positive output token amount (Scala txPositiveAssets, 108) ---
+
+#[test]
+fn reject_zero_amount_output_token() {
+    // Scala `txPositiveAssets` requires every output token amount > 0. A
+    // 0-amount token satisfies conservation (0 <= input, or mint) so without
+    // the rule-108 check it is accepted.
+    let input_box = make_ergo_box(2_000_000_000, 1);
+    let input_box_id = input_box.box_id().unwrap();
+    let mut utxo_map = HashMap::new();
+    utxo_map.insert(input_box_id, input_box);
+    let utxo = TestUtxo(utxo_map);
+
+    let output = ErgoBoxCandidate::new(
+        2_000_000_000, // ERG conserved (only the token rule should fire)
+        simple_tree(),
+        100,
+        vec![Token {
+            token_id: input_box_id,
+            amount: 0,
+        }],
+        AdditionalRegisters::empty(),
+    )
+    .unwrap();
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: input_box_id,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![output],
+    };
+    let tx_bytes = serialize_tx(&tx);
+    let mut cost = CostAccumulator::recording_only();
+    let ctx = default_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let policy = LocalPolicy::default_policy();
+    let mut tx_cx = ergo_validation::TxValidationCtx {
+        ctx: &ctx,
+        params: &params,
+        cost: &mut cost,
+        last_headers: &[],
+    };
+
+    let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
+    assert!(matches!(
+        err,
+        ValidationError::NonPositiveTokenAmount {
+            index: 0,
+            amount: 0,
+            ..
+        }
+    ));
+}
+
 // --- Cost accumulator: recording vs enforcing ---
 
 #[test]

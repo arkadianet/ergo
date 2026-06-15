@@ -1461,9 +1461,37 @@ impl SyncExecutor {
             return Ok(None);
         }
 
+        // RD-02 — the deepest reorg the active backend can serve. The UTXO
+        // store prunes its undo log past ROLLBACK_WINDOW; the digest store
+        // retains full history (unbounded → `None`), so a digest node must
+        // still be allowed to follow a legitimately deep better branch.
+        let max_rollback_depth = store.max_rollback_depth();
+
         let mut height = original_height;
         let mut full_id = cs.best_full_block_id;
         loop {
+            // Never propose a fork point the state layer cannot roll back to.
+            // Beyond the backend's rollback depth the resulting `target_height`
+            // would make `rollback_to` doomed (`StateError::ReorgTooDeep`), so
+            // stop the descent and decline the reorg (`None`) instead of
+            // walking to genesis and handing the executor an unrollbackable
+            // target it would re-attempt — and re-fail — every tick. Scala
+            // parity: `FullBlockProcessor` never caches a non-best block deeper
+            // than `keepVersions = 200`, so it never attempts such a reorg. A
+            // UTXO node this far behind must resync (snapshot / NiPoPoW), which
+            // it cannot do by rolling its pruned undo log back.
+            if let Some(max_depth) = max_rollback_depth {
+                if original_height - height > max_depth {
+                    debug!(
+                        event = "full_chain_fork_too_deep",
+                        original_height,
+                        scanned_to = height,
+                        max = max_depth,
+                        "best-header fork deeper than backend rollback depth — declining reorg",
+                    );
+                    return Ok(None);
+                }
+            }
             if height == 0 {
                 return Ok(Some((0, [0u8; 32])));
             }

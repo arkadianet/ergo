@@ -8,7 +8,7 @@ use ergo_ser::ergo_tree::read_ergo_tree;
 use ergo_ser::register::{AdditionalRegisters, RegisterValue};
 use ergo_ser::sigma_value::read_constant;
 use ergo_ser::transaction::{read_transaction, Transaction};
-use ergo_state::store::StateStore;
+use ergo_state::store::{StateError, StateStore};
 
 #[derive(serde::Deserialize)]
 #[allow(dead_code)]
@@ -203,14 +203,26 @@ fn pruning_beyond_rollback_window() {
     assert_eq!(store.height(), 1000);
     assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
 
-    // Rollback to 799 (outside ROLLBACK_WINDOW): should fail because
-    // undo entry at height 800 was pruned (pruned when height 1000 was applied,
-    // which prunes entries at height <= 800)
+    // Rollback to 799 (outside ROLLBACK_WINDOW): must fail with the distinct
+    // RD-02 `ReorgTooDeep` signal (depth 201 > window 200), refused BEFORE any
+    // mutation. The undo entry at height 800 was pruned when height 1000 was
+    // applied (prune drops entries at height <= tip - ROLLBACK_WINDOW = 800),
+    // so the Phase-1 pre-read could only surface this as an undistinguished
+    // `NoCommittedState`; the pre-mutation depth guard returns the typed error.
     let result = store.rollback_to(799, None, None);
     assert!(
-        result.is_err(),
-        "rollback beyond ROLLBACK_WINDOW should fail"
+        matches!(
+            result,
+            Err(StateError::ReorgTooDeep {
+                depth: 201,
+                max: 200
+            })
+        ),
+        "rollback beyond ROLLBACK_WINDOW must return ReorgTooDeep {{ 201, 200 }}, got {result:?}",
     );
+    // Pre-mutation refusal: the tip is observably unchanged.
+    assert_eq!(store.height(), 1000);
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
 }
 
 /// Crash recovery after 1000 blocks: reopen DB and verify state.

@@ -212,6 +212,7 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         // Scala's verifier-path provenance, but for admission routing
         // they're all fast-fails alongside collection-level rules.
         E::NoInputs
+        | E::NoOutputs
         | E::DuplicateInput { .. }
         | E::TooManyInputs { .. }
         | E::TooManyDataInputs { .. }
@@ -233,9 +234,10 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         E::InternalInvariantViolated(_) => {
             ValidationErr::Other("internal validator invariant violated".into())
         }
-        E::ErgNotConserved { .. } | E::TokenNotConserved { .. } | E::InvalidMinting { .. } => {
-            ValidationErr::MonetaryFailed
-        }
+        E::ErgNotConserved { .. }
+        | E::TokenNotConserved { .. }
+        | E::NonPositiveTokenAmount { .. }
+        | E::InvalidMinting { .. } => ValidationErr::MonetaryFailed,
         E::ScriptError { .. } | E::ProofFailed { .. } => ValidationErr::ScriptFailed,
         E::CostExceeded { .. } => ValidationErr::CostExceeded,
         // JitCost arithmetic overflow is structurally distinct from a
@@ -426,6 +428,10 @@ mod tests {
             ValidationErr::Structural
         ));
         assert!(matches!(
+            map_validation_error(ValidationError::NoOutputs),
+            ValidationErr::Structural
+        ));
+        assert!(matches!(
             map_validation_error(ValidationError::DuplicateInput { index: 0 }),
             ValidationErr::Structural
         ));
@@ -455,6 +461,14 @@ mod tests {
         assert!(matches!(
             map_validation_error(ValidationError::InvalidMinting {
                 token_id: "x".into()
+            }),
+            ValidationErr::MonetaryFailed
+        ));
+        assert!(matches!(
+            map_validation_error(ValidationError::NonPositiveTokenAmount {
+                index: 0,
+                token_id: "x".into(),
+                amount: 0
             }),
             ValidationErr::MonetaryFailed
         ));

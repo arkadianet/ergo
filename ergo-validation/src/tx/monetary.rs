@@ -17,6 +17,26 @@ pub fn validate_monetary(
     Ok(())
 }
 
+/// Scala `txPositiveAssets` (rule 108): every output token amount must be
+/// strictly positive — `outputCandidates.forall(_.additionalTokens.forall(_._2 > 0))`
+/// (ErgoTransaction.scala:399-401, non-disablable). Amounts are `u64` on the
+/// wire, so `== 0` is the exact analog of `!(_ > 0)`. Stateless (output-only),
+/// so it runs before input resolution / monetary conservation.
+pub fn check_positive_assets(tx: &Transaction) -> Result<(), ValidationError> {
+    for (index, out) in tx.output_candidates.iter().enumerate() {
+        for token in &out.tokens {
+            if token.amount == 0 {
+                return Err(ValidationError::NonPositiveTokenAmount {
+                    index,
+                    token_id: hex::encode(token.token_id.as_bytes()),
+                    amount: token.amount,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_erg_conservation(
     tx: &Transaction,
     resolved_inputs: &[ErgoBox],

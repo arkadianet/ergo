@@ -131,6 +131,10 @@ pub fn validate_transaction(
     // relative position: on a multi-violation tx where both rule 124
     // and rule 116/117 would fire, Scala surfaces rule 124 first and
     // so do we.
+    // Rule 108 (txPositiveAssets) — Scala fires this in validateStateful
+    // before the per-output verifyOutput loop (112/124); it is stateless
+    // (output token amounts only), so it runs here, ahead of the height loop.
+    monetary::check_positive_assets(&tx)?;
     heights::validate_output_heights(&tx, cx.ctx)?;
     heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.pre_header_version)?;
 
@@ -191,6 +195,8 @@ pub fn validate_transaction_parsed(
     // Structural
     structural::validate_structural(&tx, cx.params)?;
 
+    // Rule 108 (txPositiveAssets) — before the per-output 112/124 loop.
+    monetary::check_positive_assets(&tx)?;
     // Per-output height constraints (Scala rules 112 + 124)
     heights::validate_output_heights(&tx, cx.ctx)?;
     heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.pre_header_version)?;
