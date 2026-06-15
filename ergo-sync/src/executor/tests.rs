@@ -126,6 +126,50 @@ fn full_chain_fork_point_detects_best_header_branch_switch() {
 
 // ----- error paths -----
 
+/// OBS-1 — a block-apply rejection is captured for observability: the latest
+/// rejection is retained and the monotonic counter increments. The two genuine
+/// invalid-block sinks call `record_block_apply_error`; this pins the recording
+/// mechanism + accessors the snapshot/health/metrics surfaces read.
+#[test]
+fn record_block_apply_error_retains_latest_and_counts() {
+    let mut ex = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    assert!(ex.last_block_apply_error().is_none());
+    assert_eq!(ex.block_apply_error_count(), 0);
+
+    ex.record_block_apply_error(id(0xAB), 1234, "bad merkle root".to_string());
+    let e = ex.last_block_apply_error().expect("rejection recorded");
+    assert_eq!(e.header_id, id(0xAB));
+    assert_eq!(e.height, 1234);
+    assert_eq!(e.reason, "bad merkle root");
+    assert_eq!(ex.block_apply_error_count(), 1);
+
+    // A DISTINCT rejected header replaces `last`; the counter is monotonic.
+    ex.record_block_apply_error(id(0xCD), 1235, "tx invalid".to_string());
+    let e = ex.last_block_apply_error().unwrap();
+    assert_eq!(e.height, 1235);
+    assert_eq!(e.reason, "tx invalid");
+    assert_eq!(ex.block_apply_error_count(), 2);
+    let at_after_cd = e.at;
+
+    // Re-rejecting the SAME header (the per-tick retry of an invalid best-chain
+    // block) is NOT a new event: the counter and timestamp are unchanged, so
+    // the counter counts distinct rejections and `age_ms` ages honestly.
+    ex.record_block_apply_error(id(0xCD), 1235, "tx invalid".to_string());
+    assert_eq!(
+        ex.block_apply_error_count(),
+        2,
+        "retry must not inflate count"
+    );
+    assert_eq!(
+        ex.last_block_apply_error().unwrap().at,
+        at_after_cd,
+        "retry must not reset the timestamp"
+    );
+}
+
 /// RD-02 — a best-header branch that forks more than `ROLLBACK_WINDOW` blocks
 /// below the full-block tip must NOT yield a fork point. The state layer can
 /// only roll back the last `ROLLBACK_WINDOW` blocks (its undo log is pruned

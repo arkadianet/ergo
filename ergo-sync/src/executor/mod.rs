@@ -225,6 +225,27 @@ pub struct SyncExecutor {
     /// Per-tick block-pipeline timings (process_block phases + drain
     /// scheduler stats). Read+reset by the node heartbeat.
     pub block_perf: BlockPerfCounters,
+    /// The most recent block-apply REJECTION (a block this node refused while
+    /// its peers may have accepted it). Set only in the two genuine
+    /// invalid-block sinks (NOT data-wait or reorg arms). Surfaced to operators
+    /// via /health (`HealthStatus::Rejecting`) and /status so a consensus
+    /// fork-from-network is visible, not just a `warn!` line. Session-scoped
+    /// (cleared on restart, like `block_perf`).
+    last_block_apply_error: Option<LastBlockApplyError>,
+    /// Monotonic count of block-apply rejections since start. Backs the
+    /// `ergo_node_block_apply_errors_total` Prometheus counter.
+    block_apply_error_count: u64,
+}
+
+/// A block this node rejected during apply. `at` is an `Instant` so callers
+/// compute `age_ms` at read time (matching the snapshot-age pattern) rather
+/// than storing a wall-clock.
+#[derive(Clone, Debug)]
+pub struct LastBlockApplyError {
+    pub header_id: [u8; 32],
+    pub height: u32,
+    pub reason: String,
+    pub at: Instant,
 }
 
 impl SyncExecutor {
@@ -304,6 +325,8 @@ impl SyncExecutor {
             script_validation_checkpoint: None,
             header_perf: HeaderPerfCounters::default(),
             block_perf: BlockPerfCounters::default(),
+            last_block_apply_error: None,
+            block_apply_error_count: 0,
         }
     }
 
@@ -318,6 +341,45 @@ impl SyncExecutor {
     /// the header chain, not just bailed on the near-tip gate).
     pub fn recovery_done(&self) -> bool {
         self.recovery_done
+    }
+
+    /// The most recent block-apply rejection, if any (see
+    /// [`LastBlockApplyError`]).
+    pub fn last_block_apply_error(&self) -> Option<&LastBlockApplyError> {
+        self.last_block_apply_error.as_ref()
+    }
+
+    /// Monotonic count of block-apply rejections since start.
+    pub fn block_apply_error_count(&self) -> u64 {
+        self.block_apply_error_count
+    }
+
+    /// Record a block-apply REJECTION for observability. Called only from the
+    /// two genuine invalid-block sinks — NOT the data-wait (SectionNotFound /
+    /// AdProofsUnavailable) or reorg (ParentNotBestFull / Digest*) arms, which
+    /// are benign during normal IBD and would otherwise pin a red health state.
+    ///
+    /// Deduplicated against the SAME header: `mark_session_invalid` does not
+    /// remove the header from `HEADER_CHAIN_INDEX`, so the executor re-selects
+    /// and re-rejects the same `best_chain` block every sync tick. Without the
+    /// guard the counter would count retries (not distinct rejections) and
+    /// `at` would never age. Only a DISTINCT rejected header is a new event;
+    /// repeats keep the original timestamp and counter.
+    fn record_block_apply_error(&mut self, header_id: [u8; 32], height: u32, reason: String) {
+        if self
+            .last_block_apply_error
+            .as_ref()
+            .is_some_and(|e| e.header_id == header_id)
+        {
+            return;
+        }
+        self.last_block_apply_error = Some(LastBlockApplyError {
+            header_id,
+            height,
+            reason,
+            at: Instant::now(),
+        });
+        self.block_apply_error_count += 1;
     }
 
     /// Clear the `recovery_done` latch so the next sync_tick re-runs
@@ -1065,6 +1127,7 @@ impl SyncExecutor {
                     error = %e,
                     "block validation failed",
                 );
+                self.record_block_apply_error(*header_id, meta.height, e.to_string());
                 store.mark_session_invalid(*header_id);
                 Vec::new()
             }
@@ -1294,6 +1357,7 @@ impl SyncExecutor {
                 }
                 Err(e) => {
                     warn!(height = next, error = %e, "block apply failed");
+                    self.record_block_apply_error(header_id, next, e.to_string());
                     store.mark_session_invalid(header_id);
                     break;
                 }

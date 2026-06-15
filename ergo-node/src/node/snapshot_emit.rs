@@ -156,6 +156,20 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     let headers_chain_synced = state.coordinator.sync_state().headers_chain_synced();
     let max_peer_height = state.coordinator.sync_state().best_known_header_height();
     let recovery_done = state.executor.recovery_done();
+    // OBS-1: project the executor's most recent block-apply REJECTION to the
+    // API DTO, computing `age_ms` from the captured `Instant` against this
+    // snapshot's `now` (the executor stores an `Instant`, not a wall-clock).
+    let block_apply_errors_total = state.executor.block_apply_error_count();
+    let last_block_apply_error =
+        state
+            .executor
+            .last_block_apply_error()
+            .map(|e| ergo_api::types::ApiBlockApplyError {
+                block_id: hex::encode(e.header_id),
+                height: e.height,
+                reason: e.reason.clone(),
+                age_ms: now.saturating_duration_since(e.at).as_millis() as u64,
+            });
 
     let peer_count = state.peer_manager.connected_peers().count() as u32;
     let peers_vec: Vec<&ergo_p2p::peer::PeerInfo> = state.peer_manager.connected_peers().collect();
@@ -311,6 +325,8 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             .into_iter()
             .map(|(h, id)| (h, hex::encode(id)))
             .collect(),
+        last_block_apply_error,
+        block_apply_errors_total,
     };
 
     if let Some(pub_) = state.snapshot_publisher.as_mut() {

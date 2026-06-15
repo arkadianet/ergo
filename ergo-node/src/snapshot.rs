@@ -209,6 +209,8 @@ impl NodeSnapshot {
                 headers_ahead_of_full_blocks: 0,
                 mempool_size: 0,
                 snapshot_age_ms: 0,
+                last_block_apply_error: None,
+                block_apply_errors_total: 0,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -465,6 +467,14 @@ pub struct SnapshotParts<'a> {
     /// Mode-2 serve-cache manifests `(height, hex id)`; see
     /// `NodeSnapshot::snapshot_manifests`.
     pub snapshot_manifests: Vec<(i32, String)>,
+    /// OBS-1: the most recent block-apply REJECTION projected to the API DTO
+    /// (age computed at publish time from the executor's `Instant`), or `None`.
+    /// Drives `ApiStatus.last_block_apply_error` and the
+    /// `HealthStatus::Rejecting` overlay in `build_snapshot`.
+    pub last_block_apply_error: Option<ergo_api::types::ApiBlockApplyError>,
+    /// OBS-1: monotonic block-apply rejection count, for the
+    /// `ergo_node_block_apply_errors_total` Prometheus counter.
+    pub block_apply_errors_total: u64,
 }
 
 fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64) -> NodeSnapshot {
@@ -500,6 +510,10 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         difficulty: decode_compact_bits(best_full_block_n_bits).to_string(),
     };
 
+    // OBS-1: an outstanding block-apply rejection overrides the sync-derived
+    // health below (a node refusing blocks its peers accept is not healthy,
+    // however it looks on the sync axis).
+    let rejecting = p.last_block_apply_error.is_some();
     let status = ApiStatus {
         sync_state,
         peer_count: p.peer_count,
@@ -509,6 +523,8 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         mempool_size: p.mempool_size,
         snapshot_age_ms: 0,
         bootstrap: p.bootstrap.clone(),
+        last_block_apply_error: p.last_block_apply_error.clone(),
+        block_apply_errors_total: p.block_apply_errors_total,
     };
 
     let tip = ApiTip {
@@ -541,10 +557,14 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         revalidation_pending: p.mempool_revalidation_pending,
     };
 
-    let health_status = match sync_state {
-        SyncStateLabel::Disconnected => HealthStatus::Disconnected,
-        SyncStateLabel::Stalled => HealthStatus::Stalled,
-        SyncStateLabel::Syncing | SyncStateLabel::AtTip => HealthStatus::Ok,
+    let health_status = if rejecting {
+        HealthStatus::Rejecting
+    } else {
+        match sync_state {
+            SyncStateLabel::Disconnected => HealthStatus::Disconnected,
+            SyncStateLabel::Stalled => HealthStatus::Stalled,
+            SyncStateLabel::Syncing | SyncStateLabel::AtTip => HealthStatus::Ok,
+        }
     };
     let health = ApiHealth {
         status: health_status,
@@ -753,6 +773,8 @@ mod tests {
             max_peer_height: 0,
             mining_enabled: false,
             snapshot_manifests: Vec::new(),
+            last_block_apply_error: None,
+            block_apply_errors_total: 0,
         }
     }
 
@@ -960,6 +982,44 @@ mod tests {
 
         assert_eq!(snap.pool_inputs.len(), 1);
         assert_eq!(snap.pool_inputs.get(&spent_box), Some(&spending_tx));
+    }
+
+    /// OBS-1: a block-apply rejection threads from `SnapshotParts` through
+    /// `build_snapshot` onto `status.last_block_apply_error` + the counter, AND
+    /// overrides health to `Rejecting` (a node refusing blocks is unhealthy
+    /// however the sync axis looks). Absent ⇒ `None` and the normal
+    /// sync-derived health, never `Rejecting`.
+    #[test]
+    fn build_snapshot_surfaces_block_apply_rejection_and_health() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.last_block_apply_error = Some(ergo_api::types::ApiBlockApplyError {
+            block_id: "ab".repeat(32),
+            height: 1234,
+            reason: "tx invalid".to_string(),
+            age_ms: 42,
+        });
+        parts.block_apply_errors_total = 3;
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+        let e = snap
+            .status
+            .last_block_apply_error
+            .as_ref()
+            .expect("rejection surfaced on status");
+        assert_eq!(e.height, 1234);
+        assert_eq!(e.reason, "tx invalid");
+        assert_eq!(snap.status.block_apply_errors_total, 3);
+        assert_eq!(snap.health.status, HealthStatus::Rejecting);
+
+        // No rejection: None on status, and health is NOT Rejecting.
+        let mut publisher2 =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        publisher2.publish(make_parts(500, 500, &[]));
+        let snap2 = publisher2.handle().load_full();
+        assert!(snap2.status.last_block_apply_error.is_none());
+        assert_ne!(snap2.health.status, HealthStatus::Rejecting);
     }
 
     /// `max_peer_height` and `mining_enabled` travel from `SnapshotParts`

@@ -57,6 +57,8 @@ impl NodeReadState for StubReadState {
             mempool_size: 0,
             snapshot_age_ms: 0,
             bootstrap: None,
+            last_block_apply_error: None,
+            block_apply_errors_total: 0,
         }
     }
     fn tip(&self) -> ApiTip {
