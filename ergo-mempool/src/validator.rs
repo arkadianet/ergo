@@ -212,6 +212,7 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         // Scala's verifier-path provenance, but for admission routing
         // they're all fast-fails alongside collection-level rules.
         E::NoInputs
+        | E::NoOutputs
         | E::DuplicateInput { .. }
         | E::TooManyInputs { .. }
         | E::TooManyDataInputs { .. }
@@ -233,9 +234,10 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         E::InternalInvariantViolated(_) => {
             ValidationErr::Other("internal validator invariant violated".into())
         }
-        E::ErgNotConserved { .. } | E::TokenNotConserved { .. } | E::InvalidMinting { .. } => {
-            ValidationErr::MonetaryFailed
-        }
+        E::ErgNotConserved { .. }
+        | E::TokenNotConserved { .. }
+        | E::NonPositiveTokenAmount { .. }
+        | E::InvalidMinting { .. } => ValidationErr::MonetaryFailed,
         E::ScriptError { .. } | E::ProofFailed { .. } => ValidationErr::ScriptFailed,
         E::CostExceeded { .. } => ValidationErr::CostExceeded,
         // JitCost arithmetic overflow is structurally distinct from a

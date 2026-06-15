@@ -180,6 +180,7 @@ fn scala_sourced_rejection_parity() {
         // Assert category-level parity with Scala node
         let our_category = match &err {
             ValidationError::NoInputs
+            | ValidationError::NoOutputs
             | ValidationError::DuplicateInput { .. }
             | ValidationError::TooManyInputs { .. }
             | ValidationError::TooManyDataInputs { .. }
@@ -204,6 +205,7 @@ fn scala_sourced_rejection_parity() {
             // verifier provenance — the two intentionally differ.
             ValidationError::ErgNotConserved { .. }
             | ValidationError::TokenNotConserved { .. }
+            | ValidationError::NonPositiveTokenAmount { .. }
             | ValidationError::InvalidMinting { .. }
             | ValidationError::OutputValueTooLow { .. }
             | ValidationError::TooManyTokens { .. }
