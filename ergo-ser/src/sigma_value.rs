@@ -639,8 +639,26 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) {
     }
 }
 
+/// Scala bounds nested value/`SigmaBoolean` deserialization at
+/// `SigmaConstants.MaxTreeDepth` (= 110) via the shared reader level
+/// (`CoreByteReader`); past it `DeserializeCallDepthExceeded` is thrown. Mirror
+/// that bound here so a deeply nested `Cand`/`Cor`/`Cthreshold` chain from peer
+/// data (a box register or context-extension `SigmaProp` constant) is rejected
+/// rather than overflowing the worker-thread stack.
+const MAX_SIGMA_TREE_DEPTH: usize = 110;
+
 fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
+    read_sigma_boolean_at_depth(r, 0)
+}
+
+fn read_sigma_boolean_at_depth(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
+    if depth > MAX_SIGMA_TREE_DEPTH {
+        return Err(ReadError::InvalidData(format!(
+            "SigmaBoolean recursion depth exceeds maximum ({MAX_SIGMA_TREE_DEPTH})"
+        )));
+    }
     let tag = r.get_u8()?;
+    let next = depth + 1;
     match tag {
         TRIVIAL_PROP_FALSE => Ok(SigmaBoolean::TrivialProp(false)),
         TRIVIAL_PROP_TRUE => Ok(SigmaBoolean::TrivialProp(true)),
@@ -658,7 +676,7 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
-                children.push(read_sigma_boolean(r)?);
+                children.push(read_sigma_boolean_at_depth(r, next)?);
             }
             Ok(SigmaBoolean::Cand(children))
         }
@@ -666,7 +684,7 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
-                children.push(read_sigma_boolean(r)?);
+                children.push(read_sigma_boolean_at_depth(r, next)?);
             }
             Ok(SigmaBoolean::Cor(children))
         }
@@ -676,7 +694,7 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
-                children.push(read_sigma_boolean(r)?);
+                children.push(read_sigma_boolean_at_depth(r, next)?);
             }
             Ok(SigmaBoolean::Cthreshold { k, children })
         }
@@ -1317,6 +1335,38 @@ mod tests {
             ],
         };
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
+    }
+
+    #[test]
+    fn read_sigma_boolean_within_depth_limit_roundtrips() {
+        // A single-child Cand chain within MaxTreeDepth (110) must still parse.
+        let mut sb = SigmaBoolean::TrivialProp(true);
+        for _ in 0..100 {
+            sb = SigmaBoolean::Cand(vec![sb]);
+        }
+        roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
+    }
+
+    #[test]
+    fn read_sigma_boolean_deep_nesting_rejected_not_overflow() {
+        // A SigmaProp constant value is peer-controllable (box register /
+        // context extension). A long single-child Cand chain (~3 wire bytes per
+        // level) must be REJECTED at the MaxTreeDepth bound rather than
+        // recursing unbounded and overflowing the worker-thread stack — Scala
+        // throws DeserializeCallDepthExceeded past depth 110.
+        let mut sb = SigmaBoolean::TrivialProp(true);
+        for _ in 0..200 {
+            sb = SigmaBoolean::Cand(vec![sb]);
+        }
+        let mut w = VlqWriter::new();
+        write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
+        let data = w.result();
+        let mut r = VlqReader::new(&data);
+        let err = read_value(&mut r, &SigmaType::SSigmaProp).unwrap_err();
+        assert!(
+            matches!(err, ReadError::InvalidData(ref m) if m.contains("depth")),
+            "expected depth-limit error, got {err:?}"
+        );
     }
 
     // ===== 3. Collection roundtrips =====
