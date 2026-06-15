@@ -4602,8 +4602,10 @@ fn reject_unsupported_constant() {
 // DepthLimitExceeded — deeply nested If expressions
 #[test]
 fn reject_depth_limit_exceeded() {
-    // Build a chain of 200 nested If(true, If(true, ... , 1), 0)
-    // which exceeds MAX_EVAL_DEPTH (100)
+    // Build a chain of 200 nested If(true, If(true, ... , 1), 0), which
+    // exceeds MAX_EVAL_DEPTH (110). This AST is built directly (bypassing the
+    // parser), so the runtime guard is the only backstop against stack
+    // overflow on such inputs — keep it.
     let mut expr = const_int(1);
     for _ in 0..200 {
         expr = op(
@@ -4620,6 +4622,27 @@ fn reject_depth_limit_exceeded() {
         matches!(err, EvalError::DepthLimitExceeded(_)),
         "got {err:?}"
     );
+}
+
+// SIG-2 — the evaluator must accept every depth the PARSER accepts. The parser
+// cap (ergo_ser MAX_EXPR_DEPTH = Scala MaxTreeDepth = 110, oracle-pinned) lets a
+// tree up to 110 levels deep parse; the evaluator must not reject it at a lower
+// bound. 105 nested Ifs reach eval-depth ~106 — above the OLD 100 cap (RED) but
+// within the new 110 cap (GREEN) — and must evaluate to the inner Int(1).
+#[test]
+fn eval_accepts_parser_max_depth() {
+    let mut expr = const_int(1);
+    for _ in 0..105 {
+        expr = op(
+            0x95,
+            Payload::Three(
+                Box::new(const_bool(true)),
+                Box::new(expr),
+                Box::new(const_int(0)),
+            ),
+        );
+    }
+    assert_eq!(run_eval(&expr), Value::Int(1));
 }
 
 // Script evaluates to TrivialProp(false) — spending should be rejected

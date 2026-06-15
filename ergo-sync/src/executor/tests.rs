@@ -124,6 +124,118 @@ fn full_chain_fork_point_detects_best_header_branch_switch() {
     );
 }
 
+// ----- error paths -----
+
+/// OBS-1 — a block-apply rejection is captured for observability: the latest
+/// rejection is retained and the monotonic counter increments. The two genuine
+/// invalid-block sinks call `record_block_apply_error`; this pins the recording
+/// mechanism + accessors the snapshot/health/metrics surfaces read.
+#[test]
+fn record_block_apply_error_retains_latest_and_counts() {
+    let mut ex = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    assert!(ex.last_block_apply_error().is_none());
+    assert_eq!(ex.block_apply_error_count(), 0);
+
+    ex.record_block_apply_error(id(0xAB), 1234, "bad merkle root".to_string());
+    let e = ex.last_block_apply_error().expect("rejection recorded");
+    assert_eq!(e.header_id, id(0xAB));
+    assert_eq!(e.height, 1234);
+    assert_eq!(e.reason, "bad merkle root");
+    assert_eq!(ex.block_apply_error_count(), 1);
+
+    // A DISTINCT rejected header replaces `last`; the counter is monotonic.
+    ex.record_block_apply_error(id(0xCD), 1235, "tx invalid".to_string());
+    let e = ex.last_block_apply_error().unwrap();
+    assert_eq!(e.height, 1235);
+    assert_eq!(e.reason, "tx invalid");
+    assert_eq!(ex.block_apply_error_count(), 2);
+    let at_after_cd = e.at;
+
+    // Re-rejecting the SAME header (the per-tick retry of an invalid best-chain
+    // block) is NOT a new event: the counter and timestamp are unchanged, so
+    // the counter counts distinct rejections and `age_ms` ages honestly.
+    ex.record_block_apply_error(id(0xCD), 1235, "tx invalid".to_string());
+    assert_eq!(
+        ex.block_apply_error_count(),
+        2,
+        "retry must not inflate count"
+    );
+    assert_eq!(
+        ex.last_block_apply_error().unwrap().at,
+        at_after_cd,
+        "retry must not reset the timestamp"
+    );
+}
+
+/// RD-02 — a best-header branch that forks more than `ROLLBACK_WINDOW` blocks
+/// below the full-block tip must NOT yield a fork point. The state layer can
+/// only roll back the last `ROLLBACK_WINDOW` blocks (its undo log is pruned
+/// past that), so proposing the genesis fork would hand the executor a
+/// `target_height` whose `rollback_to` is doomed (`StateError::ReorgTooDeep`)
+/// and which it would re-attempt — and re-fail — every tick. The capped walk
+/// declines (`Ok(None)`) instead of walking to genesis and returning
+/// `Some((0, [0; 32]))`.
+#[test]
+fn full_chain_fork_point_caps_at_rollback_window() {
+    use ergo_state::store::ROLLBACK_WINDOW;
+
+    let mut store = open_initialized_store();
+    let depth = ROLLBACK_WINDOW + 2; // 202: just past the window
+
+    // Branch A — the applied full-block chain, tip at `depth`.
+    let mut parent = [0u8; 32];
+    for h in 1..=depth {
+        parent = apply_empty_block(&mut store, h, parent);
+    }
+    assert_eq!(store.chain_state().best_full_block_height, depth);
+
+    // Branch B — a header-only chain forking at genesis, so it diverges from
+    // branch A at every height `1..=depth` (common ancestor = genesis, fork
+    // depth == `depth` > ROLLBACK_WINDOW). Marking its tip best forces the
+    // best-header chain index onto branch B, so `get_header_id_at_height`
+    // resolves to branch B for the whole descent.
+    let b_id = |h: u32| {
+        let mut idb = [0xB0u8; 32];
+        idb[0] = (h >> 8) as u8;
+        idb[1] = h as u8;
+        idb
+    };
+    let mut b_parent = [0u8; 32];
+    for h in 1..=depth {
+        let this = b_id(h);
+        // `new_best = Some(..)` forces the best-header tip unconditionally
+        // (no score comparison), so a trivial score suffices for the tip.
+        let new_best = (h == depth).then(|| (depth, vec![0xFFu8; 8]));
+        store
+            .store_validated_header(
+                &this,
+                &[0xB0; 8],
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: b_parent,
+                    height: h,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: h as u64,
+                },
+                new_best,
+            )
+            .unwrap();
+        b_parent = this;
+    }
+    assert_eq!(store.chain_state().best_header_id, b_id(depth));
+    assert_eq!(store.chain_state().best_full_block_height, depth);
+
+    let executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let store = ergo_state::StateBackendKind::Utxo(store);
+    assert_eq!(executor.full_chain_fork_point(&store).unwrap(), None);
+}
+
 #[test]
 fn full_chain_reorg_rolls_back_without_marking_new_branch_invalid() {
     let mut store = open_initialized_store();

@@ -63,7 +63,8 @@
   },
   {
     "label": "invalid_proof",
-    "expectedCategory": "PROOF",
+    "expectedCategory": "MONETARY",
+    "note": "Tx is ERG-unbalanced (input 2838006000000000 != single output 2838005999000000; burns 0.001 ERG). Scala validateStateful checks txErgPreservation (ErgoTransaction.scala:430) BEFORE script verification (:435), so the full pipeline rejects at MONETARY. The scalaError below is the isolated script-check error captured during corpus generation; it does not reflect the full-pipeline first failure for this multiply-defective vector.",
     "txHex": "01911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df3720abababababababababababababababababababababababababababababababab00000001c0b3c39beca485050008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
     "scalaError": "Malformed transaction: Scripts of all transaction inputs should pass verification. 6360d65254923120bb516cfd507b6dd446054cd2067a7f01e050ec7a830919f3: #0 => Failure(java.lang.ArrayIndexOutOfBoundsException)",
     "height": 1762060,
@@ -94,7 +95,8 @@
   },
   {
     "label": "empty_proof_nontrivial",
-    "expectedCategory": "SCRIPT",
+    "expectedCategory": "MONETARY",
+    "note": "Same unbalanced synthetic spend as invalid_proof (input 2838006000000000 != single output 2838005999000000; burns 0.001 ERG), with an empty proof instead of a corrupted one. Scala validateStateful rejects at txErgPreservation (ErgoTransaction.scala:430) before script verification (:435), so the full pipeline rejects at MONETARY.",
     "txHex": "01911aa4f05c6f333dcd000da7868bcc31afbad8085557a3abcfb069173776df370000000001c0b3c39beca485050008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988cc66b0000",
     "scalaError": "Malformed transaction: Scripts of all transaction inputs should pass verification. 6360d65254923120bb516cfd507b6dd446054cd2067a7f01e050ec7a830919f3: #0 => Failure(java.lang.ArrayIndexOutOfBoundsException)",
     "height": 1762060,

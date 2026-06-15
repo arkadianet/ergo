@@ -23,6 +23,10 @@ pub enum ValidationError {
     /// Transaction has zero inputs.
     #[error("transaction has no inputs")]
     NoInputs,
+    /// Transaction has zero outputs. Scala `txNoOutputs` (rule 101,
+    /// `mayBeDisabled = false`).
+    #[error("transaction has no outputs")]
+    NoOutputs,
     /// Same `box_id` appears more than once in `inputs`.
     #[error("duplicate input box ID at index {index}")]
     DuplicateInput {
@@ -207,6 +211,18 @@ pub enum ValidationError {
     InvalidMinting {
         /// Hex-encoded mint-claiming token id.
         token_id: String,
+    },
+    /// An output token amount is not strictly positive. Scala
+    /// `txPositiveAssets` (rule 108, `mayBeDisabled = false`):
+    /// `outputCandidates.forall(_.additionalTokens.forall(_._2 > 0))`.
+    #[error("output {index}: token {token_id} has non-positive amount {amount} (rule 108)")]
+    NonPositiveTokenAmount {
+        /// Index of the offending output.
+        index: usize,
+        /// Hex-encoded token id.
+        token_id: String,
+        /// The non-positive amount.
+        amount: u64,
     },
 
     // --- Script ---

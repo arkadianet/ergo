@@ -267,6 +267,22 @@ impl StateBackendKind {
         }
     }
 
+    /// The deepest reorg this backend can roll back, or `None` if unbounded.
+    ///
+    /// The UTXO store prunes `UNDO_LOG` below `tip - ROLLBACK_WINDOW` on every
+    /// forward apply, so a rollback deeper than [`crate::store::ROLLBACK_WINDOW`]
+    /// is unserviceable (`rollback_to` returns `StateError::ReorgTooDeep`). The
+    /// digest store retains a history row for every applied height — no bounded
+    /// prune, so its deepest reachable rollback is genesis. Callers that decide
+    /// whether to attempt a reorg (the executor fork-walk) must gate on this so
+    /// a digest node still follows a legitimately deep better branch.
+    pub fn max_rollback_depth(&self) -> Option<u32> {
+        match self {
+            Self::Utxo(_) => Some(crate::store::ROLLBACK_WINDOW),
+            Self::Digest(_) => None,
+        }
+    }
+
     /// A cloned `Arc` handle to the underlying redb `Database`, regardless
     /// of backend. The wallet writer task opens its own read txns against
     /// this without a backend-typed branch (both backends share one redb
@@ -538,6 +554,20 @@ mod tests {
 
         assert!(utxo.as_utxo_mut().is_some());
         assert!(digest.as_utxo_mut().is_none());
+    }
+
+    #[test]
+    fn max_rollback_depth_bounds_utxo_and_is_unbounded_for_digest() {
+        let (utxo, _u) = utxo_backend();
+        let (digest, _d) = digest_backend();
+
+        // UTXO prunes UNDO_LOG past ROLLBACK_WINDOW, so its deepest serviceable
+        // rollback is bounded; the digest store retains full history → genesis.
+        assert_eq!(
+            utxo.max_rollback_depth(),
+            Some(crate::store::ROLLBACK_WINDOW)
+        );
+        assert_eq!(digest.max_rollback_depth(), None);
     }
 
     #[test]

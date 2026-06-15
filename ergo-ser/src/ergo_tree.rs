@@ -191,11 +191,17 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 }
                 Ok((tree, false))
             }
+            // A tree-depth overflow is Scala's `DeserializeCallDepthExceeded`,
+            // a `SerializerException` that `deserializeErgoTree` does NOT catch
+            // (it only wraps ReaderPositionLimitExceeded / IllegalArgumentException
+            // / ValidationException). So it must HARD-REJECT even under has_size,
+            // not become an UnparsedErgoTree — otherwise a size-delimited tree
+            // nested past MaxTreeDepth would be accept-invalid vs Scala.
+            Err(e @ ReadError::DepthLimitExceeded { .. }) => Err(e),
             Err(_) => {
-                // parse_body raised (unknown opcode, invalid type tag,
-                // truncated data, depth exceeded, etc.). Under has_size
-                // Scala wraps on ValidationException, which covers all
-                // of these paths — match by wrapping.
+                // Other parse failures (unknown opcode, invalid type tag) map to
+                // Scala's ValidationException, which under has_size is wrapped
+                // as UnparsedErgoTree (the soft-fork-compatible path).
                 Ok((
                     unparsed_soft_fork_tree(version, has_size, constant_segregation),
                     true,
@@ -770,6 +776,30 @@ mod tests {
             }
             other => panic!("expected Const(SBoolean=true) soft-fork body, got {other:?}"),
         }
+    }
+
+    /// A size-delimited (`has_size`) tree whose body nests past MaxTreeDepth
+    /// (110) must HARD-REJECT, NOT be wrapped as `UnparsedErgoTree`. Scala's
+    /// `DeserializeCallDepthExceeded` is a `SerializerException` that
+    /// `deserializeErgoTree` does not catch, so a depth overflow is
+    /// consensus-rejected even under the soft-fork wrapper. (Regression for the
+    /// codex review of the MAX_EXPR_DEPTH=110 fix — the wrapper used to swallow
+    /// this into an accepted unparsed tree.)
+    #[test]
+    fn size_flagged_over_depth_body_hard_rejects_not_wrapped() {
+        // header 0x08 = v0, has_size, no cseg; body = 150x SizeOf(0xB1) then a
+        // Height (0xA3) leaf — depth far exceeds MaxTreeDepth (110).
+        let mut body = vec![0xB1u8; 150];
+        body.push(0xA3);
+        let mut bytes = vec![0x08u8];
+        ergo_primitives::vlq::encode_vlq_into(body.len() as u64, &mut bytes);
+        bytes.extend_from_slice(&body);
+        let mut r = VlqReader::new(&bytes);
+        let err = read_ergo_tree(&mut r).unwrap_err();
+        assert!(
+            matches!(err, ReadError::DepthLimitExceeded { .. }),
+            "size-delimited over-depth tree must hard-reject, not soft-fork wrap; got {err:?}"
+        );
     }
 
     /// Same tree, but with `has_size` bit cleared — Scala raises rather

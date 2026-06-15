@@ -162,6 +162,32 @@ pub struct ApiStatus {
     /// bootstrap card, hide the normal block-sync pipeline row".
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bootstrap: Option<ApiBootstrapStatus>,
+    /// The most recent block this node REJECTED during apply — a consensus
+    /// fork-from-network signal (the node refused a block its peers may have
+    /// accepted). `None` when no rejection has occurred this session. A
+    /// persistent `Some(_)` is an operator page.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_block_apply_error: Option<ApiBlockApplyError>,
+    /// Monotonic count of block-apply rejections since node start (the
+    /// `ergo_node_block_apply_errors_total` Prometheus counter source).
+    /// Session-scoped — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub block_apply_errors_total: u64,
+}
+
+/// A block this node rejected during apply, surfaced to operators. Distinct
+/// from a benign data-wait (section not yet downloaded) or reorg — this is a
+/// block the node refused on validation while its peers may have accepted it.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiBlockApplyError {
+    /// Hex-encoded rejected header id.
+    pub block_id: String,
+    /// Height the rejected block claimed.
+    pub height: u32,
+    /// Operator-facing rejection reason (the `BlockProcessError` Display).
+    pub reason: String,
+    /// Milliseconds since the rejection was recorded (computed at read time).
+    pub age_ms: u64,
 }
 
 /// Bootstrap progress for the Mode 2 (UTXO snapshot) consume side.
@@ -632,6 +658,10 @@ pub enum HealthStatus {
     Ok,
     Stalled,
     Disconnected,
+    /// A block-apply rejection is outstanding — the node refused a block its
+    /// peers may have accepted (a possible consensus fork from the network).
+    /// /health maps this to HTTP 503 so operators page on it.
+    Rejecting,
 }
 
 /// Hex-encode a 32-byte id without the `0x` prefix.

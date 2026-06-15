@@ -66,7 +66,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiHealth'
         '503':
-          description: Node is stalled or disconnected
+          description: Node is stalled, disconnected, or rejecting blocks
           content:
             application/json:
               schema:
@@ -287,6 +287,34 @@ paths:
                 $ref: '#/components/schemas/ApiVotes'
 components:
   schemas:
+    ApiBlockApplyError:
+      type: object
+      description: |-
+        A block this node rejected during apply, surfaced to operators. Distinct
+        from a benign data-wait (section not yet downloaded) or reorg — this is a
+        block the node refused on validation while its peers may have accepted it.
+      required:
+      - block_id
+      - height
+      - reason
+      - age_ms
+      properties:
+        age_ms:
+          type: integer
+          format: int64
+          description: Milliseconds since the rejection was recorded (computed at read time).
+          minimum: 0
+        block_id:
+          type: string
+          description: Hex-encoded rejected header id.
+        height:
+          type: integer
+          format: int32
+          description: Height the rejected block claimed.
+          minimum: 0
+        reason:
+          type: string
+          description: Operator-facing rejection reason (the `BlockProcessError` Display).
     ApiBootstrapPhase:
       type: string
       description: |-
@@ -1125,6 +1153,14 @@ components:
           type: integer
           format: int32
           minimum: 0
+        block_apply_errors_total:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic count of block-apply rejections since node start (the
+            `ergo_node_block_apply_errors_total` Prometheus counter source).
+            Session-scoped — resets on restart, which `rate()` handles.
+          minimum: 0
         bootstrap:
           oneOf:
           - type: 'null'
@@ -1141,6 +1177,15 @@ components:
           type: integer
           format: int32
           minimum: 0
+        last_block_apply_error:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiBlockApplyError'
+            description: |-
+              The most recent block this node REJECTED during apply — a consensus
+              fork-from-network signal (the node refused a block its peers may have
+              accepted). `None` when no rejection has occurred this session. A
+              persistent `Some(_)` is an operator page.
         mempool_size:
           type: integer
           format: int32
@@ -1371,6 +1416,7 @@ components:
       - ok
       - stalled
       - disconnected
+      - rejecting
     RawTransactionBytes:
       type: string
       format: binary

@@ -11,6 +11,7 @@ use ergo_p2p::framing::{wire_len, MessageFrame};
 use ergo_p2p::handshake::{
     deserialize_handshake_with_consumed, serialize_handshake, Handshake, PeerSpec,
 };
+use ergo_p2p::peer::HANDSHAKE_TIMEOUT;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -116,7 +117,7 @@ pub async fn dial_task(
     {
         return;
     }
-    let result = do_handshake(stream, magic, &our_handshake).await;
+    let result = do_handshake(stream, magic, &our_handshake, HANDSHAKE_TIMEOUT).await;
     emit_handshake_outcome(addr, result, &event_tx, "dial").await;
 }
 
@@ -132,7 +133,7 @@ pub async fn accept_task(
     our_handshake: Handshake,
     event_tx: mpsc::Sender<PeerEvent>,
 ) {
-    let result = do_handshake(stream, magic, &our_handshake).await;
+    let result = do_handshake(stream, magic, &our_handshake, HANDSHAKE_TIMEOUT).await;
     emit_handshake_outcome(peer_addr, result, &event_tx, "accept").await;
 }
 
@@ -214,43 +215,50 @@ async fn do_handshake(
     mut stream: TcpStream,
     magic: [u8; 4],
     our_handshake: &Handshake,
+    deadline: Duration,
 ) -> Result<(PeerSpec, u64, Connection), String> {
-    let hs_bytes = serialize_handshake(our_handshake);
-    stream
-        .write_all(&hs_bytes)
-        .await
-        .map_err(|e| format!("send handshake: {e}"))?;
-
-    // Read peer's handshake as raw bytes. The TCP read may also contain
-    // the start of subsequent framed messages — we must not discard those.
-    let mut buf = vec![0u8; 16384];
-    let mut total_read = 0;
-
-    loop {
-        let n = tokio::time::timeout(Duration::from_secs(30), stream.read(&mut buf[total_read..]))
+    // Single ABSOLUTE deadline for the whole handshake (send + read), matching
+    // Scala's `scheduleOnce(handshakeTimeout)` in PeerConnectionHandler. The old
+    // per-read 30s timer was reset by every byte, so a slow-loris peer trickling
+    // one byte per sub-30s window held the connection (FD) + the detached accept
+    // task indefinitely. Production passes `HANDSHAKE_TIMEOUT`; the deadline is a
+    // parameter only so tests can drive it with a short real clock.
+    tokio::time::timeout(deadline, async move {
+        let hs_bytes = serialize_handshake(our_handshake);
+        stream
+            .write_all(&hs_bytes)
             .await
-            .map_err(|_| "handshake read timeout".to_string())?
-            .map_err(|e| format!("read handshake: {e}"))?;
+            .map_err(|e| format!("send handshake: {e}"))?;
 
-        if n == 0 {
-            return Err("connection closed during handshake".to_string());
-        }
-        total_read += n;
+        // Read peer's handshake as raw bytes. The TCP read may also contain
+        // the start of subsequent framed messages — we must not discard those.
+        let mut buf = vec![0u8; 16384];
+        let mut total_read = 0;
 
-        match deserialize_handshake_with_consumed(&buf[..total_read]) {
-            Ok((hs, consumed)) => {
-                let leftover = buf[consumed..total_read].to_vec();
-                let conn = Connection::new_with_buffer(stream, magic, leftover);
-                return Ok((hs.peer_spec, hs.time, conn));
+        loop {
+            let n = stream
+                .read(&mut buf[total_read..])
+                .await
+                .map_err(|e| format!("read handshake: {e}"))?;
+
+            if n == 0 {
+                return Err("connection closed during handshake".to_string());
             }
-            Err(_) if total_read < 8096 => {
-                continue;
-            }
-            Err(e) => {
-                return Err(format!("parse handshake: {e}"));
+            total_read += n;
+
+            match deserialize_handshake_with_consumed(&buf[..total_read]) {
+                Ok((hs, consumed)) => {
+                    let leftover = buf[consumed..total_read].to_vec();
+                    let conn = Connection::new_with_buffer(stream, magic, leftover);
+                    return Ok((hs.peer_spec, hs.time, conn));
+                }
+                Err(_) if total_read < 8096 => continue,
+                Err(e) => return Err(format!("parse handshake: {e}")),
             }
         }
-    }
+    })
+    .await
+    .map_err(|_| "handshake deadline exceeded".to_string())?
 }
 
 /// Per-peer read/write loop. Owns the Connection.
@@ -379,5 +387,75 @@ mod tests {
         assert_eq!(bytes_out.load(Ordering::Relaxed), 23);
 
         task.abort();
+    }
+
+    // ----- error paths -----
+
+    /// A slow-loris peer that TRICKLES incomplete handshake bytes — fast enough
+    /// that a per-read timer would keep resetting — must still hit the ABSOLUTE
+    /// handshake deadline. A silent peer wouldn't distinguish the two designs
+    /// (a per-read timer also fires on pure silence); the drip is what exercises
+    /// the reset bug. Production uses `HANDSHAKE_TIMEOUT` (Scala
+    /// `handshakeTimeout = 30s`); the deadline is injectable so this drives a
+    /// short real clock instead of the `test-util` paused clock this crate
+    /// deliberately avoids (see `mining_bridge` tests).
+    #[tokio::test]
+    async fn do_handshake_absolute_deadline_fires_on_slow_loris_trickle() {
+        use ergo_p2p::handshake::{PeerSpec, Version};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut slow_client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        let our = Handshake {
+            time: 1_700_000_000_000,
+            peer_spec: PeerSpec {
+                agent_name: "ergo-rust/test".into(),
+                version: Version {
+                    major: 5,
+                    minor: 0,
+                    patch: 13,
+                },
+                node_name: "t".into(),
+                declared_address: None,
+                features: vec![],
+            },
+        };
+        let deadline = Duration::from_millis(150);
+        // Drip one byte every 50ms — under the deadline, so a per-read timer
+        // would reset on each byte and never fire. The bytes never form a valid
+        // handshake, so the read loop keeps spinning until the absolute deadline.
+        let drip = tokio::spawn(async move {
+            loop {
+                if slow_client.write_all(&[0]).await.is_err() {
+                    break; // server closed on deadline
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let started = tokio::time::Instant::now();
+        // Outer watchdog: if the implementation regresses to a per-read timer,
+        // the drip above keeps the read pending forever, so this timeout (not the
+        // deadline) is what would fire — `.expect` then fails the test instead of
+        // hanging. `Connection` isn't `Debug`, so match instead of `unwrap_err`.
+        let result = tokio::time::timeout(
+            deadline + Duration::from_secs(1),
+            do_handshake(server, MAINNET_MAGIC, &our, deadline),
+        )
+        .await
+        .expect("test watchdog: do_handshake did not return — per-read timer regression?");
+        let elapsed = started.elapsed();
+        drip.abort();
+
+        match result {
+            Err(e) => assert!(e.contains("deadline"), "expected deadline error, got: {e}"),
+            Ok(_) => panic!("trickling peer should not complete a handshake"),
+        }
+        // It must actually wait for the deadline rather than failing instantly.
+        assert!(
+            elapsed >= deadline,
+            "returned before deadline: {elapsed:?} < {deadline:?}",
+        );
     }
 }

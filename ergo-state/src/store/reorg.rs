@@ -116,6 +116,32 @@ impl StateStore {
             });
         }
 
+        // RD-02 — refuse a rollback deeper than the undo-retention window
+        // BEFORE any mutation. Every forward apply prunes `UNDO_LOG` rows at
+        // heights `<= tip - ROLLBACK_WINDOW` (see the prune at the apply
+        // seam in `mod.rs`), so once `depth > ROLLBACK_WINDOW` the undo entry
+        // for the lowest replayed block (`target_height + 1`) is already gone
+        // and the Phase-1 pre-read below would surface it as an
+        // undistinguished `NoCommittedState`. Return the distinct
+        // `ReorgTooDeep` instead so the executor can decline the reorg rather
+        // than re-attempt a doomed rollback every tick. Scala-faithful:
+        // keepVersions=200 means a deeper reorg is never attempted
+        // (FullBlockProcessor caps its non-best cache at the same window).
+        if depth > crate::store::ROLLBACK_WINDOW {
+            warn!(
+                event = "state_rollback_refused",
+                from_height,
+                target_height,
+                depth,
+                max = crate::store::ROLLBACK_WINDOW,
+                "reorg deeper than rollback window — refusing",
+            );
+            return Err(StateError::ReorgTooDeep {
+                depth,
+                max: crate::store::ROLLBACK_WINDOW,
+            });
+        }
+
         // Force durable flush before rollback.
         if self.ibd_mode && self.ibd_blocks_since_flush > 0 {
             if let Err(e) = self.force_durable_flush() {

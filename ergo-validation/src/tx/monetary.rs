@@ -17,6 +17,26 @@ pub fn validate_monetary(
     Ok(())
 }
 
+/// Scala `txPositiveAssets` (rule 108): every output token amount must be
+/// strictly positive — `outputCandidates.forall(_.additionalTokens.forall(_._2 > 0))`
+/// (ErgoTransaction.scala:399-401, non-disablable). Amounts are `u64` on the
+/// wire, so `== 0` is the exact analog of `!(_ > 0)`. Stateless (output-only),
+/// so it runs before input resolution / monetary conservation.
+pub fn check_positive_assets(tx: &Transaction) -> Result<(), ValidationError> {
+    for (index, out) in tx.output_candidates.iter().enumerate() {
+        for token in &out.tokens {
+            if token.amount == 0 {
+                return Err(ValidationError::NonPositiveTokenAmount {
+                    index,
+                    token_id: hex::encode(token.token_id.as_bytes()),
+                    amount: token.amount,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_erg_conservation(
     tx: &Transaction,
     resolved_inputs: &[ErgoBox],
@@ -40,13 +60,24 @@ fn check_erg_conservation(
             outputs: u64::MAX,
         })?;
 
-    if input_sum < output_sum {
+    // Scala `txErgPreservation` requires strict equality `inputSum == outputsSum`
+    // (the miner fee is itself an output box), so any imbalance — including
+    // burning ERG (input > output) — must be rejected.
+    if input_sum != output_sum {
         return Err(ValidationError::ErgNotConserved {
             inputs: input_sum,
             outputs: output_sum,
         });
     }
     Ok(())
+}
+
+/// Per-token-id amount accumulator with Scala `Math.addExact` (i64) overflow
+/// semantics: token amounts are unsigned on the wire but Scala sums them as
+/// `Long`, so a running total in `(i64::MAX, u64::MAX]` overflows and is
+/// rejected (Scala `txAssetsInOneBox`). `None` signals overflow.
+fn add_token_amount_i64(acc: u64, amount: u64) -> Option<u64> {
+    acc.checked_add(amount).filter(|&s| s <= i64::MAX as u64)
 }
 
 fn check_token_conservation(
@@ -57,7 +88,7 @@ fn check_token_conservation(
     for b in resolved_inputs {
         for token in &b.candidate.tokens {
             let entry = input_tokens.entry(token.token_id).or_insert(0);
-            *entry = entry.checked_add(token.amount).ok_or_else(|| {
+            *entry = add_token_amount_i64(*entry, token.amount).ok_or_else(|| {
                 ValidationError::TokenNotConserved {
                     token_id: hex::encode(token.token_id.as_bytes()),
                     input: u64::MAX,
@@ -71,7 +102,7 @@ fn check_token_conservation(
     for out in &tx.output_candidates {
         for token in &out.tokens {
             let entry = output_tokens.entry(token.token_id).or_insert(0);
-            *entry = entry.checked_add(token.amount).ok_or_else(|| {
+            *entry = add_token_amount_i64(*entry, token.amount).ok_or_else(|| {
                 ValidationError::TokenNotConserved {
                     token_id: hex::encode(token.token_id.as_bytes()),
                     input: 0,

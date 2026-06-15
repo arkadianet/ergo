@@ -78,12 +78,12 @@ use crate::compat::traits::NodeChainQuery;
 use crate::traits::ChainParamsView;
 use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
 use crate::types::{
-    ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint, ApiDifficultySeries,
-    ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost, ApiIdentity, ApiInfo,
-    ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiNativeSubmitError,
-    ApiPeer, ApiRecentBlock, ApiStatus, ApiSubmitError, ApiSubmitResponse, ApiSyncStatus, ApiTip,
-    ApiTxSource, ApiVotableParam, ApiVotes, ApiWeightFunction, HealthStatus, RawTransactionBytes,
-    SubmitError, SubmitMode, SyncStateLabel,
+    ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
+    ApiDifficultySeries, ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost,
+    ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions,
+    ApiNativeSubmitError, ApiPeer, ApiRecentBlock, ApiStatus, ApiSubmitError, ApiSubmitResponse,
+    ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam, ApiVotes, ApiWeightFunction, HealthStatus,
+    RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
@@ -1384,6 +1384,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         RawTransactionBytes,
         ApiHistoryMode,
         ApiBootstrapStatus,
+        ApiBlockApplyError,
         ApiHeaderRef,
         ApiFullBlockRef,
         ApiDifficultyPoint,
@@ -1688,6 +1689,9 @@ ergo_node_mempool_revalidation_pending {revalidating}
 # HELP ergo_node_snapshot_age_ms Snapshot age — how stale the read view is.
 # TYPE ergo_node_snapshot_age_ms gauge
 ergo_node_snapshot_age_ms {snap_age}
+# HELP ergo_node_block_apply_errors_total Block-apply rejections since node start.
+# TYPE ergo_node_block_apply_errors_total counter
+ergo_node_block_apply_errors_total {apply_errs}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -1700,6 +1704,7 @@ ergo_node_snapshot_age_ms {snap_age}
         cap_bytes = mempool.capacity_bytes,
         revalidating = mempool.revalidation_pending,
         snap_age = status.snapshot_age_ms,
+        apply_errs = status.block_apply_errors_total,
     );
 
     (
@@ -1865,7 +1870,7 @@ async fn peers_connect_handler(
     responses(
         (status = 200, description = "Node is healthy (synced and connected)",
          body = ApiHealth, content_type = "application/json"),
-        (status = 503, description = "Node is stalled or disconnected",
+        (status = 503, description = "Node is stalled, disconnected, or rejecting blocks",
          body = ApiHealth, content_type = "application/json"),
     ),
 )]
@@ -1873,7 +1878,11 @@ async fn health_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response 
     let h = read.health();
     let status = match h.status {
         HealthStatus::Ok => StatusCode::OK,
-        HealthStatus::Stalled | HealthStatus::Disconnected => StatusCode::SERVICE_UNAVAILABLE,
+        // `Rejecting` (an outstanding block-apply rejection) is a page-worthy
+        // not-healthy condition, same 503 as Stalled/Disconnected.
+        HealthStatus::Stalled | HealthStatus::Disconnected | HealthStatus::Rejecting => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
     };
     let body = serde_json::to_vec(&h).unwrap_or_else(|_| b"{}".to_vec());
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()

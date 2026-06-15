@@ -60,9 +60,11 @@ pub struct PopowBootstrap {
     /// current bootstrap. Cleared per-peer on disconnect via
     /// [`Self::forget_peer`].
     requested_peers: BTreeSet<PeerId>,
-    /// Peers we've successfully received a proof from (regardless of
-    /// validity). Used for the dashboard observability surface and
-    /// to avoid double-counting toward quorum.
+    /// Peers we've received a proof from (regardless of validity). Gates
+    /// [`Self::on_proof_received`]: a peer already in this set has its
+    /// further proofs dropped before the verifier, so it cannot contribute
+    /// more than one proof toward quorum (Scala parity). Also backs the
+    /// dashboard `provider_count` observability surface.
     seen_providers: BTreeSet<PeerId>,
     started_at: Option<Instant>,
 }
@@ -138,9 +140,16 @@ impl PopowBootstrap {
         self.requested_peers.remove(&peer);
     }
 
-    /// Hand an inbound proof to the verifier. Returns the verification
-    /// outcome unchanged so the caller can act on it (e.g., penalize
-    /// on `ValidationError` or `WrongGenesis`).
+    /// Hand an inbound proof to the verifier. Returns `Some(result)` with
+    /// the verification outcome so the caller can act on it (e.g., penalize
+    /// on `ValidationError` or `WrongGenesis`), or `None` when the proof is
+    /// dropped before the verifier because `peer` already contributed one.
+    ///
+    /// Per-peer dedup (Scala `ErgoNodeViewSynchronizer.scala:1066`): a peer
+    /// may contribute at most one proof to the verifier. Without it the
+    /// quorum (`proofs_processed >= quorum`) could be satisfied by a single
+    /// peer sending `quorum` proofs — a Sybil/eclipse bypass. The duplicate
+    /// is dropped with no penalty, matching Scala.
     ///
     /// If the verifier returns `BetterChain` or `NoBetterChain` AND
     /// the running counter has reached the quorum threshold, the
@@ -149,8 +158,12 @@ impl PopowBootstrap {
         &mut self,
         peer: PeerId,
         proof: NipopowProof,
-    ) -> NipopowVerificationResult {
-        self.seen_providers.insert(peer);
+    ) -> Option<NipopowVerificationResult> {
+        // `BTreeSet::insert` returns false when the peer was already present:
+        // it has already contributed its one counted proof, so drop this one.
+        if !self.seen_providers.insert(peer) {
+            return None;
+        }
         let result = self.verifier.process(proof);
         if matches!(
             result,
@@ -161,7 +174,7 @@ impl PopowBootstrap {
         {
             self.state = PopowBootstrapState::BestSelected;
         }
-        result
+        Some(result)
     }
 
     /// `true` once the reducer has seen at least `quorum` valid
@@ -284,7 +297,10 @@ mod tests {
         b.mark_requested(peer(1), Instant::now());
         b.mark_requested(peer(2), Instant::now());
         let r1 = b.on_proof_received(peer(1), valid_proof());
-        assert!(matches!(r1, NipopowVerificationResult::BetterChain { .. }));
+        assert!(matches!(
+            r1,
+            Some(NipopowVerificationResult::BetterChain { .. })
+        ));
         // After 1 valid proof, quorum not yet met (need 2).
         assert!(!b.quorum_reached());
         let _ = b.on_proof_received(peer(2), valid_proof());
@@ -313,5 +329,61 @@ mod tests {
         assert_eq!(b.pending_request_peers(&[peer(1)]).len(), 0);
         b.forget_peer(peer(1));
         assert_eq!(b.pending_request_peers(&[peer(1)]), vec![peer(1)]);
+    }
+
+    // ----- error paths -----
+
+    /// Scala parity (ErgoNodeViewSynchronizer.scala:1066 + PopowProcessor
+    /// .scala:141): a peer may contribute at most one proof to the verifier.
+    /// A second proof from the same peer is dropped before the verifier and
+    /// does not bump `proofs_processed`, so one peer can never reach quorum.
+    #[test]
+    fn second_proof_from_same_peer_is_dropped_and_does_not_count() {
+        let mut b = fresh_bootstrap(2);
+        b.mark_requested(peer(1), Instant::now());
+
+        let r1 = b.on_proof_received(peer(1), valid_proof());
+        assert!(matches!(
+            r1,
+            Some(NipopowVerificationResult::BetterChain { .. })
+        ));
+        assert_eq!(b.proofs_processed(), 1);
+
+        // Same peer again: dropped before the verifier, no penalty.
+        let r2 = b.on_proof_received(peer(1), valid_proof());
+        assert!(r2.is_none(), "duplicate peer proof must be dropped");
+        assert_eq!(
+            b.proofs_processed(),
+            1,
+            "counter must not bump on a duplicate peer"
+        );
+        assert!(!b.quorum_reached(), "one peer can never reach quorum=2");
+        assert_eq!(b.state(), PopowBootstrapState::Requesting);
+    }
+
+    /// Quorum counts DISTINCT peers: two proofs from one peer do not reach
+    /// quorum=2; a second distinct peer does.
+    #[test]
+    fn quorum_requires_two_distinct_peers() {
+        let mut b = fresh_bootstrap(2);
+        b.mark_requested(peer(1), Instant::now());
+        b.mark_requested(peer(2), Instant::now());
+
+        let _ = b.on_proof_received(peer(1), valid_proof());
+        let _ = b.on_proof_received(peer(1), valid_proof()); // dup → dropped
+        assert!(
+            !b.quorum_reached(),
+            "two proofs from one peer must not reach quorum"
+        );
+
+        let r = b.on_proof_received(peer(2), valid_proof());
+        assert!(matches!(
+            r,
+            Some(
+                NipopowVerificationResult::BetterChain { .. }
+                    | NipopowVerificationResult::NoBetterChain { .. }
+            )
+        ));
+        assert!(b.quorum_reached(), "second distinct peer reaches quorum");
     }
 }

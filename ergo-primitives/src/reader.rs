@@ -40,6 +40,17 @@ pub enum ReadError {
     /// caller's wire format — supply a short context string.
     #[error("invalid data: {0}")]
     InvalidData(String),
+    /// Nested value/expression deserialization exceeded the maximum tree depth
+    /// (Scala `SigmaConstants.MaxTreeDepth`). Scala raises this as a
+    /// `SerializerException` (`DeserializeCallDepthExceeded`), which is NOT in
+    /// the set its `ErgoTreeSerializer.deserializeErgoTree` catches, so it is
+    /// never wrapped into an `UnparsedErgoTree` (soft fork) even for
+    /// size-delimited trees — it must propagate as a HARD rejection.
+    #[error("deserialization depth exceeds maximum ({max})")]
+    DepthLimitExceeded {
+        /// The depth bound that was exceeded.
+        max: usize,
+    },
 }
 
 impl<'a> VlqReader<'a> {

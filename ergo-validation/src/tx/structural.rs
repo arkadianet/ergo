@@ -34,6 +34,7 @@ pub fn validate_structural(
     params: &ProtocolParams,
 ) -> Result<(), ValidationError> {
     check_has_inputs(tx)?;
+    check_has_outputs(tx)?;
     check_collection_caps(tx)?;
     check_no_duplicate_inputs(tx)?;
     // Note: duplicate data inputs are allowed (read-only references, matches Scala)
@@ -46,6 +47,17 @@ pub fn validate_structural(
 fn check_has_inputs(tx: &Transaction) -> Result<(), ValidationError> {
     if tx.inputs.is_empty() {
         return Err(ValidationError::NoInputs);
+    }
+    Ok(())
+}
+
+/// Rule 101 (`txNoOutputs`) — Scala rejects a transaction with zero outputs
+/// in `validateStateless`, immediately after `txNoInputs`
+/// (`ErgoTransaction.scala:94`). Non-disablable. The wire codec accepts an
+/// empty output vector, so this is the only guard.
+fn check_has_outputs(tx: &Transaction) -> Result<(), ValidationError> {
+    if tx.output_candidates.is_empty() {
+        return Err(ValidationError::NoOutputs);
     }
     Ok(())
 }
