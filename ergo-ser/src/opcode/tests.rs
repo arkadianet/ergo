@@ -680,6 +680,33 @@ fn error_depth_limit() {
     );
 }
 
+/// Exact expression-depth boundary, pinned against the Scala reference node
+/// (mainnet, sigma-state 6.0.2, GET /utils/ergoTreeToAddress): a no-size tree
+/// body of 110 `SizeOf` ops reports `nested value deserialization call
+/// depth(111) exceeds allowed maximum 110` (DeserializeCallDepthExceeded),
+/// while 109 does NOT hit the depth limit. Our 0-based `depth >= MAX_EXPR_DEPTH`
+/// must reject at exactly the same point: 110 SizeOf rejects, 109 parses.
+#[test]
+fn expr_depth_boundary_matches_scala_oracle() {
+    let chain = |n: usize| {
+        let mut data = vec![0xB1u8; n]; // n SizeOf (One arg)
+        data.push(0xA3); // Height leaf
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || parse_body(&mut VlqReader::new(&data), 0))
+            .unwrap()
+            .join()
+            .unwrap()
+    };
+    // 110 SizeOf -> Scala depth(111) > 110 -> reject; we reject identically.
+    assert!(matches!(
+        chain(MAX_EXPR_DEPTH).unwrap_err(),
+        ReadError::DepthLimitExceeded { .. }
+    ));
+    // 109 SizeOf -> Scala does NOT hit the depth limit; we must parse it.
+    assert!(chain(MAX_EXPR_DEPTH - 1).is_ok());
+}
+
 /// 0xDE SomeValue is rejected at parse, matching Scala. The opcode
 /// has no Scala serializer registration, so accepting it would be
 /// an accept-more divergence — this test asserts the rejection.
