@@ -154,3 +154,20 @@ public_bind = false
 # resident (multi-GB on mainnet archival) — enable only on a mining
 # node with RAM headroom. See docs/configuration.md.
 # candidate_base_cache = false
+
+[voting]
+# On-chain protocol-parameter voting. When mining, each block this node
+# produces casts up to 2 votes (Parameters.ParamVotesCount) nudging the
+# listed parameters one step per block toward your target value. Voting on
+# a parameter already at its target (or at its min/max bound) casts no
+# vote. Requires [mining] enabled = true — targets with mining off are a
+# startup error. GET /api/v1/votes shows the live votable set + current
+# values. Soft-fork / blockVersion (123) voting is NOT operator-settable.
+#
+# Map each canonical parameter NAME to its desired numeric value. Votable
+# names: storageFeeFactor, minValuePerByte, maxBlockSize, maxBlockCost,
+# tokenAccessCost, inputCost, dataInputCost, outputCost, subblocksPerBlock.
+# An unknown or non-votable name is a startup error.
+# [voting.targets]
+# maxBlockSize = 2097152
+# storageFeeFactor = 1250000

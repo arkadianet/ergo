@@ -973,6 +973,61 @@ mod tests {
         assert!(check_votes_known(&h, 0).is_ok());
     }
 
+    /// SAFETY NET for the candidate-vote selector (PR2): every `[u8;3]`
+    /// `select_candidate_votes` produces — across diverse operator configs, at
+    /// both off-epoch and epoch-start heights — must PASS the real header-votes
+    /// validators (rules 212/213/214/215, strictest `rule_disabled = false`).
+    /// If the selector ever emitted an invalid vote, our mined block would be
+    /// rejected by peers; this pins that it can't.
+    #[test]
+    fn selected_candidate_votes_always_pass_header_validators() {
+        use crate::active_params::scala_launch;
+        use crate::voting::select_candidate_votes;
+        use std::collections::BTreeMap;
+
+        let mut active = scala_launch();
+        active.subblocks_per_block = Some(4); // id 9 active so it's a candidate vote
+
+        let cfg = |pairs: &[(u8, i64)]| -> BTreeMap<u8, i64> { pairs.iter().copied().collect() };
+        let configs = [
+            cfg(&[]),                               // neutral
+            cfg(&[(1, 2_000_000), (4, 9_000_000)]), // two increases
+            cfg(&[(1, 2_000_000), (3, 100_000)]),   // increase + decrease
+            cfg(&[(9, 8)]),                         // id 9 increase (active)
+            cfg(&[(3, 100_000)]),                   // decrease only
+            // four increases — must cap to two:
+            cfg(&[
+                (1, 9_000_000),
+                (2, 9_000_000),
+                (3, 9_000_000),
+                (4, 9_000_000),
+            ]),
+        ];
+
+        for targets in &configs {
+            for (height, is_epoch_start) in [(100u32, false), (MAINNET_VOTING_LENGTH, true)] {
+                let votes = select_candidate_votes(&active, targets, is_epoch_start);
+                let h = header_with_height(height, votes);
+                assert!(
+                    check_votes_number_active(&h, false).is_ok(),
+                    "rule 212: votes={votes:?} @ h={height}"
+                );
+                assert!(
+                    check_votes_no_duplicates(&h).is_ok(),
+                    "rule 213: votes={votes:?} @ h={height}"
+                );
+                assert!(
+                    check_votes_no_contradictions(&h).is_ok(),
+                    "rule 214: votes={votes:?} @ h={height}"
+                );
+                assert!(
+                    check_votes_known(&h, MAINNET_VOTING_LENGTH).is_ok(),
+                    "rule 215: votes={votes:?} @ h={height}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn votes_known_passes_epoch_start_all_known_votes() {
         // h=1024 IS an epoch start. Votes 3 (MaxBlockSize), 5

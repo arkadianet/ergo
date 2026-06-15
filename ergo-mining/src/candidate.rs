@@ -37,10 +37,13 @@ use ergo_ser::header::{read_header, serialize_header_without_pow, Header};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
 use ergo_validation::popow::algos::unpack_interlinks;
 use ergo_validation::{
-    validate_transaction_parsed, voting::derive_activated_script_version, CheckedTransaction,
-    CostAccumulator, JitCost, ProtocolParams, TransactionContext, TxValidationCtx, UtxoView,
+    validate_transaction_parsed,
+    voting::{derive_activated_script_version, select_candidate_votes},
+    CheckedTransaction, CostAccumulator, JitCost, ProtocolParams, TransactionContext,
+    TxValidationCtx, UtxoView,
 };
 use num_bigint::BigUint;
+use std::collections::BTreeMap;
 
 use crate::candidate_selection::{select_user_txs, CandidateOverlay};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
@@ -150,6 +153,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     reemission: Option<&ReemissionSettings>,
     chain_config: &DifficultyParams,
     eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &BTreeMap<u8, i64>,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
@@ -188,6 +192,21 @@ pub fn generate_candidate<V: CandidateStateView>(
     let (active_params, validation_settings) = view.tip_snapshot_params().map_err(state_err)?;
     let last_headers = view.last_applied_chain_window_10().map_err(state_err)?;
 
+    // 2b. Reduce the operator's configured voting targets to the header-votes
+    //     triple. Pure + consensus-safe: `select_candidate_votes` only ever
+    //     emits a combination that passes the header-votes validator (rules
+    //     212/213/214/215). Epoch-start awareness is tied to the SAME period
+    //     the rest of the builder uses (`is_epoch_boundary_mainnet`, the
+    //     `MAINNET_VOTING_LENGTH` the extension encoder + the epoch refusal at
+    //     the top of this fn key on): at an epoch start, rule 215 admits only
+    //     known increases, so the selector drops decreases + id 9 there. In
+    //     practice this is always `false` at this point — an epoch-boundary
+    //     candidate already early-returned above — but deriving it (rather than
+    //     hardcoding `false`) keeps the votes safe-by-construction if that
+    //     refusal is ever lifted. Empty targets ⇒ `[0,0,0]`.
+    let is_epoch_start = is_epoch_boundary_mainnet(candidate_height);
+    let candidate_votes = select_candidate_votes(&active_params, voting_targets, is_epoch_start);
+
     // 3. Difficulty retarget (or parent's nBits when non-recalc)
     let epoch_len = epoch_length_for_height(candidate_height, chain_config);
     let needed_heights = previous_heights_for_recalculation(candidate_height, epoch_len);
@@ -213,7 +232,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         height: candidate_height,
         timestamp,
         n_bits: new_n_bits,
-        votes: [0u8; 3], // v1: neutral votes
+        votes: candidate_votes,
         miner_pubkey: *miner_pk,
     };
 
@@ -284,7 +303,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         pre_header_version: pre_header.version,
         pre_header_parent_id: parent_id,
         pre_header_n_bits: new_n_bits as u64,
-        pre_header_votes: [0u8; 3],
+        pre_header_votes: candidate_votes,
     };
 
     let emission_bytes = serialize_tx(&emission_tx, "serialize_emission_tx")?;
@@ -572,7 +591,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         extension_root: Digest32::from_bytes(extension_root_bytes),
         n_bits: new_n_bits,
         height: candidate_height,
-        votes: [0u8; 3],
+        votes: candidate_votes,
         unparsed_bytes: Vec::new(),
         solution: placeholder_solution,
     };

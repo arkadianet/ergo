@@ -113,6 +113,14 @@ pub struct MiningHandle {
     claim_storage_rent: bool,
     /// Max rent boxes per block's self-claim (see `with_rent_config`).
     max_storage_rent_claims: u32,
+    /// Operator-configured on-chain voting targets, keyed by signed-i8
+    /// parameter id (stored as `u8`). Empty by default (no voting); set via
+    /// [`MiningHandle::with_voting_targets`] from the `[voting]` config. The
+    /// candidate builder reduces these to a `header.votes` triple through
+    /// `select_candidate_votes`, casting at most `ParamVotesCount` (2) votes
+    /// per block toward the targets. `Arc` so every clone of the handle shares
+    /// the one configured policy.
+    voting_targets: Arc<std::collections::BTreeMap<u8, i64>>,
 }
 
 impl MiningHandle {
@@ -150,6 +158,7 @@ impl MiningHandle {
             chain_config: Arc::new(chain_config),
             claim_storage_rent: false,
             max_storage_rent_claims: 0,
+            voting_targets: Arc::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -174,6 +183,24 @@ impl MiningHandle {
     /// Max rent boxes swept into one block's self-claim.
     pub fn max_storage_rent_claims(&self) -> u32 {
         self.max_storage_rent_claims
+    }
+
+    /// Set the operator's on-chain voting targets (keyed by signed-i8 param id
+    /// stored as `u8`). Empty by default. Builder-style so existing
+    /// constructors and their callers default to non-voting.
+    pub fn with_voting_targets(
+        mut self,
+        voting_targets: std::collections::BTreeMap<u8, i64>,
+    ) -> Self {
+        self.voting_targets = Arc::new(voting_targets);
+        self
+    }
+
+    /// The operator's configured voting targets — forwarded to the candidate
+    /// builder, which reduces them to a `header.votes` triple. Empty ⇒ neutral
+    /// votes.
+    pub fn voting_targets(&self) -> &std::collections::BTreeMap<u8, i64> {
+        &self.voting_targets
     }
 
     /// Update the authoritative tip + synced bit. Called by the action loop

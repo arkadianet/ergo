@@ -68,6 +68,11 @@ pub struct SnapshotReadState {
     /// is the on-disk size; `data_dir` is the volume the disk-space readout
     /// resolves against.
     host_paths: HostPaths,
+    /// Operator-configured voting targets (param id → target value) resolved
+    /// from `[voting.targets]` at boot — the SAME map handed to the
+    /// `MiningHandle`. Captured here so `GET /api/v1/votes` reports the policy
+    /// the node is actually mining with (`configured_votes`). Empty ⇒ neutral.
+    voting_targets: std::collections::BTreeMap<u8, i64>,
 }
 
 /// Filesystem paths the `/api/v1/host` handler needs to compute per-call
@@ -161,11 +166,17 @@ impl NodeAdmin for ShutdownAdmin {
 }
 
 impl SnapshotReadState {
-    pub fn new(handle: SnapshotHandle, identity: IdentitySlot, host_paths: HostPaths) -> Self {
+    pub fn new(
+        handle: SnapshotHandle,
+        identity: IdentitySlot,
+        host_paths: HostPaths,
+        voting_targets: std::collections::BTreeMap<u8, i64>,
+    ) -> Self {
         Self {
             handle,
             identity,
             host_paths,
+            voting_targets,
         }
     }
 
@@ -204,8 +215,23 @@ impl NodeReadState for SnapshotReadState {
                     max: d.max,
                 })
                 .collect(),
-            // Operator vote configuration ships in the follow-up.
-            configured_votes: Vec::new(),
+            // The operator's configured `[voting.targets]` policy (id → name +
+            // target), ascending by id (BTreeMap iteration order). Reports the
+            // policy as configured, independent of whether a given parameter
+            // would cast a vote this block — that depends on the live value
+            // versus the target. Every id was validated votable at config load,
+            // so `votable_param_name` resolves; fall back defensively.
+            configured_votes: self
+                .voting_targets
+                .iter()
+                .map(|(&id, &target)| ergo_api::ApiConfiguredVote {
+                    parameter_id: id,
+                    name: ergo_validation::voting::votable_param_name(id)
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    target,
+                })
+                .collect(),
         }
     }
 

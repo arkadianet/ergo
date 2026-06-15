@@ -74,6 +74,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
             file: None,
         },
         mining_config: ergo_mining::MiningConfig::default(),
+        voting_targets: std::collections::BTreeMap::new(),
         wallet_expose_private_keys: false,
     }
 }

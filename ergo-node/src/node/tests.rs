@@ -586,6 +586,7 @@ fn cfg_with_mode(
             file: None,
         },
         mining_config: ergo_mining::MiningConfig::default(),
+        voting_targets: std::collections::BTreeMap::new(),
         wallet_expose_private_keys: false,
     }
 }
