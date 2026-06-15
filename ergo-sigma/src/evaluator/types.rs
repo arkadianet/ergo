@@ -647,7 +647,15 @@ impl From<CostError> for EvalError {
     }
 }
 
-pub(crate) const MAX_EVAL_DEPTH: usize = 100;
+/// Runtime evaluation-depth backstop. Set to the PARSER bound
+/// (`ergo_ser` `MAX_EXPR_DEPTH` = Scala `SigmaConstants.MaxTreeDepth` = 110),
+/// NOT below it: a tree that successfully parsed is at most 110 levels deep, so
+/// this guard never fires for a parser-accepted tree — it only backstops
+/// AST-constructed or deserialize-extended inputs against stack overflow. A
+/// lower value would reject trees the parser (= Scala, which has no runtime
+/// eval-depth limit, only cost) accepts → reject-valid. Scala's deserialize-time
+/// `DeserializeCallDepthExceeded` (also 110) is the analog; keep the guard.
+pub(crate) const MAX_EVAL_DEPTH: usize = 110;
 
 /// Variable environment for let-bindings (ValDef/ValUse).
 pub(crate) type Env = std::collections::HashMap<u32, Value>;
