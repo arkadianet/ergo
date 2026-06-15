@@ -37,12 +37,25 @@ const SHEADER_CODE: u8 = 104;
 const SPREHEADER_CODE: u8 = 105;
 const SGLOBAL_CODE: u8 = 106;
 
-/// Maximum nesting depth for `read_type` recursion. Mirrors Scala's
-/// `CoreSerializer.MaxTreeDepth` (default 100, used by
-/// `CoreByteReader.level_=` to throw `DeserializeCallDepthExceeded`).
-/// Without this guard, a maliciously deeply-nested type
-/// (`Coll[Coll[Coll[...]]]`) would blow our recursion stack —
-/// Scala rejects gracefully at 100 levels.
+/// Maximum nesting depth for `read_type` recursion — a stack-overflow guard,
+/// NOT a faithful consensus boundary. Scala applies NO type-descriptor depth
+/// limit: `TypeSerializer.deserialize` threads a `depth` parameter but never
+/// checks it, and the `CoreByteReader.level` / `SigmaConstants.MaxTreeDepth`
+/// (=110) mechanism is incremented only by the value/expression serializers
+/// (`ValueSerializer`, `DataSerializer`, `SigmaBoolean`), never by
+/// `TypeSerializer`. The only real Scala bound on type-descriptor nesting is
+/// the reader position limit = `SigmaConstants.MaxPropositionBytes` (4096),
+/// since each `Coll`/`Option` level costs one type byte.
+///
+/// We deliberately keep a *conservative* recursion bound rather than the true
+/// 4096 ceiling: `read_type` is recursive descent, and ~4096-deep recursion
+/// overflows the native stack (a worse failure than the reject-valid it would
+/// cure). So a type descriptor nested 101..4096 deep — which Scala accepts —
+/// is rejected here. That divergence is theoretical (no consensus-reachable
+/// mainnet box nests type descriptors anywhere near this deep) and strictly
+/// safer than crashing. Full parity needs an iterative (heap-stack) `read_type`
+/// that can absorb a 4 KB-deep chain without native recursion; that rewrite is
+/// tracked as a follow-up, not attempted here.
 const MAX_TYPE_DEPTH: usize = 100;
 
 /// Sigma type descriptors used by the Ergo protocol for serializing
@@ -907,9 +920,11 @@ mod tests {
         //     `0x0C` (`COLL_CODE` = 1*PRIM_RANGE = 12, primId 0).
         //   - Final inner type can be the embeddable SBoolean (0x01).
         //
-        // With MAX_TYPE_DEPTH levels of Coll wrappers, our reader
-        // must error gracefully (not stack-overflow). The error
-        // message names the limit.
+        // Past MAX_TYPE_DEPTH our recursive reader must error gracefully
+        // rather than overflow the native stack. The cap is a conservative
+        // stack-safety bound, not the true Scala ceiling (= MaxPropositionBytes
+        // = 4096) — see the constant's doc. The relative `MAX_TYPE_DEPTH + 5`
+        // keeps this honest if the constant changes.
         let mut bytes = vec![0x0Cu8; MAX_TYPE_DEPTH + 5];
         // Inner type after the chain: SBoolean (1).
         bytes.push(0x01);
