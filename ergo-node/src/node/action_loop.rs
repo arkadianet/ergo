@@ -354,43 +354,130 @@ fn handle_mempool_tick(state: &mut NodeState) {
             }
         }
         PollOutcome::Error { tip, error } => {
-            // `TooFarBehind` / `MissingSections` / `ReorgTooDeep`.
-            // The notifier already advanced `last_seen` to `tip`;
-            // next poll yields NoChange. Consumer semantics: the
-            // pool currently self-heals on the next sync_tick —
-            // pending-revalidation state is drained per tick, so a
-            // stale notifier error here only ever costs one tick of
-            // throughput, not correctness.
-            //
-            // Severity split:
-            //   - `TooFarBehind` / `ReorgTooDeep` are the expected
-            //     outcome during IBD when blocks land faster than
-            //     the notifier polling cadence. The mempool is
-            //     already IBD-gated, so the diff would have been
-            //     thrown away anyway. Log at debug to keep IBD
-            //     output readable.
-            //   - `MissingSections` indicates a gap in the chain
-            //     index (chain_index entry without persisted section
-            //     bytes) — a real consistency issue. Stay at warn.
-            use ergo_state::diff::TxDiffError;
-            match error {
-                TxDiffError::TooFarBehind | TxDiffError::ReorgTooDeep => {
-                    debug!(
-                        height = tip.height,
-                        header_id = %hex::encode(tip.header_id),
-                        error = ?error,
-                        "mempool notifier skipped (catch-up gap)",
-                    );
-                }
-                TxDiffError::MissingSections { .. } => {
-                    warn!(
-                        height = tip.height,
-                        header_id = %hex::encode(tip.header_id),
-                        error = ?error,
-                        "mempool notifier error at tip",
-                    );
-                }
-            }
+            reconcile_on_diff_error(&mut state.mempool, tip, &error);
         }
+    }
+}
+
+/// Reconcile the mempool when a tip-change diff could not be computed.
+///
+/// `TooFarBehind` / `ReorgTooDeep` (a forward catch-up jump or a reorg wider
+/// than the rollback window) and `MissingSections` (a chain-index gap) all
+/// leave us unable to identify which pooled txs were confirmed in the skipped
+/// blocks. Scala's `updateMemPool` removes confirmed txs on every accepted tip
+/// change; to preserve that invariant when the exact set is uncomputable, we
+/// quarantine the WHOLE active pool into the revalidation queue, so no
+/// possibly-confirmed/stale tx is served (`MempoolSnapshot::capture`) or
+/// relayed. (This is intentionally conservative: a benign forward jump may
+/// quarantine still-valid txs, which are then re-admitted on relay — strictly
+/// safer than serving confirmed txs. The earlier claim that the pool
+/// "self-heals on the next sync_tick" was false: `tick_revalidation` has no
+/// production caller; draining the revalidation queue is a separate gap.)
+///
+/// Returns the number of txs quarantined (0 when the pool was empty — the
+/// common IBD case, since the pool is IBD-gated).
+fn reconcile_on_diff_error(
+    mempool: &mut ergo_mempool::Mempool,
+    tip: ergo_state::diff::TipPointer,
+    error: &ergo_state::diff::TxDiffError,
+) -> usize {
+    use ergo_state::diff::TxDiffError;
+    // Per-variant cause logging:
+    //   - `TooFarBehind` / `ReorgTooDeep` are expected during IBD when blocks
+    //     land faster than the notifier cadence — debug, to keep IBD readable.
+    //   - `MissingSections` is a chain-index gap (chain_index entry without
+    //     persisted section bytes) — a real consistency issue, stays at warn.
+    match error {
+        TxDiffError::TooFarBehind | TxDiffError::ReorgTooDeep => {
+            debug!(
+                height = tip.height,
+                header_id = %hex::encode(tip.header_id),
+                error = ?error,
+                "mempool notifier skipped (catch-up gap)",
+            );
+        }
+        TxDiffError::MissingSections { .. } => {
+            warn!(
+                height = tip.height,
+                header_id = %hex::encode(tip.header_id),
+                error = ?error,
+                "mempool notifier error at tip",
+            );
+        }
+    }
+    // `size()` is the active-pool count; capture it before demoting so we can
+    // report what was quarantined (the method itself returns the queue-cap
+    // overflow count, not the quarantine count).
+    let quarantined = mempool.size();
+    let overflow = mempool.demote_all_for_revalidation();
+    if quarantined > 0 {
+        warn!(
+            quarantined,
+            overflow,
+            height = tip.height,
+            "mempool catch-up/reorg gap exceeded rollback window: quarantined active pool for revalidation",
+        );
+    }
+    quarantined
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_mempool::types::MempoolConfig;
+    use ergo_mempool::{weight, Entry, Mempool, TxSource};
+    use ergo_primitives::digest::Digest32;
+    use ergo_state::diff::{TipPointer, TxDiffError};
+    use std::sync::Arc;
+
+    fn dig(b: u8) -> Digest32 {
+        Digest32::from_bytes([b; 32])
+    }
+
+    fn seed(mempool: &mut Mempool, b: u8) {
+        let bytes: Arc<[u8]> = Arc::from(vec![b; 20].into_boxed_slice());
+        let entry = Entry::new(
+            dig(b),
+            bytes,
+            vec![dig(b ^ 0x10)],
+            vec![dig(b ^ 0x20)],
+            vec![],
+            1_000_000,
+            100,
+            20,
+            50_000,
+            TxSource::Api,
+        );
+        mempool.pool_mut().insert(entry).unwrap();
+    }
+
+    /// XC-1: when the tip-change diff is unrecoverable (a forward catch-up jump
+    /// or reorg wider than the rollback window), the Error-arm reconciliation
+    /// must quarantine the whole active pool so no possibly-confirmed/stale tx
+    /// keeps being served or relayed — matching Scala's invariant that no
+    /// confirmed tx survives in the pool after an accepted tip change.
+    #[test]
+    fn reconcile_on_diff_error_quarantines_active_pool() {
+        let mut mempool = Mempool::new(
+            MempoolConfig::default(),
+            weight::from_config("cost").unwrap(),
+        );
+        seed(&mut mempool, 1);
+        seed(&mut mempool, 2);
+        seed(&mut mempool, 3);
+        assert_eq!(mempool.size(), 3);
+
+        let tip = TipPointer {
+            height: 500,
+            header_id: [0xFF; 32],
+        };
+        let quarantined = reconcile_on_diff_error(&mut mempool, tip, &TxDiffError::ReorgTooDeep);
+
+        assert_eq!(quarantined, 3, "all three active txs quarantined");
+        assert_eq!(
+            mempool.size(),
+            0,
+            "active pool emptied — no stale/confirmed tx is served or relayed",
+        );
     }
 }
