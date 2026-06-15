@@ -40,13 +40,24 @@ fn check_erg_conservation(
             outputs: u64::MAX,
         })?;
 
-    if input_sum < output_sum {
+    // Scala `txErgPreservation` requires strict equality `inputSum == outputsSum`
+    // (the miner fee is itself an output box), so any imbalance — including
+    // burning ERG (input > output) — must be rejected.
+    if input_sum != output_sum {
         return Err(ValidationError::ErgNotConserved {
             inputs: input_sum,
             outputs: output_sum,
         });
     }
     Ok(())
+}
+
+/// Per-token-id amount accumulator with Scala `Math.addExact` (i64) overflow
+/// semantics: token amounts are unsigned on the wire but Scala sums them as
+/// `Long`, so a running total in `(i64::MAX, u64::MAX]` overflows and is
+/// rejected (Scala `txAssetsInOneBox`). `None` signals overflow.
+fn add_token_amount_i64(acc: u64, amount: u64) -> Option<u64> {
+    acc.checked_add(amount).filter(|&s| s <= i64::MAX as u64)
 }
 
 fn check_token_conservation(
@@ -57,7 +68,7 @@ fn check_token_conservation(
     for b in resolved_inputs {
         for token in &b.candidate.tokens {
             let entry = input_tokens.entry(token.token_id).or_insert(0);
-            *entry = entry.checked_add(token.amount).ok_or_else(|| {
+            *entry = add_token_amount_i64(*entry, token.amount).ok_or_else(|| {
                 ValidationError::TokenNotConserved {
                     token_id: hex::encode(token.token_id.as_bytes()),
                     input: u64::MAX,
@@ -71,7 +82,7 @@ fn check_token_conservation(
     for out in &tx.output_candidates {
         for token in &out.tokens {
             let entry = output_tokens.entry(token.token_id).or_insert(0);
-            *entry = entry.checked_add(token.amount).ok_or_else(|| {
+            *entry = add_token_amount_i64(*entry, token.amount).ok_or_else(|| {
                 ValidationError::TokenNotConserved {
                     token_id: hex::encode(token.token_id.as_bytes()),
                     input: 0,

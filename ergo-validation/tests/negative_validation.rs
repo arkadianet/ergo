@@ -227,7 +227,9 @@ fn reject_erg_inflation() {
 
 #[test]
 fn reject_invalid_token_minting() {
-    let input_box = make_ergo_box(1_000_000_000, 1);
+    // Input value matches the single output so ERG is conserved and the minting
+    // rule is what fires (not the strict-equality ERG check).
+    let input_box = make_ergo_box(500_000_000, 1);
     let input_box_id = input_box.box_id().unwrap();
     let mut utxo_map = HashMap::new();
     utxo_map.insert(input_box_id, input_box);
@@ -269,6 +271,96 @@ fn reject_invalid_token_minting() {
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
     assert!(matches!(err, ValidationError::InvalidMinting { .. }));
+}
+
+// --- Monetary: ERG must be strictly conserved (no burning) ---
+
+#[test]
+fn reject_erg_burn() {
+    // Scala `txErgPreservation` requires inputSum == outputsSum exactly (the
+    // miner fee is itself an output box). Burning ERG (input > output) must be
+    // rejected; it was previously accepted because the check used `<`.
+    let input_box = make_ergo_box(2_000_000_000, 1); // 2 ERG input
+    let input_box_id = input_box.box_id().unwrap();
+    let mut utxo_map = HashMap::new();
+    utxo_map.insert(input_box_id, input_box);
+    let utxo = TestUtxo(utxo_map);
+
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: input_box_id,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![make_candidate(1_000_000_000)], // 1 ERG out — 1 ERG burned
+    };
+    let tx_bytes = serialize_tx(&tx);
+    let mut cost = CostAccumulator::recording_only();
+    let ctx = default_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let policy = LocalPolicy::default_policy();
+    let mut tx_cx = ergo_validation::TxValidationCtx {
+        ctx: &ctx,
+        params: &params,
+        cost: &mut cost,
+        last_headers: &[],
+    };
+
+    let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
+    assert!(matches!(err, ValidationError::ErgNotConserved { .. }));
+}
+
+// --- Monetary: per-token-id sum must use i64 (Scala Math.addExact) ---
+
+#[test]
+fn reject_token_sum_over_i64_max() {
+    // Scala sums per-token-id amounts with `Math.addExact` (i64), so a per-type
+    // sum in (i64::MAX, u64::MAX] overflows Long and is rejected. Previously the
+    // Rust check summed with u64 and accepted such sums.
+    let input_box = make_ergo_box(2_000_000_000, 1);
+    let input_box_id = input_box.box_id().unwrap(); // == minted token id
+    let mut utxo_map = HashMap::new();
+    utxo_map.insert(input_box_id, input_box);
+    let utxo = TestUtxo(utxo_map);
+
+    // Two outputs minting the same token; amounts sum to i64::MAX + 1 (fits in
+    // u64, overflows i64). ERG balances (1 + 1 == 2 ERG) so only the token rule
+    // can fire.
+    let mk_out = |amount: u64| {
+        ErgoBoxCandidate::new(
+            1_000_000_000,
+            simple_tree(),
+            100,
+            vec![Token {
+                token_id: input_box_id,
+                amount,
+            }],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()
+    };
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: input_box_id,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![mk_out(i64::MAX as u64), mk_out(1)],
+    };
+    let tx_bytes = serialize_tx(&tx);
+    let mut cost = CostAccumulator::recording_only();
+    let ctx = default_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let policy = LocalPolicy::default_policy();
+    let mut tx_cx = ergo_validation::TxValidationCtx {
+        ctx: &ctx,
+        params: &params,
+        cost: &mut cost,
+        last_headers: &[],
+    };
+
+    let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
+    assert!(matches!(err, ValidationError::TokenNotConserved { .. }));
 }
 
 // --- Cost accumulator: recording vs enforcing ---
@@ -348,7 +440,8 @@ fn allow_duplicate_data_inputs() {
                 box_id: data_box_id,
             }, // duplicate — should be allowed
         ],
-        output_candidates: vec![make_candidate(1_000_000_000)],
+        // Match the 2 ERG input so ERG is strictly conserved.
+        output_candidates: vec![make_candidate(2_000_000_000)],
     };
     let tx_bytes = serialize_tx(&tx);
     let mut utxo_map = HashMap::new();
