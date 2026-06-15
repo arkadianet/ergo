@@ -673,6 +673,31 @@ impl NodeConfig {
             return Err(format!("[mining]: {e}"));
         }
 
+        // [voting] — operator on-chain voting policy. Resolve each
+        // `[voting.targets]` parameter NAME to its votable id; an unknown or
+        // non-votable name (blockVersion, soft-fork, typo) is a startup error.
+        // Targets only ever cast a vote while mining, so non-empty targets with
+        // mining disabled is refused (mirrors the claim_storage_rent gate).
+        let mut voting_targets: std::collections::BTreeMap<u8, i64> =
+            std::collections::BTreeMap::new();
+        for (name, target) in &toml_cfg.voting.targets {
+            let id = ergo_validation::voting::votable_param_id(name).ok_or_else(|| {
+                format!(
+                    "[voting] target {name:?} is not an operator-votable parameter \
+                     (votable: storageFeeFactor, minValuePerByte, maxBlockSize, \
+                     maxBlockCost, tokenAccessCost, inputCost, dataInputCost, \
+                     outputCost, subblocksPerBlock; blockVersion is soft-fork driven)"
+                )
+            })?;
+            voting_targets.insert(id, *target);
+        }
+        if !voting_targets.is_empty() && !mining_config.enabled {
+            return Err("[voting] targets are set but [mining] enabled = false — \
+                        votes are only cast while mining. Enable mining or remove \
+                        the [voting.targets]."
+                .into());
+        }
+
         // [logging] — TOML drives subscriber wiring. Defaults preserve
         // pre-config behavior: stderr only at warn level. File output
         // is opt-in; when enabled the directory is resolved against
@@ -773,6 +798,7 @@ impl NodeConfig {
             enable_anchor_scheduler,
             logging,
             mining_config,
+            voting_targets,
             wallet_expose_private_keys: toml_cfg.wallet.expose_private_keys.unwrap_or(false),
         })
     }

@@ -1054,6 +1054,15 @@ async fn submit_full_block_oneshot_dropped_returns_shutting_down() {
 /// Build a `SnapshotReadState` pinned to `host_paths` for host() tests.
 /// The snapshot itself is a default empty publisher — host() ignores it.
 fn read_state_for_host(host_paths: HostPaths) -> SnapshotReadState {
+    read_state_with_targets(host_paths, std::collections::BTreeMap::new())
+}
+
+/// Like `read_state_for_host` but seeds the operator voting targets so the
+/// `configured_votes` projection in `votes()` can be exercised.
+fn read_state_with_targets(
+    host_paths: HostPaths,
+    voting_targets: std::collections::BTreeMap<u8, i64>,
+) -> SnapshotReadState {
     let api_info = ergo_api::types::ApiInfo {
         agent_name: "test".into(),
         node_name: "test".into(),
@@ -1070,7 +1079,12 @@ fn read_state_for_host(host_paths: HostPaths) -> SnapshotReadState {
     );
     let identity_slot: crate::api_bridge::IdentitySlot =
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(ApiIdentity::default()));
-    SnapshotReadState::new(publisher.handle(), identity_slot, host_paths)
+    SnapshotReadState::new(
+        publisher.handle(),
+        identity_slot,
+        host_paths,
+        voting_targets,
+    )
 }
 
 /// `votes()` projects the snapshot's active params into the votable-parameter
@@ -1104,6 +1118,40 @@ fn votes_serves_votable_params_from_active_set() {
         "no operator votes configured yet"
     );
     assert_eq!(v.block_version, 1);
+}
+
+/// With `[voting.targets]` configured, `votes()` reports them under
+/// `configured_votes` — id → canonical name + target — sorted by parameter id,
+/// so an operator with the API enabled can verify the policy the node mines
+/// with.
+#[test]
+fn votes_reports_configured_operator_votes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut targets = std::collections::BTreeMap::new();
+    targets.insert(3u8, 600_000i64); // maxBlockSize
+    targets.insert(1u8, 1_300_000i64); // storageFeeFactor
+    let read = read_state_with_targets(
+        HostPaths {
+            state_db: dir.path().join("s.redb"),
+            index_db: dir.path().join("i.redb"),
+            data_dir: dir.path().to_path_buf(),
+        },
+        targets,
+    );
+    let v = read.votes();
+    let cv: Vec<(u8, &str, i64)> = v
+        .configured_votes
+        .iter()
+        .map(|c| (c.parameter_id, c.name.as_str(), c.target))
+        .collect();
+    assert_eq!(
+        cv,
+        vec![
+            (1, "storageFeeFactor", 1_300_000),
+            (3, "maxBlockSize", 600_000),
+        ],
+        "configured votes mirror [voting.targets], ascending by id"
+    );
 }
 
 /// State DB file present and non-empty → `Some(len)` with the actual

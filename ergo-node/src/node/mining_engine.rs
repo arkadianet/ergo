@@ -891,6 +891,7 @@ mod tests {
             ergo_mining::emission_rules::MonetarySettings::mainnet(),
             None,
             ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
         )
     }
 

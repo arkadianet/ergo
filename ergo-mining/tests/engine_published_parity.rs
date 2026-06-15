@@ -429,6 +429,7 @@ fn handle(regime: &Regime) -> MiningHandle {
         MonetarySettings::mainnet(),
         regime.reemission.clone(),
         DifficultyParams::mainnet(),
+        ergo_validation::VotingSettings::mainnet(),
     )
 }
 
@@ -466,6 +467,8 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("on-loop generate_candidate ok")
     .expect("on-loop candidate is Some");
@@ -799,6 +802,8 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -930,6 +935,8 @@ fn generate_candidate_measures_phase_timings() {
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -1022,6 +1029,8 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect_err("non-genesis parent without interlinks must fail the build");
 
@@ -1075,6 +1084,8 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("minimal generate_candidate ok")
     .expect("minimal candidate is Some");
@@ -1089,6 +1100,8 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
@@ -1173,6 +1186,8 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("minimal generate_candidate ok")
     .expect("minimal candidate is Some");
@@ -1187,6 +1202,8 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
@@ -1270,6 +1287,8 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         regime.reemission.as_ref(),
         &DifficultyParams::mainnet(),
         &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
     )
     .expect("off-loop generate_candidate ok")
     .expect("off-loop candidate is Some");
@@ -1359,5 +1378,78 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         serialize_txs(&snap_c.transactions),
         serialize_txs(&oracle_c.transactions),
         "serialized candidate transactions must match",
+    );
+}
+
+// ----- operator votes -----
+
+#[test]
+fn generated_candidate_emits_configured_param_votes() {
+    // A configured voting target that moves a votable parameter must surface as
+    // a non-neutral `header.votes` on the built candidate — the end-to-end wire
+    // from `voting_targets` through `select_candidate_votes` into all three
+    // vote-bearing sites (pre-header, tx-context pre-header, final header).
+    let regime = Regime::pre_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+
+    // Read the live active params the builder will see at the tip.
+    let (active, _vs) = StateStore::tip_snapshot_params(&store);
+    // storageFeeFactor (id 1) at genesis is the launch default, strictly below
+    // its max, so an increase target casts exactly one `+1` param vote.
+    assert!(
+        active.storage_fee_factor < 2_500_000,
+        "genesis storageFeeFactor must sit below its max to be increasable",
+    );
+    let mut targets = std::collections::BTreeMap::new();
+    targets.insert(1u8, active.storage_fee_factor as i64 + 1);
+
+    let (c, _w, _timings) = generate_candidate(
+        &store,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+        &targets,
+        &ergo_validation::VotingSettings::mainnet(),
+    )
+    .expect("generate_candidate ok")
+    .expect("candidate is Some");
+
+    assert_eq!(
+        c.header.votes,
+        [1, 0, 0],
+        "an increase target on storageFeeFactor must cast a single +1 param vote",
+    );
+}
+
+#[test]
+fn generated_candidate_emits_neutral_votes_without_targets() {
+    // No configured targets ⇒ the candidate votes neutral, byte-identical to the
+    // pre-feature behaviour. Pins that the wiring defaults to non-voting.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, _tip) = synced_store(&regime);
+
+    let (c, _w, _timings) = generate_candidate(
+        &store,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        regime.reemission.as_ref(),
+        &DifficultyParams::mainnet(),
+        &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
+    )
+    .expect("generate_candidate ok")
+    .expect("candidate is Some");
+
+    assert_eq!(
+        c.header.votes,
+        [0, 0, 0],
+        "no configured targets must leave the candidate voting neutral",
     );
 }

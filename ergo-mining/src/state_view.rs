@@ -66,6 +66,13 @@ pub trait CandidateStateView: UtxoView {
         &self,
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError>;
+    /// Whether the Mode 2 (UTXO-snapshot) first-epoch trust sentinel is armed in
+    /// this committed view. While armed, the cumulative validation settings the
+    /// view reports are still the launch defaults (not the real pre-snapshot
+    /// cumulative), so an epoch-boundary candidate built here would serialize a
+    /// `0x02` block peers reject on `exMatchValidationSettings`. The builder
+    /// refuses boundary mining while this is `true`.
+    fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError>;
 }
 
 // On-loop: verbatim delegation to the existing inherent methods, so the
@@ -102,6 +109,9 @@ impl CandidateStateView for StateStore {
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         StateStore::candidate_dry_run(self, checked)
     }
+    fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+        Ok(StateStore::is_mode2_trust_first_epoch_armed(self))
+    }
 }
 
 // Off-loop: every read served from the snapshot's one held transaction.
@@ -137,6 +147,9 @@ impl CandidateStateView for CommittedSnapshot {
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         CommittedSnapshot::candidate_dry_run(self, checked)
+    }
+    fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+        CommittedSnapshot::mode2_trust_first_epoch_armed(self)
     }
 }
 
@@ -241,5 +254,8 @@ impl CandidateStateView for CachedSnapshotView<'_> {
         // Record disposition even on error (the path taken is still informative).
         self.disposition.set(disp);
         result
+    }
+    fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+        CommittedSnapshot::mode2_trust_first_epoch_armed(self.snap)
     }
 }

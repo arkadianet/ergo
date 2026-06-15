@@ -38,7 +38,7 @@ section rejects typos:
 
 | Strict (unknown key = error) | Lenient (unknown key ignored) |
 |---|---|
-| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[mining]` |
+| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[mining]` |
 
 ## Top-level keys
 
@@ -213,6 +213,46 @@ either way.
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
 | `candidate_base_cache` | bool | `false` | Caches the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds (enriched refresh, mempool-driven rebuilds) are near-instant. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
 
+## `[voting]`
+
+On-chain protocol-parameter voting. When this node mines, each block it
+produces casts up to two votes (`Parameters.ParamVotesCount = 2`) nudging the
+configured parameters one step per block toward your target value. The node
+only ever casts votes that the consensus header-vote rules accept (at most two
+parameter votes, no duplicates or contradictions, and only known increases at
+an epoch-start block); a parameter already at its target — or already at its
+`min`/`max` bound — casts no vote. Soft-fork voting and `blockVersion` (123)
+are **not** operator-settable here.
+
+`GET /api/v1/votes` shows the live votable set with each parameter's current
+value, step, and bounds, plus the votes this node is configured to cast.
+
+Non-empty targets require `[mining] enabled = true` — configuring voting with
+mining off is a startup error (the votes would never be cast).
+
+### `[voting.targets]`
+
+A map of canonical parameter **name** → desired integer value. An unknown or
+non-votable name is a startup error.
+
+| Votable name | Vote id | Meaning |
+|---|---|---|
+| `storageFeeFactor` | 1 | nanoErg per byte per storage-rent period |
+| `minValuePerByte` | 2 | Minimum box value per byte |
+| `maxBlockSize` | 3 | Maximum block size (bytes) |
+| `maxBlockCost` | 4 | Maximum block cost (JIT cost units) |
+| `tokenAccessCost` | 5 | Per-token access cost |
+| `inputCost` | 6 | Per-input cost |
+| `dataInputCost` | 7 | Per-data-input cost |
+| `outputCost` | 8 | Per-output cost |
+| `subblocksPerBlock` | 9 | Sub-blocks per block (only active post-EIP-37) |
+
+```toml
+[voting.targets]
+maxBlockSize = 2097152
+storageFeeFactor = 1250000
+```
+
 ## `[wallet]`
 
 | Key | Type | Default | Description |
@@ -266,6 +306,10 @@ checks and are enforced at load:
 - The digest backend additionally rejects `[mining] enabled = true` and
   `[indexer] enabled = true`, and `state_type = "digest"` boots only in
   the headers-only combo.
+- `[mining] claim_storage_rent = true` requires `[indexer] enabled = true`
+  (the eligible-box scan reads the extra-index).
+- `[voting.targets]` set with `[mining] enabled = false` is rejected — the
+  votes are only ever cast by blocks this node mines.
 
 ## Minimal example
 

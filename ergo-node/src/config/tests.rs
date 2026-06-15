@@ -1521,3 +1521,85 @@ fn node_section_unknown_field_rejected() {
         "error: {err}"
     );
 }
+
+// ----- [voting] -----
+
+/// A valid 33-byte compressed secp256k1 point — the same generator-point hex
+/// the mining tests use to satisfy `MiningConfig::validate`.
+const TEST_MINER_PK_HEX: &str =
+    "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+#[test]
+fn voting_defaults_to_no_targets() {
+    // No `[voting]` section ⇒ empty target map; the node mines neutral.
+    let path = default_toml();
+    let cli = minimal_cli(Some(path.path()));
+    let cfg = NodeConfig::load(cli).expect("default config must load");
+    assert!(
+        cfg.voting_targets.is_empty(),
+        "absent [voting] ⇒ no configured targets"
+    );
+}
+
+#[test]
+fn voting_targets_resolve_names_to_ids() {
+    // `[voting.targets]` maps canonical camelCase parameter names to numeric
+    // targets; load resolves each name to its signed-i8 id (stored as u8).
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nenabled = true\nminer_public_key_hex = \"{TEST_MINER_PK_HEX}\"\n\
+         [voting.targets]\nstorageFeeFactor = 1300000\nmaxBlockSize = 600000\n",
+    ));
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("valid voting targets must load");
+    assert_eq!(cfg.voting_targets.get(&1), Some(&1_300_000i64), "id 1");
+    assert_eq!(cfg.voting_targets.get(&3), Some(&600_000i64), "id 3");
+    assert_eq!(cfg.voting_targets.len(), 2);
+}
+
+#[test]
+fn voting_unknown_param_name_rejected() {
+    // blockVersion (123) is NOT operator-votable; a target for it (or a typo)
+    // is a startup config error naming the section + the bad name.
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nenabled = true\nminer_public_key_hex = \"{TEST_MINER_PK_HEX}\"\n\
+         [voting.targets]\nblockVersion = 4\n",
+    ));
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("non-votable param must reject");
+    assert!(err.contains("[voting]"), "must name the section: {err}");
+    assert!(err.contains("blockVersion"), "must name the param: {err}");
+}
+
+#[test]
+fn voting_targets_without_mining_rejected() {
+    // Configured targets with mining disabled never cast a vote — refuse to
+    // start so the misconfiguration surfaces (mirrors the claim_storage_rent
+    // requires-indexer gate).
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [voting.targets]\nstorageFeeFactor = 1300000\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("voting without mining must reject");
+    assert!(err.contains("[voting]"), "must name the section: {err}");
+    assert!(err.contains("[mining]"), "must point at mining: {err}");
+}
+
+#[test]
+fn voting_section_unknown_field_rejected() {
+    // deny_unknown_fields on the [voting] section catches typos like a
+    // mis-keyed `target` (singular) instead of the `targets` map.
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nenabled = true\nminer_public_key_hex = \"{TEST_MINER_PK_HEX}\"\n\
+         [voting]\ntarget = 1\n",
+    ));
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("unknown [voting] field should reject");
+    assert!(
+        err.contains("target") || err.contains("unknown"),
+        "error: {err}"
+    );
+}
