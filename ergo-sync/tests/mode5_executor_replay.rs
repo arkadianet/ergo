@@ -552,3 +552,61 @@ fn mode5_executor_replay_rejects_wrong_parent_root() {
         "expected a parent-root replay rejection at verifier construction, got: {msg}"
     );
 }
+
+/// Negative — NiPoPoW interlinks wiring (BV-01). With the parent extension now
+/// threaded into `BlockValidationContext`, rules 401/402 fire. Corrupt the
+/// PARENT's stored interlink vector (truncate one interlink entry so the
+/// parent's interlinks no longer decode) and assert the child at `APPLY_LO` is
+/// rejected with an interlink structure mismatch (Scala `exIlStructure`, rule
+/// 402). This proves the wiring is ACTIVE — a `None` parent extension would
+/// take Scala's recoverable `exIlUnableToValidate` (rule 413) path and ACCEPT,
+/// so the green replay alone could not distinguish a wired Some from an inert
+/// None. Everything else (proof, child sections, parent root) is intact, so the
+/// rejection can only come from the interlink comparison.
+#[test]
+fn mode5_executor_replay_rejects_mutated_parent_interlinks() {
+    use ergo_ser::extension::{read_extension, write_extension};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (store, rows) = build_seeded_store(tmp.path());
+
+    // The parent of the first applied block; its extension was seeded by
+    // `store_sections` under `compute_section_id(TYPE_EXTENSION, ..)`.
+    let parent = &rows[&(APPLY_LO - 1)];
+    let parent_header = parse_header(&parent.header_bytes);
+    let parent_ext_id = compute_section_id(
+        TYPE_EXTENSION,
+        &parent.header_id,
+        parent_header.extension_root.as_bytes(),
+    );
+
+    // Truncate one interlink entry's value (a 33-byte run-length+id) so
+    // `unpack_interlinks` rejects the parent vector → rule 402.
+    let mut ext =
+        read_extension(&mut VlqReader::new(&parent.extension_bytes)).expect("parent ext decodes");
+    let il = ext
+        .fields
+        .iter_mut()
+        .find(|f| f.key[0] == 0x01) // INTERLINKS_VECTOR_PREFIX
+        .expect("parent extension carries an interlink field");
+    assert!(!il.value.is_empty(), "interlink value is non-empty");
+    il.value.pop();
+    let mut w = VlqWriter::new();
+    write_extension(&mut w, &ext).expect("re-serialize mutated extension");
+    store
+        .store_block_section_typed(&parent_ext_id, &w.result(), TYPE_EXTENSION)
+        .expect("overwrite parent extension with corrupted interlinks");
+
+    let mut backend = StateBackendKind::Digest(store);
+    let msg = process_first_applied(&mut backend, &rows)
+        .expect_err("corrupted parent interlinks must be rejected via the wired 401/402 path");
+
+    let StateBackendKind::Digest(ref d) = backend else {
+        unreachable!()
+    };
+    assert_eq!(d.height(), APPLY_LO - 1, "no state advance on rejection");
+    assert!(
+        msg.contains("interlink structure mismatch") && msg.contains("rule 402"),
+        "expected an interlink structure-mismatch rejection (rule 402), got: {msg}"
+    );
+}
