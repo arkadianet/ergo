@@ -186,6 +186,29 @@ impl NodeReadState for SnapshotReadState {
         self.handle.load().info.clone()
     }
 
+    fn votes(&self) -> ergo_api::ApiVotes {
+        let snap = self.handle.load();
+        let active = &snap.active_params;
+        ergo_api::ApiVotes {
+            block_height: snap.tip.best_full_block.height,
+            block_version: active.block_version,
+            epoch_start_height: active.epoch_start_height,
+            votable_parameters: ergo_validation::voting::votable_param_descriptors(active)
+                .into_iter()
+                .map(|d| ergo_api::ApiVotableParam {
+                    id: d.id,
+                    name: d.name.to_string(),
+                    current: d.current,
+                    step: d.step,
+                    min: d.min,
+                    max: d.max,
+                })
+                .collect(),
+            // Operator vote configuration ships in the follow-up.
+            configured_votes: Vec::new(),
+        }
+    }
+
     fn identity(&self) -> ApiIdentity {
         (**self.identity.load()).clone()
     }

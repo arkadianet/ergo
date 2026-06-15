@@ -305,6 +305,51 @@ pub struct ApiTip {
     pub headers_ahead_of_full_blocks: u32,
 }
 
+/// `GET /api/v1/votes` — what the node operator can vote on. Native operator
+/// endpoint (no Scala equivalent; ungated like the other `/api/v1/*` reads).
+/// The votable set + per-parameter bounds come from the same table the
+/// consensus vote-recompute uses, so an operator (and the candidate-vote
+/// selector) sees exactly which votes are legal.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiVotes {
+    /// Current full-block height (votes are cast by the miner at the next height).
+    pub block_height: u32,
+    /// Active block-format version.
+    pub block_version: u8,
+    /// Height the current voting epoch's parameters took effect from.
+    pub epoch_start_height: u32,
+    /// The numeric parameters an operator can vote to change, with the bounds a
+    /// vote must respect. Excludes blockVersion (soft-fork driven, not voted).
+    pub votable_parameters: Vec<ApiVotableParam>,
+    /// The operator's configured votes (from the `[voting]` config). Empty until
+    /// operator vote configuration ships.
+    pub configured_votes: Vec<ApiConfiguredVote>,
+}
+
+/// A votable numeric protocol parameter and the inclusive bounds a vote may not
+/// cross. Mirror of `ergo_validation::voting::ParamDescriptor`.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiVotableParam {
+    pub id: u8,
+    pub name: String,
+    pub current: i32,
+    pub step: i32,
+    pub min: i32,
+    pub max: i32,
+}
+
+/// An operator's configured vote target for one parameter.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiConfiguredVote {
+    pub parameter_id: u8,
+    pub name: String,
+    /// Desired target value; the node votes up/down toward it.
+    pub target: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct ApiHeaderRef {
     pub height: u32,

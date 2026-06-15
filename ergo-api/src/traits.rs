@@ -14,8 +14,8 @@ use ergo_ser::ergo_box::ErgoBox;
 use crate::compat::types::{ScalaFullBlock, ScalaTransactionInput};
 use crate::types::{
     ApiHealth, ApiHost, ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
-    ApiMempoolTransactions, ApiPeer, ApiRecentBlock, ApiStatus, ApiSyncStatus, ApiTip, SubmitError,
-    SubmitMode,
+    ApiMempoolTransactions, ApiPeer, ApiRecentBlock, ApiStatus, ApiSyncStatus, ApiTip, ApiVotes,
+    SubmitError, SubmitMode,
 };
 
 pub trait NodeReadState: Send + Sync {
@@ -51,6 +51,13 @@ pub trait NodeReadState: Send + Sync {
     /// `SnapshotReadState` serves the precomputed tail.
     fn recent_blocks(&self, _n: u32) -> Vec<ApiRecentBlock> {
         Vec::new()
+    }
+    /// Operator-facing voting view: the votable parameters + bounds and the
+    /// operator's configured votes (`GET /api/v1/votes`). Default empty so test
+    /// fixtures needn't override; the production `SnapshotReadState` serves the
+    /// live votable set from the snapshot's active params.
+    fn votes(&self) -> ApiVotes {
+        ApiVotes::default()
     }
 }
 

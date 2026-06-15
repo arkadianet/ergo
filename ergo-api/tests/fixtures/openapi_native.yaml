@@ -273,6 +273,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiTip'
+  /api/v1/votes:
+    get:
+      tags:
+      - node
+      operationId: votes_handler
+      responses:
+        '200':
+          description: Votable protocol parameters + bounds and the operator's configured votes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiVotes'
 components:
   schemas:
     ApiBootstrapPhase:
@@ -403,6 +415,24 @@ components:
             Number of peers in the quorum that voted for the selected
             manifest. `0` during the `discovery` phase before quorum.
           minimum: 0
+    ApiConfiguredVote:
+      type: object
+      description: An operator's configured vote target for one parameter.
+      required:
+      - parameterId
+      - name
+      - target
+      properties:
+        name:
+          type: string
+        parameterId:
+          type: integer
+          format: int32
+          minimum: 0
+        target:
+          type: integer
+          format: int64
+          description: Desired target value; the node votes up/down toward it.
     ApiDifficultyPoint:
       type: object
       description: |-
@@ -1250,6 +1280,81 @@ components:
       description: |-
         Where a mempool transaction entered our pool. Tagged union — clients
         switch on `kind` and read `addr` only for `peer`.
+    ApiVotableParam:
+      type: object
+      description: |-
+        A votable numeric protocol parameter and the inclusive bounds a vote may not
+        cross. Mirror of `ergo_validation::voting::ParamDescriptor`.
+      required:
+      - id
+      - name
+      - current
+      - step
+      - min
+      - max
+      properties:
+        current:
+          type: integer
+          format: int32
+        id:
+          type: integer
+          format: int32
+          minimum: 0
+        max:
+          type: integer
+          format: int32
+        min:
+          type: integer
+          format: int32
+        name:
+          type: string
+        step:
+          type: integer
+          format: int32
+    ApiVotes:
+      type: object
+      description: |-
+        `GET /api/v1/votes` — what the node operator can vote on. Native operator
+        endpoint (no Scala equivalent; ungated like the other `/api/v1/*` reads).
+        The votable set + per-parameter bounds come from the same table the
+        consensus vote-recompute uses, so an operator (and the candidate-vote
+        selector) sees exactly which votes are legal.
+      required:
+      - blockHeight
+      - blockVersion
+      - epochStartHeight
+      - votableParameters
+      - configuredVotes
+      properties:
+        blockHeight:
+          type: integer
+          format: int32
+          description: Current full-block height (votes are cast by the miner at the next height).
+          minimum: 0
+        blockVersion:
+          type: integer
+          format: int32
+          description: Active block-format version.
+          minimum: 0
+        configuredVotes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiConfiguredVote'
+          description: |-
+            The operator's configured votes (from the `[voting]` config). Empty until
+            operator vote configuration ships.
+        epochStartHeight:
+          type: integer
+          format: int32
+          description: Height the current voting epoch's parameters took effect from.
+          minimum: 0
+        votableParameters:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiVotableParam'
+          description: |-
+            The numeric parameters an operator can vote to change, with the bounds a
+            vote must respect. Excludes blockVersion (soft-fork driven, not voted).
     ApiWeightFunction:
       type: string
       description: |-

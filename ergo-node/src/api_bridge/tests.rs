@@ -1073,6 +1073,39 @@ fn read_state_for_host(host_paths: HostPaths) -> SnapshotReadState {
     SnapshotReadState::new(publisher.handle(), identity_slot, host_paths)
 }
 
+/// `votes()` projects the snapshot's active params into the votable-parameter
+/// set (scala_launch has subblocks_per_block = None → ids 1..=8, no id 9, never
+/// blockVersion), with bounds straight from the shared recompute table.
+#[test]
+fn votes_serves_votable_params_from_active_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let read = read_state_for_host(HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    });
+    let v = read.votes();
+    let ids: Vec<u8> = v.votable_parameters.iter().map(|p| p.id).collect();
+    assert_eq!(
+        ids,
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        "scala_launch → ids 1..=8"
+    );
+    let sff = v.votable_parameters.iter().find(|p| p.id == 1).unwrap();
+    assert_eq!(sff.name, "storageFeeFactor");
+    assert_eq!(sff.current, 1_250_000);
+    assert_eq!((sff.step, sff.min, sff.max), (25_000, 0, 2_500_000));
+    assert!(
+        v.votable_parameters.iter().all(|p| p.id != 123),
+        "blockVersion never votable"
+    );
+    assert!(
+        v.configured_votes.is_empty(),
+        "no operator votes configured yet"
+    );
+    assert_eq!(v.block_version, 1);
+}
+
 /// State DB file present and non-empty → `Some(len)` with the actual
 /// file length.
 #[test]

@@ -408,6 +408,73 @@ fn max_value_for(id: u8, _current_value: i32) -> i32 {
     }
 }
 
+// ----- Public votable-parameter descriptors -----
+
+/// A votable numeric protocol parameter, with the bounds a vote must respect.
+/// Shared by the operator votes endpoint (display) and the candidate-vote
+/// selector (range/votability gating), so both read the SAME table that
+/// `compute_next_params` recomputes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamDescriptor {
+    /// Parameter id (1..=8, or 9 when active).
+    pub id: u8,
+    /// Stable Scala-style camelCase name.
+    pub name: &'static str,
+    /// Current value in the active table.
+    pub current: i32,
+    /// Per-vote step size at the current value.
+    pub step: i32,
+    /// Inclusive lower bound — a vote may not push below this.
+    pub min: i32,
+    /// Inclusive upper bound — a vote may not push above this.
+    pub max: i32,
+}
+
+/// Stable camelCase name for a votable numeric parameter id, or `None` for ids
+/// outside the votable numeric set (e.g. 123 = blockVersion, which is soft-fork
+/// driven, not operator-votable).
+pub fn votable_param_name(id: u8) -> Option<&'static str> {
+    Some(match id {
+        1 => "storageFeeFactor",
+        2 => "minValuePerByte",
+        3 => "maxBlockSize",
+        4 => "maxBlockCost",
+        5 => "tokenAccessCost",
+        6 => "inputCost",
+        7 => "dataInputCost",
+        8 => "outputCost",
+        SUBBLOCKS_PER_BLOCK_ID => "subblocksPerBlock",
+        _ => return None,
+    })
+}
+
+/// The operator-votable numeric parameters for the given active table: ids
+/// 1..=8 always, plus id 9 (subblocksPerBlock) ONLY when it is present in the
+/// active table. Excludes blockVersion (123). The candidate-vote selector and
+/// the votes endpoint both build from this — never from a private copy of the
+/// step/min/max constants.
+pub fn votable_param_descriptors(active: &ActiveProtocolParameters) -> Vec<ParamDescriptor> {
+    let mut out = Vec::new();
+    for id in 1u8..=SUBBLOCKS_PER_BLOCK_ID {
+        // `read_param_by_id` returns `None` for an absent id 9, which is exactly
+        // the votability gate (`subblocks_per_block.is_some()`); 1..=8 are always
+        // present. Any other id never reaches here (loop is 1..=9).
+        let current = match read_param_by_id(active, id) {
+            Some(v) => v,
+            None => continue,
+        };
+        out.push(ParamDescriptor {
+            id,
+            name: votable_param_name(id).expect("1..=9 are named"),
+            current,
+            step: step_for(id, current),
+            min: min_value_for(id),
+            max: max_value_for(id, current),
+        });
+    }
+    out
+}
+
 // ----- Helpers: extras manipulation -----
 
 fn upsert_extra(p: &ActiveProtocolParameters, id: u8, value: i32) -> ActiveProtocolParameters {
@@ -468,6 +535,41 @@ mod tests {
     #[test]
     fn threshold_soft_fork_approved_29491_fails() {
         assert!(!vs().soft_fork_approved(29_491));
+    }
+
+    #[test]
+    fn votable_descriptors_cover_1_to_8_gate_id9_and_exclude_block_version() {
+        // scala_launch has subblocks_per_block = None → id 9 absent.
+        let p = launch_at(1024);
+        let d = votable_param_descriptors(&p);
+        let ids: Vec<u8> = d.iter().map(|x| x.id).collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            "1..=8, no id 9 (absent), no 123"
+        );
+        // storageFeeFactor descriptor matches the shared table.
+        let sff = d.iter().find(|x| x.id == 1).unwrap();
+        assert_eq!(sff.name, "storageFeeFactor");
+        assert_eq!(sff.current, 1_250_000);
+        assert_eq!(sff.step, 25_000);
+        assert_eq!(sff.min, 0);
+        assert_eq!(sff.max, 2_500_000);
+
+        // When id 9 is active, it appears (votability gate = presence).
+        let mut p9 = launch_at(1024);
+        p9.subblocks_per_block = Some(4);
+        let d9 = votable_param_descriptors(&p9);
+        let sub = d9
+            .iter()
+            .find(|x| x.id == 9)
+            .expect("id 9 present when active");
+        assert_eq!(sub.name, "subblocksPerBlock");
+        assert_eq!(sub.current, 4);
+        assert_eq!((sub.min, sub.max, sub.step), (2, 2_048, 1));
+        // blockVersion (123) is NEVER votable.
+        assert!(d9.iter().all(|x| x.id != 123));
+        assert!(votable_param_name(123).is_none());
     }
 
     #[test]
