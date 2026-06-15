@@ -304,6 +304,8 @@ pub fn build_and_publish(
                 handle.reemission_ref(),
                 handle.chain_config(),
                 eligible_rent_boxes.as_slice(),
+                handle.voting_targets(),
+                handle.voting_settings(),
             );
             // Read disposition from the view regardless of whether the build
             // succeeded — the path taken (Hit/Advanced/Rehydrated/…) is
@@ -320,6 +322,8 @@ pub fn build_and_publish(
             handle.reemission_ref(),
             handle.chain_config(),
             eligible_rent_boxes.as_slice(),
+            handle.voting_targets(),
+            handle.voting_settings(),
         )?,
     };
     let Some((candidate, work, timings)) = built else {
@@ -361,6 +365,7 @@ mod tests {
             MonetarySettings::mainnet(),
             Some(ReemissionSettings::mainnet()),
             DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
         )
     }
 

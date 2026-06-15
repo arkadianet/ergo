@@ -948,6 +948,7 @@ async fn run_inner_with_backend(
         snapshot_publisher.handle(),
         identity_slot.clone(),
         host_paths,
+        config.voting_targets.clone(),
     )
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
@@ -991,11 +992,13 @@ async fn run_inner_with_backend(
             config.chain_spec.monetary,
             config.chain_spec.reemission.clone(),
             config.chain_spec.difficulty.clone(),
+            config.chain_spec.voting,
         )
         .with_rent_config(
             config.mining_config.claim_storage_rent,
             config.mining_config.max_storage_rent_claims,
-        );
+        )
+        .with_voting_targets(config.voting_targets.clone());
         let network_prefix = config.chain_spec.network_params.address_prefix;
         // Subscribe to the handle's serve-state-change notifications so the
         // bridge's longpoll wait wakes the instant the served candidate changes

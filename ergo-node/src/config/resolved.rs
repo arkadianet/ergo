@@ -169,6 +169,14 @@ pub struct NodeConfig {
     /// `--mining-public-key`. Validated at startup before the mining
     /// task is spawned so a misconfigured node refuses to start.
     pub mining_config: ergo_mining::MiningConfig,
+    /// `[voting.targets]` resolved to votable parameter ids (`u8` — the vote
+    /// *encoding* in the header triple is signed `±id`, but the id itself is
+    /// unsigned) → operator target values. Empty ⇒ the node mines with neutral
+    /// votes. Each entry's name was validated against the votable set at
+    /// config load; threaded into the `MiningHandle` at boot so the candidate
+    /// builder casts at most `ParamVotesCount` (2) votes per block toward
+    /// these targets. Non-empty only when `[mining] enabled = true`.
+    pub voting_targets: std::collections::BTreeMap<u8, i64>,
     /// `[wallet] expose_private_keys`: when `true`, the
     /// `POST /wallet/getPrivateKey` route returns the derived secret
     /// scalar for an address. Default `false` — the route otherwise

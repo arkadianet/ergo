@@ -78,12 +78,12 @@ use crate::compat::traits::NodeChainQuery;
 use crate::traits::ChainParamsView;
 use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
 use crate::types::{
-    ApiBlockApplyError, ApiBootstrapStatus, ApiDifficultyPoint, ApiDifficultySeries,
-    ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost, ApiIdentity, ApiInfo,
-    ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiNativeSubmitError,
-    ApiPeer, ApiRecentBlock, ApiStatus, ApiSubmitError, ApiSubmitResponse, ApiSyncStatus, ApiTip,
-    ApiTxSource, ApiWeightFunction, HealthStatus, RawTransactionBytes, SubmitError, SubmitMode,
-    SyncStateLabel,
+    ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
+    ApiDifficultySeries, ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost,
+    ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions,
+    ApiNativeSubmitError, ApiPeer, ApiRecentBlock, ApiStatus, ApiSubmitError, ApiSubmitResponse,
+    ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam, ApiVotes, ApiWeightFunction, HealthStatus,
+    RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
@@ -568,6 +568,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/api/v1/identity", get(identity_handler))
         .route("/api/v1/host", get(host_handler))
         .route("/api/v1/status", get(status_handler))
+        .route("/api/v1/votes", get(votes_handler))
         .route("/api/v1/tip", get(tip_handler))
         .route("/api/v1/blocks/recent", get(recent_blocks_handler))
         .route("/api/v1/sync", get(sync_handler))
@@ -1348,6 +1349,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         identity_handler,
         host_handler,
         status_handler,
+        votes_handler,
         tip_handler,
         recent_blocks_handler,
         sync_handler,
@@ -1365,6 +1367,9 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiIdentity,
         ApiHost,
         ApiStatus,
+        ApiVotes,
+        ApiVotableParam,
+        ApiConfiguredVote,
         ApiTip,
         ApiRecentBlock,
         ApiSyncStatus,
@@ -1522,6 +1527,19 @@ async fn identity_handler(State(read): State<Arc<dyn NodeReadState>>) -> Respons
 )]
 async fn host_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
     Json(read.host()).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/votes",
+    tag = "node",
+    responses(
+        (status = 200, description = "Votable protocol parameters + bounds and the operator's configured votes",
+         body = ApiVotes, content_type = "application/json"),
+    ),
+)]
+async fn votes_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
+    Json(read.votes()).into_response()
 }
 
 #[utoipa::path(

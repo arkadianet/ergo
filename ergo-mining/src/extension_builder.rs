@@ -4,18 +4,18 @@
 //! the extension at height `H` carries:
 //!
 //! 1. NIPoPoW interlinks (key prefix `0x01`) — **always**.
-//! 2. At voting-epoch boundary (`H % voting_length == 0`): the
-//!    proposed-update parameter map (key prefix `0x00`) and chunked
+//! 2. At voting-epoch boundary (`H % voting_length == 0`): the recomputed
+//!    parameter map (key prefix `0x00`, including the carried-forward
+//!    `proposed_update` at id 124) and the chunked cumulative
 //!    validation-settings update (key prefix `0x02`).
-//! 3. At block-version 3: inject rule replacements
-//!    `1011→1016, 1007→1017, 1008→1018` into `proposed_update`.
 //!
-//! This module implements step 1 (the non-epoch path) completely.
-//! Step 2 + 3 (epoch-boundary fields) are **deferred**: the parameter
-//! and validation-settings *parsers* exist in `ergo-validation` but no
-//! serializer / extension-field encoder does yet. A node built on this
-//! crate can mine ~1023/1024 of all blocks; the ~1/1024 that land on
-//! a voting-epoch boundary need the deferred work below.
+//! This module owns step 1 (the interlinks, always present). Step 2 — the
+//! `0x00`/`0x02` fields for an epoch-boundary candidate — is computed by the
+//! caller ([`crate::candidate::generate_candidate`] runs the same
+//! `compute_next_params` the block validator does and serializes the result via
+//! `ergo_validation::active_params_to_extension_fields` /
+//! `validation_settings_update_to_extension_fields`) and passed in here as
+//! `epoch_boundary_fields`, which this function appends after the interlinks.
 
 use ergo_primitives::digest::ModifierId;
 use ergo_ser::header::Header;
@@ -31,28 +31,43 @@ pub const MAINNET_VOTING_LENGTH: u32 = 1024;
 /// Build the extension field list for a candidate at `new_height`,
 /// given the parent header and its (already-unpacked) interlinks.
 ///
-/// Returns an error when `new_height` lands on a voting-epoch boundary
-/// (i.e. `new_height % MAINNET_VOTING_LENGTH == 0`) — the epoch
-/// boundary path needs to serialize the proposed-update parameter map
-/// and validation-settings chunks, which isn't implemented yet.
-/// Non-boundary heights return a `Vec<(Vec<u8>, Vec<u8>)>` of packed
-/// interlinks fields only, matching the structure of mainnet blocks
-/// at non-boundary heights.
+/// At a non-boundary height (`new_height % voting_length != 0`) returns the
+/// packed interlinks fields only — `epoch_boundary_fields` must be empty.
+///
+/// At a voting-epoch boundary (`new_height % voting_length == 0`, `new_height >
+/// 0`) returns the interlinks fields followed by `epoch_boundary_fields` — the
+/// recomputed `0x00` parameter map (with `proposed_update` at id 124) and the
+/// `0x02` cumulative validation-settings chunks the caller produced from
+/// `compute_next_params`. The caller MUST supply those fields at a boundary;
+/// an empty slice there is a logic error and is rejected, since a boundary
+/// block with no parameter map fails the peer's `exParseParameters` rule.
 pub fn build_candidate_extension_fields(
     parent_header: &Header,
     parent_interlinks: &[ModifierId],
     new_height: u32,
     voting_length: u32,
+    epoch_boundary_fields: &[([u8; 2], Vec<u8>)],
 ) -> Result<ExtensionFields, MiningError> {
-    if new_height.is_multiple_of(voting_length) {
+    let is_boundary = new_height > 0 && new_height.is_multiple_of(voting_length);
+    if is_boundary && epoch_boundary_fields.is_empty() {
         return Err(MiningError::InvalidConfig(format!(
-            "epoch-boundary candidate at height {new_height} not yet supported \
-             (proposed-update + validation-settings extension encoding is deferred — \
-             see crate::extension_builder docs)"
+            "epoch-boundary candidate at height {new_height} requires the recomputed \
+             parameter + validation-settings extension fields"
+        )));
+    }
+    if !is_boundary && !epoch_boundary_fields.is_empty() {
+        return Err(MiningError::InvalidConfig(format!(
+            "epoch-boundary fields supplied at non-boundary height {new_height}"
         )));
     }
     let new_interlinks = update_interlinks(parent_header, parent_interlinks)?;
-    Ok(pack_interlinks(&new_interlinks))
+    let mut fields = pack_interlinks(&new_interlinks);
+    fields.extend(
+        epoch_boundary_fields
+            .iter()
+            .map(|(k, v)| (k.to_vec(), v.clone())),
+    );
+    Ok(fields)
 }
 
 /// Extension-section field list as canonical wire pairs: `(key_bytes,
@@ -117,15 +132,34 @@ mod tests {
     // ----- error paths -----
 
     #[test]
-    fn rejects_epoch_boundary_height() {
-        // Synthesize a parent header at h=1023; the candidate would be
-        // at h=1024 which is an epoch boundary. Builder must refuse.
+    fn rejects_epoch_boundary_without_recomputed_fields() {
+        // Candidate at h=1024 (an epoch boundary) with NO epoch fields supplied
+        // is a caller logic error — a boundary block must carry the recomputed
+        // parameter map, so the builder refuses rather than emitting an
+        // interlinks-only extension a peer would reject at exParseParameters.
         let parent = synth_header(1023);
-        let err = build_candidate_extension_fields(&parent, &[], 1024, MAINNET_VOTING_LENGTH)
-            .expect_err("must reject epoch boundary");
+        let err = build_candidate_extension_fields(&parent, &[], 1024, MAINNET_VOTING_LENGTH, &[])
+            .expect_err("must reject boundary with no epoch fields");
         match err {
             MiningError::InvalidConfig(msg) => {
-                assert!(msg.contains("epoch-boundary"), "{msg}")
+                assert!(msg.contains("requires the recomputed"), "{msg}")
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_epoch_fields_at_non_boundary_height() {
+        // The inverse guard: epoch fields supplied at a non-boundary height
+        // (h=1025) is also a logic error.
+        let parent = synth_header(1024);
+        let bogus = vec![([0x00u8, 1u8], vec![0, 0, 0, 1])];
+        let err =
+            build_candidate_extension_fields(&parent, &[], 1025, MAINNET_VOTING_LENGTH, &bogus)
+                .expect_err("must reject epoch fields off-boundary");
+        match err {
+            MiningError::InvalidConfig(msg) => {
+                assert!(msg.contains("non-boundary"), "{msg}")
             }
             other => panic!("expected InvalidConfig, got {other:?}"),
         }

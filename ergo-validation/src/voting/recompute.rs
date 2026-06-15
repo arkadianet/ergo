@@ -408,6 +408,165 @@ fn max_value_for(id: u8, _current_value: i32) -> i32 {
     }
 }
 
+// ----- Public votable-parameter descriptors -----
+
+/// A votable numeric protocol parameter, with the bounds a vote must respect.
+/// Shared by the operator votes endpoint (display) and the candidate-vote
+/// selector (range/votability gating), so both read the SAME table that
+/// `compute_next_params` recomputes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamDescriptor {
+    /// Parameter id (1..=8, or 9 when active).
+    pub id: u8,
+    /// Stable Scala-style camelCase name.
+    pub name: &'static str,
+    /// Current value in the active table.
+    pub current: i32,
+    /// Per-vote step size at the current value.
+    pub step: i32,
+    /// Inclusive lower bound — a vote may not push below this.
+    pub min: i32,
+    /// Inclusive upper bound — a vote may not push above this.
+    pub max: i32,
+}
+
+/// Stable camelCase name for a votable numeric parameter id, or `None` for ids
+/// outside the votable numeric set (e.g. 123 = blockVersion, which is soft-fork
+/// driven, not operator-votable).
+pub fn votable_param_name(id: u8) -> Option<&'static str> {
+    Some(match id {
+        1 => "storageFeeFactor",
+        2 => "minValuePerByte",
+        3 => "maxBlockSize",
+        4 => "maxBlockCost",
+        5 => "tokenAccessCost",
+        6 => "inputCost",
+        7 => "dataInputCost",
+        8 => "outputCost",
+        SUBBLOCKS_PER_BLOCK_ID => "subblocksPerBlock",
+        _ => return None,
+    })
+}
+
+/// Reverse of [`votable_param_name`]: resolve a config-supplied parameter name
+/// to its structurally-votable id (1..=9), or `None` for any name outside that
+/// set (`blockVersion`, soft-fork, or a typo). Case-sensitive — the canonical
+/// camelCase spelling is the only accepted form.
+///
+/// Used by the node's `[voting]` config loader to translate operator target
+/// names to ids at startup; an unresolvable name is a startup config error.
+/// Resolving id 9 here is purely structural — whether a `subblocksPerBlock`
+/// target actually casts a vote is gated at build time by
+/// [`votable_param_descriptors`] (present only once the active table carries
+/// it), so a configured-but-not-yet-active id 9 simply no-ops.
+pub fn votable_param_id(name: &str) -> Option<u8> {
+    (1u8..=SUBBLOCKS_PER_BLOCK_ID).find(|&id| votable_param_name(id) == Some(name))
+}
+
+/// The operator-votable numeric parameters for the given active table: ids
+/// 1..=8 always, plus id 9 (subblocksPerBlock) ONLY when it is present in the
+/// active table. Excludes blockVersion (123). The candidate-vote selector and
+/// the votes endpoint both build from this — never from a private copy of the
+/// step/min/max constants.
+pub fn votable_param_descriptors(active: &ActiveProtocolParameters) -> Vec<ParamDescriptor> {
+    let mut out = Vec::new();
+    for id in 1u8..=SUBBLOCKS_PER_BLOCK_ID {
+        // `read_param_by_id` returns `None` for an absent id 9, which is exactly
+        // the votability gate (`subblocks_per_block.is_some()`); 1..=8 are always
+        // present. Any other id never reaches here (loop is 1..=9).
+        let current = match read_param_by_id(active, id) {
+            Some(v) => v,
+            None => continue,
+        };
+        out.push(ParamDescriptor {
+            id,
+            name: votable_param_name(id).expect("1..=9 are named"),
+            current,
+            step: step_for(id, current),
+            min: min_value_for(id),
+            max: max_value_for(id, current),
+        });
+    }
+    out
+}
+
+/// Select a candidate header's `votes` (`[u8; 3]`) from the operator's
+/// per-parameter target values, given the active parameter table and whether
+/// the candidate sits at a voting-epoch start. Pure; produces votes that ALWAYS
+/// pass the header-votes validator (rules 212/213/214/215) — pinned by the
+/// validator-backed tests in `header.rs`.
+///
+/// - Only votable parameters are considered (ids 1..=8, plus id 9 when present
+///   in the active table); `blockVersion` (123) and soft-fork (120) are never
+///   emitted here (soft-fork voting is deferred until the epoch-boundary
+///   extension encoding lands).
+/// - For a target `!= current`: `+id` to increase, `-id` to decrease — but only
+///   while the parameter can still move that way (`current < max` /
+///   `current > min`; the recompute clamps to `[min, max]`). A target that
+///   isn't `step`-aligned can oscillate by one step at the boundary — Scala's
+///   `votingTargets` behaves the same; pick a step-aligned target to settle.
+/// - At an epoch start where rule 215 (`hdrVotesUnknown`) is ACTIVE, the header
+///   accepts only `{1..=8, 120}` (increases of the first eight params +
+///   soft-fork), so decreases and id 9 are suppressed there. When rule 215 has
+///   been soft-fork-disabled (mainnet 6.0 carries `rules_to_disable=[215,409]`),
+///   decreases and id 9 ARE valid at an epoch start, so they are NOT suppressed
+///   — letting an operator seed a downward or subblocks vote post-6.0.
+///   `rule_215_disabled` is the live status (`prev_settings.is_rule_disabled(215)`)
+///   and is only consulted at an epoch start.
+/// - At most `ParamVotesCount` (2) parameter votes (rule 212), chosen in
+///   ascending id order for determinism; one vote per id ⇒ never a duplicate
+///   (rule 213) or contradictory (rule 214) pair.
+/// - No configured targets (or none actionable) ⇒ `[0, 0, 0]` (no vote).
+pub fn select_candidate_votes(
+    active: &ActiveProtocolParameters,
+    targets: &std::collections::BTreeMap<u8, i64>,
+    is_epoch_start: bool,
+    rule_215_disabled: bool,
+) -> [u8; 3] {
+    /// `Parameters.ParamVotesCount` — max non-soft-fork votes per header.
+    const MAX_PARAM_VOTES: usize = 2;
+    let mut chosen: Vec<i8> = Vec::new();
+    // `votable_param_descriptors` yields the votable ids in ascending order, so
+    // iteration order IS the deterministic priority.
+    for d in votable_param_descriptors(active) {
+        if chosen.len() >= MAX_PARAM_VOTES {
+            break;
+        }
+        let target = match targets.get(&d.id) {
+            Some(t) => *t,
+            None => continue,
+        };
+        let current = d.current as i64;
+        if target == current {
+            continue;
+        }
+        let increase = target > current;
+        // Can the parameter still move that way? (recompute clamps to [min,max],
+        // so a vote at the bound has no effect — don't cast it.)
+        let can_move = if increase {
+            d.current < d.max
+        } else {
+            d.current > d.min
+        };
+        if !can_move {
+            continue;
+        }
+        // Epoch-start rule 215: while ACTIVE only increases of ids 1..=8 are
+        // known-votable, so suppress decreases and id 9 (subblocksPerBlock). Once
+        // rule 215 is soft-fork-disabled (mainnet 6.0) the header accepts them,
+        // so don't suppress.
+        if is_epoch_start && !rule_215_disabled && (!increase || d.id == SUBBLOCKS_PER_BLOCK_ID) {
+            continue;
+        }
+        chosen.push(if increase { d.id as i8 } else { -(d.id as i8) });
+    }
+    let mut out = [0u8; 3];
+    for (i, v) in chosen.into_iter().enumerate() {
+        out[i] = v as u8;
+    }
+    out
+}
+
 // ----- Helpers: extras manipulation -----
 
 fn upsert_extra(p: &ActiveProtocolParameters, id: u8, value: i32) -> ActiveProtocolParameters {
@@ -468,6 +627,134 @@ mod tests {
     #[test]
     fn threshold_soft_fork_approved_29491_fails() {
         assert!(!vs().soft_fork_approved(29_491));
+    }
+
+    #[test]
+    fn votable_descriptors_cover_1_to_8_gate_id9_and_exclude_block_version() {
+        // scala_launch has subblocks_per_block = None → id 9 absent.
+        let p = launch_at(1024);
+        let d = votable_param_descriptors(&p);
+        let ids: Vec<u8> = d.iter().map(|x| x.id).collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            "1..=8, no id 9 (absent), no 123"
+        );
+        // storageFeeFactor descriptor matches the shared table.
+        let sff = d.iter().find(|x| x.id == 1).unwrap();
+        assert_eq!(sff.name, "storageFeeFactor");
+        assert_eq!(sff.current, 1_250_000);
+        assert_eq!(sff.step, 25_000);
+        assert_eq!(sff.min, 0);
+        assert_eq!(sff.max, 2_500_000);
+
+        // When id 9 is active, it appears (votability gate = presence).
+        let mut p9 = launch_at(1024);
+        p9.subblocks_per_block = Some(4);
+        let d9 = votable_param_descriptors(&p9);
+        let sub = d9
+            .iter()
+            .find(|x| x.id == 9)
+            .expect("id 9 present when active");
+        assert_eq!(sub.name, "subblocksPerBlock");
+        assert_eq!(sub.current, 4);
+        assert_eq!((sub.min, sub.max, sub.step), (2, 2_048, 1));
+        // blockVersion (123) is NEVER votable.
+        assert!(d9.iter().all(|x| x.id != 123));
+        assert!(votable_param_name(123).is_none());
+    }
+
+    #[test]
+    fn votable_param_id_round_trips_names_and_rejects_non_votable() {
+        // Every structurally-votable id (1..=9) round-trips name→id→name.
+        for id in 1u8..=SUBBLOCKS_PER_BLOCK_ID {
+            let name = votable_param_name(id).expect("1..=9 are named");
+            assert_eq!(votable_param_id(name), Some(id), "round-trip id {id}");
+        }
+        // subblocksPerBlock (id 9) resolves structurally (runtime presence is
+        // gated later by `votable_param_descriptors`).
+        assert_eq!(votable_param_id("subblocksPerBlock"), Some(9));
+        // blockVersion (123), soft-fork, and typos are NOT operator-votable.
+        assert_eq!(votable_param_id("blockVersion"), None);
+        assert_eq!(votable_param_id("softFork"), None);
+        assert_eq!(votable_param_id("storagefeefactor"), None); // case-sensitive
+        assert_eq!(votable_param_id(""), None);
+    }
+
+    #[test]
+    fn select_votes_empty_targets_is_neutral() {
+        use std::collections::BTreeMap;
+        assert_eq!(
+            select_candidate_votes(&launch_at(1024), &BTreeMap::new(), false, false),
+            [0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn select_votes_increase_and_decrease_off_epoch_in_id_order() {
+        use std::collections::BTreeMap;
+        let p = launch_at(1024); // storage_fee_factor 1_250_000, max_block_size 524_288
+        let mut t = BTreeMap::new();
+        t.insert(1u8, 2_000_000i64); // increase id 1 (current 1.25M < max 2.5M)
+        t.insert(3u8, 200_000i64); // decrease id 3 (current 524288 > min 16384)
+        let v = select_candidate_votes(&p, &t, false, false);
+        assert_eq!(v, [1, (-3i8) as u8, 0], "ascending: +1 then -3");
+    }
+
+    #[test]
+    fn select_votes_epoch_start_rule215_active_suppresses_decreases_and_id9() {
+        use std::collections::BTreeMap;
+        let mut p = launch_at(1024);
+        p.subblocks_per_block = Some(4); // id 9 active
+        let mut t = BTreeMap::new();
+        t.insert(1u8, 2_000_000i64); // increase id 1 — allowed at epoch start
+        t.insert(3u8, 100_000i64); // decrease id 3 — suppressed at epoch start
+        t.insert(9u8, 8i64); // id 9 — suppressed at epoch start
+        assert_eq!(
+            select_candidate_votes(&p, &t, true, false),
+            [1, 0, 0],
+            "rule 215 active ⇒ only increases of 1..=8 at an epoch start",
+        );
+    }
+
+    #[test]
+    fn select_votes_epoch_start_rule215_disabled_allows_decreases_and_id9() {
+        use std::collections::BTreeMap;
+        // Post-6.0 mainnet disables rule 215, so an epoch-start header may seed
+        // decreases and id 9 — the operator can initiate a downward / subblocks
+        // vote. Cap-2 (rule 212) still applies in ascending id order.
+        let mut p = launch_at(1024);
+        p.subblocks_per_block = Some(4); // id 9 active
+        let mut t = BTreeMap::new();
+        t.insert(3u8, 100_000i64); // decrease id 3 — now allowed
+        t.insert(9u8, 8i64); // id 9 increase — now allowed
+        assert_eq!(
+            select_candidate_votes(&p, &t, true, true),
+            [(-3i8) as u8, 9, 0],
+            "rule 215 disabled ⇒ decreases + id 9 seedable at an epoch start",
+        );
+    }
+
+    #[test]
+    fn select_votes_caps_at_two_param_votes() {
+        use std::collections::BTreeMap;
+        let p = launch_at(1024);
+        let mut t = BTreeMap::new();
+        for id in 1u8..=8 {
+            t.insert(id, 9_000_000i64); // every param wants to increase
+        }
+        // Only the first two in ascending id order (rule 212 ParamVotesCount=2).
+        assert_eq!(select_candidate_votes(&p, &t, false, false), [1, 2, 0]);
+    }
+
+    #[test]
+    fn select_votes_range_gated_at_bound() {
+        use std::collections::BTreeMap;
+        let mut p = launch_at(1024);
+        p.storage_fee_factor = 2_500_000; // id 1 already at max
+        let mut t = BTreeMap::new();
+        t.insert(1u8, 9_000_000i64); // wants increase but can't move → no vote
+        assert_eq!(select_candidate_votes(&p, &t, false, false), [0, 0, 0]);
     }
 
     #[test]

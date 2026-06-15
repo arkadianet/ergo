@@ -23,6 +23,27 @@ pub(super) struct TomlConfig {
     pub(super) wallet: TomlWallet,
     #[serde(default)]
     pub(super) mining: ergo_mining::MiningConfig,
+    pub(super) voting: TomlVoting,
+}
+
+/// `[voting]` TOML section: operator on-chain voting policy. Only a
+/// `[voting.targets]` map of canonical camelCase parameter name → desired
+/// numeric value. The candidate builder moves each parameter one step per
+/// block toward its target (capped at `ParamVotesCount` = 2 votes per block).
+///
+/// Names are resolved to votable ids at load time via
+/// `ergo_validation::voting::votable_param_id`; an unknown or non-votable name
+/// (e.g. `blockVersion`, soft-fork) is a startup error. No soft-fork field —
+/// soft-fork voting (the epoch-boundary proposed-update encoding) is deferred.
+///
+/// `deny_unknown_fields` so a mis-keyed `target` (singular) surfaces as a parse
+/// error rather than silently no-opping.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TomlVoting {
+    /// Parameter-name → target-value map. Empty/absent ⇒ the node mines with
+    /// neutral votes. Keys are validated against the votable set at load.
+    pub(super) targets: std::collections::BTreeMap<String, i64>,
 }
 
 /// `[wallet]` TOML section: operator flags controlling sensitive
