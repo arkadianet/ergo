@@ -391,20 +391,20 @@ mod tests {
 
     // ----- error paths -----
 
-    /// A silent / slow-loris peer must hit the ABSOLUTE handshake deadline, not
-    /// be held forever by the (former) per-read timer that any byte reset.
-    /// Production uses `HANDSHAKE_TIMEOUT` (Scala `handshakeTimeout = 30s`); the
-    /// deadline is injectable so this drives a short real clock instead of the
-    /// `test-util` paused clock this crate deliberately avoids (see
-    /// `mining_bridge` tests).
+    /// A slow-loris peer that TRICKLES incomplete handshake bytes — fast enough
+    /// that a per-read timer would keep resetting — must still hit the ABSOLUTE
+    /// handshake deadline. A silent peer wouldn't distinguish the two designs
+    /// (a per-read timer also fires on pure silence); the drip is what exercises
+    /// the reset bug. Production uses `HANDSHAKE_TIMEOUT` (Scala
+    /// `handshakeTimeout = 30s`); the deadline is injectable so this drives a
+    /// short real clock instead of the `test-util` paused clock this crate
+    /// deliberately avoids (see `mining_bridge` tests).
     #[tokio::test]
-    async fn do_handshake_absolute_deadline_fires_on_silent_peer() {
+    async fn do_handshake_absolute_deadline_fires_on_slow_loris_trickle() {
         use ergo_p2p::handshake::{PeerSpec, Version};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Connect but never send a (complete) handshake; keep it alive so the
-        // server's read stays pending rather than seeing a clean EOF.
-        let _silent_client = TcpStream::connect(addr).await.unwrap();
+        let mut slow_client = TcpStream::connect(addr).await.unwrap();
         let (server, _) = listener.accept().await.unwrap();
 
         let our = Handshake {
@@ -422,15 +422,35 @@ mod tests {
             },
         };
         let deadline = Duration::from_millis(150);
+        // Drip one byte every 50ms — under the deadline, so a per-read timer
+        // would reset on each byte and never fire. The bytes never form a valid
+        // handshake, so the read loop keeps spinning until the absolute deadline.
+        let drip = tokio::spawn(async move {
+            loop {
+                if slow_client.write_all(&[0]).await.is_err() {
+                    break; // server closed on deadline
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
         let started = tokio::time::Instant::now();
-        // The per-read timer alone would never fire on a silent peer; only the
-        // absolute deadline can. `Connection` isn't `Debug`, so match instead of
-        // `unwrap_err()` (which would need the Ok tuple to be `Debug`).
-        let result = do_handshake(server, MAINNET_MAGIC, &our, deadline).await;
+        // Outer watchdog: if the implementation regresses to a per-read timer,
+        // the drip above keeps the read pending forever, so this timeout (not the
+        // deadline) is what would fire — `.expect` then fails the test instead of
+        // hanging. `Connection` isn't `Debug`, so match instead of `unwrap_err`.
+        let result = tokio::time::timeout(
+            deadline + Duration::from_secs(1),
+            do_handshake(server, MAINNET_MAGIC, &our, deadline),
+        )
+        .await
+        .expect("test watchdog: do_handshake did not return — per-read timer regression?");
         let elapsed = started.elapsed();
+        drip.abort();
+
         match result {
             Err(e) => assert!(e.contains("deadline"), "expected deadline error, got: {e}"),
-            Ok(_) => panic!("silent peer should not complete a handshake"),
+            Ok(_) => panic!("trickling peer should not complete a handshake"),
         }
         // It must actually wait for the deadline rather than failing instantly.
         assert!(

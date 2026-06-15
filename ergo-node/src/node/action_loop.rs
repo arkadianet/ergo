@@ -407,7 +407,11 @@ fn reconcile_on_diff_error(
     }
     // `size()` is the active-pool count; capture it before demoting so we can
     // report what was quarantined (the method itself returns the queue-cap
-    // overflow count, not the quarantine count).
+    // overflow count, not the quarantine count). Carry `error` so the cause is
+    // visible at warn level whenever real txs are dropped — the per-variant
+    // logging above is debug for the benign catch-up gaps. The message is
+    // variant-neutral: any diff error (not only a rollback-window overflow) can
+    // reach here, e.g. `MissingSections`.
     let quarantined = mempool.size();
     let overflow = mempool.demote_all_for_revalidation();
     if quarantined > 0 {
@@ -415,7 +419,8 @@ fn reconcile_on_diff_error(
             quarantined,
             overflow,
             height = tip.height,
-            "mempool catch-up/reorg gap exceeded rollback window: quarantined active pool for revalidation",
+            error = ?error,
+            "mempool diff error: quarantined active pool for revalidation",
         );
     }
     quarantined

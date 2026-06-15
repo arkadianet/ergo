@@ -597,6 +597,10 @@ fn mode5_executor_replay_rejects_mutated_parent_interlinks() {
         .store_block_section_typed(&parent_ext_id, &w.result(), TYPE_EXTENSION)
         .expect("overwrite parent extension with corrupted interlinks");
 
+    // The seeded tip root before the call; a clean rejection must leave it
+    // byte-for-byte unchanged (a partial write that left height alone would
+    // otherwise slip past the height check).
+    let pre_root = rows[&APPLY_LO].parent_state_root;
     let mut backend = StateBackendKind::Digest(store);
     let msg = process_first_applied(&mut backend, &rows)
         .expect_err("corrupted parent interlinks must be rejected via the wired 401/402 path");
@@ -605,6 +609,11 @@ fn mode5_executor_replay_rejects_mutated_parent_interlinks() {
         unreachable!()
     };
     assert_eq!(d.height(), APPLY_LO - 1, "no state advance on rejection");
+    assert_eq!(
+        d.root_digest(),
+        pre_root,
+        "root must be unchanged on rejection"
+    );
     assert!(
         msg.contains("interlink structure mismatch") && msg.contains("rule 402"),
         "expected an interlink structure-mismatch rejection (rule 402), got: {msg}"
