@@ -4,10 +4,14 @@ use crate::sigma_value::SigmaValue;
 /// Maximum byte value that encodes an inline Constant (type code), not an opcode.
 pub(super) const LAST_CONSTANT_CODE: u8 = 0x70;
 
-/// Maximum expression depth to prevent stack overflow on malicious input.
-/// Kept conservative to fit within default thread stacks; no real ErgoTree
-/// comes close to this depth.
-pub(super) const MAX_EXPR_DEPTH: usize = 300;
+/// Maximum expression-tree depth, matching Scala `SigmaConstants.MaxTreeDepth`
+/// (= 110): the reference deserializer increments the shared reader level per
+/// nested value and throws `DeserializeCallDepthExceeded` once it exceeds this
+/// bound (`CoreByteReader`). A tree nested past 110 levels must be REJECTED to
+/// stay consensus-compatible (Scala does not soft-fork this into an
+/// `UnparsedErgoTree`), as well as to bound stack use. No real ErgoTree comes
+/// close to this depth.
+pub(super) const MAX_EXPR_DEPTH: usize = 110;
 
 /// Convenience alias used at the [`crate::ergo_tree`] boundary, where
 /// the body of a tree is just a single root [`Expr`].

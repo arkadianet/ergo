@@ -1,7 +1,7 @@
 use ergo_primitives::reader::{ReadError, VlqReader};
 
 use crate::sigma_type::{decode_type, read_type, SigmaType};
-use crate::sigma_value::{read_value, SigmaValue};
+use crate::sigma_value::{read_value_at_depth, SigmaValue};
 
 use super::types::{
     method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr, IrNode, Payload,
@@ -36,17 +36,24 @@ pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError
 /// Public so that register values — which are serialized as arbitrary
 /// evaluated expressions, not just plain constants — can be parsed.
 pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<Expr, ReadError> {
-    if depth > MAX_EXPR_DEPTH {
-        return Err(ReadError::InvalidData(format!(
-            "expression depth exceeds maximum ({MAX_EXPR_DEPTH})"
-        )));
+    // `>=`: depth is 0-based here (root enters at 0), while Scala's shared
+    // reader level is incremented BEFORE parsing each nested value, so Rust
+    // `depth` == Scala `level - 1`. Rejecting at `depth >= MAX_EXPR_DEPTH`
+    // therefore matches Scala's `level > MaxTreeDepth` boundary exactly.
+    if depth >= MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: MAX_EXPR_DEPTH,
+        });
     }
     let first = r.get_u8()?;
 
     if first <= LAST_CONSTANT_CODE {
         // Inline constant: first byte is a type code
         let tpe = decode_type(r, first)?;
-        let val = read_value(r, &tpe)?;
+        // Thread the current expression depth into the constant's value so a
+        // nested SigmaProp continues the shared MaxTreeDepth budget (Scala's
+        // single CoreByteReader.level across expr + value + SigmaBoolean).
+        let val = read_value_at_depth(r, &tpe, depth)?;
         // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
         // (Scala DataSerializer.deserialize(SHeader)). The gate fires PER
         // materialized header, so a constant that actually CARRIES a header

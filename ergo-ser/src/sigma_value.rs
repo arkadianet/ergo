@@ -286,6 +286,20 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
 
 /// Read value data for a known type.
 pub fn read_value(r: &mut VlqReader, tpe: &SigmaType) -> Result<SigmaValue, ReadError> {
+    read_value_at_depth(r, tpe, 0)
+}
+
+/// Depth-threaded [`read_value`]. `depth` is the shared reader-level budget
+/// (Scala `CoreByteReader.level`): it is carried in from `parse_expr` so a
+/// `SigmaProp` constant nested inside a deep ErgoTree expression continues the
+/// SAME MaxTreeDepth (110) budget rather than restarting at 0. Composite values
+/// (Coll/Option/Tuple elements) recurse at `depth + 1`, mirroring Scala's
+/// per-nested-value level increment.
+pub(crate) fn read_value_at_depth(
+    r: &mut VlqReader,
+    tpe: &SigmaType,
+    depth: usize,
+) -> Result<SigmaValue, ReadError> {
     match tpe {
         SigmaType::SBoolean => {
             let b = r.get_u8()?;
@@ -315,7 +329,8 @@ pub fn read_value(r: &mut VlqReader, tpe: &SigmaType) -> Result<SigmaValue, Read
             r.get_array::<GROUP_ELEMENT_LENGTH>()?,
         ))),
         SigmaType::SSigmaProp => {
-            let sb = read_sigma_boolean(r)?;
+            // Continue the shared depth budget into the SigmaBoolean tree.
+            let sb = read_sigma_boolean_at_depth(r, depth)?;
             Ok(SigmaValue::SigmaProp(sb))
         }
         SigmaType::SAvlTree => {
@@ -323,17 +338,17 @@ pub fn read_value(r: &mut VlqReader, tpe: &SigmaType) -> Result<SigmaValue, Read
             Ok(SigmaValue::AvlTree(avl))
         }
         SigmaType::SColl(elem_type) => {
-            let coll = read_coll(r, elem_type)?;
+            let coll = read_coll(r, elem_type, depth)?;
             Ok(SigmaValue::Coll(coll))
         }
         SigmaType::SOption(elem_type) => {
-            let opt = read_option(r, elem_type)?;
+            let opt = read_option(r, elem_type, depth)?;
             Ok(SigmaValue::Opt(opt))
         }
         SigmaType::STuple(elem_types) => {
             let mut vals = Vec::with_capacity(elem_types.len());
             for t in elem_types {
-                vals.push(read_value(r, t)?);
+                vals.push(read_value_at_depth(r, t, depth + 1)?);
             }
             Ok(SigmaValue::Tuple(vals))
         }
@@ -501,15 +516,24 @@ fn write_unsigned_bigint_value(
 /// For non-size-delimited trees: reads header + constants (if cseg) +
 ///   falls back to the full opcode parser for the body.
 fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
+    let tree_start = r.position();
     let header = r.get_u8()?;
     let version = header & 0x07;
     let has_size = header & 0x08 != 0;
     let cseg = header & 0x10 != 0;
 
     if has_size {
-        // Size-delimited: skip the body as a raw blob.
+        // Size-delimited: advance past the body blob (we keep the box opaque for
+        // round-trip fidelity), then re-parse the captured tree so an over-depth
+        // embedded tree HARD-REJECTS. Scala deserializes the box proposition via
+        // ErgoTreeSerializer, which depth-checks it; `read_ergo_tree_tracking_wrap`
+        // re-raises `DepthLimitExceeded` and soft-forks every other failure, so
+        // unknown/soft-forkable content still parses while depth overflow is
+        // surfaced rather than swallowed as opaque bytes.
         let size = r.get_u32_exact()? as usize;
         let _ = r.get_bytes(size)?;
+        let tree_bytes = r.data_slice(tree_start, r.position()).to_vec();
+        crate::ergo_tree::read_ergo_tree_tracking_wrap(&mut VlqReader::new(&tree_bytes))?;
     } else {
         // Non-size-delimited: must parse constants and body to find boundary.
         if cseg {
@@ -639,8 +663,25 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) {
     }
 }
 
-fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
+/// Scala bounds nested value/`SigmaBoolean` deserialization at
+/// `SigmaConstants.MaxTreeDepth` (= 110) via the shared reader level
+/// (`CoreByteReader`); past it `DeserializeCallDepthExceeded` is thrown. Mirror
+/// that bound here so a deeply nested `Cand`/`Cor`/`Cthreshold` chain from peer
+/// data (a box register or context-extension `SigmaProp` constant) is rejected
+/// rather than overflowing the worker-thread stack.
+const MAX_SIGMA_TREE_DEPTH: usize = 110;
+
+fn read_sigma_boolean_at_depth(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
+    // `>=`: depth is 0-based (root enters at 0) while Scala increments the
+    // shared reader level BEFORE parsing each nested node, so Rust `depth` ==
+    // Scala `level - 1`; `depth >= MAX` matches Scala's `level > MaxTreeDepth`.
+    if depth >= MAX_SIGMA_TREE_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: MAX_SIGMA_TREE_DEPTH,
+        });
+    }
     let tag = r.get_u8()?;
+    let next = depth + 1;
     match tag {
         TRIVIAL_PROP_FALSE => Ok(SigmaBoolean::TrivialProp(false)),
         TRIVIAL_PROP_TRUE => Ok(SigmaBoolean::TrivialProp(true)),
@@ -658,7 +699,7 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
-                children.push(read_sigma_boolean(r)?);
+                children.push(read_sigma_boolean_at_depth(r, next)?);
             }
             Ok(SigmaBoolean::Cand(children))
         }
@@ -666,7 +707,7 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
-                children.push(read_sigma_boolean(r)?);
+                children.push(read_sigma_boolean_at_depth(r, next)?);
             }
             Ok(SigmaBoolean::Cor(children))
         }
@@ -676,7 +717,7 @@ fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
-                children.push(read_sigma_boolean(r)?);
+                children.push(read_sigma_boolean_at_depth(r, next)?);
             }
             Ok(SigmaBoolean::Cthreshold { k, children })
         }
@@ -729,7 +770,11 @@ fn write_coll(
     Ok(())
 }
 
-fn read_coll(r: &mut VlqReader, elem_type: &SigmaType) -> Result<CollValue, ReadError> {
+fn read_coll(
+    r: &mut VlqReader,
+    elem_type: &SigmaType,
+    depth: usize,
+) -> Result<CollValue, ReadError> {
     let count = r.get_u16()? as usize;
     match elem_type {
         SigmaType::SBoolean => {
@@ -743,7 +788,7 @@ fn read_coll(r: &mut VlqReader, elem_type: &SigmaType) -> Result<CollValue, Read
         _ => {
             let mut vals = Vec::with_capacity(count);
             for _ in 0..count {
-                vals.push(read_value(r, elem_type)?);
+                vals.push(read_value_at_depth(r, elem_type, depth + 1)?);
             }
             Ok(CollValue::Values(vals))
         }
@@ -798,6 +843,7 @@ fn write_option(
 fn read_option(
     r: &mut VlqReader,
     elem_type: &SigmaType,
+    depth: usize,
 ) -> Result<Option<Box<SigmaValue>>, ReadError> {
     // scorex VLQReader.getOption: `if (tag != 0) Some(getValue) else None`.
     // ANY nonzero discriminant byte (not just 0x01) is Some; only 0x00 is
@@ -807,7 +853,7 @@ fn read_option(
     if tag == 0 {
         Ok(None)
     } else {
-        let val = read_value(r, elem_type)?;
+        let val = read_value_at_depth(r, elem_type, depth + 1)?;
         Ok(Some(Box::new(val)))
     }
 }
@@ -1317,6 +1363,118 @@ mod tests {
             ],
         };
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
+    }
+
+    #[test]
+    fn read_sigma_boolean_within_depth_limit_roundtrips() {
+        // A single-child Cand chain within MaxTreeDepth (110) must still parse.
+        let mut sb = SigmaBoolean::TrivialProp(true);
+        for _ in 0..100 {
+            sb = SigmaBoolean::Cand(vec![sb]);
+        }
+        roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
+    }
+
+    #[test]
+    fn read_sigma_boolean_deep_nesting_rejected_not_overflow() {
+        // A SigmaProp constant value is peer-controllable (box register /
+        // context extension). A long single-child Cand chain (~3 wire bytes per
+        // level) must be REJECTED at the MaxTreeDepth bound rather than
+        // recursing unbounded and overflowing the worker-thread stack — Scala
+        // throws DeserializeCallDepthExceeded past depth 110.
+        let mut sb = SigmaBoolean::TrivialProp(true);
+        for _ in 0..200 {
+            sb = SigmaBoolean::Cand(vec![sb]);
+        }
+        let mut w = VlqWriter::new();
+        write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
+        let data = w.result();
+        let mut r = VlqReader::new(&data);
+        let err = read_value(&mut r, &SigmaType::SSigmaProp).unwrap_err();
+        assert!(
+            matches!(err, ReadError::DepthLimitExceeded { max } if max == MAX_SIGMA_TREE_DEPTH),
+            "expected depth-limit error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_sigma_boolean_depth_boundary_matches_scala() {
+        // Scala rejects the 110-deep chain (level reaches 111 before the leaf)
+        // and accepts the 109-deep one. With a 0-based counter and `depth >=
+        // MAX`, our leaf sits at depth == (#Cand), so 110 Cands reject and 109
+        // accept — the exact Scala boundary.
+        let chain = |n: usize| {
+            let mut sb = SigmaBoolean::TrivialProp(true);
+            for _ in 0..n {
+                sb = SigmaBoolean::Cand(vec![sb]);
+            }
+            let mut w = VlqWriter::new();
+            write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
+            w.result()
+        };
+        // 109 Cands: accepted.
+        let ok = chain(MAX_SIGMA_TREE_DEPTH - 1);
+        assert!(read_value(&mut VlqReader::new(&ok), &SigmaType::SSigmaProp).is_ok());
+        // 110 Cands: rejected (matches Scala level 111 > MaxTreeDepth).
+        let bad = chain(MAX_SIGMA_TREE_DEPTH);
+        assert!(matches!(
+            read_value(&mut VlqReader::new(&bad), &SigmaType::SSigmaProp).unwrap_err(),
+            ReadError::DepthLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn shared_depth_budget_across_expr_and_sigma_boundary() {
+        // The leak: an inline SigmaProp constant nested inside a deep ErgoTree
+        // expression used to restart the SigmaBoolean budget at 0. Scala shares
+        // one CoreByteReader.level across expr + value + SigmaBoolean, so the
+        // counts ADD. Here N SizeOf expr wrappers wrap a SigmaProp constant with
+        // M Cands: neither N nor M alone exceeds MaxTreeDepth (110), but N+M does.
+        let sigma_const = |m: usize| {
+            let mut sb = SigmaBoolean::TrivialProp(true);
+            for _ in 0..m {
+                sb = SigmaBoolean::Cand(vec![sb]);
+            }
+            let mut w = VlqWriter::new();
+            write_constant(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
+            w.result()
+        };
+        let body = |n: usize, m: usize| {
+            let mut b = vec![0xB1u8; n]; // n SizeOf (One-arg) expr wrappers
+            b.extend_from_slice(&sigma_const(m));
+            b
+        };
+        // 60 expr + 60 sigma = 120 >= 110 → rejected via the shared budget
+        // (was accepted before the fix, when the sigma counter reset to 0).
+        let over = body(60, 60);
+        assert!(matches!(
+            crate::opcode::parse_body(&mut VlqReader::new(&over), 0).unwrap_err(),
+            ReadError::DepthLimitExceeded { .. }
+        ));
+        // 40 expr + 40 sigma = 80 < 110 → accepted.
+        let ok = body(40, 40);
+        assert!(crate::opcode::parse_body(&mut VlqReader::new(&ok), 0).is_ok());
+    }
+
+    #[test]
+    fn sbox_constant_with_over_depth_tree_hard_rejects() {
+        // An SBox inline constant whose proposition is a SIZE-DELIMITED tree
+        // nested past MaxTreeDepth must hard-reject (Scala deserializes the
+        // embedded box tree via ErgoTreeSerializer, which depth-checks it) — not
+        // be accepted as opaque bytes by skip_ergo_tree.
+        let mut tree = vec![0x08u8]; // header: v0, has_size
+        let mut tree_body = vec![0xB1u8; 150]; // SizeOf chain (over-depth)
+        tree_body.push(0xA3); // Height leaf
+        ergo_primitives::vlq::encode_vlq_into(tree_body.len() as u64, &mut tree);
+        tree.extend_from_slice(&tree_body);
+        let mut box_bytes = vec![0x01u8]; // box value = 1 nanoErg
+        box_bytes.extend_from_slice(&tree); // proposition (parse fails here)
+        let mut r = VlqReader::new(&box_bytes);
+        let err = read_value(&mut r, &SigmaType::SBox).unwrap_err();
+        assert!(
+            matches!(err, ReadError::DepthLimitExceeded { .. }),
+            "SBox-embedded over-depth tree must hard-reject, got {err:?}"
+        );
     }
 
     // ===== 3. Collection roundtrips =====
