@@ -132,6 +132,7 @@ function buildRows(params, configured) {
       input.step = String(r.step);
     }
     input.placeholder = 'no vote';
+    input.setAttribute('aria-label', `${r.name} vote target`);
     input.dataset.id = String(r.id);
     input.dataset.name = r.name;
     if (cfg.has(r.id)) input.value = String(cfg.get(r.id));

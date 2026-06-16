@@ -32,6 +32,7 @@ export function makeTable(container, columns, opts = {}) {
       s.className = 'dtable__th micro-label' + (c.align === 'right' ? ' dtable__c--r' : '');
       s.style.flex = c.width ? `0 0 ${c.width}px` : '1';
       s.textContent = c.label + (sort.key === c.key ? (sort.dir < 0 ? ' ▾' : ' ▴') : '');
+      s.setAttribute('aria-sort', sort.key === c.key ? (sort.dir < 0 ? 'descending' : 'ascending') : 'none');
       s.onclick = () => {
         sort = { key: c.key, dir: sort.key === c.key ? -sort.dir : -1 };
         draw();
@@ -93,10 +94,14 @@ export function makeTable(container, columns, opts = {}) {
 }
 
 export function copyBtn(text) {
-  const b = document.createElement('span');
+  // A real <button> so it's keyboard-focusable/operable; the row toggle
+  // already ignores clicks inside `.copy`.
+  const b = document.createElement('button');
+  b.type = 'button';
   b.className = 'copy';
   b.textContent = '⧉';
   b.title = 'copy';
+  b.setAttribute('aria-label', 'copy');
   b.onclick = () => navigator.clipboard?.writeText(text);
   return b;
 }

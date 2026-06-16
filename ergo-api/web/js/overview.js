@@ -305,6 +305,12 @@ function pipeRow(label, valTxt, frac, color) {
   v.textContent = valTxt;
   const g = document.createElement('div');
   g.className = 'gauge';
+  const pct = Math.round(Math.max(0, Math.min(100, frac * 100)));
+  g.setAttribute('role', 'progressbar');
+  g.setAttribute('aria-valuemin', '0');
+  g.setAttribute('aria-valuemax', '100');
+  g.setAttribute('aria-valuenow', String(pct));
+  g.setAttribute('aria-label', label);
   const f = document.createElement('div');
   f.className = 'gauge__fill';
   f.style.width = `${Math.max(0, Math.min(100, frac * 100))}%`;
@@ -393,6 +399,11 @@ function renderBody() {
       );
       const g = document.createElement('div');
       g.className = 'gauge';
+      g.setAttribute('role', 'progressbar');
+      g.setAttribute('aria-valuemin', '0');
+      g.setAttribute('aria-valuemax', '100');
+      g.setAttribute('aria-valuenow', String(Math.round(Math.min(100, pct * 100))));
+      g.setAttribute('aria-label', 'mempool capacity');
       const f = document.createElement('div');
       f.className = 'gauge__fill';
       f.style.width = `${Math.min(100, pct * 100)}%`;
