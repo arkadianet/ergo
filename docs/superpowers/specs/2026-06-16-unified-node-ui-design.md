@@ -210,7 +210,9 @@ working throughout.**
   the write-down gate. Send-confirm → `<dialog>`.
 - **Fix two latent issues:** optimistic send allows resubmitting the same draft
   (`wallet.js:770` — reset/disable form on submit); UI "logout" doesn't lock
-  server-side (`wallet.js:154` — offer to `POST /wallet/lock` on logout).
+  server-side (`wallet.js:154` — offer to call `GET /wallet/lock` on logout; the
+  route is a GET per `wallet/mod.rs:361` + `wallet_lock_matrix.rs`, and stays a
+  GET — changing it would be a REST-surface change (non-goal)).
 - Theme/density now apply to the wallet automatically (it's in the shell).
 
 ### E. Native Swagger + a11y
@@ -230,10 +232,13 @@ working throughout.**
 - **web.rs:** add `pub const JS_WALLET = include_str!("../web/js/wallet.js")`.
   After migration, remove the `WALLET_UI_INDEX_HTML` / `WALLET_UI_JS` /
   `WALLET_CSS` includes (old files deleted).
-- **server.rs routes:** add `/js/wallet.js`; replace the `/wallet/ui*` static
-  group with a **redirect** `/wallet/ui` → `/#wallet` (301/308) for bookmarks
-  (`/wallet/ui/index.html`, `/wallet/ui/wallet.js` redirect or 404 — they no
-  longer exist).
+- **server.rs routes:** add `/js/wallet.js`. Replace the `/wallet/ui*` static
+  group with **public redirect routes** for ALL THREE retired paths —
+  `/wallet/ui`, `/wallet/ui/index.html`, `/wallet/ui/wallet.js` → `/#wallet`
+  (308). These MUST stay explicitly registered in the public group **before** the
+  gated `crate::wallet::router_with_security` merge, because that router has a
+  `/wallet/*rest` catch-all (`wallet/mod.rs:342`) — without explicit redirects the
+  retired aliases would fall through to the gate and return 403, not redirect.
 - **Extend the security-header layer to the SPA root (codex #3).** The wallet now
   lives at `/`, so `/` + every SPA asset (`/`, `/index.html` if any, the CSS, the
   `/js/*` modules, the font) must carry the wallet-grade headers (CSP
@@ -248,12 +253,16 @@ working throughout.**
 - **Tests (codex #10):**
   - Rewrite `wallet_ui_headers.rs::dashboard_root_does_not_carry_wallet_csp` →
     `dashboard_root_carries_spa_security_headers` (now `/` SHOULD carry CSP +
-    no-store + no-referrer), and assert `/js/*.js`, the CSS, and `/js/wallet.js`
-    carry them too. Keep an assertion that `/swagger/native` does **NOT** carry
+    no-store + no-referrer), and assert the OTHER real static routes carry them
+    too: `/index.html`, `/tokens.css` (+ components/dashboard css),
+    `/fonts/jetbrains-mono.woff2`, `/js/app.js` (+ siblings), and the new
+    `/js/wallet.js`. Keep an assertion that `/swagger/native` does **NOT** carry
     the strict CSP.
-  - Update `wallet_ui_auth_scope.rs`: `/wallet/ui` now redirects (assert 3xx →
-    `/#wallet`) instead of serving the page; the public-without-key property moves
-    to `/` (already public). `/wallet/*` JSON stays gated (unchanged).
+  - Update `wallet_ui_auth_scope.rs`: all three retired `/wallet/ui*` paths now
+    **redirect** (assert 308 → `/#wallet`) without a key — proving they're public
+    and do NOT hit the gated `/wallet/*rest` catch-all (403); the page-serving
+    body assertions are dropped. `/wallet/status` stays gated (403 no key, 200
+    with key) — unchanged, and is the verify probe §C relies on.
   - Run the full Rust gate (`cargo fmt --all -- --check`; `cargo clippy
     --workspace --all-targets --all-features -- -D warnings`; `cargo test
     --workspace`) — these tests live in `ergo-api/tests/`.
@@ -274,7 +283,8 @@ working throughout.**
    `format.js` (incl. `nanoErgFromDecimal`) + lifecycle scrub/nav-guard;
    **extend the security-header layer to `/` + SPA assets** and add the
    `/js/wallet.js` route.
-6. Flip `/wallet/ui` → redirect; **delete** old `wallet/index.html`,
+6. Flip all `/wallet/ui*` → public 308 redirects to `/#wallet` (§F); **delete**
+   old `wallet/index.html`,
    `wallet/wallet.js`, `wallet.css`, and their `web.rs` includes; **delete** the
    `.w-*` / `.panel-*` / duplicate-`.panel` CSS. Update Rust tests (§F).
 7. Native swagger theming + dedupe.
