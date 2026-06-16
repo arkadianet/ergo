@@ -127,9 +127,19 @@
   color: var(--blue);
   cursor: pointer;
   opacity: 0.55;
+  /* Rendered as a <button> so it is keyboard-focusable; reset the chrome. */
+  background: none;
+  border: none;
+  font: inherit;
+  padding: 0;
 }
 .copy:hover {
   opacity: 1;
+}
+.copy:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Settings dialog */
@@ -143,7 +153,7 @@
   width: 92vw;
 }
 .dialog::backdrop {
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scrim);
 }
 .dialog__body {
   padding: var(--space-6);
@@ -208,7 +218,7 @@
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--bd2);
+  border-bottom: 1px solid var(--divider);
   cursor: pointer;
 }
 .dtable__row:hover {
@@ -258,4 +268,172 @@
     font-size: var(--fs-micro);
     text-transform: uppercase;
   }
+}
+
+/* Form controls — one shared skin for every input/select/textarea
+   (settings dialog, voting target, wallet forms, authorize field). */
+.input,
+.select,
+.textarea {
+  font: inherit;
+  background: var(--s2);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  color: var(--tx);
+  padding: var(--space-4);
+  min-width: 0;
+}
+.input:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+/* Block-level status message (wallet errors, voting save status, the
+   authorize prompt, scan-invalidated). Inline status uses .pill. */
+.banner {
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--tx2) 30%, transparent);
+  background: color-mix(in srgb, var(--tx2) 10%, transparent);
+  color: var(--tx2);
+}
+.banner--ok {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+  color: var(--green);
+}
+.banner--warn {
+  background: color-mix(in srgb, var(--yellow) 12%, transparent);
+  border-color: color-mix(in srgb, var(--yellow) 40%, transparent);
+  color: var(--yellow);
+}
+.banner--err {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  color: var(--red);
+}
+.banner--info {
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
+  border-color: color-mix(in srgb, var(--blue) 40%, transparent);
+  color: var(--blue);
+  word-break: break-all;
+}
+
+/* Two-column label/value grid (wallet status/balances, modal lines). */
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-5);
+  font-size: var(--fs-small);
+}
+.kv .k {
+  color: var(--tx3);
+}
+.kv .v {
+  text-align: right;
+  word-break: break-word;
+}
+.kv .v--green {
+  color: var(--green);
+}
+.kv .v--red {
+  color: var(--red);
+}
+.kv .v--dim {
+  color: var(--tx3);
+}
+.kv .v--hash {
+  font-variant-numeric: tabular-nums;
+  color: var(--blue);
+}
+
+/* Responsive semantic table — for editable/static matrices that need real
+   <table> semantics and stable cell nodes (voting). Reflows to label/value
+   rows under 760px. The card-row .dtable above is for sortable list data. */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-body);
+}
+.table th {
+  text-align: left;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--tx3);
+  font-weight: 600;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--bd);
+}
+.table td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--divider);
+  color: var(--tx);
+  vertical-align: top;
+}
+.table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 760px) {
+  .table thead {
+    display: none;
+  }
+  .table tr {
+    display: block;
+    border-bottom: 1px solid var(--divider);
+    padding: var(--space-3) 0;
+  }
+  .table td {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-4);
+    border: none;
+    padding: var(--space-1) 0;
+  }
+  .table td::before {
+    content: attr(data-label);
+    color: var(--tx3);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+  }
+}
+
+/* Panel head sub-parts (status panels with a dot + a right-aligned note). */
+.panel__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tx2);
+}
+.panel__right {
+  font-size: var(--fs-small);
+  color: var(--tx2);
+}
+.panel__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tx3);
+  flex: none;
+}
+.panel__dot--green {
+  background: var(--green);
+}
+.panel__dot--orange {
+  background: var(--orange);
+}
+.panel__dot--blue {
+  background: var(--blue);
 }

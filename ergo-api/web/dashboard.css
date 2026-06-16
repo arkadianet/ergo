@@ -187,7 +187,7 @@
   font-size: var(--fs-small);
 }
 .ov-big {
-  font-size: 18px;
+  font-size: var(--fs-lg);
   font-weight: 700;
 }
 .distbar {

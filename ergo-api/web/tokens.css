@@ -27,7 +27,6 @@
   --purple: #bc8cff;
   --yellow: #d29922;
   --accent: var(--orange);
-  --grid-line: rgba(139, 148, 158, 0.08);
 }
 
 .theme-light {
@@ -49,7 +48,6 @@
   --purple: #8250df;
   --yellow: #9a6700;
   --accent: var(--orange);
-  --grid-line: rgba(31, 35, 40, 0.06);
 }
 
 .theme-hc {
@@ -71,7 +69,6 @@
   --purple: #d2a8ff;
   --yellow: #e3b341;
   --accent: var(--orange);
-  --grid-line: rgba(255, 255, 255, 0.12);
 }
 
 :root {
@@ -89,12 +86,13 @@
   --fs-small: 9.5px;
   --fs-body: 11px;
   --fs-value: 14px;
-  --fs-hero: 26px;
-  --topbar-h: 40px;
+  --fs-lg: 18px;
   --sidebar-w: 148px;
-  --footer-h: 24px;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
   --dur: 0.12s;
+  /* Semantic aliases (theme-resolved at use site via the vars they wrap). */
+  --divider: var(--bd2);
+  --scrim: rgba(0, 0, 0, 0.55);
 }
 
 html {
@@ -118,5 +116,4 @@ body {
   --space-5: 8px;
   --space-6: 10px;
   --space-7: 14px;
-  --fs-hero: 20px;
 }
