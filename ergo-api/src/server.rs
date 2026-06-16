@@ -1412,8 +1412,32 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         (name = "admin", description = "API-key-gated operator routes"),
         (name = "health", description = "Liveness + readiness"),
     ),
+    modifiers(&SecurityAddon),
 )]
 pub(crate) struct NativeOpenApi;
+
+/// Registers the `ApiKeyAuth` security scheme on the native spec so Swagger UI
+/// renders an Authorize control (and a per-operation padlock) for the
+/// api-key-gated routes. The scheme matches the runtime gate exactly: the secret
+/// rides the `api_key` request header ([`crate::auth::API_KEY_HEADER`]), which is
+/// what [`crate::auth::require_api_key`] checks. Individual gated operations opt
+/// in via `security(("ApiKeyAuth" = []))` on their `#[utoipa::path]`.
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+        let components = openapi
+            .components
+            .get_or_insert_with(utoipa::openapi::Components::new);
+        components.add_security_scheme(
+            "ApiKeyAuth",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new(
+                crate::auth::API_KEY_HEADER,
+            ))),
+        );
+    }
+}
 
 /// Serialise the native OpenAPI document to YAML.
 ///
@@ -1557,6 +1581,7 @@ async fn votes_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
     path = "/api/v1/votes",
     tag = "admin",
     request_body = ApiSetVotesRequest,
+    security(("ApiKeyAuth" = [])),
     responses(
         (status = 204, description = "Voting targets replaced"),
         (status = 400, description = "A target named a non-votable parameter"),
@@ -1868,6 +1893,7 @@ pub(crate) fn map_submit_error(err: SubmitError) -> (StatusCode, ApiSubmitError)
     post,
     path = "/api/v1/node/shutdown",
     tag = "admin",
+    security(("ApiKeyAuth" = [])),
     responses(
         (status = 202,
          description = "Shutdown accepted; body is the literal text `shutdown_requested`. Drain proceeds asynchronously.",

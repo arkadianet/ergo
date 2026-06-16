@@ -414,6 +414,9 @@
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--tx4);
   color: var(--tx);
+  /* The Parameter cell carries a name + a wrapped description line, so keep
+     every cell top-aligned rather than centered against the tallest one. */
+  vertical-align: top;
 }
 .vtable .vt-num {
   text-align: right;
@@ -452,4 +455,16 @@
 .vt-inactive {
   color: var(--tx3);
   font-size: var(--fs-micro);
+}
+.vt-name {
+  font-weight: 500;
+}
+/* Operator-facing explanation of the parameter, shown under its name. Always
+   visible so the implication of a vote is clear without hovering. */
+.vt-desc {
+  margin-top: var(--space-2);
+  max-width: 52ch;
+  font-size: var(--fs-small);
+  line-height: 1.45;
+  color: var(--tx3);
 }

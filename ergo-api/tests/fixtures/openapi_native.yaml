@@ -223,6 +223,8 @@ paths:
                 type: string
         '403':
           description: Missing or invalid api_key (when API security is configured)
+      security:
+      - ApiKeyAuth: []
   /api/v1/peers:
     get:
       tags:
@@ -304,6 +306,8 @@ paths:
           description: Missing or invalid api_key
         '409':
           description: Node is not mining
+      security:
+      - ApiKeyAuth: []
 components:
   schemas:
     ApiBlockApplyError:
@@ -1366,6 +1370,7 @@ components:
       required:
       - id
       - name
+      - description
       - current
       - step
       - min
@@ -1374,6 +1379,12 @@ components:
         current:
           type: integer
           format: int32
+        description:
+          type: string
+          description: |-
+            One-line operator-facing explanation of what the parameter governs and
+            the implication of voting it higher. Sourced from
+            `ergo_validation::voting::votable_param_description`.
         id:
           type: integer
           format: int32
@@ -1485,6 +1496,11 @@ components:
       - syncing
       - at_tip
       - stalled
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: api_key
 tags:
 - name: node
   description: Node identity, host, status

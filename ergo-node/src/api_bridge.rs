@@ -273,6 +273,7 @@ impl NodeReadState for SnapshotReadState {
                 .map(|d| ergo_api::ApiVotableParam {
                     id: d.id,
                     name: d.name.to_string(),
+                    description: d.description.to_string(),
                     current: d.current,
                     step: d.step,
                     min: d.min,

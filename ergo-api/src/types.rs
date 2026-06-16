@@ -361,6 +361,10 @@ pub struct ApiVotes {
 pub struct ApiVotableParam {
     pub id: u8,
     pub name: String,
+    /// One-line operator-facing explanation of what the parameter governs and
+    /// the implication of voting it higher. Sourced from
+    /// `ergo_validation::voting::votable_param_description`.
+    pub description: String,
     pub current: i32,
     pub step: i32,
     pub min: i32,
