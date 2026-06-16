@@ -13,7 +13,7 @@
 // REPLACES the full target set.
 import { api } from './api-client.js';
 import { num } from './format.js';
-import { getApiKey } from './settings.js';
+import { getApiKey, subscribe } from './auth.js';
 import { sparkline } from './sparkline.js';
 
 let root = null;
@@ -24,10 +24,13 @@ let builtKey = null;
 // True while the last poll's fetch failed, so a recovered fetch can clear the
 // "Could not load voting data." error without clobbering a save result.
 let loadFailed = false;
+// Unsubscribe handle for the auth-state gating of the Save button.
+let votingAuthUnsub = null;
 
-function cell(text, cls) {
+function cell(text, cls, label) {
   const td = document.createElement('td');
   if (cls) td.className = cls;
+  if (label) td.dataset.label = label; // mobile reflow label (.table)
   td.textContent = text;
   return td;
 }
@@ -36,8 +39,10 @@ function setStatus(msg, kind) {
   const el = root.querySelector('[data-status]');
   if (!el) return;
   el.textContent = msg || '';
-  el.style.color =
-    kind === 'ok' ? 'var(--green)' : kind === 'err' ? 'var(--red)' : 'var(--tx3)';
+  // Color via class (not inline style); the span is aria-live so screen
+  // readers announce save/validation results.
+  el.className =
+    'vt-status' + (kind === 'ok' ? ' vt-status--ok' : kind === 'err' ? ' vt-status--err' : '');
 }
 
 // Rows to render = every votable parameter, PLUS any configured vote whose
@@ -83,6 +88,7 @@ function buildRows(params, configured) {
     const tr = document.createElement('tr');
     tr.dataset.id = String(r.id);
     const nameTd = document.createElement('td');
+    nameTd.dataset.label = 'Parameter';
     const nameLine = document.createElement('div');
     nameLine.className = 'vt-name';
     nameLine.textContent = r.name;
@@ -104,20 +110,22 @@ function buildRows(params, configured) {
     }
     tr.append(
       nameTd,
-      cell(num(r.current), 'vt-num vt-current'),
-      cell(r.votable ? `${num(r.min)} – ${num(r.max)}` : '—', 'vt-num vt-range'),
-      cell(num(r.step), 'vt-num'),
+      cell(num(r.current), 'table__num vt-current', 'Current'),
+      cell(r.votable ? `${num(r.min)} – ${num(r.max)}` : '—', 'table__num vt-range', 'Range'),
+      cell(num(r.step), 'table__num', 'Step'),
     );
     // configured (live) target cell
     const live = document.createElement('td');
-    live.className = 'vt-num vt-live';
+    live.className = 'table__num vt-live';
+    live.dataset.label = 'Voting';
     live.textContent = cfg.has(r.id) ? num(cfg.get(r.id)) : '—';
     tr.append(live);
     // editable target input
     const inputTd = document.createElement('td');
+    inputTd.dataset.label = 'Target';
     const input = document.createElement('input');
     input.type = 'number';
-    input.className = 'vt-input';
+    input.className = 'input vt-input';
     if (r.votable) {
       input.min = String(r.min);
       input.max = String(r.max);
@@ -150,7 +158,7 @@ function refreshCells(params, configured) {
 
 async function save() {
   if (!getApiKey()) {
-    setStatus('Set your API key in ⚙ Settings to change votes.', 'err');
+    setStatus('Set your api_key via the Authorize chip to change votes.', 'err');
     return;
   }
   // Collect non-blank inputs as the full desired set (replace semantics).
@@ -189,7 +197,7 @@ async function save() {
     return;
   }
   if (res.status === 403) {
-    setStatus('Rejected (403): missing or invalid API key — check ⚙ Settings.', 'err');
+    setStatus('Rejected (403): missing or invalid api_key — use the Authorize chip.', 'err');
   } else if (res.status === 409) {
     setStatus('Node is not mining — vote targets have no effect until mining is enabled.', 'err');
   } else {
@@ -206,8 +214,8 @@ export function mount(el) {
       <span class="pg-count micro-label" data-meta></span></div>
     <p class="vt-note micro-label">
       Set the value the node should vote toward for each parameter (within its allowed range);
-      the node then casts votes for you while mining. Setting requires an API key (⚙ Settings)
-      and a mining node — viewing is always available.
+      the node then casts votes for you while mining. Setting requires an api_key
+      (use the Authorize chip in the sidebar) and a mining node — viewing is always available.
     </p>
     <p class="vt-note micro-label">
       <b>How votes are applied.</b> Each block can carry at most <b>two</b> parameter votes — a
@@ -218,17 +226,17 @@ export function mount(el) {
       any already at your target or at a range bound, so the remaining targets take their turn in
       later epochs as the leading ones settle.
     </p>
-    <table class="vtable">
+    <table class="table">
       <thead><tr>
-        <th>Parameter</th><th class="vt-num">Current</th><th class="vt-num">Range</th>
-        <th class="vt-num">Step</th><th class="vt-num">Voting</th><th>Target</th>
+        <th>Parameter</th><th class="table__num">Current</th><th class="table__num">Range</th>
+        <th class="table__num">Step</th><th class="table__num">Voting</th><th>Target</th>
       </tr></thead>
       <tbody data-rows></tbody>
     </table>
     <div class="vt-actions">
       <button class="btn btn--primary" data-save type="button">Save votes</button>
-      <button class="btn" data-clear type="button">Clear all</button>
-      <span class="vt-status" data-status></span>
+      <button class="btn btn--danger" data-clear type="button">Clear all</button>
+      <span class="vt-status" data-status aria-live="polite"></span>
     </div>
     <div class="vt-history">
       <div class="pg-head"><span class="pg-title">Parameter change history</span>
@@ -244,6 +252,15 @@ export function mount(el) {
   el.querySelector('[data-clear]').addEventListener('click', () => {
     for (const input of root.querySelectorAll('.vt-input')) input.value = '';
     setStatus('Cleared inputs — press “Save votes” to apply.', 'muted');
+  });
+  // Preflight gate: disable Save while no api_key is set (instead of only
+  // erroring on click). The server stays authoritative on key validity.
+  const saveBtn = el.querySelector('[data-save]');
+  if (votingAuthUnsub) votingAuthUnsub();
+  votingAuthUnsub = subscribe((s) => {
+    const noKey = s === 'none';
+    saveBtn.disabled = noKey;
+    saveBtn.title = noKey ? 'Set your api_key via the Authorize chip to set votes' : '';
   });
   historyLoaded = false;
   historyLoading = false;

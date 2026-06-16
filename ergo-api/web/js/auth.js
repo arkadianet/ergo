@@ -137,6 +137,18 @@ function renderChip(chip, s) {
   chip.title = TITLES[s];
 }
 
+// Set by initAuth so other surfaces (the Overview prompt, voting hint) can open
+// the Authorize dialog without reaching into the DOM themselves.
+let dialogEl = null;
+let inputEl = null;
+
+// Open the Authorize dialog (prefilled with the current key, if any).
+export function promptAuthorize() {
+  if (!dialogEl) return;
+  inputEl.value = getApiKey();
+  dialogEl.showModal();
+}
+
 // Wire the shell lock chip + its dialog. The dialog template is static (no
 // untrusted interpolation); the field value is assigned via the DOM.
 export function initAuth(chip, dialog) {
@@ -157,10 +169,9 @@ export function initAuth(chip, dialog) {
       </div>
     </form>`;
   const input = dialog.querySelector('#auth-key');
-  chip.addEventListener('click', () => {
-    input.value = getApiKey();
-    dialog.showModal();
-  });
+  dialogEl = dialog;
+  inputEl = input;
+  chip.addEventListener('click', promptAuthorize);
   dialog.addEventListener('close', () => {
     const v = dialog.returnValue;
     if (v === 'save') setApiKey(input.value);

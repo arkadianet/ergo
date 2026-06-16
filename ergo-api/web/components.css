@@ -39,6 +39,10 @@
 .btn--ghost {
   background: transparent;
 }
+.btn--sm {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-small);
+}
 .btn[disabled] {
   opacity: 0.5;
   cursor: not-allowed;

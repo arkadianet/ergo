@@ -4,6 +4,7 @@
 import { api } from './api-client.js';
 import { sparkline } from './sparkline.js';
 import { num, bytes, dur } from './format.js';
+import { subscribe, promptAuthorize } from './auth.js';
 
 const HISTORY_LEN = 60;
 const hist = { blockTimes: [], mempool: [], height: [], difficulty: [] };
@@ -64,6 +65,7 @@ function setText(sel, t) {
 export function mount(el) {
   root = el;
   el.innerHTML = `
+    <div class="ov-prompt banner banner--info" data-auth-prompt hidden></div>
     <div class="ov-top">
       <div class="ov-ident" data-ident hidden>
         <span class="ov-ident__mode" data-ident-mode>—</span>
@@ -94,6 +96,22 @@ export function mount(el) {
       renderBody();
     };
   });
+  // Authorize prompt: visible only while no api_key is set. Built once; the
+  // subscription just toggles visibility as the auth state changes.
+  const prompt = root.querySelector('[data-auth-prompt]');
+  if (prompt) {
+    const txt = document.createElement('span');
+    txt.textContent = 'Authorize to unlock operator controls (voting, wallet).';
+    const btn = document.createElement('button');
+    btn.className = 'btn btn--primary btn--sm';
+    btn.type = 'button';
+    btn.textContent = 'Authorize';
+    btn.addEventListener('click', promptAuthorize);
+    prompt.append(txt, btn);
+    subscribe((s) => {
+      prompt.hidden = s !== 'none';
+    });
+  }
   renderBody();
   if (state.status) onFast({ status: state.status, info: state.info });
   // Node identity is static config — fetch once on mount. Render from
