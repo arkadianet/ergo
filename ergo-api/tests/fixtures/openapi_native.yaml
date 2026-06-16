@@ -301,7 +301,7 @@ paths:
         '204':
           description: Voting targets replaced
         '400':
-          description: A target named a non-votable parameter
+          description: A target named a non-votable parameter, or fell outside the parameter's allowable [min, max] voting range
         '403':
           description: Missing or invalid api_key
         '409':
@@ -1409,8 +1409,10 @@ components:
     ApiVotableParam:
       type: object
       description: |-
-        A votable numeric protocol parameter and the inclusive bounds a vote may not
-        cross. Mirror of `ergo_validation::voting::ParamDescriptor`.
+        A votable numeric protocol parameter and the inclusive `[min, max]` target
+        bounds. A vote moves the parameter at most one `step` per voting epoch toward
+        the target and only while it is inside the bound, so a target outside
+        `[min, max]` is rejected. Mirror of `ergo_validation::voting::ParamDescriptor`.
       required:
       - id
       - name
@@ -1436,9 +1438,13 @@ components:
         max:
           type: integer
           format: int32
+          description: Inclusive upper target bound.
         min:
           type: integer
           format: int32
+          description: |-
+            Inclusive lower target bound. The recompute gates at the bound (won't
+            step a parameter further past it) rather than hard-clamping.
         name:
           type: string
         step:

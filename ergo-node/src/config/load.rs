@@ -689,6 +689,18 @@ impl NodeConfig {
                      outputCost, subblocksPerBlock; blockVersion is soft-fork driven)"
                 )
             })?;
+            // Reject an out-of-range target at startup (same `[min, max]` the
+            // runtime `POST /api/v1/votes` write enforces) — otherwise a
+            // fat-fingered config value silently pins the parameter at its bound
+            // forever with no warning. Bounds are constant per id.
+            if let Some((min, max)) = ergo_validation::voting::votable_param_bounds(id) {
+                if *target < min as i64 || *target > max as i64 {
+                    return Err(format!(
+                        "[voting] target {target} for {name:?} is outside its allowable \
+                         voting range [{min}, {max}]"
+                    ));
+                }
+            }
             voting_targets.insert(id, *target);
         }
         if !voting_targets.is_empty() && !mining_config.enabled {

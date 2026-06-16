@@ -186,6 +186,22 @@ pub enum VotingControlError {
         /// The offending parameter id.
         parameter_id: u8,
     },
+    /// A target fell outside the parameter's allowable `[min, max]` voting
+    /// bounds. The consensus recompute only steps a parameter toward a bound and
+    /// won't step it past, so a target beyond the bound can never be a settling
+    /// value — it would just pin the parameter at the bound forever. The node
+    /// rejects it rather than accepting a misleading target. Mapped to
+    /// `400 Bad Request`.
+    OutOfRange {
+        /// The offending parameter id.
+        parameter_id: u8,
+        /// The rejected target value.
+        target: i64,
+        /// Inclusive lower bound for this parameter.
+        min: i64,
+        /// Inclusive upper bound for this parameter.
+        max: i64,
+    },
 }
 
 /// No-op `NodeAdmin` for tests and configurations that don't expose

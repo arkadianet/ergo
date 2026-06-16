@@ -472,28 +472,56 @@
 .vt-history {
   margin-top: var(--space-7);
 }
-.vt-hist-event {
-  padding: var(--space-3) 0;
+/* One row per parameter: name · net from→to · sparkline · step count · toggle. */
+.vt-hist-group {
   border-bottom: 1px solid var(--tx4);
 }
-.vt-hist-height {
+.vt-hist-row {
+  display: grid;
+  grid-template-columns: 16ch minmax(14ch, 1fr) 120px auto auto;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-3) 0;
+}
+.vt-hist-pname {
+  font-weight: 500;
+}
+.vt-hist-net {
+  font-variant-numeric: tabular-nums;
+}
+.vt-hist-spark {
+  min-width: 0;
+}
+.vt-hist-count {
   font-size: var(--fs-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--tx3);
+  font-variant-numeric: tabular-nums;
 }
-.vt-hist-list {
-  margin: var(--space-2) 0 0;
-  padding-left: var(--space-5);
+.vt-hist-toggle {
+  font: inherit;
+  font-size: var(--fs-small);
+  background: none;
+  border: none;
+  color: var(--blue);
+  cursor: pointer;
+  padding: 0;
 }
-.vt-hist-list li {
+.vt-hist-steps {
+  margin: 0 0 var(--space-3);
+  padding-left: 16ch;
+  list-style: none;
+}
+.vt-hist-steps li {
   display: flex;
   gap: var(--space-4);
   align-items: baseline;
   padding: var(--space-1) 0;
 }
-.vt-hist-name {
-  min-width: 16ch;
+.vt-hist-at {
+  min-width: 10ch;
+  color: var(--tx3);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
 }
 .vt-hist-delta {
   font-variant-numeric: tabular-nums;

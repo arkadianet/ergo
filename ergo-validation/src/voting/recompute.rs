@@ -427,10 +427,29 @@ pub struct ParamDescriptor {
     pub current: i32,
     /// Per-vote step size at the current value.
     pub step: i32,
-    /// Inclusive lower bound — a vote may not push below this.
+    /// Inclusive lower bound a vote may target. The recompute won't step a
+    /// parameter that is already at/below this; a single approved step from just
+    /// inside can still land up to one step below it (Scala parity — a gate, not
+    /// a hard clamp).
     pub min: i32,
-    /// Inclusive upper bound — a vote may not push above this.
+    /// Inclusive upper bound a vote may target. The recompute won't step a
+    /// parameter that is already at/above this; a single approved step from just
+    /// inside can still land up to one step above it (Scala parity — a gate, not
+    /// a hard clamp).
     pub max: i32,
+}
+
+/// Inclusive `[min, max]` target bounds for a votable numeric parameter id, or
+/// `None` for ids outside the votable set. The recompute's min/max gates do not
+/// depend on a parameter's current value, so these bounds are constant per id —
+/// callers that only need to validate a target (the runtime `POST /api/v1/votes`
+/// write and the `[voting.targets]` config loader) can check it without an
+/// active-parameter table. A target beyond the returned range can never be a
+/// settling value (the recompute won't step the parameter past the bound), so
+/// such a target is rejected rather than silently driving the parameter to the
+/// bound forever.
+pub fn votable_param_bounds(id: u8) -> Option<(i32, i32)> {
+    votable_param_name(id).map(|_| (min_value_for(id), max_value_for(id, 0)))
 }
 
 /// Stable camelCase name for a votable numeric parameter id, or `None` for ids

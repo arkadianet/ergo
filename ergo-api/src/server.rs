@@ -1609,7 +1609,8 @@ async fn votes_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
     security(("ApiKeyAuth" = [])),
     responses(
         (status = 204, description = "Voting targets replaced"),
-        (status = 400, description = "A target named a non-votable parameter"),
+        (status = 400, description = "A target named a non-votable parameter, or fell \
+outside the parameter's allowable [min, max] voting range"),
         (status = 403, description = "Missing or invalid api_key"),
         (status = 409, description = "Node is not mining"),
     ),
@@ -1631,6 +1632,15 @@ async fn set_votes_handler(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(VotingControlError::NotVotable { parameter_id }) => crate::utils::bad_request(format!(
             "parameter id {parameter_id} is not operator-votable (votable ids: 1..=8, 9)"
+        )),
+        Err(VotingControlError::OutOfRange {
+            parameter_id,
+            target,
+            min,
+            max,
+        }) => crate::utils::bad_request(format!(
+            "target {target} for parameter id {parameter_id} is outside its allowable \
+             voting range [{min}, {max}]"
         )),
         Err(VotingControlError::MiningDisabled) => (
             StatusCode::CONFLICT,

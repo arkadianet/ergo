@@ -1,7 +1,8 @@
 // Voting page: shows the protocol parameters the operator can vote on (with
 // current value + allowed range), and — for a mining node with an API key set —
-// lets the operator set vote targets. The node nudges each parameter one step
-// per block toward its target, at most two parameters per block.
+// lets the operator set vote targets. The node casts a vote each block toward
+// the target; an approved parameter then moves at most one step per voting
+// epoch (1024 blocks on mainnet), at most two parameters per epoch.
 //
 // Reads `GET /api/v1/votes` (open). Writes `POST /api/v1/votes` (auth-gated by
 // the operator's api_key; rejected 409 when the node is not mining). The write
@@ -9,6 +10,7 @@
 import { api } from './api-client.js';
 import { num } from './format.js';
 import { getApiKey } from './settings.js';
+import { sparkline } from './sparkline.js';
 
 let root = null;
 // Signature of the rows currently built (see `rowsKey`). The 4s poll only
@@ -119,6 +121,7 @@ function buildRows(params, configured) {
     }
     input.placeholder = 'no vote';
     input.dataset.id = String(r.id);
+    input.dataset.name = r.name;
     if (cfg.has(r.id)) input.value = String(cfg.get(r.id));
     inputTd.append(input);
     tr.append(inputTd);
@@ -148,12 +151,31 @@ async function save() {
   }
   // Collect non-blank inputs as the full desired set (replace semantics).
   const votes = [];
+  const invalid = [];
   for (const input of root.querySelectorAll('.vt-input')) {
     const raw = input.value.trim();
     if (raw === '') continue;
+    const label = input.dataset.name || `id ${input.dataset.id}`;
     const target = Number(raw);
-    if (!Number.isFinite(target)) continue;
+    if (!Number.isFinite(target)) {
+      invalid.push(`${label} is not a number`);
+      continue;
+    }
+    // A vote can only move a parameter within its allowable [min, max] — a
+    // target beyond that can never be reached, so reject it here (the node
+    // enforces the same bound authoritatively). Bounds present only on votable
+    // rows; non-votable (e.g. subblocks pre-activation) inputs have none.
+    const min = input.min === '' ? null : Number(input.min);
+    const max = input.max === '' ? null : Number(input.max);
+    if ((min !== null && target < min) || (max !== null && target > max)) {
+      invalid.push(`${label} must be ${num(min)} – ${num(max)}`);
+      continue;
+    }
     votes.push({ parameterId: Number(input.dataset.id), target });
+  }
+  if (invalid.length) {
+    setStatus(`Out of allowable range — ${invalid.join('; ')}.`, 'err');
+    return;
   }
   setStatus('Saving…', 'muted');
   const res = await api.setVotes(votes);
@@ -179,9 +201,10 @@ export function mount(el) {
     <div class="pg-head"><span class="pg-title">Voting</span>
       <span class="pg-count micro-label" data-meta></span></div>
     <p class="vt-note micro-label">
-      Set the value the node should vote toward for each parameter. The node moves each
-      one step per block, at most two parameters per block. Setting requires an API key
-      (⚙ Settings) and a mining node; viewing is always available.
+      Set the value the node should vote toward for each parameter (within its allowed range).
+      The node votes each block; an approved parameter moves at most one step per voting epoch,
+      at most two parameters per epoch. Setting requires an API key (⚙ Settings) and a mining
+      node; viewing is always available.
     </p>
     <table class="vtable">
       <thead><tr>
@@ -199,8 +222,9 @@ export function mount(el) {
       <div class="pg-head"><span class="pg-title">Parameter change history</span>
         <span class="pg-count micro-label" data-hist-meta></span></div>
       <p class="vt-note micro-label">
-        Protocol-parameter changes that have taken effect at past voting-epoch boundaries,
-        newest first. Boundaries where nothing changed are omitted.
+        How each protocol parameter has moved over time, one row per parameter. A vote can
+        shift a parameter by at most one step per epoch and only within its allowable range,
+        so most rows are slow ramps — open “details” for the per-epoch steps.
       </p>
       <div data-history></div>
     </div>`;
@@ -210,34 +234,57 @@ export function mount(el) {
     setStatus('Cleared inputs — press “Save votes” to apply.', 'muted');
   });
   historyLoaded = false;
+  historyLoading = false;
+  historyAttempts = 0;
   loadHistory();
 }
 
 // Boundaries change at most once per voting epoch (~34h on mainnet), so the
-// change history is fetched once per visit (and retried by `load` until it
-// succeeds) rather than on every poll.
+// change history is fetched once per visit. `historyLoading` collapses the
+// mount()+first-poll race into a single in-flight request; after
+// HISTORY_MAX_ATTEMPTS transient/absent results we stop (a node without the
+// endpoint shouldn't be polled every 4s forever).
 let historyLoaded = false;
+let historyLoading = false;
+let historyAttempts = 0;
+const HISTORY_MAX_ATTEMPTS = 3;
+
+function historyNote(text) {
+  return Object.assign(document.createElement('p'), {
+    className: 'vt-note micro-label',
+    textContent: text,
+  });
+}
 
 async function loadHistory() {
   const host = root && root.querySelector('[data-history]');
-  if (!host) return;
+  if (!host || historyLoaded || historyLoading) return;
+  historyLoading = true;
+  try {
+    await loadHistoryInner(host);
+  } finally {
+    historyLoading = false;
+  }
+}
+
+async function loadHistoryInner(host) {
   const h = await api.votesHistory();
   if (!h) {
-    // 404 when the node has no chain reader wired, or a transient failure —
-    // leave a neutral note and let `load` retry on the next poll.
-    host.replaceChildren(
-      Object.assign(document.createElement('p'), {
-        className: 'vt-note micro-label',
-        textContent: 'Change history is unavailable on this node.',
-      }),
-    );
+    historyAttempts += 1;
+    // getJson() collapses a 404 (endpoint not mounted) and a transient blip to
+    // the same null. Retry a few times for the transient case, then give up so
+    // a node that structurally lacks the endpoint isn't polled forever.
+    if (historyAttempts >= HISTORY_MAX_ATTEMPTS) {
+      historyLoaded = true;
+      host.replaceChildren(historyNote('Change history is unavailable on this node.'));
+    }
     return;
   }
   historyLoaded = true;
   const meta = root.querySelector('[data-hist-meta]');
   if (meta) meta.textContent = h.epochLength ? `epoch ${num(h.epochLength)} blocks` : '';
-  const events = (h.changes || []).slice().reverse(); // newest first
-  if (events.length === 0) {
+  const changes = h.changes || [];
+  if (changes.length === 0) {
     host.replaceChildren(
       Object.assign(document.createElement('p'), {
         className: 'vt-note micro-label',
@@ -246,31 +293,93 @@ async function loadHistory() {
     );
     return;
   }
-  host.replaceChildren();
-  for (const ev of events) {
-    const block = document.createElement('div');
-    block.className = 'vt-hist-event';
-    const head = document.createElement('div');
-    head.className = 'vt-hist-height';
-    head.textContent = `height ${num(ev.height)}`;
-    block.append(head);
-    const ul = document.createElement('ul');
-    ul.className = 'vt-hist-list';
+  // Regroup the per-boundary events into one trajectory per parameter (the
+  // events are ascending by height, so each parameter's steps stay in order).
+  const byId = new Map();
+  for (const ev of changes) {
     for (const c of ev.params || []) {
-      const li = document.createElement('li');
-      const name = document.createElement('span');
-      name.className = 'vt-hist-name';
-      name.textContent = c.name;
-      const delta = document.createElement('span');
-      delta.className = 'vt-hist-delta';
-      const from = c.from === null || c.from === undefined ? '—' : num(c.from);
-      delta.textContent = `${from} → ${num(c.to)}`;
-      li.append(name, delta);
-      ul.append(li);
+      let g = byId.get(c.id);
+      if (!g) {
+        g = { id: c.id, name: c.name, description: c.description, steps: [] };
+        byId.set(c.id, g);
+      }
+      g.steps.push({ height: ev.height, from: c.from, to: c.to });
     }
-    block.append(ul);
-    host.append(block);
   }
+  const groups = [...byId.values()].sort((a, b) => a.id - b.id);
+  host.replaceChildren(...groups.map(renderParamGroup));
+}
+
+// One parameter's trajectory: net from→to, a sparkline of value-over-time, the
+// step count + height span, and an expandable per-epoch step list.
+function renderParamGroup(g) {
+  const first = g.steps[0];
+  const last = g.steps[g.steps.length - 1];
+  const baseline = first.from; // null when the parameter activated here
+  const hasBaseline = baseline !== null && baseline !== undefined;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'vt-hist-group';
+
+  const row = document.createElement('div');
+  row.className = 'vt-hist-row';
+
+  const name = document.createElement('div');
+  name.className = 'vt-hist-pname';
+  name.textContent = g.name;
+  // Parity with the voting table: surface the parameter explanation on hover
+  // (blockVersion has no votable description — it only appears in history).
+  if (g.description) name.title = g.description;
+
+  const net = document.createElement('div');
+  net.className = 'vt-hist-net';
+  const arrow = !hasBaseline ? '•' : last.to > baseline ? '↑' : last.to < baseline ? '↓' : '→';
+  net.textContent = `${hasBaseline ? num(baseline) : '—'} → ${num(last.to)} ${arrow}`;
+
+  const spark = document.createElement('div');
+  spark.className = 'vt-hist-spark';
+  // Series = baseline (if numeric) then each post-step value. Needs ≥2 points.
+  const series = (hasBaseline ? [baseline] : []).concat(g.steps.map((s) => s.to));
+  if (series.length > 1) spark.append(sparkline(series, { color: 'var(--blue)', w: 120, h: 18 }));
+
+  const count = document.createElement('div');
+  count.className = 'vt-hist-count';
+  const span =
+    first.height === last.height
+      ? `h${num(first.height)}`
+      : `h${num(first.height)}→${num(last.height)}`;
+  count.textContent = `${g.steps.length} step${g.steps.length === 1 ? '' : 's'} · ${span}`;
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'vt-hist-toggle';
+  toggle.textContent = 'details';
+
+  row.append(name, net, spark, count, toggle);
+  wrap.append(row);
+
+  const steps = document.createElement('ul');
+  steps.className = 'vt-hist-steps';
+  steps.hidden = true;
+  for (const s of g.steps.slice().reverse()) {
+    // newest step first
+    const li = document.createElement('li');
+    const at = document.createElement('span');
+    at.className = 'vt-hist-at';
+    at.textContent = `h${num(s.height)}`;
+    const delta = document.createElement('span');
+    delta.className = 'vt-hist-delta';
+    const from = s.from === null || s.from === undefined ? '—' : num(s.from);
+    delta.textContent = `${from} → ${num(s.to)}`;
+    li.append(at, delta);
+    steps.append(li);
+  }
+  toggle.addEventListener('click', () => {
+    steps.hidden = !steps.hidden;
+    toggle.textContent = steps.hidden ? 'details' : 'hide';
+  });
+  wrap.append(steps);
+  return wrap;
 }
 
 async function load() {

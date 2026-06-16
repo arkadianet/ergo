@@ -354,8 +354,10 @@ pub struct ApiVotes {
     pub configured_votes: Vec<ApiConfiguredVote>,
 }
 
-/// A votable numeric protocol parameter and the inclusive bounds a vote may not
-/// cross. Mirror of `ergo_validation::voting::ParamDescriptor`.
+/// A votable numeric protocol parameter and the inclusive `[min, max]` target
+/// bounds. A vote moves the parameter at most one `step` per voting epoch toward
+/// the target and only while it is inside the bound, so a target outside
+/// `[min, max]` is rejected. Mirror of `ergo_validation::voting::ParamDescriptor`.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiVotableParam {
@@ -367,7 +369,10 @@ pub struct ApiVotableParam {
     pub description: String,
     pub current: i32,
     pub step: i32,
+    /// Inclusive lower target bound. The recompute gates at the bound (won't
+    /// step a parameter further past it) rather than hard-clamping.
     pub min: i32,
+    /// Inclusive upper target bound.
     pub max: i32,
 }
 

@@ -1279,6 +1279,47 @@ fn set_voting_targets_signals_rebuild_only_on_success() {
     );
 }
 
+/// A target beyond the parameter's allowable `[min, max]` range is rejected
+/// (`OutOfRange`) rather than silently clamped, and the rejected write does not
+/// mutate the set. Bounds are constant per id, so no active-param source is
+/// needed — enforcement is unconditional whenever voting is enabled.
+#[test]
+fn set_voting_targets_rejects_target_outside_allowable_range() {
+    use ergo_api::{NodeAdmin, VotingControlError};
+
+    let slot = std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new()));
+    let admin = crate::api_bridge::ShutdownAdmin::new(
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        None,
+    )
+    .with_voting_targets(slot.clone());
+
+    // storageFeeFactor (id 1) allowable range is [0, 2_500_000].
+    // An in-range target is accepted.
+    admin.set_voting_targets(vec![(1, 1_300_000)]).unwrap();
+    assert_eq!(
+        *slot.read().unwrap(),
+        [(1u8, 1_300_000i64)].into_iter().collect()
+    );
+
+    // A target above the max is rejected as OutOfRange…
+    assert_eq!(
+        admin.set_voting_targets(vec![(1, 3_000_000)]).unwrap_err(),
+        VotingControlError::OutOfRange {
+            parameter_id: 1,
+            target: 3_000_000,
+            min: 0,
+            max: 2_500_000,
+        },
+    );
+    // …and the rejected write is atomic — the prior in-range set survives.
+    assert_eq!(
+        *slot.read().unwrap(),
+        [(1u8, 1_300_000i64)].into_iter().collect(),
+        "rejected out-of-range write must not mutate the set",
+    );
+}
+
 /// State DB file present and non-empty → `Some(len)` with the actual
 /// file length.
 #[test]

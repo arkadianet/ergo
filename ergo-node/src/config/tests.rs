@@ -1573,6 +1573,25 @@ fn voting_unknown_param_name_rejected() {
 }
 
 #[test]
+fn voting_target_out_of_range_rejected() {
+    // storageFeeFactor (id 1) allowable range is [0, 2_500_000]. A target above
+    // the max can never be a settling value (the recompute won't step past the
+    // bound), so it is a startup config error rather than a silent bound-pin.
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nenabled = true\nminer_public_key_hex = \"{TEST_MINER_PK_HEX}\"\n\
+         [voting.targets]\nstorageFeeFactor = 9000000\n",
+    ));
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("out-of-range target must reject");
+    assert!(err.contains("[voting]"), "must name the section: {err}");
+    assert!(
+        err.contains("allowable") && err.contains("2500000"),
+        "must report the allowable range: {err}"
+    );
+}
+
+#[test]
 fn voting_targets_without_mining_rejected() {
     // Configured targets with mining disabled never cast a vote — refuse to
     // start so the misconfiguration surfaces (mirrors the claim_storage_rent
