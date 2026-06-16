@@ -1,8 +1,12 @@
 // Voting page: shows the protocol parameters the operator can vote on (with
 // current value + allowed range), and — for a mining node with an API key set —
-// lets the operator set vote targets. The node casts a vote each block toward
-// the target; an approved parameter then moves at most one step per voting
-// epoch (1024 blocks on mainnet), at most two parameters per epoch.
+// lets the operator set vote targets. Each block carries at most two parameter
+// votes (consensus rule 212, ParamVotesCount=2); a parameter changes only once
+// more than half the blocks in the voting epoch carry its vote (Scala
+// VotingSettings.changeApproved = count > votingLength/2; >512 of 1024 on
+// mainnet), and then moves exactly one step per epoch within its range. When
+// more than two parameters are targeted the node votes lowest-id-first and
+// skips any already at target or at a bound, so the rest follow in later epochs.
 //
 // Reads `GET /api/v1/votes` (open). Writes `POST /api/v1/votes` (auth-gated by
 // the operator's api_key; rejected 409 when the node is not mining). The write
@@ -201,10 +205,18 @@ export function mount(el) {
     <div class="pg-head"><span class="pg-title">Voting</span>
       <span class="pg-count micro-label" data-meta></span></div>
     <p class="vt-note micro-label">
-      Set the value the node should vote toward for each parameter (within its allowed range).
-      The node votes each block; an approved parameter moves at most one step per voting epoch,
-      at most two parameters per epoch. Setting requires an API key (⚙ Settings) and a mining
-      node; viewing is always available.
+      Set the value the node should vote toward for each parameter (within its allowed range);
+      the node then casts votes for you while mining. Setting requires an API key (⚙ Settings)
+      and a mining node — viewing is always available.
+    </p>
+    <p class="vt-note micro-label">
+      <b>How votes are applied.</b> Each block can carry at most <b>two</b> parameter votes — a
+      consensus limit, so extra targets can’t all be cast at once. A parameter changes only once
+      <b>more than half the blocks in the voting epoch</b> carry its vote (over 512 of 1024 on
+      mainnet), and then it moves by exactly <b>one step</b>, never past its range. If you target
+      more than two parameters the node votes for the <b>lowest-numbered</b> ones first and skips
+      any already at your target or at a range bound, so the remaining targets take their turn in
+      later epochs as the leading ones settle.
     </p>
     <table class="vtable">
       <thead><tr>

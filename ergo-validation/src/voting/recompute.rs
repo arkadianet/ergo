@@ -619,6 +619,15 @@ pub fn select_candidate_votes(
             Some(t) => *t,
             None => continue,
         };
+        // Defence-in-depth: the operator-facing setters (`POST /api/v1/votes`
+        // and the `[voting]` config loader) already reject any target outside
+        // `[min, max]`, so a stored target is always in range. Re-check here so
+        // the invariant does not rest solely on every writer remembering — an
+        // out-of-range target is never cast as a vote, mirroring the setters'
+        // rejection rather than driving the parameter at its bound forever.
+        if target < d.min as i64 || target > d.max as i64 {
+            continue;
+        }
         let current = d.current as i64;
         if target == current {
             continue;
@@ -822,10 +831,21 @@ mod tests {
     fn select_votes_caps_at_two_param_votes() {
         use std::collections::BTreeMap;
         let p = launch_at(1024);
-        let mut t = BTreeMap::new();
-        for id in 1u8..=8 {
-            t.insert(id, 9_000_000i64); // every param wants to increase
-        }
+        // An in-range increase target for every param (the setters reject
+        // out-of-range, so the cap test must use values they'd accept): id 1
+        // 1_250_000→2_000_000 (≤2.5M), id 2 360→9_000 (≤10_000), and the rest
+        // comfortably below their large default max.
+        let targets = [
+            (1u8, 2_000_000i64),
+            (2, 9_000),
+            (3, 600_000),
+            (4, 2_000_000),
+            (5, 1_000),
+            (6, 9_000),
+            (7, 1_000),
+            (8, 1_000),
+        ];
+        let t: BTreeMap<u8, i64> = targets.into_iter().collect();
         // Only the first two in ascending id order (rule 212 ParamVotesCount=2).
         assert_eq!(select_candidate_votes(&p, &t, false, false), [1, 2, 0]);
     }
@@ -837,6 +857,29 @@ mod tests {
         p.storage_fee_factor = 2_500_000; // id 1 already at max
         let mut t = BTreeMap::new();
         t.insert(1u8, 9_000_000i64); // wants increase but can't move → no vote
+        assert_eq!(select_candidate_votes(&p, &t, false, false), [0, 0, 0]);
+    }
+
+    #[test]
+    fn select_votes_skips_target_above_max() {
+        use std::collections::BTreeMap;
+        // Defence-in-depth backstop. The POST and `[voting]` config setters
+        // already reject an out-of-range target, but if one ever reached the
+        // selector with the parameter's CURRENT value still inside the range,
+        // the `can_move` gate alone (current < max) would cast a vote toward the
+        // illegal target. The bound re-check must suppress it.
+        let p = launch_at(1024); // storage_fee_factor 1_250_000, max 2_500_000
+        let mut t = BTreeMap::new();
+        t.insert(1u8, 3_000_000i64); // above StorageFeeFactorMax
+        assert_eq!(select_candidate_votes(&p, &t, false, false), [0, 0, 0]);
+    }
+
+    #[test]
+    fn select_votes_skips_target_below_min() {
+        use std::collections::BTreeMap;
+        let p = launch_at(1024); // storage_fee_factor 1_250_000, min 0
+        let mut t = BTreeMap::new();
+        t.insert(1u8, -5i64); // below StorageFeeFactorMin
         assert_eq!(select_candidate_votes(&p, &t, false, false), [0, 0, 0]);
     }
 
