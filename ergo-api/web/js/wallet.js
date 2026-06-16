@@ -23,6 +23,9 @@ let authUnsub = null;
 let mnemonicGateOpen = false;
 // True while an init/restore/unlock/send POST is in flight.
 let submitInFlight = false;
+// The open send-confirm <dialog> (appended to document.body), tracked so it can
+// be removed on section exit and never linger over another section.
+let confirmDlg = null;
 // Panes are built once and visibility-toggled so a refresh never wipes input;
 // these flags also gate the rebuild and are reset by scrubSecrets().
 let onboardRendered = false;
@@ -126,13 +129,23 @@ export function onSlow() {
   return refresh();
 }
 
-// Veto navigation while the once-shown recovery phrase is still on screen.
+// Veto navigation while a recovery phrase is on screen OR an onboarding/unlock/
+// send request is still in flight (leaving mid-init would scrub the pane the
+// generated mnemonic must render into — a funds-safety loss).
 export function canLeave() {
-  if (!mnemonicGateOpen) return true;
-  return window.confirm(
-    'Your recovery phrase is on screen and has not been confirmed saved. ' +
-      'Leaving discards it permanently. Leave anyway?',
-  );
+  if (mnemonicGateOpen) {
+    return window.confirm(
+      'Your recovery phrase is on screen and has not been confirmed saved. ' +
+        'Leaving discards it permanently. Leave anyway?',
+    );
+  }
+  if (submitInFlight) {
+    return window.confirm(
+      'A wallet operation is still in progress — its result (including a freshly ' +
+        'generated recovery phrase) may be lost. Leave anyway?',
+    );
+  }
+  return true;
 }
 
 // ── auth gate + secret scrub ─────────────────────────────────────────────────
@@ -150,6 +163,12 @@ function renderAuthGate(s) {
 
 function scrubSecrets() {
   if (!root) return;
+  // Remove any open send-confirm dialog so it can't linger over (or submit
+  // from) another section. remove() does not fire 'close', so doSend won't run.
+  if (confirmDlg) {
+    confirmDlg.remove();
+    confirmDlg = null;
+  }
   for (const inp of root.querySelectorAll('input[type="password"]')) inp.value = '';
   const pre = q('[data-mnemonic]');
   if (pre) pre.textContent = '';
@@ -427,6 +446,7 @@ function fail(errEl, msg) {
 
 function showMnemonicGate(mnemonic, chosenPass) {
   const pane = q('[data-onboard-pane]');
+  if (!pane) return; // section was torn down mid-init; nothing to render into
   pane.replaceChildren();
   mnemonicGateOpen = true; // suspend polling + guard navigation
   const pre = el('pre', { class: 'w-mnemonic', 'data-mnemonic': true });
@@ -645,7 +665,9 @@ function showConfirm(requests, totalNano) {
   );
   dlg.append(form);
   document.body.append(dlg);
+  confirmDlg = dlg;
   dlg.addEventListener('close', () => {
+    confirmDlg = null;
     if (dlg.returnValue === 'confirm') doSend(requests);
     dlg.remove();
   });

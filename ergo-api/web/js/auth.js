@@ -63,8 +63,13 @@ function setState(s) {
 // Opportunistic re-verify from api-client / wallet calls. `gated` marks a call
 // the server actually auth-checks; a 2xx there confirms the key, whereas a 2xx
 // from a public endpoint proves nothing. A 403 anywhere is a definitive reject.
-export function report(status, gated = false) {
-  if (!getApiKey()) return;
+// `keyUsed` is the api_key the request was sent with; a response that arrives
+// after the operator changed the key is ignored so it can't mislabel the new
+// key (e.g. key A's 403 marking key B invalid).
+export function report(status, gated = false, keyUsed) {
+  const key = getApiKey();
+  if (!key) return;
+  if (keyUsed !== undefined && keyUsed !== key) return;
   if (status === 403) setState('invalid');
   else if (gated && status >= 200 && status < 300 && state !== 'authorized') {
     setState('authorized');
@@ -72,7 +77,8 @@ export function report(status, gated = false) {
 }
 
 async function verify() {
-  if (!getApiKey()) {
+  const probeKey = getApiKey();
+  if (!probeKey) {
     setState('none');
     return;
   }
@@ -80,13 +86,14 @@ async function verify() {
   try {
     const r = await fetch('/wallet/status', {
       cache: 'no-store',
-      headers: { api_key: getApiKey() },
+      headers: { api_key: probeKey },
     });
+    if (probeKey !== getApiKey()) return; // a newer setApiKey superseded this probe
     if (r.status === 200) setState('authorized');
     else if (r.status === 403) setState('invalid');
     else setState('unverified');
   } catch {
-    setState('unverified');
+    if (probeKey === getApiKey()) setState('unverified');
   }
 }
 

@@ -69,6 +69,9 @@ export function makeTable(container, columns, opts = {}) {
         };
         r.onclick = toggle;
         r.onkeydown = (e) => {
+          // Let a focused copy button handle its own Enter/Space (don't
+          // preventDefault its native activation before it fires).
+          if (e.target.closest('.copy')) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             toggle(e);

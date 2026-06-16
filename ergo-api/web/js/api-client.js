@@ -14,7 +14,7 @@ async function getJson(path) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { cache: 'no-store', headers });
-    if (key) report(r.status); // reads are public: only a 403 is meaningful here
+    if (key) report(r.status, false, key); // reads are public: only a 403 is meaningful here
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -31,7 +31,7 @@ async function postJson(path, body) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
-    if (key) report(r.status, true); // writes are gated: a 2xx here confirms the key
+    if (key) report(r.status, true, key); // writes are gated: a 2xx here confirms the key
     if (r.ok) return { ok: true, status: r.status };
     let detail = null;
     try {
@@ -54,7 +54,7 @@ async function walletReq(path, opts = {}) {
   if (key) headers['api_key'] = key;
   try {
     const r = await fetch(path, { cache: 'no-store', ...opts, headers });
-    if (key) report(r.status, true);
+    if (key) report(r.status, true, key);
     let data = null;
     let reason = null;
     const text = await r.text();
