@@ -52,6 +52,7 @@ export const api = {
   mempoolTransactions: () => getJson('/api/v1/mempool/transactions'),
   txDetail: (id) => getJson(`/api/v1/transactions/${id}/detail`),
   votes: () => getJson('/api/v1/votes'),
+  votesHistory: () => getJson('/api/v1/votes/history'),
   // Auth-gated write: `votes` is the full desired set (replaces current).
   setVotes: (votes) => postJson('/api/v1/votes', { votes }),
 };

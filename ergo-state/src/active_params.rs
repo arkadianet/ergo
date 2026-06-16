@@ -135,6 +135,41 @@ pub(crate) fn compute_validation_settings_at(
     Ok(settings)
 }
 
+/// Every `voted_params` row in ascending epoch-start-height order.
+///
+/// One row per epoch boundary (plus the height-0 genesis row), so the table
+/// is sparse — at most one entry per `voting_length` blocks. The operator
+/// votes-history endpoint walks these and diffs consecutive rows to recover
+/// the parameter-change timeline. An absent table yields an empty vec.
+pub(crate) fn read_all(
+    txn: &redb::ReadTransaction,
+) -> Result<Vec<ActiveProtocolParameters>, ActiveParamsReadError> {
+    let t = match txn.open_table(VOTED_PARAMS) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for entry in t.iter()? {
+        let (k, val) = entry?;
+        let key = k.value();
+        let params = ActiveProtocolParameters::deserialize(val.value()).map_err(|e| {
+            ActiveParamsReadError::Decode {
+                height: key as u32,
+                source: e,
+            }
+        })?;
+        if params.epoch_start_height as u64 != key {
+            return Err(ActiveParamsReadError::KeyMismatch {
+                row_key: key,
+                embedded_height: params.epoch_start_height,
+            });
+        }
+        out.push(params);
+    }
+    Ok(out)
+}
+
 /// Collect the set of keys present in `voted_params`.
 pub(crate) fn present_keys(
     txn: &redb::ReadTransaction,
@@ -355,6 +390,38 @@ mod tests {
         let r = db.begin_read().unwrap();
         let keys = present_keys(&r).unwrap();
         assert_eq!(keys, [0, 1024].into_iter().collect());
+    }
+
+    #[test]
+    fn read_all_returns_every_row_ascending() {
+        let (_dir, db) = open_db();
+        let launch = scala_launch();
+        let mut at_1024 = scala_launch();
+        at_1024.epoch_start_height = 1024;
+        let mut at_2048 = scala_launch();
+        at_2048.epoch_start_height = 2048;
+
+        // Insert out of height order; the scan must still return ascending by key.
+        let txn = crate::begin_write_qr(&db).unwrap();
+        insert(&txn, &at_2048).unwrap();
+        insert(&txn, &launch).unwrap();
+        insert(&txn, &at_1024).unwrap();
+        txn.commit().unwrap();
+
+        let r = db.begin_read().unwrap();
+        let heights: Vec<u32> = read_all(&r)
+            .unwrap()
+            .iter()
+            .map(|p| p.epoch_start_height)
+            .collect();
+        assert_eq!(heights, vec![0, 1024, 2048]);
+    }
+
+    #[test]
+    fn read_all_empty_when_table_missing() {
+        let (_dir, db) = open_db();
+        let r = db.begin_read().unwrap();
+        assert!(read_all(&r).unwrap().is_empty());
     }
 
     #[test]

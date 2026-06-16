@@ -194,12 +194,83 @@ export function mount(el) {
       <button class="btn btn--primary" data-save type="button">Save votes</button>
       <button class="btn" data-clear type="button">Clear all</button>
       <span class="vt-status" data-status></span>
+    </div>
+    <div class="vt-history">
+      <div class="pg-head"><span class="pg-title">Parameter change history</span>
+        <span class="pg-count micro-label" data-hist-meta></span></div>
+      <p class="vt-note micro-label">
+        Protocol-parameter changes that have taken effect at past voting-epoch boundaries,
+        newest first. Boundaries where nothing changed are omitted.
+      </p>
+      <div data-history></div>
     </div>`;
   el.querySelector('[data-save]').addEventListener('click', save);
   el.querySelector('[data-clear]').addEventListener('click', () => {
     for (const input of root.querySelectorAll('.vt-input')) input.value = '';
     setStatus('Cleared inputs — press “Save votes” to apply.', 'muted');
   });
+  historyLoaded = false;
+  loadHistory();
+}
+
+// Boundaries change at most once per voting epoch (~34h on mainnet), so the
+// change history is fetched once per visit (and retried by `load` until it
+// succeeds) rather than on every poll.
+let historyLoaded = false;
+
+async function loadHistory() {
+  const host = root && root.querySelector('[data-history]');
+  if (!host) return;
+  const h = await api.votesHistory();
+  if (!h) {
+    // 404 when the node has no chain reader wired, or a transient failure —
+    // leave a neutral note and let `load` retry on the next poll.
+    host.replaceChildren(
+      Object.assign(document.createElement('p'), {
+        className: 'vt-note micro-label',
+        textContent: 'Change history is unavailable on this node.',
+      }),
+    );
+    return;
+  }
+  historyLoaded = true;
+  const meta = root.querySelector('[data-hist-meta]');
+  if (meta) meta.textContent = h.epochLength ? `epoch ${num(h.epochLength)} blocks` : '';
+  const events = (h.changes || []).slice().reverse(); // newest first
+  if (events.length === 0) {
+    host.replaceChildren(
+      Object.assign(document.createElement('p'), {
+        className: 'vt-note micro-label',
+        textContent: 'No protocol-parameter changes recorded yet.',
+      }),
+    );
+    return;
+  }
+  host.replaceChildren();
+  for (const ev of events) {
+    const block = document.createElement('div');
+    block.className = 'vt-hist-event';
+    const head = document.createElement('div');
+    head.className = 'vt-hist-height';
+    head.textContent = `height ${num(ev.height)}`;
+    block.append(head);
+    const ul = document.createElement('ul');
+    ul.className = 'vt-hist-list';
+    for (const c of ev.params || []) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'vt-hist-name';
+      name.textContent = c.name;
+      const delta = document.createElement('span');
+      delta.className = 'vt-hist-delta';
+      const from = c.from === null || c.from === undefined ? '—' : num(c.from);
+      delta.textContent = `${from} → ${num(c.to)}`;
+      li.append(name, delta);
+      ul.append(li);
+    }
+    block.append(ul);
+    host.append(block);
+  }
 }
 
 async function load() {
@@ -225,6 +296,9 @@ async function load() {
   // a light cell refresh that leaves the operator's in-progress edits intact.
   if (rowsKey(params, configured) !== builtKey) buildRows(params, configured);
   else refreshCells(params, configured);
+  // Retry the one-shot history fetch until it lands (first paint, or after a
+  // transient failure); a new boundary mid-session is rare enough to ignore.
+  if (!historyLoaded) loadHistory();
 }
 
 export async function onSlow() {

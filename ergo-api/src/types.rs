@@ -402,6 +402,50 @@ pub struct ApiVoteTarget {
     pub target: i64,
 }
 
+/// Response for `GET /api/v1/votes/history` — the protocol-parameter change
+/// timeline reconstructed from the node's stored per-epoch parameter rows.
+/// Each entry is an epoch boundary at which one or more parameters actually
+/// changed (boundaries with no change are omitted), so this reads as the
+/// governance history: what the network's votes have changed, and when.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiVotesHistory {
+    /// Voting epoch length in blocks (mainnet 1024, testnet 128). Parameter
+    /// changes can only take effect at heights that are multiples of this.
+    pub epoch_length: u32,
+    /// Current full-block height, for context.
+    pub current_height: u32,
+    /// Epoch boundaries where at least one parameter changed, oldest first.
+    pub changes: Vec<ApiVoteChangeEvent>,
+}
+
+/// One epoch boundary at which the active protocol parameters changed.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiVoteChangeEvent {
+    /// Epoch-start height at which these new values took effect.
+    pub height: u32,
+    /// The parameters that changed at this boundary.
+    pub params: Vec<ApiParamChange>,
+}
+
+/// A single parameter's change across one epoch boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiParamChange {
+    /// Parameter id (1..=8, 9 = subblocksPerBlock, or 123 = blockVersion).
+    pub id: u8,
+    /// Stable camelCase parameter name.
+    pub name: String,
+    /// One-line operator-facing explanation of the parameter.
+    pub description: String,
+    /// Value before this boundary. `null` when the parameter first became
+    /// active here (e.g. `subblocksPerBlock` at its activation fork).
+    pub from: Option<i64>,
+    /// Value from this boundary onward.
+    pub to: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct ApiHeaderRef {
     pub height: u32,

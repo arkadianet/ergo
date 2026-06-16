@@ -83,10 +83,10 @@ use crate::types::{
     ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
     ApiDifficultySeries, ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost,
     ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions,
-    ApiNativeSubmitError, ApiPeer, ApiRecentBlock, ApiSetVotesRequest, ApiStatus, ApiSubmitError,
-    ApiSubmitResponse, ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam, ApiVoteTarget,
-    ApiVotes, ApiWeightFunction, HealthStatus, RawTransactionBytes, SubmitError, SubmitMode,
-    SyncStateLabel,
+    ApiNativeSubmitError, ApiParamChange, ApiPeer, ApiRecentBlock, ApiSetVotesRequest, ApiStatus,
+    ApiSubmitError, ApiSubmitResponse, ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam,
+    ApiVoteChangeEvent, ApiVoteTarget, ApiVotes, ApiVotesHistory, ApiWeightFunction, HealthStatus,
+    RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
@@ -945,6 +945,11 @@ pub fn router_with_mempool_and_wallet_and_security(
                     "/api/v1/difficulty/history",
                     get(difficulty_history_handler),
                 )
+                // Native votes-history rides the same chain-reader state as
+                // the Scala-compat routes (the timeline comes from the stored
+                // `voted_params` rows), so it is mounted here and stays
+                // conditional on `compat` being wired.
+                .route("/api/v1/votes/history", get(votes_history_handler))
                 .route("/info", get(scala_info_handler))
                 .route("/blocks", get(scala_header_ids_paged_handler))
                 .route("/blocks/at/:height", get(scala_block_ids_at_height_handler))
@@ -1353,6 +1358,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
     paths(
         info_handler,
         difficulty_history_handler,
+        votes_history_handler,
         identity_handler,
         host_handler,
         status_handler,
@@ -1380,6 +1386,9 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiConfiguredVote,
         ApiSetVotesRequest,
         ApiVoteTarget,
+        ApiVotesHistory,
+        ApiVoteChangeEvent,
+        ApiParamChange,
         ApiTip,
         ApiRecentBlock,
         ApiSyncStatus,
@@ -1486,6 +1495,22 @@ async fn difficulty_history_handler(
         })
         .collect();
     Json(ApiDifficultySeries { points }).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/votes/history",
+    tag = "node",
+    responses(
+        (status = 200,
+         description = "Protocol-parameter change timeline (epoch boundaries where a \
+parameter changed, oldest first). Conditional: mounted only when the node is wired with \
+a chain reader (the same handle the Scala-compat routes use).",
+         body = ApiVotesHistory, content_type = "application/json"),
+    ),
+)]
+async fn votes_history_handler(State(chain): State<Arc<dyn NodeChainQuery>>) -> Response {
+    Json(chain.votes_history()).into_response()
 }
 
 #[utoipa::path(

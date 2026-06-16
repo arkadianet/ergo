@@ -468,3 +468,34 @@
   line-height: 1.45;
   color: var(--tx3);
 }
+/* Parameter-change history, shown below the voting table. */
+.vt-history {
+  margin-top: var(--space-7);
+}
+.vt-hist-event {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--tx4);
+}
+.vt-hist-height {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--tx3);
+}
+.vt-hist-list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+}
+.vt-hist-list li {
+  display: flex;
+  gap: var(--space-4);
+  align-items: baseline;
+  padding: var(--space-1) 0;
+}
+.vt-hist-name {
+  min-width: 16ch;
+}
+.vt-hist-delta {
+  font-variant-numeric: tabular-nums;
+  color: var(--blue);
+}
