@@ -43,6 +43,10 @@ pub enum BuildReason {
     WalletReady,
     /// First build once `synced(tip)` first holds.
     Startup,
+    /// Operator changed the voting targets (auth-gated `POST /api/v1/votes`);
+    /// force a same-tip rebuild so the new header votes take effect on the next
+    /// mined block instead of waiting for the next tip / mempool change.
+    VotesChanged,
 }
 
 /// The authoritative current tip, maintained by the action loop on the
@@ -292,6 +296,9 @@ pub fn build_and_publish(
     // serve every non-dry-run read from the same one held transaction, so the
     // candidate is identical bar the dry-run's hydration source — which is
     // itself byte-identical (proven against the uncached oracle in ergo-state).
+    // Snapshot the operator's current voting targets once for this build (read
+    // under the shared lock); both build paths pass it by reference.
+    let voting_targets = handle.voting_targets();
     let built = match base {
         Some(slot) => {
             let view = CachedSnapshotView::new(&snapshot, slot);
@@ -304,7 +311,7 @@ pub fn build_and_publish(
                 handle.reemission_ref(),
                 handle.chain_config(),
                 eligible_rent_boxes.as_slice(),
-                handle.voting_targets(),
+                &voting_targets,
                 handle.voting_settings(),
             );
             // Read disposition from the view regardless of whether the build
@@ -322,7 +329,7 @@ pub fn build_and_publish(
             handle.reemission_ref(),
             handle.chain_config(),
             eligible_rent_boxes.as_slice(),
-            handle.voting_targets(),
+            &voting_targets,
             handle.voting_settings(),
         )?,
     };

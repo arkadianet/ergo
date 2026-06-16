@@ -156,6 +156,36 @@ pub trait NodeAdmin: Send + Sync {
     /// shutdown keep compiling; the node wires a real sender into its
     /// action loop.
     fn connect_to_peer(&self, _addr: std::net::SocketAddr) {}
+
+    /// Replace the operator's on-chain voting targets (the auth-gated
+    /// `POST /api/v1/votes` write). `targets` is the FULL desired set of
+    /// `(parameter_id, target_value)` pairs and REPLACES the current set —
+    /// an empty slice clears all votes. The implementation validates that each
+    /// `parameter_id` is operator-votable and applies the set to the shared
+    /// voting-targets slot the candidate builder reads.
+    ///
+    /// Default returns [`VotingControlError::MiningDisabled`] so admin handles
+    /// without a mining subsystem reject the write — voting only has an effect
+    /// while the node is mining.
+    fn set_voting_targets(&self, _targets: Vec<(u8, i64)>) -> Result<(), VotingControlError> {
+        Err(VotingControlError::MiningDisabled)
+    }
+}
+
+/// Why an operator `POST /api/v1/votes` write was rejected. The handler maps
+/// these to HTTP status + a Scala-parity JSON error envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VotingControlError {
+    /// The node is not mining, so there is no candidate builder to apply votes
+    /// to. Mapped to `409 Conflict`.
+    MiningDisabled,
+    /// A target named a parameter id that is not operator-votable (e.g.
+    /// `blockVersion` 123, soft-fork 120, or an unknown id). Mapped to
+    /// `400 Bad Request`.
+    NotVotable {
+        /// The offending parameter id.
+        parameter_id: u8,
+    },
 }
 
 /// No-op `NodeAdmin` for tests and configurations that don't expose

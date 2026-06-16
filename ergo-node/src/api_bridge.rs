@@ -68,11 +68,12 @@ pub struct SnapshotReadState {
     /// is the on-disk size; `data_dir` is the volume the disk-space readout
     /// resolves against.
     host_paths: HostPaths,
-    /// Operator-configured voting targets (param id → target value) resolved
-    /// from `[voting.targets]` at boot — the SAME map handed to the
-    /// `MiningHandle`. Captured here so `GET /api/v1/votes` reports the policy
-    /// the node is actually mining with (`configured_votes`). Empty ⇒ neutral.
-    voting_targets: std::collections::BTreeMap<u8, i64>,
+    /// Operator voting targets (param id → target value), seeded from
+    /// `[voting.targets]` at boot. This is the SAME `Arc<RwLock<…>>` slot the
+    /// `MiningHandle` reads and the auth-gated `POST /api/v1/votes` writes, so
+    /// `GET /api/v1/votes` always reports the LIVE policy (config + any runtime
+    /// edits). Empty ⇒ neutral.
+    voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
 }
 
 /// Filesystem paths the `/api/v1/host` handler needs to compute per-call
@@ -126,6 +127,17 @@ pub struct ShutdownAdmin {
     /// Operator `/peers/connect` dial requests into the action loop.
     /// `None` for embedders that only expose shutdown.
     peer_connect_tx: Option<tokio::sync::mpsc::Sender<std::net::SocketAddr>>,
+    /// Shared voting-targets slot (the SAME `Arc<RwLock<…>>` the `MiningHandle`
+    /// reads and the API read state reports). `Some` only when mining is
+    /// enabled — `POST /api/v1/votes` returns `MiningDisabled` when `None`,
+    /// since votes have no effect without a candidate builder.
+    voting_targets: Option<std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>>,
+    /// Wakes the action loop to force a same-tip candidate rebuild after a vote
+    /// change, so the new header votes apply to the next mined block instead of
+    /// waiting for the next tip / mempool change. Held even when mining is off
+    /// (keeps the channel open); only fired on a successful vote update, which
+    /// requires `voting_targets` to be `Some`.
+    votes_changed_tx: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
 impl ShutdownAdmin {
@@ -136,7 +148,28 @@ impl ShutdownAdmin {
         Self {
             notify,
             peer_connect_tx,
+            voting_targets: None,
+            votes_changed_tx: None,
         }
+    }
+
+    /// Wire the shared voting-targets slot so `POST /api/v1/votes` can update
+    /// it. Call only when mining is enabled; otherwise the write is rejected
+    /// with `MiningDisabled`.
+    pub fn with_voting_targets(
+        mut self,
+        slot: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
+    ) -> Self {
+        self.voting_targets = Some(slot);
+        self
+    }
+
+    /// Wire the action-loop rebuild signal so a successful vote change forces an
+    /// immediate same-tip candidate rebuild. Held regardless of mining state to
+    /// keep the channel open; only fired on a successful update.
+    pub fn with_votes_changed_signal(mut self, tx: tokio::sync::mpsc::Sender<()>) -> Self {
+        self.votes_changed_tx = Some(tx);
+        self
     }
 
     pub fn into_dyn(self) -> Arc<dyn NodeAdmin> {
@@ -163,6 +196,37 @@ impl NodeAdmin for ShutdownAdmin {
             info!(peer = %addr, "/peers/connect dial requested");
         }
     }
+
+    fn set_voting_targets(
+        &self,
+        targets: Vec<(u8, i64)>,
+    ) -> Result<(), ergo_api::VotingControlError> {
+        let Some(slot) = &self.voting_targets else {
+            return Err(ergo_api::VotingControlError::MiningDisabled);
+        };
+        // Validate every id is operator-votable (1..=8, or 9) BEFORE applying
+        // any, so a bad id rejects the whole request without a partial update.
+        // `votable_param_name` returns `None` for blockVersion (123), soft-fork
+        // (120), and unknown ids.
+        for (id, _) in &targets {
+            if ergo_validation::voting::votable_param_name(*id).is_none() {
+                return Err(ergo_api::VotingControlError::NotVotable { parameter_id: *id });
+            }
+        }
+        // REPLACE the set (BTreeMap collect dedups by id, last wins).
+        let map: std::collections::BTreeMap<u8, i64> = targets.into_iter().collect();
+        let count = map.len();
+        *slot.write().expect("voting_targets poisoned") = map;
+        // Force an immediate candidate rebuild so the new votes apply now, not
+        // on the next tip / mempool change. Fire-and-forget: a full channel
+        // already has a rebuild queued (each rebuild reads the latest targets),
+        // so a dropped signal is harmless.
+        if let Some(tx) = &self.votes_changed_tx {
+            let _ = tx.try_send(());
+        }
+        info!(count, "voting targets replaced via POST /api/v1/votes");
+        Ok(())
+    }
 }
 
 impl SnapshotReadState {
@@ -170,7 +234,7 @@ impl SnapshotReadState {
         handle: SnapshotHandle,
         identity: IdentitySlot,
         host_paths: HostPaths,
-        voting_targets: std::collections::BTreeMap<u8, i64>,
+        voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     ) -> Self {
         Self {
             handle,
@@ -215,14 +279,16 @@ impl NodeReadState for SnapshotReadState {
                     max: d.max,
                 })
                 .collect(),
-            // The operator's configured `[voting.targets]` policy (id → name +
-            // target), ascending by id (BTreeMap iteration order). Reports the
-            // policy as configured, independent of whether a given parameter
-            // would cast a vote this block — that depends on the live value
-            // versus the target. Every id was validated votable at config load,
-            // so `votable_param_name` resolves; fall back defensively.
+            // The operator's LIVE voting policy (config + any runtime
+            // `POST /api/v1/votes` edits), read under the shared lock, ascending
+            // by id (BTreeMap order). Reported as configured, independent of
+            // whether a parameter would cast a vote this block (that depends on
+            // the live value vs the target). Every id was validated votable when
+            // set, so `votable_param_name` resolves; fall back defensively.
             configured_votes: self
                 .voting_targets
+                .read()
+                .expect("voting_targets poisoned")
                 .iter()
                 .map(|(&id, &target)| ergo_api::ApiConfiguredVote {
                     parameter_id: id,

@@ -388,3 +388,68 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* ----- Voting page ----- */
+.vt-note {
+  max-width: 70ch;
+  line-height: 1.5;
+  margin: var(--space-3) 0 var(--space-5);
+}
+.vtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-body);
+}
+.vtable th {
+  text-align: left;
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--tx3);
+  font-weight: 600;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--bd);
+}
+.vtable td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--tx4);
+  color: var(--tx);
+}
+.vtable .vt-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.vtable .vt-range {
+  color: var(--tx2);
+}
+.vtable .vt-live {
+  color: var(--blue);
+}
+.vt-input {
+  font: inherit;
+  width: 11ch;
+  text-align: right;
+  background: var(--s2);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  color: var(--tx);
+  padding: var(--space-2) var(--space-3);
+}
+.vt-input:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+.vt-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+.vt-status {
+  font-size: var(--fs-small);
+  color: var(--tx3);
+}
+.vt-inactive {
+  color: var(--tx3);
+  font-size: var(--fs-micro);
+}

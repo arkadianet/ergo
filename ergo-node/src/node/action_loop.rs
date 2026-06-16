@@ -42,6 +42,9 @@ pub(super) async fn action_loop(
     mut mining_submit_rx: mpsc::Receiver<crate::mining_bridge::MiningRequest>,
     // Operator /peers/connect dial requests from the REST admin handle.
     mut peer_connect_rx: mpsc::Receiver<std::net::SocketAddr>,
+    // Operator vote changes (POST /api/v1/votes) — each `()` forces an
+    // immediate same-tip mining candidate rebuild so the new votes take effect.
+    mut votes_changed_rx: mpsc::Receiver<()>,
     // Mining wiring (handle + off-loop engine intent channel). `Some` exactly
     // when mining is configured on. The loop dispatches mining requests
     // against the handle and publishes a `BuildIntent` on tip change, a
@@ -105,6 +108,9 @@ pub(super) async fn action_loop(
     // the fresh build's pool snapshot isn't immediately re-refreshed.
     let mut mining_last_revision = state.mempool.revision();
     let mut mining_last_mempool_signal: Option<Instant> = None;
+    // Set by the votes-changed arm; consumed in the post-arm mining block to
+    // force a same-tip rebuild this iteration (so a vote change applies now).
+    let mut mining_votes_dirty = false;
     // Startup priming: publish the initial BestTip + (if already synced) the
     // first BuildIntent, so an idle already-synced node serves a candidate
     // without waiting for an unrelated state change (Codex plan finding).
@@ -138,6 +144,13 @@ pub(super) async fn action_loop(
             }
             Some(addr) = peer_connect_rx.recv() => {
                 connect_to_address(&mut state, addr);
+            }
+            Some(()) = votes_changed_rx.recv() => {
+                // Operator changed votes; coalesce any queued updates and force
+                // ONE same-tip rebuild below — each rebuild reads the latest
+                // shared target map, so extra queued notifications add nothing.
+                while votes_changed_rx.try_recv().is_ok() {}
+                mining_votes_dirty = true;
             }
             _ = mempool_tick.tick() => {
                 handle_mempool_tick(&mut state);
@@ -233,7 +246,11 @@ pub(super) async fn action_loop(
                 last_recovery: mining_last_recovery,
                 last_mempool_signal: mining_last_mempool_signal,
             };
-            if let Some(reason) = decide_mining_signal(
+            // A vote change forces a same-tip rebuild even when the tip/mempool
+            // are unchanged. A tip/recovery/mempool signal (if any) takes its
+            // own reason — those rebuilds already read the latest votes — so
+            // `VotesChanged` only fires when nothing else would.
+            let decided = decide_mining_signal(
                 &producer,
                 tip_now,
                 has_cached,
@@ -241,7 +258,10 @@ pub(super) async fn action_loop(
                 now,
                 MINING_RECOVERY_RETRY,
                 wiring.refresh_debounce,
-            ) {
+            );
+            let signal = decided.or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
+            mining_votes_dirty = false;
+            if let Some(reason) = signal {
                 let prev = mining_last_tip.best_full_id();
                 mining_last_tip =
                     signal_mining_engine(&state, wiring, &mut mining_chain_seq, &prev, reason);
@@ -258,7 +278,9 @@ pub(super) async fn action_loop(
                     }
                     // A same-parent refresh: advance the pool tracker to the
                     // revision we just rebuilt against and stamp the debounce.
-                    BuildReason::MempoolRefresh => {
+                    // `VotesChanged` is the same shape — a forced same-tip
+                    // rebuild against the current pool.
+                    BuildReason::MempoolRefresh | BuildReason::VotesChanged => {
                         mining_last_revision = revision_now;
                         mining_last_mempool_signal = Some(now);
                     }
