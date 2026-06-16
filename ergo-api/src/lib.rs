@@ -35,6 +35,6 @@ pub use server::{
 };
 pub use traits::{
     ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,
-    NoopNodeAdmin, PoolTxDetail,
+    NoopNodeAdmin, PoolTxDetail, VotingControlError,
 };
 pub use types::*;

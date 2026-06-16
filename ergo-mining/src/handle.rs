@@ -120,13 +120,15 @@ pub struct MiningHandle {
     /// Max rent boxes per block's self-claim (see `with_rent_config`).
     max_storage_rent_claims: u32,
     /// Operator-configured on-chain voting targets, keyed by signed-i8
-    /// parameter id (stored as `u8`). Empty by default (no voting); set via
-    /// [`MiningHandle::with_voting_targets`] from the `[voting]` config. The
-    /// candidate builder reduces these to a `header.votes` triple through
-    /// `select_candidate_votes`, casting at most `ParamVotesCount` (2) votes
-    /// per block toward the targets. `Arc` so every clone of the handle shares
-    /// the one configured policy.
-    voting_targets: Arc<std::collections::BTreeMap<u8, i64>>,
+    /// parameter id (stored as `u8`). Empty by default (no voting); seeded from
+    /// the `[voting]` config and updatable at runtime via the auth-gated
+    /// `POST /api/v1/votes` endpoint. The candidate builder reads a snapshot per
+    /// build ([`MiningHandle::voting_targets`]) and reduces it to a
+    /// `header.votes` triple through `select_candidate_votes`. The slot is a
+    /// SHARED `Arc<RwLock<…>>`: boot hands the SAME lock to this handle, the
+    /// API read state (so `GET /api/v1/votes` reflects live edits), and the
+    /// admin write path — so a runtime change is seen by all three at once.
+    voting_targets: Arc<RwLock<std::collections::BTreeMap<u8, i64>>>,
 }
 
 impl MiningHandle {
@@ -168,7 +170,7 @@ impl MiningHandle {
             voting_settings: Arc::new(voting_settings),
             claim_storage_rent: false,
             max_storage_rent_claims: 0,
-            voting_targets: Arc::new(std::collections::BTreeMap::new()),
+            voting_targets: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -195,22 +197,28 @@ impl MiningHandle {
         self.max_storage_rent_claims
     }
 
-    /// Set the operator's on-chain voting targets (keyed by signed-i8 param id
-    /// stored as `u8`). Empty by default. Builder-style so existing
-    /// constructors and their callers default to non-voting.
+    /// Share the operator's on-chain voting-targets slot with this handle.
+    /// Boot creates ONE `Arc<RwLock<…>>` and hands the same lock here and to the
+    /// API read state + admin write path, so a runtime `POST /api/v1/votes`
+    /// edit is reflected in the candidate builder and `GET /api/v1/votes`
+    /// together. Builder-style; existing constructors default to an empty slot.
     pub fn with_voting_targets(
         mut self,
-        voting_targets: std::collections::BTreeMap<u8, i64>,
+        voting_targets: Arc<RwLock<std::collections::BTreeMap<u8, i64>>>,
     ) -> Self {
-        self.voting_targets = Arc::new(voting_targets);
+        self.voting_targets = voting_targets;
         self
     }
 
-    /// The operator's configured voting targets — forwarded to the candidate
-    /// builder, which reduces them to a `header.votes` triple. Empty ⇒ neutral
-    /// votes.
-    pub fn voting_targets(&self) -> &std::collections::BTreeMap<u8, i64> {
-        &self.voting_targets
+    /// A snapshot of the operator's current voting targets — read under the
+    /// shared lock and cloned (the map holds at most a handful of entries). The
+    /// candidate builder calls this per build, so it always sees the latest
+    /// runtime-configured policy. Empty ⇒ neutral votes.
+    pub fn voting_targets(&self) -> std::collections::BTreeMap<u8, i64> {
+        self.voting_targets
+            .read()
+            .expect("voting_targets poisoned")
+            .clone()
     }
 
     /// Update the authoritative tip + synced bit. Called by the action loop

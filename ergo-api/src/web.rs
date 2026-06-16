@@ -25,6 +25,7 @@ pub const JS_SPARKLINE: &str = include_str!("../web/js/sparkline.js");
 pub const JS_OVERVIEW: &str = include_str!("../web/js/overview.js");
 pub const JS_PEERS: &str = include_str!("../web/js/peers.js");
 pub const JS_MEMPOOL: &str = include_str!("../web/js/mempool.js");
+pub const JS_VOTING: &str = include_str!("../web/js/voting.js");
 pub const JS_APP: &str = include_str!("../web/js/app.js");
 
 /// Self-hosted JetBrains Mono (variable, SIL OFL 1.1) — embedded so both

@@ -285,6 +285,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiVotes'
+    post:
+      tags:
+      - admin
+      operationId: set_votes_handler
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiSetVotesRequest'
+        required: true
+      responses:
+        '204':
+          description: Voting targets replaced
+        '400':
+          description: A target named a non-votable parameter
+        '403':
+          description: Missing or invalid api_key
+        '409':
+          description: Node is not mining
 components:
   schemas:
     ApiBlockApplyError:
@@ -1123,6 +1142,20 @@ components:
           type: integer
           format: int32
           minimum: 0
+    ApiSetVotesRequest:
+      type: object
+      description: |-
+        Request body for `POST /api/v1/votes` (auth-gated operator write). The
+        `votes` list is the FULL desired set and REPLACES the node's current voting
+        targets — an empty list clears all votes.
+      required:
+      - votes
+      properties:
+        votes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiVoteTarget'
+          description: The operator's desired votes, one entry per parameter to target.
     ApiStateType:
       type: string
       description: |-
@@ -1356,6 +1389,24 @@ components:
         step:
           type: integer
           format: int32
+    ApiVoteTarget:
+      type: object
+      description: One desired vote in a `POST /api/v1/votes` request.
+      required:
+      - parameterId
+      - target
+      properties:
+        parameterId:
+          type: integer
+          format: int32
+          description: |-
+            Votable parameter id (1..=8, or 9 = subblocksPerBlock). `blockVersion`
+            (123) and soft-fork (120) are not operator-votable and are rejected.
+          minimum: 0
+        target:
+          type: integer
+          format: int64
+          description: Desired value; the node votes up/down one step per block toward it.
     ApiVotes:
       type: object
       description: |-
@@ -1386,8 +1437,9 @@ components:
           items:
             $ref: '#/components/schemas/ApiConfiguredVote'
           description: |-
-            The operator's configured votes (from the `[voting]` config). Empty until
-            operator vote configuration ships.
+            The operator's configured voting targets — the boot `[voting]` config
+            plus any successful runtime `POST /api/v1/votes` edits (the live policy).
+            Empty when no targets are configured.
         epochStartHeight:
           type: integer
           format: int32

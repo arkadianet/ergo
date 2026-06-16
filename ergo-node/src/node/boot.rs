@@ -847,6 +847,10 @@ async fn run_inner_with_backend(
     // Operator /peers/connect -> action-loop dial requests. Small bound:
     // these are manual, rare, and fire-and-forget.
     let (peer_connect_tx, peer_connect_rx) = mpsc::channel::<std::net::SocketAddr>(16);
+    // Operator POST /api/v1/votes -> action-loop "rebuild the mining candidate
+    // now" signal. Rare, fire-and-forget, coalescing (each rebuild reads the
+    // latest targets), so a tiny bound is plenty.
+    let (votes_changed_tx, votes_changed_rx) = mpsc::channel::<()>(8);
 
     // Mining request channel — same shape as submit_rx. Capacity 64 is
     // generous for external-miner polling: typical miners poll the
@@ -944,11 +948,18 @@ async fn run_inner_with_backend(
         index_db: config.data_dir.join(&config.indexer_config.db_filename),
         data_dir: config.data_dir.clone(),
     };
+    // ONE shared voting-targets slot, seeded from `[voting.targets]`. The SAME
+    // `Arc<RwLock<…>>` is handed to the API read state (so `GET /api/v1/votes`
+    // reports the live policy), the mining handle (candidate building reads it
+    // per build), and — only when mining is enabled — the admin write path (so
+    // the auth-gated `POST /api/v1/votes` updates all three at once).
+    let voting_targets_slot =
+        std::sync::Arc::new(std::sync::RwLock::new(config.voting_targets.clone()));
     let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
         host_paths,
-        config.voting_targets.clone(),
+        voting_targets_slot.clone(),
     )
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
@@ -998,7 +1009,7 @@ async fn run_inner_with_backend(
             config.mining_config.claim_storage_rent,
             config.mining_config.max_storage_rent_claims,
         )
-        .with_voting_targets(config.voting_targets.clone());
+        .with_voting_targets(voting_targets_slot.clone());
         let network_prefix = config.chain_spec.network_params.address_prefix;
         // Subscribe to the handle's serve-state-change notifications so the
         // bridge's longpoll wait wakes the instant the served candidate changes
@@ -1086,12 +1097,20 @@ async fn run_inner_with_backend(
                 // lock-free `arc_swap.load()` per snapshot, so the
                 // overlay adds no contention with the main loop.
                 let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
-                let admin_handle: Arc<dyn ergo_api::NodeAdmin> =
-                    crate::api_bridge::ShutdownAdmin::new(
-                        shutdown_notify.clone(),
-                        Some(peer_connect_tx.clone()),
-                    )
-                    .into_dyn();
+                let mut admin = crate::api_bridge::ShutdownAdmin::new(
+                    shutdown_notify.clone(),
+                    Some(peer_connect_tx.clone()),
+                )
+                // Held regardless of mining state to keep the channel open; only
+                // fired on a successful vote update (which requires mining).
+                .with_votes_changed_signal(votes_changed_tx.clone());
+                // Expose the runtime voting write only when mining is enabled —
+                // votes have no effect without a candidate builder, so
+                // `POST /api/v1/votes` otherwise returns `MiningDisabled`.
+                if config.mining_config.enabled {
+                    admin = admin.with_voting_targets(voting_targets_slot.clone());
+                }
+                let admin_handle: Arc<dyn ergo_api::NodeAdmin> = admin.into_dyn();
 
                 // Production wallet admin. Owns the secret storage + wallet
                 // state behind RwLocks; the writer task is a dedicated tokio
@@ -1571,6 +1590,7 @@ async fn run_inner_with_backend(
         submit_rx,
         mining_submit_rx,
         peer_connect_rx,
+        votes_changed_rx,
         mining_wiring,
         shutdown_rx,
         mempool_tick_ms,

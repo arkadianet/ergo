@@ -348,8 +348,9 @@ pub struct ApiVotes {
     /// The numeric parameters an operator can vote to change, with the bounds a
     /// vote must respect. Excludes blockVersion (soft-fork driven, not voted).
     pub votable_parameters: Vec<ApiVotableParam>,
-    /// The operator's configured votes (from the `[voting]` config). Empty until
-    /// operator vote configuration ships.
+    /// The operator's configured voting targets — the boot `[voting]` config
+    /// plus any successful runtime `POST /api/v1/votes` edits (the live policy).
+    /// Empty when no targets are configured.
     pub configured_votes: Vec<ApiConfiguredVote>,
 }
 
@@ -373,6 +374,27 @@ pub struct ApiConfiguredVote {
     pub parameter_id: u8,
     pub name: String,
     /// Desired target value; the node votes up/down toward it.
+    pub target: i64,
+}
+
+/// Request body for `POST /api/v1/votes` (auth-gated operator write). The
+/// `votes` list is the FULL desired set and REPLACES the node's current voting
+/// targets — an empty list clears all votes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiSetVotesRequest {
+    /// The operator's desired votes, one entry per parameter to target.
+    pub votes: Vec<ApiVoteTarget>,
+}
+
+/// One desired vote in a `POST /api/v1/votes` request.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiVoteTarget {
+    /// Votable parameter id (1..=8, or 9 = subblocksPerBlock). `blockVersion`
+    /// (123) and soft-fork (120) are not operator-votable and are rejected.
+    pub parameter_id: u8,
+    /// Desired value; the node votes up/down one step per block toward it.
     pub target: i64,
 }
 

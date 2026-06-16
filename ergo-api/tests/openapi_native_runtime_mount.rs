@@ -457,6 +457,116 @@ async fn peers_connect_malformed_body_is_400() {
     assert_eq!(*recorder.connected.lock().unwrap(), None);
 }
 
+// ----- POST /api/v1/votes (admin-wired, api_key-gated operator write) -----
+
+/// Admin that mirrors the production `set_voting_targets` shape: rejects when
+/// `mining` is off (MiningDisabled), rejects non-votable ids (NotVotable), else
+/// records the accepted set. Lets the route tests pin gating + error mapping +
+/// body parsing without pulling the node impl in.
+struct RecordingVotingAdmin {
+    mining: bool,
+    last: std::sync::Mutex<Option<Vec<(u8, i64)>>>,
+}
+
+impl NodeAdmin for RecordingVotingAdmin {
+    fn request_shutdown(&self) {}
+    fn set_voting_targets(
+        &self,
+        targets: Vec<(u8, i64)>,
+    ) -> Result<(), ergo_api::VotingControlError> {
+        if !self.mining {
+            return Err(ergo_api::VotingControlError::MiningDisabled);
+        }
+        for (id, _) in &targets {
+            if !(1..=9).contains(id) {
+                return Err(ergo_api::VotingControlError::NotVotable { parameter_id: *id });
+            }
+        }
+        *self.last.lock().unwrap() = Some(targets);
+        Ok(())
+    }
+}
+
+fn voting_app(mining: bool) -> (axum::Router, Arc<RecordingVotingAdmin>) {
+    let admin = Arc::new(RecordingVotingAdmin {
+        mining,
+        last: std::sync::Mutex::new(None),
+    });
+    let app = router_with_mempool_and_wallet_and_security(
+        ctx(None),
+        Some(admin.clone() as Arc<dyn NodeAdmin>),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    );
+    (app, admin)
+}
+
+#[tokio::test]
+async fn votes_post_is_api_key_gated_and_records_targets() {
+    let (app, admin) = voting_app(true);
+    let body = "{\"votes\":[{\"parameterId\":3,\"target\":600000}]}";
+    // Auth-gated: no key → 403, the handler never runs.
+    assert_eq!(
+        post_body(&app, "/api/v1/votes", None, body).await,
+        StatusCode::FORBIDDEN,
+        "voting write must reject without the api_key",
+    );
+    assert!(
+        admin.last.lock().unwrap().is_none(),
+        "rejected write never reached the admin"
+    );
+    // With the key → 204 and the parsed targets reach the admin.
+    assert_eq!(
+        post_body(&app, "/api/v1/votes", Some("hello"), body).await,
+        StatusCode::NO_CONTENT,
+    );
+    assert_eq!(*admin.last.lock().unwrap(), Some(vec![(3u8, 600_000i64)]));
+}
+
+#[tokio::test]
+async fn votes_post_mining_disabled_is_409() {
+    let (app, _admin) = voting_app(false);
+    assert_eq!(
+        post_body(
+            &app,
+            "/api/v1/votes",
+            Some("hello"),
+            "{\"votes\":[{\"parameterId\":3,\"target\":600000}]}",
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "a non-mining node rejects the voting write with 409",
+    );
+}
+
+#[tokio::test]
+async fn votes_post_non_votable_id_is_400() {
+    let (app, _admin) = voting_app(true);
+    // blockVersion (123) is not operator-votable.
+    assert_eq!(
+        post_body(
+            &app,
+            "/api/v1/votes",
+            Some("hello"),
+            "{\"votes\":[{\"parameterId\":123,\"target\":4}]}",
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+    );
+}
+
+#[tokio::test]
+async fn votes_post_malformed_body_is_400() {
+    let (app, _admin) = voting_app(true);
+    for body in ["not json", "{}", "{\"votes\":\"x\"}"] {
+        assert_eq!(
+            post_body(&app, "/api/v1/votes", Some("hello"), body).await,
+            StatusCode::BAD_REQUEST,
+            "malformed body {body} must 400",
+        );
+    }
+}
+
 // ----- auth gate vs. router fallback (unknown paths must 404, never 403) -----
 //
 // Regression tests for the `.layer` fallback-capture bug: wrapping a

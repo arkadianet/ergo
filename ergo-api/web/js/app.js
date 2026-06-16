@@ -7,9 +7,10 @@ import { api } from './api-client.js';
 import * as overview from './overview.js';
 import * as peers from './peers.js';
 import * as mempool from './mempool.js';
+import * as voting from './voting.js';
 
-const SECTIONS = ['overview', 'peers', 'mempool'];
-const renderers = { overview, peers, mempool };
+const SECTIONS = ['overview', 'peers', 'mempool', 'voting'];
+const renderers = { overview, peers, mempool, voting };
 let current = 'overview';
 
 function setConn(ok) {

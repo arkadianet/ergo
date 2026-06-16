@@ -76,19 +76,22 @@ use crate::compat::handlers::{
 };
 use crate::compat::traits::NodeChainQuery;
 use crate::traits::ChainParamsView;
-use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
+use crate::traits::{
+    MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView, VotingControlError,
+};
 use crate::types::{
     ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
     ApiDifficultySeries, ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost,
     ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions,
-    ApiNativeSubmitError, ApiPeer, ApiRecentBlock, ApiStatus, ApiSubmitError, ApiSubmitResponse,
-    ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam, ApiVotes, ApiWeightFunction, HealthStatus,
-    RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
+    ApiNativeSubmitError, ApiPeer, ApiRecentBlock, ApiSetVotesRequest, ApiStatus, ApiSubmitError,
+    ApiSubmitResponse, ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam, ApiVoteTarget,
+    ApiVotes, ApiWeightFunction, HealthStatus, RawTransactionBytes, SubmitError, SubmitMode,
+    SyncStateLabel,
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
     JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS,
-    JS_SPARKLINE, JS_TABLE, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
+    JS_SPARKLINE, JS_TABLE, JS_VOTING, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
     WALLET_CSS, WALLET_UI_INDEX_HTML, WALLET_UI_JS,
 };
 use ergo_indexer_types::IndexerQuery;
@@ -559,6 +562,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/overview.js", get(|| async { js(JS_OVERVIEW) }))
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
+        .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/api-docs/openapi.yaml", get(openapi_yaml))
@@ -596,6 +600,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         let admin_routes: Router = Router::new()
             .route("/api/v1/node/shutdown", post(shutdown_handler))
             .route("/node/shutdown", post(shutdown_handler))
+            // Operator voting write — auth-gated so only the operator can change
+            // what the node votes for (the read `GET /api/v1/votes` stays open).
+            .route("/api/v1/votes", post(set_votes_handler))
             // Scala `ErgoPeersApiRoute.connect` is the one /peers route
             // with `withAuth` — it rides the same admin + key gate.
             .route("/peers/connect", post(peers_connect_handler))
@@ -1350,6 +1357,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         host_handler,
         status_handler,
         votes_handler,
+        set_votes_handler,
         tip_handler,
         recent_blocks_handler,
         sync_handler,
@@ -1370,6 +1378,8 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiVotes,
         ApiVotableParam,
         ApiConfiguredVote,
+        ApiSetVotesRequest,
+        ApiVoteTarget,
         ApiTip,
         ApiRecentBlock,
         ApiSyncStatus,
@@ -1540,6 +1550,48 @@ async fn host_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
 )]
 async fn votes_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
     Json(read.votes()).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/votes",
+    tag = "admin",
+    request_body = ApiSetVotesRequest,
+    responses(
+        (status = 204, description = "Voting targets replaced"),
+        (status = 400, description = "A target named a non-votable parameter"),
+        (status = 403, description = "Missing or invalid api_key"),
+        (status = 409, description = "Node is not mining"),
+    ),
+)]
+async fn set_votes_handler(
+    State(admin): State<Arc<dyn NodeAdmin>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: crate::types::ApiSetVotesRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return crate::utils::bad_request(format!("invalid request body: {e}")),
+    };
+    let targets: Vec<(u8, i64)> = req
+        .votes
+        .iter()
+        .map(|v| (v.parameter_id, v.target))
+        .collect();
+    match admin.set_voting_targets(targets) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(VotingControlError::NotVotable { parameter_id }) => crate::utils::bad_request(format!(
+            "parameter id {parameter_id} is not operator-votable (votable ids: 1..=8, 9)"
+        )),
+        Err(VotingControlError::MiningDisabled) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": 409,
+                "reason": "mining.disabled",
+                "detail": "voting targets can only be set on a mining node",
+            })),
+        )
+            .into_response(),
+    }
 }
 
 #[utoipa::path(

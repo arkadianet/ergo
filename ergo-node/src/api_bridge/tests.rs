@@ -1063,6 +1063,19 @@ fn read_state_with_targets(
     host_paths: HostPaths,
     voting_targets: std::collections::BTreeMap<u8, i64>,
 ) -> SnapshotReadState {
+    read_state_with_slot(
+        host_paths,
+        std::sync::Arc::new(std::sync::RwLock::new(voting_targets)),
+    )
+}
+
+/// Like `read_state_with_targets` but shares an EXISTING voting-targets slot, so
+/// a test can wire the same `Arc<RwLock<…>>` into both the read state and a
+/// `ShutdownAdmin` and observe runtime writes reflected in `votes()`.
+fn read_state_with_slot(
+    host_paths: HostPaths,
+    voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
+) -> SnapshotReadState {
     let api_info = ergo_api::types::ApiInfo {
         agent_name: "test".into(),
         node_name: "test".into(),
@@ -1151,6 +1164,113 @@ fn votes_reports_configured_operator_votes() {
             (3, "maxBlockSize", 600_000),
         ],
         "configured votes mirror [voting.targets], ascending by id"
+    );
+}
+
+/// A runtime `POST /api/v1/votes` write (via `NodeAdmin::set_voting_targets`)
+/// updates the SHARED slot, and `GET /api/v1/votes` (the read state on the same
+/// slot) reflects it live — REPLACE semantics, with non-votable ids rejected
+/// atomically and an empty set clearing all votes.
+#[test]
+fn set_voting_targets_write_is_reflected_live_by_votes() {
+    use ergo_api::{NodeAdmin, VotingControlError};
+
+    let dir = tempfile::tempdir().unwrap();
+    let slot = std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new()));
+    let read = read_state_with_slot(
+        HostPaths {
+            state_db: dir.path().join("s.redb"),
+            index_db: dir.path().join("i.redb"),
+            data_dir: dir.path().to_path_buf(),
+        },
+        slot.clone(),
+    );
+    // Mining-enabled admin shares the same slot.
+    let admin = crate::api_bridge::ShutdownAdmin::new(
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        None,
+    )
+    .with_voting_targets(slot.clone());
+
+    let configured = |r: &SnapshotReadState| -> Vec<(u8, i64)> {
+        r.votes()
+            .configured_votes
+            .iter()
+            .map(|c| (c.parameter_id, c.target))
+            .collect()
+    };
+
+    assert!(configured(&read).is_empty(), "starts empty");
+
+    // Set → reflected live by the read endpoint.
+    admin.set_voting_targets(vec![(3, 600_000)]).unwrap();
+    assert_eq!(configured(&read), vec![(3, 600_000)]);
+
+    // REPLACE: a new set replaces (not merges).
+    admin.set_voting_targets(vec![(1, 1_300_000)]).unwrap();
+    assert_eq!(configured(&read), vec![(1, 1_300_000)]);
+
+    // Non-votable id (blockVersion 123) rejected; the set is unchanged.
+    assert_eq!(
+        admin
+            .set_voting_targets(vec![(1, 9), (123, 4)])
+            .unwrap_err(),
+        VotingControlError::NotVotable { parameter_id: 123 },
+    );
+    assert_eq!(
+        configured(&read),
+        vec![(1, 1_300_000)],
+        "rejected write is atomic"
+    );
+
+    // Empty clears.
+    admin.set_voting_targets(vec![]).unwrap();
+    assert!(configured(&read).is_empty(), "empty set clears all votes");
+}
+
+/// Without a wired slot (mining disabled), the write is rejected — votes have
+/// no effect with no candidate builder.
+#[test]
+fn set_voting_targets_without_mining_is_rejected() {
+    use ergo_api::{NodeAdmin, VotingControlError};
+    let admin = crate::api_bridge::ShutdownAdmin::new(
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        None,
+    );
+    assert_eq!(
+        admin.set_voting_targets(vec![(3, 600_000)]).unwrap_err(),
+        VotingControlError::MiningDisabled,
+    );
+}
+
+/// A SUCCESSFUL vote change fires the action-loop rebuild signal (so the new
+/// votes apply on the next mined block, not the next tip/mempool change); a
+/// REJECTED change does not.
+#[test]
+fn set_voting_targets_signals_rebuild_only_on_success() {
+    use ergo_api::NodeAdmin;
+    let slot = std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new()));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
+    let admin = crate::api_bridge::ShutdownAdmin::new(
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        None,
+    )
+    .with_voting_targets(slot)
+    .with_votes_changed_signal(tx);
+
+    // Success → exactly one rebuild signal queued.
+    admin.set_voting_targets(vec![(3, 600_000)]).unwrap();
+    assert!(
+        rx.try_recv().is_ok(),
+        "a successful vote change signals a rebuild"
+    );
+    assert!(rx.try_recv().is_err(), "exactly one signal per change");
+
+    // Rejected (non-votable id) → no rebuild signal.
+    assert!(admin.set_voting_targets(vec![(123, 4)]).is_err());
+    assert!(
+        rx.try_recv().is_err(),
+        "a rejected vote change must NOT signal a rebuild",
     );
 }
 
