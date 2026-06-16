@@ -8,7 +8,9 @@
 //! refactor that accidentally gates `/wallet/ui` or ungates
 //! `/wallet/status` fails here:
 //!
-//! * `GET /wallet/ui` / `…/index.html` / `…/wallet.js` → 200 with no key.
+//! * `GET /wallet/ui` / `…/index.html` / `…/wallet.js` → 308 redirect to
+//!   `/#wallet` with no key (retired to the SPA; public, NOT swallowed by the
+//!   gated `/wallet/*rest` catch-all).
 //! * `GET /wallet/status` → 403 with no key (gate unmoved), 200 with the
 //!   pinned Scala-parity key (proves the 403 is the gate, not a missing
 //!   route).
@@ -18,7 +20,7 @@
 
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
 use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
@@ -112,49 +114,36 @@ fn get_with_header(path: &str, name: &str, value: &str) -> Request<Body> {
         .unwrap()
 }
 
-async fn body_string(resp: axum::response::Response) -> String {
-    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
-    String::from_utf8(bytes.to_vec()).unwrap()
+fn location(resp: &axum::response::Response) -> Option<String> {
+    resp.headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
 }
 
 // ----- happy path -----
 
 #[tokio::test]
-async fn wallet_ui_page_is_public_without_api_key() {
+async fn wallet_ui_redirects_to_spa_without_api_key() {
+    // Retired to the SPA: a public 308 → /#wallet, NOT a 403 from the gated
+    // /wallet/*rest catch-all.
     let resp = app().oneshot(get("/wallet/ui")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    assert!(
-        body.contains("/wallet/ui/wallet.js"),
-        "served page should be the wallet UI shell"
-    );
+    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location(&resp).as_deref(), Some("/#wallet"));
 }
 
 #[tokio::test]
-async fn wallet_ui_index_html_alias_is_public_without_api_key() {
+async fn wallet_ui_index_html_alias_redirects_to_spa() {
     let resp = app().oneshot(get("/wallet/ui/index.html")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location(&resp).as_deref(), Some("/#wallet"));
 }
 
 #[tokio::test]
-async fn wallet_ui_js_is_public_with_javascript_content_type() {
+async fn wallet_ui_js_alias_redirects_to_spa() {
     let resp = app().oneshot(get("/wallet/ui/wallet.js")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
-    assert!(
-        ct.contains("javascript"),
-        "expected a javascript content-type, got {ct:?}"
-    );
-    let body = body_string(resp).await;
-    assert!(
-        body.contains("api_key"),
-        "wallet.js should drive /wallet/* via the api_key header"
-    );
+    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(location(&resp).as_deref(), Some("/#wallet"));
 }
 
 #[tokio::test]

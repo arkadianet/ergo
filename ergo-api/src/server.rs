@@ -29,7 +29,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, head, post},
     Json, Router,
 };
@@ -89,11 +89,10 @@ use crate::types::{
     RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
-    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP, JS_AUTH,
-    JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS,
+    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
+    JS_AUTH, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS,
     JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML,
     TOKENS_CSS,
-    WALLET_CSS, WALLET_UI_INDEX_HTML, WALLET_UI_JS,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::NetworkPrefix;
@@ -550,7 +549,6 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/tokens.css", get(tokens_css))
         .route("/components.css", get(components_css))
         .route("/dashboard.css", get(dashboard_css))
-        .route("/wallet.css", get(wallet_css))
         .route("/fonts/jetbrains-mono.woff2", get(jetbrains_mono_woff2))
         .route("/js/app.js", get(|| async { js(JS_APP) }))
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
@@ -1121,13 +1119,10 @@ pub fn router_with_mempool_and_wallet_and_security(
         None => operator,
     };
 
-    // `/wallet/ui*` — the browser wallet UI (static bundle). Mounted on
-    // the PUBLIC operator surface, deliberately OUTSIDE the api_key-gated
-    // `/wallet/*` JSON subtree below: the page itself carries no secrets,
-    // and authenticates each `/wallet/*` call with the key the operator
-    // pastes into it. `wallet_ui_router` carries its own security-header
-    // layer (CSP, no-store) covering the bare `/wallet/ui` mount and every
-    // sibling asset; those headers stay off the dashboard at `/`.
+    // `/wallet/ui*` — retired: the wallet is now a section of the dashboard SPA
+    // (`/#wallet`). These public paths 308-redirect there for bookmarks. Merged
+    // BEFORE the gated `/wallet/*` router below so the static `/wallet/ui` routes
+    // win over its `/wallet/*rest` catch-all (which would otherwise 403 them).
     let assembled = assembled.merge(wallet_ui_router());
 
     // `/wallet/*` — unconditionally mounted per spec §8.1.
@@ -1150,11 +1145,9 @@ pub fn router_with_mempool_and_wallet_and_security(
     // parameters we don't want promoted into higher-signal logs, and the
     // path alone identifies the endpoint for correlation. Sensitive
     // per-request detail belongs in sanitized handler-level logs.
-    assembled
-        .layer(from_fn(spa_security_headers))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request| {
+    assembled.layer(from_fn(spa_security_headers)).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &Request| {
                 static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
                 let req_id = HTTP_REQ_SEQ.fetch_add(1, Ordering::Relaxed);
                 tracing::info_span!(
@@ -1193,32 +1186,26 @@ pub fn router_with_mempool_and_wallet_and_security(
     )
 }
 
-/// Build the public wallet-UI route group: the bare `/wallet/ui` page
-/// plus its `/wallet/ui/index.html` alias and `/wallet/ui/wallet.js`
-/// asset, wrapped in the [`wallet_ui_security_headers`] layer. Owning the
-/// three routes in one nested `Router<()>` lets the header layer cover
-/// both the bare `/wallet/ui` mount (the mnemonic-bearing page) and every
-/// sibling asset in one place. Merged into the operator router by
-/// [`router_with_mempool_and_wallet_and_security`]; never wrapped by the
-/// `/wallet/*` auth gate.
+/// Public redirect routes for the retired `/wallet/ui*` paths → the dashboard
+/// SPA's wallet section (`/#wallet`). Kept as their own router merged before the
+/// gated `/wallet/*` router so the static routes win over its `/wallet/*rest`
+/// catch-all (otherwise these would 403 instead of redirecting).
 fn wallet_ui_router() -> Router {
     Router::new()
-        .route("/wallet/ui", get(wallet_ui_index))
-        .route("/wallet/ui/index.html", get(wallet_ui_index))
-        .route("/wallet/ui/wallet.js", get(wallet_ui_js))
-        .layer(from_fn(wallet_ui_security_headers))
+        .route("/wallet/ui", get(wallet_ui_redirect))
+        .route("/wallet/ui/index.html", get(wallet_ui_redirect))
+        .route("/wallet/ui/wallet.js", get(wallet_ui_redirect))
 }
 
-/// Response-header layer for the wallet-UI route group, covering the bare
-/// `/wallet/ui` mount and every sibling asset. A `from_fn` layer (rather
-/// than tower-http's `SetResponseHeaderLayer`) keeps the dependency
-/// surface unchanged — `ergo-api`'s `tower-http` enables only the `trace`
-/// feature.
-///
-/// `Cache-Control: no-store` is a bfcache mitigation for the mnemonic-bearing
-/// pages, not a hard guarantee — some browsers retain bfcache snapshots
-/// regardless. The web font is self-hosted (see `web.rs`), so `default-src
-/// 'self'` does not block it.
+async fn wallet_ui_redirect() -> Redirect {
+    Redirect::permanent("/#wallet")
+}
+
+/// Strict response headers for the mnemonic-bearing SPA surfaces (applied by
+/// `spa_security_headers`). `Cache-Control: no-store` is a bfcache mitigation,
+/// not a hard guarantee — some browsers retain bfcache snapshots regardless.
+/// The web font is self-hosted (see `web.rs`), so `default-src 'self'` does not
+/// block it.
 fn apply_strict_static_headers(headers: &mut HeaderMap) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -1235,12 +1222,6 @@ fn apply_strict_static_headers(headers: &mut HeaderMap) {
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-}
-
-async fn wallet_ui_security_headers(req: Request, next: Next) -> Response {
-    let mut resp = next.run(req).await;
-    apply_strict_static_headers(resp.headers_mut());
-    resp
 }
 
 /// The dashboard SPA at `/` now hosts the wallet section (it renders mnemonics
@@ -1262,21 +1243,6 @@ async fn spa_security_headers(req: Request, next: Next) -> Response {
         apply_strict_static_headers(resp.headers_mut());
     }
     resp
-}
-
-async fn wallet_ui_index() -> Html<&'static str> {
-    Html(WALLET_UI_INDEX_HTML)
-}
-
-async fn wallet_ui_js() -> Response {
-    (
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        WALLET_UI_JS,
-    )
-        .into_response()
 }
 
 async fn index() -> Html<&'static str> {
@@ -1355,14 +1321,6 @@ async fn dashboard_css() -> Response {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         DASHBOARD_CSS,
-    )
-        .into_response()
-}
-
-async fn wallet_css() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        WALLET_CSS,
     )
         .into_response()
 }

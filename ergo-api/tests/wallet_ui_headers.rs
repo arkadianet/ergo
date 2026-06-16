@@ -1,10 +1,11 @@
-//! Security-header regression for the wallet-UI route group.
+//! Security-header regression for the dashboard SPA static surface.
 //!
-//! The wallet UI renders mnemonics (init/restore), so its responses carry
-//! a strict CSP plus `Cache-Control: no-store` (a bfcache mitigation).
-//! These headers must cover the bare `/wallet/ui` mount AND every sibling
-//! asset, and must NOT leak onto the operator dashboard at `/`, which
-//! relies on a CDN-hosted web font that `default-src 'self'` would block.
+//! The SPA at `/` hosts the wallet section, which renders mnemonics
+//! (init/restore), so the SPA document and its static assets carry a strict
+//! CSP plus `Cache-Control: no-store` (a bfcache mitigation) and
+//! `Referrer-Policy: no-referrer`. These headers must cover `/`, the CSS/JS
+//! assets and the self-hosted font, and must NOT leak onto the CDN-backed
+//! `/swagger*` pages (whose `default-src 'self'` would block Swagger-UI).
 
 use std::sync::Arc;
 
@@ -27,8 +28,8 @@ const EXPECTED_CSP: &str =
 const EXPECTED_CACHE_CONTROL: &str = "no-store, no-cache, must-revalidate";
 
 /// `NodeReadState` stub whose methods panic if reached. The routes this
-/// test exercises — the static `/wallet/ui*` bundle and the static `/`
-/// dashboard — never touch the read surface; a call here would be a
+/// test exercises — the static SPA assets (`/`, CSS/JS, font) and
+/// `/swagger/native` — never touch the read surface; a call here would be a
 /// routing regression we want surfaced loudly.
 struct UnusedReadState;
 
@@ -92,7 +93,7 @@ fn header_str(resp: &axum::response::Response, name: header::HeaderName) -> Opti
         .map(|s| s.to_owned())
 }
 
-async fn assert_wallet_ui_headers(path: &str) {
+async fn assert_spa_security_headers(path: &str) {
     let resp = app().oneshot(get(path)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "{path} should serve 200");
     assert_eq!(
@@ -120,32 +121,47 @@ async fn assert_wallet_ui_headers(path: &str) {
 // ----- happy path -----
 
 #[tokio::test]
-async fn wallet_ui_bare_mount_carries_security_headers() {
-    // The bare `/wallet/ui` page is the sensitive one (renders mnemonics);
-    // the layer must reach it, not just the sibling assets.
-    assert_wallet_ui_headers("/wallet/ui").await;
+async fn dashboard_root_carries_spa_security_headers() {
+    // `/` now hosts the wallet section (renders mnemonics), so the SPA
+    // document must carry the strict headers the legacy `/wallet/ui` did.
+    assert_spa_security_headers("/").await;
 }
 
 #[tokio::test]
-async fn wallet_ui_index_html_alias_carries_security_headers() {
-    assert_wallet_ui_headers("/wallet/ui/index.html").await;
+async fn index_html_alias_carries_spa_security_headers() {
+    assert_spa_security_headers("/index.html").await;
 }
 
 #[tokio::test]
-async fn wallet_ui_js_carries_security_headers() {
-    assert_wallet_ui_headers("/wallet/ui/wallet.js").await;
+async fn spa_css_carries_spa_security_headers() {
+    assert_spa_security_headers("/tokens.css").await;
+}
+
+#[tokio::test]
+async fn spa_js_carries_spa_security_headers() {
+    assert_spa_security_headers("/js/app.js").await;
+}
+
+#[tokio::test]
+async fn wallet_js_module_carries_spa_security_headers() {
+    assert_spa_security_headers("/js/wallet.js").await;
+}
+
+#[tokio::test]
+async fn web_font_carries_spa_security_headers() {
+    assert_spa_security_headers("/fonts/jetbrains-mono.woff2").await;
 }
 
 // ----- scope isolation -----
 
 #[tokio::test]
-async fn dashboard_root_does_not_carry_wallet_csp() {
-    // The dashboard at `/` loads a CDN web font; `default-src 'self'`
-    // would break it. The wallet CSP must stay scoped to `/wallet/ui*`.
-    let resp = app().oneshot(get("/")).await.unwrap();
+async fn swagger_native_does_not_carry_strict_csp() {
+    // The native Swagger page loads Swagger-UI from a CDN; the strict
+    // `default-src 'self'` CSP must stay off it.
+    let resp = app().oneshot(get("/swagger/native")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
         header_str(&resp, header::CONTENT_SECURITY_POLICY).is_none(),
-        "dashboard `/` must not carry a Content-Security-Policy header"
+        "/swagger/native must not carry the strict Content-Security-Policy header"
     );
 }
