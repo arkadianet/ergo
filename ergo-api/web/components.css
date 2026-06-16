@@ -454,3 +454,9 @@ code {
 .panel__dot--blue {
   background: var(--blue);
 }
+
+/* Muted helper text. */
+.muted {
+  color: var(--tx2);
+  font-size: var(--fs-small);
+}

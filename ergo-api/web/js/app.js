@@ -20,9 +20,10 @@ import * as overview from './overview.js';
 import * as peers from './peers.js';
 import * as mempool from './mempool.js';
 import * as voting from './voting.js';
+import * as wallet from './wallet.js';
 
-const SECTIONS = ['overview', 'peers', 'mempool', 'voting'];
-const renderers = { overview, peers, mempool, voting };
+const SECTIONS = ['overview', 'peers', 'mempool', 'voting', 'wallet'];
+const renderers = { overview, peers, mempool, voting, wallet };
 const mounted = new Set();
 let current = null;
 // Holds the section name whose onSlow() is in flight, so a 4 s tick can't

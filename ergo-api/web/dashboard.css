@@ -506,3 +506,84 @@
   font-variant-numeric: tabular-nums;
   color: var(--blue);
 }
+
+/* ── Wallet section ────────────────────────────────────────────── */
+.w-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 820px;
+}
+.w-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.w-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.w-label {
+  font-size: var(--fs-small);
+  color: var(--tx2);
+}
+.w-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.w-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.w-addr {
+  font-size: var(--fs-small);
+  color: var(--tx);
+  word-break: break-all;
+  background: var(--s2);
+  border: 1px solid var(--bd2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+}
+.w-recipient {
+  border: 1px solid var(--bd2);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.w-tokens {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.w-token {
+  gap: var(--space-2);
+}
+.w-r-addr,
+.w-r-value {
+  flex: 1;
+}
+.w-mnemonic {
+  background: var(--s2);
+  border: 1px solid var(--bd);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  font-size: var(--fs-value);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--tx);
+  user-select: all;
+}
+.w-check {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  font-size: var(--fs-small);
+  color: var(--tx2);
+}

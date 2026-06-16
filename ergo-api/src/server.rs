@@ -27,7 +27,7 @@ use tracing::{error, info};
 use axum::{
     body::Bytes,
     extract::{Path, Query, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, head, post},
@@ -91,7 +91,8 @@ use crate::types::{
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP, JS_AUTH,
     JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS,
-    JS_SPARKLINE, JS_TABLE, JS_VOTING, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
+    JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML,
+    TOKENS_CSS,
     WALLET_CSS, WALLET_UI_INDEX_HTML, WALLET_UI_JS,
 };
 use ergo_indexer_types::IndexerQuery;
@@ -564,6 +565,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
+        .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/api-docs/openapi.yaml", get(openapi_yaml))
@@ -1148,9 +1150,11 @@ pub fn router_with_mempool_and_wallet_and_security(
     // parameters we don't want promoted into higher-signal logs, and the
     // path alone identifies the endpoint for correlation. Sensitive
     // per-request detail belongs in sanitized handler-level logs.
-    assembled.layer(
-        TraceLayer::new_for_http()
-            .make_span_with(|request: &Request| {
+    assembled
+        .layer(from_fn(spa_security_headers))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request| {
                 static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
                 let req_id = HTTP_REQ_SEQ.fetch_add(1, Ordering::Relaxed);
                 tracing::info_span!(
@@ -1211,13 +1215,11 @@ fn wallet_ui_router() -> Router {
 /// surface unchanged — `ergo-api`'s `tower-http` enables only the `trace`
 /// feature.
 ///
-/// The CSP is scoped to `/wallet/ui*` alone so the operator dashboard at
-/// `/` keeps its CDN-hosted web font. `Cache-Control: no-store` is a
-/// bfcache mitigation for the mnemonic-bearing pages, not a hard
-/// guarantee — some browsers retain bfcache snapshots regardless.
-async fn wallet_ui_security_headers(req: Request, next: Next) -> Response {
-    let mut resp = next.run(req).await;
-    let headers = resp.headers_mut();
+/// `Cache-Control: no-store` is a bfcache mitigation for the mnemonic-bearing
+/// pages, not a hard guarantee — some browsers retain bfcache snapshots
+/// regardless. The web font is self-hosted (see `web.rs`), so `default-src
+/// 'self'` does not block it.
+fn apply_strict_static_headers(headers: &mut HeaderMap) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
@@ -1233,6 +1235,32 @@ async fn wallet_ui_security_headers(req: Request, next: Next) -> Response {
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+}
+
+async fn wallet_ui_security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    apply_strict_static_headers(resp.headers_mut());
+    resp
+}
+
+/// The dashboard SPA at `/` now hosts the wallet section (it renders mnemonics
+/// during init), so the SPA document and its static assets carry the same
+/// strict headers as the legacy `/wallet/ui` bundle did. Scoped by path so the
+/// `/swagger*` pages (which load Swagger-UI from a CDN), `/api/*` and `/metrics`
+/// are unaffected.
+async fn spa_security_headers(req: Request, next: Next) -> Response {
+    let is_spa = {
+        let p = req.uri().path();
+        p == "/"
+            || p == "/index.html"
+            || p.starts_with("/js/")
+            || p.starts_with("/fonts/")
+            || p.ends_with(".css")
+    };
+    let mut resp = next.run(req).await;
+    if is_spa {
+        apply_strict_static_headers(resp.headers_mut());
+    }
     resp
 }
 

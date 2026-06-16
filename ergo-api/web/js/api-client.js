@@ -45,6 +45,41 @@ async function postJson(path, body) {
   }
 }
 
+// Wallet routes need the raw status + the {reason|detail} envelope (403 ->
+// re-authorize, wallet_locked, etc.), so they don't use getJson/postJson.
+// Returns { ok, status, data, reason }; reports status to auth (gated).
+async function walletReq(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  const key = getApiKey();
+  if (key) headers['api_key'] = key;
+  try {
+    const r = await fetch(path, { cache: 'no-store', ...opts, headers });
+    if (key) report(r.status, true);
+    let data = null;
+    let reason = null;
+    const text = await r.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+        reason = data.reason || data.detail || null;
+      } catch {
+        /* non-JSON body */
+      }
+    }
+    return { ok: r.ok, status: r.status, data, reason };
+  } catch (e) {
+    return { ok: false, status: 0, data: null, reason: String(e) };
+  }
+}
+
+function walletPost(path, body) {
+  return walletReq(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export const api = {
   status: () => getJson('/api/v1/status'),
   info: () => getJson('/api/v1/info'),
@@ -63,6 +98,20 @@ export const api = {
   votesHistory: () => getJson('/api/v1/votes/history'),
   // Auth-gated write: `votes` is the full desired set (replaces current).
   setVotes: (votes) => postJson('/api/v1/votes', { votes }),
+  // Wallet section: api_key-gated; each returns { ok, status, data, reason }.
+  // /lock and /deriveNextKey are GET routes (see ergo-api wallet/mod.rs).
+  wallet: {
+    status: () => walletReq('/wallet/status'),
+    init: (body) => walletPost('/wallet/init', body),
+    restore: (body) => walletPost('/wallet/restore', body),
+    unlock: (pass) => walletPost('/wallet/unlock', { pass }),
+    lock: () => walletReq('/wallet/lock'),
+    balances: () => walletReq('/wallet/balances'),
+    addresses: () => walletReq('/wallet/addresses'),
+    deriveNextKey: () => walletReq('/wallet/deriveNextKey'),
+    updateChangeAddress: (address) => walletPost('/wallet/updateChangeAddress', { address }),
+    send: (requests) => walletPost('/wallet/payment/send', requests),
+  },
 };
 
 export { getJson };
