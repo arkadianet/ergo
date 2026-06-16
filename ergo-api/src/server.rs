@@ -89,7 +89,7 @@ use crate::types::{
     RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
-    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
+    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP, JS_AUTH,
     JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS,
     JS_SPARKLINE, JS_TABLE, JS_VOTING, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
     WALLET_CSS, WALLET_UI_INDEX_HTML, WALLET_UI_JS,
@@ -553,6 +553,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/fonts/jetbrains-mono.woff2", get(jetbrains_mono_woff2))
         .route("/js/app.js", get(|| async { js(JS_APP) }))
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
+        .route("/js/auth.js", get(|| async { js(JS_AUTH) }))
         .route("/js/format.js", get(|| async { js(JS_FORMAT) }))
         .route("/js/fee-stats.js", get(|| async { js(JS_FEE_STATS) }))
         .route("/js/router.js", get(|| async { js(JS_ROUTER) }))

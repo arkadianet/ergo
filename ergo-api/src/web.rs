@@ -16,6 +16,7 @@ pub const WALLET_CSS: &str = include_str!("../web/wallet.css");
 
 // ES modules for the overhauled dashboard, served under `/js/`.
 pub const JS_API_CLIENT: &str = include_str!("../web/js/api-client.js");
+pub const JS_AUTH: &str = include_str!("../web/js/auth.js");
 pub const JS_FORMAT: &str = include_str!("../web/js/format.js");
 pub const JS_FEE_STATS: &str = include_str!("../web/js/fee-stats.js");
 pub const JS_ROUTER: &str = include_str!("../web/js/router.js");

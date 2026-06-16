@@ -1,6 +1,12 @@
 // Thin fetch wrapper. Any error/non-2xx/parse-failure resolves to null;
 // callers render placeholders. The API key (if set) is read per-call.
-import { getApiKey } from './settings.js';
+//
+// Return shapes are deliberately unchanged (data-or-null for reads,
+// {ok,status,detail} for writes). The only addition is a side-effect call to
+// auth.report() so the Authorize chip can re-verify opportunistically: a 403
+// with a key set means the key is bad; a 2xx from a *gated* write confirms it
+// (a 2xx from a public read proves nothing — see auth.js).
+import { getApiKey, report } from './auth.js';
 
 async function getJson(path) {
   try {
@@ -8,6 +14,7 @@ async function getJson(path) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { cache: 'no-store', headers });
+    if (key) report(r.status); // reads are public: only a 403 is meaningful here
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -24,6 +31,7 @@ async function postJson(path, body) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (key) report(r.status, true); // writes are gated: a 2xx here confirms the key
     if (r.ok) return { ok: true, status: r.status };
     let detail = null;
     try {

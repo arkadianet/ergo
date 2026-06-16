@@ -1,15 +1,11 @@
-// Settings: API key (session-only) + non-secret prefs (localStorage).
-const KEY = 'ergo.apikey'; // sessionStorage — never persisted to disk
+// Settings: non-secret prefs (localStorage). The api_key is NOT here anymore —
+// it lives in auth.js (the shell Authorize chip). Re-exported below so existing
+// importers keep working during the migration.
+export { getApiKey, setApiKey } from './auth.js';
+
 const PREFS = 'ergo.prefs'; // localStorage — theme/density/explorer
 const defaults = { theme: 'dark', density: 'normal', explorer: '' };
 
-export function getApiKey() {
-  return sessionStorage.getItem(KEY) || '';
-}
-export function setApiKey(v) {
-  if (v) sessionStorage.setItem(KEY, v);
-  else sessionStorage.removeItem(KEY);
-}
 export function prefs() {
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS) || '{}') };
@@ -42,8 +38,6 @@ export function initSettings(dialog, openBtn) {
   dialog.innerHTML = `
     <form method="dialog" class="dialog__body">
       <h3 class="micro-label">Settings</h3>
-      <label>API key
-        <input id="set-key" type="password" autocomplete="off"></label>
       <label>Explorer URL (optional)
         <input id="set-exp" placeholder="https://explorer.ergoplatform.com"></label>
       <label>Theme
@@ -55,14 +49,12 @@ export function initSettings(dialog, openBtn) {
         <button class="btn" value="cancel" type="submit">Close</button>
       </div>
     </form>`;
-  dialog.querySelector('#set-key').value = getApiKey();
   dialog.querySelector('#set-exp').value = p.explorer;
   dialog.querySelector('#set-theme').value = p.theme;
   dialog.querySelector('#set-den').value = p.density;
   openBtn.addEventListener('click', () => dialog.showModal());
   dialog.addEventListener('close', () => {
     if (dialog.returnValue !== 'save') return;
-    setApiKey(dialog.querySelector('#set-key').value.trim());
     setPref('explorer', dialog.querySelector('#set-exp').value.trim());
     setPref('theme', dialog.querySelector('#set-theme').value);
     setPref('density', dialog.querySelector('#set-den').value);

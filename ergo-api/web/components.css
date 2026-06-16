@@ -182,6 +182,19 @@
   gap: var(--space-3);
   justify-content: flex-end;
 }
+.dialog__note {
+  margin: 0;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--tx2);
+}
+
+/* Inline code spans (dialog notes, wallet hints). */
+code {
+  background: var(--s2);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+}
 
 /* Card-row table — fixed flex layout cannot blow out; ellipsis + copy
    on long values; rows reflow to stacked cards under 760px. */

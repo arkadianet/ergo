@@ -14,6 +14,7 @@
 //   canLeave()  — return false to veto navigation (wallet mnemonic gate).
 import { startRouter } from './router.js';
 import { initSettings, applyPrefs } from './settings.js';
+import { initAuth } from './auth.js';
 import { api } from './api-client.js';
 import * as overview from './overview.js';
 import * as peers from './peers.js';
@@ -89,6 +90,10 @@ function boot() {
   initSettings(
     document.getElementById('settings-dialog'),
     document.getElementById('open-settings'),
+  );
+  initAuth(
+    document.getElementById('auth-chip'),
+    document.getElementById('auth-dialog'),
   );
   applyPrefs();
   startRouter(SECTIONS, show, beforeLeave);
