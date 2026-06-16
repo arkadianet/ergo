@@ -44,6 +44,21 @@ window.onload = () => {
     deepLinking: true,
     presets: [SwaggerUIBundle.presets.apis],
     layout: "BaseLayout",
+    // Carry the api_key the operator set in the dashboard (⚙ Settings, kept in
+    // this origin's sessionStorage) into Swagger's `ApiKeyAuth` scheme on every
+    // load, so the gated endpoints show authorized (closed padlock) without
+    // re-entering it. Deliberately NOT `persistAuthorization` — that would write
+    // the secret to localStorage (survives tab/browser close); re-applying from
+    // sessionStorage here keeps the key session-scoped, matching how the
+    // dashboard and wallet UI hold it.
+    onComplete: () => {
+      try {
+        const key = sessionStorage.getItem("ergo.apikey");
+        if (key) window.ui.preauthorizeApiKey("ApiKeyAuth", key);
+      } catch (_) {
+        /* sessionStorage may be blocked; operator can still Authorize manually */
+      }
+    },
   });
 };
 </script>

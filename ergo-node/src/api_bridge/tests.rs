@@ -1123,6 +1123,11 @@ fn votes_serves_votable_params_from_active_set() {
     assert_eq!(sff.current, 1_250_000);
     assert_eq!((sff.step, sff.min, sff.max), (25_000, 0, 2_500_000));
     assert!(
+        sff.description.contains("Storage-rent"),
+        "votable params carry the operator-facing description: {:?}",
+        sff.description,
+    );
+    assert!(
         v.votable_parameters.iter().all(|p| p.id != 123),
         "blockVersion never votable"
     );

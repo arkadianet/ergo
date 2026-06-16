@@ -420,6 +420,9 @@ pub struct ParamDescriptor {
     pub id: u8,
     /// Stable Scala-style camelCase name.
     pub name: &'static str,
+    /// One-line operator-facing explanation of what the parameter governs and
+    /// the implication of raising it (see [`votable_param_description`]).
+    pub description: &'static str,
     /// Current value in the active table.
     pub current: i32,
     /// Per-vote step size at the current value.
@@ -444,6 +447,66 @@ pub fn votable_param_name(id: u8) -> Option<&'static str> {
         7 => "dataInputCost",
         8 => "outputCost",
         SUBBLOCKS_PER_BLOCK_ID => "subblocksPerBlock",
+        _ => return None,
+    })
+}
+
+/// One-line operator-facing description of a votable numeric parameter: what it
+/// governs and the practical implication of raising it. Surfaced by the operator
+/// votes endpoint / dashboard so an operator understands what a vote does before
+/// casting it. `None` for ids outside the votable numeric set.
+///
+/// The implication claims were verified against the cost/economic model in
+/// `dev-docs/protocol/{costing,emission-monetary}.md` and the validation code
+/// (`ergo-validation/src/tx/{script,structural}.rs`); keep them accurate if the
+/// model changes — operators cast real consensus votes based on this text.
+pub fn votable_param_description(id: u8) -> Option<&'static str> {
+    Some(match id {
+        1 => {
+            "Storage-rent fee in nanoErg per box byte, levied on boxes past the \
+              ~4-year storage period; raising it increases the rent a miner can \
+              claim from such dormant boxes."
+        }
+        2 => {
+            "Dust floor in nanoErg per box byte: every output's value must be at \
+              least its serialized size times this. Raising it forces higher \
+              minimum box values and rejects more small outputs."
+        }
+        3 => {
+            "Caps the serialized size, in bytes, of a block's transactions. \
+              Raising it lets more transactions fit per block but enlarges \
+              blocks, increasing bandwidth, storage, and validation load per node."
+        }
+        4 => {
+            "Caps total transaction validation cost summed across a block; a \
+              block over it is rejected. Raising it admits heavier blocks but \
+              raises every node's worst-case per-block validation work."
+        }
+        5 => {
+            "Block-cost units charged per token entry and per distinct token id \
+              across a tx's inputs and outputs; raising it makes token-heavy \
+              transactions consume more of the per-block cost budget."
+        }
+        6 => {
+            "Block-cost units charged per transaction input in the init cost \
+              tallied against maxBlockCost; raising it makes each input consume \
+              more budget, so fewer inputs fit per block."
+        }
+        7 => {
+            "Block-cost units charged per read-only data-input box in a \
+              transaction's init cost. Raising it makes referencing boxes more \
+              expensive, so fewer fit under the block cost cap."
+        }
+        8 => {
+            "Block-cost units charged per output box a transaction creates, added \
+              to its init cost against the block cost budget. Raising it makes \
+              outputs pricier, so fewer fit per block."
+        }
+        SUBBLOCKS_PER_BLOCK_ID => {
+            "Number of sub-blocks each block is split into \
+              (active only after the 6.0 / block-v4 fork). Raising it divides each \
+              block into more sub-blocks."
+        }
         _ => return None,
     })
 }
@@ -481,6 +544,7 @@ pub fn votable_param_descriptors(active: &ActiveProtocolParameters) -> Vec<Param
         out.push(ParamDescriptor {
             id,
             name: votable_param_name(id).expect("1..=9 are named"),
+            description: votable_param_description(id).expect("1..=9 are described"),
             current,
             step: step_for(id, current),
             min: min_value_for(id),

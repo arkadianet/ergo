@@ -43,6 +43,7 @@ function unionRows(params, configured) {
   const rows = params.map((p) => ({
     id: p.id,
     name: p.name,
+    description: p.description,
     current: p.current,
     min: p.min,
     max: p.max,
@@ -76,13 +77,24 @@ function buildRows(params, configured) {
     const tr = document.createElement('tr');
     tr.dataset.id = String(r.id);
     const nameTd = document.createElement('td');
-    nameTd.textContent = r.name;
+    const nameLine = document.createElement('div');
+    nameLine.className = 'vt-name';
+    nameLine.textContent = r.name;
     if (!r.votable) {
       // Configured but not in the current votable set — keep it, but flag it.
       const hint = document.createElement('span');
       hint.className = 'vt-inactive';
       hint.textContent = ' (not active)';
-      nameTd.append(hint);
+      nameLine.append(hint);
+    }
+    nameTd.append(nameLine);
+    // Operator-facing explanation of what the vote does (from the API). Always
+    // visible (not a hover tooltip) so the implication is clear on any device.
+    if (r.description) {
+      const desc = document.createElement('div');
+      desc.className = 'vt-desc';
+      desc.textContent = r.description;
+      nameTd.append(desc);
     }
     tr.append(
       nameTd,
