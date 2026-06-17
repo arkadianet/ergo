@@ -547,8 +547,10 @@ function showSendPanel() {
 }
 
 function setSendEnabled(unlocked) {
+  const panel = q('[data-send-panel]');
   const btn = q('[data-send-submit]');
   const note = q('[data-send-locked]');
+  if (panel) panel.classList.toggle('w-panel--locked', !unlocked);
   if (btn) btn.disabled = !unlocked;
   if (note) note.hidden = unlocked;
 }

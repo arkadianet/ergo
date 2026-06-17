@@ -85,8 +85,10 @@ function buildRows(params, configured) {
   tbody.replaceChildren();
   const cfg = new Map(configured.map((c) => [c.parameterId, c.target]));
   for (const r of unionRows(params, configured)) {
+    const hasConfiguredVote = cfg.has(r.id);
     const tr = document.createElement('tr');
     tr.dataset.id = String(r.id);
+    tr.classList.toggle('vt-row--active', hasConfiguredVote);
     const nameTd = document.createElement('td');
     nameTd.dataset.label = 'Parameter';
     const nameLine = document.createElement('div');
@@ -118,7 +120,7 @@ function buildRows(params, configured) {
     const live = document.createElement('td');
     live.className = 'table__num vt-live';
     live.dataset.label = 'Voting';
-    live.textContent = cfg.has(r.id) ? num(cfg.get(r.id)) : '—';
+    paintLiveCell(live, hasConfiguredVote, cfg.get(r.id));
     tr.append(live);
     // editable target input
     const inputTd = document.createElement('td');
@@ -135,12 +137,18 @@ function buildRows(params, configured) {
     input.setAttribute('aria-label', `${r.name} vote target`);
     input.dataset.id = String(r.id);
     input.dataset.name = r.name;
-    if (cfg.has(r.id)) input.value = String(cfg.get(r.id));
+    input.classList.toggle('vt-input--active', hasConfiguredVote);
+    if (hasConfiguredVote) input.value = String(cfg.get(r.id));
     inputTd.append(input);
     tr.append(inputTd);
     tbody.append(tr);
   }
   builtKey = rowsKey(params, configured);
+}
+
+function paintLiveCell(cellEl, active, value) {
+  cellEl.textContent = active ? num(value) : '—';
+  cellEl.classList.toggle('vt-live--active', active);
 }
 
 // Light per-poll refresh: update the read-only current + live-target cells
@@ -150,10 +158,14 @@ function refreshCells(params, configured) {
   const curById = new Map(params.map((p) => [p.id, p.current]));
   for (const tr of root.querySelectorAll('tr[data-id]')) {
     const id = Number(tr.dataset.id);
+    const hasConfiguredVote = cfg.has(id);
+    tr.classList.toggle('vt-row--active', hasConfiguredVote);
     const cur = tr.querySelector('.vt-current');
     if (cur && curById.has(id)) cur.textContent = num(curById.get(id));
     const live = tr.querySelector('.vt-live');
-    if (live) live.textContent = cfg.has(id) ? num(cfg.get(id)) : '—';
+    if (live) paintLiveCell(live, hasConfiguredVote, cfg.get(id));
+    const input = tr.querySelector('.vt-input');
+    if (input) input.classList.toggle('vt-input--active', hasConfiguredVote);
   }
 }
 
