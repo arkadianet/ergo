@@ -18,6 +18,17 @@ use crate::types::{
     SubmitError, SubmitMode,
 };
 
+/// Snapshot-read surface the node implements for the API server.
+///
+/// **Production-override contract.** Several methods below ship a default impl
+/// that returns an empty / `Default` value. Those defaults exist *solely* so
+/// the many test fixtures that implement this trait need not be updated every
+/// time a read method is added — they are **not** a valid production shape. Any
+/// operator-facing implementation MUST override every defaulted method: a
+/// missing override compiles cleanly but then silently serves empty data on a
+/// live endpoint (e.g. `GET /api/v1/votes`). The production `SnapshotReadState`
+/// in `ergo-node` overrides all of them. When adding a method here, make it
+/// required unless test fixtures genuinely never exercise the route.
 pub trait NodeReadState: Send + Sync {
     fn info(&self) -> ApiInfo;
     fn status(&self) -> ApiStatus;

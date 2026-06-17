@@ -23,7 +23,11 @@ pub trait NodeChainQuery: Send + Sync {
     /// reconstructed from the node's stored per-epoch parameter rows. Native
     /// (`/api/v1/*`), not a Scala route, but it rides this store-backed trait
     /// because the history comes from `voted_params`, not the snapshot.
-    /// Default empty for bridges without a chain store.
+    ///
+    /// The default returns an empty timeline. Any store-backed (production)
+    /// bridge MUST override it — a missing override compiles cleanly but then
+    /// silently serves an empty history on this live endpoint. The production
+    /// bridge in `ergo-node` overrides it from `voted_params`.
     fn votes_history(&self) -> crate::types::ApiVotesHistory {
         crate::types::ApiVotesHistory::default()
     }

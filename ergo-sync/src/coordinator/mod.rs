@@ -2,7 +2,8 @@
 //!
 //! Takes incoming events (messages received, timeouts, state changes) and
 //! produces outgoing actions (send messages, persist data, validate headers).
-//! Pure logic — no I/O or async. The caller (network loop) executes actions.
+//! Pure logic — no I/O or async beyond `tracing` diagnostics; every other
+//! effect is an emitted `Action`. The caller (network loop) executes actions.
 //!
 //! Integrates: DeliveryTracker, AssemblyTracker, SyncState, PeerChainStatus.
 //!
@@ -33,11 +34,12 @@ use ergo_ser::modifier_id::{
 
 /// An action for the network/state layer to execute.
 ///
-/// Logging is emitted directly via `eprintln!` at the call site (no Log
-/// variant): a routed variant allocated a `String` eagerly even for
-/// suppressed Debug lines and added a three-layer match just to reach
-/// stderr. Routed effects that DO carry weight (ordering, channel-full
-/// recovery, executor fixed-point drains) stay in the enum.
+/// Diagnostics are emitted directly via `tracing` macros at the call site,
+/// deliberately *not* as a routed `Log` variant: a routed variant would
+/// allocate a `String` eagerly even for suppressed (filtered-out) lines and
+/// add a three-layer match just to reach the subscriber. Routed effects that
+/// DO carry weight (ordering, channel-full recovery, executor fixed-point
+/// drains) stay in the enum.
 #[derive(Debug)]
 pub enum Action {
     /// Send a message to a specific peer.

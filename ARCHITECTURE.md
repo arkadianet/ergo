@@ -222,8 +222,9 @@ oracle-parity tests.
 
 ### Sync (`ergo-sync`)
 
-- **Coordinator purity.** `SyncCoordinator` performs no I/O and no async — every
-  effect is an emitted `Action`. This is the testability/determinism contract.
+- **Coordinator purity.** `SyncCoordinator` performs no I/O and no async beyond
+  `tracing` diagnostics — every other effect is an emitted `Action`. This is the
+  testability/determinism contract.
 - **One PoW per header.** `pre_validate_header` produces an unforgeable
   `PowCheckedHeader`; `finalize_header` consumes it without re-checking, and
   orphan retries reuse the cached proof.
