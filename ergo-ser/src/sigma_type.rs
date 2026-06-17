@@ -1,3 +1,4 @@
+use crate::error::WriteError;
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
@@ -154,7 +155,7 @@ impl SigmaType {
 }
 
 /// Serialize a Sigma type descriptor.
-pub fn write_type(w: &mut VlqWriter, t: &SigmaType) {
+pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
     match t {
         // Primitives: single byte = type code
         SigmaType::SBoolean => w.put_u8(1),
@@ -177,33 +178,38 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) {
         SigmaType::SContext => w.put_u8(SCONTEXT_CODE),
         SigmaType::SString => w.put_u8(SSTRING_CODE),
         SigmaType::STypeVar(ref name) => {
-            // Scala TypeSerializer writes name length as a single
-            // unsigned byte (`w.putUByte(name.length)` /
-            // `r.getUByte()` at TypeSerializer.scala:203). VLQ-u32 would
-            // round-trip on the wire for length < 128 (VLQ 1-byte and
-            // raw u8 alias) but desync from Scala for 128..=255.
-            assert!(
-                name.len() <= u8::MAX as usize,
-                "STypeVar name too long for Scala wire format: {} bytes (max 255)",
-                name.len()
-            );
+            // Scala TypeSerializer writes the name length as a single unsigned
+            // byte (`w.putUByte(bytes.length)` at TypeSerializer.scala:124).
+            // A lossy-decoded name (see [`crate::jvm_utf8`]) can re-encode
+            // longer than the original wire bytes — e.g. 86 bytes of 0xff
+            // expand to 258 bytes of U+FFFD — overflowing the length byte.
+            // Scala's `putUByte` throws on the same overflow, so we mirror it
+            // with a recoverable error rather than a panic (the consensus
+            // box/tx ids use the original wire bytes, never this writer).
+            let bytes = name.as_bytes();
+            if bytes.len() > u8::MAX as usize {
+                return Err(WriteError::InvalidData(format!(
+                    "STypeVar name too long for Scala wire format: {} bytes (max 255)",
+                    bytes.len()
+                )));
+            }
             w.put_u8(STYPEVAR_CODE);
-            w.put_u8(name.len() as u8);
-            w.put_bytes(name.as_bytes());
+            w.put_u8(bytes.len() as u8);
+            w.put_bytes(bytes);
         }
         SigmaType::SHeader => w.put_u8(SHEADER_CODE),
         SigmaType::SPreHeader => w.put_u8(SPREHEADER_CODE),
         SigmaType::SGlobal => w.put_u8(SGLOBAL_CODE),
 
         // Coll[T] — constrId 1, or Coll[Coll[T]] — constrId 2
-        SigmaType::SColl(elem) => write_coll(w, elem),
+        SigmaType::SColl(elem) => write_coll(w, elem)?,
 
         // Option[T] — constrId 3, or Option[Coll[T]] — constrId 4
-        SigmaType::SOption(elem) => write_option(w, elem),
+        SigmaType::SOption(elem) => write_option(w, elem)?,
 
         // Tuples: pairs (constrId 5/6/7), triples (constrId 6 primId=0),
         // quads (constrId 7 primId=0), and general (TUPLE_CODE for 5+)
-        SigmaType::STuple(elems) => write_tuple(w, elems),
+        SigmaType::STuple(elems) => write_tuple(w, elems)?,
 
         // SFunc: FUNC_CODE + 1-byte domain count + domain types + range
         // type + 1-byte tpeParams count + STypeVar idents. Counts are
@@ -214,31 +220,34 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) {
             t_range,
             tpe_params,
         } => {
-            assert!(
-                t_dom.len() <= u8::MAX as usize,
-                "SFunc domain count too large for Scala wire format: {} (max 255)",
-                t_dom.len()
-            );
-            assert!(
-                tpe_params.len() <= u8::MAX as usize,
-                "SFunc tpeParams count too large for Scala wire format: {} (max 255)",
-                tpe_params.len()
-            );
+            if t_dom.len() > u8::MAX as usize {
+                return Err(WriteError::InvalidData(format!(
+                    "SFunc domain count too large for Scala wire format: {} (max 255)",
+                    t_dom.len()
+                )));
+            }
+            if tpe_params.len() > u8::MAX as usize {
+                return Err(WriteError::InvalidData(format!(
+                    "SFunc tpeParams count too large for Scala wire format: {} (max 255)",
+                    tpe_params.len()
+                )));
+            }
             w.put_u8(FUNC_CODE);
             w.put_u8(t_dom.len() as u8);
             for d in t_dom {
-                write_type(w, d);
+                write_type(w, d)?;
             }
-            write_type(w, t_range);
+            write_type(w, t_range)?;
             w.put_u8(tpe_params.len() as u8);
             for p in tpe_params {
-                write_type(w, p);
+                write_type(w, p)?;
             }
         }
     }
+    Ok(())
 }
 
-fn write_coll(w: &mut VlqWriter, elem: &SigmaType) {
+fn write_coll(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
     // Coll[Coll[embeddable]] has a compressed single-byte form (constrId 2,
     // 0x18 + the embeddable code). This optimization applies ONLY when the
     // innermost element is embeddable; Coll[Coll[non-embeddable]] uses the
@@ -248,7 +257,7 @@ fn write_coll(w: &mut VlqWriter, elem: &SigmaType) {
     if let SigmaType::SColl(inner) = elem {
         if let Some(code) = inner.embeddable_code() {
             w.put_u8(COLL_COLL_CODE + code);
-            return;
+            return Ok(());
         }
         // else: fall through to the general Coll[elem] path below, which
         // writes COLL_CODE then recurses into `elem` (the inner Coll).
@@ -258,11 +267,12 @@ fn write_coll(w: &mut VlqWriter, elem: &SigmaType) {
         w.put_u8(COLL_CODE + code);
     } else {
         w.put_u8(COLL_CODE);
-        write_type(w, elem);
+        write_type(w, elem)?;
     }
+    Ok(())
 }
 
-fn write_option(w: &mut VlqWriter, elem: &SigmaType) {
+fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
     // Check for Option[Coll[T]] — constrId 4
     if let SigmaType::SColl(inner) = elem {
         if let Some(code) = inner.embeddable_code() {
@@ -271,34 +281,35 @@ fn write_option(w: &mut VlqWriter, elem: &SigmaType) {
         } else {
             // Option[Coll[complex]] — constrId 4 + primId 0, then inner type
             w.put_u8(OPTION_COLL_CODE);
-            write_type(w, inner);
+            write_type(w, inner)?;
         }
-        return;
+        return Ok(());
     }
     // Option[T] — constrId 3
     if let Some(code) = elem.embeddable_code() {
         w.put_u8(OPTION_CODE + code);
     } else {
         w.put_u8(OPTION_CODE);
-        write_type(w, elem);
+        write_type(w, elem)?;
     }
+    Ok(())
 }
 
-fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) {
+fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError> {
     match elems.len() {
-        2 => write_pair(w, &elems[0], &elems[1]),
+        2 => write_pair(w, &elems[0], &elems[1])?,
         3 => {
             // Triple: constrId 6, primId 0 => byte 72, then 3 types
             w.put_u8(PAIR2_CODE);
             for elem in elems {
-                write_type(w, elem);
+                write_type(w, elem)?;
             }
         }
         4 => {
             // Quad: constrId 7, primId 0 => byte 84, then 4 types
             w.put_u8(PAIR_SYM_CODE);
             for elem in elems {
-                write_type(w, elem);
+                write_type(w, elem)?;
             }
         }
         n => {
@@ -306,43 +317,46 @@ fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) {
             // Scala writes count as a single unsigned byte
             // (`w.putUByte` at TypeSerializer.scala:189 read path;
             // matched in TupleSerializer for the value-level tuple).
-            assert!(
-                n <= u8::MAX as usize,
-                "STuple element count too large for Scala wire format: {n} (max 255)"
-            );
+            if n > u8::MAX as usize {
+                return Err(WriteError::InvalidData(format!(
+                    "STuple element count too large for Scala wire format: {n} (max 255)"
+                )));
+            }
             w.put_u8(TUPLE_CODE);
             w.put_u8(n as u8);
             for elem in elems {
-                write_type(w, elem);
+                write_type(w, elem)?;
             }
         }
     }
+    Ok(())
 }
 
-fn write_pair(w: &mut VlqWriter, t1: &SigmaType, t2: &SigmaType) {
+fn write_pair(w: &mut VlqWriter, t1: &SigmaType, t2: &SigmaType) -> Result<(), WriteError> {
     // Symmetric pair: both elements are the same embeddable type — constrId 7
     if t1 == t2 {
         if let Some(code) = t1.embeddable_code() {
             w.put_u8(PAIR_SYM_CODE + code);
-            return;
+            return Ok(());
         }
     }
     // First element embeddable — constrId 5
     if let Some(code) = t1.embeddable_code() {
         w.put_u8(PAIR1_CODE + code);
-        write_type(w, t2);
-        return;
+        write_type(w, t2)?;
+        return Ok(());
     }
     // Second element embeddable — constrId 6
     if let Some(code) = t2.embeddable_code() {
         w.put_u8(PAIR2_CODE + code);
-        write_type(w, t1);
-        return;
+        write_type(w, t1)?;
+        return Ok(());
     }
     // Neither element embeddable — constrId 5, primId 0 (general pair)
     w.put_u8(PAIR1_CODE);
-    write_type(w, t1);
-    write_type(w, t2);
+    write_type(w, t1)?;
+    write_type(w, t2)?;
+    Ok(())
 }
 
 /// Deserialize a Sigma type descriptor. Public entry — starts the
@@ -398,16 +412,16 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
         SCONTEXT_CODE => Ok(SigmaType::SContext),
         SSTRING_CODE => Ok(SigmaType::SString),
         STYPEVAR_CODE => {
-            // Scala TypeSerializer.scala:203 reads name length as
-            // unsigned byte and accepts anything in 0..=255 — no
-            // additional Rust-side cap. A tighter cap would reject
-            // Scala-valid descriptors and silently diverge from the
-            // accept set.
+            // Scala TypeSerializer.scala:203-204 reads the name length as an
+            // unsigned byte (anything 0..=255) and decodes the bytes with
+            // `new String(bytes, UTF_8)` — the JVM's LOSSY decoder. A strict
+            // `from_utf8` here rejected ill-formed names the Scala node
+            // accepts (reject-valid on sizeless trees; a too-broad soft-fork
+            // placeholder on size-delimited ones), so we mirror the JVM byte
+            // for byte. See [`crate::jvm_utf8`].
             let name_len = r.get_u8()? as usize;
             let name_bytes = r.get_bytes(name_len)?;
-            let name = String::from_utf8(name_bytes.to_vec())
-                .map_err(|e| ReadError::InvalidData(format!("invalid type variable name: {e}")))?;
-            Ok(SigmaType::STypeVar(name))
+            Ok(SigmaType::STypeVar(crate::jvm_utf8::decode(name_bytes)))
         }
         SHEADER_CODE => Ok(SigmaType::SHeader),
         SPREHEADER_CODE => Ok(SigmaType::SPreHeader),
@@ -598,7 +612,7 @@ mod tests {
 
     fn encode(t: &SigmaType) -> Vec<u8> {
         let mut w = VlqWriter::new();
-        write_type(&mut w, t);
+        write_type(&mut w, t).unwrap();
         w.result()
     }
 
@@ -879,37 +893,63 @@ mod tests {
         );
     }
 
-    // Write-side bound assertions: programmer constructing a SigmaType
-    // with a length / count that overflows Scala's single-byte wire
-    // form. Panic at the construction site so the bug surfaces before
-    // a corrupted wire stream propagates downstream.
+    // Write-side bound checks: a SigmaType whose length / count overflows
+    // Scala's single-byte wire form must surface a recoverable WriteError
+    // (Scala's `putUByte` throws on the same overflow). A lossy-decoded
+    // STypeVar name (see [`crate::jvm_utf8`]) is the reachable trigger — it
+    // can expand past 255 bytes — so this MUST NOT panic the node.
 
-    #[test]
-    #[should_panic(expected = "STypeVar name too long for Scala wire format")]
-    fn stypevar_name_above_255_panics_on_write() {
-        let name = "x".repeat(256);
-        let t = SigmaType::STypeVar(name);
-        let _ = encode(&t);
+    fn write_err(t: &SigmaType) -> WriteError {
+        let mut w = VlqWriter::new();
+        write_type(&mut w, t).expect_err("expected a WriteError, got Ok")
     }
 
     #[test]
-    #[should_panic(expected = "STuple element count too large for Scala wire format")]
-    fn stuple_count_above_255_panics_on_write() {
+    fn stypevar_name_above_255_errors_on_write() {
+        let err = write_err(&SigmaType::STypeVar("x".repeat(256)));
+        assert!(
+            matches!(&err, WriteError::InvalidData(m) if m.contains("STypeVar name too long")),
+            "got: {err:?}"
+        );
+    }
+
+    /// The reachable trigger: a lossy-decoded name can EXPAND past 255 bytes
+    /// (86 bytes of 0xff -> 86x U+FFFD = 258 bytes). Such a name is accepted at
+    /// parse (matching the JVM) but must surface a WriteError on re-serialize,
+    /// NOT panic the node.
+    #[test]
+    fn lossy_expanded_stypevar_name_errors_on_write_not_panics() {
+        let name = crate::jvm_utf8::decode(&[0xffu8; 86]);
+        assert_eq!(name.len(), 86 * 3, "each 0xff -> 3-byte U+FFFD");
+        let err = write_err(&SigmaType::STypeVar(name));
+        assert!(
+            matches!(&err, WriteError::InvalidData(m) if m.contains("STypeVar name too long")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn stuple_count_above_255_errors_on_write() {
         let elems: Vec<SigmaType> = (0..256).map(|_| SigmaType::SInt).collect();
-        let t = SigmaType::STuple(elems);
-        let _ = encode(&t);
+        let err = write_err(&SigmaType::STuple(elems));
+        assert!(
+            matches!(&err, WriteError::InvalidData(m) if m.contains("STuple element count too large")),
+            "got: {err:?}"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "SFunc domain count too large for Scala wire format")]
-    fn sfunc_dom_count_above_255_panics_on_write() {
+    fn sfunc_dom_count_above_255_errors_on_write() {
         let t_dom: Vec<SigmaType> = (0..256).map(|_| SigmaType::SInt).collect();
-        let t = SigmaType::SFunc {
+        let err = write_err(&SigmaType::SFunc {
             t_dom,
             t_range: Box::new(SigmaType::SUnit),
             tpe_params: vec![],
-        };
-        let _ = encode(&t);
+        });
+        assert!(
+            matches!(&err, WriteError::InvalidData(m) if m.contains("SFunc domain count too large")),
+            "got: {err:?}"
+        );
     }
 
     #[test]

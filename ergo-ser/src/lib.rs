@@ -41,6 +41,7 @@ pub mod error;
 pub mod extension;
 pub mod header;
 pub mod input;
+pub mod jvm_utf8;
 pub mod modifier_id;
 pub mod opcode;
 pub mod popow_header;

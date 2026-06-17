@@ -110,7 +110,7 @@ fn write_payload(
             );
             w.put_u8(tpe_args.len() as u8);
             for t in tpe_args {
-                crate::sigma_type::write_type(w, t);
+                crate::sigma_type::write_type(w, t)?;
             }
             write_expr(w, rhs, cseg)?;
         }
@@ -128,7 +128,7 @@ fn write_payload(
             for (id, tpe) in args {
                 w.put_u32(*id);
                 let t = tpe.as_ref().expect("FuncValue arg always has type");
-                write_type(w, t);
+                write_type(w, t)?;
             }
             write_expr(w, body, cseg)?;
         }
@@ -161,13 +161,13 @@ fn write_payload(
             // `method_explicit_type_args_count` (0 for almost everything,
             // 1 for the v6 methods declaring `Seq(tT)`); zero writes zero.
             for t in type_args {
-                crate::sigma_type::write_type(w, t);
+                crate::sigma_type::write_type(w, t)?;
             }
         }
 
         Payload::ConcreteCollection { elem_type, items } => {
             w.put_u16(items.len() as u16);
-            write_type(w, elem_type);
+            write_type(w, elem_type)?;
             for item in items {
                 write_expr(w, item, cseg)?;
             }
@@ -212,17 +212,17 @@ fn write_payload(
         Payload::ExtractRegisterAs { input, reg_id, tpe } => {
             write_expr(w, input, cseg)?;
             w.put_u8(*reg_id);
-            write_type(w, tpe);
+            write_type(w, tpe)?;
         }
 
         Payload::GetVar { var_id, tpe } => {
             w.put_u8(*var_id);
-            write_type(w, tpe);
+            write_type(w, tpe)?;
         }
 
         Payload::DeserializeContext { id, tpe } => {
             // Scala: type first, then id
-            write_type(w, tpe);
+            write_type(w, tpe)?;
             w.put_u8(*id);
         }
 
@@ -232,7 +232,7 @@ fn write_payload(
             default,
         } => {
             w.put_u8(*reg_id);
-            write_type(w, tpe);
+            write_type(w, tpe)?;
             if let Some(d) = default {
                 w.put_u8(1);
                 write_expr(w, d, cseg)?;
@@ -249,7 +249,7 @@ fn write_payload(
         }
 
         Payload::NoneValue { tpe } => {
-            write_type(w, tpe);
+            write_type(w, tpe)?;
         }
 
         Payload::ByIndex {
@@ -269,7 +269,7 @@ fn write_payload(
 
         Payload::NumericCast { input, tpe } => {
             write_expr(w, input, cseg)?;
-            write_type(w, tpe);
+            write_type(w, tpe)?;
         }
 
         Payload::FuncApply { func, args } => {

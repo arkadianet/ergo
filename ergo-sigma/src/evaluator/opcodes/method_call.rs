@@ -2958,10 +2958,16 @@ pub(in crate::evaluator) fn serialize_put_cost(
 /// the serialized type's byte length. `ergo_ser::sigma_type::write_type` IS the
 /// TypeSerializer encoder, so serialize-and-count is exact for every type
 /// (including the pair/triple/quad/tuple-n encodings).
-fn type_enc_bytes(tpe: &ergo_ser::sigma_type::SigmaType) -> u64 {
+fn type_enc_bytes(tpe: &ergo_ser::sigma_type::SigmaType) -> Result<u64, EvalError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
-    ergo_ser::sigma_type::write_type(&mut w, tpe);
-    w.result().len() as u64
+    // A type whose length/count overflows Scala's single-byte wire form (e.g. a
+    // lossy-decoded STypeVar name > 255 bytes) makes Scala's `putUByte` throw a
+    // SerializerException mid-cost; mirror that as a runtime eval failure rather
+    // than a panic.
+    ergo_ser::sigma_type::write_type(&mut w, tpe).map_err(|_| {
+        EvalError::RuntimeException("TypeSerializer.serialize: type too large for wire format")
+    })?;
+    Ok(w.result().len() as u64)
 }
 
 /// JitCost of `SigmaByteWriter.putValue(v)` for a box register value, mirroring
@@ -2998,7 +3004,7 @@ fn register_put_value_cost(bytes: &[u8]) -> Result<u64, EvalError> {
 fn expr_put_value_cost(expr: &Expr) -> Result<u64, EvalError> {
     use ergo_ser::opcode::{IrNode, Payload};
     match expr {
-        Expr::Const { tpe, val } => Ok(type_enc_bytes(tpe) + serialize_put_cost(tpe, val)?),
+        Expr::Const { tpe, val } => Ok(type_enc_bytes(tpe)? + serialize_put_cost(tpe, val)?),
         Expr::Op(IrNode {
             opcode: 0x86,
             payload: Payload::Tuple { items },
@@ -3020,7 +3026,7 @@ fn expr_put_value_cost(expr: &Expr) -> Result<u64, EvalError> {
             payload: Payload::ConcreteCollection { elem_type, items },
         }) => {
             // put(opCode)=1 + putUShort(size)=3 + putType(elemType)
-            let mut c = 1 + 3 + type_enc_bytes(elem_type);
+            let mut c = 1 + 3 + type_enc_bytes(elem_type)?;
             for item in items {
                 c += expr_put_value_cost(item)?;
             }
