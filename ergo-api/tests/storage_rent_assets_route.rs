@@ -273,6 +273,7 @@ async fn matures_at_height_zero_short_circuits_before_voted_param_lookup() {
     let (status, body) = json_get(app, "/blockchain/storageRent/maturesAt/0").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
 }
 
 #[tokio::test]
@@ -285,6 +286,7 @@ async fn matures_in_range_to_height_zero_short_circuits_before_voted_param_looku
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
 }
 
 // ---- stubs --------------------------------------------------------
