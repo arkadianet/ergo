@@ -1351,7 +1351,7 @@ async fn wallet_css() -> Response {
         description = "Rust-native operator API for the Ergo node (`/api/v1/*`). \
 This document describes the production-superset route set: the conditional routes \
 (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, \
-`/api/v1/difficulty/history`) are mounted only when the node is wired with the matching \
+`/api/v1/difficulty/history`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
 submit / admin / chain-reader handles, so a given process may serve fewer routes than \
 appear here. Query `GET /api/v1/health` to confirm a running node's state."
     ),

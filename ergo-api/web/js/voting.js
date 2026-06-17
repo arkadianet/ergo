@@ -165,6 +165,10 @@ async function save() {
       invalid.push(`${label} is not a number`);
       continue;
     }
+    if (!Number.isInteger(target)) {
+      invalid.push(`${label} must be a whole number`);
+      continue;
+    }
     // A vote can only move a parameter within its allowable [min, max] — a
     // target beyond that can never be reached, so reject it here (the node
     // enforces the same bound authoritatively). Bounds present only on votable
