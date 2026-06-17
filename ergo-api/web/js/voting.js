@@ -211,22 +211,34 @@ export function mount(el) {
   builtKey = null;
   loadFailed = false;
   el.innerHTML = `
-    <div class="pg-head"><span class="pg-title">Voting</span>
-      <span class="pg-count micro-label" data-meta></span></div>
-    <p class="vt-note micro-label">
-      Set the value the node should vote toward for each parameter (within its allowed range);
-      the node then casts votes for you while mining. Setting requires an api_key
-      (use the Authorize chip in the sidebar) and a mining node — viewing is always available.
-    </p>
-    <p class="vt-note micro-label">
-      <b>How votes are applied.</b> Each block can carry at most <b>two</b> parameter votes — a
-      consensus limit, so extra targets can’t all be cast at once. A parameter changes only once
-      <b>more than half the blocks in the voting epoch</b> carry its vote (over 512 of 1024 on
-      mainnet), and then it moves by exactly <b>one step</b>, never past its range. If you target
-      more than two parameters the node votes for the <b>lowest-numbered</b> ones first and skips
-      any already at your target or at a range bound, so the remaining targets take their turn in
-      later epochs as the leading ones settle.
-    </p>
+    <div class="pg-head">
+      <div>
+        <h1 class="pg-title">Voting</h1>
+        <span class="pg-count micro-label" data-meta></span>
+      </div>
+    </div>
+    <div class="vt-rules" aria-label="Voting rules">
+      <div class="vt-rule">
+        <span class="micro-label">Targets</span>
+        <b>Within range</b>
+        <span>Blank clears a vote; saves replace the full target set.</span>
+      </div>
+      <div class="vt-rule">
+        <span class="micro-label">Authority</span>
+        <b>api_key + mining</b>
+        <span>Viewing is public; writes require an authorized mining node.</span>
+      </div>
+      <div class="vt-rule">
+        <span class="micro-label">Per block</span>
+        <b>Two votes</b>
+        <span>Extra targets wait while lower numbered parameters settle.</span>
+      </div>
+      <div class="vt-rule">
+        <span class="micro-label">Per epoch</span>
+        <b>One step</b>
+        <span>Changes need more than half of epoch blocks carrying the vote.</span>
+      </div>
+    </div>
     <table class="table">
       <thead><tr>
         <th>Parameter</th><th class="table__num">Current</th><th class="table__num">Range</th>
@@ -240,8 +252,12 @@ export function mount(el) {
       <span class="vt-status" data-status aria-live="polite"></span>
     </div>
     <div class="vt-history">
-      <div class="pg-head"><span class="pg-title">Parameter change history</span>
-        <span class="pg-count micro-label" data-hist-meta></span></div>
+      <div class="pg-head">
+        <div>
+          <h1 class="pg-title">Parameter history</h1>
+          <span class="pg-count micro-label" data-hist-meta></span>
+        </div>
+      </div>
       <p class="vt-note micro-label">
         How each protocol parameter has moved over time, one row per parameter. A vote can
         shift a parameter by at most one step per epoch and only within its allowable range,

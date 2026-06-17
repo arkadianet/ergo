@@ -11,6 +11,7 @@ export function makeTable(container, columns, opts = {}) {
 
   const table = document.createElement('div');
   table.className = 'dtable';
+  table.setAttribute('role', 'table');
   container.replaceChildren(table);
 
   function cell(c, row) {
@@ -27,12 +28,14 @@ export function makeTable(container, columns, opts = {}) {
   function header() {
     const h = document.createElement('div');
     h.className = 'dtable__head';
+    h.setAttribute('role', 'row');
     for (const c of columns) {
       const s = document.createElement('button');
       s.className = 'dtable__th micro-label' + (c.align === 'right' ? ' dtable__c--r' : '');
       s.style.flex = c.width ? `0 0 ${c.width}px` : '1';
       s.textContent = c.label + (sort.key === c.key ? (sort.dir < 0 ? ' ▾' : ' ▴') : '');
       s.setAttribute('aria-sort', sort.key === c.key ? (sort.dir < 0 ? 'descending' : 'ascending') : 'none');
+      s.setAttribute('role', 'columnheader');
       s.onclick = () => {
         sort = { key: c.key, dir: sort.key === c.key ? -sort.dir : -1 };
         draw();
@@ -54,7 +57,15 @@ export function makeTable(container, columns, opts = {}) {
 
   function draw() {
     table.replaceChildren(header());
-    for (const row of sortedRows()) {
+    const nextRows = sortedRows();
+    if (!nextRows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dtable__empty';
+      empty.textContent = 'No rows to display.';
+      table.append(empty);
+      return;
+    }
+    for (const row of nextRows) {
       const r = document.createElement('div');
       r.className = 'dtable__row';
       const rk = opts.rowKey(row);
@@ -62,6 +73,8 @@ export function makeTable(container, columns, opts = {}) {
       for (const c of columns) r.append(cell(c, row));
       if (opts.renderDetail) {
         r.tabIndex = 0;
+        r.setAttribute('role', 'button');
+        r.setAttribute('aria-expanded', String(expanded === rk));
         const toggle = (e) => {
           if (e.target.closest('.copy')) return;
           expanded = expanded === rk ? null : rk;

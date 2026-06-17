@@ -35,7 +35,7 @@ function setConn(ok) {
   const dot = document.getElementById('conn-dot');
   const state = document.getElementById('conn-state');
   if (dot) dot.style.color = ok ? 'var(--green)' : 'var(--red)';
-  if (state) state.textContent = ok ? 'live' : 'unreachable';
+  if (state) state.textContent = ok ? 'Live' : 'Unreachable';
 }
 
 function tickClock() {

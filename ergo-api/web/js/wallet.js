@@ -68,7 +68,11 @@ export function mount(el_) {
   root = el_;
   // Static shells only; bodies are filled with DOM nodes (textContent) below.
   root.innerHTML = `
-    <div class="pg-head"><span class="pg-title">Wallet</span></div>
+    <div class="pg-head">
+      <div>
+        <h1 class="pg-title">Wallet</h1>
+      </div>
+    </div>
     <div class="ov-prompt banner banner--info" data-wallet-prompt hidden></div>
     <div class="w-wrap" data-wallet-app hidden>
       <div class="banner banner--warn" data-scan-banner hidden></div>
@@ -210,9 +214,9 @@ function renderStatusPanel(s) {
   const kv = el('div', { class: 'kv' });
   kv.append(
     el('div', { class: 'k', text: 'initialized' }),
-    el('div', { class: `v ${s.isInitialized ? 'v--green' : 'v--dim'}`, text: String(s.isInitialized) }),
+    el('div', { class: `v ${s.isInitialized ? 'v--green' : 'v--dim'}`, text: s.isInitialized ? 'ready' : 'not set up' }),
     el('div', { class: 'k', text: 'unlocked' }),
-    el('div', { class: `v ${s.isUnlocked ? 'v--green' : 'v--dim'}`, text: String(s.isUnlocked) }),
+    el('div', { class: `v ${s.isUnlocked ? 'v--green' : 'v--dim'}`, text: s.isUnlocked ? 'unlocked' : 'locked' }),
     el('div', { class: 'k', text: 'change address' }),
     changeAddr,
     el('div', { class: 'k', text: 'wallet height' }),

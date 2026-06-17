@@ -66,12 +66,15 @@ export function mount(el) {
   root = el;
   el.innerHTML = `
     <div class="ov-prompt banner banner--info" data-auth-prompt hidden></div>
-    <div class="ov-top">
-      <div class="ov-ident" data-ident hidden>
-        <span class="ov-ident__mode" data-ident-mode>—</span>
-        <span class="ov-ident__chips" data-ident-chips></span>
+    <div class="pg-head pg-head--flush ov-top">
+      <div>
+        <h1 class="pg-title">Node overview</h1>
+        <div class="ov-ident" data-ident hidden>
+          <span class="ov-ident__mode" data-ident-mode>—</span>
+          <span class="ov-ident__chips" data-ident-chips></span>
+        </div>
       </div>
-      <div class="tabs ov-toggle">
+      <div class="tabs ov-toggle" aria-label="overview view">
         <button class="tab" type="button" data-view="cockpit">Cockpit</button>
         <button class="tab" type="button" data-view="charts">Charts</button>
       </div>
@@ -265,7 +268,7 @@ function panel(title, openHash) {
   const head = document.createElement('div');
   head.className = 'panel__head';
   const t = document.createElement('span');
-  t.className = 'micro-label';
+  t.className = 'panel__title';
   t.textContent = title;
   head.append(t);
   if (openHash) {

@@ -112,8 +112,12 @@ function renderDetail(t) {
 export function mount(el) {
   root = el;
   el.innerHTML = `
-    <div class="pg-head"><span class="pg-title">Mempool</span>
-      <span class="pg-count micro-label" data-count></span></div>
+    <div class="pg-head">
+      <div>
+        <h1 class="pg-title">Mempool</h1>
+        <span class="pg-count micro-label" data-count></span>
+      </div>
+    </div>
     <div class="mp-cap">
       <div class="mp-cell">
         <div class="micro-label">Slots · capacity (Scala parity)</div>

@@ -138,7 +138,7 @@ function renderChip(chip, s) {
   dot.style.color = DOT[s];
   dot.setAttribute('aria-hidden', 'true');
   const label = document.createElement('span');
-  label.textContent = ` ${LABELS[s]}`;
+  label.textContent = LABELS[s];
   chip.replaceChildren(dot, label);
   chip.setAttribute('aria-label', `Authorization: ${LABELS[s]}`);
   chip.title = TITLES[s];
