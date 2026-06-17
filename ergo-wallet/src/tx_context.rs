@@ -264,6 +264,7 @@ fn ergo_box_to_eval_box_simple(b: &ErgoBox, _index: usize) -> EvalBox {
             .map(|t| (*t.token_id.as_bytes(), t.amount))
             .collect(),
         raw_bytes,
+        register_bytes: b.candidate.register_bytes().to_vec(),
     }
 }
 
@@ -302,6 +303,7 @@ fn candidate_to_eval_box_simple(c: &ErgoBoxCandidate, index: usize) -> EvalBox {
             .map(|t| (*t.token_id.as_bytes(), t.amount))
             .collect(),
         raw_bytes,
+        register_bytes: c.register_bytes().to_vec(),
     }
 }
 

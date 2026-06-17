@@ -452,6 +452,7 @@ pub(crate) fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox,
             .map(|t| (*t.token_id.as_bytes(), t.amount))
             .collect(),
         raw_bytes,
+        register_bytes: b.candidate.register_bytes().to_vec(),
     })
 }
 
@@ -501,6 +502,7 @@ pub(crate) fn candidate_to_eval_box(
             .map(|t| (*t.token_id.as_bytes(), t.amount))
             .collect(),
         raw_bytes,
+        register_bytes: c.register_bytes().to_vec(),
     })
 }
 
