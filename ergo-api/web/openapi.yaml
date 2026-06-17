@@ -18,12 +18,15 @@ info:
     deferred items are listed with their status; off-spec items
     are not on our roadmap.
 
-    **Script execution (deferred — `ergo-sigma` exposes the
-    primitives, no REST wrapper yet):**
+    **Script compile/execute (no ErgoScript compiler in this build):**
 
     - `/script/p2sAddress`, `/script/p2shAddress`,
-      `/script/addressToTree/{address}`,
-      `/script/addressToBytes/{address}`, `/script/executeWithContext`
+      `/script/executeWithContext` — these compile or run ErgoScript
+      *source*, and this node ships no compiler.
+
+    (The stateless decoders `/script/addressToTree/{address}` and
+    `/script/addressToBytes/{address}` ARE mounted — they match the
+    Scala wire shape; see **Everything else**.)
 
     **Tracked / planned (the underlying logic exists; the REST
     surface is not yet mounted):**
@@ -60,8 +63,9 @@ info:
     extractHints / deriveKey / updateChangeAddress / rescan / …) is
     always mounted, gated by the operator `api_key` and the wallet's own
     locked / initialized state — read-only mirrors return the zero-state
-    status, not `404`. A self-contained browser wallet UI is served at
-    **`/wallet/ui`**.
+    status, not `404`. The browser wallet is now a section of the unified
+    operator dashboard SPA (served at `/`); the legacy `/wallet/ui*`
+    paths redirect there.
 
     The full `/scan/*` surface (register / deregister / listAll /
     unspentBoxes / spentBoxes / stopTracking / addBox / p2sRule) is
@@ -85,16 +89,18 @@ info:
     - `/api/v1/*` — full operator read surface (info, status, tip,
       sync, peers, health, host, identity, blocks/recent,
       mempool {summary, transactions, transactions/{id}},
-      transactions/{id}/detail, difficulty/history, node/shutdown).
+      transactions/{id}/detail, difficulty/history, votes,
+      votes/history, node/shutdown).
       Loopback by default; returns the same data as the Scala-compat
-      surface in a flatter schema with Rust-typed fields. The two
-      write routes `POST /api/v1/mempool/{submit, check}` are always
-      mounted, matching the Scala-compat write surface.
+      surface in a flatter schema with Rust-typed fields. Write routes
+      `POST /api/v1/mempool/{submit, check}` are always mounted; the
+      auth-gated `POST /api/v1/votes` (operator vote targets) mounts
+      with the admin handle.
     - `/metrics` — Prometheus exposition (gauges) projected from
       the snapshot's `info()`, `status()`, and `mempool_summary()`
       reads — chain tip, peer state, mempool sizing,
-      bootstrap-progress. Header / block timing counters are
-      planned, not yet exported.
+      bootstrap-progress — plus block-apply rejection counters.
+      Header / block timing counters are planned, not yet exported.
     - `/blockchain/storageRent/eligibleAt/{height}`,
       `/blockchain/storageRent/maturesAt/{height}`,
       `/blockchain/storageRent/maturesInRange?fromHeight=&toHeight=` —
