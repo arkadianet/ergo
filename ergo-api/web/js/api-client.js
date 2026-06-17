@@ -1,6 +1,12 @@
 // Thin fetch wrapper. Any error/non-2xx/parse-failure resolves to null;
 // callers render placeholders. The API key (if set) is read per-call.
-import { getApiKey } from './settings.js';
+//
+// Return shapes are deliberately unchanged (data-or-null for reads,
+// {ok,status,detail} for writes). The only addition is a side-effect call to
+// auth.report() so the Authorize chip can re-verify opportunistically: a 403
+// with a key set means the key is bad; a 2xx from a *gated* write confirms it
+// (a 2xx from a public read proves nothing — see auth.js).
+import { getApiKey, report } from './auth.js';
 
 async function getJson(path) {
   try {
@@ -8,6 +14,7 @@ async function getJson(path) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { cache: 'no-store', headers });
+    if (key) report(r.status, false, key); // reads are public: only a 403 is meaningful here
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -24,6 +31,7 @@ async function postJson(path, body) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (key) report(r.status, true, key); // writes are gated: a 2xx here confirms the key
     if (r.ok) return { ok: true, status: r.status };
     let detail = null;
     try {
@@ -35,6 +43,41 @@ async function postJson(path, body) {
   } catch (e) {
     return { ok: false, status: 0, detail: String(e) };
   }
+}
+
+// Wallet routes need the raw status + the {reason|detail} envelope (403 ->
+// re-authorize, wallet_locked, etc.), so they don't use getJson/postJson.
+// Returns { ok, status, data, reason }; reports status to auth (gated).
+async function walletReq(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  const key = getApiKey();
+  if (key) headers['api_key'] = key;
+  try {
+    const r = await fetch(path, { cache: 'no-store', ...opts, headers });
+    if (key) report(r.status, true, key);
+    let data = null;
+    let reason = null;
+    const text = await r.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+        reason = data.reason || data.detail || null;
+      } catch {
+        /* non-JSON body */
+      }
+    }
+    return { ok: r.ok, status: r.status, data, reason };
+  } catch (e) {
+    return { ok: false, status: 0, data: null, reason: String(e) };
+  }
+}
+
+function walletPost(path, body) {
+  return walletReq(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 export const api = {
@@ -55,6 +98,20 @@ export const api = {
   votesHistory: () => getJson('/api/v1/votes/history'),
   // Auth-gated write: `votes` is the full desired set (replaces current).
   setVotes: (votes) => postJson('/api/v1/votes', { votes }),
+  // Wallet section: api_key-gated; each returns { ok, status, data, reason }.
+  // /lock and /deriveNextKey are GET routes (see ergo-api wallet/mod.rs).
+  wallet: {
+    status: () => walletReq('/wallet/status'),
+    init: (body) => walletPost('/wallet/init', body),
+    restore: (body) => walletPost('/wallet/restore', body),
+    unlock: (pass) => walletPost('/wallet/unlock', { pass }),
+    lock: () => walletReq('/wallet/lock'),
+    balances: () => walletReq('/wallet/balances'),
+    addresses: () => walletReq('/wallet/addresses'),
+    deriveNextKey: () => walletReq('/wallet/deriveNextKey'),
+    updateChangeAddress: (address) => walletPost('/wallet/updateChangeAddress', { address }),
+    send: (requests) => walletPost('/wallet/payment/send', requests),
+  },
 };
 
 export { getJson };

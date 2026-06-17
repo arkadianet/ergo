@@ -4,6 +4,7 @@
 import { api } from './api-client.js';
 import { sparkline } from './sparkline.js';
 import { num, bytes, dur } from './format.js';
+import { subscribe, promptAuthorize } from './auth.js';
 
 const HISTORY_LEN = 60;
 const hist = { blockTimes: [], mempool: [], height: [], difficulty: [] };
@@ -64,12 +65,16 @@ function setText(sel, t) {
 export function mount(el) {
   root = el;
   el.innerHTML = `
-    <div class="ov-top">
-      <div class="ov-ident" data-ident hidden>
-        <span class="ov-ident__mode" data-ident-mode>—</span>
-        <span class="ov-ident__chips" data-ident-chips></span>
+    <div class="ov-prompt banner banner--info" data-auth-prompt hidden></div>
+    <div class="pg-head pg-head--flush ov-top">
+      <div>
+        <h1 class="pg-title">Node overview</h1>
+        <div class="ov-ident" data-ident hidden>
+          <span class="ov-ident__mode" data-ident-mode>—</span>
+          <span class="ov-ident__chips" data-ident-chips></span>
+        </div>
       </div>
-      <div class="tabs ov-toggle">
+      <div class="tabs ov-toggle" aria-label="overview view">
         <button class="tab" type="button" data-view="cockpit">Cockpit</button>
         <button class="tab" type="button" data-view="charts">Charts</button>
       </div>
@@ -94,6 +99,22 @@ export function mount(el) {
       renderBody();
     };
   });
+  // Authorize prompt: visible only while no api_key is set. Built once; the
+  // subscription just toggles visibility as the auth state changes.
+  const prompt = root.querySelector('[data-auth-prompt]');
+  if (prompt) {
+    const txt = document.createElement('span');
+    txt.textContent = 'Authorize to unlock operator controls (voting, wallet).';
+    const btn = document.createElement('button');
+    btn.className = 'btn btn--primary btn--sm';
+    btn.type = 'button';
+    btn.textContent = 'Authorize';
+    btn.addEventListener('click', promptAuthorize);
+    prompt.append(txt, btn);
+    subscribe((s) => {
+      prompt.hidden = s !== 'none';
+    });
+  }
   renderBody();
   if (state.status) onFast({ status: state.status, info: state.info });
   // Node identity is static config — fetch once on mount. Render from
@@ -247,7 +268,7 @@ function panel(title, openHash) {
   const head = document.createElement('div');
   head.className = 'panel__head';
   const t = document.createElement('span');
-  t.className = 'micro-label';
+  t.className = 'panel__title';
   t.textContent = title;
   head.append(t);
   if (openHash) {
@@ -287,6 +308,12 @@ function pipeRow(label, valTxt, frac, color) {
   v.textContent = valTxt;
   const g = document.createElement('div');
   g.className = 'gauge';
+  const pct = Math.round(Math.max(0, Math.min(100, frac * 100)));
+  g.setAttribute('role', 'progressbar');
+  g.setAttribute('aria-valuemin', '0');
+  g.setAttribute('aria-valuemax', '100');
+  g.setAttribute('aria-valuenow', String(pct));
+  g.setAttribute('aria-label', label);
   const f = document.createElement('div');
   f.className = 'gauge__fill';
   f.style.width = `${Math.max(0, Math.min(100, frac * 100))}%`;
@@ -375,6 +402,11 @@ function renderBody() {
       );
       const g = document.createElement('div');
       g.className = 'gauge';
+      g.setAttribute('role', 'progressbar');
+      g.setAttribute('aria-valuemin', '0');
+      g.setAttribute('aria-valuemax', '100');
+      g.setAttribute('aria-valuenow', String(Math.round(Math.min(100, pct * 100))));
+      g.setAttribute('aria-label', 'mempool capacity');
       const f = document.createElement('div');
       f.className = 'gauge__fill';
       f.style.width = `${Math.min(100, pct * 100)}%`;

@@ -101,8 +101,12 @@ function renderDetail(p) {
 export function mount(el) {
   root = el;
   el.innerHTML = `
-    <div class="pg-head"><span class="pg-title">Peers</span>
-      <span class="pg-count micro-label" data-count></span></div>
+    <div class="pg-head">
+      <div>
+        <h1 class="pg-title">Peers</h1>
+        <span class="pg-count micro-label" data-count></span>
+      </div>
+    </div>
     <div class="comp" data-comp></div>
     <div data-table></div>`;
   table = makeTable(el.querySelector('[data-table]'), COLS, {

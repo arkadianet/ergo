@@ -1,4 +1,4 @@
-/* Design tokens — the single source for color, space, radius, type. */
+/* Design tokens: shared color, spacing, radius, type, and motion. */
 @font-face {
   font-family: 'JetBrains Mono';
   src: url('/fonts/jetbrains-mono.woff2') format('woff2');
@@ -9,69 +9,72 @@
 
 :root,
 .theme-dark {
-  --bg: #0d1117;
-  --s1: #0f141b;
-  --s2: #161b22;
-  --s3: #1c2128;
-  --s4: #22272e;
-  --bd: #30363d;
-  --bd2: #21262d;
-  --tx: #e6edf3;
-  --tx2: #8b949e;
-  --tx3: #484f58;
-  --tx4: #2d333b;
-  --green: #3fb950;
-  --orange: #f0883e;
-  --red: #f85149;
-  --blue: #58a6ff;
-  --purple: #bc8cff;
-  --yellow: #d29922;
+  --bg: #0b0c0e;
+  --s1: #121316;
+  --s2: #181a1d;
+  --s3: #202328;
+  --s4: #2b2f35;
+  --bd: #3a3f46;
+  --bd2: #25292f;
+  --tx: #eef3f7;
+  --tx2: #a8b4bf;
+  --tx3: #71808d;
+  --tx4: #434951;
+  --green: #4fd17a;
+  --orange: #f2a154;
+  --red: #ff6b65;
+  --blue: #68b7ff;
+  --purple: #b79dff;
+  --yellow: #e1bd59;
+  --cyan: #55d1c4;
   --accent: var(--orange);
-  --grid-line: rgba(139, 148, 158, 0.08);
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
 }
 
 .theme-light {
-  --bg: #ffffff;
-  --s1: #f6f8fa;
-  --s2: #eaeef2;
-  --s3: #dde3ea;
-  --s4: #d0d7de;
-  --bd: #d0d7de;
-  --bd2: #e1e6eb;
-  --tx: #1f2328;
-  --tx2: #636c76;
-  --tx3: #8c959f;
-  --tx4: #d0d7de;
-  --green: #1a7f37;
-  --orange: #bc4c00;
-  --red: #cf222e;
+  --bg: #f4f6f8;
+  --s1: #ffffff;
+  --s2: #eef2f5;
+  --s3: #e2e8ee;
+  --s4: #d5dde5;
+  --bd: #c4ced8;
+  --bd2: #dbe2e8;
+  --tx: #17212b;
+  --tx2: #52606d;
+  --tx3: #7b8794;
+  --tx4: #c8d0d8;
+  --green: #157f46;
+  --orange: #b85b00;
+  --red: #c92828;
   --blue: #0969da;
-  --purple: #8250df;
-  --yellow: #9a6700;
+  --purple: #7252c7;
+  --yellow: #936800;
+  --cyan: #087f78;
   --accent: var(--orange);
-  --grid-line: rgba(31, 35, 40, 0.06);
+  --shadow: 0 14px 34px rgba(20, 32, 43, 0.12);
 }
 
 .theme-hc {
   --bg: #000000;
-  --s1: #0a0c10;
-  --s2: #10141a;
-  --s3: #161b22;
-  --s4: #1c2128;
-  --bd: #7d8590;
-  --bd2: #3d444d;
+  --s1: #080b0f;
+  --s2: #10161f;
+  --s3: #182230;
+  --s4: #243143;
+  --bd: #8a949e;
+  --bd2: #4a5561;
   --tx: #ffffff;
-  --tx2: #c9d1d9;
-  --tx3: #9aa3ad;
-  --tx4: #3d444d;
+  --tx2: #d6dde4;
+  --tx3: #aab4be;
+  --tx4: #56616d;
   --green: #56d364;
   --orange: #ffa657;
   --red: #ff7b72;
   --blue: #79c0ff;
   --purple: #d2a8ff;
   --yellow: #e3b341;
+  --cyan: #64e8d9;
   --accent: var(--orange);
-  --grid-line: rgba(255, 255, 255, 0.12);
+  --shadow: none;
 }
 
 :root {
@@ -82,22 +85,25 @@
   --space-5: 12px;
   --space-6: 16px;
   --space-7: 24px;
+  --space-8: 32px;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
-  --fs-micro: 8.5px;
-  --fs-small: 9.5px;
-  --fs-body: 11px;
-  --fs-value: 14px;
-  --fs-hero: 26px;
-  --topbar-h: 40px;
-  --sidebar-w: 148px;
-  --footer-h: 24px;
+  --fs-micro: 10px;
+  --fs-small: 12px;
+  --fs-body: 13px;
+  --fs-value: 20px;
+  --fs-lg: 26px;
+  --sidebar-w: 232px;
+  --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
-  --dur: 0.12s;
+  --dur: 0.14s;
+  --divider: var(--bd2);
+  --scrim: rgba(0, 0, 0, 0.62);
 }
 
 html {
+  background: var(--bg);
   font-size: var(--fs-body);
 }
 
@@ -105,9 +111,17 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--tx);
-  font-family: var(--mono);
-  font-feature-settings: 'tnum' 1, 'cv11' 1;
+  font-family: var(--sans);
+  font-feature-settings: 'tnum' 1;
+  line-height: 1.35;
   -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }
 
 * {
@@ -118,5 +132,6 @@ body {
   --space-5: 8px;
   --space-6: 10px;
   --space-7: 14px;
-  --fs-hero: 20px;
+  --fs-body: 12px;
+  --fs-value: 17px;
 }

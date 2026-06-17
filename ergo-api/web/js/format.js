@@ -26,6 +26,17 @@ export function truncMiddle(s, head = 6, tail = 6) {
   return `${s.slice(0, head)}…${s.slice(-tail)}`;
 }
 
+// Parse a decimal-ERG string into exact BigInt nanoErg (9 dp), no float. Throws
+// on malformed input or more than 9 fractional digits. Used by wallet send so a
+// large amount is never silently corrupted by `Number * 1e9`.
+export function nanoErgFromDecimal(str) {
+  const s = String(str).trim();
+  if (!/^\d+(\.\d+)?$/.test(s)) throw new Error('not a decimal number');
+  const [whole, frac = ''] = s.split('.');
+  if (frac.length > 9) throw new Error('more than 9 decimal places');
+  return BigInt(whole) * NANO + BigInt((frac + '000000000').slice(0, 9));
+}
+
 export function ageMs(ms) {
   if (ms == null) return '—';
   const s = Math.floor(ms / 1000);
@@ -59,5 +70,15 @@ if (new URLSearchParams(location.search).has('selftest')) {
   eq(truncMiddle('a'.repeat(64)), 'aaaaaa…aaaaaa', 'trunc');
   eq(ageMs(42_000), '42s', 'age s');
   eq(ageMs(7_400_000), '2h', 'age h');
+  eq(String(nanoErgFromDecimal('1.5')), '1500000000', 'nanoErg 1.5');
+  eq(String(nanoErgFromDecimal('0.00125')), '1250000', 'nanoErg sub');
+  eq(String(nanoErgFromDecimal('5')), '5000000000', 'nanoErg whole');
+  let threw = false;
+  try {
+    nanoErgFromDecimal('1.2345678901');
+  } catch {
+    threw = true;
+  }
+  console.assert(threw, 'format nanoErg >9dp should throw');
   console.log('format.js selftest done');
 }

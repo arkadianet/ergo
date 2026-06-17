@@ -112,18 +112,22 @@ function renderDetail(t) {
 export function mount(el) {
   root = el;
   el.innerHTML = `
-    <div class="pg-head"><span class="pg-title">Mempool</span>
-      <span class="pg-count micro-label" data-count></span></div>
+    <div class="pg-head">
+      <div>
+        <h1 class="pg-title">Mempool</h1>
+        <span class="pg-count micro-label" data-count></span>
+      </div>
+    </div>
     <div class="mp-cap">
       <div class="mp-cell">
         <div class="micro-label">Slots · capacity (Scala parity)</div>
         <div class="mp-slot" data-slot>—</div>
-        <div class="gauge"><div class="gauge__fill" data-slotfill style="width:0%"></div></div>
+        <div class="gauge" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="mempool slots used"><div class="gauge__fill" data-slotfill style="width:0%"></div></div>
       </div>
       <div class="mp-cell">
         <div class="micro-label">Bytes · local budget</div>
         <div class="mp-byte" data-byte>—</div>
-        <div class="gauge gauge--sub"><div class="gauge__fill" data-bytefill style="width:0%"></div></div>
+        <div class="gauge gauge--sub" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="mempool bytes used"><div class="gauge__fill" data-bytefill style="width:0%"></div></div>
       </div>
       <div class="mp-cell">
         <div class="micro-label">Weight policy</div>
@@ -164,9 +168,13 @@ export async function onSlow() {
     const e = root.querySelector(sel);
     if (e) e.textContent = t;
   };
-  const setW = (sel, w) => {
+  const setW = (sel, pct) => {
     const e = root.querySelector(sel);
-    if (e) e.style.width = w;
+    if (!e) return;
+    const clamped = Math.min(100, Math.max(0, pct));
+    e.style.width = `${clamped}%`;
+    // Mirror the fill into the parent gauge's aria-valuenow for screen readers.
+    if (e.parentElement) e.parentElement.setAttribute('aria-valuenow', String(Math.round(clamped)));
   };
 
   root.querySelector('[data-count]').textContent = `${num(summary?.size ?? txs.length)} unconfirmed`;
@@ -174,10 +182,10 @@ export async function onSlow() {
   if (summary) {
     const slotPct = summary.capacity_count > 0 ? (summary.size / summary.capacity_count) * 100 : 0;
     set('[data-slot]', `${num(summary.size)} / ${num(summary.capacity_count)}  ·  ${slotPct.toFixed(0)}%`);
-    setW('[data-slotfill]', `${Math.min(100, slotPct)}%`);
+    setW('[data-slotfill]', slotPct);
     const bytePct = summary.capacity_bytes > 0 ? (summary.total_bytes / summary.capacity_bytes) * 100 : 0;
     set('[data-byte]', `${bytes(summary.total_bytes)} / ${bytes(summary.capacity_bytes)}  ·  ${bytePct.toFixed(0)}%`);
-    setW('[data-bytefill]', `${Math.min(100, bytePct)}%`);
+    setW('[data-bytefill]', bytePct);
     set('[data-reval]', num(summary.revalidation_pending));
   }
   set('[data-weight]', weightLabel(txWrap && txWrap.weight_function));
