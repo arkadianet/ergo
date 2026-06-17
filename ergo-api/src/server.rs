@@ -83,10 +83,10 @@ use crate::types::{
     ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
     ApiDifficultySeries, ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost,
     ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions,
-    ApiNativeSubmitError, ApiPeer, ApiRecentBlock, ApiSetVotesRequest, ApiStatus, ApiSubmitError,
-    ApiSubmitResponse, ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam, ApiVoteTarget,
-    ApiVotes, ApiWeightFunction, HealthStatus, RawTransactionBytes, SubmitError, SubmitMode,
-    SyncStateLabel,
+    ApiNativeSubmitError, ApiParamChange, ApiPeer, ApiRecentBlock, ApiSetVotesRequest, ApiStatus,
+    ApiSubmitError, ApiSubmitResponse, ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam,
+    ApiVoteChangeEvent, ApiVoteTarget, ApiVotes, ApiVotesHistory, ApiWeightFunction, HealthStatus,
+    RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
@@ -945,6 +945,11 @@ pub fn router_with_mempool_and_wallet_and_security(
                     "/api/v1/difficulty/history",
                     get(difficulty_history_handler),
                 )
+                // Native votes-history rides the same chain-reader state as
+                // the Scala-compat routes (the timeline comes from the stored
+                // `voted_params` rows), so it is mounted here and stays
+                // conditional on `compat` being wired.
+                .route("/api/v1/votes/history", get(votes_history_handler))
                 .route("/info", get(scala_info_handler))
                 .route("/blocks", get(scala_header_ids_paged_handler))
                 .route("/blocks/at/:height", get(scala_block_ids_at_height_handler))
@@ -1346,13 +1351,14 @@ async fn wallet_css() -> Response {
         description = "Rust-native operator API for the Ergo node (`/api/v1/*`). \
 This document describes the production-superset route set: the conditional routes \
 (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, \
-`/api/v1/difficulty/history`) are mounted only when the node is wired with the matching \
+`/api/v1/difficulty/history`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
 submit / admin / chain-reader handles, so a given process may serve fewer routes than \
 appear here. Query `GET /api/v1/health` to confirm a running node's state."
     ),
     paths(
         info_handler,
         difficulty_history_handler,
+        votes_history_handler,
         identity_handler,
         host_handler,
         status_handler,
@@ -1380,6 +1386,9 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiConfiguredVote,
         ApiSetVotesRequest,
         ApiVoteTarget,
+        ApiVotesHistory,
+        ApiVoteChangeEvent,
+        ApiParamChange,
         ApiTip,
         ApiRecentBlock,
         ApiSyncStatus,
@@ -1490,6 +1499,22 @@ async fn difficulty_history_handler(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/votes/history",
+    tag = "node",
+    responses(
+        (status = 200,
+         description = "Protocol-parameter change timeline (epoch boundaries where a \
+parameter changed, oldest first). Conditional: mounted only when the node is wired with \
+a chain reader (the same handle the Scala-compat routes use).",
+         body = ApiVotesHistory, content_type = "application/json"),
+    ),
+)]
+async fn votes_history_handler(State(chain): State<Arc<dyn NodeChainQuery>>) -> Response {
+    Json(chain.votes_history()).into_response()
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/blocks/recent",
     tag = "chain",
     description = "Most-recent full blocks for the dashboard, newest first. \
@@ -1584,7 +1609,8 @@ async fn votes_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
     security(("ApiKeyAuth" = [])),
     responses(
         (status = 204, description = "Voting targets replaced"),
-        (status = 400, description = "A target named a non-votable parameter"),
+        (status = 400, description = "A target named a non-votable parameter, or fell \
+outside the parameter's allowable [min, max] voting range"),
         (status = 403, description = "Missing or invalid api_key"),
         (status = 409, description = "Node is not mining"),
     ),
@@ -1606,6 +1632,15 @@ async fn set_votes_handler(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(VotingControlError::NotVotable { parameter_id }) => crate::utils::bad_request(format!(
             "parameter id {parameter_id} is not operator-votable (votable ids: 1..=8, 9)"
+        )),
+        Err(VotingControlError::OutOfRange {
+            parameter_id,
+            target,
+            min,
+            max,
+        }) => crate::utils::bad_request(format!(
+            "target {target} for parameter id {parameter_id} is outside its allowable \
+             voting range [{min}, {max}]"
         )),
         Err(VotingControlError::MiningDisabled) => (
             StatusCode::CONFLICT,

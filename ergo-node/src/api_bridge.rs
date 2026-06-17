@@ -213,6 +213,27 @@ impl NodeAdmin for ShutdownAdmin {
                 return Err(ergo_api::VotingControlError::NotVotable { parameter_id: *id });
             }
         }
+        // Reject any target outside the parameter's allowable `[min, max]` voting
+        // bounds. The recompute only ever steps a parameter toward a bound (and
+        // won't step past it), so a target beyond the bound can never be a
+        // settling value — it would just pin the parameter at the bound forever
+        // while silently misleading the operator. The bounds are constant per id
+        // (the same `[min, max]` `GET /api/v1/votes` reports), so no active-param
+        // table is needed. Votable-name check above already rejected non-votable
+        // ids, so `votable_param_bounds` is `Some` for every id here.
+        for (id, target) in &targets {
+            if let Some((min, max)) = ergo_validation::voting::votable_param_bounds(*id) {
+                let (min, max) = (min as i64, max as i64);
+                if *target < min || *target > max {
+                    return Err(ergo_api::VotingControlError::OutOfRange {
+                        parameter_id: *id,
+                        target: *target,
+                        min,
+                        max,
+                    });
+                }
+            }
+        }
         // REPLACE the set (BTreeMap collect dedups by id, last wins).
         let map: std::collections::BTreeMap<u8, i64> = targets.into_iter().collect();
         let count = map.len();

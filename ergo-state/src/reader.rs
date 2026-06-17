@@ -158,6 +158,18 @@ impl ChainStoreReader {
         Ok(crate::active_params::read_latest_at(&r, height)?)
     }
 
+    /// Every `voted_params` row (one per epoch boundary, plus the genesis
+    /// row at height 0), ascending by epoch-start height. The operator
+    /// votes-history endpoint diffs consecutive rows to reconstruct the
+    /// parameter-change timeline. Reads under a single read txn; the table
+    /// is sparse (≤ one row per voting epoch), so the scan is cheap.
+    pub fn voted_params_history(
+        &self,
+    ) -> Result<Vec<ergo_validation::ActiveProtocolParameters>, StateError> {
+        let r = self.db.begin_read()?;
+        Ok(crate::active_params::read_all(&r)?)
+    }
+
     /// Serialized header bytes by header_id. Returns `None` if not present.
     /// Does not see headers that are still in `batch_headers` and not yet
     /// committed — sufficient for id-keyed historical lookups.

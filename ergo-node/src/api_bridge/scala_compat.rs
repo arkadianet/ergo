@@ -160,6 +160,29 @@ impl NodeChainQuery for ScalaCompatBridge {
         }
     }
 
+    fn votes_history(&self) -> ergo_api::types::ApiVotesHistory {
+        let snap = self.handle.load();
+        let current_height = snap.tip.best_full_block.height;
+        // Epoch length is network-fixed; surfaced so the UI can explain that
+        // changes only land on `voting_length`-block boundaries.
+        let epoch_length = match self.static_cfg.network.as_str() {
+            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
+            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
+            _ => 0,
+        };
+        match self.store_reader.voted_params_history() {
+            Ok(rows) => build_votes_history(&rows, epoch_length, current_height),
+            Err(e) => {
+                warn!(handler = "votes_history", error = %e, "scala-compat handler failed");
+                ergo_api::types::ApiVotesHistory {
+                    epoch_length,
+                    current_height,
+                    changes: Vec::new(),
+                }
+            }
+        }
+    }
+
     fn header_ids_at_height(&self, height: u32) -> Vec<String> {
         // Reads HEADERS_BY_HEIGHT (the multi-id index added in 684e980),
         // which mirrors Scala's `heightIdsKey` row from
@@ -1026,6 +1049,71 @@ fn parse_header_id(s: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
+/// Diff a `voted_params` history (ascending by epoch-start height) into the
+/// parameter-change timeline. Pure — the bridge supplies the rows from the
+/// store, keeping the diff independently testable. `rows[0]` is the genesis
+/// row, which has no predecessor and is never diffed. Only boundaries where at
+/// least one parameter actually changed produce an event.
+pub(super) fn build_votes_history(
+    rows: &[ergo_validation::ActiveProtocolParameters],
+    epoch_length: u32,
+    current_height: u32,
+) -> ergo_api::types::ApiVotesHistory {
+    use ergo_validation::voting::votable_param_descriptors;
+
+    let mut changes = Vec::new();
+    let mut prev: Option<&ergo_validation::ActiveProtocolParameters> = None;
+    for row in rows {
+        if let Some(p) = prev {
+            let prev_vals: std::collections::BTreeMap<u8, i32> = votable_param_descriptors(p)
+                .into_iter()
+                .map(|d| (d.id, d.current))
+                .collect();
+            let mut params = Vec::new();
+            for d in votable_param_descriptors(row) {
+                let from = prev_vals.get(&d.id).copied();
+                if from != Some(d.current) {
+                    params.push(ergo_api::types::ApiParamChange {
+                        id: d.id,
+                        name: d.name.to_string(),
+                        description: d.description.to_string(),
+                        from: from.map(|v| v as i64),
+                        to: d.current as i64,
+                    });
+                }
+            }
+            // blockVersion (123): advanced by soft-fork activation, not a
+            // numeric parameter vote, but it IS a governance event worth
+            // showing (e.g. the v3 → v4 transition).
+            if p.block_version != row.block_version {
+                params.push(ergo_api::types::ApiParamChange {
+                    id: 123,
+                    name: "blockVersion".to_string(),
+                    description: "Block format version — advanced by soft-fork \
+                                  activation, not a numeric parameter vote."
+                        .to_string(),
+                    from: Some(p.block_version as i64),
+                    to: row.block_version as i64,
+                });
+            }
+            if !params.is_empty() {
+                params.sort_by_key(|c| c.id);
+                changes.push(ergo_api::types::ApiVoteChangeEvent {
+                    height: row.epoch_start_height,
+                    params,
+                });
+            }
+        }
+        prev = Some(row);
+    }
+
+    ergo_api::types::ApiVotesHistory {
+        epoch_length,
+        current_height,
+        changes,
+    }
+}
+
 /// Same shape as [`parse_header_id`] — both ids are 32-byte blake2b256
 /// digests rendered as 64-char unprefixed lowercase hex. Kept as a
 /// separate name so call sites at the trait boundary read by intent.
@@ -1061,4 +1149,63 @@ pub(super) fn encode_scala_output_from_raw(
         hex::encode(parsed.transaction_id.as_bytes()),
         parsed.index,
     )
+}
+
+#[cfg(test)]
+mod votes_history_tests {
+    use super::build_votes_history;
+    use ergo_validation::scala_launch;
+
+    /// Only boundaries where a parameter actually changed appear, each decoded
+    /// (id/name/description) with the correct from→to, ascending by height.
+    #[test]
+    fn build_votes_history_reports_only_changed_boundaries_with_decoded_deltas() {
+        let genesis = scala_launch(); // height 0 (no predecessor → never diffed)
+        let mut e1 = scala_launch();
+        e1.epoch_start_height = 1024; // identical to genesis → no event
+
+        let mut e2 = scala_launch();
+        e2.epoch_start_height = 2048;
+        e2.storage_fee_factor = genesis.storage_fee_factor + 25_000; // id 1 changes
+
+        let mut e3 = scala_launch();
+        e3.epoch_start_height = 3072; // identical to e2 → no event
+        e3.storage_fee_factor = e2.storage_fee_factor;
+
+        let mut e4 = scala_launch();
+        e4.epoch_start_height = 4096;
+        e4.storage_fee_factor = e2.storage_fee_factor;
+        e4.block_version = genesis.block_version + 1; // blockVersion fork event
+
+        let rows = vec![genesis.clone(), e1, e2.clone(), e3, e4];
+        let h = build_votes_history(&rows, 1024, 4096);
+
+        assert_eq!(h.epoch_length, 1024);
+        assert_eq!(h.current_height, 4096);
+        assert_eq!(h.changes.len(), 2, "only 2048 and 4096 changed");
+
+        let at_2048 = &h.changes[0];
+        assert_eq!(at_2048.height, 2048);
+        assert_eq!(at_2048.params.len(), 1);
+        let sff = &at_2048.params[0];
+        assert_eq!(sff.id, 1);
+        assert_eq!(sff.name, "storageFeeFactor");
+        assert_eq!(sff.from, Some(genesis.storage_fee_factor as i64));
+        assert_eq!(sff.to, e2.storage_fee_factor as i64);
+        assert!(!sff.description.is_empty());
+
+        let at_4096 = &h.changes[1];
+        assert_eq!(at_4096.height, 4096);
+        assert_eq!(at_4096.params.len(), 1);
+        assert_eq!(at_4096.params[0].id, 123);
+        assert_eq!(at_4096.params[0].name, "blockVersion");
+        assert_eq!(at_4096.params[0].from, Some(genesis.block_version as i64));
+        assert_eq!(at_4096.params[0].to, (genesis.block_version + 1) as i64);
+    }
+
+    #[test]
+    fn build_votes_history_empty_when_only_genesis() {
+        let h = build_votes_history(&[scala_launch()], 1024, 0);
+        assert!(h.changes.is_empty());
+    }
 }

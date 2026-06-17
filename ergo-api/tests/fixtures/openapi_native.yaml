@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ergo Rust Node — Native API
-  description: 'Rust-native operator API for the Ergo node (`/api/v1/*`). This document describes the production-superset route set: the conditional routes (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, `/api/v1/difficulty/history`) are mounted only when the node is wired with the matching submit / admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
+  description: 'Rust-native operator API for the Ergo node (`/api/v1/*`). This document describes the production-superset route set: the conditional routes (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching submit / admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
@@ -301,13 +301,25 @@ paths:
         '204':
           description: Voting targets replaced
         '400':
-          description: A target named a non-votable parameter
+          description: A target named a non-votable parameter, or fell outside the parameter's allowable [min, max] voting range
         '403':
           description: Missing or invalid api_key
         '409':
           description: Node is not mining
       security:
       - ApiKeyAuth: []
+  /api/v1/votes/history:
+    get:
+      tags:
+      - node
+      operationId: votes_history_handler
+      responses:
+        '200':
+          description: 'Protocol-parameter change timeline (epoch boundaries where a parameter changed, oldest first). Conditional: mounted only when the node is wired with a chain reader (the same handle the Scala-compat routes use).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiVotesHistory'
 components:
   schemas:
     ApiBlockApplyError:
@@ -1010,6 +1022,38 @@ components:
           - 'null'
         reason:
           type: string
+    ApiParamChange:
+      type: object
+      description: A single parameter's change across one epoch boundary.
+      required:
+      - id
+      - name
+      - description
+      - to
+      properties:
+        description:
+          type: string
+          description: One-line operator-facing explanation of the parameter.
+        from:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Value before this boundary. `null` when the parameter first became
+            active here (e.g. `subblocksPerBlock` at its activation fork).
+        id:
+          type: integer
+          format: int32
+          description: Parameter id (1..=8, 9 = subblocksPerBlock, or 123 = blockVersion).
+          minimum: 0
+        name:
+          type: string
+          description: Stable camelCase parameter name.
+        to:
+          type: integer
+          format: int64
+          description: Value from this boundary onward.
     ApiPeer:
       type: object
       required:
@@ -1365,8 +1409,10 @@ components:
     ApiVotableParam:
       type: object
       description: |-
-        A votable numeric protocol parameter and the inclusive bounds a vote may not
-        cross. Mirror of `ergo_validation::voting::ParamDescriptor`.
+        A votable numeric protocol parameter and the inclusive `[min, max]` target
+        bounds. A vote moves the parameter at most one `step` per voting epoch toward
+        the target and only while it is inside the bound, so a target outside
+        `[min, max]` is rejected. Mirror of `ergo_validation::voting::ParamDescriptor`.
       required:
       - id
       - name
@@ -1392,14 +1438,35 @@ components:
         max:
           type: integer
           format: int32
+          description: Inclusive upper target bound.
         min:
           type: integer
           format: int32
+          description: |-
+            Inclusive lower target bound. The recompute gates at the bound (won't
+            step a parameter further past it) rather than hard-clamping.
         name:
           type: string
         step:
           type: integer
           format: int32
+    ApiVoteChangeEvent:
+      type: object
+      description: One epoch boundary at which the active protocol parameters changed.
+      required:
+      - height
+      - params
+      properties:
+        height:
+          type: integer
+          format: int32
+          description: Epoch-start height at which these new values took effect.
+          minimum: 0
+        params:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiParamChange'
+          description: The parameters that changed at this boundary.
     ApiVoteTarget:
       type: object
       description: One desired vote in a `POST /api/v1/votes` request.
@@ -1463,6 +1530,36 @@ components:
           description: |-
             The numeric parameters an operator can vote to change, with the bounds a
             vote must respect. Excludes blockVersion (soft-fork driven, not voted).
+    ApiVotesHistory:
+      type: object
+      description: |-
+        Response for `GET /api/v1/votes/history` — the protocol-parameter change
+        timeline reconstructed from the node's stored per-epoch parameter rows.
+        Each entry is an epoch boundary at which one or more parameters actually
+        changed (boundaries with no change are omitted), so this reads as the
+        governance history: what the network's votes have changed, and when.
+      required:
+      - epochLength
+      - currentHeight
+      - changes
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiVoteChangeEvent'
+          description: Epoch boundaries where at least one parameter changed, oldest first.
+        currentHeight:
+          type: integer
+          format: int32
+          description: Current full-block height, for context.
+          minimum: 0
+        epochLength:
+          type: integer
+          format: int32
+          description: |-
+            Voting epoch length in blocks (mainnet 1024, testnet 128). Parameter
+            changes can only take effect at heights that are multiples of this.
+          minimum: 0
     ApiWeightFunction:
       type: string
       description: |-

@@ -19,6 +19,15 @@ pub trait NodeChainQuery: Send + Sync {
     /// not change after boot.
     fn info(&self) -> ScalaInfo;
 
+    /// `GET /api/v1/votes/history` — the protocol-parameter change timeline,
+    /// reconstructed from the node's stored per-epoch parameter rows. Native
+    /// (`/api/v1/*`), not a Scala route, but it rides this store-backed trait
+    /// because the history comes from `voted_params`, not the snapshot.
+    /// Default empty for bridges without a chain store.
+    fn votes_history(&self) -> crate::types::ApiVotesHistory {
+        crate::types::ApiVotesHistory::default()
+    }
+
     /// `/blocks/at/{height}` — header IDs at a given height.
     ///
     /// Scala's `history.headerIdsAtHeight(h)` returns `Seq[ModifierId]`,
