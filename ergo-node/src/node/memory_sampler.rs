@@ -67,24 +67,24 @@ pub(super) fn sample_memory(
             None => (0, 0, "Disabled", 0),
         };
 
+    // One snapshot of the store's instrumentation gauges; all-zero when
+    // there is no UTXO arena (digest mode), which keeps the CSV shape stable.
+    let sm = utxo.map(|u| u.metrics()).unwrap_or_default();
+
     let sample = crate::mem_csv::MemSample {
         ts_ms: crate::mem_csv::now_ms(),
         best_header: bh,
         best_full_block: bf,
         sync_phase,
         proc,
-        avl_cache_clean_bytes: utxo
-            .map(|u| u.arena_cache_clean_bytes() as u64)
-            .unwrap_or(0),
-        avl_cache_capacity_bytes: utxo
-            .map(|u| u.arena_cache_capacity_bytes() as u64)
-            .unwrap_or(0),
-        avl_clean_len: utxo.map(|u| u.arena_cache_clean_len() as u64).unwrap_or(0),
-        avl_dirty_len: utxo.map(|u| u.arena_cache_dirty_len() as u64).unwrap_or(0),
-        avl_read_count: utxo.map(|u| u.arena_read_count()).unwrap_or(0),
-        batch_headers_len: utxo.map(|u| u.batch_headers_len() as u64).unwrap_or(0),
-        batch_headers_bytes: utxo.map(|u| u.batch_headers_bytes() as u64).unwrap_or(0),
-        batch_meta_len: utxo.map(|u| u.batch_meta_len() as u64).unwrap_or(0),
+        avl_cache_clean_bytes: sm.arena_cache_clean_bytes as u64,
+        avl_cache_capacity_bytes: sm.arena_cache_capacity_bytes as u64,
+        avl_clean_len: sm.arena_cache_clean_len as u64,
+        avl_dirty_len: sm.arena_cache_dirty_len as u64,
+        avl_read_count: sm.arena_read_count,
+        batch_headers_len: sm.batch_headers_len as u64,
+        batch_headers_bytes: sm.batch_headers_bytes as u64,
+        batch_meta_len: sm.batch_meta_len as u64,
         header_index_len: state.executor.header_index_len() as u64,
         header_index_est_bytes: state.executor.header_index_estimated_bytes() as u64,
         last_headers_len: state.executor.last_headers_len() as u64,
@@ -102,7 +102,7 @@ pub(super) fn sample_memory(
         // feature, so their `cache_stats().evictions()` returns 0. The
         // column is kept for wire-shape parity; only the indexer column
         // surfaces real numbers today.
-        redb_state_evictions: utxo.map(|u| u.redb_cache_evictions()).unwrap_or(0),
+        redb_state_evictions: sm.redb_cache_evictions,
         redb_indexer_evictions,
         redb_addrbook_evictions: 0,
         indexer_indexed_height,

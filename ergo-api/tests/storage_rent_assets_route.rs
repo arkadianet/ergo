@@ -117,6 +117,16 @@ async fn json_get(app: axum::Router, path: &str) -> (StatusCode, serde_json::Val
 }
 
 fn build_app(indexer: StubIndexer) -> axum::Router {
+    build_app_with_params(
+        indexer,
+        Arc::new(StubChainParams) as Arc<dyn ChainParamsView>,
+    )
+}
+
+fn build_app_with_params(
+    indexer: StubIndexer,
+    chain_params: Arc<dyn ChainParamsView>,
+) -> axum::Router {
     let ctx = ServerCtx {
         read: Arc::new(StubReadState),
         compat: None,
@@ -124,7 +134,7 @@ fn build_app(indexer: StubIndexer) -> axum::Router {
         indexer: Some(Arc::new(indexer) as Arc<dyn IndexerQuery>),
         mempool: Arc::new(NoopMempoolView::new()),
         network: ergo_ser::address::NetworkPrefix::Mainnet,
-        chain_params: Some(Arc::new(StubChainParams) as Arc<dyn ChainParamsView>),
+        chain_params: Some(chain_params),
         mining: None,
         emission: None,
         emission_scripts: None,
@@ -240,6 +250,43 @@ async fn eligible_row_missing_box_record_errors() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+// ----- edge cases: H < StoragePeriod short-circuit -----
+
+// All three storage-rent handlers must return an empty page for heights below
+// `StoragePeriod` WITHOUT consulting `storage_fee_factor_for_validation_at` —
+// that lookup reads the `H - 1` voted-params row and panics in debug at H == 0
+// (no row exists below genesis). `PanicOnFactorParams` turns a missing
+// short-circuit into a test panic instead of a silent regression.
+
+#[tokio::test]
+async fn eligible_at_height_zero_short_circuits_before_voted_param_lookup() {
+    let app = build_app_with_params(StubIndexer::new(vec![]), Arc::new(PanicOnFactorParams));
+    let (status, body) = json_get(app, "/blockchain/storageRent/eligibleAt/0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
+}
+
+#[tokio::test]
+async fn matures_at_height_zero_short_circuits_before_voted_param_lookup() {
+    let app = build_app_with_params(StubIndexer::new(vec![]), Arc::new(PanicOnFactorParams));
+    let (status, body) = json_get(app, "/blockchain/storageRent/maturesAt/0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn matures_in_range_to_height_zero_short_circuits_before_voted_param_lookup() {
+    let app = build_app_with_params(StubIndexer::new(vec![]), Arc::new(PanicOnFactorParams));
+    let (status, body) = json_get(
+        app,
+        "/blockchain/storageRent/maturesInRange?fromHeight=0&toHeight=0",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], serde_json::json!([]));
+}
+
 // ---- stubs --------------------------------------------------------
 
 struct StubChainParams;
@@ -251,6 +298,24 @@ impl ChainParamsView for StubChainParams {
     fn compute_storage_fee(&self, box_bytes_len: i32, storage_fee_factor: i32) -> i32 {
         // Consensus arithmetic: factor * bytes_len, wrapping i32 (see
         // ergo_validation::storage_rent::compute_storage_fee).
+        storage_fee_factor.wrapping_mul(box_bytes_len)
+    }
+}
+
+/// `ChainParamsView` that panics if its factor method is ever called. Used to
+/// pin that the `H < StoragePeriod` short-circuit fires before the handler
+/// reaches the `H - 1` voted-params lookup.
+struct PanicOnFactorParams;
+
+impl ChainParamsView for PanicOnFactorParams {
+    fn storage_fee_factor_for_validation_at(&self, h: u32) -> Option<i32> {
+        panic!(
+            "storage_fee_factor_for_validation_at({h}) called: a storage-rent \
+             handler reached the voted-param lookup for a height below \
+             StoragePeriod instead of short-circuiting to an empty page"
+        );
+    }
+    fn compute_storage_fee(&self, box_bytes_len: i32, storage_fee_factor: i32) -> i32 {
         storage_fee_factor.wrapping_mul(box_bytes_len)
     }
 }

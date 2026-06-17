@@ -607,6 +607,37 @@ pub(crate) struct ScanMatchRecord {
 /// Rollback window: undo entries older than this are pruned on forward apply.
 pub const ROLLBACK_WINDOW: u32 = 200;
 
+/// Point-in-time read-only instrumentation gauges for a [`StateStore`].
+///
+/// Grouped into one struct so the consensus-critical `StateStore` surface
+/// isn't padded with a dozen individual metric getters. Every field is pure
+/// observability — none is consensus state. Produced by [`StateStore::metrics`]
+/// and consumed only by the heartbeat sampler in `ergo-node`. `Default` is the
+/// all-zero reading used for backends without a UTXO arena (e.g. digest mode).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StateMetrics {
+    /// Cumulative AVL arena node reads since the last `arena_reset_read_count`.
+    pub arena_read_count: u64,
+    /// Bytes currently held in the AVL arena's clean LRU cache (0 if unbudgeted).
+    pub arena_cache_clean_bytes: usize,
+    /// Configured byte budget for the AVL clean cache (0 if unbudgeted).
+    pub arena_cache_capacity_bytes: usize,
+    /// Number of nodes in the AVL clean cache.
+    pub arena_cache_clean_len: usize,
+    /// Structurally modified (dirty) AVL nodes pending commit. Sustained
+    /// growth signals a stalled commit pipeline.
+    pub arena_cache_dirty_len: usize,
+    /// Headers buffered in `batch_headers` awaiting persist.
+    pub batch_headers_len: usize,
+    /// Sum of buffered header bytes in `batch_headers`.
+    pub batch_headers_bytes: usize,
+    /// `header_meta` entries buffered awaiting persist.
+    pub batch_meta_len: usize,
+    /// Cumulative redb page-cache evictions for the state DB. Only non-zero
+    /// when redb's `cache_metrics` feature is enabled.
+    pub redb_cache_evictions: u64,
+}
+
 pub struct StateStore {
     db: Arc<Database>,
     tree: AvlTree,
@@ -866,19 +897,6 @@ impl StateStore {
         self.tree.arena_reset_read_count()
     }
 
-    /// Bytes currently held in the clean LRU cache of the AVL arena.
-    /// Observability accessor; returns 0 for arenas without a
-    /// byte-budgeted cache (e.g. `MemoryArena` used by tests).
-    pub fn arena_cache_clean_bytes(&self) -> usize {
-        self.tree.arena_cache_clean_bytes()
-    }
-
-    /// Configured byte budget for the AVL clean cache (`DEFAULT_CACHE_BYTES`
-    /// or whatever was passed to `open_with_cache`). 0 if unbudgeted.
-    pub fn arena_cache_capacity_bytes(&self) -> usize {
-        self.tree.arena_cache_capacity_bytes()
-    }
-
     /// A cloned `Arc` handle to the underlying redb `Database`. Allows
     /// subsystems (e.g. the wallet writer task) to open their own read
     /// transactions against the same database file without going through
@@ -888,43 +906,24 @@ impl StateStore {
         self.db.clone()
     }
 
-    /// Cumulative count of redb cache evictions for the state DB. Surfaces
-    /// pressure on redb's internal page cache: a steadily rising value
-    /// means redb is forced to rotate hot pages out and pay a re-read
-    /// cost. Only non-zero when the `cache_metrics` feature is enabled
-    /// on the redb crate.
-    pub fn redb_cache_evictions(&self) -> u64 {
-        self.db.cache_stats().evictions()
-    }
-
-    /// Number of nodes in the AVL clean cache.
-    pub fn arena_cache_clean_len(&self) -> usize {
-        self.tree.arena_cache_clean_len()
-    }
-
-    /// Number of structurally modified (dirty) AVL nodes pending commit.
-    /// A persistently growing dirty count signals a stalled commit pipeline.
-    pub fn arena_cache_dirty_len(&self) -> usize {
-        self.tree.arena_cache_dirty_len()
-    }
-
-    /// Number of headers buffered in the batch_headers map awaiting persist.
-    /// Normally drained per-batch; sustained growth signals commit-pipeline
-    /// stall.
-    pub fn batch_headers_len(&self) -> usize {
-        self.headers.batch_headers_len()
-    }
-
-    /// Sum of buffered header bytes in `batch_headers`. Linear in the
-    /// number of buffered headers; cheap because batch_headers is small in
-    /// the steady state.
-    pub fn batch_headers_bytes(&self) -> usize {
-        self.headers.batch_headers_bytes()
-    }
-
-    /// Number of header_meta entries buffered awaiting persist.
-    pub fn batch_meta_len(&self) -> usize {
-        self.headers.batch_meta_len()
+    /// Point-in-time snapshot of the store's read-only instrumentation
+    /// gauges (AVL arena cache, persist-batch buffers, redb eviction
+    /// counter). Grouped behind one accessor — see [`StateMetrics`] — so the
+    /// consensus-critical `StateStore` surface isn't padded with a dozen
+    /// individual getters; the heartbeat sampler in `ergo-node` is the only
+    /// consumer. Pure observability — none of these fields is consensus state.
+    pub fn metrics(&self) -> StateMetrics {
+        StateMetrics {
+            arena_read_count: self.tree.arena_read_count(),
+            arena_cache_clean_bytes: self.tree.arena_cache_clean_bytes(),
+            arena_cache_capacity_bytes: self.tree.arena_cache_capacity_bytes(),
+            arena_cache_clean_len: self.tree.arena_cache_clean_len(),
+            arena_cache_dirty_len: self.tree.arena_cache_dirty_len(),
+            batch_headers_len: self.headers.batch_headers_len(),
+            batch_headers_bytes: self.headers.batch_headers_bytes(),
+            batch_meta_len: self.headers.batch_meta_len(),
+            redb_cache_evictions: self.db.cache_stats().evictions(),
+        }
     }
 
     /// Insert a (key, value) directly into the AVL tree without running
