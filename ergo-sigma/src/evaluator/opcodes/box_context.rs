@@ -10,7 +10,8 @@
 //! - 0xE3 GetVar              — context-extension Option lookup with exact-type match
 
 use ergo_primitives::cost::CostAccumulator;
-use ergo_ser::opcode::Expr;
+use ergo_primitives::reader::VlqReader;
+use ergo_ser::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 
 use super::super::cost::add_cost;
@@ -220,18 +221,31 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
 }
 
 /// Canonical candidate serialization (`bytesWithNoRef`): value, script, height,
-/// tokens, then the registers re-serialized from their PARSED values with every
-/// `GroupElement` canonicalized (identity garbage normalized; non-identity
-/// points curve-validated). Mirrors `write_ergo_box_candidate` exactly except
-/// the register block is emitted from `additionalRegisters` rather than copied
-/// verbatim from the retained wire bytes — which is what normalizes the
-/// encoding. For a canonically-encoded box this reproduces `raw_bytes` minus the
-/// 32-byte txId + VLQ index suffix byte-for-byte.
+/// tokens, then the register block re-emitted with every `GroupElement`
+/// canonicalized (identity garbage normalized; non-identity points
+/// curve-validated). Mirrors `write_ergo_box_candidate` exactly except the
+/// register block is re-serialized through GE normalization rather than copied
+/// verbatim — which is what normalizes the encoding. For a canonically-encoded
+/// box this reproduces `raw_bytes` minus the 32-byte txId + VLQ index suffix
+/// byte-for-byte.
+///
+/// The register block is re-emitted from the verbatim wire bytes
+/// (`EvalBox.register_bytes`), NOT from the parsed `registers` field, so each
+/// register's node provenance is preserved: a Constant-encoded tuple stays a
+/// Constant, a `CreateTuple` (0x86) register stays 0x86, a `ConcreteCollection`
+/// (0x83) register stays 0x83. This matches Scala `ErgoBoxCandidate.serializer`,
+/// which re-serializes each register's parsed AST node as-is. Re-encoding from
+/// the parsed `RegisterValue` instead would force every tuple-typed register
+/// into `CreateTuple` form (`register::write_register_value`), producing a wrong
+/// `bytesWithNoRef` preimage for a Constant-encoded tuple register — the
+/// divergence that stalled mainnet block 1808895.
+///
+/// Test-only boxes carry no wire `register_bytes`; they fall back to a
+/// structural re-encode from the parsed registers (behavior-preserving for the
+/// boxes that path serves, none of which carry a Constant-encoded tuple).
 pub(in crate::evaluator) fn box_candidate_bytes_canonical(
     b: &EvalBox,
 ) -> Result<Vec<u8>, EvalError> {
-    use ergo_ser::register::{write_registers, AdditionalRegisters, RegisterValue};
-
     let mut w = ergo_primitives::writer::VlqWriter::new();
     w.put_u64(b.value as u64);
     w.put_bytes(&b.script_bytes);
@@ -241,6 +255,93 @@ pub(in crate::evaluator) fn box_candidate_bytes_canonical(
         w.put_bytes(id);
         w.put_u64(*amount);
     }
+    if b.register_bytes.is_empty() {
+        write_registers_structural(&mut w, b)?;
+    } else {
+        write_registers_canonical(&mut w, &b.register_bytes)?;
+    }
+    Ok(w.result())
+}
+
+/// Re-emit the register block from its verbatim wire bytes, normalizing only
+/// `GroupElement` encodings while preserving each register's node shape. See
+/// [`box_candidate_bytes_canonical`] for why provenance must be preserved.
+fn write_registers_canonical(
+    w: &mut ergo_primitives::writer::VlqWriter,
+    register_bytes: &[u8],
+) -> Result<(), EvalError> {
+    let entries = ergo_ser::register::split_register_bytes(register_bytes).map_err(|e| {
+        EvalError::TypeError {
+            expected: "splittable register block",
+            got: format!("register block split failed: {e}"),
+        }
+    })?;
+    w.put_u8(entries.len() as u8);
+    for entry in &entries {
+        let mut r = VlqReader::new(entry);
+        let expr = parse_expr(&mut r, 0, 0).map_err(|e| EvalError::TypeError {
+            expected: "parseable register expression",
+            got: format!("register expr parse failed: {e}"),
+        })?;
+        let canon = canonicalize_register_expr(&expr)?;
+        write_expr(w, &canon, false).map_err(|e| EvalError::TypeError {
+            expected: "serializable register expression",
+            got: format!("register expr re-serialization failed: {e}"),
+        })?;
+    }
+    Ok(())
+}
+
+/// Return a copy of register expression `e` with every `GroupElement`
+/// canonicalized, preserving the node's form: a `Const` re-canonicalizes its
+/// inline value; a `CreateTuple` (0x86) / `ConcreteCollection` (0x83) recurses
+/// into its items; any other form (e.g. `Coll[Boolean]` bit-packed) carries no
+/// `GroupElement` and is returned unchanged.
+fn canonicalize_register_expr(e: &Expr) -> Result<Expr, EvalError> {
+    Ok(match e {
+        Expr::Const { tpe, val } => Expr::Const {
+            tpe: tpe.clone(),
+            val: canonicalize_group_elements(val)?,
+        },
+        Expr::Op(IrNode {
+            opcode: opcode @ 0x86,
+            payload: Payload::Tuple { items },
+        }) => Expr::Op(IrNode {
+            opcode: *opcode,
+            payload: Payload::Tuple {
+                items: items
+                    .iter()
+                    .map(canonicalize_register_expr)
+                    .collect::<Result<_, _>>()?,
+            },
+        }),
+        Expr::Op(IrNode {
+            opcode: opcode @ 0x83,
+            payload: Payload::ConcreteCollection { elem_type, items },
+        }) => Expr::Op(IrNode {
+            opcode: *opcode,
+            payload: Payload::ConcreteCollection {
+                elem_type: elem_type.clone(),
+                items: items
+                    .iter()
+                    .map(canonicalize_register_expr)
+                    .collect::<Result<_, _>>()?,
+            },
+        }),
+        other => other.clone(),
+    })
+}
+
+/// Structural register re-encode for test-only boxes that carry no wire
+/// `register_bytes`. Tuple-typed registers go out in `CreateTuple` form (see
+/// `register::write_register_value`); this is acceptable only because the boxes
+/// reaching this path never carry a Constant-encoded tuple register.
+fn write_registers_structural(
+    w: &mut ergo_primitives::writer::VlqWriter,
+    b: &EvalBox,
+) -> Result<(), EvalError> {
+    use ergo_ser::register::{write_registers, AdditionalRegisters, RegisterValue};
+
     let registers: Vec<RegisterValue> = b
         .registers
         .iter()
@@ -252,13 +353,10 @@ pub(in crate::evaluator) fn box_candidate_bytes_canonical(
             })
         })
         .collect::<Result<_, EvalError>>()?;
-    write_registers(&mut w, &AdditionalRegisters { registers }).map_err(|e| {
-        EvalError::TypeError {
-            expected: "serializable box registers",
-            got: format!("register re-serialization failed: {e}"),
-        }
-    })?;
-    Ok(w.result())
+    write_registers(w, &AdditionalRegisters { registers }).map_err(|e| EvalError::TypeError {
+        expected: "serializable box registers",
+        got: format!("register re-serialization failed: {e}"),
+    })
 }
 
 /// Return a copy of `v` with every `GroupElement` canonicalized (recursing

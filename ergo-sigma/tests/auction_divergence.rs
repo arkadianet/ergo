@@ -157,6 +157,7 @@ fn make_eval_box(b: &ErgoBox) -> EvalBox {
             .map(|t| (*t.token_id.as_bytes(), t.amount))
             .collect(),
         raw_bytes: w.result(),
+        register_bytes: b.candidate.register_bytes().to_vec(),
     }
 }
 

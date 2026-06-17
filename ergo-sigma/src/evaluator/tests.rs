@@ -93,6 +93,7 @@ fn box_equality_self_vs_inputs_0() {
         registers: [None, None, None, None, None, None],
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
         height: 200,
@@ -139,6 +140,7 @@ fn box_equality_in_tuple() {
         registers: [None, None, None, None, None, None],
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
         height: 200,
@@ -184,6 +186,7 @@ fn box_equality_in_option() {
         registers: [None, None, None, None, None, None],
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
         height: 200,
@@ -231,6 +234,7 @@ fn box_collection_vs_derived_tuple() {
         registers: [None, None, None, None, None, None],
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let box1 = EvalBox {
         creation_height: 101,
@@ -242,6 +246,7 @@ fn box_collection_vs_derived_tuple() {
         registers: [None, None, None, None, None, None],
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
         height: 200,
@@ -307,6 +312,7 @@ fn coll_box_eq_cost_uses_per_item() {
         output_index: 0,
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let box1 = EvalBox {
         creation_height: 101,
@@ -318,6 +324,7 @@ fn coll_box_eq_cost_uses_per_item() {
         output_index: 0,
         tokens: Vec::new(),
         raw_bytes: Vec::new(),
+        register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
         height: 200,
@@ -1585,6 +1592,7 @@ fn make_test_box() -> EvalBox {
         ],
         tokens: vec![([0x11; 32], 100), ([0x22; 32], 200)],
         raw_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        register_bytes: Vec::new(),
     }
 }
 
@@ -12406,6 +12414,11 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
     raw.extend_from_slice(&[0x11; 32]); // transaction id
     raw.push(0x00); // output index VLQ(0)
 
+    // register_bytes = the verbatim register block (count byte + R4 entry),
+    // garbage retained — the canonical re-serializer parses + normalizes this.
+    let mut register_bytes = vec![0x01u8, 0x07u8]; // count 1, R4 type SGroupElement
+    register_bytes.extend_from_slice(&ge_garbage);
+
     let b = EvalBox {
         creation_height: 0,
         script_bytes: vec![0x10, 0x00],
@@ -12428,6 +12441,7 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         ],
         tokens: Vec::new(),
         raw_bytes: raw,
+        register_bytes,
     };
     let ctx = ctx_with_self_box(&b);
     let expr = op(0xC4, Payload::One(Box::new(op(0xA7, Payload::Zero))));
@@ -12448,6 +12462,161 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         &out[out.len() - 34..],
         expected_tail.as_slice(),
         "register tail must be canonical identity GE"
+    );
+}
+
+// ---- Cluster: ExtractBytesWithNoRef preserves register node provenance ----
+
+// Encode an expression to its wire bytes (for building register entries).
+fn expr_wire_bytes(e: &Expr) -> Vec<u8> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::opcode::write_expr(&mut w, e, false).unwrap();
+    w.result()
+}
+
+// Build a self_box carrying exactly `register_bytes` and return its
+// bytesWithoutRef (0xC4). Only the register block drives the 0xC4 register
+// tail, so the prefix fields and parsed `registers` are placeholders.
+fn bytes_with_no_ref_for_register_block(register_bytes: Vec<u8>) -> Vec<u8> {
+    let b = EvalBox {
+        creation_height: 0,
+        script_bytes: vec![0x10, 0x00],
+        value: 1000,
+        id: [0u8; 32],
+        transaction_id: [0u8; 32],
+        output_index: 0,
+        registers: [None, None, None, None, None, None],
+        tokens: Vec::new(),
+        raw_bytes: Vec::new(),
+        register_bytes,
+    };
+    let ctx = ctx_with_self_box(&b);
+    let expr = op(0xC4, Payload::One(Box::new(op(0xA7, Payload::Zero))));
+    match run_eval_ctx(&expr, &ctx) {
+        Value::CollBytes(v) => v,
+        other => panic!("expected CollBytes, got {other:?}"),
+    }
+}
+
+/// A tuple-typed register encoded as a Constant (DataSerializer form) must
+/// round-trip through bytesWithoutRef byte-for-byte — NOT collapse into a
+/// `CreateTuple` (0x86) expression. The parsed `RegisterValue` alone is
+/// ambiguous (a Constant tuple and a CreateTuple expr both parse to
+/// `(STuple, Tuple)`); only the verbatim wire bytes carry the provenance. This
+/// is the divergence that stalled mainnet block 1808895.
+#[test]
+fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
+    let tpe = SigmaType::STuple(vec![SigmaType::SLong, SigmaType::SLong]);
+    let val = SigmaValue::Tuple(vec![SigmaValue::Long(5), SigmaValue::Long(7)]);
+    let entry = expr_wire_bytes(&Expr::Const {
+        tpe: tpe.clone(),
+        val: val.clone(),
+    });
+    assert!(
+        entry[0] <= 0x70,
+        "fixture must be Constant-encoded, got lead {:#x}",
+        entry[0]
+    );
+
+    // The same value through the structural register writer goes out as a
+    // CreateTuple (0x86) — the buggy encoding. bytesWithoutRef must NOT produce
+    // this; it must reproduce the Constant `entry` verbatim.
+    let structural = {
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::register::write_registers(
+            &mut w,
+            &ergo_ser::register::AdditionalRegisters {
+                registers: vec![ergo_ser::register::RegisterValue { tpe, value: val }],
+            },
+        )
+        .unwrap();
+        w.result()
+    };
+    assert_eq!(
+        structural[1], 0x86,
+        "structural writer emits CreateTuple for tuple registers (the bug)"
+    );
+
+    let mut register_bytes = vec![0x01u8];
+    register_bytes.extend_from_slice(&entry);
+    let out = bytes_with_no_ref_for_register_block(register_bytes);
+
+    assert_eq!(
+        &out[out.len() - entry.len()..],
+        entry.as_slice(),
+        "Constant-encoded tuple register must round-trip verbatim (not 0x86)"
+    );
+}
+
+/// A register genuinely encoded as a `CreateTuple` expression (0x86) — real
+/// mainnet boxes carry these (e.g. block 855650 R8) — must KEEP its 0x86 form
+/// through bytesWithoutRef. The fix preserves provenance both ways: it must not
+/// rewrite a Constant tuple as 0x86, nor a 0x86 register as a Constant.
+#[test]
+fn extract_bytes_with_no_ref_preserves_create_tuple_register() {
+    let create_tuple = Expr::Op(IrNode {
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![
+                Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(5),
+                },
+                Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(7),
+                },
+            ],
+        },
+    });
+    let entry = expr_wire_bytes(&create_tuple);
+    assert_eq!(entry[0], 0x86, "fixture must be a CreateTuple expression");
+
+    let mut register_bytes = vec![0x01u8];
+    register_bytes.extend_from_slice(&entry);
+    let out = bytes_with_no_ref_for_register_block(register_bytes);
+
+    assert_eq!(
+        &out[out.len() - entry.len()..],
+        entry.as_slice(),
+        "CreateTuple (0x86) register must stay 0x86 (provenance preserved)"
+    );
+}
+
+/// The exact mainnet-1808895 box shape: a register that is a Constant of a
+/// tuple type CONTAINING a GroupElement. The GE must be canonicalized (identity
+/// garbage -> 33 zeros) WHILE the register stays Constant form — the two
+/// behaviors the fix has to satisfy at once.
+#[test]
+fn extract_bytes_with_no_ref_normalizes_ge_inside_constant_tuple_register() {
+    let ge_garbage = {
+        let mut g = [0xaau8; 33];
+        g[0] = 0x00; // identity lead: trailing bytes discarded at parse
+        g
+    };
+    let tpe = SigmaType::STuple(vec![SigmaType::SGroupElement, SigmaType::SLong]);
+    let val = SigmaValue::Tuple(vec![
+        SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
+            ge_garbage,
+        )),
+        SigmaValue::Long(7),
+    ]);
+    let entry = expr_wire_bytes(&Expr::Const { tpe, val });
+    assert!(entry[0] <= 0x70, "fixture must be Constant-encoded");
+    assert!(entry.contains(&0xAA), "fixture must carry GE garbage");
+
+    let mut register_bytes = vec![0x01u8];
+    register_bytes.extend_from_slice(&entry);
+    let out = bytes_with_no_ref_for_register_block(register_bytes);
+
+    let tail = &out[out.len() - entry.len()..];
+    assert!(
+        !tail.contains(&0xAA),
+        "GE garbage inside the tuple register must be normalized"
+    );
+    assert_eq!(
+        tail[0], entry[0],
+        "register must stay Constant form (same tuple type code, not 0x86)"
     );
 }
 
