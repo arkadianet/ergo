@@ -16,13 +16,72 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-17
+
+A consensus-fix and operator-experience release. The headline is a
+reject-valid divergence that stalled the mainnet node at block 1808895; it
+also closes the `/scan/*` wallet-scan API, lands the operator voting and
+votes-history surfaces, unifies the dashboard UI, and continues the SANTA
+conformance and QA hardening. As always for this node: re-verify its
+verdicts against the Scala reference node before relying on it for funds.
+
+### Fixed
+
+- **Consensus: register node-provenance in `bytesWithNoRef` (#91).**
+  `ExtractBytesWithNoRef` (0xC4) re-serialized box registers from their
+  parsed values, emitting every tuple-typed register as a `CreateTuple`
+  (0x86) expression. A register encoded on the wire as a plain `Constant`
+  then produced a wrong `blake2b256(bytesWithoutRef)`, so an empty-proof
+  spend whose guard hashes a successor box's tuple register reduced to
+  `false` where Scala reduces to `true` — rejecting the canonical mainnet
+  block 1808895 and stalling the node. Registers now re-emit from their
+  verbatim wire bytes, preserving each register's node shape (Constant /
+  CreateTuple / ConcreteCollection) while still canonicalizing
+  `GroupElement` encodings.
+- **Consensus QA hardening (#83, #85, #86).** Strict ERG conservation,
+  i64 token-sum overflow guards, ErgoTree/`SigmaBoolean` depth bounds (P0);
+  reject zero-output / zero-token transactions and distinct deep-reorg
+  refusal (P1); interlinks 401/402, NiPoPoW dedup, mempool quarantine,
+  eval-depth, and handshake-deadline fixes (P2).
+- **SANTA conformance (#68–#74).** Eval-tier (14→1 coal) and chain-tier
+  (13→2 coal) parity with the Scala `sigmastate-interpreter`: GroupElement
+  / tuple / `SBox` accessor / `bytesWithoutRef` / `deserializeTo[Box]`
+  handling; `CheckV6Type` on register types (rule 1019); `CheckHeaderSizeBit`
+  on box scripts (rule 1012); hostile 122-without-121 soft-fork table (rule
+  407); non-unary `FuncValue` + `atLeast` >255 children; V6 deserialize-
+  substitution costing.
+- **Mining ADProofs include the data-input Lookup prefix (#66)** plus a
+  pre-broadcast candidate-ADProofs self-check (#67).
+- Pre-v3 trees auto-upcast mixed-kind numeric operands (#54); mempool
+  invalidation-cache Scala parity + address network check (#62).
+
 ### Added
 
-- `GET /emission/scripts` (mainnet): the three emission-related contracts
-  as P2S addresses, served from oracle-verified constants byte-identical
-  to the live-Scala capture. Testnet returns 404 pending an oracle
-  capture (documented divergence — Scala's testnet serves three testnet
-  addresses).
+- **Unified operator dashboard + shell-level Authorize (#92).** One design
+  system (tokens + shared components), SPA section lifecycle, and an
+  Authorize chip that sets the `api_key` from anywhere (out of Settings /
+  Swagger); the standalone wallet page is folded in as a `#wallet` section;
+  native Swagger themed; accessibility pass.
+- **Operator voting (#82, #88, #89, #90).** `GET /api/v1/votes`
+  (votable-parameters view), auth-gated runtime `POST /api/v1/votes`,
+  `GET /api/v1/votes/history` (parameter-change timeline) with vote-bounds
+  enforcement, votable-parameter descriptions, and `api_key` carried into
+  the Swagger pages.
+- **Wallet-scan API `/scan/*` (#57–#61, #75–#81).** Persistent scan
+  registry (register / deregister / listAll), block-apply box tracking,
+  `unspentBoxes` / `spentBoxes`, `transactionsByScanId`, `stopTracking` /
+  `addBox` / `p2sRule`, rescan participation, reserved-id reads,
+  off-chain (mempool) boxes via `minConfirmations=-1`, and tag/box purge
+  on deregister.
+- **REST parity.** `/emission/scripts` (#63), `POST /peers/connect` (#64),
+  `/utxo/getSnapshotsInfo` Mode-2 cache (#65), `/script/addressToTree` +
+  `/script/addressToBytes` (#56).
+- **Observability (#87).** Block-apply rejections surfaced via `/health`,
+  `/status`, and `/metrics`.
+
+### Performance
+
+- Cold-resilient candidate hydrate + mining build visibility (#55).
 
 ## [0.4.0] - 2026-06-10
 
