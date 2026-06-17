@@ -879,6 +879,7 @@ fn eval_box_from_ergo(b: &ErgoBox) -> ergo_sigma::evaluator::EvalBox {
         registers: [None, None, None, None, None, None],
         tokens: vec![],
         raw_bytes: vec![],
+        register_bytes: vec![],
     }
 }
 
@@ -894,6 +895,7 @@ fn eval_box_from_candidate(c: &ErgoBoxCandidate, index: usize) -> ergo_sigma::ev
         registers: [None, None, None, None, None, None],
         tokens: vec![],
         raw_bytes: vec![],
+        register_bytes: vec![],
     }
 }
 

@@ -1472,6 +1472,7 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 registers,
                 tokens,
                 raw_bytes,
+                register_bytes: ergo_box.candidate.register_bytes().to_vec(),
             })))
         }
         (SigmaType::SAvlTree, SigmaValue::AvlTree(data)) => Ok(Value::AvlTree(data.clone())),
