@@ -445,7 +445,8 @@ pub struct ParamDescriptor {
 /// callers that only need to validate a target (the runtime `POST /api/v1/votes`
 /// write and the `[voting.targets]` config loader) can check it without an
 /// active-parameter table. A target beyond the returned range can never be a
-/// settling value (the recompute won't step the parameter past the bound), so
+/// settling value (recompute stops further movement once current is at/over the
+/// gate; from just inside, one approved step may still overshoot by one step), so
 /// such a target is rejected rather than silently driving the parameter to the
 /// bound forever.
 pub fn votable_param_bounds(id: u8) -> Option<(i32, i32)> {
