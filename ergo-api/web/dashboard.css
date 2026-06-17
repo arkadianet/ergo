@@ -541,13 +541,39 @@
 .vt-range {
   color: var(--tx2);
 }
+.vt-row--active {
+  background: color-mix(in srgb, var(--blue) 5%, transparent);
+}
 .vt-live {
   color: var(--blue);
 }
+.vt-live--active {
+  color: var(--tx);
+}
+.vt-live--active::before {
+  content: 'active ';
+  color: var(--blue);
+  font-family: var(--sans);
+  font-size: var(--fs-small);
+}
 .vt-input {
   width: 12ch;
+  min-height: 34px;
   text-align: right;
   padding: var(--space-3) var(--space-4);
+  font-family: var(--mono);
+}
+.vt-input--active {
+  border-color: color-mix(in srgb, var(--blue) 45%, var(--bd));
+  background: color-mix(in srgb, var(--blue) 7%, var(--s2));
+}
+.vt-input::-webkit-outer-spin-button,
+.vt-input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+.vt-input[type='number'] {
+  appearance: textfield;
 }
 .vt-actions {
   display: flex;
@@ -645,25 +671,50 @@
 .w-wrap {
   display: grid;
   grid-template-columns: minmax(280px, 0.85fr) minmax(420px, 1.15fr);
+  grid-template-areas:
+    'scan scan'
+    'status send'
+    'balances send'
+    'addresses keys';
   gap: var(--space-5);
   align-items: start;
   max-width: 1240px;
 }
+.w-wrap:has(> [data-scan-banner][hidden]) {
+  grid-template-areas:
+    'status send'
+    'balances send'
+    'addresses keys';
+}
 .w-wrap > [data-scan-banner] {
-  grid-column: 1 / -1;
+  grid-area: scan;
 }
 .w-wrap > [data-onboard-panel] {
   grid-column: 1 / -1;
   max-width: 820px;
 }
-.w-wrap > [data-status-panel],
-.w-wrap > [data-balances-panel],
-.w-wrap > [data-addresses-panel] {
-  grid-column: 1;
+.w-wrap > [data-status-panel] {
+  grid-area: status;
 }
-.w-wrap > [data-send-panel],
+.w-wrap > [data-balances-panel] {
+  grid-area: balances;
+}
+.w-wrap > [data-addresses-panel] {
+  grid-area: addresses;
+}
+.w-wrap > [data-send-panel] {
+  grid-area: send;
+}
 .w-wrap > [data-keys-panel] {
-  grid-column: 2;
+  grid-area: keys;
+}
+.w-panel--locked .w-recipient {
+  opacity: 0.72;
+}
+.w-panel--locked [data-send-submit] {
+  background: color-mix(in srgb, var(--accent) 42%, var(--s3));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--bd));
+  color: var(--tx2);
 }
 .w-form {
   display: flex;
@@ -756,6 +807,21 @@
   .drawer-grid,
   .w-wrap {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      'scan'
+      'status'
+      'balances'
+      'addresses'
+      'send'
+      'keys';
+  }
+  .w-wrap:has(> [data-scan-banner][hidden]) {
+    grid-template-areas:
+      'status'
+      'balances'
+      'addresses'
+      'send'
+      'keys';
   }
   .w-wrap > [data-status-panel],
   .w-wrap > [data-balances-panel],
