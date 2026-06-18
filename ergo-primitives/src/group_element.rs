@@ -21,6 +21,19 @@ impl GroupElement {
     }
 }
 
+/// Read a 33-byte group element AND record it on the reader's sideband so a
+/// higher (crypto-capable) layer can curve-check it after parsing. Every
+/// deserializer that reads a group element must go through this — that is what
+/// makes the curve check complete (the Scala reference curve-checks each point
+/// while deserializing; we collect at the same points and validate later).
+pub fn read_group_element(
+    r: &mut crate::reader::VlqReader,
+) -> Result<GroupElement, crate::reader::ReadError> {
+    let bytes = r.get_array::<GROUP_ELEMENT_LENGTH>()?;
+    r.record_group_element(bytes);
+    Ok(GroupElement::from_bytes(bytes))
+}
+
 impl std::fmt::Debug for GroupElement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GroupElement({})", hex::encode(self.as_bytes()))

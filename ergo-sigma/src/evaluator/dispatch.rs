@@ -214,6 +214,22 @@ pub(crate) fn pre_reduction_checks(
     Ok(())
 }
 
+/// Validate one group-element encoding exactly as Scala's
+/// `GroupElementSerializer.parse` does at deserialize time: a `0x00`-lead
+/// encoding is the identity (accepted, trailing bytes ignored); any other lead
+/// must decode to an on-curve SecP256K1 point. Off-curve points and invalid
+/// SEC1 prefixes error.
+///
+/// Exposed for the consensus group-element check: the node stores group elements
+/// as raw bytes and defers the curve check to spend-eval, so a transaction
+/// carrying an off-curve point would be accepted at creation where the JVM
+/// rejects it at deserialize. `ergo-ser` collects every point seen during a
+/// parse on the reader's sideband; `ergo-validation` drains that set and passes
+/// each point here.
+pub fn validate_group_element(bytes: [u8; 33]) -> Result<(), EvalError> {
+    opcodes::sigma::canonicalize_group_element(bytes).map(|_| ())
+}
+
 /// Structural rebuild replacing every `ConstPlaceholder { index }` with
 /// the corresponding inline `Expr::Const` from the segregated constant
 /// table. Out-of-range indexes are left as placeholders — they error at

@@ -1,3 +1,4 @@
+pub mod ge;
 pub mod heights;
 pub mod monetary;
 pub(crate) mod script;
@@ -103,8 +104,14 @@ pub fn validate_transaction(
         )));
     }
 
-    // Stage 1: deserialize
-    let tx = deserialize_transaction(tx_bytes)?;
+    // Stage 1: deserialize (also collects every group element seen on the wire)
+    let (tx, group_elements) = deserialize_transaction(tx_bytes)?;
+
+    // Stage 1.5: every group element must be on-curve. Scala rejects an off-curve
+    // / bad-prefix point while deserializing the transaction; the node's
+    // deserialize is crypto-free, so we curve-check the collected points here
+    // (earliest stateless stage) to match that deserialize-time rejection.
+    ge::validate_group_elements(&group_elements)?;
 
     // Stage 2: structural (stateless — cheaper than canonical re-serialization)
     structural::validate_structural(&tx, cx.params)?;
@@ -195,6 +202,17 @@ pub fn validate_transaction_parsed(
     // Structural
     structural::validate_structural(&tx, cx.params)?;
 
+    // Group elements on-curve (Scala curve-checks them at deserialize). This
+    // path receives an already-parsed tx, so re-collect the points from the
+    // original bytes (validated equal to `tx` by check_canonical above) and
+    // curve-check them. (Perf follow-up: thread the points from the block
+    // deserializer to avoid this re-parse.)
+    {
+        let mut r = VlqReader::new(original_bytes);
+        read_transaction(&mut r).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
+        ge::validate_group_elements(&r.take_group_elements())?;
+    }
+
     // Rule 108 (txPositiveAssets) — before the per-output 112/124 loop.
     monetary::check_positive_assets(&tx)?;
     // Per-output height constraints (Scala rules 112 + 124)
@@ -241,7 +259,12 @@ pub fn validate_transaction_parsed(
     })
 }
 
-fn deserialize_transaction(tx_bytes: &[u8]) -> Result<Transaction, ValidationError> {
+/// Returns the parsed transaction and every group element seen during the parse
+/// (collected on the reader's sideband), so the caller can curve-check them —
+/// matching Scala's deserialize-time `GroupElementSerializer.parse`.
+fn deserialize_transaction(
+    tx_bytes: &[u8],
+) -> Result<(Transaction, Vec<[u8; 33]>), ValidationError> {
     let mut r = VlqReader::new(tx_bytes);
     let tx =
         read_transaction(&mut r).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
@@ -251,7 +274,7 @@ fn deserialize_transaction(tx_bytes: &[u8]) -> Result<Transaction, ValidationErr
             r.remaining(),
         )));
     }
-    Ok(tx)
+    Ok((tx, r.take_group_elements()))
 }
 
 fn check_canonical(tx: &Transaction, expected_bytes: &[u8]) -> Result<(), ValidationError> {

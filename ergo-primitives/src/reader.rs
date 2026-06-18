@@ -13,6 +13,15 @@ pub struct VlqReader<'a> {
     /// Set only for scoped sub-parses (e.g. an SBox candidate body bounded to
     /// `start + MaxBoxSize`); leaves all other parsing unaffected.
     position_limit: Option<usize>,
+    /// Sideband: every group-element encoding (raw 33 bytes) seen during the
+    /// parse. Crypto-free — just bytes. The Scala reference curve-checks each
+    /// group element while deserializing; this crate is crypto-free, so the
+    /// higher layer (`ergo-validation` via `ergo-sigma`) drains and validates
+    /// these after parsing. Collected here rather than by walking the parsed
+    /// AST so that soft-fork-wrapped trees and opaque SBox bodies — which lose
+    /// the points in the AST — are still covered. See
+    /// [`record_group_element`](Self::record_group_element).
+    group_elements: Vec<[u8; 33]>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -61,11 +70,29 @@ impl<'a> VlqReader<'a> {
             data,
             pos: 0,
             position_limit: None,
+            group_elements: Vec::new(),
         }
     }
 
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Record a group-element encoding seen during the parse (the raw 33 bytes,
+    /// exactly as on the wire). Called by the deserializers at every point the
+    /// Scala reference would curve-check a group element.
+    pub fn record_group_element(&mut self, ge: [u8; 33]) {
+        self.group_elements.push(ge);
+    }
+
+    /// All group-element encodings seen so far.
+    pub fn group_elements(&self) -> &[[u8; 33]] {
+        &self.group_elements
+    }
+
+    /// Take the recorded group elements, leaving the sideband empty.
+    pub fn take_group_elements(&mut self) -> Vec<[u8; 33]> {
+        std::mem::take(&mut self.group_elements)
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped

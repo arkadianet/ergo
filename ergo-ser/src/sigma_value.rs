@@ -1,4 +1,4 @@
-use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
+use ergo_primitives::group_element::{read_group_element, GroupElement};
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
@@ -325,9 +325,7 @@ pub(crate) fn read_value_at_depth(
             let v = read_bigint_value(r)?;
             Ok(SigmaValue::BigInt(v))
         }
-        SigmaType::SGroupElement => Ok(SigmaValue::GroupElement(GroupElement::from_bytes(
-            r.get_array::<GROUP_ELEMENT_LENGTH>()?,
-        ))),
+        SigmaType::SGroupElement => Ok(SigmaValue::GroupElement(read_group_element(r)?)),
         SigmaType::SSigmaProp => {
             // Continue the shared depth budget into the SigmaBoolean tree.
             let sb = read_sigma_boolean_at_depth(r, depth)?;
@@ -537,7 +535,15 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
         let size = r.get_u32_exact()? as usize;
         let _ = r.get_bytes(size)?;
         let tree_bytes = r.data_slice(tree_start, r.position()).to_vec();
-        crate::ergo_tree::read_ergo_tree_tracking_wrap(&mut VlqReader::new(&tree_bytes))?;
+        // Re-parse the captured (size-delimited) inner tree on a sub-reader, then
+        // forward its group elements onto the outer reader's sideband — otherwise
+        // an off-curve point inside a nested SBox's size-delimited script would be
+        // lost (the JVM curve-checks it while deserializing the nested box).
+        let mut sub = VlqReader::new(&tree_bytes);
+        crate::ergo_tree::read_ergo_tree_tracking_wrap(&mut sub)?;
+        for ge in sub.take_group_elements() {
+            r.record_group_element(ge);
+        }
     } else {
         // Non-size-delimited: must parse constants and body to find boundary.
         if cseg {
@@ -689,14 +695,12 @@ fn read_sigma_boolean_at_depth(r: &mut VlqReader, depth: usize) -> Result<SigmaB
     match tag {
         TRIVIAL_PROP_FALSE => Ok(SigmaBoolean::TrivialProp(false)),
         TRIVIAL_PROP_TRUE => Ok(SigmaBoolean::TrivialProp(true)),
-        PROVE_DLOG => Ok(SigmaBoolean::ProveDlog(GroupElement::from_bytes(
-            r.get_array::<GROUP_ELEMENT_LENGTH>()?,
-        ))),
+        PROVE_DLOG => Ok(SigmaBoolean::ProveDlog(read_group_element(r)?)),
         PROVE_DHTUPLE => {
-            let g = GroupElement::from_bytes(r.get_array::<GROUP_ELEMENT_LENGTH>()?);
-            let h = GroupElement::from_bytes(r.get_array::<GROUP_ELEMENT_LENGTH>()?);
-            let u = GroupElement::from_bytes(r.get_array::<GROUP_ELEMENT_LENGTH>()?);
-            let v = GroupElement::from_bytes(r.get_array::<GROUP_ELEMENT_LENGTH>()?);
+            let g = read_group_element(r)?;
+            let h = read_group_element(r)?;
+            let u = read_group_element(r)?;
+            let v = read_group_element(r)?;
             Ok(SigmaBoolean::ProveDHTuple { g, h, u, v })
         }
         SIGMA_AND => {

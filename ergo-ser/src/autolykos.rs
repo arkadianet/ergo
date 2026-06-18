@@ -1,4 +1,4 @@
-use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
+use ergo_primitives::group_element::{read_group_element, GroupElement};
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
@@ -87,10 +87,10 @@ pub fn write_solution(w: &mut VlqWriter, sol: &AutolykosSolution) -> Result<(), 
 /// Decode an Autolykos solution from `r`. `block_version == 1` selects
 /// the v1 layout; any higher version selects the v2 layout.
 pub fn read_solution(r: &mut VlqReader, block_version: u8) -> Result<AutolykosSolution, ReadError> {
-    let pk = GroupElement::from_bytes(r.get_array::<GROUP_ELEMENT_LENGTH>()?);
+    let pk = read_group_element(r)?;
 
     if block_version == 1 {
-        let w = GroupElement::from_bytes(r.get_array::<GROUP_ELEMENT_LENGTH>()?);
+        let w = read_group_element(r)?;
         let nonce = r.get_array::<NONCE_LENGTH>()?;
         let d_len = r.get_u8()? as usize;
         let d = r.get_bytes(d_len)?.to_vec();
