@@ -27,12 +27,13 @@ const V6_SOFT_FORK_VERSION: u8 = 3;
 /// proving/tests, where `self_box` is `None`). Such trees are canonical, so
 /// their re-serialized length equals their original length.
 ///
-/// It must NOT be used on the consensus spend path: re-serialization is NOT
-/// byte-identical to the original wire form for non-canonical encodings (e.g.
-/// the compact `Relation2` `0x85` boolean-constant pair, which the writer
-/// expands to two `Const` children), so it would diverge from Scala's
-/// `ergoTree.bytes.length`. The consensus path uses `self_box.script_bytes`
-/// (the preserved original bytes) instead — see the cost site below.
+/// It must NOT be used on the consensus spend path: re-serialization is not
+/// guaranteed byte-identical to the original wire form for every encoding, so it
+/// could diverge from Scala's `ergoTree.bytes.length`. The consensus path uses
+/// `self_box.script_bytes` (the preserved original bytes) instead — see the cost
+/// site below. (The one historically non-canonical form this crate produced —
+/// the expanded `Relation2` boolean-constant pair — is now written compactly,
+/// but using the preserved bytes remains the robust, reference-matching rule.)
 fn serialized_ergo_tree_len(tree: &ErgoTree) -> Result<usize, VerifySpendingError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
     ergo_ser::ergo_tree::write_ergo_tree(&mut w, tree).map_err(|_| {
@@ -567,14 +568,16 @@ mod tests {
 
     #[test]
     fn deserialize_substitution_cost_uses_original_compact_relation2_wire() {
-        // Realistic non-canonical fixture: a tree whose ORIGINAL wire bytes use
-        // the compact Relation2 0x85 boolean-pair form, which is SHORTER than
-        // this crate's expanded re-encoding. The deserialize-substitution cost
-        // must track the preserved original (compact) length — matching Scala's
-        // `ergoTree.bytes.length` — not the longer re-serialization. Unlike the
-        // synthetic padded fixture above, this exercises a genuine valid wire
-        // encoding, so it also guards parse/preservation, not just the
-        // script_bytes.len() source selection.
+        // Realistic fixture using a genuine compact Relation2 0x85 boolean-pair
+        // wire form — an INTEGRATION check that the two halves of the fix
+        // compose: this crate now (a) re-serializes that form canonically (the
+        // compact-writer fix) AND (b) costs the deserialize-substitution off the
+        // spent box's preserved original bytes. So for this tree the preserved
+        // original length, the re-serialized length, and the charged length all
+        // AGREE — matching Scala's `ergoTree.bytes.length`. (The synthetic
+        // fixture above is what discriminates original-vs-reserialized via a
+        // length mismatch; this one additionally guards real parse/preservation
+        // and the writer-canon ↔ cost agreement.)
         //
         // body = If(Eq(true, true), true, DeserializeContext[SBoolean])
         // The deserialize node is on the (dead) else branch — Eq(true,true)=true
@@ -625,13 +628,18 @@ mod tests {
             "hand-assembled compact bytes must decode to the expected tree",
         );
 
-        // This crate's writer expands the Eq, so re-serialization is strictly
-        // longer than the preserved compact original.
-        let reserialized = serialized_ergo_tree_len(&tree).expect("re-serialize");
-        assert!(
-            compact.len() < reserialized,
-            "compact ({}) must be shorter than expanded ({reserialized})",
-            compact.len(),
+        // The compact-writer fix re-serializes the Relation2 bool pair back to
+        // the same 0x85 form, so re-serialization now equals the preserved
+        // compact original BYTE-FOR-BYTE (the divergence is closed from both
+        // sides).
+        let reserialized = {
+            let mut w = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::ergo_tree::write_ergo_tree(&mut w, &tree).expect("re-serialize");
+            w.result()
+        };
+        assert_eq!(
+            reserialized, compact,
+            "compact writer must re-serialize this tree byte-identically to its original",
         );
 
         // The box preserves the compact original bytes (as
@@ -651,13 +659,8 @@ mod tests {
         assert_eq!(
             delta,
             compact.len() as u64 * COST_PER_TREE_BYTE,
-            "V6 deser-subst cost must use the preserved compact length {}, not expanded {reserialized}",
+            "V6 deser-subst cost must track the preserved original length ({})",
             compact.len(),
-        );
-        assert_ne!(
-            delta,
-            reserialized as u64 * COST_PER_TREE_BYTE,
-            "must NOT charge the expanded re-serialized length",
         );
     }
 }
