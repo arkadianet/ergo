@@ -1,10 +1,42 @@
 use ergo_primitives::writer::VlqWriter;
 
 use crate::error::WriteError;
-use crate::sigma_type::write_type;
-use crate::sigma_value::write_constant;
+use crate::sigma_type::{write_type, SigmaType};
+use crate::sigma_value::{write_constant, SigmaValue};
 
-use super::types::{Body, Expr, Payload};
+use super::types::{opcode_pattern, ArgPattern, Body, Expr, Payload};
+
+/// If `opcode` is a `Relation2` operator and both operands are boolean
+/// *constants*, return their values. Scala's `Relation2Serializer` then encodes
+/// the pair as a compact `BoolCollection` (`0x85` + one packed byte, LSB-first)
+/// instead of two child expressions; mirroring that keeps re-serialization
+/// byte-identical to the reference. A genuine `Coll[Boolean]` operand is an
+/// `Op(0x85, ..)`, not a bool `Const`, so it never matches here.
+///
+/// `0x85` in a Relation2 operand position is reserved for this compact form
+/// (the reader in `opcode/parse.rs` treats a leading `0x85` there as the packed
+/// pair), so a *bare* `BoolCollection` first operand is a grammar edge that
+/// valid Scala-produced trees never emit — this writer is consistent with that
+/// reader. Relation2 opcodes are `0x8F`–`0x94` (Lt/Le/Gt/Ge/Eq/Neq), `0xEC`
+/// (BinOr), `0xED` (BinAnd) and `0xF4` (BinXor) — keyed via `opcode_pattern`.
+fn relation2_bool_pair(opcode: u8, a: &Expr, b: &Expr) -> Option<(bool, bool)> {
+    if !matches!(opcode_pattern(opcode), Some(ArgPattern::Relation2)) {
+        return None;
+    }
+    match (a, b) {
+        (
+            Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(left),
+            },
+            Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(right),
+            },
+        ) => Some((*left, *right)),
+        _ => None,
+    }
+}
 
 /// Write an ErgoTree body (single root expression) to bytes.
 pub fn write_body(
@@ -45,8 +77,17 @@ fn write_payload(
         }
 
         Payload::Two(a, b) => {
-            write_expr(w, a, cseg)?;
-            write_expr(w, b, cseg)?;
+            if let Some((left, right)) = relation2_bool_pair(opcode, a, b) {
+                // Compact Relation2 bool-constant pair (Scala
+                // Relation2Serializer): the 0x85 BoolCollection marker + one
+                // packed byte, LSB-first (bit 0 = left, bit 1 = right). The
+                // reader (opcode/parse.rs) decodes this back to the two Consts.
+                w.put_u8(0x85);
+                w.put_u8(u8::from(left) | (u8::from(right) << 1));
+            } else {
+                write_expr(w, a, cseg)?;
+                write_expr(w, b, cseg)?;
+            }
         }
 
         Payload::Three(a, b, c) => {

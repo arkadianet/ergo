@@ -52,6 +52,104 @@ fn roundtrip_inline_constant_sigmaprop() {
 }
 
 #[test]
+fn relation2_bool_constant_pair_writes_compact_0x85_form() {
+    // Scala's Relation2Serializer encodes a relation over two boolean CONSTANTS
+    // as a compact BoolCollection: opcode + 0x85 marker + one packed byte,
+    // LSB-first (bit 0 = left, bit 1 = right). Pin the exact bytes for `Eq`
+    // (0x93) and confirm the reader decodes them back to the two Consts and the
+    // re-serialization is byte-identical.
+    let pair = |opcode: u8, left: bool, right: bool| {
+        Expr::Op(IrNode {
+            opcode,
+            payload: Payload::Two(
+                Box::new(Expr::Const {
+                    tpe: SigmaType::SBoolean,
+                    val: SigmaValue::Boolean(left),
+                }),
+                Box::new(Expr::Const {
+                    tpe: SigmaType::SBoolean,
+                    val: SigmaValue::Boolean(right),
+                }),
+            ),
+        })
+    };
+    let bytes = |body: &Body| {
+        let mut w = VlqWriter::new();
+        write_body(&mut w, body, false).unwrap();
+        w.result()
+    };
+    // Eq (0x93): all four bit combinations pin the packed byte (LSB-first).
+    assert_eq!(bytes(&pair(0x93, true, false)), vec![0x93, 0x85, 0x01]);
+    assert_eq!(bytes(&pair(0x93, false, true)), vec![0x93, 0x85, 0x02]);
+    assert_eq!(bytes(&pair(0x93, true, true)), vec![0x93, 0x85, 0x03]);
+    assert_eq!(bytes(&pair(0x93, false, false)), vec![0x93, 0x85, 0x00]);
+    // The compact form applies to every Relation2 opcode, incl. BinXor (0xF4)
+    // and the lazy BinOr/BinAnd (0xEC/0xED) — keyed off opcode_pattern.
+    assert_eq!(bytes(&pair(0xF4, true, false)), vec![0xF4, 0x85, 0x01]);
+    assert_eq!(bytes(&pair(0xEC, false, true)), vec![0xEC, 0x85, 0x02]);
+    assert_eq!(bytes(&pair(0xED, true, true)), vec![0xED, 0x85, 0x03]);
+    roundtrip(&pair(0x93, true, false), false);
+    roundtrip(&pair(0xF4, false, true), false);
+}
+
+#[test]
+fn non_relation2_two_arg_opcode_with_bool_consts_stays_expanded() {
+    // The compact 0x85 form is gated on the opcode being a Relation2, not just
+    // on the operands being bool consts. A Two-arg non-Relation2 opcode (Plus,
+    // 0x9A) over two boolean Consts must stay expanded (opcode + two Consts).
+    let body = Expr::Op(IrNode {
+        opcode: 0x9A, // Plus — Two-arg, NOT a Relation2
+        payload: Payload::Two(
+            Box::new(Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            }),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(false),
+            }),
+        ),
+    });
+    let mut w = VlqWriter::new();
+    write_body(&mut w, &body, false).unwrap();
+    assert_ne!(
+        w.result().get(1),
+        Some(&0x85),
+        "non-Relation2 Two-arg opcode must not emit the compact 0x85 form"
+    );
+    roundtrip(&body, false);
+}
+
+#[test]
+fn relation2_non_bool_operands_stay_expanded() {
+    // A Relation2 whose operands are NOT both boolean constants must use the
+    // expanded two-child encoding (no 0x85 compact form). Here both operands
+    // are Int constants, so the bytes are opcode + Const(Int) + Const(Int).
+    let body = Expr::Op(IrNode {
+        opcode: 0x93, // Eq
+        payload: Payload::Two(
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(1),
+            }),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(2),
+            }),
+        ),
+    });
+    let mut w = VlqWriter::new();
+    write_body(&mut w, &body, false).unwrap();
+    let out = w.result();
+    assert_ne!(
+        out.get(1),
+        Some(&0x85),
+        "Int-operand Relation2 must not emit the compact 0x85 form"
+    );
+    roundtrip(&body, false);
+}
+
+#[test]
 fn roundtrip_zero_arg_opcodes() {
     // 0x81 UnitConstant intentionally absent from this set: SUnit
     // values roundtrip through the constant-encoding path, not a
