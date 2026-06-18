@@ -164,14 +164,24 @@ fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>])
 
     let surfaces = oracle_surfaces();
     let mut rng = Rng::new(seed);
-    let mut divergences = Vec::new();
+    // Dedup by root-cause signature so a soak reports unique CLASSES (with a
+    // count + one representative), not thousands of instances of the same bug.
+    let mut classes: std::collections::HashMap<String, (u64, ergo_difftest::oracle::Divergence)> =
+        std::collections::HashMap::new();
+    let mut total = 0u64;
     let mut checked = 0u64;
     'outer: for _ in 0..iters {
         let input = ergo_difftest::generate::gen_input(&mut rng, corpus);
         for spec in &surfaces {
             match diff(spec, &input, &mut oracle) {
                 Ok(None) => {}
-                Ok(Some(d)) => divergences.push(d),
+                Ok(Some(d)) => {
+                    total += 1;
+                    classes
+                        .entry(divergence_signature(&d))
+                        .and_modify(|e| e.0 += 1)
+                        .or_insert((1, d));
+                }
                 Err(e) => {
                     eprintln!("oracle: pipe error after {checked} checks: {e}");
                     break 'outer;
@@ -179,30 +189,50 @@ fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>])
             }
             checked += 1;
         }
-        if checked.is_multiple_of(3000) {
+        if checked.is_multiple_of(50_000) {
             eprintln!(
-                "oracle: {checked} checks, {} divergence(s)",
-                divergences.len()
+                "oracle: {checked} checks, {} unique class(es), {total} total",
+                classes.len()
             );
         }
     }
 
     println!(
-        "oracle: checks={checked} surfaces={} divergences={}",
+        "oracle: checks={checked} surfaces={} unique_classes={} total_divergences={total}",
         surfaces.len(),
-        divergences.len()
+        classes.len(),
     );
-    if divergences.is_empty() {
+    if classes.is_empty() {
         println!("node and JVM reference agree on all checked inputs");
         return ExitCode::SUCCESS;
     }
-    for d in &divergences {
+    let mut sorted: Vec<_> = classes.into_values().collect();
+    sorted.sort_by_key(|(count, _)| std::cmp::Reverse(*count));
+    for (count, d) in &sorted {
         println!(
-            "  [{:?}] {}\n    rust={:?}\n    jvm ={:?}\n    repro: difftest --repro {}",
+            "  [{:?}] {} (x{count})\n    rust={:?}\n    jvm ={:?}\n    repro: difftest --repro {}",
             d.kind, d.surface, d.rust, d.jvm, d.input_hex
         );
     }
     ExitCode::FAILURE
+}
+
+/// Root-cause signature for deduping divergences: surface + kind + each side's
+/// verdict class (the JVM error class distinguishes reject causes).
+fn divergence_signature(d: &ergo_difftest::oracle::Divergence) -> String {
+    use ergo_difftest::oracle::Verdict;
+    let cls = |v: &Verdict| match v {
+        Verdict::Accept(_) => "accept".to_string(),
+        Verdict::Reject(e) => format!("reject:{}", e.split_whitespace().next().unwrap_or("")),
+        Verdict::Err(_) => "err".to_string(),
+    };
+    format!(
+        "{}|{:?}|rust={}|jvm={}",
+        d.surface,
+        d.kind,
+        cls(&d.rust),
+        cls(&d.jvm)
+    )
 }
 
 fn parse_next(args: &[String], i: &mut usize, flag: &str) -> u64 {
