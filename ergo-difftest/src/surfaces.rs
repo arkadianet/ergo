@@ -71,33 +71,11 @@ where
     Outcome::Accepted
 }
 
-/// read-only no-panic check: outcome only distinguishes Ok/Err; a panic is
-/// caught by the runner and reported as a bug.
-fn ro_check<T, D>(input: &[u8], decode: D) -> Outcome
-where
-    D: Fn(&mut VlqReader) -> Result<T, ReadError>,
-{
-    let mut r = VlqReader::new(input);
-    match decode(&mut r) {
-        Ok(_) => Outcome::Accepted,
-        Err(_) => Outcome::Rejected,
-    }
-}
-
 macro_rules! rw {
     ($name:literal, $decode:path, $encode:path) => {
         Surface {
             name: $name,
             run: Box::new(|b| rw_check(b, $decode, $encode)),
-        }
-    };
-}
-
-macro_rules! ro {
-    ($name:literal, $decode:path) => {
-        Surface {
-            name: $name,
-            run: Box::new(|b| ro_check(b, $decode)),
         }
     };
 }
@@ -110,8 +88,9 @@ pub fn names() -> Vec<&'static str> {
 /// Build the surface registry. Optionally filter to a single surface by name.
 pub fn registry(only: Option<&str>) -> Vec<Surface> {
     use ergo_ser::{
-        ad_proofs, ergo_box, ergo_tree, extension, header, input, sigma_type, sigma_value,
-        transaction,
+        ad_proofs, autolykos, batch_merkle_proof, block_transactions, difficulty, ergo_box,
+        ergo_tree, extension, header, input, popow_header, popow_proof, register, sigma_type,
+        sigma_value, token, transaction,
     };
 
     let all: Vec<Surface> = vec![
@@ -138,12 +117,117 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
             transaction::read_transaction,
             transaction::write_transaction
         ),
+        rw!(
+            "unsigned_transaction",
+            transaction::read_unsigned_transaction,
+            transaction::write_unsigned_transaction
+        ),
+        // Block / header sections.
+        rw!("header", header::read_header, header::write_header),
+        rw!(
+            "block_transactions",
+            block_transactions::read_block_transactions,
+            block_transactions::write_block_transactions
+        ),
+        rw!(
+            "extension",
+            extension::read_extension,
+            extension::write_extension
+        ),
+        rw!(
+            "popow_header",
+            popow_header::read_popow_header,
+            popow_header::write_popow_header
+        ),
+        rw!(
+            "nipopow_proof",
+            popow_proof::read_nipopow_proof,
+            popow_proof::write_nipopow_proof
+        ),
+        // Input / proof / register sub-structures.
+        rw!("input", input::read_input, input::write_input),
+        rw!(
+            "unsigned_input",
+            input::read_unsigned_input,
+            input::write_unsigned_input
+        ),
+        rw!(
+            "context_extension",
+            input::read_context_extension,
+            input::write_context_extension
+        ),
+        rw!(
+            "spending_proof",
+            input::read_spending_proof,
+            input::write_spending_proof
+        ),
+        rw!(
+            "register",
+            register::read_registers,
+            register::write_registers
+        ),
+        // Adapter surfaces: the writer returns `()` (infallible) or the
+        // reader takes a version, so they don't fit the `rw!` path macro.
+        Surface {
+            name: "ad_proofs",
+            run: Box::new(|b| {
+                rw_check(b, ad_proofs::read_ad_proofs, |w, v| {
+                    ad_proofs::write_ad_proofs(w, v);
+                    Ok(())
+                })
+            }),
+        },
+        Surface {
+            name: "token",
+            run: Box::new(|b| {
+                rw_check(b, token::read_token, |w, v| {
+                    token::write_token(w, v);
+                    Ok(())
+                })
+            }),
+        },
+        Surface {
+            name: "nbits_difficulty",
+            run: Box::new(|b| {
+                rw_check(b, difficulty::read_nbits, |w, v| {
+                    difficulty::write_nbits(w, *v);
+                    Ok(())
+                })
+            }),
+        },
+        Surface {
+            name: "autolykos_v1",
+            run: Box::new(|b| {
+                rw_check(
+                    b,
+                    |r| autolykos::read_solution(r, 1),
+                    autolykos::write_solution,
+                )
+            }),
+        },
+        Surface {
+            name: "autolykos_v2",
+            run: Box::new(|b| {
+                rw_check(
+                    b,
+                    |r| autolykos::read_solution(r, 2),
+                    autolykos::write_solution,
+                )
+            }),
+        },
         // ----- read-only no-panic -----
-        ro!("header", header::read_header),
-        ro!("context_extension", input::read_context_extension),
-        ro!("input", input::read_input),
-        ro!("extension", extension::read_extension),
-        ro!("ad_proofs", ad_proofs::read_ad_proofs),
+        // `deserialize_batch_merkle_proof` takes the whole byte slice (and a
+        // `WriteError`-typed result), so it can't go through `ro_check`/`rw!`;
+        // a panic on malformed bytes is caught by the runner and reported.
+        Surface {
+            name: "batch_merkle_proof",
+            run: Box::new(
+                |b| match batch_merkle_proof::deserialize_batch_merkle_proof(b) {
+                    Ok(_) => Outcome::Accepted,
+                    Err(_) => Outcome::Rejected,
+                },
+            ),
+        },
     ];
 
     match only {
