@@ -52,6 +52,23 @@ pub struct Header {
     pub solution: AutolykosSolution,
 }
 
+/// Compare a header version against a threshold using **signed** byte
+/// semantics, matching Scala (`Header.Version = Byte`, so
+/// `HeaderSerializer` gates `unparsed_bytes` on `version > InitialVersion`
+/// where both are signed `Byte`s).
+///
+/// This only differs from an unsigned compare for malformed version bytes
+/// `> 127` (real headers are v1-4): e.g. byte `195` is `-61` signed, which is
+/// NOT `> InitialVersion(1)`, so the reference reads NO `unparsed_bytes`
+/// section. An unsigned `195 > 1` would read a spurious length+payload and
+/// shift the Autolykos-solution offset — a byte-grammar divergence. Keeping the
+/// comparison signed makes node and reference agree on the wire grammar for
+/// every version byte.
+#[inline]
+fn version_gt(version: u8, threshold: u8) -> bool {
+    (version as i8) > (threshold as i8)
+}
+
 /// Header-side wire-format bounds. Called from
 /// `write_header_without_pow`, which `write_header` delegates to —
 /// so both PoW-message and header_id paths run the same check.
@@ -59,8 +76,8 @@ pub struct Header {
 /// PoW message hash (`Blake2b256(bytesWithoutPow(header))`); a silent
 /// wrap there would split the header_id path from the PoW message path.
 fn check_header_bounds(h: &Header) -> Result<(), WriteError> {
-    if h.version > INITIAL_VERSION
-        && h.version <= INTERPRETER_60_VERSION
+    if version_gt(h.version, INITIAL_VERSION)
+        && !version_gt(h.version, INTERPRETER_60_VERSION)
         && !h.unparsed_bytes.is_empty()
     {
         return Err(WriteError::InvalidData(format!(
@@ -69,7 +86,7 @@ fn check_header_bounds(h: &Header) -> Result<(), WriteError> {
             h.unparsed_bytes.len()
         )));
     }
-    if h.version > INITIAL_VERSION && h.unparsed_bytes.len() > u8::MAX as usize {
+    if version_gt(h.version, INITIAL_VERSION) && h.unparsed_bytes.len() > u8::MAX as usize {
         return Err(WriteError::InvalidData(format!(
             "header unparsed_bytes too long for Scala wire format: {} bytes (max 255)",
             h.unparsed_bytes.len()
@@ -101,7 +118,7 @@ pub fn write_header_without_pow(w: &mut VlqWriter, h: &Header) -> Result<(), Wri
     w.put_u32(h.height);
     w.put_bytes(&h.votes);
 
-    if h.version > INITIAL_VERSION {
+    if version_gt(h.version, INITIAL_VERSION) {
         w.put_u8(h.unparsed_bytes.len() as u8);
         w.put_bytes(&h.unparsed_bytes);
     }
@@ -134,10 +151,10 @@ pub fn read_header(r: &mut VlqReader) -> Result<Header, ReadError> {
     let height = r.get_u32_exact()?;
     let votes: [u8; 3] = r.get_array::<3>()?;
 
-    let unparsed_bytes = if version > INITIAL_VERSION {
+    let unparsed_bytes = if version_gt(version, INITIAL_VERSION) {
         let len = r.get_u8()? as usize;
         let bytes = r.get_bytes(len)?;
-        if version > INTERPRETER_60_VERSION {
+        if version_gt(version, INTERPRETER_60_VERSION) {
             bytes.to_vec()
         } else {
             // v2-v4 emit the bytes on the wire but drop them on read,
@@ -264,6 +281,54 @@ mod tests {
         let decoded = read_header(&mut r).unwrap();
         assert!(r.is_empty());
         assert_eq!(header, decoded);
+    }
+
+    #[test]
+    fn header_version_above_127_uses_signed_unparsed_gate() {
+        // Scala reads the version as a SIGNED `Byte`: 195 == -61, which is NOT
+        // `> InitialVersion(1)`, so a v195 header has NO unparsed_bytes section
+        // on the wire. The discriminator vs an unsigned gate is byte LAYOUT:
+        // under unsigned (`195 > 1`) the writer would add a 1-byte length field;
+        // under signed it must not. So a v195 header's bytes-without-pow length
+        // must equal a v1 header's (neither has the section), and be one byte
+        // shorter than a v2 header (which does). This test fails under the old
+        // unsigned comparison.
+        let hdr = |version: u8| Header {
+            version,
+            parent_id: ModifierId::from_bytes([0x01; 32]),
+            ad_proofs_root: Digest32::from_bytes([0x02; 32]),
+            transactions_root: Digest32::from_bytes([0x03; 32]),
+            state_root: ADDigest::from_bytes([0x04; 33]),
+            timestamp: 1_672_531_200_000,
+            extension_root: Digest32::from_bytes([0x05; 32]),
+            n_bits: 0x1a01_7660,
+            height: 123_456,
+            votes: [0; 3],
+            unparsed_bytes: vec![],
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes([0x02; 33]),
+                nonce: [0xAA; 8],
+            },
+        };
+        let len_v1 = serialize_header_without_pow(&hdr(1)).unwrap().len();
+        let len_v2 = serialize_header_without_pow(&hdr(2)).unwrap().len();
+        let len_v195 = serialize_header_without_pow(&hdr(195)).unwrap().len();
+        assert_eq!(
+            len_v195, len_v1,
+            "v>127 must use the signed gate (no unparsed-bytes section), matching v1 layout",
+        );
+        assert_eq!(
+            len_v2,
+            len_v1 + 1,
+            "v2 carries a 1-byte unparsed-bytes length field (sanity for the discriminator)",
+        );
+
+        // Full round-trip is byte-stable under the signed gate.
+        let (bytes, _id) = serialize_header(&hdr(195)).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let decoded = read_header(&mut r).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(hdr(195), decoded);
     }
 
     #[test]
