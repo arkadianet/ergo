@@ -232,6 +232,16 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
                     tpe_params.len()
                 )));
             }
+            // The reader requires each tpeParam to be an STypeVar
+            // (`require(ident.isInstanceOf[STypeVar])`); refuse to emit a
+            // descriptor that would not round-trip.
+            for p in tpe_params {
+                if !matches!(p, SigmaType::STypeVar(_)) {
+                    return Err(WriteError::InvalidData(format!(
+                        "SFunc tpeParam must be an STypeVar, got {p:?}"
+                    )));
+                }
+            }
             w.put_u8(FUNC_CODE);
             w.put_u8(t_dom.len() as u8);
             for d in t_dom {
@@ -297,6 +307,15 @@ fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
 
 fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError> {
     match elems.len() {
+        0 | 1 => {
+            // STuple is read back as 2+ elements (the TUPLE_CODE reader rejects
+            // count < 2); refuse to emit a degenerate tuple that would not
+            // round-trip.
+            return Err(WriteError::InvalidData(format!(
+                "STuple must have at least 2 elements, got {}",
+                elems.len()
+            )));
+        }
         2 => write_pair(w, &elems[0], &elems[1])?,
         3 => {
             // Triple: constrId 6, primId 0 => byte 72, then 3 types
@@ -950,6 +969,32 @@ mod tests {
             matches!(&err, WriteError::InvalidData(m) if m.contains("SFunc domain count too large")),
             "got: {err:?}"
         );
+    }
+
+    #[test]
+    fn sfunc_non_typevar_tpe_param_errors_on_write() {
+        // The reader rejects non-STypeVar tpeParams; the writer must not emit
+        // a descriptor that fails to round-trip.
+        let err = write_err(&SigmaType::SFunc {
+            t_dom: vec![SigmaType::SInt],
+            t_range: Box::new(SigmaType::SInt),
+            tpe_params: vec![SigmaType::SInt],
+        });
+        assert!(
+            matches!(&err, WriteError::InvalidData(m) if m.contains("SFunc tpeParam must be an STypeVar")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn tuple_below_two_elements_errors_on_write() {
+        for elems in [vec![], vec![SigmaType::SInt]] {
+            let err = write_err(&SigmaType::STuple(elems));
+            assert!(
+                matches!(&err, WriteError::InvalidData(m) if m.contains("STuple must have at least 2 elements")),
+                "got: {err:?}"
+            );
+        }
     }
 
     #[test]
