@@ -14,14 +14,15 @@ use tracing::debug;
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ad_proofs::read_ad_proofs;
-use ergo_ser::block_transactions::read_block_transactions;
+use ergo_ser::block_transactions::read_block_transactions_with_group_elements;
 use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS, TYPE_EXTENSION};
 use ergo_state::store::StateStore;
 use ergo_state::{ChainStateRead, DigestStateStore, HeaderSectionStore};
 use ergo_validation::block::{
-    validate_full_block_parallel, BlockValidationContext, BlockValidationError, SoftForkState,
+    validate_full_block_parallel_with_group_elements, BlockValidationContext, BlockValidationError,
+    SoftForkState,
 };
 use ergo_validation::context::ProtocolParams;
 use ergo_validation::header::CheckedHeader;
@@ -378,7 +379,7 @@ fn process_block_utxo(
         },
     )?;
     let mut r = VlqReader::new(&bt_bytes);
-    let block_txs = read_block_transactions(&mut r)
+    let (block_txs, tx_group_elements) = read_block_transactions_with_group_elements(&mut r)
         .map_err(|e| BlockProcessError::Deserialize(format!("block_transactions: {e:?}")))?;
 
     let ext_bytes = store.get_block_section(&expected.extension_id)?.ok_or(
@@ -615,7 +616,13 @@ fn process_block_utxo(
 
     // 8. Validate the full block (no PoW/difficulty — already validated by header pipeline)
     let t0 = Instant::now();
-    let checked_block = validate_full_block_parallel(checked_header, &block_txs, &extension, &ctx)?;
+    let checked_block = validate_full_block_parallel_with_group_elements(
+        checked_header,
+        &block_txs,
+        &extension,
+        &ctx,
+        &tx_group_elements,
+    )?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
 
@@ -768,7 +775,7 @@ fn process_block_digest(
         },
     )?;
     let mut r = VlqReader::new(&bt_bytes);
-    let block_txs = read_block_transactions(&mut r)
+    let (block_txs, tx_group_elements) = read_block_transactions_with_group_elements(&mut r)
         .map_err(|e| BlockProcessError::Deserialize(format!("block_transactions: {e:?}")))?;
 
     let ext_bytes = store.get_block_section(&expected.extension_id)?.ok_or(
@@ -1135,7 +1142,13 @@ fn process_block_digest(
     };
 
     let t0 = Instant::now();
-    let checked_block = validate_full_block_parallel(checked_header, &block_txs, &extension, &ctx)?;
+    let checked_block = validate_full_block_parallel_with_group_elements(
+        checked_header,
+        &block_txs,
+        &extension,
+        &ctx,
+        &tx_group_elements,
+    )?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
 

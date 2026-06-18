@@ -81,7 +81,34 @@ pub fn write_block_transactions_with_version(
 /// (v1) or [`write_block_transactions_with_version`] (any version). The
 /// reader auto-detects the optional v2+ marker by checking whether the
 /// first VLQ-`u32` after `header_id` exceeds `MAX_TRANSACTIONS_IN_BLOCK`.
+/// Reads the block-transactions section. Delegates to
+/// [`read_block_transactions_with_group_elements`] and drops the points; as a
+/// result the reader's group-element sideband is drained on return (rather than
+/// left accumulated as in the standalone form). No caller inspects the sideband
+/// after this call, and a drained sideband is the safer post-condition — group
+/// elements from this section never leak into a subsequent unrelated read.
 pub fn read_block_transactions(r: &mut VlqReader) -> Result<BlockTransactions, ReadError> {
+    let (block_transactions, _group_elements) = read_block_transactions_with_group_elements(r)?;
+    Ok(block_transactions)
+}
+
+/// Group-element points per transaction in a block, index-aligned 1:1 with
+/// `BlockTransactions::transactions`; inner `Vec` holds one tx's 33-byte points.
+pub type PerTxGroupElements = Vec<Vec<[u8; 33]>>;
+
+/// Like [`read_block_transactions`], but also returns the group-element points
+/// collected during each transaction's parse, index-aligned 1:1 with
+/// `transactions`.
+///
+/// The `VlqReader` records every 33-byte group element it reads onto a
+/// crypto-free sideband; draining it after each transaction yields exactly that
+/// transaction's points. The block validator curve-checks these (Scala curve-
+/// checks group elements at deserialize) — collecting them here, at the single
+/// authoritative parse, lets `validate_transaction_parsed` skip re-deserializing
+/// each transaction just to re-collect them.
+pub fn read_block_transactions_with_group_elements(
+    r: &mut VlqReader,
+) -> Result<(BlockTransactions, PerTxGroupElements), ReadError> {
     let header_id = ModifierId::from_bytes(r.get_array::<32>()?);
 
     // Scala serializer writes a version marker for blocks with version > 1:
@@ -105,17 +132,26 @@ pub fn read_block_transactions(r: &mut VlqReader) -> Result<BlockTransactions, R
         ver_or_count as usize
     };
 
+    // Discard any points read before the first transaction (header_id/count
+    // carry none, but a reused reader could) so each per-tx Vec holds only that
+    // transaction's points.
+    let _ = r.take_group_elements();
+
     let mut transactions = Vec::with_capacity(count.min(TRANSACTIONS_VEC_SOFT_CAP));
+    let mut per_tx_group_elements = Vec::with_capacity(count.min(TRANSACTIONS_VEC_SOFT_CAP));
     for tx_idx in 0..count {
-        transactions.push(
-            read_transaction(r)
-                .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?,
-        );
+        let tx = read_transaction(r)
+            .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?;
+        transactions.push(tx);
+        per_tx_group_elements.push(r.take_group_elements());
     }
-    Ok(BlockTransactions {
-        header_id,
-        transactions,
-    })
+    Ok((
+        BlockTransactions {
+            header_id,
+            transactions,
+        },
+        per_tx_group_elements,
+    ))
 }
 
 #[cfg(test)]
