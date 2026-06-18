@@ -177,13 +177,21 @@ pub fn to_hex(bytes: &[u8]) -> String {
 }
 
 pub fn from_hex(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
+    // Operate on bytes, not string slices: `&s[i..i + 2]` would panic on a
+    // multi-byte UTF-8 char straddling an even offset. A hex parser must
+    // reject any non-ASCII-hex input with `None`, never crash on it.
+    let s = s.trim().as_bytes();
     if !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    let nibble = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    };
+    s.chunks_exact(2)
+        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }
 
@@ -233,5 +241,14 @@ mod tests {
     fn hex_round_trips() {
         let b = vec![0x00, 0x1b, 0xff, 0xa0];
         assert_eq!(from_hex(&to_hex(&b)).unwrap(), b);
+    }
+
+    #[test]
+    fn from_hex_non_ascii_returns_none_not_panic() {
+        // A multi-byte UTF-8 char at an even offset would panic a string-slice
+        // parser. The byte-wise parser must reject it with `None`.
+        assert_eq!(from_hex("éé"), None); // 4 bytes, no ASCII-hex boundary panic
+        assert_eq!(from_hex("0é"), None); // odd-after-trim shape, mixed bytes
+        assert_eq!(from_hex("zz"), None); // even length, not hex digits
     }
 }

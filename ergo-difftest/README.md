@@ -16,7 +16,7 @@ Generates and mutates bytes, runs them through the decoders, and checks:
 * **parse → serialize fixed point** — decode, re-encode, re-decode must reach a
   byte-stable fixed point (catches non-canonical / echo-trap re-encoding).
 
-```
+```bash
 cargo run -p ergo-difftest -- --iters 1000000 --seed 7
 cargo run -p ergo-difftest -- --surface ergo_tree --corpus test-vectors/mainnet
 cargo run -p ergo-difftest -- --repro 1b1501040a…     # triage one input
@@ -38,7 +38,7 @@ node's verdict against the JVM's:
   "unparsed" trees are filtered; box/tx canonical is not compared because the
   node retains the original ergoTree slice).
 
-```
+```bash
 cargo run -p ergo-difftest -- --oracle --iters 2000 --corpus test-vectors/mainnet
 ```
 
@@ -54,7 +54,7 @@ those codecs are exercised in-context via `ergo_tree`/`ergo_box_candidate`.
 `ergo-core` the node mirrors (version 6.0.2). `sigma-state` is on Maven;
 `ergo-core` (transaction/header) is not, so publish it locally first:
 
-```
+```bash
 cd <ergo reference checkout>
 sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 ```

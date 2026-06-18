@@ -97,7 +97,9 @@ impl Oracle {
 
 impl Drop for Oracle {
     fn drop(&mut self) {
-        // Closing stdin lets the oracle's stdin loop terminate; then reap it.
+        // Kill the JVM oracle and reap it so it never lingers as a zombie.
+        // (SIGKILL rather than closing stdin for EOF: scala-cli/JVM does not
+        // reliably exit on stdin EOF, and a stuck oracle would hang Drop.)
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
