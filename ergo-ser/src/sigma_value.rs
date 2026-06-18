@@ -186,7 +186,7 @@ pub fn write_constant(
     tpe: &SigmaType,
     val: &SigmaValue,
 ) -> Result<(), WriteError> {
-    write_type(w, tpe);
+    write_type(w, tpe)?;
     write_value(w, tpe, val)
 }
 
@@ -361,9 +361,13 @@ pub(crate) fn read_value_at_depth(
                 )));
             }
             let bytes = r.get_bytes(len)?;
-            let s = String::from_utf8(bytes.to_vec())
-                .map_err(|e| ReadError::InvalidData(format!("invalid UTF-8 in SString: {e}")))?;
-            Ok(SigmaValue::Str(s))
+            // Scala CoreDataSerializer.scala:104-110 decodes SString values
+            // with `new String(bytes, UTF_8)` (lossy). The decoded value is
+            // EQ-compared and length-costed at eval, so it must match the JVM
+            // codepoint for codepoint — a strict `from_utf8` would both
+            // reject Scala-accepted values AND, if relaxed naively, diverge on
+            // the replacement count. See [`crate::jvm_utf8`].
+            Ok(SigmaValue::Str(crate::jvm_utf8::decode(bytes)))
         }
         SigmaType::SUnsignedBigInt => {
             let v = read_unsigned_bigint_value(r)?;
@@ -1713,6 +1717,36 @@ mod tests {
     }
 
     // ----- oracle parity (golden byte tests for specific encodings) -----
+
+    /// SString values with ill-formed UTF-8 must decode like the Scala node's
+    /// `new String(bytes, UTF_8)` (CoreDataSerializer.scala:104-110) — lossy,
+    /// not a strict `from_utf8` reject. The decoded value is EQ-compared at
+    /// eval, so it must match the JVM codepoint for codepoint. Expected
+    /// strings are the JVM (Corretto 17) decode of each byte sequence; the
+    /// surrogate case `ed a0 80` is the JVM/Rust-lossy divergence (1 vs 3
+    /// U+FFFD) that pins why `jvm_utf8::decode` is required here.
+    #[test]
+    fn sstring_value_illformed_utf8_decodes_like_jvm() {
+        for (name_bytes, expected) in [
+            (vec![0xffu8], "\u{FFFD}"),
+            (vec![0xed, 0xa0, 0x80], "\u{FFFD}"),
+            (vec![0xc0, 0x80], "\u{FFFD}\u{FFFD}"),
+            (vec![0x61, 0xff, 0x62], "a\u{FFFD}b"),
+        ] {
+            let mut w = VlqWriter::new();
+            w.put_u32(name_bytes.len() as u32);
+            w.put_bytes(&name_bytes);
+            let data = w.result();
+            let mut r = VlqReader::new(&data);
+            let v = read_value(&mut r, &SigmaType::SString)
+                .unwrap_or_else(|e| panic!("expected lossy accept for {name_bytes:?}, got {e:?}"));
+            assert_eq!(
+                v,
+                SigmaValue::Str(expected.to_string()),
+                "for {name_bytes:?}"
+            );
+        }
+    }
 
     #[test]
     fn golden_boolean_bytes() {

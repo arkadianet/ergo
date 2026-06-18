@@ -12,7 +12,7 @@ use ergo_ser::sigma_type::{read_type, write_type, SigmaType};
 
 fn encode(t: &SigmaType) -> Vec<u8> {
     let mut w = VlqWriter::new();
-    write_type(&mut w, t);
+    write_type(&mut w, t).unwrap();
     w.result()
 }
 
