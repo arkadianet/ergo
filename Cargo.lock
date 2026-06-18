@@ -610,7 +610,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ergo-api"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-chain-spec"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-crypto"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blake2",
  "ergo-chain-spec",
@@ -663,8 +663,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ergo-difftest"
+version = "0.4.1"
+dependencies = [
+ "ergo-primitives",
+ "ergo-ser",
+]
+
+[[package]]
 name = "ergo-indexer"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-indexer-types",
  "ergo-primitives",
@@ -682,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-indexer-types"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -691,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-mempool"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-mempool",
  "ergo-primitives",
@@ -709,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-mining"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -730,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-node"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -772,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-p2p"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -786,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-primitives"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blake2",
  "hex",
@@ -798,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-rest-json"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -811,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-ser"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bs58",
  "ergo-primitives",
@@ -826,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-sigma"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "ergo-crypto",
@@ -848,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-state"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bincode",
  "blake2",
@@ -879,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-sync"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -901,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-validation"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -923,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes-gcm",
  "assert_cmd",
