@@ -177,7 +177,16 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // the observed mainnet malformed trees (Const of a non-SigmaProp
         // type inside a size-delimited wrapper — e.g. block 1,702,686).
         let mut inner = VlqReader::new(bounded_data);
-        match parse_body(&mut inner, version, has_size, constant_segregation) {
+        let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
+        // Forward the group elements the inner parse collected (constants + body
+        // up to any failure point) onto the OUTER reader — EVEN when the body is
+        // about to be soft-fork-wrapped below. Scala curve-checks these while
+        // deserializing, before producing its UnparsedErgoTree, so the obligation
+        // must survive the wrap (this is the case a post-parse AST walk loses).
+        for ge in inner.take_group_elements() {
+            r.record_group_element(ge);
+        }
+        match parsed {
             Ok(tree) => {
                 if let crate::opcode::Expr::Const { tpe, .. } = &tree.body {
                     if *tpe != crate::sigma_type::SigmaType::SSigmaProp {
