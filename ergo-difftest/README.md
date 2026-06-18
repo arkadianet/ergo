@@ -16,6 +16,19 @@ Generates and mutates bytes, runs them through the decoders, and checks:
 * **parse → serialize fixed point** — decode, re-encode, re-decode must reach a
   byte-stable fixed point (catches non-canonical / echo-trap re-encoding).
 
+Phase 1 covers **every standalone** `ergo-ser` wire decoder: the block/header
+sections (`header`, `block_transactions`, `extension`, `popow_header`,
+`nipopow_proof`), the transaction tree (`transaction`, `unsigned_transaction`,
+`ergo_box`, `ergo_box_candidate`, `ergo_tree`, `sigma_type`, `constant`), the
+input/proof/register sub-structures (`input`, `unsigned_input`,
+`context_extension`, `spending_proof`, `register`), and the leaf codecs
+(`ad_proofs`, `token`, `nbits_difficulty`, `autolykos_v1`, `autolykos_v2`,
+`batch_merkle_proof`). Version-parameterised readers (Autolykos) get one surface
+per version; `()`-returning writers are wrapped to fit the fixed-point check.
+Codecs that only ever appear *nested* inside another (`data_input`,
+`token_indexed`, `read_value`) are exercised in-context via their containing
+surface, not standalone.
+
 ```bash
 cargo run -p ergo-difftest -- --iters 1000000 --seed 7
 cargo run -p ergo-difftest -- --surface ergo_tree --corpus test-vectors/mainnet
