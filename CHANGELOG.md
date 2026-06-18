@@ -16,6 +16,70 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-19
+
+A consensus-hardening release. A new differential + invariant fuzzer for the
+wire-format decoders surfaced a cluster of node-vs-Scala divergences that a
+SANTA grade or a state-root soak would not catch; this release fixes them. As
+always for this node: re-verify its verdicts against the Scala reference node
+before relying on it for funds.
+
+### Added
+
+- **Differential + invariant fuzzer for the consensus wire decoders (#98, #102).**
+  New `ergo-difftest` crate. Phase 1 is hermetic and oracle-free — no-panic
+  (`catch_unwind`) plus a parse→serialize fixed-point check — across **every
+  standalone `ergo-ser` decoder** (23 surfaces). Phase 2 is a JVM differential
+  oracle (`scala-cli` + sigma-state/ergo-core 6.0.2) that diffs the node's
+  accept/reject and canonical bytes against the reference. This harness found the
+  consensus fixes below.
+
+### Fixed
+
+- **Consensus: curve-check `GroupElement`s at deserialize (#99).** The node
+  accepted off-curve / bad-prefix compressed EC points that the JVM rejects in
+  `GroupElementSerializer.parse` (`decodePoint`), an accept-invalid divergence on
+  box/transaction group-element constants. Points are now curve-checked at
+  deserialize via parse-time collection on the reader's crypto-free sideband
+  (preserving the `ergo-ser`/`ergo-primitives` crypto-free boundary) and validated
+  at the transaction chokepoint. Full-history soak: 40,005,152 group elements
+  over 1.81M blocks, 0 false rejections.
+- **Consensus: deserialize-substitution cost on original tree bytes (#100).** The
+  V6 `Deserialize*` substitution cost (`ergoTree.bytes.length × CostPerTreeByte`)
+  was computed by **re-serializing** the parsed tree, which is not byte-identical
+  to the original wire form for non-canonical encodings (e.g. the compact
+  `Relation2` `0x85` boolean pair, re-encoded longer). On a guard tree with such
+  a form plus a `Deserialize` node spent under V6, the node over-charged and
+  could reject-valid a transaction the reference accepts — a stall-class
+  divergence. The cost now uses the spent box's preserved original wire-byte
+  length, matching Scala's `ergoTree.bytes.length`.
+- **Consensus: JVM lossy UTF-8 for `STypeVar`/`SString` (#97).** The node applied
+  strict `from_utf8` to `STypeVar` names and `SString` values, rejecting
+  ill-formed UTF-8 that the JVM's `new String(bytes, UTF_8)` accepts via lossy
+  replacement. Ported a byte-exact JDK `UTF_8` REPLACE decoder (oracle-tested
+  against Corretto-17).
+- **Consensus parity: signed-byte header version gate (#103).** The trailing
+  `unparsed_bytes` section was gated on an unsigned `version` comparison; Scala
+  uses a signed `Byte`. Agrees for all real headers (v1–4); diverges only for a
+  malformed version byte > 127 (unreachable — PoW-firewalled), now matched via
+  signed semantics. No version-range reject is added (that would be the
+  chain-split direction).
+
+### Changed
+
+- **Perf: collect group-element points once at block deserialize (#101).** The
+  block validator re-deserialized every transaction a second time solely to
+  re-collect group-element points for the curve-check. Points are now collected
+  at the single authoritative block parse and borrowed into per-tx validation —
+  one deserialize instead of two on the block-apply hot path. Behavior-preserving.
+- **Serialization: compact `Relation2` boolean-pair writer (#104).** A relation
+  over two boolean constants now re-emits Scala's compact `BoolCollection`
+  (`0x85`) form rather than two expanded `Const` children, so re-serialization is
+  byte-identical to the reference. No change to validation of preserved on-chain
+  bytes (consensus paths transmit the original tree bytes verbatim; #100 covers
+  the one cost path that re-serialized); node/wallet-*constructed* trees with such
+  a relation now serialize to the Scala-canonical form.
+
 ## [0.4.1] - 2026-06-17
 
 A consensus-fix and operator-experience release. The headline is a
