@@ -14,7 +14,10 @@ use thiserror::Error;
 use crate::context::{ProtocolParams, TransactionContext, UtxoView};
 use crate::error::ValidationError;
 use crate::header::{CheckedHeader, HeaderValidationError};
-use crate::tx::{validate_transaction_parsed, CheckedTransaction};
+use crate::tx::{
+    validate_transaction_parsed, validate_transaction_parsed_with_group_elements,
+    CheckedTransaction,
+};
 
 /// Chain context needed to validate a full block.
 ///
@@ -752,6 +755,10 @@ pub(crate) struct TxLayers {
     pub(crate) layers: Vec<Vec<usize>>,
 }
 
+// (tx index, re-serialized tx bytes, resolved inputs, resolved data inputs).
+// The per-tx group-element points are NOT carried here: they are borrowed and
+// indexed (`group_elements[i]`) inside the parallel closure, avoiding a per-tx
+// Vec clone — the points slice is `Sync` and outlives the parallel section.
 type TxLayerInput = (usize, Vec<u8>, Vec<ErgoBox>, Vec<ErgoBox>);
 type TxLayerResult = (usize, Result<(CheckedTransaction, u64), ValidationError>);
 
@@ -1222,9 +1229,24 @@ fn validate_full_block_parallel_impl(
     extension: &Extension,
     ctx: &BlockValidationContext<'_>,
     mut costs_out: Option<&mut Vec<(usize, u64)>>,
+    // Per-tx group-element points, index-aligned with
+    // `block_transactions.transactions`, collected at the block deserialize so
+    // the curve-check needn't re-parse each tx. `None` ⇒ each tx re-parses its
+    // own bytes to collect them (the backward-compatible path).
+    group_elements: Option<&[Vec<[u8; 33]>]>,
 ) -> Result<CheckedBlock, BlockValidationError> {
     let header = checked_header.header();
     let header_id = checked_header.header_id();
+
+    // The points (when supplied) must be 1:1 with the transactions. The
+    // production caller guarantees this (same parse), so a mismatch is a caller
+    // bug: assert it in debug, and degrade safely below via `.get(i)` (a missing
+    // index falls back to re-parsing that tx's points — correct, just slower —
+    // so a wiring error can never bypass or misapply the curve-check).
+    debug_assert!(
+        group_elements.is_none_or(|ge| ge.len() == block_transactions.transactions.len()),
+        "per-tx group_elements must be index-aligned with transactions",
+    );
 
     // Checkpoint enforcement — see validate_full_block for invariant doc.
     let skip_scripts = match ctx.script_validation_checkpoint {
@@ -1440,14 +1462,29 @@ fn validate_full_block_parallel_impl(
                     cost: &mut cost,
                     last_headers: raw_headers_ref,
                 };
-                let result = validate_transaction_parsed(
-                    txs[i].clone(),
-                    &tx_bytes,
-                    inputs,
-                    data_inputs,
-                    skip_scripts,
-                    &mut tx_cx,
-                );
+                // Pre-collected points (from the block deserialize) skip the
+                // per-tx re-parse; borrowed (not cloned) and indexed here.
+                // `.get(i)` (not `[i]`) degrades safely to the re-parse path if
+                // the slice is missing/mis-sized, rather than panicking.
+                let result = match group_elements.and_then(|ge| ge.get(i)) {
+                    Some(ge) => validate_transaction_parsed_with_group_elements(
+                        txs[i].clone(),
+                        &tx_bytes,
+                        ge,
+                        inputs,
+                        data_inputs,
+                        skip_scripts,
+                        &mut tx_cx,
+                    ),
+                    None => validate_transaction_parsed(
+                        txs[i].clone(),
+                        &tx_bytes,
+                        inputs,
+                        data_inputs,
+                        skip_scripts,
+                        &mut tx_cx,
+                    ),
+                };
                 match result {
                     Ok(checked) => (i, Ok((checked, cost.total_block_cost()))),
                     Err(e) => (i, Err(e)),
@@ -1518,7 +1555,37 @@ pub fn validate_full_block_parallel(
     extension: &Extension,
     ctx: &BlockValidationContext<'_>,
 ) -> Result<CheckedBlock, BlockValidationError> {
-    validate_full_block_parallel_impl(checked_header, block_transactions, extension, ctx, None)
+    validate_full_block_parallel_impl(
+        checked_header,
+        block_transactions,
+        extension,
+        ctx,
+        None,
+        None,
+    )
+}
+
+/// Like [`validate_full_block_parallel`], but the caller supplies the per-tx
+/// group-element points (collected once at the block deserialize, index-aligned
+/// with `block_transactions.transactions`). This lets per-tx validation
+/// curve-check group elements without re-deserializing each transaction — the
+/// production block-processing entry point. A mis-sized slice degrades to the
+/// re-parse path per transaction, so it can never bypass the curve-check.
+pub fn validate_full_block_parallel_with_group_elements(
+    checked_header: CheckedHeader,
+    block_transactions: &BlockTransactions,
+    extension: &Extension,
+    ctx: &BlockValidationContext<'_>,
+    group_elements: &[Vec<[u8; 33]>],
+) -> Result<CheckedBlock, BlockValidationError> {
+    validate_full_block_parallel_impl(
+        checked_header,
+        block_transactions,
+        extension,
+        ctx,
+        None,
+        Some(group_elements),
+    )
 }
 
 /// Parallel full-block validation returning per-tx costs indexed by tx
@@ -1537,6 +1604,7 @@ pub fn validate_full_block_parallel_with_costs(
         extension,
         ctx,
         Some(&mut costs),
+        None,
     )
     .map(|block| (block, costs))
 }

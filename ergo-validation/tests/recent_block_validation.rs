@@ -37,7 +37,9 @@ use ergo_ser::transaction::{read_transaction, Transaction};
 
 use ergo_validation::context::{ProtocolParams, TransactionContext};
 use ergo_validation::cost::CostAccumulator;
-use ergo_validation::tx::validate_transaction_parsed;
+use ergo_validation::tx::{
+    validate_transaction_parsed, validate_transaction_parsed_with_group_elements,
+};
 
 /// Progressive UTXO state with split resolution semantics.
 ///
@@ -273,6 +275,10 @@ fn validate_recent_1000_blocks() {
     let mut multi_tx_blocks = 0;
     let mut missing_input_skipped = 0;
     let mut eval_gap_skipped = 0;
+    // One-time regression: prove the threaded GE path curve-checks the points it
+    // is given (perf follow-up — block path supplies pre-collected points instead
+    // of re-parsing). Flipped true after the first successful tx is re-checked.
+    let mut threaded_offcurve_checked = false;
 
     for (&height, block_txs) in &blocks {
         let hi = header_info
@@ -319,6 +325,18 @@ fn validate_recent_1000_blocks() {
                 }
             };
 
+            // Clone the (valid) tx + resolved inputs once, so that after a
+            // successful validation we can re-run the THREADED group-element
+            // variant with a deliberately off-curve point and confirm it is
+            // rejected — i.e. that supplied points are actually curve-checked.
+            let threaded_probe = (!threaded_offcurve_checked).then(|| {
+                (
+                    tx.clone(),
+                    resolved_inputs.clone(),
+                    resolved_data_inputs.clone(),
+                )
+            });
+
             let mut cost = CostAccumulator::recording_only();
             let mut tx_cx = ergo_validation::TxValidationCtx {
                 ctx: &ctx,
@@ -335,6 +353,38 @@ fn validate_recent_1000_blocks() {
                 &mut tx_cx,
             ) {
                 Ok(checked) => {
+                    if let Some((tx_c, ri_c, rdi_c)) = threaded_probe {
+                        // 0x02 + 32 zero bytes: valid prefix, not on secp256k1
+                        // (the ge.rs off-curve fixture). The tx is otherwise the
+                        // same one that just validated, so it reaches the GE
+                        // stage and must reject there.
+                        let mut off_curve = [0u8; 33];
+                        off_curve[0] = 0x02;
+                        let mut probe_cost = CostAccumulator::recording_only();
+                        let mut probe_cx = ergo_validation::TxValidationCtx {
+                            ctx: &ctx,
+                            params: &params,
+                            cost: &mut probe_cost,
+                            last_headers: &[],
+                        };
+                        let res = validate_transaction_parsed_with_group_elements(
+                            tx_c,
+                            &tx_bytes,
+                            &[off_curve],
+                            ri_c,
+                            rdi_c,
+                            false,
+                            &mut probe_cx,
+                        );
+                        assert!(
+                            matches!(
+                                res,
+                                Err(ergo_validation::error::ValidationError::Deserialization(_))
+                            ),
+                            "threaded GE path must reject a supplied off-curve point; got {res:?}"
+                        );
+                        threaded_offcurve_checked = true;
+                    }
                     let computed_id =
                         ergo_ser::transaction::transaction_id(checked.transaction()).unwrap();
                     assert_eq!(

@@ -192,6 +192,45 @@ pub fn validate_transaction_parsed(
     skip_scripts: bool,
     cx: &mut TxValidationCtx<'_>,
 ) -> Result<CheckedTransaction, ValidationError> {
+    // Callers without pre-collected group elements (single-tx validation, the
+    // sequential block path, tests): re-collect the points from `original_bytes`
+    // and delegate. The production block validator uses the variant below to
+    // skip this re-parse — it already collected the points at the one
+    // authoritative deserialize.
+    let group_elements = {
+        let mut r = VlqReader::new(original_bytes);
+        read_transaction(&mut r).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
+        r.take_group_elements()
+    };
+    validate_transaction_parsed_with_group_elements(
+        tx,
+        original_bytes,
+        &group_elements,
+        resolved_inputs,
+        resolved_data_inputs,
+        skip_scripts,
+        cx,
+    )
+}
+
+/// Same as [`validate_transaction_parsed`], but the caller supplies this
+/// transaction's group-element points instead of having the function re-parse
+/// `original_bytes` to re-collect them.
+///
+/// `group_elements` MUST be exactly this `tx`'s points. The block validator
+/// guarantees that by collecting them in the same deserialize that produced
+/// `tx` (index-aligned), so a tx cannot dodge the on-curve check via mismatched
+/// points. The on-curve rule is otherwise identical — Scala curve-checks group
+/// elements at deserialize.
+pub fn validate_transaction_parsed_with_group_elements(
+    tx: Transaction,
+    original_bytes: &[u8],
+    group_elements: &[[u8; 33]],
+    resolved_inputs: Vec<ErgoBox>,
+    resolved_data_inputs: Vec<ErgoBox>,
+    skip_scripts: bool,
+    cx: &mut TxValidationCtx<'_>,
+) -> Result<CheckedTransaction, ValidationError> {
     // Verify resolved inputs match transaction
     verify_resolved_inputs_match(&tx, &resolved_inputs)?;
     verify_resolved_data_inputs_match(&tx, &resolved_data_inputs)?;
@@ -202,16 +241,8 @@ pub fn validate_transaction_parsed(
     // Structural
     structural::validate_structural(&tx, cx.params)?;
 
-    // Group elements on-curve (Scala curve-checks them at deserialize). This
-    // path receives an already-parsed tx, so re-collect the points from the
-    // original bytes (validated equal to `tx` by check_canonical above) and
-    // curve-check them. (Perf follow-up: thread the points from the block
-    // deserializer to avoid this re-parse.)
-    {
-        let mut r = VlqReader::new(original_bytes);
-        read_transaction(&mut r).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
-        ge::validate_group_elements(&r.take_group_elements())?;
-    }
+    // Group elements on-curve (Scala curve-checks them at deserialize).
+    ge::validate_group_elements(group_elements)?;
 
     // Rule 108 (txPositiveAssets) — before the per-output 112/124 loop.
     monetary::check_positive_assets(&tx)?;
