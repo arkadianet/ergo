@@ -47,11 +47,14 @@ pub fn write_block_transactions(
 
 /// Block-version-aware BlockTransactions writer. For
 /// `block_version == 1` emits the legacy
-/// `header_id || u32 count || tx*` shape. For `block_version >= 2`
-/// emits Scala's v2+ shape:
+/// `header_id || u32 count || tx*` shape. For a *signed* `block_version > 1`
+/// (i.e. `2..=127` — Scala treats the version as a signed `Byte`) emits Scala's
+/// v2+ shape:
 /// `header_id || u32 (MAX_TRANSACTIONS_IN_BLOCK + block_version) ||
 ///  u32 count || tx*` — the version marker that
-/// [`read_block_transactions`] auto-detects on the read side.
+/// [`read_block_transactions`] auto-detects on the read side. A malformed
+/// `block_version > 127` is signed-negative, so it is markerless (v1 shape),
+/// matching the reference; this is unreachable on a PoW-valid header.
 ///
 /// Required for byte-fidelity checks: reconstructed canonical bytes
 /// must match the blake2b256 of
@@ -67,7 +70,12 @@ pub fn write_block_transactions_with_version(
     block_version: u8,
 ) -> Result<(), WriteError> {
     w.put_bytes(bt.header_id.as_bytes());
-    if block_version > 1 {
+    // Scala `BlockTransactionsSerializer` gates the v2+ marker on a SIGNED
+    // `Byte` comparison (`blockVersion > 1`). Agrees for all real versions
+    // (1-4); a malformed version > 127 is signed-negative, so no marker is
+    // written — matching the reference. (Unreachable in practice: such a block
+    // version cannot exist on a PoW-valid header.)
+    if (block_version as i8) > 1 {
         w.put_u32(MAX_TRANSACTIONS_IN_BLOCK + block_version as u32);
     }
     w.put_u32(bt.transactions.len() as u32);
@@ -293,8 +301,8 @@ mod tests {
     }
 
     /// Symmetric round-trip across v1, v2, v3, v4 to pin the version
-    /// marker formula. v1 omits the marker; v2..v255 each emit
-    /// `MAX_TRANSACTIONS_IN_BLOCK + block_version`.
+    /// marker formula. v1 omits the marker; signed `block_version > 1`
+    /// (2..=127) emits `MAX_TRANSACTIONS_IN_BLOCK + block_version`.
     #[test]
     fn block_transactions_v_writer_roundtrip_for_all_versions() {
         let bt = BlockTransactions {
@@ -420,5 +428,43 @@ mod tests {
             }
             other => panic!("unexpected error past gate: {other:?}"),
         }
+    }
+
+    #[test]
+    fn v2_marker_gate_is_signed_no_marker_above_version_127() {
+        // Scala's v2+ marker gate is a signed `Byte` comparison. A version > 127
+        // is signed-negative, so NO marker is written — the bytes match the v1
+        // (markerless) layout. Pins the signed gate for the unreachable > 127
+        // case; real versions 1-4 are unaffected.
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x33; 32]),
+            transactions: vec![make_tx(0x01)],
+        };
+        let ser = |version: u8| {
+            let mut w = VlqWriter::new();
+            write_block_transactions_with_version(&mut w, &bt, version).unwrap();
+            w.result()
+        };
+        let v1 = ser(1);
+        // The signed transition is exactly at 127/128: 127 as i8 is +127
+        // (> 1 → marker); 128 as i8 is -128 (not > 1 → markerless), as is 195.
+        assert!(
+            ser(127).len() > v1.len(),
+            "version 127 is signed-positive (> 1) and must carry the marker",
+        );
+        assert_eq!(
+            ser(128),
+            v1,
+            "version 128 is signed -128 (not > 1) → no marker, matching v1 layout",
+        );
+        assert_eq!(
+            ser(195),
+            v1,
+            "version > 127 must write no v2 marker (signed gate), matching v1 layout",
+        );
+        assert!(
+            ser(2).len() > v1.len(),
+            "a real v2 block carries the marker (longer than v1)",
+        );
     }
 }

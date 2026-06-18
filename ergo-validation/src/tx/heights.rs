@@ -57,7 +57,11 @@ pub fn validate_monotonic_heights(
     resolved_inputs: &[ErgoBox],
     block_version: u8,
 ) -> Result<(), ValidationError> {
-    if block_version <= HARDENING_VERSION {
+    // Signed-Byte version comparison (Scala `Header.Version = Byte`): the
+    // HardeningVersion gate is signed. Agrees for real versions (1-4); a
+    // malformed version > 127 is signed-negative, so the rule is skipped —
+    // matching the reference. (Unreachable: PoW-firewalled.)
+    if (block_version as i8) <= HARDENING_VERSION as i8 {
         return Ok(());
     }
     let max_input_height = resolved_inputs
@@ -260,6 +264,25 @@ mod tests {
         let tx = make_tx_with_outputs(vec![candidate_at_height(100)]);
         let inputs = vec![input_at_height(100, 1), input_at_height(80, 2)];
         validate_monotonic_heights(&tx, &inputs, 3).unwrap();
+    }
+
+    #[test]
+    fn monotonic_v127_signed_positive_enforces() {
+        // 127 as i8 is +127 (> HardeningVersion 2), so the rule is enforced:
+        // an output below the max input height is rejected.
+        let tx = make_tx_with_outputs(vec![candidate_at_height(50)]);
+        let inputs = vec![input_at_height(100, 1)];
+        assert!(validate_monotonic_heights(&tx, &inputs, 127).is_err());
+    }
+
+    #[test]
+    fn monotonic_v128_signed_negative_is_noop() {
+        // 128 as i8 is -128 (<= HardeningVersion 2 under signed semantics), so
+        // the rule is a no-op — same output that v127 rejects now passes.
+        // (Unreachable in practice; pins the 127/128 signed boundary.)
+        let tx = make_tx_with_outputs(vec![candidate_at_height(50)]);
+        let inputs = vec![input_at_height(100, 1)];
+        validate_monotonic_heights(&tx, &inputs, 128).unwrap();
     }
 
     #[test]
