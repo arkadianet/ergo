@@ -20,11 +20,19 @@ const COST_PER_TREE_BYTE: u64 = 2;
 /// charged when `activated_script_version >= V6_SOFT_FORK_VERSION`.
 const V6_SOFT_FORK_VERSION: u8 = 3;
 
-/// Length of the canonical serialized ErgoTree — Scala's
-/// `ergoTree.bytes.length`, used for the deserialize-substitution cost. We
-/// re-serialize the parsed tree (byte-identical for every wire-conformant
-/// tree, which the wire-tier corpus pins); only invoked on the rare
-/// `hasDeserialize` path so the re-serialization is not on the hot path.
+/// Re-serialized length of a parsed ErgoTree.
+///
+/// FALLBACK ONLY: used for the deserialize-substitution cost when the spent
+/// box's original wire bytes are unavailable (in-memory trees built for
+/// proving/tests, where `self_box` is `None`). Such trees are canonical, so
+/// their re-serialized length equals their original length.
+///
+/// It must NOT be used on the consensus spend path: re-serialization is NOT
+/// byte-identical to the original wire form for non-canonical encodings (e.g.
+/// the compact `Relation2` `0x85` boolean-constant pair, which the writer
+/// expands to two `Const` children), so it would diverge from Scala's
+/// `ergoTree.bytes.length`. The consensus path uses `self_box.script_bytes`
+/// (the preserved original bytes) instead — see the cost site below.
 fn serialized_ergo_tree_len(tree: &ErgoTree) -> Result<usize, VerifySpendingError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
     ergo_ser::ergo_tree::write_ergo_tree(&mut w, tree).map_err(|_| {
@@ -188,7 +196,21 @@ pub fn verify_spending_proof_with_context_and_cost(
     if ctx.activated_script_version >= V6_SOFT_FORK_VERSION
         && super::evaluator::expr_has_deserialize(&ergo_tree.body)
     {
-        let tree_len = serialized_ergo_tree_len(ergo_tree)?;
+        // Scala costs `ergoTree.bytes.length` — the ORIGINAL bytes the tree was
+        // deserialized from (`ErgoTree.propositionBytes`, Interpreter.scala:246),
+        // NOT a re-serialization. On the consensus spend path `self_box` is the
+        // box being spent and `ergo_tree` is its guard, so `self_box.script_bytes`
+        // (the preserved original wire bytes) is exactly that length. Using it
+        // avoids a re-serialization that is not byte-identical for non-canonical
+        // wire forms (e.g. the compact `Relation2` 0x85 boolean pair → expands to
+        // two `Const`s, a LONGER re-encoding), which would over-charge the cost
+        // and reject-valid a transaction the reference node accepts. Fallback to
+        // re-serialization only for in-memory trees (proving/tests, self_box=None),
+        // which are canonical so the two lengths agree.
+        let tree_len = match ctx.self_box {
+            Some(b) => b.script_bytes.len(),
+            None => serialized_ergo_tree_len(ergo_tree)?,
+        };
         let subst_block_cost = (tree_len as u64).saturating_mul(COST_PER_TREE_BYTE);
         let subst = JitCost::from_block_cost(subst_block_cost)
             .map_err(|e| VerifySpendingError::Eval(CostError::from(e).into()))?;
@@ -495,6 +517,147 @@ mod tests {
             cost_v6,
             cost_pre + len * COST_PER_TREE_BYTE,
             "V6 must add deserializeSubstitutionCost = treeBytes({len}) * {COST_PER_TREE_BYTE} block units",
+        );
+    }
+
+    #[test]
+    fn deserialize_substitution_cost_uses_self_box_original_bytes_not_reserialized() {
+        // Regression for the consensus cost divergence: Scala costs
+        // `ergoTree.bytes.length` = the ORIGINAL deserialized bytes
+        // (Interpreter.scala:246), not a re-serialization. The node now reads
+        // the spent box's preserved `self_box.script_bytes` on the consensus
+        // path. Prove the charge tracks script_bytes.len() and NOT the
+        // re-serialized length, by giving the box an original-bytes length that
+        // deliberately differs from the writer's re-encoding (here +7 bytes —
+        // standing in for any non-canonical wire form like the compact
+        // Relation2 0x85 boolean pair, which re-encodes LONGER).
+        let tree = deser_dead_branch_tree();
+        let reserialized = serialized_ergo_tree_len(&tree).expect("re-serialize") as u64;
+        let mut original_bytes = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::ergo_tree::write_ergo_tree(&mut original_bytes, &tree).expect("write tree");
+        let mut script_bytes = original_bytes.result();
+        script_bytes.extend_from_slice(&[0u8; 7]); // distinct from `reserialized`
+        let self_box = crate::evaluator::EvalBox::simple(0, script_bytes.clone());
+
+        // Hold self_box constant; the only difference between activated 2 and 3
+        // is the deserialize-substitution charge, so the delta isolates it.
+        let run = |activated: u8| {
+            let mut ctx = crate::evaluator::ReductionContext::minimal(500_000, 0);
+            ctx.activated_script_version = activated;
+            ctx.ergo_tree_version = tree.version;
+            ctx.self_box = Some(&self_box);
+            let mut cost = CostAccumulator::recording_only();
+            verify_spending_proof_with_context_and_cost(&tree, &[], &[], &ctx, &mut cost)
+                .expect("dead-branch deserialize tree reduces to TrueProp and verifies");
+            cost.total_block_cost()
+        };
+        let delta = run(3) - run(2);
+        assert_eq!(
+            delta,
+            script_bytes.len() as u64 * COST_PER_TREE_BYTE,
+            "V6 deser-subst cost must use self_box.script_bytes.len()={}, not reserialized={reserialized}",
+            script_bytes.len(),
+        );
+        assert_ne!(
+            script_bytes.len() as u64,
+            reserialized,
+            "test is only meaningful when original-bytes length differs from re-serialized length",
+        );
+    }
+
+    #[test]
+    fn deserialize_substitution_cost_uses_original_compact_relation2_wire() {
+        // Realistic non-canonical fixture: a tree whose ORIGINAL wire bytes use
+        // the compact Relation2 0x85 boolean-pair form, which is SHORTER than
+        // this crate's expanded re-encoding. The deserialize-substitution cost
+        // must track the preserved original (compact) length — matching Scala's
+        // `ergoTree.bytes.length` — not the longer re-serialization. Unlike the
+        // synthetic padded fixture above, this exercises a genuine valid wire
+        // encoding, so it also guards parse/preservation, not just the
+        // script_bytes.len() source selection.
+        //
+        // body = If(Eq(true, true), true, DeserializeContext[SBoolean])
+        // The deserialize node is on the (dead) else branch — Eq(true,true)=true
+        // selects the `true` then-branch — so it is never evaluated.
+        let bool_const = |b: bool| {
+            Box::new(Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(b),
+            })
+        };
+        let tree = ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            constants: vec![],
+            body: Expr::Op(IrNode {
+                opcode: 0x95, // If
+                payload: Payload::Three(
+                    Box::new(Expr::Op(IrNode {
+                        opcode: 0x93, // Eq (Relation2)
+                        payload: Payload::Two(bool_const(true), bool_const(true)),
+                    })),
+                    bool_const(true),
+                    Box::new(Expr::Op(IrNode {
+                        opcode: 0xD4, // DeserializeContext
+                        payload: Payload::DeserializeContext {
+                            id: 0,
+                            tpe: SigmaType::SBoolean,
+                        },
+                    })),
+                ),
+            }),
+        };
+
+        // Hand-assembled COMPACT wire (Eq in the 0x85 form). The parse
+        // cross-check proves these bytes decode to exactly `tree`:
+        //   0x00 header(v0) | 0x95 If
+        //   | 0x93 0x85 0x03  Eq(true,true) compact (packed bits 0b11)
+        //   | 0x01 0x01       Const(true)  (SBoolean type, value true)
+        //   | 0xD4 0x01 0x00  DeserializeContext (type SBoolean, id 0)
+        let compact = vec![0x00, 0x95, 0x93, 0x85, 0x03, 0x01, 0x01, 0xD4, 0x01, 0x00];
+        let parsed = {
+            let mut r = ergo_primitives::reader::VlqReader::new(&compact);
+            ergo_ser::ergo_tree::read_ergo_tree(&mut r).expect("compact tree parses")
+        };
+        assert_eq!(
+            parsed, tree,
+            "hand-assembled compact bytes must decode to the expected tree",
+        );
+
+        // This crate's writer expands the Eq, so re-serialization is strictly
+        // longer than the preserved compact original.
+        let reserialized = serialized_ergo_tree_len(&tree).expect("re-serialize");
+        assert!(
+            compact.len() < reserialized,
+            "compact ({}) must be shorter than expanded ({reserialized})",
+            compact.len(),
+        );
+
+        // The box preserves the compact original bytes (as
+        // candidate.ergo_tree_bytes() does). Cost must use that length.
+        let self_box = crate::evaluator::EvalBox::simple(0, compact.clone());
+        let run = |activated: u8| {
+            let mut ctx = crate::evaluator::ReductionContext::minimal(500_000, 0);
+            ctx.activated_script_version = activated;
+            ctx.ergo_tree_version = tree.version;
+            ctx.self_box = Some(&self_box);
+            let mut cost = CostAccumulator::recording_only();
+            verify_spending_proof_with_context_and_cost(&tree, &[], &[], &ctx, &mut cost)
+                .expect("dead-branch deserialize tree verifies without error");
+            cost.total_block_cost()
+        };
+        let delta = run(3) - run(2);
+        assert_eq!(
+            delta,
+            compact.len() as u64 * COST_PER_TREE_BYTE,
+            "V6 deser-subst cost must use the preserved compact length {}, not expanded {reserialized}",
+            compact.len(),
+        );
+        assert_ne!(
+            delta,
+            reserialized as u64 * COST_PER_TREE_BYTE,
+            "must NOT charge the expanded re-serialized length",
         );
     }
 }
