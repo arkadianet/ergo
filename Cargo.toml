@@ -18,6 +18,7 @@ members = [
     "ergo-indexer",
     "ergo-api",
     "ergo-rest-json",
+    "ergo-difftest",
 ]
 
 [workspace.package]

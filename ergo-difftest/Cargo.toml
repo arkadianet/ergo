@@ -1,0 +1,16 @@
+[package]
+name        = "ergo-difftest"
+description = "Differential / invariant fuzzing harness for Ergo wire-format decoders. Generates and mutates bytes, runs them through the consensus decoders, and checks oracle-free invariants (no-panic, parse/serialize fixed point). The JVM-oracle differential layer (scripts/jvm_serde_oracle) is layered on top for accept/reject parity."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+
+[[bin]]
+name = "difftest"
+path = "src/bin/difftest.rs"

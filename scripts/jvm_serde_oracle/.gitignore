@@ -1,0 +1,4 @@
+# scala-cli / BSP build outputs — machine-specific, never commit
+.bsp/
+.scala-build/
+*.class
