@@ -437,12 +437,22 @@ fn validate_recent_1000_blocks() {
                             &v.id[..16]
                         )
                     });
-                    if checked.resolved_inputs().iter().any(|b| {
-                        b.candidate
-                            .tokens
-                            .iter()
-                            .any(|t| t.token_id.as_bytes() == &reemission_token_id)
-                    }) {
+                    // Count only txs that actually hit the burn-path trigger,
+                    // matching `verify_reemission_spending` exactly: height
+                    // strictly above activation AND a non-emission input (value
+                    // <= the 100K-ERG floor) carrying the re-emission token.
+                    // Token presence alone would over-count (e.g. a >100K-ERG
+                    // input routes to the emission-box branch, not the burn).
+                    const REWARD_BOX_VALUE_CEILING: u64 = 100_000 * 1_000_000_000;
+                    if height > reemission_rules.activation_height
+                        && checked.resolved_inputs().iter().any(|b| {
+                            b.candidate.value <= REWARD_BOX_VALUE_CEILING
+                                && b.candidate
+                                    .tokens
+                                    .iter()
+                                    .any(|t| t.token_id.as_bytes() == &reemission_token_id)
+                        })
+                    {
                         reemission_spends_checked += 1;
                     }
                     utxo.apply_validated_tx(checked.transaction());

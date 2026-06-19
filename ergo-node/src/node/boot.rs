@@ -153,8 +153,21 @@ fn expected_sentinel(config: &NodeConfig) -> &'static str {
 fn build_reemission_rules(
     spec: &ergo_chain_spec::ChainSpec,
 ) -> Option<ergo_validation::ReemissionRuleInputs> {
+    // `None` means EIP-27 is not enabled on this network (e.g. testnet), so the
+    // block validator correctly runs without the re-emission check.
     let reemission = spec.reemission.as_ref()?;
-    let trees = spec.emission_script_trees()?;
+    // EIP-27 IS configured: the verified pay-to-reemission contract tree MUST be
+    // available, else we would build rules without a contract to match outputs
+    // against. Fail closed — refuse to boot rather than silently disable a
+    // consensus check. Unreachable for `ChainSpec::for_network` (mainnet has the
+    // trees; testnet returns above), so a failure here means a non-canonical /
+    // inconsistent spec, surfaced loudly like the sibling `.expect("const hex")`
+    // invariants in `emission_script_trees`.
+    let trees = spec.emission_script_trees().expect(
+        "chain spec configures EIP-27 re-emission but exposes no verified \
+         pay-to-reemission contract tree; refusing to boot with re-emission \
+         validation silently disabled",
+    );
     Some(ergo_validation::ReemissionRuleInputs {
         activation_height: reemission.activation_height,
         reemission_token_id: *reemission.reemission_token_id.as_bytes(),
