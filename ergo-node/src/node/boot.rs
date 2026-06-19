@@ -1050,6 +1050,10 @@ async fn run_inner_with_backend(
             config.mining_config.claim_storage_rent,
             config.mining_config.max_storage_rent_claims,
         )
+        // Same EIP-27 rules the block validator and mempool use, so a candidate
+        // can never carry an EIP-27-invalid emission / fee / storage-rent /
+        // selected tx that block validation would later reject.
+        .with_reemission_rules(build_reemission_rules(&config.chain_spec))
         .with_voting_targets(voting_targets_slot.clone());
         let network_prefix = config.chain_spec.network_params.address_prefix;
         // Subscribe to the handle's serve-state-change notifications so the

@@ -371,6 +371,14 @@ fn validate_recent_1000_blocks() {
                 params: &params,
                 cost: &mut cost,
                 last_headers: &[],
+                // Enforce EIP-27 re-emission INSIDE the validator (Design B):
+                // every real mainnet tx in this post-activation range runs
+                // through the integrated burn check. A reject-valid divergence
+                // would surface as a validation error below (these blocks were
+                // all accepted by Scala).
+                rules: ergo_validation::TxValidationRules {
+                    reemission: Some(&reemission_rules),
+                },
             };
             match validate_transaction_parsed(
                 tx,
@@ -394,6 +402,7 @@ fn validate_recent_1000_blocks() {
                             params: &params,
                             cost: &mut probe_cost,
                             last_headers: &[],
+                            rules: ergo_validation::TxValidationRules::default(),
                         };
                         let res = validate_transaction_parsed_with_group_elements(
                             tx_c,
@@ -421,22 +430,11 @@ fn validate_recent_1000_blocks() {
                         "tx ID mismatch at height {}",
                         height
                     );
-                    // EIP-27 re-emission burning (Scala verifyReemissionSpending):
-                    // every real mainnet tx here must pass. A rejection would be
-                    // a reject-valid divergence (Scala accepted this block).
-                    ergo_validation::verify_reemission_spending(
-                        checked.transaction(),
-                        checked.resolved_inputs(),
-                        height,
-                        &reemission_rules,
-                    )
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "reject-valid: real mainnet tx {} at height {height} failed the \
-                             EIP-27 re-emission check: {e}",
-                            &v.id[..16]
-                        )
-                    });
+                    // EIP-27 re-emission burning already ran INSIDE
+                    // `validate_transaction_parsed` above (tx_cx.rules.reemission
+                    // = Some), so reaching this Ok arm means the integrated check
+                    // accepted the tx. A reject-valid divergence would have
+                    // surfaced as a validation error in the match arm below.
                     // Count only txs that actually hit the burn-path trigger,
                     // matching `verify_reemission_spending` exactly: height
                     // strictly above activation AND a non-emission input (value

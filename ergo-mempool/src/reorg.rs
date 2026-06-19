@@ -277,6 +277,7 @@ mod tests {
                 tx_context: &self.tx_context,
                 params: &self.params,
                 last_headers: &[],
+                reemission: None,
             }
         }
     }
@@ -622,6 +623,7 @@ mod tests {
             tx_context: &ctx.tx_context,
             params: &ctx.params,
             last_headers: &[],
+            reemission: None,
         };
         let mut cx = AdmissionCtx {
             tip_ctx: &lagging,

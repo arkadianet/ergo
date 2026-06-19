@@ -60,6 +60,7 @@ impl Ctx {
             tx_context: &self.tx_context,
             params: &self.params,
             last_headers: &[],
+            reemission: None,
         }
     }
 }

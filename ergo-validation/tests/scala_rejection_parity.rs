@@ -164,6 +164,7 @@ fn scala_sourced_rejection_parity() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
 
         let result = validate_transaction(&tx_bytes, &utxo_view, &policy, &mut tx_cx);

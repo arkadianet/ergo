@@ -108,6 +108,7 @@ fn reject_no_inputs() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -132,6 +133,7 @@ fn reject_duplicate_inputs() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -156,6 +158,7 @@ fn reject_output_value_too_low() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -183,6 +186,7 @@ fn reject_missing_input_box() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -217,6 +221,7 @@ fn reject_erg_inflation() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -267,6 +272,7 @@ fn reject_invalid_token_minting() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -304,6 +310,7 @@ fn reject_erg_burn() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -357,6 +364,7 @@ fn reject_token_sum_over_i64_max() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -386,6 +394,7 @@ fn reject_no_outputs() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -434,6 +443,7 @@ fn reject_zero_amount_output_token() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -494,6 +504,7 @@ fn reject_trailing_bytes() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -541,6 +552,7 @@ fn allow_duplicate_data_inputs() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     // Transaction must pass validation — TrivialTrue script, valid monetary, duplicates allowed.

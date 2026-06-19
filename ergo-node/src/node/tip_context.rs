@@ -22,6 +22,10 @@ pub(super) struct OwnedTipContext {
     pub(super) tx_context: ergo_validation::TransactionContext,
     pub(super) params: ergo_validation::ProtocolParams,
     pub(super) last_headers: Vec<ergo_ser::header::Header>,
+    /// EIP-27 re-emission rule inputs (mainnet only), cloned from the
+    /// executor's boot-time copy so admission enforces the same burning
+    /// condition the block validator does. `None` on networks without EIP-27.
+    pub(super) reemission: Option<ergo_validation::ReemissionRuleInputs>,
 }
 
 impl OwnedTipContext {
@@ -34,6 +38,7 @@ impl OwnedTipContext {
             tx_context: &self.tx_context,
             params: &self.params,
             last_headers: &self.last_headers,
+            reemission: self.reemission.as_ref(),
         }
     }
 }
@@ -69,6 +74,9 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
     // rollback_to / execute_reorg, so this read is consistent with the
     // tip we just observed above.
     let params = ergo_validation::ProtocolParams::from_active(state.store.active_params());
+    // Same EIP-27 rule inputs the block validator uses (installed on the
+    // executor at boot); `None` on networks without re-emission.
+    let reemission = state.executor.reemission_rules().cloned();
     Some(OwnedTipContext {
         tip: TipPointer {
             height: tip_height,
@@ -79,5 +87,6 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
         tx_context,
         params,
         last_headers,
+        reemission,
     })
 }

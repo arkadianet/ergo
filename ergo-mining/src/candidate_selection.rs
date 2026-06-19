@@ -34,7 +34,7 @@ use ergo_ser::header::Header;
 use ergo_ser::transaction::{read_transaction, transaction_id, Transaction};
 use ergo_validation::{
     validate_transaction_parsed, CheckedTransaction, CostAccumulator, JitCost, ProtocolParams,
-    TransactionContext, TxValidationCtx, UtxoView,
+    ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules, UtxoView,
 };
 
 use crate::error::MiningError;
@@ -161,6 +161,7 @@ pub struct Selected {
 /// pinned txs (and a safety gap); selection stops at the first tx that
 /// would exceed either. Transactions that conflict, fail to resolve, or
 /// fail revalidation are skipped.
+#[allow(clippy::too_many_arguments)]
 pub fn select_user_txs(
     overlay: &mut CandidateOverlay,
     snapshot: &MempoolReadSnapshot,
@@ -169,6 +170,7 @@ pub fn select_user_txs(
     last_headers: &[Header],
     cost_budget: u64,
     size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Selected, MiningError> {
     let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
         MiningError::IdComputation {
@@ -216,6 +218,9 @@ pub fn select_user_txs(
                 params,
                 cost: &mut cost,
                 last_headers,
+                rules: TxValidationRules {
+                    reemission: reemission_rules,
+                },
             };
             match validate_transaction_parsed(
                 tx.clone(),
@@ -433,6 +438,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -465,6 +471,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -495,6 +502,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -537,6 +545,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -574,6 +583,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -602,8 +612,17 @@ mod tests {
         let mut overlay = CandidateOverlay::new(&utxo);
         let params = ProtocolParams::mainnet_default();
         // 250-byte budget at 100 bytes each → 2 fit, the 3rd overruns.
-        let sel =
-            select_user_txs(&mut overlay, &snap, &ctx(), &params, &[], u64::MAX, 250).unwrap();
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &params,
+            &[],
+            u64::MAX,
+            250,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(sel.checked.len(), 2, "size budget must stop at 2 txs");
         assert_eq!(sel.total_size, 200);
@@ -618,7 +637,8 @@ mod tests {
 
         let mut overlay = CandidateOverlay::new(&utxo);
         let params = ProtocolParams::mainnet_default();
-        let sel = select_user_txs(&mut overlay, &snap, &ctx(), &params, &[], 0, u64::MAX).unwrap();
+        let sel =
+            select_user_txs(&mut overlay, &snap, &ctx(), &params, &[], 0, u64::MAX, None).unwrap();
 
         assert!(sel.checked.is_empty(), "a zero cost budget admits nothing");
     }
@@ -644,6 +664,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -684,6 +705,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 
@@ -741,6 +763,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap();
 

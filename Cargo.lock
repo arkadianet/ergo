@@ -701,6 +701,7 @@ dependencies = [
 name = "ergo-mempool"
 version = "0.4.2"
 dependencies = [
+ "ergo-chain-spec",
  "ergo-mempool",
  "ergo-primitives",
  "ergo-ser",

@@ -121,6 +121,7 @@ fn trace_inner() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
 
         match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {

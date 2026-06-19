@@ -306,6 +306,7 @@ fn cost_total_oracle_mainnet_700000_700001() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
         match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {
             Ok(_) => {
@@ -374,6 +375,7 @@ fn cost_limit_rejects_inside_script_eval_at_one_below_expected() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
     let result = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx);
 
@@ -432,6 +434,7 @@ fn cost_limit_rejects_at_init_cost_charge() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
     let result = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx);
 
