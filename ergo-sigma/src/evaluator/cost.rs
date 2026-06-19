@@ -399,19 +399,39 @@ fn eq_with_cost_inner(
                 _ => Ok(false),
             }
         }
-        // Typed primitive/descriptor coll carriers + Tokens: the existing
-        // `add_eq_cost` arms already charge MatchType + length-gated PerItem
-        // faithfully (full length, no per-element short-circuit — Scala's
-        // primitive/descriptor branches cost the whole array).
-        Value::CollBytes(_)
-        | Value::CollBool(_)
-        | Value::CollInt(_)
-        | Value::CollLong(_)
-        | Value::CollShort(_)
-        | Value::Str(_)
-        | Value::CollBox(_)
-        | Value::CollHeader(_)
-        | Value::Tokens(_) => {
+        // Primitive coll carriers: Scala's `equalCOA_Prim` short-circuits BOTH
+        // value and cost at the first unequal element — `PerItemCost` is billed
+        // over the COMPARED PREFIX, not the full length. Mirror that. (All-equal
+        // and length-mismatch costs are unchanged; only early-mismatch is
+        // cheaper, matching the reference.) Per-type chunk sizes from
+        // `cost_table::add_eq_cost`: Byte/Bool=128, Short=96, Int=64, Long=48.
+        Value::CollBytes(a) => match right {
+            Value::CollBytes(b) => prim_coll_eq(cost, a, b, 128),
+            _ => prim_coll_eq_fallback(cost, left, right, ctx),
+        },
+        Value::CollBool(a) => match right {
+            Value::CollBool(b) => prim_coll_eq(cost, a, b, 128),
+            _ => prim_coll_eq_fallback(cost, left, right, ctx),
+        },
+        Value::CollShort(a) => match right {
+            Value::CollShort(b) => prim_coll_eq(cost, a, b, 96),
+            _ => prim_coll_eq_fallback(cost, left, right, ctx),
+        },
+        Value::CollInt(a) => match right {
+            Value::CollInt(b) => prim_coll_eq(cost, a, b, 64),
+            _ => prim_coll_eq_fallback(cost, left, right, ctx),
+        },
+        Value::CollLong(a) => match right {
+            Value::CollLong(b) => prim_coll_eq(cost, a, b, 48),
+            _ => prim_coll_eq_fallback(cost, left, right, ctx),
+        },
+        // SString equality is NOT equalCOA_Prim: Scala's string case bills
+        // `addSeqCost(EQ_COA_Short, s.length)` — the FULL length even on an early
+        // mismatch — so it must NOT short-circuit (doing so would undercharge a
+        // long early-mismatch string and diverge on cost-limit decisions). Keep
+        // the full-length `add_eq_cost` charge. Box / Header / Tokens colls use
+        // Scala's `equalColls` (per-element) path, also charged via `add_eq_cost`.
+        Value::Str(_) | Value::CollBox(_) | Value::CollHeader(_) | Value::Tokens(_) => {
             let match_len = coll_len(left, ctx) == coll_len(right, ctx);
             cost_table::add_eq_cost(cost, left, match_len)?;
             Ok(super::helpers::values_equal(left, right, ctx)?)
@@ -468,6 +488,59 @@ fn eq_coll_fallback(
     };
     cost.add(eq_coll.compute(k_eff)?)?;
     Ok(all_eq)
+}
+
+/// Scala `DataValueComparer.equalCOA_Prim`: primitive-array equality that
+/// short-circuits BOTH value and cost at the first unequal element. Charges
+/// `MatchType`, then `PerItemCost(15, 2, chunk_size)` over the COMPARED PREFIX
+/// — the first-mismatch index + 1, or the full length when all elements are
+/// equal — mirroring `addSeqCost(EQ_COA_<T>, i)` where `i` is the loop's
+/// returned compared count. A length mismatch returns `false` after only the
+/// `MatchType` charge (Scala returns before the per-item loop). For all-equal
+/// (and empty) collections the compared count equals the length, so the cost is
+/// identical to the prior full-length charge. The caller guarantees `a`/`b` are
+/// the same primitive carrier.
+fn prim_coll_eq<T: PartialEq>(
+    cost: &mut CostAccumulator,
+    a: &[T],
+    b: &[T],
+    chunk_size: u32,
+) -> Result<bool, EvalError> {
+    cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    let mut k_eff = 0u32;
+    let mut all_eq = true;
+    for (ai, bi) in a.iter().zip(b.iter()) {
+        k_eff += 1;
+        if ai != bi {
+            all_eq = false;
+            break;
+        }
+    }
+    let eq_coa = CostKind::PerItem {
+        base: JitCost::from_jit(15),
+        per_chunk: JitCost::from_jit(2),
+        chunk_size,
+    };
+    cost.add(eq_coa.compute(k_eff)?)?;
+    Ok(all_eq)
+}
+
+/// Defensive fallback for the unreachable case where two operands reaching
+/// equality are not the same primitive carrier (`require_comparable` gates this
+/// out). Charges the prior full-length cost and defers the boolean to the
+/// uncosted authority.
+fn prim_coll_eq_fallback(
+    cost: &mut CostAccumulator,
+    left: &Value,
+    right: &Value,
+    ctx: &ReductionContext<'_>,
+) -> Result<bool, EvalError> {
+    let match_len = coll_len(left, ctx) == coll_len(right, ctx);
+    cost_table::add_eq_cost(cost, left, match_len)?;
+    super::helpers::values_equal(left, right, ctx)
 }
 
 /// Tree-height byte stored in the trailing position of an `ADDigest`
@@ -600,5 +673,117 @@ pub(crate) fn collection_len(coll: &Value, ctx: &ReductionContext) -> usize {
             BoxSource::DataInputs => ctx.data_inputs.len(),
         },
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod prim_coll_eq_tests {
+    use super::*;
+
+    // ----- helpers -----
+
+    fn eq_cost(a: &[u8], b: &[u8]) -> (u64, bool) {
+        let mut c = CostAccumulator::recording_only();
+        let eq = prim_coll_eq(&mut c, a, b, 128).expect("prim_coll_eq");
+        (c.total().value(), eq)
+    }
+
+    // ----- happy path -----
+
+    /// `equalCOA_Prim`: the per-item cost scales with the COMPARED prefix
+    /// (first-mismatch index + 1), so an early mismatch costs strictly less than
+    /// a late one — the Scala short-circuit the prior full-length charge missed.
+    #[test]
+    fn collbytes_eq_cost_short_circuits_at_first_mismatch() {
+        let base = vec![0u8; 512];
+        let mut early = base.clone();
+        early[0] = 1; // mismatch at index 0 -> compared 1
+        let mut late = base.clone();
+        late[500] = 1; // mismatch at index 500 -> compared 501
+
+        let (c_early, e_early) = eq_cost(&base, &early);
+        let (c_late, e_late) = eq_cost(&base, &late);
+        assert!(!e_early && !e_late, "both differ -> not equal");
+        assert!(
+            c_early < c_late,
+            "early mismatch must cost less than late: {c_early} vs {c_late}"
+        );
+    }
+
+    /// All-equal bills over the full length (compared count == length), so the
+    /// cost is unchanged from the prior full-length charge.
+    #[test]
+    fn collbytes_eq_cost_all_equal_bills_full_length() {
+        let base = vec![7u8; 512];
+        let (c_eq, eq) = eq_cost(&base, &base);
+        let mut last = base.clone();
+        last[511] = 9; // mismatch at the last index -> compared 512 == length
+        let (c_full, _) = eq_cost(&base, &last);
+        assert!(eq, "identical colls are equal");
+        assert_eq!(
+            c_eq, c_full,
+            "all-equal must bill the same as a last-element mismatch (both compare all)"
+        );
+    }
+
+    // ----- error paths -----
+
+    /// A length mismatch returns `false` after only the `MatchType` charge —
+    /// Scala returns before the per-item loop, so no per-item cost is billed.
+    #[test]
+    fn collbytes_eq_cost_length_mismatch_charges_only_match_type() {
+        let (c, eq) = eq_cost(&vec![0u8; 512], &[0u8; 10]);
+        assert!(!eq, "different lengths -> not equal");
+        assert_eq!(
+            c,
+            cost_table::MATCH_TYPE,
+            "length mismatch bills only MatchType, no per-item"
+        );
+    }
+
+    /// Two empty colls are equal; the compared count is 0, so the cost is
+    /// `MatchType` + `PerItemCost.compute(0)` (the base, no chunks).
+    #[test]
+    fn collbytes_eq_cost_empty_collections() {
+        let (c, eq) = eq_cost(&[], &[]);
+        assert!(eq, "empty colls are equal");
+        let base = CostKind::PerItem {
+            base: JitCost::from_jit(15),
+            per_chunk: JitCost::from_jit(2),
+            chunk_size: 128,
+        }
+        .compute(0)
+        .unwrap()
+        .value();
+        assert_eq!(
+            c,
+            cost_table::MATCH_TYPE + base,
+            "empty: MatchType + base cost over 0 items"
+        );
+    }
+
+    /// The short-circuit holds across the non-byte chunk sizes (Short=96,
+    /// Int=64, Long=48) — `prim_coll_eq` is generic over the carrier, so an
+    /// early mismatch must cost less than a late one at every chunk size.
+    #[test]
+    fn prim_coll_eq_short_circuits_across_chunk_sizes() {
+        fn cost_i32(a: &[i32], b: &[i32], chunk: u32) -> u64 {
+            let mut c = CostAccumulator::recording_only();
+            prim_coll_eq(&mut c, a, b, chunk).expect("prim_coll_eq");
+            c.total().value()
+        }
+        for chunk in [96u32, 64, 48] {
+            let base = vec![0i32; 200];
+            let mut early = base.clone();
+            early[0] = 1;
+            let mut late = base.clone();
+            late[199] = 1;
+            let c_early = cost_i32(&base, &early, chunk);
+            let c_late = cost_i32(&base, &late, chunk);
+            assert!(
+                c_early < c_late,
+                "chunk {chunk}: early {c_early} must cost less than late {c_late}"
+            );
+        }
     }
 }
