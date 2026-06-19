@@ -161,7 +161,21 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             // rhs; each must be an STypeVar
             // (`r.getType().asInstanceOf[STypeVar]` — a non-typevar
             // type fails the cast and the whole parse).
-            let n_tpe_args = r.get_u8()? as usize;
+            //
+            // Scala reads nTpeArgs as a SIGNED Byte (`r.getByte()`) and passes
+            // it to `safeNewArray[STypeVar](nTpeArgs)`, which throws
+            // NegativeArraySizeException for a negative count. Wire bytes
+            // 0x80..=0xFF are negative-as-signed, so they are an unconditional
+            // deserialization failure — reject them rather than reading them as
+            // an unsigned 128..=255 count and over-reading that many type args.
+            let n_tpe_args_byte = r.get_u8()?;
+            if n_tpe_args_byte > 0x7f {
+                return Err(ReadError::InvalidData(format!(
+                    "FunDef nTpeArgs {n_tpe_args_byte} is negative as a signed \
+                     Byte (Scala safeNewArray rejects the negative count)"
+                )));
+            }
+            let n_tpe_args = n_tpe_args_byte as usize;
             let mut tpe_args = Vec::with_capacity(n_tpe_args);
             for _ in 0..n_tpe_args {
                 let t = read_type(r)?;
@@ -498,6 +512,47 @@ mod tests {
             Expr::Const { val, .. } => assert!(val.contains_option()),
             other => panic!("expected Const, got {other:?}"),
         }
+    }
+
+    // ----- FunDef nTpeArgs signed-byte bound -----
+
+    /// Build a `FunDef` expr (opcode 0xD7): id=1, `n_tpe_args` STypeVar params,
+    /// trivial `Const(SInt, 0)` rhs. The count byte is written RAW, so values
+    /// 0x80..=0xFF reproduce a wire FunDef whose nTpeArgs is negative-as-signed
+    /// — with that many valid type-arg entries present, so a non-rejecting
+    /// parser reads them all and (wrongly) succeeds.
+    fn fundef_expr_bytes(n_tpe_args: u8) -> Vec<u8> {
+        let mut b = vec![0xD7, 0x01, n_tpe_args]; // FunDef, id=1 (VLQ), nTpeArgs
+        for i in 0..(n_tpe_args as usize) {
+            let name = format!("T{}", i + 1);
+            b.push(0x67); // STYPEVAR_CODE
+            b.push(name.len() as u8);
+            b.extend_from_slice(name.as_bytes());
+        }
+        b.extend_from_slice(&[0x04, 0x00]); // rhs = Const(SInt, 0)
+        b
+    }
+
+    #[test]
+    fn fundef_ntpeargs_127_accepts() {
+        // 0x7f is the signed-Byte max; Scala safeNewArray(127) succeeds.
+        let bytes = fundef_expr_bytes(0x7f);
+        let mut r = VlqReader::new(&bytes);
+        parse_expr(&mut r, 0, 3).expect("nTpeArgs=127 must parse");
+    }
+
+    #[test]
+    fn fundef_ntpeargs_128_rejects() {
+        // 0x80 is negative as a signed Byte; Scala ValDefSerializer reads
+        // getByte() -> safeNewArray(-128) -> NegativeArraySizeException, failing
+        // the whole deserialize. We must reject too, not over-read 128 args.
+        let bytes = fundef_expr_bytes(0x80);
+        let mut r = VlqReader::new(&bytes);
+        let err = parse_expr(&mut r, 0, 3).expect_err("nTpeArgs=128 must reject");
+        assert!(
+            matches!(&err, ReadError::InvalidData(m) if m.contains("nTpeArgs")),
+            "unexpected error {err:?}"
+        );
     }
 
     #[test]
