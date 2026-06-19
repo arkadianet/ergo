@@ -19,7 +19,9 @@ use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
-use ergo_validation::{ProtocolParams, TransactionContext, TxValidationCtx, UtxoView};
+use ergo_validation::{
+    ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, UtxoView,
+};
 use tracing::warn;
 
 use crate::budget::{BudgetVerdict, CostBudgets};
@@ -44,6 +46,13 @@ pub struct TipContext<'a> {
     pub tx_context: &'a TransactionContext,
     pub params: &'a ProtocolParams,
     pub last_headers: &'a [Header],
+    /// EIP-27 re-emission rule inputs for this network. When `Some`, an
+    /// admitted transaction that spends re-emission tokens must burn them and
+    /// pay the pay-to-reemission contract (Scala `verifyReemissionSpending`),
+    /// so the node refuses to relay a transaction the Scala mempool rejects.
+    /// `None` disables the check (testnet / no EIP-27). See
+    /// [`ergo_validation::ReemissionRuleInputs`].
+    pub reemission: Option<&'a ReemissionRuleInputs>,
 }
 
 impl TipContext<'_> {
@@ -152,11 +161,17 @@ pub trait Validator {
     /// the `data_input_view` is `CommittedOnly`. Charge consumed cost
     /// to `cx.cost` so the caller can read `cx.cost.consumed()`
     /// afterwards.
+    ///
+    /// `reemission`, when `Some`, makes the validator additionally enforce the
+    /// EIP-27 re-emission burning condition (Scala `verifyReemissionSpending`)
+    /// on the resolved inputs it already holds. `None` skips it (testnet / no
+    /// EIP-27). The admission pipeline passes `cx.tip_ctx.reemission`.
     fn validate(
         &self,
         tx_bytes: &[u8],
         input_view: &dyn UtxoView,
         data_input_view: &dyn UtxoView,
+        reemission: Option<&ReemissionRuleInputs>,
         cx: &mut TxValidationCtx<'_>,
     ) -> Result<Validated, ValidationErr>;
 }
@@ -259,6 +274,7 @@ impl Validator for MockValidator {
         tx_bytes: &[u8],
         _input_view: &dyn UtxoView,
         _data_input_view: &dyn UtxoView,
+        _reemission: Option<&ReemissionRuleInputs>,
         cx: &mut TxValidationCtx<'_>,
     ) -> Result<Validated, ValidationErr> {
         self.validate_calls.set(self.validate_calls.get() + 1);
@@ -570,7 +586,13 @@ pub fn check<V: Validator>(
         cost: &mut cost,
         last_headers: cx.tip_ctx.last_headers,
     };
-    let validated = match validator.validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx) {
+    let validated = match validator.validate(
+        tx_bytes,
+        &overlay_view,
+        &committed_view,
+        cx.tip_ctx.reemission,
+        &mut tx_cx,
+    ) {
         Ok(v) => v,
         Err(err) => {
             // Charge whatever cost the validator consumed.

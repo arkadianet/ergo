@@ -120,6 +120,7 @@ fn tip_ctx<'a>(
         tx_context: tx_ctx,
         params,
         last_headers: &[],
+        reemission: None,
     }
 }
 

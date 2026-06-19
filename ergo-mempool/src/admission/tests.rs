@@ -56,6 +56,7 @@ impl TipContextOwned {
             tx_context: &self.tx_context,
             params: &self.params,
             last_headers: &[],
+            reemission: None,
         }
     }
 }
@@ -1801,6 +1802,7 @@ fn data_input_does_not_resolve_through_pool_overlay() {
             tx_bytes: &[u8],
             _input_view: &dyn UtxoView,
             data_input_view: &dyn UtxoView,
+            _reemission: Option<&ergo_validation::ReemissionRuleInputs>,
             cx: &mut ergo_validation::TxValidationCtx<'_>,
         ) -> Result<Validated, ValidationErr> {
             if tx_bytes != self.bytes {

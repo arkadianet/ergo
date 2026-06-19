@@ -265,7 +265,30 @@ fn mempool_admits_mainnet_corpus_1761k() {
     // want the complete signal.
     const CORPUS_LIMIT: usize = 500;
 
+    // Real mainnet EIP-27 rule inputs (oracle-pinned chain-spec constants).
+    // Heights 1.76M are past the activation height, so this corpus admits real
+    // reward-box spends that must burn re-emission tokens + pay the
+    // pay-to-reemission contract. Enabling the rule here exercises the mempool
+    // wiring (TipContext -> Validator::validate -> verify_reemission_spending)
+    // end-to-end against real data: the pinned `admitted` / `explicit_rejects`
+    // counts below stay green only if the rule does not reject-valid any of
+    // these Scala-accepted txs.
+    let reemission_rules = {
+        let spec = ergo_chain_spec::ChainSpec::mainnet();
+        let r = spec.reemission.as_ref().expect("mainnet reemission");
+        ergo_validation::ReemissionRuleInputs {
+            activation_height: r.activation_height,
+            reemission_token_id: *r.reemission_token_id.as_bytes(),
+            pay_to_reemission_tree: spec
+                .emission_script_trees()
+                .expect("mainnet emission trees")
+                .pay_to_reemission,
+        }
+    };
+    let reemission_token_id = reemission_rules.reemission_token_id;
+
     let mut admitted = 0usize;
+    let mut reemission_spends_admitted = 0usize;
     let mut below_min_fee = 0usize;
     // Fee-output counts for every below-min-fee reject. The pinned
     // invariant below asserts every entry is 0 — i.e. every below-
@@ -342,7 +365,24 @@ fn mempool_admits_mainnet_corpus_1761k() {
                 tx_context: &tx_context,
                 params: &params,
                 last_headers: &[],
+                reemission: Some(&reemission_rules),
             };
+            // Does this tx hit the EIP-27 burn-path trigger, exactly as
+            // `verify_reemission_spending`: height strictly above activation
+            // AND a non-emission input (value <= the 100K-ERG floor) carrying
+            // the re-emission token. Mirrors `EMISSION_BOX_VALUE_FLOOR` so the
+            // counter reflects the real branch, not just token presence.
+            const REWARD_BOX_VALUE_CEILING: u64 = 100_000 * 1_000_000_000;
+            let spends_reemission = *height > reemission_rules.activation_height
+                && tx.inputs.iter().any(|i| {
+                    utxo.all.get(&i.box_id).is_some_and(|b| {
+                        b.candidate.value <= REWARD_BOX_VALUE_CEILING
+                            && b.candidate
+                                .tokens
+                                .iter()
+                                .any(|t| t.token_id.as_bytes() == &reemission_token_id)
+                    })
+                });
 
             let (outcome, _actions) = mempool.process(
                 &tx_bytes,
@@ -356,6 +396,9 @@ fn mempool_admits_mainnet_corpus_1761k() {
             match outcome {
                 AdmissionOutcome::Admitted { .. } => {
                     admitted += 1;
+                    if spends_reemission {
+                        reemission_spends_admitted += 1;
+                    }
                     utxo.apply_tx(&tx);
                 }
                 AdmissionOutcome::Rejected { reason } => {
@@ -407,6 +450,9 @@ fn mempool_admits_mainnet_corpus_1761k() {
         "\n[mempool] self-consistency summary ({total_txs} txs from heights 1,761,000-1,762,000):",
     );
     eprintln!("  admitted         : {admitted}");
+    eprintln!(
+        "  EIP-27 re-emission spends admitted (burn path exercised): {reemission_spends_admitted}"
+    );
     eprintln!("  below_min_fee    : {below_min_fee}");
     eprintln!("  unresolved_input : {unresolved_input}");
     eprintln!("  other rejected   : {explicit_rejects}");
@@ -435,6 +481,14 @@ fn mempool_admits_mainnet_corpus_1761k() {
     assert_eq!(
         explicit_rejects, 0,
         "pinned: 0 other rejections — no unexpected pipeline failures"
+    );
+    // The EIP-27 burn path must actually fire here, else `explicit_rejects == 0`
+    // proves nothing about re-emission. These are real reward-box spends Scala
+    // accepted; admitting them through the rule (0 reject-valid) is the point.
+    assert!(
+        reemission_spends_admitted > 0,
+        "expected real EIP-27 re-emission spends admitted through the mempool \
+         pipeline, found none — the burn path was not exercised"
     );
     assert_eq!(
         total_txs,

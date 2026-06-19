@@ -28,6 +28,7 @@ tracing         = { workspace = true }
 
 [dev-dependencies]
 ergo-mempool       = { path = ".", features = ["test-support"] }
+ergo-chain-spec    = { workspace = true }
 hex                = { workspace = true }
 indexmap           = { workspace = true }
 serde              = { workspace = true, features = ["derive"] }

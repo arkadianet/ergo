@@ -10,7 +10,10 @@ use ergo_primitives::digest::{blake2b256, Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::transaction::{bytes_to_sign, read_transaction, Transaction};
-use ergo_validation::{validate_transaction_parsed, UtxoView, ValidationError};
+use ergo_validation::{
+    validate_transaction_parsed, verify_reemission_spending, ReemissionRuleInputs, UtxoView,
+    ValidationError,
+};
 
 use crate::admission::{PeekedTx, Validated, ValidationErr, Validator};
 
@@ -92,6 +95,7 @@ impl Validator for ErgoValidator {
         tx_bytes: &[u8],
         input_view: &dyn UtxoView,
         data_input_view: &dyn UtxoView,
+        reemission: Option<&ReemissionRuleInputs>,
         cx: &mut ergo_validation::TxValidationCtx<'_>,
     ) -> Result<Validated, ValidationErr> {
         // Deserialize. Trailing-byte check mirrors ergo-validation.
@@ -120,6 +124,22 @@ impl Validator for ErgoValidator {
             cx,
         )
         .map_err(map_validation_error)?;
+
+        // EIP-27 re-emission burning (Scala `verifyReemissionSpending`, part of
+        // `validateStateful` — which on the reference node gates mempool
+        // admission too). Refuse to admit / relay a transaction the Scala
+        // mempool would reject. The block-apply path enforces this
+        // independently; this keeps an invalid tx out of our pool and out of
+        // candidate selection in the first place.
+        if let Some(rules) = reemission {
+            verify_reemission_spending(
+                checked.transaction(),
+                checked.resolved_inputs(),
+                cx.ctx.height,
+                rules,
+            )
+            .map_err(map_validation_error)?;
+        }
 
         // Fee: sum of output values whose proposition matches the
         // mainnet miner-fee ErgoTree. In Ergo, fees are paid AS an
@@ -410,7 +430,9 @@ mod tests {
             cost: &mut cost,
             last_headers: &[],
         };
-        let err = v.validate(b"\xff\xff\xff", &u, &u, &mut tx_cx).unwrap_err();
+        let err = v
+            .validate(b"\xff\xff\xff", &u, &u, None, &mut tx_cx)
+            .unwrap_err();
         assert!(matches!(err, ValidationErr::Deserialize));
     }
 
