@@ -30,11 +30,36 @@ impl ChainStateAccessor for StubChainAccessor {
     }
 }
 
+/// Chain accessor with a configurable tip height — drives the EIP-27
+/// candidate-height (`tip+1`) trigger in `native_balance`.
+struct StubChainAccessorTip(u32);
+
+impl ChainStateAccessor for StubChainAccessorTip {
+    fn wallet_scan_height(&self) -> u32 {
+        self.0
+    }
+
+    fn tip_height(&self) -> u32 {
+        self.0
+    }
+
+    fn is_pruned(&self) -> bool {
+        false
+    }
+
+    fn read_block_at(&self, _height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
+        None
+    }
+}
+
 struct StubTxSubmitter;
 
 #[async_trait]
 impl TxSubmitter for StubTxSubmitter {
-    async fn submit_transaction(&self, _tx_bytes: Vec<u8>) -> Result<String, WalletAdminError> {
+    async fn submit_transaction(
+        &self,
+        _tx_bytes: Vec<u8>,
+    ) -> Result<String, ergo_api::types::SubmitError> {
         Ok("0000000000000000000000000000000000000000000000000000000000000000".to_string())
     }
 }
@@ -57,6 +82,7 @@ async fn admin_init_status_roundtrip() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        reemission: None,
     };
 
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
@@ -118,6 +144,7 @@ async fn get_private_key_gated_by_expose_flag_false() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
@@ -201,6 +228,7 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
@@ -260,5 +288,283 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
         encoded, recipient,
         "recipient output tree must re-encode to the P2PK address it was built for \
          (canonical, non-segregated) — a P2S/segregated tree would fail this",
+    );
+}
+
+// ----- native balance (EIP-27) -----
+
+/// End-to-end proof of the symptom fix: on an EIP-27 net past activation, the
+/// native balance holds back the re-emission tokens a reward box owes
+/// (`reserved`), so `available = confirmed − reserved` instead of the
+/// over-reported gross. The reserve is computed by the shared consensus helper
+/// at candidate height `tip+1`.
+#[tokio::test]
+async fn native_balance_reserves_eip27_reward_box_tokens() {
+    use ergo_state::wallet::tables::WALLET_BOXES;
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+
+    const REEMISSION_TOKEN: [u8; 32] = [0x11; 32];
+    const OTHER_TOKEN: [u8; 32] = [0x22; 32];
+    const ACTIVATION: u32 = 100;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
+    ));
+    let state = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::state::WalletState::empty(false),
+    ));
+    let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+    let db_for_seed = db.clone();
+    // tip 200 → candidate height 201 > activation 100 → the EIP-27 spend trigger fires.
+    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessorTip(200));
+    let cfg = WriterConfig {
+        network: ergo_ser::address::NetworkPrefix::Mainnet,
+        expose_private_keys: false,
+        reemission: Some(ergo_validation::ReemissionRuleInputs {
+            activation_height: ACTIVATION,
+            reemission_token_id: REEMISSION_TOKEN,
+            pay_to_reemission_tree: vec![0u8], // unused by the reserve estimate
+        }),
+    };
+    let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
+    let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
+        std::sync::Arc::new(ergo_api::NoopMempoolView::new());
+    tokio::spawn(run_wallet_writer(
+        rx, storage, state, db, chain, cfg, submitter, mempool,
+    ));
+    let admin = NodeWalletAdmin::new(tx);
+
+    // Initialize so the wallet is not Uninitialized (balance is a read — works locked).
+    admin
+        .init("pw".to_string(), String::new(), 24)
+        .await
+        .unwrap();
+
+    // Seed two Confirmed boxes: a reward box below the 100k-ERG floor carrying 7
+    // re-emission tokens, and an ordinary box with a different token.
+    let reward = WalletBox {
+        box_id: [0xAA; 32],
+        creation_tx_id: [0xA1; 32],
+        creation_output_index: 0,
+        creation_height: 150,
+        value: 1_000_000_000,
+        assets: vec![(REEMISSION_TOKEN, 7)],
+        status: BoxStatus::Confirmed,
+        provenance: BoxProvenance::MinerReward,
+    };
+    let ordinary = WalletBox {
+        box_id: [0xBB; 32],
+        creation_tx_id: [0xB1; 32],
+        creation_output_index: 0,
+        creation_height: 150,
+        value: 5_000_000_000,
+        assets: vec![(OTHER_TOKEN, 3)],
+        status: BoxStatus::Confirmed,
+        provenance: BoxProvenance::Owned,
+    };
+    {
+        let w = db_for_seed.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_BOXES).unwrap();
+            t.insert(reward.box_id, bincode::serialize(&reward).unwrap())
+                .unwrap();
+            t.insert(ordinary.box_id, bincode::serialize(&ordinary).unwrap())
+                .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    let bal = admin.native_balance(false).await.unwrap();
+
+    // confirmed = 1e9 + 5e9; reserved = 7 (re-emission tokens the reward box owes);
+    // available = confirmed − reserved (NOT the over-reported gross).
+    assert_eq!(bal.nano_erg.confirmed, "6000000000");
+    assert_eq!(bal.nano_erg.reserved, "7");
+    assert_eq!(bal.nano_erg.available, "5999999993");
+    assert_eq!(bal.nano_erg.immature, "0");
+
+    let r = bal
+        .reemission
+        .expect("reemission block present on an EIP-27 net past activation");
+    assert_eq!(r.reserved_token_amount, "7");
+    assert_eq!(r.reserved_box_count, 1);
+    assert!(!r.reserved_exceeds_confirmed);
+    assert_eq!(r.token_id, hex::encode(REEMISSION_TOKEN));
+
+    // The re-emission token is omitted from assets; the other token is kept.
+    assert_eq!(
+        bal.assets.len(),
+        1,
+        "re-emission token must be omitted from assets"
+    );
+    assert_eq!(bal.assets[0].token_id, hex::encode(OTHER_TOKEN));
+    assert_eq!(bal.assets[0].amount, "3");
+
+    // Unconfirmed delta is null unless explicitly requested.
+    assert!(bal.unconfirmed.is_none());
+}
+
+/// Native read endpoints end-to-end: status, paged boxes (sorted before
+/// paging), single-box lookup (present + absent), and empty transactions.
+#[tokio::test]
+async fn native_reads_status_boxes_and_lookup() {
+    use ergo_api::wallet::native::dto::NetworkDto;
+    use ergo_state::wallet::tables::WALLET_BOXES;
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
+    ));
+    let state = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::state::WalletState::empty(false),
+    ));
+    let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+    let db_seed = db.clone();
+    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessorTip(200));
+    let cfg = WriterConfig {
+        network: ergo_ser::address::NetworkPrefix::Mainnet,
+        expose_private_keys: false,
+        reemission: None,
+    };
+    let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
+    let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
+        std::sync::Arc::new(ergo_api::NoopMempoolView::new());
+    tokio::spawn(run_wallet_writer(
+        rx, storage, state, db, chain, cfg, submitter, mempool,
+    ));
+    let admin = NodeWalletAdmin::new(tx);
+
+    admin
+        .init("pw".to_string(), String::new(), 24)
+        .await
+        .unwrap();
+
+    // Status: initialized, locked, mainnet, tip 200.
+    let st = admin.native_status().await.unwrap();
+    assert!(st.initialized && st.locked);
+    assert_eq!(st.tip_height, 200);
+    assert!(matches!(st.network, NetworkDto::Mainnet));
+
+    // Seed two confirmed boxes at heights 100 and 200.
+    let mk = |bid: u8, h: u32, val: u64| WalletBox {
+        box_id: [bid; 32],
+        creation_tx_id: [bid; 32],
+        creation_output_index: 0,
+        creation_height: h,
+        value: val,
+        assets: vec![],
+        status: BoxStatus::Confirmed,
+        provenance: BoxProvenance::Owned,
+    };
+    let lo = mk(0xA0, 100, 1_000);
+    let hi = mk(0xB0, 200, 2_000);
+    {
+        let w = db_seed.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_BOXES).unwrap();
+            t.insert(lo.box_id, bincode::serialize(&lo).unwrap())
+                .unwrap();
+            t.insert(hi.box_id, bincode::serialize(&hi).unwrap())
+                .unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    // Boxes: total 2, sorted (creationHeight desc) → the height-200 box first.
+    let page = admin.native_boxes(0, 50).await.unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].box_id, hex::encode([0xB0; 32]));
+    assert_eq!(page.items[0].value, "2000");
+    assert_eq!(page.items[1].box_id, hex::encode([0xA0; 32]));
+
+    // Paging window: limit 1 → one item, total still the full count.
+    let p1 = admin.native_boxes(0, 1).await.unwrap();
+    assert_eq!(p1.items.len(), 1);
+    assert_eq!(p1.total, 2);
+    assert_eq!(p1.items[0].box_id, hex::encode([0xB0; 32]));
+
+    // Single-box lookup: present + absent.
+    assert!(admin
+        .native_box_by_id(hex::encode([0xA0; 32]))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(admin
+        .native_box_by_id(hex::encode([0xCC; 32]))
+        .await
+        .unwrap()
+        .is_none());
+
+    // No transactions seeded → empty page.
+    let txs = admin.native_transactions(0, 50).await.unwrap();
+    assert_eq!(txs.total, 0);
+    assert!(txs.items.is_empty());
+}
+
+/// codex P1-3: `changeAddress` is persisted public metadata — native status must
+/// surface it even while the wallet is LOCKED (it is `null` only when unset).
+#[tokio::test]
+async fn native_status_shows_change_address_while_locked() {
+    use ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
+    ));
+    let state = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::state::WalletState::empty(false),
+    ));
+    let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+    let db_seed = db.clone();
+    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
+    let cfg = WriterConfig {
+        network: ergo_ser::address::NetworkPrefix::Mainnet,
+        expose_private_keys: false,
+        reemission: None,
+    };
+    let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
+    let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
+        std::sync::Arc::new(ergo_api::NoopMempoolView::new());
+    tokio::spawn(run_wallet_writer(
+        rx, storage, state, db, chain, cfg, submitter, mempool,
+    ));
+    let admin = NodeWalletAdmin::new(tx);
+
+    admin
+        .init("pw".to_string(), String::new(), 24)
+        .await
+        .unwrap();
+
+    // Persist a change-address pubkey (the secp256k1 generator — a valid point)
+    // directly, and DO NOT unlock.
+    let pk_bytes =
+        hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798").unwrap();
+    let pk: [u8; 33] = pk_bytes.try_into().unwrap();
+    {
+        let w = db_seed.begin_write().unwrap();
+        {
+            let mut t = w.open_table(WALLET_CHANGE_ADDRESS).unwrap();
+            t.insert((), pk).unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    let st = admin.native_status().await.unwrap();
+    assert!(st.locked, "wallet must be locked (never unlocked)");
+    let expected = ergo_wallet::address::pubkey_to_p2pk_address(
+        &pk,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    )
+    .unwrap();
+    assert_eq!(
+        st.change_address.as_deref(),
+        Some(expected.as_str()),
+        "changeAddress must be surfaced while locked (codex P1-3)",
     );
 }

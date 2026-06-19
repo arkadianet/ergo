@@ -34,7 +34,16 @@ use ergo_wallet::storage::SecretStorage;
 /// inject a stub.
 #[async_trait]
 pub trait TxSubmitter: Send + Sync {
-    async fn submit_transaction(&self, tx_bytes: Vec<u8>) -> Result<String, WalletAdminError>;
+    /// Submit signed tx bytes; returns the tx id on admission. The error is the
+    /// **typed** [`ergo_api::types::SubmitError`] `{reason, detail}` — NOT collapsed
+    /// to a string — so callers can distinguish a `duplicate` admission (map to an
+    /// idempotent success) from a real failure (map to 5xx) at their own boundary.
+    /// The native send path (P3) maps `duplicate` → `200 accepted`; the existing
+    /// compat callers map it to `WalletAdminError::Internal` exactly as before.
+    async fn submit_transaction(
+        &self,
+        tx_bytes: Vec<u8>,
+    ) -> Result<String, ergo_api::types::SubmitError>;
 }
 
 /// Production `TxSubmitter` backed by the node's `NodeSubmit` bridge.
@@ -50,12 +59,15 @@ impl NodeSubmitAdapter {
 
 #[async_trait]
 impl TxSubmitter for NodeSubmitAdapter {
-    async fn submit_transaction(&self, tx_bytes: Vec<u8>) -> Result<String, WalletAdminError> {
+    async fn submit_transaction(
+        &self,
+        tx_bytes: Vec<u8>,
+    ) -> Result<String, ergo_api::types::SubmitError> {
         use ergo_api::types::SubmitMode;
+        // Forward the typed SubmitError unmodified — each caller maps it intentionally.
         self.inner
             .submit_transaction(tx_bytes, SubmitMode::Broadcast)
             .await
-            .map_err(|e| WalletAdminError::Internal(format!("submit: {}", e.reason)))
     }
 }
 
@@ -102,6 +114,55 @@ pub enum WalletCommand {
     },
     BalancesWithUnconfirmed {
         reply: oneshot::Sender<Result<WalletBalances, WalletAdminError>>,
+    },
+    /// Native `/api/v1/wallet/balance` — EIP-27-aware breakdown.
+    NativeBalance {
+        include_unconfirmed: bool,
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError>,
+        >,
+    },
+    /// Native `/api/v1/wallet/status`.
+    NativeStatus {
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError>,
+        >,
+    },
+    /// Native `/api/v1/wallet/addresses` (paged).
+    NativeAddresses {
+        offset: u32,
+        limit: u32,
+        reply:
+            oneshot::Sender<Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError>>,
+    },
+    /// Native `/api/v1/wallet/boxes` (paged).
+    NativeBoxes {
+        offset: u32,
+        limit: u32,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError>>,
+    },
+    /// Native `/api/v1/wallet/boxes/{boxId}`.
+    NativeBoxById {
+        box_id_hex: String,
+        reply: oneshot::Sender<
+            Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError>,
+        >,
+    },
+    /// Native `/api/v1/wallet/transactions` (paged).
+    NativeTransactions {
+        offset: u32,
+        limit: u32,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError>>,
+    },
+    /// Native `/api/v1/wallet/transactions/{txId}`.
+    NativeTransactionById {
+        tx_id_hex: String,
+        reply: oneshot::Sender<
+            Result<
+                Option<ergo_api::wallet::native::dto::WalletTransactionSummary>,
+                WalletAdminError,
+            >,
+        >,
     },
     Addresses {
         reply: oneshot::Sender<Result<WalletAddressList, WalletAdminError>>,
@@ -325,6 +386,80 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn balances_with_unconfirmed(&self) -> Result<WalletBalances, WalletAdminError> {
         self.send_cmd(|reply| WalletCommand::BalancesWithUnconfirmed { reply })
+            .await
+    }
+
+    async fn native_balance(
+        &self,
+        include_unconfirmed: bool,
+    ) -> Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeBalance {
+            include_unconfirmed,
+            reply,
+        })
+        .await
+    }
+
+    async fn native_status(
+        &self,
+    ) -> Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError> {
+        self.send_cmd(|reply| WalletCommand::NativeStatus { reply })
+            .await
+    }
+
+    async fn native_addresses(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeAddresses {
+            offset,
+            limit,
+            reply,
+        })
+        .await
+    }
+
+    async fn native_boxes(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeBoxes {
+            offset,
+            limit,
+            reply,
+        })
+        .await
+    }
+
+    async fn native_box_by_id(
+        &self,
+        box_id_hex: String,
+    ) -> Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeBoxById { box_id_hex, reply })
+            .await
+    }
+
+    async fn native_transactions(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeTransactions {
+            offset,
+            limit,
+            reply,
+        })
+        .await
+    }
+
+    async fn native_transaction_by_id(
+        &self,
+        tx_id_hex: String,
+    ) -> Result<Option<ergo_api::wallet::native::dto::WalletTransactionSummary>, WalletAdminError>
+    {
+        self.send_cmd(move |reply| WalletCommand::NativeTransactionById { tx_id_hex, reply })
             .await
     }
 
@@ -615,21 +750,15 @@ pub struct ChainStateAccessorImpl {
     db: Arc<redb::Database>,
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
-    /// Best full-block height at the time the accessor was constructed.
-    /// Updated lazily: for rescan bounds this value is recomputed via the
-    /// `read_tip` closure inside `rescan_full_rebuild`; for status reads
-    /// it's close enough.
-    tip_height: u32,
     is_pruned: bool,
 }
 
 impl ChainStateAccessorImpl {
-    pub fn new(db: Arc<redb::Database>, tip_height: u32, is_pruned: bool) -> Self {
+    pub fn new(db: Arc<redb::Database>, is_pruned: bool) -> Self {
         let reader = ergo_state::reader::ChainStoreReader::new_from_db(db.clone());
         Self {
             db,
             reader,
-            tip_height,
             is_pruned,
         }
     }
@@ -647,7 +776,19 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
     }
 
     fn tip_height(&self) -> u32 {
-        self.tip_height
+        // Live committed tip (best full-block height), read each call — NOT a
+        // value captured at construction. A node that boots below EIP-27
+        // activation and then syncs past it MUST observe the new tip, or the
+        // native `reserved`/`eip27Active` (candidate height `tip+1`) would stay
+        // wrong forever (codex P0). Same `chain_state_meta` source the block
+        // validator's candidate height uses; degrades to 0 only if the chain is
+        // unstarted/unreadable.
+        self.reader
+            .committed_tip()
+            .ok()
+            .flatten()
+            .map(|(h, _)| h)
+            .unwrap_or(0)
     }
 
     fn is_pruned(&self) -> bool {
@@ -962,13 +1103,20 @@ fn try_mark_scan_invalidated(db: &redb::Database) -> Result<(), redb::Error> {
     Ok(())
 }
 
-/// Pruning + network + operator-flag config supplied at boot.
+/// Network + operator-flag + EIP-27 config supplied at boot.
 pub struct WriterConfig {
     pub network: ergo_ser::address::NetworkPrefix,
     /// `[wallet] expose_private_keys`: gates `POST /wallet/getPrivateKey`.
     /// `false` (default) returns 403 Forbidden; `true` allows the
     /// route to return the derived secret scalar.
     pub expose_private_keys: bool,
+    /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27
+    /// nets, e.g. testnet, where `ChainSpec::reemission` is `None`). Built at
+    /// boot from `build_reemission_rules(&config.chain_spec)` — the same source
+    /// the block/mempool validator uses, so the wallet's re-emission reserve
+    /// estimate and burn-aware builder share one trigger/token-id/floor with
+    /// consensus. When `None`, the wallet surfaces no re-emission reserve.
+    pub reemission: Option<ergo_validation::ReemissionRuleInputs>,
 }
 
 /// Writer-task loop. Runs in a dedicated tokio task; receives commands and
@@ -1032,6 +1180,34 @@ pub async fn run_wallet_writer(
             WalletCommand::Balances { reply } => commands::admin::balances(&ctx, reply).await,
             WalletCommand::BalancesWithUnconfirmed { reply } => {
                 commands::admin::balances_with_unconfirmed(&ctx, reply).await
+            }
+            WalletCommand::NativeBalance {
+                include_unconfirmed,
+                reply,
+            } => commands::admin::native_balance(&ctx, include_unconfirmed, reply).await,
+            WalletCommand::NativeStatus { reply } => {
+                commands::admin::native_status(&ctx, reply).await
+            }
+            WalletCommand::NativeAddresses {
+                offset,
+                limit,
+                reply,
+            } => commands::admin::native_addresses(&ctx, offset, limit, reply).await,
+            WalletCommand::NativeBoxes {
+                offset,
+                limit,
+                reply,
+            } => commands::admin::native_boxes(&ctx, offset, limit, reply).await,
+            WalletCommand::NativeBoxById { box_id_hex, reply } => {
+                commands::admin::native_box_by_id(&ctx, box_id_hex, reply).await
+            }
+            WalletCommand::NativeTransactions {
+                offset,
+                limit,
+                reply,
+            } => commands::admin::native_transactions(&ctx, offset, limit, reply).await,
+            WalletCommand::NativeTransactionById { tx_id_hex, reply } => {
+                commands::admin::native_transaction_by_id(&ctx, tx_id_hex, reply).await
             }
             WalletCommand::Addresses { reply } => commands::admin::addresses(&ctx, reply).await,
             WalletCommand::Boxes { page, reply } => commands::admin::boxes(&ctx, page, reply).await,
@@ -1814,7 +1990,13 @@ async fn payment_send_impl(
     let tx_id_hex = hex::encode(tx_id.as_bytes());
 
     let tx_bytes = serialize_signed_tx(&signed_tx)?;
-    submitter.submit_transaction(tx_bytes).await?;
+    // Compat boundary: collapse the typed SubmitError to `Internal` exactly as
+    // the adapter did before (unchanged compat behavior). The native send path
+    // (P3) maps the typed reason — e.g. `duplicate` → 200 — at its own boundary.
+    submitter
+        .submit_transaction(tx_bytes)
+        .await
+        .map_err(|e| WalletAdminError::Internal(format!("submit: {}", e.reason)))?;
 
     Ok(tx_id_hex)
 }

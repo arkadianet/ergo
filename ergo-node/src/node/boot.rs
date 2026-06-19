@@ -1161,14 +1161,13 @@ async fn run_inner_with_backend(
                 // state behind RwLocks; the writer task is a dedicated tokio
                 // task receiving commands via a channel.
                 let db_arc = store.db_arc();
-                let tip_h = chain_meta.best_full_block_height;
                 let is_pruned = config.blocks_to_keep != -1;
-                let chain_accessor: Arc<dyn super::wallet_bridge::ChainStateAccessor> =
-                    Arc::new(super::wallet_bridge::ChainStateAccessorImpl::new(
-                        db_arc.clone(),
-                        tip_h,
-                        is_pruned,
-                    ));
+                // `ChainStateAccessorImpl::tip_height()` now reads the live committed
+                // tip from redb per-call (no captured value), so no boot-time tip is
+                // threaded in.
+                let chain_accessor: Arc<dyn super::wallet_bridge::ChainStateAccessor> = Arc::new(
+                    super::wallet_bridge::ChainStateAccessorImpl::new(db_arc.clone(), is_pruned),
+                );
                 let wallet_storage = {
                     let secret_dir = config.data_dir.join("wallet");
                     Arc::new(RwLock::new(ergo_wallet::storage::SecretStorage::open(
@@ -1212,6 +1211,10 @@ async fn run_inner_with_backend(
                 let writer_cfg = super::wallet_bridge::WriterConfig {
                     network: network_prefix,
                     expose_private_keys: config.wallet_expose_private_keys,
+                    // Same EIP-27 rule inputs the block/mempool validator uses, so
+                    // the wallet's re-emission reserve + burn-aware builder cannot
+                    // drift from consensus (None off EIP-27 nets, e.g. testnet).
+                    reemission: build_reemission_rules(&config.chain_spec),
                 };
                 let submit_handle: std::sync::Arc<dyn super::wallet_bridge::TxSubmitter> =
                     std::sync::Arc::new(super::wallet_bridge::NodeSubmitAdapter::new(

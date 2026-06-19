@@ -1129,7 +1129,17 @@ pub fn router_with_mempool_and_wallet_and_security(
     // The wallet admin is always wired (never Optional); read-only
     // mirrors supply a `NoopWalletAdmin` so the routes return the
     // zero-state status rather than 404.
-    let assembled = assembled.merge(crate::wallet::router_with_security(wallet_admin, security));
+    let assembled = assembled.merge(crate::wallet::router_with_security(
+        wallet_admin.clone(),
+        security.clone(),
+    ));
+    // Native `/api/v1/wallet/*` — a second adapter over the SAME wallet admin,
+    // gated by the same operator api-key (route_layer + catch-alls). Factual
+    // DTOs + EIP-27-aware balance; the Scala-compat router above is untouched.
+    let assembled = assembled.merge(crate::wallet::native::router_with_security(
+        wallet_admin,
+        security,
+    ));
 
     // tower-http TraceLayer wraps every request in an INFO span carrying a
     // monotonic request id + method + path. Handler logs ride that span as
@@ -1362,6 +1372,13 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         submit_handler,
         check_handler,
         shutdown_handler,
+        crate::wallet::native::balance,
+        crate::wallet::native::status,
+        crate::wallet::native::addresses,
+        crate::wallet::native::boxes,
+        crate::wallet::native::box_by_id,
+        crate::wallet::native::transactions,
+        crate::wallet::native::transaction_by_id,
     ),
     components(schemas(
         ApiInfo,
@@ -1399,6 +1416,24 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiTxSource,
         SyncStateLabel,
         HealthStatus,
+        crate::wallet::native::dto::WalletBalanceDto,
+        crate::wallet::native::dto::NanoErgBreakdownDto,
+        crate::wallet::native::dto::ReemissionInfoDto,
+        crate::wallet::native::dto::UnconfirmedDeltaDto,
+        crate::wallet::native::dto::ScopeDto,
+        crate::wallet::native::dto::WalletAssetDto,
+        crate::wallet::native::dto::WalletStatusDto,
+        crate::wallet::native::dto::NetworkDto,
+        crate::wallet::native::dto::RescanStateDto,
+        crate::wallet::native::dto::WalletAddressDto,
+        crate::wallet::native::dto::AddressPage,
+        crate::wallet::native::dto::WalletBoxSummary,
+        crate::wallet::native::dto::BoxStatusDto,
+        crate::wallet::native::dto::BoxProvenanceDto,
+        crate::wallet::native::dto::BoxPage,
+        crate::wallet::native::dto::WalletTransactionSummary,
+        crate::wallet::native::dto::TxPage,
+        crate::wallet::native::error::NativeWalletError,
     )),
     tags(
         (name = "node", description = "Node identity, host, status"),
@@ -1407,6 +1442,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         (name = "mempool", description = "Mempool overlay + submission"),
         (name = "admin", description = "API-key-gated operator routes"),
         (name = "health", description = "Liveness + readiness"),
+        (name = "wallet", description = "Native api-key-gated wallet surface"),
     ),
     modifiers(&SecurityAddon),
 )]
