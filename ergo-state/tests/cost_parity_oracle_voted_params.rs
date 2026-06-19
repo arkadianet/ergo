@@ -387,6 +387,7 @@ fn cost_parity_against_scala_corpus_sampled() {
             soft_fork_state: None,
             last_headers: &last_headers,
             script_validation_checkpoint: None,
+            reemission: None,
         };
 
         let (checked_block, per_tx_costs) =

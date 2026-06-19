@@ -237,7 +237,11 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         E::ErgNotConserved { .. }
         | E::TokenNotConserved { .. }
         | E::NonPositiveTokenAmount { .. }
-        | E::InvalidMinting { .. } => ValidationErr::MonetaryFailed,
+        | E::InvalidMinting { .. }
+        // EIP-27 re-emission burning is a token/ERG-conservation-class rule
+        // (Scala surfaces it from `validateStateful`), so it shares the
+        // monetary admission bucket.
+        | E::ReemissionRulesViolated(_) => ValidationErr::MonetaryFailed,
         E::ScriptError { .. } | E::ProofFailed { .. } => ValidationErr::ScriptFailed,
         E::CostExceeded { .. } => ValidationErr::CostExceeded,
         // JitCost arithmetic overflow is structurally distinct from a
@@ -462,6 +466,10 @@ mod tests {
             map_validation_error(ValidationError::InvalidMinting {
                 token_id: "x".into()
             }),
+            ValidationErr::MonetaryFailed
+        ));
+        assert!(matches!(
+            map_validation_error(ValidationError::ReemissionRulesViolated("x".into())),
             ValidationErr::MonetaryFailed
         ));
         assert!(matches!(

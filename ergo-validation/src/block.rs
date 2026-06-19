@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::context::{ProtocolParams, TransactionContext, UtxoView};
 use crate::error::ValidationError;
 use crate::header::{CheckedHeader, HeaderValidationError};
+use crate::tx::reemission::{verify_reemission_spending, ReemissionRuleInputs};
 use crate::tx::{
     validate_transaction_parsed, validate_transaction_parsed_with_group_elements,
     CheckedTransaction,
@@ -135,6 +136,13 @@ pub struct BlockValidationContext<'a> {
     /// Mirrors Scala `mainnet.conf` `ergo.node.checkpoint`. `None` means
     /// fully validate every block.
     pub script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    /// EIP-27 re-emission rule inputs for the network being validated.
+    /// When `Some`, every transaction in the block is checked against the
+    /// re-emission burning condition (Scala
+    /// `ErgoTransaction.verifyReemissionSpending`). `None` disables the
+    /// check — the public testnet (no EIP-27) and callers that don't supply
+    /// it. See [`ReemissionRuleInputs`].
+    pub reemission: Option<&'a ReemissionRuleInputs>,
 }
 
 /// Failures raised by [`validate_full_block`] /
@@ -1182,6 +1190,19 @@ pub fn validate_full_block(
         )
         .map_err(|e| BlockValidationError::Transaction { index: i, error: e })?;
 
+        // EIP-27 re-emission burning (Scala `verifyReemissionSpending`,
+        // part of `validateStateful`). Uses the just-resolved input boxes;
+        // a violation is an accept-invalid divergence, so reject the block.
+        if let Some(rules) = ctx.reemission {
+            verify_reemission_spending(
+                checked.transaction(),
+                checked.resolved_inputs(),
+                tx_ctx.height,
+                rules,
+            )
+            .map_err(|e| BlockValidationError::Transaction { index: i, error: e })?;
+        }
+
         total_block_cost += cost.total_block_cost();
         overlay.apply_tx(checked.transaction());
         checked_txs.push(checked);
@@ -1448,6 +1469,8 @@ fn validate_full_block_parallel_impl(
         let params = ctx.params;
         let raw_headers_ref = &raw_last_headers;
         let tx_ctx_ref = &tx_ctx;
+        // `Option<&_>` is Copy — capture it into each parallel closure.
+        let reemission = ctx.reemission;
         let layer_results: Vec<TxLayerResult> = per_tx_inputs
             .into_par_iter()
             .map(|(i, tx_bytes, inputs, data_inputs)| {
@@ -1486,7 +1509,25 @@ fn validate_full_block_parallel_impl(
                     ),
                 };
                 match result {
-                    Ok(checked) => (i, Ok((checked, cost.total_block_cost()))),
+                    Ok(checked) => {
+                        // EIP-27 re-emission burning (Scala
+                        // `verifyReemissionSpending`). Same check as the
+                        // sequential arm; runs inside the per-tx closure so a
+                        // violation surfaces as this tx's error and the
+                        // deterministic first-Err-wins ordering below rejects
+                        // the block.
+                        if let Some(rules) = reemission {
+                            if let Err(e) = verify_reemission_spending(
+                                checked.transaction(),
+                                checked.resolved_inputs(),
+                                tx_ctx_ref.height,
+                                rules,
+                            ) {
+                                return (i, Err(e));
+                            }
+                        }
+                        (i, Ok((checked, cost.total_block_cost())))
+                    }
                     Err(e) => (i, Err(e)),
                 }
             })

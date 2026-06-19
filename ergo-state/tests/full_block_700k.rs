@@ -293,6 +293,7 @@ fn full_block_v2_700k_with_state() {
             soft_fork_state: None,
             last_headers: &checked_last,
             script_validation_checkpoint: None,
+            reemission: None,
         };
         let checked_header =
             ergo_validation::header::CheckedHeader::trust_me(header.clone(), *header_id);

@@ -24,6 +24,7 @@ use ergo_state::store::StateStore;
 use ergo_state::{BlockApply, ChainStateRead, HeaderSectionStore};
 use ergo_validation::context::ProtocolParams;
 use ergo_validation::header::CheckedHeader;
+use ergo_validation::ReemissionRuleInputs;
 use rayon::prelude::*;
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -220,6 +221,12 @@ pub struct SyncExecutor {
     /// [`BlockValidationContext::script_validation_checkpoint`] for the
     /// safety contract.
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    /// EIP-27 re-emission rule inputs for this node's network, plumbed
+    /// through to `validate_full_block_parallel` via `process_block` so
+    /// every block transaction is checked against the re-emission burning
+    /// condition. `None` disables the check (testnet / no EIP-27). See
+    /// [`ReemissionRuleInputs`].
+    reemission: Option<ReemissionRuleInputs>,
     /// Per-tick header-pipeline timings. Read+reset by the node heartbeat.
     pub header_perf: HeaderPerfCounters,
     /// Per-tick block-pipeline timings (process_block phases + drain
@@ -323,6 +330,7 @@ impl SyncExecutor {
             header_index: BTreeMap::new(),
             recovery_done: false,
             script_validation_checkpoint: None,
+            reemission: None,
             header_perf: HeaderPerfCounters::default(),
             block_perf: BlockPerfCounters::default(),
             last_block_apply_error: None,
@@ -335,6 +343,14 @@ impl SyncExecutor {
     /// exactly `height` is asserted against `block_id` (mismatch is fatal).
     pub fn set_script_validation_checkpoint(&mut self, ckpt: Option<(u32, [u8; 32])>) {
         self.script_validation_checkpoint = ckpt;
+    }
+
+    /// Set the EIP-27 re-emission rule inputs. `Some` enables the
+    /// re-emission burning check (Scala `verifyReemissionSpending`) on every
+    /// block transaction; `None` disables it (testnet / no EIP-27). Sourced
+    /// from the chain spec at boot.
+    pub fn set_reemission_rules(&mut self, reemission: Option<ReemissionRuleInputs>) {
+        self.reemission = reemission;
     }
 
     /// Whether `recover_coordinator` has run to completion (actually walked
@@ -1081,6 +1097,7 @@ impl SyncExecutor {
             &self.params,
             cache,
             self.script_validation_checkpoint,
+            self.reemission.as_ref(),
             Some(&self.block_perf),
             wallet_wiring.map(|w| w.hook),
         ) {
@@ -1317,6 +1334,7 @@ impl SyncExecutor {
                 &self.params,
                 cache,
                 self.script_validation_checkpoint,
+                self.reemission.as_ref(),
                 Some(&self.block_perf),
                 wallet_wiring.map(|w| w.hook),
             ) {

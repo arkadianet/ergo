@@ -290,12 +290,14 @@ fn load_last_headers_digest(
 /// pipeline byte-for-byte (`process_block_utxo`); the digest arm runs the
 /// proof-backed validation pipeline (`process_block_digest`). Both share
 /// the same header/section reads through their respective stores.
+#[allow(clippy::too_many_arguments)]
 pub fn process_block(
     store: &mut ergo_state::StateBackendKind,
     header_id: &[u8; 32],
     params: &ProtocolParams,
     cached_last_headers: Option<&[CheckedHeader]>,
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     perf: Option<&BlockPerfCounters>,
     wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
@@ -306,6 +308,7 @@ pub fn process_block(
             params,
             cached_last_headers,
             script_validation_checkpoint,
+            reemission,
             perf,
             wallet_hook,
         ),
@@ -314,6 +317,7 @@ pub fn process_block(
             header_id,
             cached_last_headers,
             script_validation_checkpoint,
+            reemission,
             perf,
             wallet_hook,
         ),
@@ -323,6 +327,7 @@ pub fn process_block(
 /// UTXO-backend block processing: load sections, validate, apply to the
 /// AVL+ box arena. This is the original `process_block` body, unchanged —
 /// the UTXO path stays byte-for-byte equivalent to the pre-Mode-5 code.
+#[allow(clippy::too_many_arguments)]
 fn process_block_utxo(
     store: &mut StateStore,
     header_id: &[u8; 32],
@@ -331,6 +336,7 @@ fn process_block_utxo(
     // an executor.rs callsite churn; will drop in a follow-up.
     cached_last_headers: Option<&[CheckedHeader]>,
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     perf: Option<&BlockPerfCounters>,
     wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
@@ -612,6 +618,7 @@ fn process_block_utxo(
         soft_fork_state,
         last_headers,
         script_validation_checkpoint,
+        reemission,
     };
 
     // 8. Validate the full block (no PoW/difficulty — already validated by header pipeline)
@@ -715,11 +722,13 @@ fn process_block_utxo(
 /// must be the committed full-block tip. A missing ADProofs section or a
 /// non-tip parent is data-availability / fork — NOT block invalidity —
 /// and is surfaced without marking the header invalid.
+#[allow(clippy::too_many_arguments)]
 fn process_block_digest(
     store: &mut DigestStateStore,
     header_id: &[u8; 32],
     cached_last_headers: Option<&[CheckedHeader]>,
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     perf: Option<&BlockPerfCounters>,
     wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
@@ -1139,6 +1148,7 @@ fn process_block_digest(
         soft_fork_state,
         last_headers,
         script_validation_checkpoint,
+        reemission,
     };
 
     let t0 = Instant::now();
