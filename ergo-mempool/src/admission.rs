@@ -19,7 +19,10 @@ use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
-use ergo_validation::{ProtocolParams, TransactionContext, TxValidationCtx, UtxoView};
+use ergo_validation::{
+    ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
+    UtxoView,
+};
 use tracing::warn;
 
 use crate::budget::{BudgetVerdict, CostBudgets};
@@ -44,6 +47,11 @@ pub struct TipContext<'a> {
     pub tx_context: &'a TransactionContext,
     pub params: &'a ProtocolParams,
     pub last_headers: &'a [Header],
+    /// EIP-27 re-emission rule inputs for this network, or `None` where EIP-27
+    /// is not enabled (testnet). Threaded into the per-tx validator's rule
+    /// bundle so admission enforces the same burning condition as block
+    /// application — same code path, no separate mempool check.
+    pub reemission: Option<&'a ReemissionRuleInputs>,
 }
 
 impl TipContext<'_> {
@@ -569,6 +577,9 @@ pub fn check<V: Validator>(
         params: cx.tip_ctx.params,
         cost: &mut cost,
         last_headers: cx.tip_ctx.last_headers,
+        rules: TxValidationRules {
+            reemission: cx.tip_ctx.reemission,
+        },
     };
     let validated = match validator.validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx) {
         Ok(v) => v,

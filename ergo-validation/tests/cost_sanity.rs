@@ -138,6 +138,7 @@ fn run_corpus_recording(
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
 
         match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {
@@ -265,6 +266,7 @@ fn corpus_passes_with_enforcing_inner() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
 
         match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {

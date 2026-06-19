@@ -16,6 +16,25 @@ use ergo_primitives::cost::JitCost;
 use crate::context::{LocalPolicy, ProtocolParams, TransactionContext, UtxoView};
 use crate::cost::CostAccumulator;
 use crate::error::ValidationError;
+use crate::tx::reemission::{verify_reemission_spending, ReemissionRuleInputs};
+
+/// Consensus rule inputs that are network constants rather than per-tx or
+/// per-epoch data — bundled so they thread through the single shared
+/// validation entry point ([`TxValidationCtx`]) instead of being applied
+/// as bolt-on checks at each call site.
+///
+/// This mirrors the Scala reference, where `verifyReemissionSpending` (and
+/// the rest of the stateful rules) live inside the one `validateStateful`
+/// that both mempool admission and block application call. New
+/// network-constant rules belong here so every caller — block apply,
+/// mempool admission, mining candidate assembly — gets them by construction.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TxValidationRules<'a> {
+    /// EIP-27 re-emission rule inputs for the network, or `None` where
+    /// EIP-27 is not enabled (testnet) — in which case the re-emission
+    /// burning check is skipped. See [`ReemissionRuleInputs`].
+    pub reemission: Option<&'a ReemissionRuleInputs>,
+}
 
 /// Bundle of per-tx validation borrows threaded through
 /// [`validate_transaction`], [`validate_transaction_parsed`], and the
@@ -38,6 +57,11 @@ pub struct TxValidationCtx<'a> {
     pub cost: &'a mut CostAccumulator,
     /// Last 10 block headers for evaluator `CONTEXT.headers`.
     pub last_headers: &'a [ergo_ser::header::Header],
+    /// Network-constant consensus rules applied inside this validation
+    /// (currently EIP-27 re-emission). Default is "no extra rules", which
+    /// every caller that doesn't supply them gets via
+    /// `TxValidationRules::default()`.
+    pub rules: TxValidationRules<'a>,
 }
 
 /// A transaction that has passed all validation checks.
@@ -171,6 +195,13 @@ pub fn validate_transaction(
     // Stage 6: script (receives precomputed message)
     script::validate_scripts(&tx, &resolved_inputs, &resolved_data_inputs, &message, cx)?;
 
+    // Stage 7: EIP-27 re-emission burning (Scala `verifyReemissionSpending`,
+    // run inside `validateStateful` after `verifyInput`). Network-constant rule
+    // carried on `cx.rules`; a no-op when not supplied (testnet / no EIP-27).
+    if let Some(rules) = cx.rules.reemission {
+        verify_reemission_spending(&tx, &resolved_inputs, cx.ctx.height, rules)?;
+    }
+
     Ok(CheckedTransaction {
         transaction: tx,
         resolved_inputs,
@@ -281,6 +312,15 @@ pub fn validate_transaction_parsed_with_group_elements(
         })?;
 
         script::validate_scripts(&tx, &resolved_inputs, &resolved_data_inputs, &message, cx)?;
+    }
+
+    // EIP-27 re-emission burning (Scala `verifyReemissionSpending`, run inside
+    // `validateStateful` after `verifyInput`). Network-constant rule carried on
+    // `cx.rules`; a no-op when not supplied (testnet / no EIP-27). Runs even
+    // when scripts are skipped below the checkpoint — it is a stateful
+    // token/monetary rule, not script evaluation.
+    if let Some(rules) = cx.rules.reemission {
+        verify_reemission_spending(&tx, &resolved_inputs, cx.ctx.height, rules)?;
     }
 
     Ok(CheckedTransaction {

@@ -353,6 +353,14 @@ impl SyncExecutor {
         self.reemission = reemission;
     }
 
+    /// The EIP-27 re-emission rule inputs installed at boot, if any. Mempool
+    /// admission and mining candidate assembly borrow these so every
+    /// transaction-validation path enforces the same burning condition the
+    /// block validator does.
+    pub fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
+        self.reemission.as_ref()
+    }
+
     /// Whether `recover_coordinator` has run to completion (actually walked
     /// the header chain, not just bailed on the near-tip gate).
     pub fn recovery_done(&self) -> bool {

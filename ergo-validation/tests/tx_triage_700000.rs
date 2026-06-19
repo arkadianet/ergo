@@ -218,6 +218,7 @@ fn triage_700000_inner() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
 
         let category = match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {

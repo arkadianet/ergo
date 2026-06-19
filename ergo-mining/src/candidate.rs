@@ -47,7 +47,8 @@ use ergo_validation::{
     voting::{derive_activated_script_version, select_candidate_votes},
     ActiveProtocolParameters, ChainHeaderReader, ChainHeaderReaderError, CheckedTransaction,
     CostAccumulator, ErgoValidationSettings, ErgoValidationSettingsUpdate, HeaderView, JitCost,
-    ProtocolParams, TransactionContext, TxValidationCtx, UtxoView, VotingSettings,
+    ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
+    UtxoView, VotingSettings,
 };
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
@@ -163,6 +164,13 @@ pub fn generate_candidate<V: CandidateStateView>(
     miner_pk: &[u8; 33],
     monetary: &MonetarySettings,
     reemission: Option<&ReemissionSettings>,
+    // EIP-27 re-emission VALIDATION rules (distinct from the emission-curve
+    // `reemission` above): threaded into every `TxValidationCtx` this builds so
+    // the candidate's emission tx, fee tx, storage-rent claims, and selected
+    // mempool txs are all checked against the burning condition — closing the
+    // gap where a locally-assembled candidate could carry an EIP-27-invalid tx
+    // that block validation later rejects. `None` where EIP-27 is disabled.
+    reemission_rules: Option<&ReemissionRuleInputs>,
     chain_config: &DifficultyParams,
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &BTreeMap<u8, i64>,
@@ -396,6 +404,9 @@ pub fn generate_candidate<V: CandidateStateView>(
             params: &params,
             cost: &mut emission_cost_acc,
             last_headers: last_headers.as_slice(),
+            rules: TxValidationRules {
+                reemission: reemission_rules,
+            },
         };
         validate_transaction_parsed(
             emission_tx.clone(),
@@ -456,6 +467,7 @@ pub fn generate_candidate<V: CandidateStateView>(
             last_headers.as_slice(),
             rent_cost_ceiling,
             rent_size_ceiling,
+            reemission_rules,
         )? {
             Some((checked, cost, size)) => {
                 overlay.apply_tx(checked.transaction())?;
@@ -488,6 +500,7 @@ pub fn generate_candidate<V: CandidateStateView>(
             last_headers.as_slice(),
             cost_budget,
             size_budget,
+            reemission_rules,
         )?;
 
         // 9e. Decide the final user set + fee tx. Trim the lowest-priority user
@@ -539,6 +552,9 @@ pub fn generate_candidate<V: CandidateStateView>(
                             params: &params,
                             cost: &mut fee_cost_acc,
                             last_headers: last_headers.as_slice(),
+                            rules: TxValidationRules {
+                                reemission: reemission_rules,
+                            },
                         };
                         validate_transaction_parsed(
                             fee_tx.clone(),

@@ -238,6 +238,7 @@ fn run_range(range: &CostRange, params: &ProtocolParams, policy: &LocalPolicy) -
             params,
             cost: &mut cost,
             last_headers: &last_headers,
+            rules: ergo_validation::TxValidationRules::default(),
         };
         match validate_transaction(&tx_bytes, &utxo, policy, &mut tx_cx) {
             Ok(checked) => {

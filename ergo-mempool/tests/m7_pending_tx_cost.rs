@@ -301,6 +301,7 @@ fn probe_cost_of_pending_tx_e67() {
         params: &params,
         cost: &mut cost,
         last_headers: &[], // last_headers empty — fine unless script uses CONTEXT.headers
+        rules: ergo_validation::TxValidationRules::default(),
     };
     let result = validate_transaction_parsed(
         tx.clone(),

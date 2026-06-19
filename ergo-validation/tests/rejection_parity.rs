@@ -144,6 +144,7 @@ fn reject_script_evaluates_to_false() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -202,6 +203,7 @@ fn reject_invalid_spending_proof() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -288,6 +290,7 @@ fn reject_transaction_exceeding_block_cost() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();
@@ -329,6 +332,7 @@ fn reject_non_canonical_encoding() {
         params: &params,
         cost: &mut cost,
         last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
     };
 
     let err = validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).unwrap_err();

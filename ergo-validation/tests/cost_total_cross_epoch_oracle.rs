@@ -312,6 +312,7 @@ fn cost_total_oracle_epoch_1499136_uses_voted_params() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
         match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {
             Ok(_) => {
@@ -402,6 +403,7 @@ fn cost_total_with_mainnet_default_diverges_by_exact_delta() {
             params: &defaults,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
         match validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx) {
             Ok(_) => {

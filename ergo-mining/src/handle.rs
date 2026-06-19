@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_state::store::StateStore;
 use ergo_state::wallet::RewardKeyResolution;
-use ergo_validation::VotingSettings;
+use ergo_validation::{ReemissionRuleInputs, VotingSettings};
 
 use crate::candidate::Candidate;
 use crate::emission_rules::MonetarySettings;
@@ -108,6 +108,13 @@ pub struct MiningHandle {
     /// (new public testnet). When `None`, candidate assembly skips
     /// the reemission tx path and builds a pre-EIP-27 emission tx.
     reemission: Option<Arc<ReemissionSettings>>,
+    /// EIP-27 re-emission VALIDATION rules (distinct from the emission-curve
+    /// `reemission`): threaded into the candidate builder's `TxValidationCtx`
+    /// so every assembled transaction (emission, fee, storage-rent, selected
+    /// mempool txs) is checked against the burning condition — the same rule
+    /// the block validator enforces. `None` where EIP-27 is disabled. Set via
+    /// [`MiningHandle::with_reemission_rules`].
+    reemission_rules: Option<Arc<ReemissionRuleInputs>>,
     chain_config: Arc<DifficultyParams>,
     /// Per-network voting-epoch settings (length, soft-fork thresholds). Needed
     /// at an epoch-boundary candidate to run `compute_next_params` and to detect
@@ -166,6 +173,10 @@ impl MiningHandle {
             reward_key,
             monetary: Arc::new(monetary),
             reemission: reemission.map(Arc::new),
+            // Defaulted off; the node opts in via `with_reemission_rules` at
+            // boot (mirrors `with_rent_config`), so constructors and their
+            // callers stay unchanged.
+            reemission_rules: None,
             chain_config: Arc::new(chain_config),
             voting_settings: Arc::new(voting_settings),
             claim_storage_rent: false,
@@ -184,6 +195,16 @@ impl MiningHandle {
     ) -> Self {
         self.claim_storage_rent = claim_storage_rent;
         self.max_storage_rent_claims = max_storage_rent_claims;
+        self
+    }
+
+    /// Install the EIP-27 re-emission validation rules (mainnet only).
+    /// Builder-style (like [`MiningHandle::with_rent_config`]) so the
+    /// constructors and their callers stay unchanged. When set, the candidate
+    /// builder enforces the burning condition on every transaction it
+    /// validates, matching block validation.
+    pub fn with_reemission_rules(mut self, reemission_rules: Option<ReemissionRuleInputs>) -> Self {
+        self.reemission_rules = reemission_rules.map(Arc::new);
         self
     }
 
@@ -272,6 +293,12 @@ impl MiningHandle {
     /// EIP-27 reemission settings, or `None` on networks without it.
     pub fn reemission_ref(&self) -> Option<&ReemissionSettings> {
         self.reemission.as_deref()
+    }
+
+    /// The EIP-27 re-emission VALIDATION rules, if installed. Used by the
+    /// candidate builder to thread them into its `TxValidationCtx`.
+    pub fn reemission_rules_ref(&self) -> Option<&ReemissionRuleInputs> {
+        self.reemission_rules.as_deref()
     }
 
     /// CAS-publish a freshly built candidate onto the back of the ring (newest)

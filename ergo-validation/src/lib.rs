@@ -55,8 +55,8 @@ pub use tx::script::{
     compute_tx_init_cost, compute_tx_init_cost_with_costs, INTERPRETER_INIT_COST,
 };
 pub use tx::CheckedTransaction;
-pub use tx::TxValidationCtx;
 pub use tx::{validate_transaction, validate_transaction_parsed};
+pub use tx::{TxValidationCtx, TxValidationRules};
 pub use voting::{
     compute_epoch_votes, compute_next_params, derive_activated_script_version, neutral_votes,
     validate_epoch_extension, ChainHeaderReader, ChainHeaderReaderError, ErgoValidationSettings,

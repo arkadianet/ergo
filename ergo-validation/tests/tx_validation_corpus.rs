@@ -161,6 +161,7 @@ fn chain_validate_blocks_2_through_10() {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
 
         let checked =

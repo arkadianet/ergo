@@ -409,6 +409,7 @@ mod tests {
             params: &params,
             cost: &mut cost,
             last_headers: &[],
+            rules: ergo_validation::TxValidationRules::default(),
         };
         let err = v.validate(b"\xff\xff\xff", &u, &u, &mut tx_cx).unwrap_err();
         assert!(matches!(err, ValidationErr::Deserialize));

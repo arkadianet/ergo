@@ -327,6 +327,7 @@ fn chain_validate_blocks_2_10000_with_state_store() {
                 params: &params,
                 cost: &mut cost,
                 last_headers: &[],
+                rules: ergo_validation::TxValidationRules::default(),
             };
 
             match validate_transaction(&tx_bytes, &overlay, &policy, &mut tx_cx) {

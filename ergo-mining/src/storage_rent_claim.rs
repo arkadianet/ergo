@@ -49,7 +49,7 @@ use ergo_ser::transaction::{write_transaction, Transaction};
 use ergo_validation::storage_rent::compute_storage_fee;
 use ergo_validation::{
     validate_transaction_parsed, CheckedTransaction, CostAccumulator, ProtocolParams,
-    TransactionContext, TxValidationCtx,
+    ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
 };
 
 use crate::error::MiningError;
@@ -271,6 +271,7 @@ pub fn build_budget_bounded_rent_claim(
     last_headers: &[Header],
     cost_ceiling: u64,
     size_ceiling: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Option<(CheckedTransaction, u64, u64)>, MiningError> {
     // Cap on the number of CLAIMABLE boxes. `build_rent_claim` caps on
     // claims (skipping unclaimable boxes), so shrinking this directly drops
@@ -308,6 +309,9 @@ pub fn build_budget_bounded_rent_claim(
                 params,
                 cost: &mut cost_acc,
                 last_headers,
+                rules: TxValidationRules {
+                    reemission: reemission_rules,
+                },
             };
             validate_transaction_parsed(
                 claim.tx.clone(),
@@ -539,6 +543,7 @@ mod tests {
             params,
             cost: &mut cost,
             last_headers: &[],
+            rules: TxValidationRules::default(),
         };
         validate_transaction_parsed(
             claim.tx.clone(),
@@ -890,6 +895,7 @@ mod tests {
             &[],
             20_000,
             u64::MAX,
+            None,
         )
         .unwrap()
         .expect("at least one claim fits");
@@ -914,6 +920,7 @@ mod tests {
             &[],
             u64::MAX,
             u64::MAX,
+            None,
         )
         .unwrap()
         .expect("claimable");
@@ -957,6 +964,7 @@ mod tests {
             &[],
             25_000,
             u64::MAX,
+            None,
         )
         .expect("must not error on an oversized initial claim")
         .expect("a smaller fitting claim exists");
