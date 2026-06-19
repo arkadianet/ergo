@@ -50,6 +50,7 @@ pub use context::{LocalPolicy, ProtocolParams, TransactionContext, UtxoView};
 pub use cost::{CostAccumulator, CostError, JitCost};
 pub use error::ValidationError;
 pub use header::CheckedHeader;
+pub use tx::reemission::{verify_reemission_spending, ReemissionRuleInputs};
 pub use tx::script::{
     compute_tx_init_cost, compute_tx_init_cost_with_costs, INTERPRETER_INIT_COST,
 };

@@ -237,6 +237,7 @@ fn full_block_pipeline_blocks_1_5() {
             soft_fork_state: None,
             last_headers: &[],
             script_validation_checkpoint: None,
+            reemission: None,
         };
         let checked_header =
             ergo_validation::header::CheckedHeader::trust_me(header.clone(), *header_id);

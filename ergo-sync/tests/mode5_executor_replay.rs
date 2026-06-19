@@ -376,6 +376,7 @@ fn mode5_executor_replay_reproduces_mainnet_state_roots() {
             None,
             None,
             None,
+            None,
         )
         .unwrap_or_else(|e| panic!("process_block failed at h={h}: {e}"));
 
@@ -440,6 +441,7 @@ fn process_first_applied(
         &row.header_id,
         &params,
         Some(&last_headers),
+        None,
         None,
         None,
         None,

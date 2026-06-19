@@ -143,6 +143,38 @@ fn expected_sentinel(config: &NodeConfig) -> &'static str {
     }
 }
 
+/// Build EIP-27 re-emission rule inputs from the chain spec. Returns
+/// `Some` only on a network that enables re-emission AND carries the
+/// verified pay-to-reemission contract tree (mainnet); `None` elsewhere
+/// (the public testnet), which disables the consensus check — matching
+/// `ChainSpec::reemission` being `None` there. Wired into the block
+/// validator so every block transaction is checked against the EIP-27
+/// burning condition (Scala `verifyReemissionSpending`).
+fn build_reemission_rules(
+    spec: &ergo_chain_spec::ChainSpec,
+) -> Option<ergo_validation::ReemissionRuleInputs> {
+    // `None` means EIP-27 is not enabled on this network (e.g. testnet), so the
+    // block validator correctly runs without the re-emission check.
+    let reemission = spec.reemission.as_ref()?;
+    // EIP-27 IS configured: the verified pay-to-reemission contract tree MUST be
+    // available, else we would build rules without a contract to match outputs
+    // against. Fail closed — refuse to boot rather than silently disable a
+    // consensus check. Unreachable for `ChainSpec::for_network` (mainnet has the
+    // trees; testnet returns above), so a failure here means a non-canonical /
+    // inconsistent spec, surfaced loudly like the sibling `.expect("const hex")`
+    // invariants in `emission_script_trees`.
+    let trees = spec.emission_script_trees().expect(
+        "chain spec configures EIP-27 re-emission but exposes no verified \
+         pay-to-reemission contract tree; refusing to boot with re-emission \
+         validation silently disabled",
+    );
+    Some(ergo_validation::ReemissionRuleInputs {
+        activation_height: reemission.activation_height,
+        reemission_token_id: *reemission.reemission_token_id.as_bytes(),
+        pay_to_reemission_tree: trees.pay_to_reemission,
+    })
+}
+
 /// Build the node, spawn the action loop on a background task, and
 /// return a [`RunHandle`] without blocking on shutdown.
 ///
@@ -653,6 +685,15 @@ async fn run_inner_with_backend(
     } else {
         info!("script-validation checkpoint: disabled (full validation)");
     }
+    let reemission_rules = build_reemission_rules(&config.chain_spec);
+    match &reemission_rules {
+        Some(r) => info!(
+            activation_height = r.activation_height,
+            "EIP-27 re-emission rules: enforced on block validation",
+        ),
+        None => info!("EIP-27 re-emission rules: disabled (no re-emission on this network)"),
+    }
+    executor.set_reemission_rules(reemission_rules);
 
     // 6. IBD durability mode (opt-in via --ibd-flush-interval). The
     // IBD batch-flush window and the background persist pipeline are

@@ -271,10 +271,38 @@ fn validate_recent_1000_blocks() {
     let blocks = group_by_height(vectors);
     let params = ProtocolParams::mainnet_default();
 
+    // EIP-27 re-emission rules sourced from the oracle-pinned mainnet chain
+    // spec (same constants the production node wires into block validation).
+    // Heights 1.76M are well past the activation height (777_217), where the
+    // emission box pays 12 ERG/block of re-emission tokens into reward boxes,
+    // so this corpus contains real on-chain reward-box spends that must burn
+    // the tokens and pay the pay-to-reemission contract. Scala accepted every
+    // one of these blocks, so `verify_reemission_spending` must NOT reject any
+    // of them (no reject-valid) — and the byte-exact pay-to-reemission tree
+    // match is proven against real outputs by their acceptance.
+    let reemission_spec = ergo_chain_spec::ChainSpec::mainnet();
+    let reemission_params = reemission_spec
+        .reemission
+        .as_ref()
+        .expect("mainnet reemission");
+    let reemission_rules = ergo_validation::ReemissionRuleInputs {
+        activation_height: reemission_params.activation_height,
+        reemission_token_id: *reemission_params.reemission_token_id.as_bytes(),
+        pay_to_reemission_tree: reemission_spec
+            .emission_script_trees()
+            .expect("mainnet emission trees")
+            .pay_to_reemission,
+    };
+    let reemission_token_id = *reemission_params.reemission_token_id.as_bytes();
+
     let mut validated = 0;
     let mut multi_tx_blocks = 0;
     let mut missing_input_skipped = 0;
     let mut eval_gap_skipped = 0;
+    // Count of validated txs that actually spend re-emission tokens (the
+    // burn-path trigger), so the assertion below proves the rule was
+    // exercised against real burns, not trivially skipped.
+    let mut reemission_spends_checked = 0u32;
     // One-time regression: prove the threaded GE path curve-checks the points it
     // is given (perf follow-up — block path supplies pre-collected points instead
     // of re-parsing). Flipped true after the first successful tx is re-checked.
@@ -393,6 +421,40 @@ fn validate_recent_1000_blocks() {
                         "tx ID mismatch at height {}",
                         height
                     );
+                    // EIP-27 re-emission burning (Scala verifyReemissionSpending):
+                    // every real mainnet tx here must pass. A rejection would be
+                    // a reject-valid divergence (Scala accepted this block).
+                    ergo_validation::verify_reemission_spending(
+                        checked.transaction(),
+                        checked.resolved_inputs(),
+                        height,
+                        &reemission_rules,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "reject-valid: real mainnet tx {} at height {height} failed the \
+                             EIP-27 re-emission check: {e}",
+                            &v.id[..16]
+                        )
+                    });
+                    // Count only txs that actually hit the burn-path trigger,
+                    // matching `verify_reemission_spending` exactly: height
+                    // strictly above activation AND a non-emission input (value
+                    // <= the 100K-ERG floor) carrying the re-emission token.
+                    // Token presence alone would over-count (e.g. a >100K-ERG
+                    // input routes to the emission-box branch, not the burn).
+                    const REWARD_BOX_VALUE_CEILING: u64 = 100_000 * 1_000_000_000;
+                    if height > reemission_rules.activation_height
+                        && checked.resolved_inputs().iter().any(|b| {
+                            b.candidate.value <= REWARD_BOX_VALUE_CEILING
+                                && b.candidate
+                                    .tokens
+                                    .iter()
+                                    .any(|t| t.token_id.as_bytes() == &reemission_token_id)
+                        })
+                    {
+                        reemission_spends_checked += 1;
+                    }
                     utxo.apply_validated_tx(checked.transaction());
                     validated += 1;
                 }
@@ -412,7 +474,17 @@ fn validate_recent_1000_blocks() {
     }
 
     eprintln!(
-        "Recent blocks: {validated}/{total_txs} validated, {missing_input_skipped} skipped (missing input), {eval_gap_skipped} skipped (script/proof), {multi_tx_blocks} multi-tx blocks, {loaded_boxes} pre-loaded boxes"
+        "Recent blocks: {validated}/{total_txs} validated, {missing_input_skipped} skipped (missing input), {eval_gap_skipped} skipped (script/proof), {multi_tx_blocks} multi-tx blocks, {loaded_boxes} pre-loaded boxes, {reemission_spends_checked} EIP-27 re-emission spends accepted"
+    );
+
+    // The corpus is post-activation and contains real re-emission-bearing
+    // reward-box spends (~hundreds in this window); confirm the burn path was
+    // actually exercised, not silently skipped, so the no-reject-valid result
+    // above is meaningful.
+    assert!(
+        reemission_spends_checked > 0,
+        "expected real EIP-27 re-emission spends in the 1.76M corpus, found none — \
+         the burn path was not exercised"
     );
 
     assert_eq!(

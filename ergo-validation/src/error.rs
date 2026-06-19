@@ -225,6 +225,16 @@ pub enum ValidationError {
         amount: u64,
     },
 
+    // --- Re-emission (EIP-27) ---
+    /// EIP-27 re-emission spending rules were violated (Scala
+    /// `ErgoTransaction.verifyReemissionSpending`): a transaction spending
+    /// re-emission tokens from a mining-reward box either carried the
+    /// re-emission token on an output instead of burning it, or did not pay
+    /// `1` nanoErg per burned token to the pay-to-reemission contract.
+    /// Carries a human-readable detail string for logs / API envelopes.
+    #[error("EIP-27 re-emission rules violated: {0}")]
+    ReemissionRulesViolated(String),
+
     // --- Script ---
     /// Script evaluation produced an evaluator-level error.
     #[error("input {index}: script evaluation failed: {reason}")]
