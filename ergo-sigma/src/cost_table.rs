@@ -373,18 +373,30 @@ pub fn add_eq_cost(
             Ok(())
         }
         Value::Tokens(v) => {
-            // Scala equalDataValues: MatchType for collection dispatch, then
-            // equalColls_Dispatch: MatchType + PerItem(10,2,1) for SAny.
-            // Per element: EQ_Tuple, then recursive equalDataValues for each
-            // field — Coll[Byte] gets MatchType+MatchType+PerItem, Long gets EQ_Prim.
+            // Tokens = Coll[(Coll[Byte], Long)]. Scala `equalDataValues`
+            // (DataValueComparer.scala) hits case 2 (Coll): a single
+            // `addCost(MatchType)` for the collection, then
+            // `equalColls_Dispatch` — whose element type is a tuple, not in
+            // `descriptors` — falls through to `equalColls`, which charges
+            // only `addSeqCost(EQ_Coll = PerItem(10,2,1))` (NO further
+            // MatchType). Each element is a `Tuple2` → case 3:
+            // `EQ_Tuple(4)`, then recurse: token-id `Coll[Byte]` re-enters
+            // case 2 (ONE `addCost(MatchType)` + `equalCOA_Prim(EQ_COA_Byte
+            // = PerItem(15,2,128))` over 32 bytes), amount `Long` → case 1
+            // `EQ_Prim(3)`.
+            //
+            // Blessed totals (cross-checked against the santa h* captured
+            // mainnet/testnet spend vectors): 0 tokens → 11, 1 token → 38,
+            // length mismatch → 1 (case-2 MatchType only).
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add(JitCost::from_jit(MATCH_TYPE))?;
                 cost.add_per_item(per_item(10, 2, 1), v.len() as u32)?;
                 for _ in v {
                     cost.add(JitCost::from_jit(EQ_TUPLE))?;
-                    // token_id: Coll[Byte] 32 bytes — two MatchTypes (collection + type dispatch)
-                    cost.add(JitCost::from_jit(MATCH_TYPE))?;
+                    // token_id: Coll[Byte] — one MatchType for the case-2
+                    // collection dispatch; `equalColls_Dispatch` routes
+                    // ByteType straight to `equalCOA_Prim` with no further
+                    // MatchType.
                     cost.add(JitCost::from_jit(MATCH_TYPE))?;
                     cost.add_per_item(per_item(15, 2, 128), 32)?;
                     // amount: Long — just EQ_Prim (dispatch cost embedded)
@@ -563,6 +575,48 @@ mod tests {
         add_eq_cost(&mut acc, &val, true).unwrap();
         // EQ_GROUP_ELEMENT(172) — includes dispatch cost
         assert_eq!(acc.total(), JitCost::from_jit(172));
+    }
+
+    // Tokens = Coll[(Coll[Byte], Long)]. Expected costs are derived from
+    // Scala `DataValueComparer.equalDataValues` (case 2 → `equalColls`
+    // fallback → per-element `EQ_Tuple` + token-id `Coll[Byte]` + amount
+    // `Long`) and cross-checked against the santa `h*` captured spend
+    // vectors — NOT from add_eq_cost itself (oracle-parity, not self-oracle).
+    #[test]
+    fn eq_cost_tokens_single_token() {
+        let mut acc = CostAccumulator::recording_only();
+        let val = Value::Tokens(vec![([0x42; 32], 100)]);
+        add_eq_cost(&mut acc, &val, true).unwrap();
+        // MATCH_TYPE(1)                          collection case-2 dispatch
+        // + EQ_Coll PerItem(10,2,1).compute(1)   = 10 + 1*2 = 12
+        // per token (×1):
+        //   EQ_Tuple(4)
+        //   + MATCH_TYPE(1)                       token-id Coll[Byte] case-2
+        //   + EQ_COA_Byte PerItem(15,2,128)(32)   = 15 + 1*2 = 17
+        //   + EQ_Prim(3)                          amount Long
+        //   = 25
+        // total = 1 + 12 + 25 = 38
+        assert_eq!(acc.total(), JitCost::from_jit(38));
+    }
+
+    #[test]
+    fn eq_cost_tokens_empty() {
+        let mut acc = CostAccumulator::recording_only();
+        let val = Value::Tokens(vec![]);
+        add_eq_cost(&mut acc, &val, true).unwrap();
+        // MATCH_TYPE(1) + EQ_Coll PerItem(10,2,1).compute(0) = 10
+        // total = 1 + 10 = 11
+        assert_eq!(acc.total(), JitCost::from_jit(11));
+    }
+
+    #[test]
+    fn eq_cost_tokens_length_mismatch_charges_only_match_type() {
+        let mut acc = CostAccumulator::recording_only();
+        let val = Value::Tokens(vec![([0x42; 32], 100)]);
+        // colls_match_len=false → Scala case 2 charges the dispatch
+        // MatchType then early-returns (`len != len`); no equalColls cost.
+        add_eq_cost(&mut acc, &val, false).unwrap();
+        assert_eq!(acc.total(), JitCost::from_jit(MATCH_TYPE));
     }
 
     #[test]

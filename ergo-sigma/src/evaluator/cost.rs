@@ -431,10 +431,38 @@ fn eq_with_cost_inner(
         // long early-mismatch string and diverge on cost-limit decisions). Keep
         // the full-length `add_eq_cost` charge. Box / Header / Tokens colls use
         // Scala's `equalColls` (per-element) path, also charged via `add_eq_cost`.
-        Value::Str(_) | Value::CollBox(_) | Value::CollHeader(_) | Value::Tokens(_) => {
+        Value::Str(_) | Value::CollBox(_) | Value::CollHeader(_) => {
             let match_len = coll_len(left, ctx) == coll_len(right, ctx);
             cost_table::add_eq_cost(cost, left, match_len)?;
             Ok(super::helpers::values_equal(left, right, ctx)?)
+        }
+        // Tokens = Coll[(Coll[Byte], Long)]. Scala compares this via case 2
+        // (Coll) → the `equalColls` fallback (the pair element type is not a
+        // `descriptors` entry): outer `MatchType`, then per-token
+        // `equalDataValues` short-circuiting at the FIRST unequal token, then
+        // `EQ_Coll(10,2,1)` over the number of tokens actually compared.
+        // Materialize each token as a `Tuple(Coll[Byte], Long)` and reuse the
+        // Tuple / CollBytes / Long arms, which already reproduce — with full
+        // short-circuit at every level — the per-token cost: `EQ_Tuple(4)` +
+        // token-id (`MatchType(1)` + `EQ_COA_Byte` over the compared byte
+        // prefix) + amount (`EQ_Prim(3)`, skipped by the tuple's `&&` when the
+        // id already differs). A token collection can arrive on the right as
+        // either `Tokens` or the `CollGeneric` tuple carrier (the two are
+        // bridged by `PartialEq`), so normalize both carriers.
+        Value::Tokens(a) => {
+            cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+            let b_view = match right {
+                Value::Tokens(b) => token_tuple_values(b),
+                Value::CollGeneric(b, _) => b.clone(),
+                // `require_comparable` gates the operand types; any other right
+                // carrier is unreachable. The case-2 MatchType is charged;
+                // defer the boolean to the uncosted authority.
+                _ => return super::helpers::values_equal(left, right, ctx),
+            };
+            if a.len() != b_view.len() {
+                return Ok(false); // Scala returns false after the lone MatchType
+            }
+            eq_coll_elems(&token_tuple_values(a), &b_view, ctx, cost)
         }
         // Scalars / Box / AvlTree / Header / PreHeader / GroupElement / BigInt /
         // Global: fixed cost, no recursion.
@@ -458,8 +486,17 @@ fn eq_coll_fallback(
     ctx: &ReductionContext<'_>,
     cost: &mut CostAccumulator,
 ) -> Result<bool, EvalError> {
+    // A token collection on the right is carried as `Value::Tokens`, not
+    // `CollGeneric` — materialize it into the same tuple view so the
+    // per-element costs are charged (skipping this is an UNDERCHARGE vs the
+    // Scala `equalColls` fallback).
+    let b_owned;
     let b: &[Value] = match right {
         Value::CollGeneric(b, _) | Value::CollBox(b) => b,
+        Value::Tokens(t) => {
+            b_owned = token_tuple_values(t);
+            &b_owned
+        }
         // Non-descriptor element collections are carried as CollGeneric on
         // both sides; any other right carrier is a type the comparison cannot
         // reach (require_comparable gates this). Fall back to the uncosted
@@ -472,6 +509,37 @@ fn eq_coll_fallback(
             )
         }
     };
+    eq_coll_elems(a, b, ctx, cost)
+}
+
+/// Materialize a `Value::Tokens` payload as the `Coll[(Coll[Byte], Long)]`
+/// tuple view Scala's `equalColls` walks — one `Tuple(Coll[Byte], Long)` per
+/// token. Lets the token-equality cost reuse the Tuple / CollBytes / Long
+/// short-circuit arms instead of a bespoke (and previously divergent) charge.
+fn token_tuple_values(tokens: &[([u8; 32], u64)]) -> Vec<Value> {
+    tokens
+        .iter()
+        .map(|(id, amount)| {
+            Value::Tuple(vec![
+                Value::CollBytes(id.to_vec()),
+                Value::Long(*amount as i64),
+            ])
+        })
+        .collect()
+}
+
+/// Scala `equalColls` per-element loop: recurse each element through
+/// `equalDataValues` (`eq_with_cost_inner`), stopping at the first unequal
+/// element, then charge `EQ_Coll = PerItemCost(10, 2, 1)` over the number of
+/// elements ACTUALLY compared (`k_eff`) — matching `addSeqCost(EQ_Coll, i)`.
+/// Callers must have charged the collection `MatchType` and verified equal
+/// lengths.
+fn eq_coll_elems(
+    a: &[Value],
+    b: &[Value],
+    ctx: &ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+) -> Result<bool, EvalError> {
     let mut k_eff = 0u32;
     let mut all_eq = true;
     for (ai, bi) in a.iter().zip(b.iter()) {
@@ -785,5 +853,120 @@ mod prim_coll_eq_tests {
                 "chunk {chunk}: early {c_early} must cost less than late {c_late}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod token_eq_tests {
+    use super::*;
+    use ergo_ser::sigma_type::SigmaType;
+
+    // ----- helpers -----
+
+    fn tok(id_fill: u8, amount: u64) -> ([u8; 32], u64) {
+        ([id_fill; 32], amount)
+    }
+
+    /// Top-level EQ cost (and boolean) for two values, via the real
+    /// `eq_with_cost` entry the EQ/NEQ opcode uses.
+    fn cost_eq(left: &Value, right: &Value) -> (u64, bool) {
+        let c = ReductionContext::minimal(500_000, 0);
+        let mut acc = CostAccumulator::recording_only();
+        let eq = eq_with_cost(left, right, &c, &mut acc).expect("eq_with_cost");
+        (acc.total().value(), eq)
+    }
+
+    // Oracle (Scala `DataValueComparer`, case 2 Coll -> `equalColls` fallback,
+    // token id 32 bytes): outer MatchType(1) + per compared token
+    //   [EQ_Tuple(4) + id(MatchType(1) + EQ_COA_Byte over compared bytes = 17)
+    //    + amount EQ_Prim(3), the amount skipped by the tuple `&&` if the id
+    //    already differs] + EQ_Coll(10,2,1) over the compared token count.
+    // 1 equal 32-byte token => 1 + (4+18+3) + 12 = 38.
+
+    // ----- happy path -----
+
+    #[test]
+    fn token_eq_single_equal_bills_38() {
+        let t = Value::Tokens(vec![tok(0xAA, 100)]);
+        let (c, eq) = cost_eq(&t, &t.clone());
+        assert!(eq, "identical single-token colls are equal");
+        assert_eq!(c, 38);
+    }
+
+    #[test]
+    fn token_eq_empty_bills_11() {
+        let t = Value::Tokens(vec![]);
+        let (c, eq) = cost_eq(&t, &t.clone());
+        assert!(eq, "empty token colls are equal");
+        assert_eq!(c, 11); // 1 + EQ_Coll.compute(0)=10
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn token_eq_length_mismatch_bills_only_match_type() {
+        let l = Value::Tokens(vec![tok(0xAA, 100)]);
+        let r = Value::Tokens(vec![]);
+        let (c, eq) = cost_eq(&l, &r);
+        assert!(!eq, "different lengths -> not equal");
+        assert_eq!(c, cost_table::MATCH_TYPE);
+    }
+
+    // ----- short-circuit (Scala `equalColls` stops at first unequal token) -----
+
+    /// A mismatch in the FIRST token compares only one token; a mismatch in the
+    /// SECOND compares both. The prior full-length charge billed both regardless
+    /// (65 for either) — this is the short-circuit overcharge the fix removes.
+    #[test]
+    fn token_eq_short_circuits_at_first_unequal_token() {
+        let base = Value::Tokens(vec![tok(0xAA, 1), tok(0xBB, 2)]);
+        // first token's amount differs -> id equal, amount compared, stop:
+        // 1 + 25 + EQ_Coll(1)=12 = 38
+        let first_diff = Value::Tokens(vec![tok(0xAA, 9), tok(0xBB, 2)]);
+        // second token differs -> both compared: 1 + 25 + 25 + EQ_Coll(2)=14 = 65
+        let second_diff = Value::Tokens(vec![tok(0xAA, 1), tok(0xBB, 9)]);
+        let (c_first, e1) = cost_eq(&base, &first_diff);
+        let (c_second, e2) = cost_eq(&base, &second_diff);
+        assert!(!e1 && !e2);
+        assert_eq!(c_first, 38, "first-token mismatch compares only 1 token");
+        assert_eq!(c_second, 65, "second-token mismatch compares both tokens");
+    }
+
+    /// When a token id differs, Scala's tuple `&&` skips the amount comparison,
+    /// so no `EQ_Prim` is billed for the amount: 1 + (EQ_Tuple 4 + id 18) + 12 = 35.
+    #[test]
+    fn token_eq_id_mismatch_skips_amount_cost() {
+        let base = Value::Tokens(vec![tok(0xAA, 1)]);
+        let id_diff = Value::Tokens(vec![tok(0xBB, 1)]);
+        let (c, eq) = cost_eq(&base, &id_diff);
+        assert!(!eq);
+        assert_eq!(c, 35);
+    }
+
+    // ----- cross-carrier (CollGeneric tuple carrier vs Tokens) -----
+
+    /// A token collection can reach equality as the `CollGeneric` tuple carrier
+    /// on one side and `Tokens` on the other. Previously `eq_coll_fallback` did
+    /// not materialize a right-hand `Tokens`, returning after only the outer
+    /// MatchType (cost 1) — an UNDERCHARGE. It must now bill the full
+    /// per-element cost, identical to the `Tokens == Tokens` path (38).
+    #[test]
+    fn token_eq_cross_carrier_charges_full_elements() {
+        let tokens = Value::Tokens(vec![tok(0xAA, 100)]);
+        let token_elem = SigmaType::STuple(vec![
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaType::SLong,
+        ]);
+        let as_generic = Value::CollGeneric(
+            vec![Value::Tuple(vec![
+                Value::CollBytes([0xAA; 32].to_vec()),
+                Value::Long(100),
+            ])],
+            Box::new(token_elem),
+        );
+        // left = CollGeneric (-> eq_coll_fallback), right = Tokens.
+        let (c, eq) = cost_eq(&as_generic, &tokens);
+        assert!(eq, "same tokens via different carriers are equal");
+        assert_eq!(c, 38);
     }
 }
