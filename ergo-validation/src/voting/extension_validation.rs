@@ -220,7 +220,11 @@ pub fn validate_epoch_extension(
     if !prev_settings.is_rule_disabled(RULE_EX_MATCH_PARAMETERS) {
         match_parameters(&parsed, &computed)?;
     }
-    if header.version >= 4 {
+    // Signed-Byte version comparison (Scala `Header.Version = Byte`): the
+    // Interpreter60Version gate is signed. Agrees for real versions (1-4); a
+    // malformed version > 127 is signed-negative, so the v6 params match is
+    // skipped — matching the reference. (Unreachable: PoW-firewalled.)
+    if (header.version as i8) >= 4 {
         match_parameters_60(&parsed, &computed)?;
     }
 

@@ -2883,7 +2883,13 @@ pub(in crate::evaluator) fn serialize_put_cost(
             c += chunk(4); // write_nbits — 4-byte compact difficulty
                            // put_u32(height) = putUInt = 0 (no charge)
             c += chunk(h.votes.len());
-            if h.version > ergo_ser::header::INITIAL_VERSION {
+            // Signed-Byte version comparison, matching the header writer
+            // (`ergo_ser::header::write_header_without_pow`) so this serialize
+            // cost agrees with the bytes actually emitted: a version > 127 is
+            // signed-negative, so no unparsed-bytes section is written or
+            // charged. (Unreachable: a script can only serialize real context
+            // headers, versions 1-4.)
+            if (h.version as i8) > ergo_ser::header::INITIAL_VERSION as i8 {
                 c += 1; // put_u8(unparsed_bytes.len())
                 c += chunk(h.unparsed_bytes.len());
             }
