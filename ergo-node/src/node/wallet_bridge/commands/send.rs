@@ -14,6 +14,97 @@ use ergo_api::wallet::WalletAdminError;
 
 use super::WriterContext;
 
+/// Whether the wallet is locked (no in-memory master key). Native build/select
+/// require an unlocked wallet (design §2) and map `Locked` → `409 wallet_locked`.
+fn is_locked(ctx: &WriterContext<'_>) -> bool {
+    ctx.storage.read().unlocked().is_none()
+}
+
+pub(crate) async fn native_select_boxes(
+    ctx: &WriterContext<'_>,
+    req: ergo_api::wallet::native::dto::BoxSelectRequest,
+    reply: oneshot::Sender<
+        Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError>,
+    >,
+) {
+    if is_locked(ctx) {
+        let _ = reply.send(Err(WalletAdminError::Locked));
+        return;
+    }
+    let result =
+        super::select_boxes_impl(&req, ctx.state, ctx.db, ctx.chain.as_ref(), ctx.cfg.network);
+    let _ = reply.send(result);
+}
+
+pub(crate) async fn native_build_transaction(
+    ctx: &WriterContext<'_>,
+    intent: ergo_api::wallet::native::dto::TxIntent,
+    reply: oneshot::Sender<
+        Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError>,
+    >,
+) {
+    if is_locked(ctx) {
+        let _ = reply.send(Err(WalletAdminError::Locked));
+        return;
+    }
+    let result = super::build_transaction_impl(
+        &intent,
+        ctx.state,
+        ctx.db,
+        ctx.chain.as_ref(),
+        ctx.cfg.network,
+    )
+    .await;
+    let _ = reply.send(result);
+}
+
+pub(crate) async fn native_sign_transaction(
+    ctx: &WriterContext<'_>,
+    req: ergo_api::wallet::native::dto::SignTxRequest,
+    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError>>,
+) {
+    // No `Locked` precondition (design §5/P0-3): signing succeeds while locked when
+    // external secrets cover every input; otherwise the prover's missing-secret
+    // surfaces as `missing_secret`, never `wallet_locked`.
+    let result = super::sign_transaction_native_impl(
+        &req,
+        ctx.storage,
+        ctx.state,
+        ctx.db,
+        ctx.chain.as_ref(),
+    )
+    .await;
+    let _ = reply.send(result);
+}
+
+pub(crate) async fn native_send_transaction(
+    ctx: &WriterContext<'_>,
+    req: ergo_api::wallet::native::dto::SendTxRequest,
+    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError>>,
+) {
+    // `intent` builds + signs with the wallet's own secrets → needs unlock;
+    // `signed` submits caller-supplied bytes → no unlock (design §2).
+    if matches!(
+        req,
+        ergo_api::wallet::native::dto::SendTxRequest::Intent { .. }
+    ) && is_locked(ctx)
+    {
+        let _ = reply.send(Err(WalletAdminError::Locked));
+        return;
+    }
+    let result = super::send_transaction_native_impl(
+        &req,
+        ctx.storage,
+        ctx.state,
+        ctx.db,
+        ctx.chain.as_ref(),
+        ctx.submit_handle.as_ref(),
+        ctx.cfg.network,
+    )
+    .await;
+    let _ = reply.send(result);
+}
+
 pub(crate) async fn payment_send(
     ctx: &WriterContext<'_>,
     requests: Vec<PaymentRequestDto>,

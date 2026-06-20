@@ -1173,7 +1173,7 @@ fn box_to_summary(
 }
 
 /// Map a stored [`ergo_state::wallet::types::WalletTransaction`] to the lean summary.
-fn tx_to_summary(
+pub(crate) fn tx_to_summary(
     wt: ergo_state::wallet::types::WalletTransaction,
 ) -> ergo_api::wallet::native::dto::WalletTransactionSummary {
     use ergo_api::wallet::native::dto::WalletTransactionSummary;

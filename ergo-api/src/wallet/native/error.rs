@@ -73,14 +73,30 @@ pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
         E::UnsupportedScript => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_script"),
         E::MissingSecret => (StatusCode::UNPROCESSABLE_ENTITY, "missing_secret"),
         E::UnsupportedIntent => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_intent"),
+        E::ReemissionObligationUnmet(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reemission_obligation_unmet",
+        ),
+        E::InsufficientFunds(_) => (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_funds"),
+        E::ReemissionSpendNotAllowed(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reemission_spend_not_allowed",
+        ),
+        E::TokenBurnNotAllowed(_) => (StatusCode::UNPROCESSABLE_ENTITY, "token_burn_not_allowed"),
+        E::TxNotFound => (StatusCode::NOT_FOUND, "tx_not_found"),
     };
     // Carry the variant's own message as `detail` only for the variants that
     // embed a bounded, non-secret string; never expand the others (avoids
     // leaking storage internals through a generic Display).
     let detail = match &e {
-        E::BadRequest(d) | E::Internal(d) | E::Forbidden(d) | E::RescanUnavailable(d) => {
-            Some(d.clone())
-        }
+        E::BadRequest(d)
+        | E::Internal(d)
+        | E::Forbidden(d)
+        | E::RescanUnavailable(d)
+        | E::ReemissionObligationUnmet(d)
+        | E::InsufficientFunds(d)
+        | E::ReemissionSpendNotAllowed(d)
+        | E::TokenBurnNotAllowed(d) => Some(d.clone()),
         _ => None,
     };
     native_err(status, reason, detail)
@@ -125,6 +141,14 @@ mod tests {
         let (s, b) = mapped(E::BoxNotFound);
         assert_eq!(s, StatusCode::NOT_FOUND);
         assert_eq!(b.reason, "box_not_found");
+    }
+
+    #[test]
+    fn reemission_obligation_unmet_maps_to_422() {
+        let (s, b) = mapped(E::ReemissionObligationUnmet("burn unmet".to_string()));
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b.reason, "reemission_obligation_unmet");
+        assert_eq!(b.detail.as_deref(), Some("burn unmet"));
     }
 
     #[test]

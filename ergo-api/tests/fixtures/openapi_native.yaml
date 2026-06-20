@@ -481,6 +481,60 @@ paths:
                 $ref: '#/components/schemas/NativeWalletError'
       security:
       - ApiKeyAuth: []
+  /api/v1/wallet/boxes/select:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/boxes/select` — burn-aware box-selection dry-run. Returns
+        the real selected inputs, computed change, and the exact EIP-27 re-emission
+        burn. Requires an unlocked wallet (design §2).
+      operationId: select_boxes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BoxSelectRequest'
+        required: true
+      responses:
+        '200':
+          description: Selection plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoxSelectResponse'
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '404':
+          description: A requested box id is not a wallet box
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet locked/uninitialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
   /api/v1/wallet/boxes/{boxId}:
     get:
       tags:
@@ -769,6 +823,146 @@ paths:
                 $ref: '#/components/schemas/TxPage'
         '400':
           description: Bad page window
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/transactions/build:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/transactions/build` — build a burn-aware unsigned tx from
+        an intent. Returns the unsigned tx plus the selected inputs, change outputs,
+        fee, and re-emission burn. Requires an unlocked wallet (design §2).
+      operationId: build_transaction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TxIntent'
+        required: true
+      responses:
+        '200':
+          description: Built unsigned transaction + plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuildTxResponse'
+        '400':
+          description: Malformed body / no outputs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet locked/uninitialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/transactions/send:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/transactions/send` — build+sign+submit an intent (needs
+        unlock) or submit a caller-supplied signed tx (no unlock). txId-first
+        idempotency: an already-known tx returns `accepted:true` without re-submitting,
+        and a duplicate submit is an idempotent accept. `Cache-Control: no-store`.
+      operationId: send_transaction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendTxRequest'
+        required: true
+      responses:
+        '200':
+          description: Accepted (fresh or idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendTxResponse'
+        '400':
+          description: Malformed body / submit rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet locked (intent send)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: insufficient_funds / reemission_* / missing_secret / unsupported_intent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/transactions/sign:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/transactions/sign` — sign a caller-supplied unsigned tx.
+        Conditional unlock: succeeds while locked when `externalSecrets` cover all
+        inputs, else `missing_secret(422)` (never `wallet_locked`). Response is
+        `Cache-Control: no-store` (it carries signed material).
+      operationId: sign_transaction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignTxRequest'
+        required: true
+      responses:
+        '200':
+          description: Signed transaction + txId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignTxResponse'
+        '400':
+          description: Malformed body / tx bytes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: missing_secret / reemission_obligation_unmet / unsupported_script
           content:
             application/json:
               schema:
@@ -2168,6 +2362,53 @@ components:
             enum:
             - custom
       description: How a wallet box was classified at apply time. Tagged.
+    BoxSelectRequest:
+      type: object
+      description: '`POST /api/v1/wallet/boxes/select` request.'
+      required:
+      - target
+      properties:
+        allowReemissionSpend:
+          type: boolean
+          description: Permit selecting a reward box carrying the re-emission token.
+        changeAddress:
+          type:
+          - string
+          - 'null'
+          description: Change address; `null` → persisted change address.
+        inputs:
+          $ref: '#/components/schemas/InputSource'
+          description: 'Where to draw inputs from (default: `auto`).'
+        target:
+          $ref: '#/components/schemas/SelectTarget'
+          description: What to cover.
+      additionalProperties: false
+    BoxSelectResponse:
+      type: object
+      description: '`POST /api/v1/wallet/boxes/select` response — a real dry-run plan.'
+      required:
+      - inputsSelected
+      - change
+      - asOf
+      properties:
+        asOf:
+          type: integer
+          format: int32
+          description: Wallet height the read was taken at.
+          minimum: 0
+        change:
+          $ref: '#/components/schemas/ChangePlan'
+          description: The real computed change.
+        inputsSelected:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelectedBoxRef'
+          description: Boxes the selector chose.
+        reemissionBurn:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ReemissionBurn'
+            description: EIP-27 burn the selection incurs, or `null`.
     BoxStatusDto:
       oneOf:
       - type: object
@@ -2208,6 +2449,42 @@ components:
             enum:
             - spent
       description: Lifecycle status of a wallet box. Tagged; lean (no full box rendering).
+    BuildTxResponse:
+      type: object
+      description: '`POST /api/v1/wallet/transactions/build` response.'
+      required:
+      - unsignedTransaction
+      - inputsSelected
+      - changeOutputs
+      - fee
+      - asOf
+      properties:
+        asOf:
+          type: integer
+          format: int32
+          description: Wallet height the inputs were read at.
+          minimum: 0
+        changeOutputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChangePlan'
+          description: Change outputs (real values), if any.
+        fee:
+          type: string
+          description: Miner fee, nanoErg (decimal string).
+        inputsSelected:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelectedBoxRef'
+          description: Boxes selected as inputs.
+        reemissionBurn:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ReemissionBurn'
+            description: EIP-27 burn the build incurs, or `null`.
+        unsignedTransaction:
+          $ref: '#/components/schemas/TxRepr'
+          description: The built unsigned transaction.
     ChangeAddressDto:
       type: object
       description: '`GET /api/v1/wallet/change-address` response. `null` when unset.'
@@ -2216,6 +2493,56 @@ components:
           type:
           - string
           - 'null'
+    ChangePlan:
+      type: object
+      description: |-
+        The real computed change of a selection/build (replaces the Scala synthetic
+        placeholder).
+      required:
+      - nanoErg
+      - assets
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletAssetDto'
+          description: Change tokens.
+        nanoErg:
+          type: string
+          description: Change nanoErg (decimal string).
+    DataInputSource:
+      oneOf:
+      - type: object
+        description: Explicit data-input box ids.
+        required:
+        - boxIds
+        - type
+        properties:
+          boxIds:
+            type: array
+            items:
+              type: string
+            description: 32-byte box ids, hex.
+          type:
+            type: string
+            enum:
+            - boxIds
+      - type: object
+        description: Explicit serialized data-input boxes, hex.
+        required:
+        - boxesHex
+        - type
+        properties:
+          boxesHex:
+            type: array
+            items:
+              type: string
+            description: Serialized `ErgoBox` bytes, hex.
+          type:
+            type: string
+            enum:
+            - boxes
+      description: 'Where a [`TxIntent`] draws its data inputs from, tagged (default: empty `boxIds`).'
     DerivationMode:
       oneOf:
       - type: object
@@ -2284,6 +2611,57 @@ components:
           format: int32
           description: Address index — the last path component.
           minimum: 0
+    ExternalSecret:
+      oneOf:
+      - type: object
+        description: Discrete-log secret.
+        required:
+        - secret
+        - type
+        properties:
+          secret:
+            type: string
+            description: 32-byte big-endian hex scalar (SENSITIVE).
+          type:
+            type: string
+            enum:
+            - dlog
+      - type: object
+        description: Diffie-Hellman tuple secret.
+        required:
+        - g
+        - h
+        - u
+        - v
+        - secret
+        - type
+        properties:
+          g:
+            type: string
+            description: Compressed SEC1 generator point, hex.
+          h:
+            type: string
+            description: Compressed SEC1 `h` point, hex.
+          secret:
+            type: string
+            description: 32-byte big-endian hex scalar (SENSITIVE).
+          type:
+            type: string
+            enum:
+            - dhTuple
+          u:
+            type: string
+            description: Compressed SEC1 `u` point, hex.
+          v:
+            type: string
+            description: Compressed SEC1 `v` point, hex.
+      description: |-
+        An externally-supplied prover secret (tagged). SENSITIVE: body-only, never
+        logged (the `Debug` impl redacts the scalar). `secret` is a 32-byte big-endian
+        hex scalar for both members; the DH-tuple member adds its four compressed SEC1
+        group elements. Manual `Deserialize` for strict rejection. Deliberately NOT
+        `Serialize` — it is request-only, and deriving `Serialize` would route the raw
+        scalar straight to JSON, defeating the `Debug` redaction.
     HealthStatus:
       type: string
       enum:
@@ -2319,6 +2697,61 @@ components:
       properties:
         mnemonic:
           type: string
+    InputSource:
+      oneOf:
+      - type: object
+        description: Automatic wallet box selection.
+        required:
+        - type
+        properties:
+          excludeBoxIds:
+            type: array
+            items:
+              type: string
+            description: Box ids to exclude from selection.
+          minConfirmations:
+            type: integer
+            format: int64
+            description: Minimum confirmations a candidate box must have (`-1` = include pool).
+          type:
+            type: string
+            enum:
+            - auto
+      - type: object
+        description: Explicit wallet box ids.
+        required:
+        - boxIds
+        - type
+        properties:
+          boxIds:
+            type: array
+            items:
+              type: string
+            description: 32-byte box ids, hex.
+          type:
+            type: string
+            enum:
+            - boxIds
+      - type: object
+        description: Explicit serialized boxes, hex.
+        required:
+        - boxesHex
+        - type
+        properties:
+          boxesHex:
+            type: array
+            items:
+              type: string
+            description: Serialized `ErgoBox` bytes, hex.
+          type:
+            type: string
+            enum:
+            - boxes
+      description: |-
+        Where a [`TxIntent`]/[`BoxSelectRequest`] draws its inputs from, tagged.
+        `auto` = wallet box selection (the default); `boxIds` = explicit wallet box
+        ids; `boxes` = explicit serialized boxes (hex). Manual `Deserialize` for strict
+        rejection.
     MnemonicVerifyRequest:
       type: object
       description: '`POST /api/v1/wallet/mnemonic/verify` request. Body-only secrets, never logged.'
@@ -2402,6 +2835,98 @@ components:
             enum:
             - testnet
       description: The network this wallet is on (from `cfg.network`).
+    OutputIntent:
+      oneOf:
+      - type: object
+        description: Pay `value` nanoErg (+ optional `assets`/`registers`) to `address`.
+        required:
+        - address
+        - value
+        - type
+        properties:
+          address:
+            type: string
+            description: |-
+              Recipient P2PK address for this network. P2S (contract) recipients are
+              not yet supported — the builder decodes the recipient as P2PK, so a P2S
+              address is rejected as a bad address.
+          assets:
+            type: array
+            items:
+              $ref: '#/components/schemas/WalletAssetDto'
+            description: Tokens to send alongside.
+          registers:
+            type:
+            - object
+            - 'null'
+            description: Non-default registers (R4..R9), hex-encoded constants. `unsupported_intent` until wired.
+            additionalProperties:
+              type: string
+            propertyNames:
+              type: string
+          type:
+            type: string
+            enum:
+            - payment
+          value:
+            type: string
+            description: nanoErg to send (decimal string).
+      - type: object
+        description: Mint a new token to `address`. `unsupported_intent` until wired.
+        required:
+        - address
+        - amount
+        - type
+        properties:
+          address:
+            type: string
+            description: Recipient of the minted token.
+          amount:
+            type: string
+            description: Amount to mint (decimal string).
+          decimals:
+            type:
+            - integer
+            - 'null'
+            format: int32
+            description: Optional EIP-4 decimals.
+            minimum: 0
+          description:
+            type:
+            - string
+            - 'null'
+            description: Optional EIP-4 description.
+          name:
+            type:
+            - string
+            - 'null'
+            description: Optional EIP-4 token name.
+          type:
+            type: string
+            enum:
+            - mint
+      - type: object
+        description: Destroy a token surplus (no output keeps these). Requires `allowTokenBurn`.
+        required:
+        - assets
+        - type
+        properties:
+          assets:
+            type: array
+            items:
+              $ref: '#/components/schemas/WalletAssetDto'
+            description: Tokens to burn (≥1).
+          type:
+            type: string
+            enum:
+            - burn
+      description: |-
+        One requested output of a [`TxIntent`], tagged. `payment` (+ optional
+        assets/registers) and `burn` are load-bearing; `mint` and `payment.registers`
+        are valid shapes that ship `unsupported_intent(422)` until builder support
+        lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
+        change). Manual `Deserialize` so unknown sibling fields and cross-variant field
+        leakage are rejected.
     RawTransactionBytes:
       type: string
       format: binary
@@ -2411,6 +2936,26 @@ components:
         `axum::body::Bytes` and forward it verbatim; this renders that body as
         `application/octet-stream` binary (`type: string, format: binary`) in
         the generated spec. Documentation only — never constructed at runtime.
+    ReemissionBurn:
+      type: object
+      description: |-
+        The EIP-27 re-emission burn a selection/build incurs. Present (non-null) only
+        when the selected inputs trigger the burn; computed exactly from the selected
+        inputs via `reemission_obligation_core`, never the wallet-wide estimate.
+      required:
+      - tokenId
+      - tokensBurned
+      - nanoErgRouted
+      properties:
+        nanoErgRouted:
+          type: string
+          description: nanoErg routed to the pay-to-reemission contract (= `tokensBurned`).
+        tokenId:
+          type: string
+          description: 32-byte re-emission token id, hex.
+        tokensBurned:
+          type: string
+          description: Re-emission tokens burned (decimal string).
     ReemissionInfoDto:
       type: object
       description: EIP-27 re-emission reserve detail. `null` off EIP-27 nets or below activation.
@@ -2522,6 +3067,93 @@ components:
       description: |-
         Scope of an unconfirmed delta. Tagged; `singleHop` is the only reachable
         variant today (`fullOffChainRegistry` is reserved, additive).
+    SelectTarget:
+      type: object
+      description: '`POST /api/v1/wallet/boxes/select` target — what the selection must cover.'
+      required:
+      - nanoErg
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletAssetDto'
+          description: Tokens the selection must cover.
+        nanoErg:
+          type: string
+          description: nanoErg the selection must cover (decimal string).
+      additionalProperties: false
+    SelectedBoxRef:
+      type: object
+      description: A selected input box (lean; additive fields later).
+      required:
+      - boxId
+      - value
+      - assets
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletAssetDto'
+          description: Tokens the box carries.
+        boxId:
+          type: string
+          description: 32-byte box id, hex.
+        value:
+          type: string
+          description: Box value, nanoErg (decimal string).
+    SendTxRequest:
+      oneOf:
+      - type: object
+        description: Build + sign + send from an intent.
+        required:
+        - intent
+        - type
+        properties:
+          intent:
+            $ref: '#/components/schemas/TxIntent'
+            description: The transaction intent.
+          type:
+            type: string
+            enum:
+            - intent
+      - type: object
+        description: Send a pre-signed transaction.
+        required:
+        - signedTransaction
+        - type
+        properties:
+          signedTransaction:
+            $ref: '#/components/schemas/TxRepr'
+            description: The signed transaction.
+          type:
+            type: string
+            enum:
+            - signed
+      description: |-
+        `POST /api/v1/wallet/transactions/send` request (tagged). `intent` builds +
+        signs with the wallet's own secrets (needs unlock); `signed` submits a
+        caller-supplied signed tx (no unlock). Manual `Deserialize` for strictness.
+    SendTxResponse:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/transactions/send` response. `accepted` is `true` both on
+        a fresh submission and on an idempotent re-send of an already-known tx.
+        `transaction` is the lean summary only when a confirmed wallet row exists.
+      required:
+      - txId
+      - accepted
+      properties:
+        accepted:
+          type: boolean
+          description: Whether the tx is accepted (fresh submit or known-tx idempotent re-send).
+        transaction:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/WalletTransactionSummary'
+            description: The wallet tx summary when a confirmed row exists, else `null`.
+        txId:
+          type: string
+          description: 32-byte transaction id, hex.
     SetChangeAddressRequest:
       type: object
       description: '`PUT /api/v1/wallet/change-address` request.'
@@ -2532,6 +3164,38 @@ components:
           type: string
           description: The address to use for change — must be a tracked P2PK on this network.
       additionalProperties: false
+    SignTxRequest:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/transactions/sign` request. Signs a caller-supplied
+        unsigned tx. Runs no `Locked` precondition: it succeeds while locked when
+        `externalSecrets` cover every input; otherwise the prover's missing-secret →
+        `missing_secret(422)`. The EIP-27 self-verify gate runs before emitting.
+      required:
+      - unsignedTransaction
+      properties:
+        externalSecrets:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExternalSecret'
+          description: Externally-supplied prover secrets (default `[]`).
+        unsignedTransaction:
+          $ref: '#/components/schemas/TxRepr'
+          description: The unsigned transaction to sign.
+      additionalProperties: false
+    SignTxResponse:
+      type: object
+      description: '`POST /api/v1/wallet/transactions/sign` response. `Cache-Control: no-store`.'
+      required:
+      - signedTransaction
+      - txId
+      properties:
+        signedTransaction:
+          $ref: '#/components/schemas/TxRepr'
+          description: The signed transaction.
+        txId:
+          type: string
+          description: 32-byte transaction id, hex.
     SyncStateLabel:
       type: string
       enum:
@@ -2539,6 +3203,48 @@ components:
       - syncing
       - at_tip
       - stalled
+    TxIntent:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/transactions/build` request (also `send.intent`). At least
+        one output. `fee` `null` uses `MIN_FEE`; `changeAddress` `null` uses the
+        persisted change address. `allowReemissionSpend`/`allowTokenBurn` default
+        `false` (fail-closed against accidental reward-box spend / token loss).
+      required:
+      - outputs
+      properties:
+        allowReemissionSpend:
+          type: boolean
+          description: Permit spending a reward box carrying the re-emission token.
+        allowTokenBurn:
+          type: boolean
+          description: |-
+            Permit dropping (burning) a non-re-emission token surplus. RESERVED: the
+            current builder never drops a non-re-emission token (any surplus always
+            becomes change), so this flag has no effect yet; it gates the deferred
+            `burn` output intent (which ships `unsupported_intent` until wired).
+        changeAddress:
+          type:
+          - string
+          - 'null'
+          description: Change address; `null` → persisted change address.
+        dataInputs:
+          $ref: '#/components/schemas/DataInputSource'
+          description: 'Where data inputs come from (default: empty `boxIds`).'
+        fee:
+          type:
+          - string
+          - 'null'
+          description: Miner fee in nanoErg (decimal string); `null` → `MIN_FEE`.
+        inputs:
+          $ref: '#/components/schemas/InputSource'
+          description: 'Where inputs come from (default: `auto`).'
+        outputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/OutputIntent'
+          description: Requested outputs (≥1; validated by the handler).
+      additionalProperties: false
     TxPage:
       type: object
       description: Paged wallet-transaction list, ordered `(blockHeight desc, txId asc)`.
@@ -2559,6 +3265,27 @@ components:
           type: integer
           format: int32
           minimum: 0
+    TxRepr:
+      oneOf:
+      - type: object
+        description: Hex of the serialized transaction bytes.
+        required:
+        - bytes
+        - type
+        properties:
+          bytes:
+            type: string
+            description: Lowercase hex of the serialized transaction.
+          type:
+            type: string
+            enum:
+            - bytes
+      description: |-
+        Wire representation of a transaction (unsigned or signed), tagged (P2-1). Only
+        `bytes` (hex of the serialized tx) is active today; `{type:"json"}` is reserved
+        (additive). One shape everywhere a tx crosses the wire — `build` output, `sign`
+        in/out, `send`, multisig in/out — never a second composition form. Manual
+        `Deserialize` so unknown sibling fields are rejected.
     UnconfirmedDeltaDto:
       type: object
       description: |-
@@ -2627,7 +3354,10 @@ components:
           description: Operator label, or `null` when unset.
     WalletAssetDto:
       type: object
-      description: A token amount. `amount` is a decimal string (token amounts can exceed 2^53).
+      description: |-
+        A token amount. `amount` is a decimal string (token amounts can exceed 2^53).
+        `deny_unknown_fields` so this stays strict when nested inside request DTOs
+        (e.g. `OutputIntent::payment.assets`, `SelectTarget.assets`).
       required:
       - tokenId
       - amount
@@ -2638,6 +3368,7 @@ components:
         tokenId:
           type: string
           description: 32-byte token id, hex.
+      additionalProperties: false
     WalletBalanceDto:
       type: object
       description: '`GET /api/v1/wallet/balance` response.'

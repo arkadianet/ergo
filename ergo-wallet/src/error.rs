@@ -91,6 +91,13 @@ pub enum WalletError {
     #[error("tx building failed: {0}")]
     TxBuild(String),
 
+    /// A burn-triggering build was asked to keep the EIP-27 re-emission token on
+    /// an output. The token must be burned (carried on no output) when a reward
+    /// box is spent, so this is rejected. Maps to REST
+    /// `422 reason: "reemission_spend_not_allowed"`.
+    #[error("re-emission token cannot be sent to an output: {0}")]
+    ReemissionTokenOnOutput(String),
+
     /// Proof produced is invalid against its own proposition. Indicates
     /// a bug in the prover (should never fire if implementation is correct).
     #[error("internal: produced proof failed self-verification (proof bug)")]

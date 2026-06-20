@@ -216,6 +216,8 @@ fn full_send_flow_produces_tx_that_verifies_at_transaction_level() {
         current_height,
         min_box_value: 1_000_000,
         data_inputs: vec![],
+        reemission: None,
+        reemission_height: 0,
     };
     let unsigned_tx = builder
         .build(&[payment_request])
@@ -333,6 +335,8 @@ fn unsigned_tx_roundtrip_then_sign_verifies() {
         current_height: 100_001,
         min_box_value: 1_000_000,
         data_inputs: vec![],
+        reemission: None,
+        reemission_height: 0,
     };
     let unsigned_tx_original = builder
         .build(&[ergo_wallet::tx_builder::PaymentRequest {
