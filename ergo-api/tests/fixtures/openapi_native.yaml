@@ -358,6 +358,40 @@ paths:
                 $ref: '#/components/schemas/NativeWalletError'
       security:
       - ApiKeyAuth: []
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/addresses` — derive a new key (next sequential, or at an
+        explicit path) and register it as a tracked address. Needs unlock.
+      operationId: derive_address
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeriveKeyRequest'
+        required: true
+      responses:
+        '200':
+          description: Derived address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DerivedAddress'
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet locked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
   /api/v1/wallet/balance:
     get:
       tags:
@@ -481,6 +515,206 @@ paths:
                 $ref: '#/components/schemas/NativeWalletError'
       security:
       - ApiKeyAuth: []
+  /api/v1/wallet/change-address:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/change-address` — current change address, or `null`.'
+      operationId: change_address_get
+      responses:
+        '200':
+          description: Change address (or null)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangeAddressDto'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+    put:
+      tags:
+      - wallet
+      summary: |-
+        `PUT /api/v1/wallet/change-address` — set the change address. The address
+        must be a tracked P2PK for this network (not unlock-gated).
+      operationId: change_address_put
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetChangeAddressRequest'
+        required: true
+      responses:
+        '200':
+          description: Change address set
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: Address is not a tracked P2PK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/init:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/init` — create a new encrypted wallet; returns the
+        generated mnemonic ONCE (no-store).
+      operationId: init
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitRequest'
+        required: true
+      responses:
+        '200':
+          description: Wallet created; mnemonic returned once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitResponse'
+        '400':
+          description: Malformed body / invalid strength
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/lock:
+    post:
+      tags:
+      - wallet
+      summary: '`POST /api/v1/wallet/lock` — drop the in-memory master key (idempotent).'
+      operationId: lock
+      responses:
+        '200':
+          description: Locked
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/mnemonic/verify:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/mnemonic/verify` — compare a candidate mnemonic against
+        the persisted seed. `matched=false` is a factual answer, not an error.
+      operationId: mnemonic_verify
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MnemonicVerifyRequest'
+        required: true
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MnemonicVerifyResult'
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet uninitialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/rescan:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/rescan` — trigger a wallet rescan (full rebuild when
+        `fromHeight` is 0). `rescan_unavailable(409)` on a backend that cannot replay.
+      operationId: rescan
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RescanRequest'
+        required: true
+      responses:
+        '200':
+          description: Rescan started
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Rescan unavailable / already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/restore:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/restore` — restore from a recovery phrase with an
+        explicit derivation mode.
+      operationId: restore
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+        required: true
+      responses:
+        '200':
+          description: Wallet restored
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet exists / restore unsupported on a pruned node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
   /api/v1/wallet/status:
     get:
       tags:
@@ -568,6 +802,41 @@ paths:
                 $ref: '#/components/schemas/NativeWalletError'
         '404':
           description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/unlock:
+    post:
+      tags:
+      - wallet
+      summary: '`POST /api/v1/wallet/unlock` — load the in-memory master key.'
+      operationId: unlock
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnlockRequest'
+        required: true
+      responses:
+        '200':
+          description: Unlocked
+        '400':
+          description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '401':
+          description: Wrong password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet uninitialized
           content:
             application/json:
               schema:
@@ -1938,6 +2207,82 @@ components:
             enum:
             - spent
       description: Lifecycle status of a wallet box. Tagged; lean (no full box rendering).
+    ChangeAddressDto:
+      type: object
+      description: '`GET /api/v1/wallet/change-address` response. `null` when unset.'
+      properties:
+        address:
+          type:
+          - string
+          - 'null'
+    DerivationMode:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - eip3
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - legacyPre1627
+      description: |-
+        Key-derivation mode for `restore` (tagged). Required — no default (the
+        legacy-default trap is deliberately removed). Manual `Deserialize` so unknown
+        sibling fields are rejected (serde can't `deny_unknown_fields` an
+        internally-tagged enum).
+    DeriveKeyRequest:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - next
+      - type: object
+        required:
+        - derivationPath
+        - type
+        properties:
+          derivationPath:
+            type: string
+          type:
+            type: string
+            enum:
+            - path
+      description: |-
+        `POST /api/v1/wallet/addresses` (derive) request (tagged). `next` derives the
+        next sequential key; `path` derives at an explicit BIP32 path. Manual
+        `Deserialize` so unknown sibling fields are rejected and each variant's fields
+        are validated (serde can't `deny_unknown_fields` an internally-tagged enum).
+    DerivedAddress:
+      type: object
+      description: '`POST /api/v1/wallet/addresses` (derive) response.'
+      required:
+      - address
+      - derivationPath
+      - index
+      properties:
+        address:
+          type: string
+          description: Encoded P2PK address for the derived key.
+        derivationPath:
+          type: string
+          description: BIP32 derivation path of the derived key.
+        index:
+          type: integer
+          format: int32
+          description: Address index — the last path component.
+          minimum: 0
     HealthStatus:
       type: string
       enum:
@@ -1945,6 +2290,57 @@ components:
       - stalled
       - disconnected
       - rejecting
+    InitRequest:
+      type: object
+      description: '`POST /api/v1/wallet/init` request. Secrets body-only, never logged.'
+      required:
+      - pass
+      properties:
+        mnemonicPass:
+          type: string
+          description: BIP39 passphrase (empty if none).
+        pass:
+          type: string
+          description: Wallet password.
+        strength:
+          type: integer
+          format: int32
+          description: 'Mnemonic word count: one of 12/15/18/21/24.'
+          minimum: 0
+      additionalProperties: false
+    InitResponse:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/init` response — the generated mnemonic, returned ONCE
+        (no-store; the page is the only place it should ever live).
+      required:
+      - mnemonic
+      properties:
+        mnemonic:
+          type: string
+    MnemonicVerifyRequest:
+      type: object
+      description: '`POST /api/v1/wallet/mnemonic/verify` request. Body-only secrets, never logged.'
+      required:
+      - mnemonic
+      properties:
+        mnemonic:
+          type: string
+          description: Candidate recovery phrase to compare against the persisted seed.
+        mnemonicPass:
+          type: string
+          description: BIP39 passphrase (empty if none).
+      additionalProperties: false
+    MnemonicVerifyResult:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/mnemonic/verify` result. `matched=false` is a factual
+        answer, not an error.
+      required:
+      - matched
+      properties:
+        matched:
+          type: boolean
     NanoErgBreakdownDto:
       type: object
       description: |-
@@ -2044,6 +2440,16 @@ components:
         tokenId:
           type: string
           description: 32-byte re-emission token id, hex.
+    RescanRequest:
+      type: object
+      description: '`POST /api/v1/wallet/rescan` request (body optional; defaults to a full rebuild).'
+      properties:
+        fromHeight:
+          type: integer
+          format: int32
+          description: Height to rescan from (0 = full rebuild).
+          minimum: 0
+      additionalProperties: false
     RescanStateDto:
       oneOf:
       - type: object
@@ -2081,6 +2487,27 @@ components:
       description: |-
         Wallet rescan lifecycle phase. `running` is a real full-rebuild-in-progress
         state; `unavailable` is returned only on a backend that cannot replay blocks.
+    RestoreRequest:
+      type: object
+      description: '`POST /api/v1/wallet/restore` request. Secrets body-only, never logged.'
+      required:
+      - mnemonic
+      - pass
+      - derivation
+      properties:
+        derivation:
+          $ref: '#/components/schemas/DerivationMode'
+          description: Required derivation mode.
+        mnemonic:
+          type: string
+          description: Recovery phrase.
+        mnemonicPass:
+          type: string
+          description: BIP39 passphrase (empty if none).
+        pass:
+          type: string
+          description: Wallet password.
+      additionalProperties: false
     ScopeDto:
       oneOf:
       - type: object
@@ -2094,6 +2521,16 @@ components:
       description: |-
         Scope of an unconfirmed delta. Tagged; `singleHop` is the only reachable
         variant today (`fullOffChainRegistry` is reserved, additive).
+    SetChangeAddressRequest:
+      type: object
+      description: '`PUT /api/v1/wallet/change-address` request.'
+      required:
+      - address
+      properties:
+        address:
+          type: string
+          description: The address to use for change — must be a tracked P2PK on this network.
+      additionalProperties: false
     SyncStateLabel:
       type: string
       enum:
@@ -2144,6 +2581,16 @@ components:
         scope:
           $ref: '#/components/schemas/ScopeDto'
           description: What the delta covers.
+    UnlockRequest:
+      type: object
+      description: '`POST /api/v1/wallet/unlock` request. `pass` is body-only, never logged.'
+      required:
+      - pass
+      properties:
+        pass:
+          type: string
+          description: Wallet password.
+      additionalProperties: false
     WalletAddressDto:
       type: object
       description: A tracked wallet address with its derivation metadata.

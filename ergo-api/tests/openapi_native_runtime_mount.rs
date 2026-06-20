@@ -710,6 +710,92 @@ async fn native_wallet_strict_query_uses_native_envelope() {
 }
 
 #[tokio::test]
+async fn native_wallet_strict_json_body_uses_native_envelope() {
+    // The strict-JSON extractor must map an unknown field (deny_unknown_fields)
+    // to the native `{reason:"bad_request"}` envelope, not Axum's default 400.
+    let app = all_wired_app();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/wallet/unlock")
+                .header(API_KEY_HEADER, "hello")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"pass":"x","bogus":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        body.contains("\"reason\":\"bad_request\""),
+        "expected the native error envelope, got: {body}",
+    );
+}
+
+#[tokio::test]
+async fn native_wallet_post_routes_are_gated() {
+    // The new POST lifecycle routes are mounted and api-key gated.
+    let app = all_wired_app();
+    assert_eq!(
+        post_body(&app, "/api/v1/wallet/lock", None, "").await,
+        StatusCode::FORBIDDEN,
+        "POST /api/v1/wallet/lock must hit the api_key gate bare",
+    );
+    // With a valid key the route is reached (NoopWalletAdmin.lock() → Ok → 200),
+    // i.e. NEITHER 403 NOR 404.
+    let with_key = post_body(&app, "/api/v1/wallet/lock", Some("hello"), "").await;
+    assert!(
+        with_key != StatusCode::FORBIDDEN && with_key != StatusCode::NOT_FOUND,
+        "POST /api/v1/wallet/lock with a valid key must be mounted past the gate, got {with_key}",
+    );
+}
+
+#[tokio::test]
+async fn native_wallet_init_rejects_bad_strength() {
+    // The native init handler validates mnemonic strength (12/15/18/21/24) and
+    // returns the native bad_request envelope for anything else.
+    let app = all_wired_app();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/wallet/init")
+                .header(API_KEY_HEADER, "hello")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"pass":"pw","strength":7}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"reason\":\"bad_request\""),
+        "expected native bad_request envelope",
+    );
+}
+
+#[tokio::test]
+async fn native_wallet_rescan_accepts_bodyless_post() {
+    // The strict extractor treats an empty body as `{}`, so a bodyless rescan
+    // POST reaches the handler (NoopWalletAdmin.rescan → a domain error, NOT a
+    // 400 body-parse error and NOT a 403/404).
+    let app = all_wired_app();
+    let status = post_body(&app, "/api/v1/wallet/rescan", Some("hello"), "").await;
+    assert!(
+        status != StatusCode::BAD_REQUEST
+            && status != StatusCode::FORBIDDEN
+            && status != StatusCode::NOT_FOUND,
+        "bodyless rescan must reach the handler (empty body → {{}}), got {status}",
+    );
+}
+
+#[tokio::test]
 async fn unknown_node_subpath_keeps_whole_prefix_gated() {
     // Scala gates the whole `node` pathPrefix the same way (probed live:
     // GET /node/zzz on the reference node → 403 forbidden).

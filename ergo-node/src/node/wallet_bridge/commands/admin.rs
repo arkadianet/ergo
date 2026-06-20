@@ -63,6 +63,16 @@ pub(crate) async fn init(
     reply: oneshot::Sender<Result<String, WalletAdminError>>,
 ) {
     let mut storage = ctx.storage.write();
+    // Refuse to overwrite an existing wallet (codex: `init` on an initialized
+    // wallet would persist a second secret file). Return a typed `WalletExists`
+    // (native 409 wallet_exists / compat 400) instead of clobbering the seed.
+    if !matches!(
+        storage.lock_state(),
+        ergo_wallet::storage::LockState::Uninitialized
+    ) {
+        let _ = reply.send(Err(WalletAdminError::WalletExists));
+        return;
+    }
     let strength_enum = match strength {
         12 => ergo_wallet::mnemonic::MnemonicStrength::Words12,
         15 => ergo_wallet::mnemonic::MnemonicStrength::Words15,
@@ -100,6 +110,14 @@ pub(crate) async fn restore(
         return;
     }
     let mut storage = ctx.storage.write();
+    // Refuse to overwrite an existing wallet (same safety guard as `init`).
+    if !matches!(
+        storage.lock_state(),
+        ergo_wallet::storage::LockState::Uninitialized
+    ) {
+        let _ = reply.send(Err(WalletAdminError::WalletExists));
+        return;
+    }
     let result = storage
         .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)
         .map_err(|e| match e {
@@ -124,8 +142,11 @@ pub(crate) async fn rescan(
     // wallet state to prevent the destructive clear-then-skip
     // sequence that would empty the wallet.
     if !ctx.chain.read_block_at_supported() {
-        let _ = reply.send(Err(WalletAdminError::Internal(
-            "rescan unavailable: chain block-read not yet implemented".to_string(),
+        // Backend cannot replay blocks (e.g. digest/pruned). Typed so the native
+        // surface maps it to `rescan_unavailable(409)` (and the compat surface to
+        // 409 too) rather than an opaque 500.
+        let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
+            "chain block-read not available on this backend".to_string(),
         )));
         return;
     }
@@ -166,7 +187,8 @@ pub(crate) async fn rescan(
     // Refuse if a rescan is already in flight; this also arms the live-apply
     // guard (the hook returns empty tracked keys while it is set).
     if crate::wallet_boot::RESCAN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        let _ = reply.send(Err(WalletAdminError::Internal(
+        // A concurrent rescan is a state precondition (409), not a 500.
+        let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
             "rescan already in progress".to_string(),
         )));
         return;
