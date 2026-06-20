@@ -2026,7 +2026,10 @@ components:
         reservedBoxCount:
           type: integer
           format: int32
-          description: Number of reward boxes carrying the re-emission token.
+          description: |-
+            Number of confirmed wallet boxes carrying the re-emission token. This is the
+            shared obligation's box count — it counts every token-carrying input once the
+            rule is triggered, not only the floor reward boxes that trigger it.
           minimum: 0
         reservedExceedsConfirmed:
           type: boolean
@@ -2035,7 +2038,9 @@ components:
             mature ERG (then `available == 0`).
         reservedTokenAmount:
           type: string
-          description: Re-emission tokens held across reward boxes; `== reserved` 1:1 (1 nanoErg/token).
+          description: |-
+            Re-emission tokens held across the wallet's confirmed boxes; `== reserved`
+            1:1 (1 nanoErg/token).
         tokenId:
           type: string
           description: 32-byte re-emission token id, hex.
@@ -2161,8 +2166,11 @@ components:
           description: BIP32 derivation path, e.g. `m/44'/429'/0'/0/0`.
         index:
           type: integer
-          format: int32
-          description: Monotonic tracked-pubkey index (insertion / derivation order).
+          format: int64
+          description: |-
+            Monotonic tracked-pubkey index (insertion / derivation order). `u64` to
+            match the storage `TrackedAddressMeta.path_idx` exactly — narrowing to
+            `u32` would silently alias distinct addresses past `u32::MAX`.
           minimum: 0
         label:
           type:
@@ -2274,7 +2282,10 @@ components:
           type:
           - string
           - 'null'
-          description: Current change address, or `null` when locked/unset (never `""`).
+          description: |-
+            Current change address, or `null` when unset (never `""`). Surfaced even
+            while locked — it is read from the persisted change-address state, not the
+            in-memory key.
         eip27Active:
           type: boolean
           description: |-

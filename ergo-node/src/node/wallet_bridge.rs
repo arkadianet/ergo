@@ -781,14 +781,17 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         // activation and then syncs past it MUST observe the new tip, or the
         // native `reserved`/`eip27Active` (candidate height `tip+1`) would stay
         // wrong forever (codex P0). Same `chain_state_meta` source the block
-        // validator's candidate height uses; degrades to 0 only if the chain is
-        // unstarted/unreadable.
-        self.reader
-            .committed_tip()
-            .ok()
-            .flatten()
-            .map(|(h, _)| h)
-            .unwrap_or(0)
+        // validator's candidate height uses. `Ok(None)` = chain unstarted → 0; a
+        // read FAILURE is surfaced in the log (not silently downgraded to 0, which
+        // would mask an operational fault as "below activation").
+        match self.reader.committed_tip() {
+            Ok(Some((h, _))) => h,
+            Ok(None) => 0,
+            Err(e) => {
+                tracing::warn!(error = %e, "wallet chain accessor: committed_tip read failed; reporting tip=0");
+                0
+            }
+        }
     }
 
     fn is_pruned(&self) -> bool {

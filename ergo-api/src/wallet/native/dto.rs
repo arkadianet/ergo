@@ -44,9 +44,12 @@ pub struct NanoErgBreakdownDto {
 pub struct ReemissionInfoDto {
     /// 32-byte re-emission token id, hex.
     pub token_id: String,
-    /// Re-emission tokens held across reward boxes; `== reserved` 1:1 (1 nanoErg/token).
+    /// Re-emission tokens held across the wallet's confirmed boxes; `== reserved`
+    /// 1:1 (1 nanoErg/token).
     pub reserved_token_amount: String,
-    /// Number of reward boxes carrying the re-emission token.
+    /// Number of confirmed wallet boxes carrying the re-emission token. This is the
+    /// shared obligation's box count — it counts every token-carrying input once the
+    /// rule is triggered, not only the floor reward boxes that trigger it.
     pub reserved_box_count: u32,
     /// `reserved > confirmed` — the pathological case where the holdback exceeds
     /// mature ERG (then `available == 0`).
@@ -135,7 +138,9 @@ pub struct WalletStatusDto {
     pub scan_height: u32,
     /// Chain frontier height (so a client can compute the sync gap).
     pub tip_height: u32,
-    /// Current change address, or `null` when locked/unset (never `""`).
+    /// Current change address, or `null` when unset (never `""`). Surfaced even
+    /// while locked — it is read from the persisted change-address state, not the
+    /// in-memory key.
     pub change_address: Option<String>,
     /// The network this wallet is on.
     pub network: NetworkDto,
@@ -158,8 +163,10 @@ pub struct WalletAddressDto {
     pub address: String,
     /// BIP32 derivation path, e.g. `m/44'/429'/0'/0/0`.
     pub derivation_path: String,
-    /// Monotonic tracked-pubkey index (insertion / derivation order).
-    pub index: u32,
+    /// Monotonic tracked-pubkey index (insertion / derivation order). `u64` to
+    /// match the storage `TrackedAddressMeta.path_idx` exactly — narrowing to
+    /// `u32` would silently alias distinct addresses past `u32::MAX`.
+    pub index: u64,
     /// Operator label, or `null` when unset.
     pub label: Option<String>,
     /// Height at which this pubkey was first tracked.

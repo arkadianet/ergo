@@ -822,21 +822,46 @@ pub(crate) async fn native_status(
                 .scan_height()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
                 .unwrap_or(0);
-            let scan_invalidated = read_txn
+            // A never-written table (`TableDoesNotExist`) is the legitimate default
+            // (false / unset); any OTHER storage fault is surfaced as `internal`
+            // rather than silently reported as a healthy wallet.
+            let scan_invalidated = match read_txn
                 .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
-                .ok()
-                .and_then(|t| t.get(()).ok().flatten().map(|g| g.value()))
-                .unwrap_or(false);
+            {
+                Ok(t) => t
+                    .get(())
+                    .map_err(|e| WalletAdminError::Internal(format!("scan_invalidated read: {e}")))?
+                    .map(|g| g.value())
+                    .unwrap_or(false),
+                Err(redb::TableError::TableDoesNotExist(_)) => false,
+                Err(e) => {
+                    return Err(WalletAdminError::Internal(format!(
+                        "scan_invalidated table: {e}"
+                    )))
+                }
+            };
             // changeAddress is persisted PUBLIC metadata — surfaced regardless of
             // lock state (codex: it must not disappear when locked); `null` only
             // when unset. Read the stored pubkey + render to the network address.
-            let change_address = read_txn
+            let change_address = match read_txn
                 .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
-                .ok()
-                .and_then(|t| t.get(()).ok().flatten().map(|g| g.value()))
-                .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, ctx.cfg.network))
-                .transpose()
-                .map_err(|e| WalletAdminError::Internal(format!("change address encode: {e}")))?;
+            {
+                Ok(t) => t
+                    .get(())
+                    .map_err(|e| WalletAdminError::Internal(format!("change_address read: {e}")))?
+                    .map(|g| g.value())
+                    .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, ctx.cfg.network))
+                    .transpose()
+                    .map_err(|e| {
+                        WalletAdminError::Internal(format!("change address encode: {e}"))
+                    })?,
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => {
+                    return Err(WalletAdminError::Internal(format!(
+                        "change_address table: {e}"
+                    )))
+                }
+            };
             let tip_height = ctx.chain.tip_height();
             let eip27_active = match &ctx.cfg.reemission {
                 Some(rules) => tip_height.saturating_add(1) > rules.activation_height,
@@ -910,7 +935,9 @@ pub(crate) async fn native_addresses(
                     Ok(WalletAddressDto {
                         address,
                         derivation_path: super::super::render_derivation_path(&m.derivation_path),
-                        index: u32::try_from(m.path_idx).unwrap_or(u32::MAX),
+                        // `index` is `u64` (matches `path_idx`) — no narrowing, so
+                        // distinct addresses never alias past `u32::MAX`.
+                        index: m.path_idx,
                         label: (!m.label.is_empty()).then_some(m.label),
                         added_at_height: m.added_at_height,
                     })
