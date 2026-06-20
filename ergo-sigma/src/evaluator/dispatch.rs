@@ -208,9 +208,35 @@ fn check_extension_key_domain(ctx: &ReductionContext<'_>) -> Result<(), EvalErro
 pub(crate) fn pre_reduction_checks(
     ctx: &ReductionContext<'_>,
     constants: &[(SigmaType, SigmaValue)],
+    body: &Expr,
 ) -> Result<(), EvalError> {
     validate_group_element_constants(constants)?;
     check_extension_key_domain(ctx)?;
+    check_v3_only_methods(ctx, body)?;
+    Ok(())
+}
+
+/// Reject a v6/EIP-50 method ([`ergo_ser::opcode::is_v3_only_method`]) used in a
+/// real pre-v3 (tree-header version < 3) ErgoTree. Scala's `deserializeErgoTree`
+/// resolves the method table against the TREE-HEADER version and throws a
+/// `ValidationException` for a v3-only method id in a v0/v1/v2 tree — eagerly,
+/// over the whole AST, so even a dead `If`-branch method rejects (vector
+/// `Global.none_pre_v3_dead_branch`). The wire parser stays version-independent
+/// (headerless register / context payloads parse with a v0 sentinel and gate v6
+/// methods at evaluation time via [`EvalError::SoftForkNotActivated`]); this
+/// gate runs once at the shared depth-0 reduction entry — covering the spend
+/// path — and keys on the tree-header version ([`ReductionContext::is_v3_ergo_tree`]),
+/// NOT the activated soft-fork version.
+fn check_v3_only_methods(ctx: &ReductionContext<'_>, body: &Expr) -> Result<(), EvalError> {
+    if !ctx.is_v3_ergo_tree() {
+        if let Some((type_id, method_id)) = ergo_ser::opcode::find_v3_only_method(body) {
+            return Err(EvalError::PreV3V6Method {
+                type_id,
+                method_id,
+                tree_version: ctx.ergo_tree_version,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -391,7 +417,7 @@ pub(in crate::evaluator) fn eval_expr(
         // The verifier ALSO runs these before its trivial-reduction fast path
         // (which bypasses this function); re-running here is cheap and keeps the
         // non-verifier entries covered.
-        pre_reduction_checks(ctx, constants)?;
+        pre_reduction_checks(ctx, constants, expr)?;
     }
     if *depth == 0 && !constants.is_empty() && expr_has_deserialize(expr) {
         let inlined = inline_placeholders(expr, constants);

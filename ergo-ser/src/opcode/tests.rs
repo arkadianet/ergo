@@ -1363,3 +1363,76 @@ fn propertycall_global_none_v6_truncated_type_byte_fails_parse() {
         "v3 none missing its explicit type byte must fail to parse",
     );
 }
+
+// ----- v3-only method gate (is_v3_only_method / find_v3_only_method) -----
+
+#[test]
+fn is_v3_only_method_table_spot_checks() {
+    // v6-only — a pre-v3 tree carrying these rejects at deserialize
+    // (methodById -> _v5MethodsMap misses the id).
+    assert!(is_v3_only_method(106, 10)); // SGlobal.none
+    assert!(is_v3_only_method(106, 3)); // SGlobal.serialize
+    assert!(is_v3_only_method(99, 19)); // SBox.getReg[T]
+    assert!(is_v3_only_method(101, 12)); // SContext.getVarFromInput
+    assert!(is_v3_only_method(9, 1)); // SUnsignedBigInt (v3-only type)
+    assert!(is_v3_only_method(3, 1)); // SInt numeric on the concrete type id
+    assert!(is_v3_only_method(104, 16)); // SHeader.checkPow
+                                         // pre-v3-legal — must NOT be flagged.
+    assert!(!is_v3_only_method(106, 1)); // SGlobal.groupGenerator
+    assert!(!is_v3_only_method(106, 2)); // SGlobal.xor
+    assert!(!is_v3_only_method(99, 7)); // SBox.getRegV5
+    assert!(!is_v3_only_method(101, 11)); // SContext.getVar
+    assert!(!is_v3_only_method(104, 1)); // SHeader.version (pre-v3 accessor)
+    assert!(!is_v3_only_method(100, 1)); // SAvlTree.digest
+    assert!(!is_v3_only_method(12, 26)); // SCollection.indexOf (pre-v3)
+}
+
+#[test]
+fn find_v3_only_method_walks_dead_branch_and_skips_clean_tree() {
+    let global = || {
+        Expr::Op(IrNode {
+            opcode: 0xDD,
+            payload: Payload::Zero,
+        })
+    };
+    let property_call = |method_id| {
+        Expr::Op(IrNode {
+            opcode: 0xDB,
+            payload: Payload::MethodCall {
+                type_id: 106,
+                method_id,
+                obj: Box::new(global()),
+                args: vec![],
+                type_args: vec![],
+            },
+        })
+    };
+    let tru = || {
+        Expr::Op(IrNode {
+            opcode: 0x7F,
+            payload: Payload::Zero,
+        })
+    };
+    // `if (true) true else Global.none` — the v6-only method is in the DEAD
+    // else-branch, yet the walk finds it (Scala deserializes the whole AST).
+    let if_dead = Expr::Op(IrNode {
+        opcode: 0x95,
+        payload: Payload::Three(
+            Box::new(tru()),
+            Box::new(tru()),
+            Box::new(property_call(10)), // SGlobal.none
+        ),
+    });
+    assert_eq!(find_v3_only_method(&if_dead), Some((106, 10)));
+
+    // A clean tree (groupGenerator is pre-v3-legal) returns None.
+    let clean = Expr::Op(IrNode {
+        opcode: 0x95,
+        payload: Payload::Three(
+            Box::new(tru()),
+            Box::new(tru()),
+            Box::new(property_call(1)), // SGlobal.groupGenerator
+        ),
+    });
+    assert_eq!(find_v3_only_method(&clean), None);
+}

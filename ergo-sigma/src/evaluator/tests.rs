@@ -1952,16 +1952,55 @@ fn methodcall_box_getreg_v6_non_int_index_errors() {
 #[test]
 fn methodcall_box_getreg_v6_rejected_in_pre_v3_tree() {
     // Method id 19 exists only in SBoxMethods.v6Methods, selected on
-    // isV3OrLaterErgoTreeVersion — the TREE version. A v2 tree with a
-    // live (99, 19) call errors even when activated >= 3 (vector:
-    // Box.getReg_adversarial getReg-v6-method-in-v2-tree-reject#2).
+    // isV3OrLaterErgoTreeVersion — the TREE version. A v2 tree carrying a
+    // (99, 19) call is rejected by the depth-0 `check_v3_only_methods` gate
+    // (Scala `methodById` -> `_v5MethodsMap` has no id 19 -> ValidationException
+    // at deserialize), before the call is reached — even when activated >= 3
+    // (vector: Box.getReg_adversarial getReg-v6-method-in-v2-tree-reject#2).
     let b = make_test_box();
     let ctx = ReductionContext {
         ergo_tree_version: 2,
         ..ctx_with_self_box(&b)
     };
     let err = run_eval_ctx_err(&getreg_v6_int_index(4), &ctx);
-    assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
+    assert!(
+        matches!(err, EvalError::PreV3V6Method { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn v6_method_in_dead_branch_rejected_pre_v3_tree() {
+    // The depth-0 `check_v3_only_methods` gate walks the WHOLE parsed body, so a
+    // v6-only method in a DEAD `If` branch is rejected on a pre-v3 tree exactly
+    // as Scala's eager deserialize does — even though lazy `If` evaluation never
+    // reaches it (santa vector: Global.none_pre_v3_dead_branch). On a v3 tree the
+    // gate is skipped and the lazy `If` returns the live branch.
+    let b = make_test_box();
+    // if (true) true else <(99,19) getReg — a v6-only method>
+    let expr = op(
+        0x95,
+        Payload::Three(
+            Box::new(op(0x7F, Payload::Zero)), // True (condition)
+            Box::new(op(0x7F, Payload::Zero)), // True (live then-branch)
+            Box::new(getreg_v6_int_index(4)),  // dead else-branch
+        ),
+    );
+    let ctx_v2 = ReductionContext {
+        ergo_tree_version: 2,
+        ..ctx_with_self_box(&b)
+    };
+    let err = run_eval_ctx_err(&expr, &ctx_v2);
+    assert!(
+        matches!(err, EvalError::PreV3V6Method { .. }),
+        "got {err:?}"
+    );
+
+    let ctx_v3 = ReductionContext {
+        ergo_tree_version: 3,
+        ..ctx_with_self_box(&b)
+    };
+    assert_eq!(run_eval_ctx(&expr, &ctx_v3), Value::Bool(true));
 }
 
 #[test]
@@ -3228,12 +3267,16 @@ fn deserializeto_sheader_gated_on_ergo_tree_version() {
         ergo_tree_version: 2,
         ..ReductionContext::minimal(0, 0)
     };
+    // deserializeTo (106, 4) is v6-only on SGlobal (pre-v3 SGlobal = {1,2}),
+    // so a v<3 main-body tree carrying it is rejected at the depth-0
+    // `check_v3_only_methods` gate (Scala: method-resolution ValidationException
+    // at deserialize) regardless of the activated version.
     assert!(
         matches!(
             eval_to_value(&expr, &ctx, &[]),
-            Err(EvalError::TypeError { .. })
+            Err(EvalError::PreV3V6Method { .. })
         ),
-        "deserializeTo[SHeader] on a v<3 ErgoTree must error (isV3OrLaterErgoTreeVersion)"
+        "deserializeTo[SHeader] on a v<3 ErgoTree must reject (v6-only method)"
     );
 }
 
@@ -11452,12 +11495,13 @@ fn serialize_call_expr(arg: Expr) -> Expr {
 
 #[test]
 fn serialize_header_rejected_pre_v3_ergo_tree() {
-    // Scala DataSerializer.serialize(SHeader) is gated on
-    // isV3OrLaterErgoTreeVersion. The v6 method gate only checks
-    // activatedScriptVersion, so a tree with ergo_tree_version < 3 (spent
-    // post-activation) must still reject serializing a Header. Use a
-    // RUNTIME header (CONTEXT.headers(0)) so this exercises the (106,3) gate,
-    // not the const-decoder gate.
+    // SGlobal.serialize (106, 3) is v6-only (pre-v3 SGlobal = {1, 2}), so a
+    // v<3 main-body tree carrying it is rejected at the depth-0
+    // `check_v3_only_methods` gate (Scala: `methodById` -> `_v5MethodsMap`
+    // misses id 3 -> ValidationException at deserialize) — even when activated
+    // >= 3. The separate VALUE-based SHeader gate (materializing an SHeader on a
+    // v<3 tree, reachable via registers/context without any v6 method) is
+    // covered by `sheader_gate_is_value_based_not_type_based`.
     let headers = vec![test_eval_header_v2()];
     let mut cx = ReductionContext::minimal(500_000, 0);
     cx.activated_script_version = 3; // method gate satisfied
@@ -11467,7 +11511,7 @@ fn serialize_header_rejected_pre_v3_ergo_tree() {
     assert!(
         matches!(
             eval_to_value(&expr, &cx, &[]),
-            Err(EvalError::TypeError { .. })
+            Err(EvalError::PreV3V6Method { .. })
         ),
         "serialize(runtime Header) must reject at ergo_tree_version < 3",
     );
@@ -11545,11 +11589,15 @@ fn serialize_coll_header_native_carrier() {
 
 #[test]
 fn serialize_coll_header_v3_gate() {
-    // Non-empty Coll[Header] is rejected on a pre-v3 ErgoTree (per
-    // materialized header); an EMPTY Coll[Header] is accepted (no header
-    // materialized) — matching the value-based contains_header gate. Uses the
-    // RUNTIME CONTEXT.headers carrier (Value::CollHeader), which bypasses the
-    // const-decoder gate, so this proves the (106,3) serialize gate.
+    // A pre-v3 main-body `Global.serialize(...)` is rejected at the depth-0
+    // `check_v3_only_methods` gate because SGlobal.serialize (106, 3) is v6-only
+    // (pre-v3 SGlobal = {1, 2}) — Scala rejects at method resolution
+    // (deserialize), BEFORE any argument is evaluated. So the rejection is
+    // structural and does NOT depend on the header collection being empty: the
+    // value-based "empty Coll[Header] accepts" case is unreachable through a
+    // real pre-v3 serialize tree (the method itself never resolves). The
+    // value-based SHeader gate is covered by
+    // `sheader_gate_is_value_based_not_type_based`.
     let expr = serialize_call_expr(op(
         0xDB,
         Payload::MethodCall {
@@ -11560,32 +11608,22 @@ fn serialize_coll_header_v3_gate() {
             type_args: vec![],
         },
     ));
-    // Non-empty headers, pre-v3 ErgoTree -> reject.
-    let headers = vec![test_eval_header_v2()];
-    let mut cx = ReductionContext::minimal(500_000, 0);
-    cx.activated_script_version = 3;
-    cx.ergo_tree_version = 2;
-    cx.last_headers = &headers;
-    assert!(
-        matches!(
-            eval_to_value(&expr, &cx, &[]),
-            Err(EvalError::TypeError { .. })
-        ),
-        "non-empty Coll[Header] serialize must reject at ergo_tree_version < 3",
-    );
-    // Empty headers, pre-v3 -> accepted (no materialized header).
-    let empty: Vec<EvalHeader> = vec![];
-    let mut cx_empty = ReductionContext::minimal(500_000, 0);
-    cx_empty.activated_script_version = 3;
-    cx_empty.ergo_tree_version = 2;
-    cx_empty.last_headers = &empty;
-    assert!(
-        matches!(
-            eval_to_value(&expr, &cx_empty, &[]),
-            Ok(Value::CollBytes(_))
-        ),
-        "empty Coll[Header] serialize is accepted even pre-v3",
-    );
+    for (label, headers) in [
+        ("non-empty", vec![test_eval_header_v2()]),
+        ("empty", vec![]),
+    ] {
+        let mut cx = ReductionContext::minimal(500_000, 0);
+        cx.activated_script_version = 3;
+        cx.ergo_tree_version = 2;
+        cx.last_headers = &headers;
+        assert!(
+            matches!(
+                eval_to_value(&expr, &cx, &[]),
+                Err(EvalError::PreV3V6Method { .. })
+            ),
+            "{label} Coll[Header] serialize must reject (v6-only method) at ergo_tree_version < 3",
+        );
+    }
 }
 
 #[test]

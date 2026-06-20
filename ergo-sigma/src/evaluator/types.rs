@@ -634,6 +634,21 @@ pub enum EvalError {
         required: u8,
         got: u8,
     },
+    /// A v6/EIP-50 method (`ergo_ser::opcode::is_v3_only_method`) appears in a
+    /// real pre-v3 (tree-header version < 3) ErgoTree. Scala's
+    /// `deserializeErgoTree` resolves the method table against the TREE-HEADER
+    /// version and throws a `ValidationException` for a v3-only method id in a
+    /// v0/v1/v2 tree — eagerly over the whole AST, so even a dead `If`-branch
+    /// method rejects. Distinct from [`SoftForkNotActivated`], which gates on
+    /// the *activated* script version, not the tree-header version.
+    #[error(
+        "method ({type_id}, {method_id}) requires ErgoTree version >= 3, got tree version {tree_version}"
+    )]
+    PreV3V6Method {
+        type_id: u8,
+        method_id: u8,
+        tree_version: u8,
+    },
 }
 
 // `?` propagation for the cost API. Both impls preserve the typed

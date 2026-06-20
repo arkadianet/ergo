@@ -20,5 +20,5 @@ mod write;
 mod tests;
 
 pub use parse::{parse_body, parse_expr};
-pub use types::{opcode_name, Body, Expr, IrNode, Payload};
+pub use types::{find_v3_only_method, is_v3_only_method, opcode_name, Body, Expr, IrNode, Payload};
 pub use write::{write_body, write_expr};
