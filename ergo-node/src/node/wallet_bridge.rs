@@ -3178,13 +3178,13 @@ async fn derive_key_impl(
     let storage_guard = storage.read();
     let unlocked = storage_guard.unlocked().ok_or(WalletAdminError::Locked)?;
 
-    // Parse the requested path.
+    // Parse the requested path. A malformed path is a client error (400), not 500.
     let path: DerivationPath =
         request
             .derivation_path
             .parse()
             .map_err(|e: ergo_wallet::error::WalletError| {
-                WalletAdminError::Internal(format!("deriveKey: invalid path: {e}"))
+                WalletAdminError::BadRequest(format!("invalid derivation path: {e}"))
             })?;
 
     // Dedup: compare against every existing tracked path via tracked_pubkeys_with_paths.
@@ -3196,13 +3196,11 @@ async fn derive_key_impl(
         .tracked_pubkeys_with_paths()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-    // Path-component comparison.
+    // Path-component comparison. An already-tracked path is a 409 precondition,
+    // not a 500 — surfaced as the typed `DerivationPathExists`.
     for (_, _, existing_path) in &existing {
         if existing_path.as_slice() == path.components() {
-            return Err(WalletAdminError::Internal(format!(
-                "derivation: path already tracked: {}",
-                path
-            )));
+            return Err(WalletAdminError::DerivationPathExists);
         }
     }
 
@@ -3303,9 +3301,7 @@ async fn derive_next_key_impl(
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
     for (_, _, existing_path) in &existing {
         if existing_path.as_slice() == path.components() {
-            return Err(WalletAdminError::Internal(format!(
-                "derivation: path already tracked: {path_str}"
-            )));
+            return Err(WalletAdminError::DerivationPathExists);
         }
     }
 

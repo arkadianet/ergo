@@ -260,6 +260,188 @@ pub struct TxPage {
     pub as_of: u32,
 }
 
+// ----- lifecycle (requests/responses) -----
+
+/// `POST /api/v1/wallet/unlock` request. `pass` is body-only, never logged.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnlockRequest {
+    /// Wallet password.
+    pub pass: String,
+}
+
+/// `POST /api/v1/wallet/mnemonic/verify` request. Body-only secrets, never logged.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MnemonicVerifyRequest {
+    /// Candidate recovery phrase to compare against the persisted seed.
+    pub mnemonic: String,
+    /// BIP39 passphrase (empty if none).
+    #[serde(default)]
+    pub mnemonic_pass: String,
+}
+
+/// `POST /api/v1/wallet/mnemonic/verify` result. `matched=false` is a factual
+/// answer, not an error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MnemonicVerifyResult {
+    pub matched: bool,
+}
+
+/// `POST /api/v1/wallet/init` request. Secrets body-only, never logged.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InitRequest {
+    /// Wallet password.
+    pub pass: String,
+    /// BIP39 passphrase (empty if none).
+    #[serde(default)]
+    pub mnemonic_pass: String,
+    /// Mnemonic word count: one of 12/15/18/21/24.
+    #[serde(default = "default_strength")]
+    pub strength: u16,
+}
+
+fn default_strength() -> u16 {
+    24
+}
+
+/// `POST /api/v1/wallet/init` response — the generated mnemonic, returned ONCE
+/// (no-store; the page is the only place it should ever live).
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InitResponse {
+    pub mnemonic: String,
+}
+
+/// Key-derivation mode for `restore` (tagged). Required — no default (the
+/// legacy-default trap is deliberately removed). Manual `Deserialize` so unknown
+/// sibling fields are rejected (serde can't `deny_unknown_fields` an
+/// internally-tagged enum).
+#[derive(Clone, Debug, ToSchema)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DerivationMode {
+    /// Modern EIP-3 derivation.
+    Eip3,
+    /// Pre-1627 derivation (matches an old CLI restore).
+    LegacyPre1627,
+}
+
+impl<'de> Deserialize<'de> for DerivationMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Tagged {
+            #[serde(rename = "type")]
+            ty: String,
+        }
+        let t = Tagged::deserialize(d)?;
+        match t.ty.as_str() {
+            "eip3" => Ok(DerivationMode::Eip3),
+            "legacyPre1627" => Ok(DerivationMode::LegacyPre1627),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["eip3", "legacyPre1627"],
+            )),
+        }
+    }
+}
+
+/// `POST /api/v1/wallet/restore` request. Secrets body-only, never logged.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreRequest {
+    /// Recovery phrase.
+    pub mnemonic: String,
+    /// BIP39 passphrase (empty if none).
+    #[serde(default)]
+    pub mnemonic_pass: String,
+    /// Wallet password.
+    pub pass: String,
+    /// Required derivation mode.
+    pub derivation: DerivationMode,
+}
+
+/// `POST /api/v1/wallet/addresses` (derive) request (tagged). `next` derives the
+/// next sequential key; `path` derives at an explicit BIP32 path. Manual
+/// `Deserialize` so unknown sibling fields are rejected and each variant's fields
+/// are validated (serde can't `deny_unknown_fields` an internally-tagged enum).
+#[derive(Clone, Debug, ToSchema)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DeriveKeyRequest {
+    Next,
+    #[serde(rename_all = "camelCase")]
+    Path {
+        derivation_path: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for DeriveKeyRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Raw {
+            #[serde(rename = "type")]
+            ty: String,
+            #[serde(default)]
+            derivation_path: Option<String>,
+        }
+        let r = Raw::deserialize(d)?;
+        match r.ty.as_str() {
+            "next" => match r.derivation_path {
+                None => Ok(DeriveKeyRequest::Next),
+                Some(_) => Err(serde::de::Error::custom(
+                    "`next` does not take a derivationPath",
+                )),
+            },
+            "path" => {
+                let derivation_path = r
+                    .derivation_path
+                    .ok_or_else(|| serde::de::Error::missing_field("derivationPath"))?;
+                Ok(DeriveKeyRequest::Path { derivation_path })
+            }
+            other => Err(serde::de::Error::unknown_variant(other, &["next", "path"])),
+        }
+    }
+}
+
+/// `POST /api/v1/wallet/addresses` (derive) response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedAddress {
+    /// Encoded P2PK address for the derived key.
+    pub address: String,
+    /// BIP32 derivation path of the derived key.
+    pub derivation_path: String,
+    /// Address index — the last path component.
+    pub index: u32,
+}
+
+/// `GET /api/v1/wallet/change-address` response. `null` when unset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeAddressDto {
+    pub address: Option<String>,
+}
+
+/// `PUT /api/v1/wallet/change-address` request.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetChangeAddressRequest {
+    /// The address to use for change — must be a tracked P2PK on this network.
+    pub address: String,
+}
+
+/// `POST /api/v1/wallet/rescan` request (body optional; defaults to a full rebuild).
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RescanRequest {
+    /// Height to rescan from (0 = full rebuild).
+    #[serde(default)]
+    pub from_height: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +626,68 @@ mod tests {
         assert!(v
             .get("changeAddress")
             .is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn lifecycle_dto_shapes() {
+        // matched is a plain bool result.
+        assert_eq!(
+            serde_json::to_value(MnemonicVerifyResult { matched: true }).unwrap(),
+            serde_json::json!({ "matched": true }),
+        );
+        // UnlockRequest rejects unknown fields (deny_unknown_fields).
+        assert!(serde_json::from_str::<UnlockRequest>(r#"{"pass":"x"}"#).is_ok());
+        assert!(serde_json::from_str::<UnlockRequest>(r#"{"pass":"x","extra":1}"#).is_err());
+        // mnemonicPass defaults to "".
+        let r: MnemonicVerifyRequest = serde_json::from_str(r#"{"mnemonic":"a b c"}"#).unwrap();
+        assert_eq!(r.mnemonic_pass, "");
+    }
+
+    #[test]
+    fn init_restore_dto_shapes() {
+        // InitRequest: strength defaults to 24; unknown field rejected.
+        let r: InitRequest = serde_json::from_str(r#"{"pass":"x"}"#).unwrap();
+        assert_eq!(r.strength, 24);
+        assert!(serde_json::from_str::<InitRequest>(r#"{"pass":"x","bogus":1}"#).is_err());
+        // RestoreRequest requires `derivation` (no default — kills the legacy trap).
+        assert!(serde_json::from_str::<RestoreRequest>(r#"{"mnemonic":"a","pass":"x"}"#).is_err());
+        let rr: RestoreRequest =
+            serde_json::from_str(r#"{"mnemonic":"a","pass":"x","derivation":{"type":"eip3"}}"#)
+                .unwrap();
+        assert!(matches!(rr.derivation, DerivationMode::Eip3));
+        let rr2: RestoreRequest = serde_json::from_str(
+            r#"{"mnemonic":"a","pass":"x","derivation":{"type":"legacyPre1627"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(rr2.derivation, DerivationMode::LegacyPre1627));
+    }
+
+    #[test]
+    fn keys_dto_shapes() {
+        // DeriveKeyRequest is tagged next|path.
+        let n: DeriveKeyRequest = serde_json::from_str(r#"{"type":"next"}"#).unwrap();
+        assert!(matches!(n, DeriveKeyRequest::Next));
+        let p: DeriveKeyRequest =
+            serde_json::from_str(r#"{"type":"path","derivationPath":"m/44'/429'/0'/0/3"}"#)
+                .unwrap();
+        assert!(matches!(p, DeriveKeyRequest::Path { .. }));
+        // ChangeAddressDto serializes null (present, not omitted).
+        let v = serde_json::to_value(ChangeAddressDto { address: None }).unwrap();
+        assert!(v.get("address").is_some_and(serde_json::Value::is_null));
+        // RescanRequest defaults fromHeight=0; rejects unknown fields.
+        let r: RescanRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(r.from_height, 0);
+        assert!(serde_json::from_str::<RescanRequest>(r#"{"bogus":1}"#).is_err());
+        // Tagged request enums reject unknown sibling fields (manual Deserialize).
+        assert!(serde_json::from_str::<DeriveKeyRequest>(r#"{"type":"next","bogus":1}"#).is_err());
+        assert!(serde_json::from_str::<DerivationMode>(r#"{"type":"eip3","bogus":1}"#).is_err());
+        // `next` rejects a stray derivationPath; `path` requires it.
+        assert!(serde_json::from_str::<DeriveKeyRequest>(
+            r#"{"type":"next","derivationPath":"m/0"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DeriveKeyRequest>(r#"{"type":"path"}"#).is_err());
+        // Unknown discriminator rejected.
+        assert!(serde_json::from_str::<DerivationMode>(r#"{"type":"bogus"}"#).is_err());
     }
 }

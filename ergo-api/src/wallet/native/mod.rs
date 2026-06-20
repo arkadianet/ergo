@@ -80,6 +80,41 @@ fn validate_hex32(s: &str) -> Result<String, NativeErr> {
     }
 }
 
+/// Strict-JSON body extractor for native POST/PUT routes. Deserializes the body
+/// via serde with the DTO's `#[serde(deny_unknown_fields)]`, mapping ANY failure
+/// (malformed JSON, unknown field, type error) to the native
+/// `{reason:"bad_request", detail}` envelope — never Axum's default plain-text
+/// 400. The centralized strict extractor the design mandates for the write surface.
+pub(crate) struct StrictJson<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for StrictJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = NativeErr;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| {
+                error::native_err(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    Some(format!("could not read body: {e}")),
+                )
+            })?;
+        // An empty body is treated as `{}` so endpoints whose fields are all
+        // optional (e.g. rescan) accept a bodyless POST; required fields still error.
+        let slice: &[u8] = if bytes.is_empty() { b"{}" } else { &bytes };
+        let value = serde_json::from_slice::<T>(slice).map_err(|e| {
+            error::native_err(StatusCode::BAD_REQUEST, "bad_request", Some(e.to_string()))
+        })?;
+        Ok(StrictJson(value))
+    }
+}
+
 /// Query for `GET /api/v1/wallet/balance`. Strict: an unknown query key is a
 /// `bad_request` (deny_unknown_fields).
 #[derive(Debug, Default, serde::Deserialize)]
@@ -273,6 +308,294 @@ pub(crate) async fn transaction_by_id(
     }
 }
 
+/// A JSON response carrying `Cache-Control: no-store` — for secret-bearing
+/// responses (the SPA security-header middleware does not cover `/api/*`).
+type NoStoreJson<T> = (
+    [(axum::http::HeaderName, axum::http::HeaderValue); 1],
+    Json<T>,
+);
+
+fn no_store<T>(body: T) -> NoStoreJson<T> {
+    (
+        [(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        )],
+        Json(body),
+    )
+}
+
+/// `POST /api/v1/wallet/unlock` — load the in-memory master key.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/unlock", tag = "wallet",
+    request_body = dto::UnlockRequest,
+    responses(
+        (status = 200, description = "Unlocked"),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 401, description = "Wrong password", body = error::NativeWalletError),
+        (status = 409, description = "Wallet uninitialized", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn unlock(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::UnlockRequest>,
+) -> Result<StatusCode, NativeErr> {
+    admin.unlock(req.pass).await.map_err(error::map_err)?;
+    Ok(StatusCode::OK)
+}
+
+/// `POST /api/v1/wallet/lock` — drop the in-memory master key (idempotent).
+#[utoipa::path(
+    post, path = "/api/v1/wallet/lock", tag = "wallet",
+    responses(
+        (status = 200, description = "Locked"),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn lock(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+) -> Result<StatusCode, NativeErr> {
+    admin.lock().await.map_err(error::map_err)?;
+    Ok(StatusCode::OK)
+}
+
+/// `POST /api/v1/wallet/mnemonic/verify` — compare a candidate mnemonic against
+/// the persisted seed. `matched=false` is a factual answer, not an error.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/mnemonic/verify", tag = "wallet",
+    request_body = dto::MnemonicVerifyRequest,
+    responses(
+        (status = 200, description = "Verification result", body = dto::MnemonicVerifyResult),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 409, description = "Wallet uninitialized", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn mnemonic_verify(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::MnemonicVerifyRequest>,
+) -> Result<NoStoreJson<dto::MnemonicVerifyResult>, NativeErr> {
+    // `check` returns `false` on an uninitialized wallet; the native contract is
+    // `409 wallet_uninitialized` (a bare `matched:false` would be misleading).
+    if !admin
+        .native_status()
+        .await
+        .map_err(error::map_err)?
+        .initialized
+    {
+        return Err(error::native_err(
+            StatusCode::CONFLICT,
+            "wallet_uninitialized",
+            None,
+        ));
+    }
+    let matched = admin
+        .check(req.mnemonic, req.mnemonic_pass)
+        .await
+        .map_err(error::map_err)?;
+    Ok(no_store(dto::MnemonicVerifyResult { matched }))
+}
+
+/// `POST /api/v1/wallet/init` — create a new encrypted wallet; returns the
+/// generated mnemonic ONCE (no-store).
+#[utoipa::path(
+    post, path = "/api/v1/wallet/init", tag = "wallet",
+    request_body = dto::InitRequest,
+    responses(
+        (status = 200, description = "Wallet created; mnemonic returned once", body = dto::InitResponse),
+        (status = 400, description = "Malformed body / invalid strength", body = error::NativeWalletError),
+        (status = 409, description = "Wallet already exists", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn init(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::InitRequest>,
+) -> Result<NoStoreJson<dto::InitResponse>, NativeErr> {
+    let strength = match req.strength {
+        12 | 15 | 18 | 21 | 24 => req.strength as u8,
+        other => {
+            return Err(error::native_err(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                Some(format!(
+                    "strength must be one of 12/15/18/21/24, got {other}"
+                )),
+            ))
+        }
+    };
+    let mnemonic = admin
+        .init(req.pass, req.mnemonic_pass, strength)
+        .await
+        .map_err(error::map_err)?;
+    Ok(no_store(dto::InitResponse { mnemonic }))
+}
+
+/// `POST /api/v1/wallet/restore` — restore from a recovery phrase with an
+/// explicit derivation mode.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/restore", tag = "wallet",
+    request_body = dto::RestoreRequest,
+    responses(
+        (status = 200, description = "Wallet restored"),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 409, description = "Wallet exists / restore unsupported on a pruned node", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn restore(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::RestoreRequest>,
+) -> Result<StatusCode, NativeErr> {
+    let use_pre_1627 = matches!(req.derivation, dto::DerivationMode::LegacyPre1627);
+    admin
+        .restore(req.mnemonic, req.mnemonic_pass, req.pass, use_pre_1627)
+        .await
+        .map_err(error::map_err)?;
+    Ok(StatusCode::OK)
+}
+
+/// Address index = the last derivation-path component (e.g. `5` in
+/// `m/44'/429'/0'/0/5`; hardened markers stripped). `None` when the path has no
+/// numeric trailing component (e.g. the bare root `m/`), so callers can reject a
+/// path that can't yield a meaningful address index rather than report a
+/// misleading `0`.
+fn index_from_path(path: &str) -> Option<u32> {
+    path.rsplit('/')
+        .next()
+        .map(|s| s.trim_end_matches('\''))
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// `POST /api/v1/wallet/addresses` — derive a new key (next sequential, or at an
+/// explicit path) and register it as a tracked address. Needs unlock.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/addresses", tag = "wallet",
+    request_body = dto::DeriveKeyRequest,
+    responses(
+        (status = 200, description = "Derived address", body = dto::DerivedAddress),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 409, description = "Wallet locked", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn derive_address(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::DeriveKeyRequest>,
+) -> Result<Json<dto::DerivedAddress>, NativeErr> {
+    let derived = match req {
+        dto::DeriveKeyRequest::Next => {
+            let r = admin.derive_next_key().await.map_err(error::map_err)?;
+            // The bridge builds a canonical `m/44'/429'/0'/0/N` path, so its last
+            // component is always a numeric index; a miss here is an internal bug.
+            let index = index_from_path(&r.derivation_path).ok_or_else(|| {
+                error::native_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    Some("derived path has no address index".to_string()),
+                )
+            })?;
+            dto::DerivedAddress {
+                index,
+                address: r.address,
+                derivation_path: r.derivation_path,
+            }
+        }
+        dto::DeriveKeyRequest::Path { derivation_path } => {
+            // Reject a caller path with no meaningful trailing index BEFORE
+            // deriving (a bare `m/` would otherwise report a misleading index 0).
+            let index = index_from_path(&derivation_path).ok_or_else(|| {
+                error::native_err(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    Some("derivation path has no numeric address index".to_string()),
+                )
+            })?;
+            let r = admin
+                .derive_key(crate::wallet::admin_advanced::DeriveKeyRequest {
+                    derivation_path: derivation_path.clone(),
+                })
+                .await
+                .map_err(error::map_err)?;
+            dto::DerivedAddress {
+                index,
+                address: r.address,
+                derivation_path,
+            }
+        }
+    };
+    Ok(Json(derived))
+}
+
+/// `GET /api/v1/wallet/change-address` — current change address, or `null`.
+#[utoipa::path(
+    get, path = "/api/v1/wallet/change-address", tag = "wallet",
+    responses(
+        (status = 200, description = "Change address (or null)", body = dto::ChangeAddressDto),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn change_address_get(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+) -> Result<Json<dto::ChangeAddressDto>, NativeErr> {
+    let status = admin.native_status().await.map_err(error::map_err)?;
+    Ok(Json(dto::ChangeAddressDto {
+        address: status.change_address,
+    }))
+}
+
+/// `PUT /api/v1/wallet/change-address` — set the change address. The address
+/// must be a tracked P2PK for this network (not unlock-gated).
+#[utoipa::path(
+    put, path = "/api/v1/wallet/change-address", tag = "wallet",
+    request_body = dto::SetChangeAddressRequest,
+    responses(
+        (status = 200, description = "Change address set"),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 422, description = "Address is not a tracked P2PK", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn change_address_put(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::SetChangeAddressRequest>,
+) -> Result<StatusCode, NativeErr> {
+    admin
+        .update_change_address(req.address)
+        .await
+        .map_err(error::map_err)?;
+    Ok(StatusCode::OK)
+}
+
+/// `POST /api/v1/wallet/rescan` — trigger a wallet rescan (full rebuild when
+/// `fromHeight` is 0). `rescan_unavailable(409)` on a backend that cannot replay.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/rescan", tag = "wallet",
+    // Optional body: the strict extractor treats an empty body as `{}` (a bodyless
+    // POST does a full rebuild), so the OpenAPI contract must not mark it required.
+    request_body = Option<dto::RescanRequest>,
+    responses(
+        (status = 200, description = "Rescan started"),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 409, description = "Rescan unavailable / already in progress", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn rescan(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::RescanRequest>,
+) -> Result<StatusCode, NativeErr> {
+    admin
+        .rescan(req.from_height)
+        .await
+        .map_err(error::map_err)?;
+    Ok(StatusCode::OK)
+}
+
 /// Build the native `/api/v1/wallet/*` router. Mirrors
 /// [`crate::wallet::router_with_security`]: the whole subtree is api-key gated
 /// via `route_layer` (never `layer` — see that fn's note on the `/emission/at`
@@ -283,15 +606,29 @@ pub fn router_with_security(
     admin: Arc<dyn WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> axum::Router {
-    use axum::routing::{any, get};
+    use axum::routing::{any, get, post};
     let r = axum::Router::new()
         .route("/api/v1/wallet/status", get(status))
         .route("/api/v1/wallet/balance", get(balance))
-        .route("/api/v1/wallet/addresses", get(addresses))
+        .route(
+            "/api/v1/wallet/addresses",
+            get(addresses).post(derive_address),
+        )
+        .route(
+            "/api/v1/wallet/change-address",
+            get(change_address_get).put(change_address_put),
+        )
         .route("/api/v1/wallet/boxes", get(boxes))
         .route("/api/v1/wallet/boxes/:box_id", get(box_by_id))
         .route("/api/v1/wallet/transactions", get(transactions))
         .route("/api/v1/wallet/transactions/:tx_id", get(transaction_by_id))
+        // --- lifecycle (POST) ---
+        .route("/api/v1/wallet/init", post(init))
+        .route("/api/v1/wallet/restore", post(restore))
+        .route("/api/v1/wallet/unlock", post(unlock))
+        .route("/api/v1/wallet/lock", post(lock))
+        .route("/api/v1/wallet/mnemonic/verify", post(mnemonic_verify))
+        .route("/api/v1/wallet/rescan", post(rescan))
         .route("/api/v1/wallet", any(crate::auth::unknown_gated_subpath))
         .route(
             "/api/v1/wallet/*rest",

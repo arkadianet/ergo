@@ -568,3 +568,44 @@ async fn native_status_shows_change_address_while_locked() {
         "changeAddress must be surfaced while locked (codex P1-3)",
     );
 }
+
+/// codex P0: `init`/`restore` must refuse to overwrite an existing wallet — the
+/// guard returns `WalletExists` rather than persisting a second secret file.
+#[tokio::test]
+async fn init_twice_returns_wallet_exists() {
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
+    ));
+    let state = Arc::new(parking_lot::RwLock::new(
+        ergo_wallet::state::WalletState::empty(false),
+    ));
+    let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
+    let cfg = WriterConfig {
+        network: ergo_ser::address::NetworkPrefix::Mainnet,
+        expose_private_keys: false,
+        reemission: None,
+    };
+    let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
+    let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
+        std::sync::Arc::new(ergo_api::NoopMempoolView::new());
+    tokio::spawn(run_wallet_writer(
+        rx, storage, state, db, chain, cfg, submitter, mempool,
+    ));
+    let admin = NodeWalletAdmin::new(tx);
+
+    admin
+        .init("pw".to_string(), String::new(), 24)
+        .await
+        .unwrap();
+    let err = admin
+        .init("pw2".to_string(), String::new(), 24)
+        .await
+        .expect_err("second init must refuse an existing wallet");
+    assert!(
+        matches!(err, WalletAdminError::WalletExists),
+        "expected WalletExists, got {err:?}",
+    );
+}
