@@ -274,6 +274,28 @@ async fn native_send_signed_real_rejection_is_error() {
     }
 }
 
+/// `send.signed` with valid-hex-but-not-a-transaction bytes is a client error
+/// (`bad_request` 400), NOT a server fault (500) from the txId helper (workflow P1).
+#[tokio::test]
+async fn native_send_signed_malformed_bytes_is_bad_request() {
+    use ergo_api::wallet::native::dto::{SendTxRequest, TxRepr};
+
+    let (admin, _db, _dir) = spawn_writer(Arc::new(RejectingSubmitter {
+        reason: "should_not_reach_submit".to_string(),
+    }));
+    // `00` is valid hex (one 0x00 byte) but not a serialized Transaction.
+    let err = admin
+        .send_transaction(SendTxRequest::Signed {
+            signed_transaction: TxRepr::from_bytes(&[0x00]),
+        })
+        .await
+        .expect_err("malformed tx bytes must be rejected");
+    assert!(
+        matches!(err, WalletAdminError::BadRequest(_)),
+        "malformed signed tx must be bad_request, not internal: {err:?}"
+    );
+}
+
 /// `send.intent` requires an unlocked wallet (it builds + signs with the wallet's
 /// own secrets): locked → `wallet_locked`.
 #[tokio::test]
@@ -776,6 +798,56 @@ async fn native_select_boxes_burn_aware_dry_run() {
     assert_eq!(plan.change.assets[0].token_id, hex::encode(OTHER_TOKEN));
     assert_eq!(plan.change.assets[0].amount, "3");
     assert_eq!(plan.as_of, 200);
+
+    // P0 (codex): the re-emission token can NEVER be a selection target when a
+    // reward box is spent — it must be burned, not delivered. Even with the spend
+    // opt-in, targeting it is rejected (a payment output carrying it would make the
+    // built tx fail `verify_reemission_spending`).
+    let target_token = BoxSelectRequest {
+        target: SelectTarget {
+            nano_erg: "100000000".to_string(),
+            assets: vec![ergo_api::wallet::native::dto::WalletAssetDto {
+                token_id: hex::encode(REEMISSION_TOKEN),
+                amount: "1".to_string(),
+            }],
+        },
+        inputs: InputSource::Auto {
+            min_confirmations: 0,
+            exclude_box_ids: vec![],
+        },
+        change_address: None,
+        allow_reemission_spend: true,
+    };
+    let err = admin.select_boxes(target_token).await.unwrap_err();
+    assert!(
+        matches!(err, WalletAdminError::ReemissionSpendNotAllowed(_)),
+        "targeting the re-emission token must be rejected: {err:?}"
+    );
+
+    // P1b (codex): `boxIds` is EXACT (uses ALL listed boxes, like build) — so the
+    // dry-run cannot under-report the burn vs what build would spend. Selecting the
+    // reward box explicitly reports its 7-token burn.
+    let exact = BoxSelectRequest {
+        target: SelectTarget {
+            nano_erg: "100000000".to_string(),
+            assets: vec![],
+        },
+        inputs: InputSource::BoxIds {
+            box_ids: vec![hex::encode([0xAA; 32])], // the reward box only
+        },
+        change_address: None,
+        allow_reemission_spend: true,
+    };
+    let plan = admin.select_boxes(exact).await.unwrap();
+    assert_eq!(plan.inputs_selected.len(), 1, "exactly the listed box");
+    assert_eq!(
+        plan.reemission_burn
+            .expect("reward box burns")
+            .tokens_burned,
+        "7"
+    );
+    // change = 1e9 input − 0.1e9 target − 7 burn.
+    assert_eq!(plan.change.nano_erg, "899999993");
 }
 
 /// Native read endpoints end-to-end: status, paged boxes (sorted before

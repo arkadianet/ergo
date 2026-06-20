@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// A token amount. `amount` is a decimal string (token amounts can exceed 2^53).
+/// `deny_unknown_fields` so this stays strict when nested inside request DTOs
+/// (e.g. `OutputIntent::payment.assets`, `SelectTarget.assets`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WalletAssetDto {
     /// 32-byte token id, hex.
     pub token_id: String,
@@ -811,7 +813,10 @@ pub struct TxIntent {
     /// Permit spending a reward box carrying the re-emission token.
     #[serde(default)]
     pub allow_reemission_spend: bool,
-    /// Permit dropping (burning) a non-re-emission token surplus.
+    /// Permit dropping (burning) a non-re-emission token surplus. RESERVED: the
+    /// current builder never drops a non-re-emission token (any surplus always
+    /// becomes change), so this flag has no effect yet; it gates the deferred
+    /// `burn` output intent (which ships `unsupported_intent` until wired).
     #[serde(default)]
     pub allow_token_burn: bool,
 }
@@ -916,8 +921,10 @@ pub struct BuildTxResponse {
 /// An externally-supplied prover secret (tagged). SENSITIVE: body-only, never
 /// logged (the `Debug` impl redacts the scalar). `secret` is a 32-byte big-endian
 /// hex scalar for both members; the DH-tuple member adds its four compressed SEC1
-/// group elements. Manual `Deserialize` for strict rejection.
-#[derive(Clone, Serialize, ToSchema)]
+/// group elements. Manual `Deserialize` for strict rejection. Deliberately NOT
+/// `Serialize` — it is request-only, and deriving `Serialize` would route the raw
+/// scalar straight to JSON, defeating the `Debug` redaction.
+#[derive(Clone, ToSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ExternalSecret {
     /// Discrete-log secret.

@@ -1568,11 +1568,13 @@ async fn build_unsigned_tx(
             let id: [u8; 32] = hex::decode(hex_id)
                 .ok()
                 .and_then(|v| v.try_into().ok())
-                .ok_or_else(|| WalletAdminError::Internal(format!("bad input id: {hex_id}")))?;
+                .ok_or_else(|| WalletAdminError::BadRequest(format!("bad input id: {hex_id}")))?;
 
-            let ergo_box = chain.lookup_utxo(&id).ok_or_else(|| {
-                WalletAdminError::Internal(format!("input box {} not found in UTXO set", hex_id))
-            })?;
+            // A caller-named input absent from the UTXO set is a client error, not a
+            // server fault (it may be already spent or never existed).
+            let ergo_box = chain
+                .lookup_utxo(&id)
+                .ok_or(WalletAdminError::BoxNotFound)?;
 
             input_erg_total = input_erg_total
                 .checked_add(ergo_box.candidate.value)
@@ -1623,10 +1625,10 @@ async fn build_unsigned_tx(
             }
         }
 
-        // Verify ERG coverage.
+        // Verify ERG coverage (a shortfall is a fundable-request failure, not a 500).
         if input_erg_total < required_erg {
-            return Err(WalletAdminError::Internal(format!(
-                "override-inputs insufficient ERG: have {input_erg_total}, need {required_erg}"
+            return Err(WalletAdminError::InsufficientFunds(format!(
+                "explicit inputs hold {input_erg_total} nanoErg, need {required_erg}"
             )));
         }
 
@@ -1634,8 +1636,8 @@ async fn build_unsigned_tx(
         for (token_id, &required_amt) in &required_tokens {
             let available = input_tokens_total.get(token_id).copied().unwrap_or(0);
             if available < required_amt {
-                return Err(WalletAdminError::Internal(format!(
-                    "override-inputs insufficient token {}: have {available}, need {required_amt}",
+                return Err(WalletAdminError::InsufficientFunds(format!(
+                    "explicit inputs hold {available} of token {}, need {required_amt}",
                     hex::encode(token_id)
                 )));
             }
@@ -1652,15 +1654,14 @@ async fn build_unsigned_tx(
             }
         }
 
-        // EIP-27 burn-aware adjustment. When this net has re-emission rules and a
-        // selected input is a reward box carrying the token at the candidate
-        // height (`tip+1`, the height the validator runs this tx at), consensus
-        // requires the re-emission tokens to be BURNED (kept on no output) and 1
+        // EIP-27 burn-aware adjustment. When a selected input is a reward box
+        // carrying the re-emission token at the candidate height (`tip+1`),
+        // consensus requires the token to be BURNED (on NO output) and 1
         // nanoErg/token paid to the pay-to-reemission contract. Mirror the SHARED
-        // validator obligation so the built tx passes self-verify and the node.
-        // The burn is funded from change first, then the fee (which stays
-        // >= MIN_FEE); an explicit input set that can't fund it is a bad request.
-        let mut fee = fee;
+        // validator obligation so the built tx passes self-verify. The burn is
+        // funded from CHANGE ONLY — the requested fee is preserved (matching the
+        // auto-selection branch); the explicit path never reselects, so an input
+        // set whose change cannot cover the burn is `insufficient_funds`.
         let mut reemission_burn: Option<(Vec<u8>, u64)> = None; // (pay2r_tree_bytes, to_burn)
         if let Some(rules) = reemission_rules {
             let obl = ergo_validation::reemission_obligation_core(
@@ -1669,19 +1670,27 @@ async fn build_unsigned_tx(
                 rules.activation_height,
             );
             if obl.triggered {
-                // No output may keep the re-emission token.
+                // No output may keep the re-emission token: a requested SEND of it is
+                // rejected (it can only be burned), and the change surplus is stripped.
+                if required_tokens
+                    .get(&rules.reemission_token_id)
+                    .is_some_and(|&a| a > 0)
+                {
+                    return Err(WalletAdminError::ReemissionSpendNotAllowed(
+                        "the re-emission token cannot be sent to an output; it is burned \
+                         when a reward box is spent"
+                            .into(),
+                    ));
+                }
                 change_tokens.remove(&rules.reemission_token_id);
                 let to_burn = obl.to_burn;
-                let from_change = to_burn.min(change_erg);
-                change_erg -= from_change;
-                let from_fee = to_burn - from_change;
-                if from_fee > fee.saturating_sub(MIN_FEE) {
-                    return Err(WalletAdminError::BadRequest(format!(
-                        "selected inputs cannot fund the {to_burn} nanoErg EIP-27 \
-                         re-emission burn (change + fee slack insufficient)"
+                if to_burn > change_erg {
+                    return Err(WalletAdminError::InsufficientFunds(format!(
+                        "explicit inputs cannot fund the {to_burn} nanoErg EIP-27 \
+                         re-emission burn from change ({change_erg} available)"
                     )));
                 }
-                fee -= from_fee;
+                change_erg -= to_burn;
                 reemission_burn = Some((rules.pay_to_reemission_tree.clone(), to_burn));
             }
         }
@@ -1887,6 +1896,26 @@ async fn build_unsigned_tx(
         let (unsigned_tx, plan) = builder
             .build_with_plan(&payment_reqs)
             .map_err(map_build_error)?;
+
+        // No output may keep the re-emission token when a burn is triggered: a
+        // requested SEND of it is rejected (it can only be burned). The builder
+        // already strips it from change; this guards the payment outputs (which the
+        // self-verify gate would otherwise reject downstream).
+        if plan.to_burn > 0 {
+            if let Some(rules) = reemission_rules {
+                if payment_reqs.iter().any(|r| {
+                    r.assets
+                        .get(&rules.reemission_token_id)
+                        .is_some_and(|&a| a > 0)
+                }) {
+                    return Err(WalletAdminError::ReemissionSpendNotAllowed(
+                        "the re-emission token cannot be sent to an output; it is burned \
+                         when a reward box is spent"
+                            .into(),
+                    ));
+                }
+            }
+        }
         let bytes = serialize_unsigned_tx(&unsigned_tx)?;
 
         // Reconstruct the response plan from the builder's `SelectionPlan` + the
@@ -2029,9 +2058,93 @@ fn validate_tracked_change_address(
     Ok(())
 }
 
+/// Burn-aware plan over an EXACT input set (no sub-selection). The explicit
+/// `boxIds` path uses this so `boxes/select` and `transactions/build` agree on
+/// WHICH boxes are spent (and therefore on the burn) — selecting a subset on one
+/// and spending all on the other would let a dry-run under-report the burn. Funds
+/// the burn from change only (fee preserved); an exact set whose change cannot
+/// cover it is `insufficient_funds`. The re-emission token is stripped from change.
+fn exact_set_plan(
+    boxes: &[ergo_wallet::box_selector::BoxSummary],
+    target_erg: u64,
+    target_tokens: &BTreeMap<[u8; 32], u64>,
+    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
+    reemission_height: u32,
+) -> Result<ergo_wallet::tx_builder::SelectionPlan, WalletAdminError> {
+    let mut input_erg: u64 = 0;
+    let mut input_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    for b in boxes {
+        input_erg = input_erg
+            .checked_add(b.value)
+            .ok_or_else(|| WalletAdminError::Internal("input ERG overflow".into()))?;
+        for (&id, &amt) in &b.tokens {
+            let e = input_tokens.entry(id).or_insert(0);
+            *e = e
+                .checked_add(amt)
+                .ok_or_else(|| WalletAdminError::Internal("input token overflow".into()))?;
+        }
+    }
+    for (id, &req) in target_tokens {
+        let have = input_tokens.get(id).copied().unwrap_or(0);
+        if have < req {
+            return Err(WalletAdminError::InsufficientFunds(format!(
+                "explicit inputs hold {have} of token {}, need {req}",
+                hex::encode(id)
+            )));
+        }
+    }
+    let to_burn = match reemission {
+        Some(rules) => {
+            ergo_validation::reemission_obligation_core(
+                boxes.iter().map(|b| {
+                    (
+                        b.value,
+                        b.tokens
+                            .get(&rules.reemission_token_id)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                }),
+                reemission_height,
+                rules.activation_height,
+            )
+            .to_burn
+        }
+        None => 0,
+    };
+    let needed = target_erg
+        .checked_add(to_burn)
+        .ok_or_else(|| WalletAdminError::Internal("target + burn overflow".into()))?;
+    if input_erg < needed {
+        return Err(WalletAdminError::InsufficientFunds(format!(
+            "explicit inputs hold {input_erg} nanoErg, need {needed} (target + EIP-27 burn)"
+        )));
+    }
+    let change_erg = input_erg - needed;
+    let mut change_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    for (&id, &amt) in &input_tokens {
+        let req = target_tokens.get(&id).copied().unwrap_or(0);
+        if amt > req {
+            change_tokens.insert(id, amt - req);
+        }
+    }
+    if to_burn > 0 {
+        if let Some(rules) = reemission {
+            change_tokens.remove(&rules.reemission_token_id);
+        }
+    }
+    Ok(ergo_wallet::tx_builder::SelectionPlan {
+        selected_ids: boxes.iter().map(|b| b.box_id).collect(),
+        change_erg,
+        change_tokens,
+        to_burn,
+    })
+}
+
 /// Native `boxes/select`: a read-only, burn-aware selection dry-run over the
 /// wallet's confirmed unspent boxes — real selected inputs, the real change plan,
-/// and the exact EIP-27 burn, all from the SHARED `select_with_reemission`.
+/// and the exact EIP-27 burn. `auto` uses the SHARED `select_with_reemission`;
+/// `boxIds` uses the exact set (so it agrees with `transactions/build`).
 fn select_boxes_impl(
     req: &ergo_api::wallet::native::dto::BoxSelectRequest,
     state: &RwLock<ergo_wallet::state::WalletState>,
@@ -2061,7 +2174,12 @@ fn select_boxes_impl(
         })
         .collect();
 
-    match &req.inputs {
+    let reemission = chain.reemission_rules();
+    let reemission_height = chain.tip_height().saturating_add(1);
+
+    // Narrow to the requested input set, then plan: `auto` sub-selects greedily;
+    // `boxIds` uses the EXACT set (same as `transactions/build`).
+    let plan = match &req.inputs {
         ndto::InputSource::Auto {
             min_confirmations,
             exclude_box_ids,
@@ -2077,6 +2195,16 @@ fn select_boxes_impl(
                 excluded.insert(parse_box_id_hex(id)?);
             }
             summaries.retain(|s| !excluded.contains(&s.box_id));
+            ergo_wallet::tx_builder::select_with_reemission(
+                &ergo_wallet::box_selector::default::DefaultBoxSelector,
+                &summaries,
+                target_erg,
+                &target_tokens,
+                MIN_BOX_VALUE,
+                reemission,
+                reemission_height,
+            )
+            .map_err(map_build_error)?
         }
         ndto::InputSource::BoxIds { box_ids } => {
             let mut wanted: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
@@ -2088,33 +2216,43 @@ fn select_boxes_impl(
             if summaries.len() != wanted.len() {
                 return Err(WalletAdminError::BoxNotFound);
             }
+            exact_set_plan(
+                &summaries,
+                target_erg,
+                &target_tokens,
+                reemission,
+                reemission_height,
+            )?
         }
         ndto::InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
-    }
+    };
 
     if let Some(addr) = &req.change_address {
         validate_tracked_change_address(addr, state, network)?;
     }
 
-    let reemission = chain.reemission_rules();
-    let reemission_height = chain.tip_height().saturating_add(1);
-    let plan = ergo_wallet::tx_builder::select_with_reemission(
-        &ergo_wallet::box_selector::default::DefaultBoxSelector,
-        &summaries,
-        target_erg,
-        &target_tokens,
-        MIN_BOX_VALUE,
-        reemission,
-        reemission_height,
-    )
-    .map_err(map_build_error)?;
-
-    if plan.to_burn > 0 && !req.allow_reemission_spend {
-        return Err(WalletAdminError::ReemissionSpendNotAllowed(format!(
-            "selection includes a reward box; {} re-emission token(s) would be burned \
-             (set allowReemissionSpend to permit it)",
-            plan.to_burn
-        )));
+    if plan.to_burn > 0 {
+        if !req.allow_reemission_spend {
+            return Err(WalletAdminError::ReemissionSpendNotAllowed(format!(
+                "selection includes a reward box; {} re-emission token(s) would be burned \
+                 (set allowReemissionSpend to permit it)",
+                plan.to_burn
+            )));
+        }
+        // The re-emission token may not be a selection target: when a reward box is
+        // spent it can only be burned, never delivered to an output.
+        if let Some(rules) = reemission {
+            if target_tokens
+                .get(&rules.reemission_token_id)
+                .is_some_and(|&a| a > 0)
+            {
+                return Err(WalletAdminError::ReemissionSpendNotAllowed(
+                    "the re-emission token cannot be a selection target; it is burned \
+                     when a reward box is spent"
+                        .into(),
+                ));
+            }
+        }
     }
 
     let summary_by_id: std::collections::HashMap<[u8; 32], &ergo_wallet::box_selector::BoxSummary> =
@@ -2345,6 +2483,23 @@ async fn sign_transaction_native_impl(
     })
 }
 
+/// Map a prover/sign error to a typed native error so the sign path's advertised
+/// 422s are reachable. A missing prover secret — the locked-sign-without-covering-
+/// external-secrets case the whole "no Locked precheck on sign" design hinges on —
+/// becomes `missing_secret` (NOT `internal`/500, NEVER `wallet_locked`); an
+/// input whose script the prover's gate rejects becomes `unsupported_script`. The
+/// unsupported-script message is the one the prover emits (`prover.rs`).
+fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
+    use ergo_wallet::error::WalletError as W;
+    match e {
+        W::MissingSecret(_) => WalletAdminError::MissingSecret,
+        W::TxBuild(m) if m.contains("unsupported script family") => {
+            WalletAdminError::UnsupportedScript
+        }
+        other => WalletAdminError::Internal(format!("sign: {other}")),
+    }
+}
+
 /// Map a submit error to a native [`WalletAdminError`]. A `duplicate` reason is the
 /// caller's concern (handled as idempotent-accepted upstream); other reasons are a
 /// client-correctable rejection (`bad_request` carrying the typed reason).
@@ -2390,8 +2545,20 @@ async fn send_transaction_native_impl(
             )
             .await?
         }
-        SendTxRequest::Signed { signed_transaction } => hex::decode(signed_transaction.bytes_hex())
-            .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?,
+        SendTxRequest::Signed { signed_transaction } => {
+            let bytes = hex::decode(signed_transaction.bytes_hex())
+                .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?;
+            // Validate the caller's bytes parse as a transaction NOW, so a
+            // valid-hex-but-not-a-tx blob is a 400 (not a 500 from the txId helper,
+            // which stays strict for our own internally-signed bytes).
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            ergo_ser::transaction::read_transaction(&mut r).map_err(|e| {
+                WalletAdminError::BadRequest(format!(
+                    "signedTransaction: not a valid transaction: {e:?}"
+                ))
+            })?;
+            bytes
+        }
     };
 
     // 2. txId FIRST — so an already-known tx never trips the UTXO-dependent
@@ -2620,7 +2787,7 @@ fn sign_unsigned_tx(
 
     let signed_tx = prover
         .sign(unsigned_tx, &boxes_to_spend, &data_boxes, &state_ctx, hints)
-        .map_err(|e| WalletAdminError::Internal(format!("sign: {e}")))?;
+        .map_err(map_sign_error)?;
 
     // Pre-submit structural validation against the SAME ruleset the node's
     // consensus validator runs (size-aware min box value =
@@ -2927,12 +3094,14 @@ async fn transaction_sign_impl(
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
 ) -> Result<Vec<u8>, WalletAdminError> {
+    // The unsigned tx bytes are fully client-supplied (native sign + compat sign):
+    // a malformed value is a client error (400), not a server fault (500).
     let unsigned_tx_bytes = hex::decode(unsigned_tx_hex)
-        .map_err(|_| WalletAdminError::Internal("unsigned_tx: bad hex".into()))?;
+        .map_err(|_| WalletAdminError::BadRequest("unsigned_tx: bad hex".into()))?;
     let unsigned_tx = {
         let mut r = ergo_primitives::reader::VlqReader::new(&unsigned_tx_bytes);
         ergo_ser::transaction::read_unsigned_transaction(&mut r)
-            .map_err(|e| WalletAdminError::Internal(format!("unsigned_tx decode: {e:?}")))?
+            .map_err(|e| WalletAdminError::BadRequest(format!("unsigned_tx decode: {e:?}")))?
     };
 
     let externals: Vec<ergo_wallet::proving::external::ProverExternalSecret> = external_secret_dtos
@@ -4527,5 +4696,58 @@ mod burn_aware_builder_tests {
             paid, 12_000_000_000,
             "must pay exactly to_burn nanoErg to pay-to-reemission",
         );
+
+        // (c) codex P1: the explicit branch funds the burn from CHANGE ONLY — the
+        // requested fee is preserved (NOT shaved), matching the auto branch.
+        let fee_tree_bytes = ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES;
+        let fee_paid: u64 = utx
+            .output_candidates
+            .iter()
+            .filter(|o| o.ergo_tree_bytes() == fee_tree_bytes)
+            .map(|o| o.value)
+            .sum();
+        assert_eq!(
+            fee_paid, MIN_FEE,
+            "the miner fee must be preserved (burn funded from change, not fee)",
+        );
+    }
+
+    /// The sign-path error mapper makes the advertised 422s reachable: a missing
+    /// prover secret → `missing_secret` (NOT internal/500 — the locked-sign-with-
+    /// externals contract); an unsupported input script → `unsupported_script`;
+    /// anything else stays internal.
+    #[test]
+    fn map_sign_error_surfaces_typed_422s() {
+        use ergo_wallet::error::WalletError as W;
+        assert!(matches!(
+            super::map_sign_error(W::MissingSecret("no secret for input 0".into())),
+            WalletAdminError::MissingSecret
+        ));
+        assert!(matches!(
+            super::map_sign_error(W::TxBuild(
+                "input 0 has an unsupported script family; only P2PK/DHT".into()
+            )),
+            WalletAdminError::UnsupportedScript
+        ));
+        assert!(matches!(
+            super::map_sign_error(W::TxBuild("reduce: boom".into())),
+            WalletAdminError::Internal(_)
+        ));
+    }
+
+    /// A `duplicate` submit reason is handled as idempotent-accept upstream; any
+    /// other submit reason maps to a client `bad_request` carrying the typed reason.
+    #[test]
+    fn map_submit_error_carries_reason() {
+        let e = super::map_submit_error(ergo_api::types::SubmitError {
+            reason: "too_big".into(),
+            detail: Some("size 1234 > max".into()),
+        });
+        match e {
+            WalletAdminError::BadRequest(m) => {
+                assert!(m.contains("too_big") && m.contains("size 1234"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 }
