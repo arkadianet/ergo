@@ -665,8 +665,9 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RescanRequest'
-        required: true
+              oneOf:
+              - type: 'null'
+              - $ref: '#/components/schemas/RescanRequest'
       responses:
         '200':
           description: Rescan started

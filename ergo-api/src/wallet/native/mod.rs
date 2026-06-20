@@ -575,7 +575,9 @@ pub(crate) async fn change_address_put(
 /// `fromHeight` is 0). `rescan_unavailable(409)` on a backend that cannot replay.
 #[utoipa::path(
     post, path = "/api/v1/wallet/rescan", tag = "wallet",
-    request_body = dto::RescanRequest,
+    // Optional body: the strict extractor treats an empty body as `{}` (a bodyless
+    // POST does a full rebuild), so the OpenAPI contract must not mark it required.
+    request_body = Option<dto::RescanRequest>,
     responses(
         (status = 200, description = "Rescan started"),
         (status = 400, description = "Malformed body", body = error::NativeWalletError),
