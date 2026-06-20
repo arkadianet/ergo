@@ -171,6 +171,9 @@ pub(crate) async fn rescan(
         )));
         return;
     }
+    // Record the start height so native `/wallet/status` can surface
+    // `rescan: {type:"running", fromHeight}` while this rebuild is in flight.
+    crate::wallet_boot::RESCAN_FROM_HEIGHT.store(start_h, Ordering::SeqCst);
     // Snapshot trees + pubkeys AFTER arming the flag so a concurrent live apply
     // (which returns empty during rescan) can't clobber the rebuild.
     let (trees, pks) = {
@@ -445,6 +448,166 @@ pub(crate) async fn balances_with_unconfirmed(
     let _ = reply.send(result);
 }
 
+/// `GET /api/v1/wallet/balance` — the native EIP-27-aware breakdown.
+///
+/// All figures come from ONE wallet read txn (`height` = its scan height). The
+/// re-emission `reserved` holdback is the shared consensus helper
+/// [`ergo_validation::reemission_obligation_core`] applied to the wallet's whole
+/// confirmed box set at the CANDIDATE height `tip+1` (the height a spend is
+/// validated at), so the wallet never over-reports spendable ERG relative to
+/// what the validator would force a spend to burn. `reserved` is never clamped:
+/// when it exceeds `confirmed`, `available` floors at 0 and
+/// `reservedExceedsConfirmed` flags it.
+pub(crate) async fn native_balance(
+    ctx: &WriterContext<'_>,
+    include_unconfirmed: bool,
+    reply: oneshot::Sender<
+        Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError>,
+    >,
+) {
+    use ergo_api::wallet::native::dto::{
+        NanoErgBreakdownDto, ReemissionInfoDto, ScopeDto, UnconfirmedDeltaDto, WalletAssetDto,
+        WalletBalanceDto,
+    };
+    use ergo_primitives::digest::Digest32;
+
+    // Uninitialized wallet → 409 (distinct from an empty-but-initialized wallet's
+    // zero balance), per the design.
+    if matches!(
+        ctx.storage.read().lock_state(),
+        ergo_wallet::storage::LockState::Uninitialized
+    ) {
+        let _ = reply.send(Err(WalletAdminError::Uninitialized));
+        return;
+    }
+
+    let result: Result<WalletBalanceDto, WalletAdminError> =
+        (|| -> Result<WalletBalanceDto, WalletAdminError> {
+            let read_txn = ctx
+                .db
+                .begin_read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+
+            // asOf from the SAME txn (snapshot consistency — NOT chain.wallet_scan_height()).
+            let height = reader
+                .scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .unwrap_or(0);
+
+            let bal = reader
+                .balance()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let confirmed = bal.confirmed_nano_ergs;
+            let immature = bal.immature_nano_ergs;
+
+            // Confirmed (unspent) boxes — fetched once, reused for the EIP-27
+            // reserve and the outgoing leg of the unconfirmed overlay.
+            let need_boxes = ctx.cfg.reemission.is_some() || include_unconfirmed;
+            let confirmed_boxes = if need_boxes {
+                reader
+                    .unspent_boxes()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            } else {
+                Vec::new()
+            };
+
+            // EIP-27 reserve via the shared obligation core at candidate height
+            // `tip+1`. The `reemission` block is present whenever EIP-27 is active
+            // on this net at the next-spend height (cfg.reemission Some AND
+            // tip+1 > activation), even if this wallet holds no reward boxes.
+            let reemission_token_id = ctx.cfg.reemission.as_ref().map(|r| r.reemission_token_id);
+            let mut reserved: u64 = 0;
+            let mut reemission: Option<ReemissionInfoDto> = None;
+            if let Some(rules) = ctx.cfg.reemission.as_ref() {
+                let candidate_height = ctx.chain.tip_height().saturating_add(1);
+                if candidate_height > rules.activation_height {
+                    let token_id = rules.reemission_token_id;
+                    let obl = ergo_validation::reemission_obligation_core(
+                        confirmed_boxes.iter().map(|wb| {
+                            let tok = wb
+                                .assets
+                                .iter()
+                                .filter(|(id, _)| *id == token_id)
+                                .map(|(_, amt)| *amt)
+                                .fold(0u64, u64::saturating_add);
+                            (wb.value, tok)
+                        }),
+                        candidate_height,
+                        rules.activation_height,
+                    );
+                    reserved = obl.to_burn;
+                    reemission = Some(ReemissionInfoDto {
+                        token_id: hex::encode(token_id),
+                        reserved_token_amount: obl.to_burn.to_string(),
+                        reserved_box_count: u32::try_from(obl.box_count).unwrap_or(u32::MAX),
+                        reserved_exceeds_confirmed: obl.to_burn > confirmed,
+                    });
+                }
+            }
+            let available = confirmed.saturating_sub(reserved);
+
+            // Confirmed token balances, omitting the re-emission token (accounted
+            // for solely by `reserved`/`reemission`).
+            let assets = bal
+                .tokens
+                .iter()
+                .filter(|(id, _)| reemission_token_id.is_none_or(|rt| **id != rt))
+                .map(|(id, amt)| WalletAssetDto {
+                    token_id: hex::encode(id),
+                    amount: amt.to_string(),
+                })
+                .collect();
+
+            // Labeled single-hop mempool delta (only when requested); NEVER folded
+            // into confirmed/available. Incoming = pool outputs to tracked trees;
+            // outgoing = confirmed wallet boxes a pool tx already spends.
+            let unconfirmed = if include_unconfirmed {
+                let mut outgoing: u128 = 0;
+                for wb in &confirmed_boxes {
+                    if ctx
+                        .mempool
+                        .is_spent_by_pool(&Digest32::from_bytes(wb.box_id))
+                    {
+                        outgoing = outgoing.saturating_add(wb.value as u128);
+                    }
+                }
+                let mut incoming: u128 = 0;
+                {
+                    let state = ctx.state.read();
+                    for out in ctx.mempool.pool_outputs().values() {
+                        if state.is_tracked_tree(out.candidate.ergo_tree_bytes()) {
+                            incoming = incoming.saturating_add(out.candidate.value as u128);
+                        }
+                    }
+                }
+                let net = incoming as i128 - outgoing as i128;
+                Some(UnconfirmedDeltaDto {
+                    scope: ScopeDto::SingleHop,
+                    incoming_nano_erg: incoming.to_string(),
+                    outgoing_nano_erg: outgoing.to_string(),
+                    net_nano_erg: net.to_string(),
+                })
+            } else {
+                None
+            };
+
+            Ok(WalletBalanceDto {
+                height,
+                nano_erg: NanoErgBreakdownDto {
+                    confirmed: confirmed.to_string(),
+                    available: available.to_string(),
+                    reserved: reserved.to_string(),
+                    immature: immature.to_string(),
+                },
+                assets,
+                reemission,
+                unconfirmed,
+            })
+        })();
+    let _ = reply.send(result);
+}
+
 /// One side of the unconfirmed overlay: a box's value + tokens to add or
 /// subtract from the confirmed balance.
 struct UnconfirmedDelta {
@@ -630,6 +793,375 @@ pub(crate) async fn transactions_by_scan_id(
             }
         };
     let _ = reply.send(result);
+}
+
+// ----- native (/api/v1/wallet) reads -----
+
+/// `GET /api/v1/wallet/status`.
+pub(crate) async fn native_status(
+    ctx: &WriterContext<'_>,
+    reply: oneshot::Sender<
+        Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError>,
+    >,
+) {
+    use ergo_api::wallet::native::dto::{NetworkDto, RescanStateDto, WalletStatusDto};
+    let result: Result<WalletStatusDto, WalletAdminError> =
+        (|| -> Result<WalletStatusDto, WalletAdminError> {
+            let initialized = !matches!(
+                ctx.storage.read().lock_state(),
+                ergo_wallet::storage::LockState::Uninitialized
+            );
+            let locked = !ctx.state.read().is_unlocked();
+            // Scan height + scan-invalidated + change address from ONE read txn.
+            let read_txn = ctx
+                .db
+                .begin_read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+            let scan_height = reader
+                .scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .unwrap_or(0);
+            // A never-written table (`TableDoesNotExist`) is the legitimate default
+            // (false / unset); any OTHER storage fault is surfaced as `internal`
+            // rather than silently reported as a healthy wallet.
+            let scan_invalidated = match read_txn
+                .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+            {
+                Ok(t) => t
+                    .get(())
+                    .map_err(|e| WalletAdminError::Internal(format!("scan_invalidated read: {e}")))?
+                    .map(|g| g.value())
+                    .unwrap_or(false),
+                Err(redb::TableError::TableDoesNotExist(_)) => false,
+                Err(e) => {
+                    return Err(WalletAdminError::Internal(format!(
+                        "scan_invalidated table: {e}"
+                    )))
+                }
+            };
+            // changeAddress is persisted PUBLIC metadata — surfaced regardless of
+            // lock state (codex: it must not disappear when locked); `null` only
+            // when unset. Read the stored pubkey + render to the network address.
+            let change_address = match read_txn
+                .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
+            {
+                Ok(t) => t
+                    .get(())
+                    .map_err(|e| WalletAdminError::Internal(format!("change_address read: {e}")))?
+                    .map(|g| g.value())
+                    .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, ctx.cfg.network))
+                    .transpose()
+                    .map_err(|e| {
+                        WalletAdminError::Internal(format!("change address encode: {e}"))
+                    })?,
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => {
+                    return Err(WalletAdminError::Internal(format!(
+                        "change_address table: {e}"
+                    )))
+                }
+            };
+            let tip_height = ctx.chain.tip_height();
+            let eip27_active = match &ctx.cfg.reemission {
+                Some(rules) => tip_height.saturating_add(1) > rules.activation_height,
+                None => false,
+            };
+            let network = match ctx.cfg.network {
+                ergo_ser::address::NetworkPrefix::Mainnet => NetworkDto::Mainnet,
+                ergo_ser::address::NetworkPrefix::Testnet => NetworkDto::Testnet,
+            };
+            // Rescan: `running` while a rebuild is in flight (set by the rescan
+            // command); `unavailable` on a non-replay (pruned) backend; else idle.
+            let rescan = if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+                RescanStateDto::Running {
+                    from_height: crate::wallet_boot::RESCAN_FROM_HEIGHT.load(Ordering::SeqCst),
+                }
+            } else if ctx.chain.is_pruned() {
+                RescanStateDto::Unavailable {
+                    detail: "node is pruned; block replay unavailable".to_string(),
+                }
+            } else {
+                RescanStateDto::Idle
+            };
+            Ok(WalletStatusDto {
+                initialized,
+                locked,
+                scan_height,
+                tip_height,
+                change_address,
+                network,
+                eip27_active,
+                rescan,
+                scan_invalidated,
+            })
+        })();
+    let _ = reply.send(result);
+}
+
+/// `GET /api/v1/wallet/addresses` (paged). Renders each tracked pubkey to its
+/// P2PK address; `total` + the page slice come from one read snapshot.
+pub(crate) async fn native_addresses(
+    ctx: &WriterContext<'_>,
+    offset: u32,
+    limit: u32,
+    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError>>,
+) {
+    use ergo_api::wallet::native::dto::{AddressPage, WalletAddressDto};
+    let network = ctx.cfg.network;
+    let result: Result<AddressPage, WalletAdminError> =
+        (|| -> Result<AddressPage, WalletAdminError> {
+            let read_txn = ctx
+                .db
+                .begin_read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+            let as_of = reader
+                .scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .unwrap_or(0);
+            // Ordered by path_idx ASC (the reader's contract).
+            let metas = reader
+                .tracked_addresses_with_meta()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let total = u32::try_from(metas.len()).unwrap_or(u32::MAX);
+            let items = metas
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(|m| {
+                    let address = ergo_wallet::address::pubkey_to_p2pk_address(&m.pubkey, network)
+                        .map_err(|e| WalletAdminError::Internal(format!("address encode: {e}")))?;
+                    Ok(WalletAddressDto {
+                        address,
+                        derivation_path: super::super::render_derivation_path(&m.derivation_path),
+                        // `index` is `u64` (matches `path_idx`) — no narrowing, so
+                        // distinct addresses never alias past `u32::MAX`.
+                        index: m.path_idx,
+                        label: (!m.label.is_empty()).then_some(m.label),
+                        added_at_height: m.added_at_height,
+                    })
+                })
+                .collect::<Result<Vec<_>, WalletAdminError>>()?;
+            Ok(AddressPage {
+                items,
+                total,
+                as_of,
+            })
+        })();
+    let _ = reply.send(result);
+}
+
+/// `GET /api/v1/wallet/boxes` (paged). All wallet boxes (any status), ordered
+/// `(creationHeight desc, boxId asc)` — sorted before paging (codex P2-13).
+pub(crate) async fn native_boxes(
+    ctx: &WriterContext<'_>,
+    offset: u32,
+    limit: u32,
+    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError>>,
+) {
+    use ergo_api::wallet::native::dto::BoxPage;
+    let result: Result<BoxPage, WalletAdminError> = (|| -> Result<BoxPage, WalletAdminError> {
+        let read_txn = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        let as_of = reader
+            .scan_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .unwrap_or(0);
+        let mut boxes = reader
+            .all_boxes()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        boxes.sort_by(|a, b| {
+            b.creation_height
+                .cmp(&a.creation_height)
+                .then_with(|| a.box_id.cmp(&b.box_id))
+        });
+        let total = u32::try_from(boxes.len()).unwrap_or(u32::MAX);
+        let items = boxes
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(box_to_summary)
+            .collect::<Result<Vec<_>, WalletAdminError>>()?;
+        Ok(BoxPage {
+            items,
+            total,
+            as_of,
+        })
+    })();
+    let _ = reply.send(result);
+}
+
+/// `GET /api/v1/wallet/boxes/{boxId}` — O(1) lookup; `None` if not tracked.
+pub(crate) async fn native_box_by_id(
+    ctx: &WriterContext<'_>,
+    box_id_hex: String,
+    reply: oneshot::Sender<
+        Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError>,
+    >,
+) {
+    let result = (|| {
+        let box_id = decode_hex32(&box_id_hex)?;
+        let read_txn = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        let wb = reader
+            .box_by_id(&box_id)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        wb.map(box_to_summary).transpose()
+    })();
+    let _ = reply.send(result);
+}
+
+/// `GET /api/v1/wallet/transactions` (paged). Ordered `(blockHeight desc, txId
+/// asc)` — sorted before paging.
+pub(crate) async fn native_transactions(
+    ctx: &WriterContext<'_>,
+    offset: u32,
+    limit: u32,
+    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError>>,
+) {
+    use ergo_api::wallet::native::dto::TxPage;
+    let result: Result<TxPage, WalletAdminError> = (|| -> Result<TxPage, WalletAdminError> {
+        let read_txn = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        let as_of = reader
+            .scan_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .unwrap_or(0);
+        let mut txs = reader
+            .all_transactions()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        txs.sort_by(|a, b| {
+            b.block_height
+                .cmp(&a.block_height)
+                .then_with(|| a.tx_id.cmp(&b.tx_id))
+        });
+        let total = u32::try_from(txs.len()).unwrap_or(u32::MAX);
+        let items = txs
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(tx_to_summary)
+            .collect();
+        Ok(TxPage {
+            items,
+            total,
+            as_of,
+        })
+    })();
+    let _ = reply.send(result);
+}
+
+/// `GET /api/v1/wallet/transactions/{txId}` — `None` if not found.
+pub(crate) async fn native_transaction_by_id(
+    ctx: &WriterContext<'_>,
+    tx_id_hex: String,
+    reply: oneshot::Sender<
+        Result<Option<ergo_api::wallet::native::dto::WalletTransactionSummary>, WalletAdminError>,
+    >,
+) {
+    let result = (|| {
+        let tx_id = decode_hex32(&tx_id_hex)?;
+        let read_txn = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        let wt = reader
+            .transaction_by_id(&tx_id)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        Ok(wt.map(tx_to_summary))
+    })();
+    let _ = reply.send(result);
+}
+
+// ----- native read helpers -----
+
+/// Decode a 64-char hex id into a 32-byte array (the handler pre-validates the
+/// shape; this is the defensive decode at the bridge boundary).
+fn decode_hex32(s: &str) -> Result<[u8; 32], WalletAdminError> {
+    let v =
+        hex::decode(s).map_err(|_| WalletAdminError::BadRequest("invalid hex id".to_string()))?;
+    v.try_into()
+        .map_err(|_| WalletAdminError::BadRequest("id must be 32 bytes".to_string()))
+}
+
+/// Map a stored [`ergo_state::wallet::types::WalletBox`] to the lean native
+/// summary. Fallible only on the (invariant-impossible) scan-id overflow — a
+/// scan id that does not fit `u16` is corrupt storage, surfaced as `internal`
+/// rather than silently truncated to `65535`.
+fn box_to_summary(
+    wb: ergo_state::wallet::types::WalletBox,
+) -> Result<ergo_api::wallet::native::dto::WalletBoxSummary, WalletAdminError> {
+    use ergo_api::wallet::native::dto::{
+        BoxProvenanceDto, BoxStatusDto, WalletAssetDto, WalletBoxSummary,
+    };
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus};
+    let status = match wb.status {
+        BoxStatus::Confirmed => BoxStatusDto::Confirmed,
+        BoxStatus::Immature { matures_at } => BoxStatusDto::Immature {
+            matures_at_height: matures_at,
+        },
+        BoxStatus::Spent {
+            spent_in_tx,
+            spent_at,
+        } => BoxStatusDto::Spent {
+            tx_id: hex::encode(spent_in_tx),
+            height: spent_at,
+        },
+    };
+    let provenance = match wb.provenance {
+        BoxProvenance::Owned => BoxProvenanceDto::Owned,
+        BoxProvenance::MinerReward => BoxProvenanceDto::MinerReward,
+        // Storage carries a u32 scan id; native ids are u16. The registry only
+        // ever allocates u16 ids, so this always fits — but fail loudly rather
+        // than truncate if that invariant is ever violated.
+        BoxProvenance::Custom { scan_id } => BoxProvenanceDto::Custom {
+            scan_id: u16::try_from(scan_id).map_err(|_| {
+                WalletAdminError::Internal(format!("custom scan id {scan_id} exceeds u16"))
+            })?,
+        },
+    };
+    Ok(WalletBoxSummary {
+        box_id: hex::encode(wb.box_id),
+        value: wb.value.to_string(),
+        assets: wb
+            .assets
+            .iter()
+            .map(|(id, amt)| WalletAssetDto {
+                token_id: hex::encode(id),
+                amount: amt.to_string(),
+            })
+            .collect(),
+        creation_tx_id: hex::encode(wb.creation_tx_id),
+        creation_output_index: wb.creation_output_index,
+        creation_height: wb.creation_height,
+        status,
+        provenance,
+    })
+}
+
+/// Map a stored [`ergo_state::wallet::types::WalletTransaction`] to the lean summary.
+fn tx_to_summary(
+    wt: ergo_state::wallet::types::WalletTransaction,
+) -> ergo_api::wallet::native::dto::WalletTransactionSummary {
+    use ergo_api::wallet::native::dto::WalletTransactionSummary;
+    WalletTransactionSummary {
+        tx_id: hex::encode(wt.tx_id),
+        block_id: hex::encode(wt.block_id),
+        block_height: wt.block_height,
+        wallet_input_box_ids: wt.wallet_inputs.iter().map(hex::encode).collect(),
+        wallet_output_box_ids: wt.wallet_outputs.iter().map(hex::encode).collect(),
+    }
 }
 
 #[cfg(test)]

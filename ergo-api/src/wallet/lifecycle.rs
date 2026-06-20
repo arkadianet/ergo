@@ -33,6 +33,22 @@ pub(crate) fn map_err(e: super::WalletAdminError) -> (StatusCode, Json<serde_jso
         E::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
         E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+        // Native-only typed variants: never constructed on the Scala-compat path
+        // (the compat bridge commands produce only the variants above). Handled
+        // here solely to keep this match exhaustive — the native surface maps
+        // them via its own `map_err`. Natural status codes are used so the
+        // response is still sensible if one ever reaches this table.
+        E::WalletExists => (StatusCode::BAD_REQUEST, "wallet_exists"),
+        E::DerivationPathExists => (StatusCode::BAD_REQUEST, "derivation_path_exists"),
+        E::AddressNotTracked => (StatusCode::NOT_FOUND, "address_not_found"),
+        E::RescanUnavailable(_) => (StatusCode::CONFLICT, "rescan_unavailable"),
+        E::SensitiveOpDisabled => (StatusCode::FORBIDDEN, "sensitive_op_disabled"),
+        E::AcknowledgementRequired => (StatusCode::BAD_REQUEST, "acknowledgement_required"),
+        E::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+        E::BoxNotFound => (StatusCode::NOT_FOUND, "box_not_found"),
+        E::UnsupportedScript => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_script"),
+        E::MissingSecret => (StatusCode::UNPROCESSABLE_ENTITY, "missing_secret"),
+        E::UnsupportedIntent => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_intent"),
     };
     // Log at the HTTP boundary so a failure is diagnosable from the node log
     // alone — the cause otherwise lived only in the response body. Server

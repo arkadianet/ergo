@@ -15,6 +15,8 @@ pub mod admin_advanced;
 pub mod lifecycle;
 pub mod lock_guard;
 pub mod multi_sig;
+/// Native `/api/v1/wallet/*` surface (a second adapter over [`WalletAdmin`]).
+pub mod native;
 pub mod reads;
 pub mod scan;
 pub mod sending;
@@ -299,6 +301,85 @@ pub trait WalletAdmin: Send + Sync {
             "scan_p2s_rule not implemented".to_string(),
         ))
     }
+
+    // --- native (/api/v1/wallet) ---
+    // Native methods returning native DTOs, kept separate from the Scala-compat
+    // methods above. Default impls error so existing mocks compile unchanged; the
+    // production `NodeWalletAdmin` overrides them with the real channel calls.
+
+    /// Native EIP-27-aware balance breakdown (`confirmed`/`available`/`reserved`
+    /// /`immature` + reserve detail). `include_unconfirmed` adds the labeled
+    /// single-hop mempool delta. Distinct from the Scala-compat [`Self::balances`]
+    /// (which surfaces only a single confirmed total).
+    async fn native_balance(
+        &self,
+        _include_unconfirmed: bool,
+    ) -> Result<native::dto::WalletBalanceDto, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_balance not implemented".to_string(),
+        ))
+    }
+
+    /// Native wallet status snapshot (init/lock, scan/tip height, network,
+    /// EIP-27-active, rescan phase, scan-invalidated).
+    async fn native_status(&self) -> Result<native::dto::WalletStatusDto, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_status not implemented".to_string(),
+        ))
+    }
+
+    /// Native paged tracked-address list with derivation metadata.
+    async fn native_addresses(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<native::dto::AddressPage, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_addresses not implemented".to_string(),
+        ))
+    }
+
+    /// Native paged wallet-box list, ordered `(creationHeight desc, boxId asc)`.
+    async fn native_boxes(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<native::dto::BoxPage, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_boxes not implemented".to_string(),
+        ))
+    }
+
+    /// Native single wallet box by id (hex). `None` if not tracked.
+    async fn native_box_by_id(
+        &self,
+        _box_id_hex: String,
+    ) -> Result<Option<native::dto::WalletBoxSummary>, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_box_by_id not implemented".to_string(),
+        ))
+    }
+
+    /// Native paged wallet-transaction list, ordered `(blockHeight desc, txId asc)`.
+    async fn native_transactions(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<native::dto::TxPage, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_transactions not implemented".to_string(),
+        ))
+    }
+
+    /// Native single wallet transaction by id (hex). `None` if not found.
+    async fn native_transaction_by_id(
+        &self,
+        _tx_id_hex: String,
+    ) -> Result<Option<native::dto::WalletTransactionSummary>, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "native_transaction_by_id not implemented".to_string(),
+        ))
+    }
 }
 
 /// Errors the admin trait can return. Maps to HTTP responses in
@@ -329,6 +410,48 @@ pub enum WalletAdminError {
     /// Used by `getPrivateKey` when `wallet.expose_private_keys = false`.
     #[error("forbidden: {0}")]
     Forbidden(String),
+    // ----- native /api/v1/wallet typed variants -----
+    // Added for the native surface so its handlers map cleanly to a specific
+    // `{reason, detail?}` + status instead of the opaque `Internal`/`BadRequest`.
+    // The Scala-compat handlers keep their existing mappings; the native and
+    // compat `map_err` tables translate these independently (e.g. `Locked` →
+    // native 409 vs compat 400). Constructed by the native bridge in later phases.
+    /// `init`/`restore` on an already-initialized wallet. Native 409.
+    #[error("wallet already exists")]
+    WalletExists,
+    /// Deriving a key at an already-tracked derivation path. Native 409.
+    #[error("derivation path already exists")]
+    DerivationPathExists,
+    /// A named address is not in the wallet's tracked set. Native 404.
+    #[error("address not tracked")]
+    AddressNotTracked,
+    /// Rescan requested on a backend that cannot replay blocks. Native 409.
+    #[error("rescan unavailable: {0}")]
+    RescanUnavailable(String),
+    /// Sensitive op disabled by `[wallet] expose_private_keys = false`. Native 403.
+    #[error("sensitive operation disabled")]
+    SensitiveOpDisabled,
+    /// Private-key export acknowledgement missing/incorrect. Native 400.
+    #[error("acknowledgement required")]
+    AcknowledgementRequired,
+    /// Sensitive-op rate limiter tripped. Native 429.
+    #[error("rate limited")]
+    RateLimited,
+    /// A referenced box id is absent from the wallet/UTXO set. Native 404.
+    #[error("box not found")]
+    BoxNotFound,
+    /// An input ErgoTree is not a supported (bare ProveDlog/DHT or matured
+    /// reward) script for wallet construction/multisig. Native 422.
+    #[error("unsupported script")]
+    UnsupportedScript,
+    /// The prover lacks a secret for an input and externals don't cover it.
+    /// Native 422 (never `wallet_locked` — the sign path has no lock precheck).
+    #[error("missing secret")]
+    MissingSecret,
+    /// A well-formed intent variant the builder does not yet support
+    /// (`mint`/`registers`). Native 422 (distinct from `bad_request`).
+    #[error("unsupported intent")]
+    UnsupportedIntent,
 }
 
 /// Build the `/wallet/*` axum router and, if `security` is `Some`,

@@ -53,8 +53,12 @@ const EMISSION_BOX_VALUE_FLOOR: u64 = 100_000 * COINS_IN_ONE_ERGO;
 /// Scala's `checkReemissionRules` being effectively off there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReemissionRuleInputs {
-    /// EIP-27 activation height. Scala `reemission.activationHeight`.
-    /// Rules apply only at heights `>= activation_height`.
+    /// EIP-27 activation height. Scala `reemission.activationHeight`. The
+    /// re-emission **spending** branch triggers strictly *above* this height
+    /// (`height > activation_height`) — see [`reemission_obligation_core`] and
+    /// [`verify_reemission_spending`]. (Reward boxes first carry the token from
+    /// the activation height onward, but a *spend* of one is only constrained
+    /// once `height` exceeds it.)
     pub activation_height: u32,
     /// 32-byte re-emission token id. Scala `reemission.reemissionTokenId`.
     pub reemission_token_id: [u8; 32],
@@ -99,35 +103,34 @@ pub fn verify_reemission_spending(
     height: u32,
     rules: &ReemissionRuleInputs,
 ) -> Result<(), ValidationError> {
-    // EIP-27 rules are checked only from the activation height onward.
-    if height < rules.activation_height {
-        return Ok(());
-    }
-
     let token_id = &rules.reemission_token_id;
 
-    // "reemissionSpending": a non-emission input (value <= 100K ERG) holds
-    // re-emission tokens, spent strictly after activation. Scala's emission
-    // box branch (value > 100K ERG) never sets this flag; an emission box's
-    // re-emission tokens are governed by the emission-box branch instead.
-    let reemission_spending = height > rules.activation_height
-        && resolved_inputs.iter().any(|b| {
-            b.candidate.value <= EMISSION_BOX_VALUE_FLOOR
-                && candidate_token_amount(&b.candidate, token_id) > 0
-        });
+    // Trigger + burn obligation via the shared [`reemission_obligation_core`], so
+    // consensus and the wallet (builder + balance) compute the burn identically.
+    // Triggered iff, strictly above activation, a non-emission input (value <=
+    // 100K ERG floor) carries the re-emission token; once triggered, `to_burn`
+    // sums the token across ALL inputs. The core subsumes the old
+    // `height < activation_height` short-circuit (it returns not-triggered at or
+    // below activation). Scala's emission-box branch (value > 100K ERG) never sets
+    // the trigger; an emission box's re-emission tokens are governed there instead.
+    let obligation = reemission_obligation_core(
+        resolved_inputs.iter().map(|b| {
+            (
+                b.candidate.value,
+                candidate_token_amount(&b.candidate, token_id),
+            )
+        }),
+        height,
+        rules.activation_height,
+    );
 
-    if !reemission_spending {
+    if !obligation.triggered {
         return Ok(());
     }
 
     // Total re-emission tokens across ALL inputs must be burned (paid out as
-    // nanoErg to the pay-to-reemission contract). Sum is saturating; the
-    // re-emission token supply is far below u64::MAX so this cannot wrap in
-    // practice, but a malformed input set must not panic the validator.
-    let to_burn: u64 = resolved_inputs
-        .iter()
-        .map(|b| candidate_token_amount(&b.candidate, token_id))
-        .fold(0u64, |acc, v| acc.saturating_add(v));
+    // nanoErg to the pay-to-reemission contract).
+    let to_burn: u64 = obligation.to_burn;
 
     // Parse the canonical pay-to-reemission contract once, so outputs can be
     // matched by `ErgoTree` structural equality (Scala semantics) rather than
@@ -189,6 +192,70 @@ fn candidate_token_amount(c: &ErgoBoxCandidate, token_id: &[u8; 32]) -> u64 {
         .fold(0u64, |acc, v| acc.saturating_add(v))
 }
 
+/// The EXACT EIP-27 re-emission burn obligation over a set of boxes — the single
+/// source of truth shared by the consensus validator
+/// ([`verify_reemission_spending`]), the wallet transaction builder, and the
+/// wallet balance surface. Each caller maps its boxes to
+/// `(box_value_nanoerg, reemission_token_amount_in_box)` (token amount extracted
+/// against [`ReemissionRuleInputs::reemission_token_id`]) and gets back the same
+/// obligation, so the wallet figures can never drift from consensus.
+///
+/// Mirrors Scala `verifyReemissionSpending` exactly:
+/// * **Triggered** when, at a height *strictly* above `activation_height`, ANY
+///   non-emission input (value `<= EMISSION_BOX_VALUE_FLOOR`) carries the
+///   re-emission token.
+/// * Once triggered, `to_burn` is the re-emission token amount summed across
+///   **ALL** input boxes — not only the floor boxes that triggered it (a
+///   non-floor input co-spent with a triggering reward box still has its tokens
+///   burned). 1 nanoErg per token is owed to the pay-to-reemission contract.
+///
+/// The balance surface uses the obligation over the wallet's whole confirmed box
+/// set ("if you swept everything in one spend") so spendable ERG is never
+/// over-reported; the builder uses it over the inputs a real spend selects.
+pub fn reemission_obligation_core(
+    boxes: impl IntoIterator<Item = (u64, u64)>,
+    height: u32,
+    activation_height: u32,
+) -> ReemissionObligation {
+    // Single pass: a non-emission floor box carrying the token sets the trigger;
+    // every box's token amount accumulates into the would-be burn (summed
+    // unconditionally, mirroring the validator's all-inputs `to_burn`).
+    let mut triggered_by_floor_box = false;
+    let mut total_tokens: u64 = 0;
+    let mut token_box_count: u64 = 0;
+    for (value, token_amount) in boxes {
+        if token_amount > 0 {
+            total_tokens = total_tokens.saturating_add(token_amount);
+            token_box_count = token_box_count.saturating_add(1);
+            if value <= EMISSION_BOX_VALUE_FLOOR {
+                triggered_by_floor_box = true;
+            }
+        }
+    }
+    let triggered = height > activation_height && triggered_by_floor_box;
+    if !triggered {
+        return ReemissionObligation::default();
+    }
+    ReemissionObligation {
+        triggered: true,
+        to_burn: total_tokens,
+        box_count: token_box_count,
+    }
+}
+
+/// Result of [`reemission_obligation_core`]: the exact EIP-27 burn obligation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReemissionObligation {
+    /// Whether the re-emission burn rule fires for this input set.
+    pub triggered: bool,
+    /// Re-emission token amount summed across ALL inputs (only meaningful when
+    /// `triggered`). Equals the nanoErg owed to the pay-to-reemission contract
+    /// (1 nanoErg per token). Zero when not triggered.
+    pub to_burn: u64,
+    /// Number of input boxes carrying the re-emission token (when triggered).
+    pub box_count: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +272,65 @@ mod tests {
 
     const ACTIVATION: u32 = 777_217;
     const REEMISSION_TOKEN: [u8; 32] = [0x11; 32];
+
+    // ----- obligation core (shared validator/wallet helper) -----
+
+    #[test]
+    fn obligation_core_sums_triggering_reward_boxes() {
+        // Two reward boxes (<= floor) with tokens + one ordinary box (no tokens):
+        // triggered, to_burn = 4 + 6, box_count = 2.
+        let boxes = [
+            (2_000_000_000u64, 4u64),
+            (1_000_000_000, 6),
+            (5_000_000_000, 0),
+        ];
+        let o = reemission_obligation_core(boxes, ACTIVATION + 1, ACTIVATION);
+        assert!(o.triggered);
+        assert_eq!(o.to_burn, 10);
+        assert_eq!(o.box_count, 2);
+    }
+
+    #[test]
+    fn obligation_core_sums_all_inputs_including_non_floor_once_triggered() {
+        // A floor reward box (value <= floor) carrying the token TRIGGERS the rule;
+        // once triggered, the burn sums the token across ALL inputs — including the
+        // non-floor box's tokens (this is the codex P0-1 mixed-input case, mirroring
+        // the validator's all-inputs `to_burn`). 12 + 5 = 17, two token-carrying boxes.
+        let boxes = [
+            (EMISSION_BOX_VALUE_FLOOR + 1, 12u64),
+            (EMISSION_BOX_VALUE_FLOOR, 5),
+        ];
+        let o = reemission_obligation_core(boxes, ACTIVATION + 1, ACTIVATION);
+        assert!(o.triggered);
+        assert_eq!(o.to_burn, 17);
+        assert_eq!(o.box_count, 2);
+    }
+
+    #[test]
+    fn obligation_core_not_triggered_without_a_floor_token_box() {
+        // Only a non-floor box carries the token (no floor reward box) → the rule
+        // does NOT fire, so nothing is burned (matches the validator: no input at
+        // or below the floor sets `reemissionSpending`).
+        let boxes = [(EMISSION_BOX_VALUE_FLOOR + 1, 12u64)];
+        assert_eq!(
+            reemission_obligation_core(boxes, ACTIVATION + 1, ACTIVATION),
+            ReemissionObligation::default()
+        );
+    }
+
+    #[test]
+    fn obligation_core_zero_at_or_below_activation() {
+        // Strict `height > activation`: at exactly activation and below, not triggered.
+        let boxes = [(1_000_000_000u64, 7u64)];
+        assert_eq!(
+            reemission_obligation_core(boxes, ACTIVATION, ACTIVATION),
+            ReemissionObligation::default()
+        );
+        assert_eq!(
+            reemission_obligation_core([(1u64, 7u64)], ACTIVATION - 1, ACTIVATION),
+            ReemissionObligation::default()
+        );
+    }
     /// Real mainnet pay-to-reemission contract tree (valid; header byte 0x19).
     const PAY2R_HEX: &str = "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302";
     /// A distinct, valid P2PK ErgoTree (header byte 0x00).
@@ -331,6 +457,32 @@ mod tests {
             candidate(10, &pay2r_bytes(), vec![]),
         ]);
         assert!(verify_reemission_spending(&t, &inputs, ACTIVATION + 5, &rules()).is_ok());
+    }
+
+    #[test]
+    fn correct_burn_includes_non_floor_token_input() {
+        // codex P0-1 regression at the CONSENSUS entry point (not just the
+        // helper): a floor reward box (5 tokens, value == floor) TRIGGERS the
+        // rule; once triggered, a co-spent NON-floor box also carrying the token
+        // (12, value > floor) has its tokens burned too → 17 owed. Paying only
+        // the floor box's 5 must reject; paying the full 17 must accept.
+        let inputs = vec![
+            input_box(EMISSION_BOX_VALUE_FLOOR, vec![reemission_token(5)]),
+            input_box(EMISSION_BOX_VALUE_FLOOR + 1, vec![reemission_token(12)]),
+        ];
+        let underpaid = tx(vec![
+            candidate(1_000, &other_bytes(), vec![]),
+            candidate(5, &pay2r_bytes(), vec![]),
+        ]);
+        assert!(matches!(
+            verify_reemission_spending(&underpaid, &inputs, ACTIVATION + 1, &rules()).unwrap_err(),
+            ValidationError::ReemissionRulesViolated(_)
+        ));
+        let full = tx(vec![
+            candidate(1_000, &other_bytes(), vec![]),
+            candidate(17, &pay2r_bytes(), vec![]),
+        ]);
+        assert!(verify_reemission_spending(&full, &inputs, ACTIVATION + 1, &rules()).is_ok());
     }
 
     #[test]

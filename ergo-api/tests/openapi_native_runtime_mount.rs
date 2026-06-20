@@ -642,6 +642,74 @@ async fn unknown_wallet_subpath_keeps_whole_prefix_gated() {
 }
 
 #[tokio::test]
+async fn native_wallet_subtree_is_api_key_gated_and_mounted() {
+    // The native `/api/v1/wallet/*` surface uses the same route_layer + catch-all
+    // gate as the Scala-compat `/wallet/*`: missing key → 403, a valid key + known
+    // route reaches the handler (mounted), a valid key + unknown subpath → bare 404
+    // (never 403-masking-404).
+    let app = all_wired_app();
+
+    // Known route, no key → gated (proves it is BOTH mounted and gated).
+    assert_eq!(
+        get_with_key(&app, "/api/v1/wallet/balance", None).await,
+        StatusCode::FORBIDDEN,
+        "GET /api/v1/wallet/balance must hit the api_key gate bare",
+    );
+    // Known route, valid key → past the gate and mounted (NoopWalletAdmin's default
+    // native_balance errors `internal` → 500; the point is it is NEITHER 403 NOR 404).
+    let with_key = get_with_key(&app, "/api/v1/wallet/balance", Some("hello")).await;
+    assert!(
+        with_key != StatusCode::FORBIDDEN && with_key != StatusCode::NOT_FOUND,
+        "GET /api/v1/wallet/balance with a valid key must be mounted past the gate, got {with_key}",
+    );
+    // Unknown subpath: whole-prefix gate first (403 without key), bare 404 with key.
+    assert_eq!(
+        get_with_key(&app, "/api/v1/wallet/zzz-not-a-route", None).await,
+        StatusCode::FORBIDDEN,
+        "unknown /api/v1/wallet/* subpath must still hit the api_key gate bare",
+    );
+    assert_eq!(
+        get_with_key(&app, "/api/v1/wallet/zzz-not-a-route", Some("hello")).await,
+        StatusCode::NOT_FOUND,
+        "unknown /api/v1/wallet/* subpath is a plain 404 once the key passes",
+    );
+    // Bare prefix is gated too.
+    assert_eq!(
+        get_with_key(&app, "/api/v1/wallet", None).await,
+        StatusCode::FORBIDDEN,
+        "the bare /api/v1/wallet prefix itself is gated",
+    );
+}
+
+#[tokio::test]
+async fn native_wallet_strict_query_uses_native_envelope() {
+    // codex P1-3 (query): a rejected query (unknown key via deny_unknown_fields)
+    // must return the native `{reason:"bad_request"}` envelope, NOT Axum's default
+    // plain-text 400. Valid key so the request passes the gate and reaches the
+    // (strict) query extractor.
+    let app = all_wired_app();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/wallet/balance?bogus=1")
+                .header(API_KEY_HEADER, "hello")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        body.contains("\"reason\":\"bad_request\""),
+        "expected the native error envelope, got: {body}",
+    );
+}
+
+#[tokio::test]
 async fn unknown_node_subpath_keeps_whole_prefix_gated() {
     // Scala gates the whole `node` pathPrefix the same way (probed live:
     // GET /node/zzz on the reference node → 403 forbidden).

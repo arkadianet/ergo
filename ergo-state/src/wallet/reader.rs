@@ -16,6 +16,23 @@ pub struct ReservedScanBox {
     pub box_bytes: Vec<u8>,
 }
 
+/// A tracked wallet pubkey with the metadata the native `GET /wallet/addresses`
+/// surfaces. Ordered by `path_idx` ascending (insertion / derivation order). The
+/// address string is rendered by the caller — the bridge knows the network
+/// prefix; the reader stays network-agnostic.
+pub struct TrackedAddressMeta {
+    /// Monotonic tracked-pubkey index (the `WALLET_TRACKED_PUBKEYS` key index).
+    pub path_idx: u64,
+    /// Compressed secp256k1 public key (33 bytes).
+    pub pubkey: [u8; 33],
+    /// BIP32 derivation path components (hardened bits set).
+    pub derivation_path: Vec<u32>,
+    /// Operator-supplied label; empty for auto-derived keys.
+    pub label: String,
+    /// Height at which this pubkey was first tracked.
+    pub added_at_height: u32,
+}
+
 /// EIP-3 first-address derivation path with hardened bits set:
 /// `m/44'/429'/0'/0/0`. The exact components the wallet persists for the
 /// first-address key (see `TrackedPubkeyMeta.derivation_path`); the miner
@@ -86,6 +103,28 @@ impl<'tx> WalletReader<'tx> {
             boxes.push(wb);
         }
         Ok(boxes)
+    }
+
+    /// One wallet box by id, O(1) (direct `WALLET_BOXES.get`). `None` if the id
+    /// is not tracked by the wallet. Backs the native `GET /wallet/boxes/{boxId}`
+    /// without the O(n) `all_boxes` scan.
+    #[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
+    pub fn box_by_id(&self, box_id: &[u8; 32]) -> Result<Option<WalletBox>, redb::Error> {
+        let tbl = match self.txn.open_table(WALLET_BOXES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let Some(g) = tbl.get(box_id)? else {
+            return Ok(None);
+        };
+        let wb: WalletBox = bincode::deserialize(g.value().as_slice()).map_err(|e| {
+            redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("WalletBox deserialize: {e}"),
+            ))
+        })?;
+        Ok(Some(wb))
     }
 
     /// Filtered: only `Confirmed`-status boxes.
@@ -239,6 +278,46 @@ impl<'tx> WalletReader<'tx> {
                     ))
                 })?;
             out.push((path_idx, pubkey, meta.derivation_path));
+        }
+        Ok(out)
+    }
+
+    /// Every tracked pubkey with its full metadata (label, added-at height,
+    /// derivation path), ordered by `path_idx` ASC. Backs the native
+    /// `GET /wallet/addresses`: the caller renders the address from `pubkey` +
+    /// network and paginates the owned Vec (`total` = len, page = slice) — all
+    /// from this single read txn. A separate method (not a change to
+    /// `tracked_pubkeys_with_paths`, which the unlock path
+    /// `SecretRegistry::from_master_key` also calls).
+    #[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
+    pub fn tracked_addresses_with_meta(&self) -> Result<Vec<TrackedAddressMeta>, redb::Error> {
+        let tbl = match self
+            .txn
+            .open_table(crate::wallet::tables::WALLET_TRACKED_PUBKEYS)
+        {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::with_capacity(tbl.len()? as usize);
+        for entry in tbl.iter()? {
+            let (k, v) = entry?;
+            let key_bytes: [u8; 41] = k.value();
+            let (path_idx, pubkey) = crate::wallet::tables::parse_tracked_pubkey_key(&key_bytes);
+            let meta: crate::wallet::types::TrackedPubkeyMeta =
+                bincode::deserialize(v.value().as_slice()).map_err(|e| {
+                    redb::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("TrackedPubkeyMeta deserialize: {e}"),
+                    ))
+                })?;
+            out.push(TrackedAddressMeta {
+                path_idx,
+                pubkey,
+                derivation_path: meta.derivation_path,
+                label: meta.derivation_path_label,
+                added_at_height: meta.added_at_height,
+            });
         }
         Ok(out)
     }

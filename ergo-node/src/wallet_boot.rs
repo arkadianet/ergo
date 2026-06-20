@@ -14,6 +14,12 @@ use redb::{Database, ReadableTableMetadata, WriteTransaction};
 pub static RESCAN_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Start height of the in-flight rescan, set alongside [`RESCAN_IN_PROGRESS`].
+/// Read by the native `/api/v1/wallet/status` handler to surface
+/// `rescan: {type:"running", fromHeight}`. Only meaningful while
+/// `RESCAN_IN_PROGRESS` is `true`.
+pub static RESCAN_FROM_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Scan-rebuild-in-progress flag. Set by the Rescan dispatch ONLY for a
 /// full rebuild (`fromHeight == 0`) that rebuilds the registered `/scan/*`
 /// tables; read by the chain-apply hook's scan path (`registered_scan_count`

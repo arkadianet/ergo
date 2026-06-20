@@ -320,8 +320,284 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiVotesHistory'
+  /api/v1/wallet/addresses:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/addresses` — paged tracked addresses + derivation metadata.'
+      operationId: addresses
+      parameters:
+      - name: offset
+        in: query
+        description: Page offset (default 0)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: limit
+        in: query
+        description: Page size (default 50, cap 16384)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: Paged tracked addresses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressPage'
+        '400':
+          description: Bad page window
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/balance:
+    get:
+      tags:
+      - wallet
+      summary: |-
+        `GET /api/v1/wallet/balance` — the EIP-27-aware nanoErg breakdown
+        (`confirmed`/`available`/`reserved`/`immature`), confirmed token balances,
+        the re-emission reserve detail, and (only with `?includeUnconfirmed=true`)
+        the labeled mempool delta. All amounts are decimal strings; the body is
+        computed from one wallet read snapshot (`height` = its scan height).
+      operationId: balance
+      parameters:
+      - name: includeUnconfirmed
+        in: query
+        description: Include the labeled single-hop mempool delta
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: Wallet balance breakdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletBalanceDto'
+        '400':
+          description: Bad query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet uninitialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/boxes:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/boxes` — paged wallet boxes (newest creation first).'
+      operationId: boxes
+      parameters:
+      - name: offset
+        in: query
+        description: Page offset (default 0)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: limit
+        in: query
+        description: Page size (default 50, cap 16384)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: Paged wallet boxes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoxPage'
+        '400':
+          description: Bad page window
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/boxes/{boxId}:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/boxes/{boxId}` — a single wallet box summary.'
+      operationId: box_by_id
+      parameters:
+      - name: boxId
+        in: path
+        description: 32-byte box id (hex)
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Wallet box summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletBoxSummary'
+        '400':
+          description: Malformed box id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '404':
+          description: Box not tracked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/status:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/status` — wallet state snapshot.'
+      operationId: status
+      responses:
+        '200':
+          description: Wallet status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletStatusDto'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/transactions:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/transactions` — paged wallet transactions (newest first).'
+      operationId: transactions
+      parameters:
+      - name: offset
+        in: query
+        description: Page offset (default 0)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: limit
+        in: query
+        description: Page size (default 50, cap 16384)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: Paged wallet transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TxPage'
+        '400':
+          description: Bad page window
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/transactions/{txId}:
+    get:
+      tags:
+      - wallet
+      summary: '`GET /api/v1/wallet/transactions/{txId}` — a single wallet transaction summary.'
+      operationId: transaction_by_id
+      parameters:
+      - name: txId
+        in: path
+        description: 32-byte transaction id (hex)
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Wallet transaction summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletTransactionSummary'
+        '400':
+          description: Malformed transaction id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
 components:
   schemas:
+    AddressPage:
+      type: object
+      description: |-
+        Paged tracked-address list. `total` = full count, `asOf` = scan height, both
+        from the same read snapshot.
+      required:
+      - items
+      - total
+      - asOf
+      properties:
+        asOf:
+          type: integer
+          format: int32
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletAddressDto'
+        total:
+          type: integer
+          format: int32
+          minimum: 0
     ApiBlockApplyError:
       type: object
       description: |-
@@ -1570,6 +1846,98 @@ components:
       - cost
       - size
       - min
+    BoxPage:
+      type: object
+      description: Paged wallet-box list, ordered `(creationHeight desc, boxId asc)`.
+      required:
+      - items
+      - total
+      - asOf
+      properties:
+        asOf:
+          type: integer
+          format: int32
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletBoxSummary'
+        total:
+          type: integer
+          format: int32
+          minimum: 0
+    BoxProvenanceDto:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - owned
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - minerReward
+      - type: object
+        required:
+        - scanId
+        - type
+        properties:
+          scanId:
+            type: integer
+            format: int32
+            minimum: 0
+          type:
+            type: string
+            enum:
+            - custom
+      description: How a wallet box was classified at apply time. Tagged.
+    BoxStatusDto:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - confirmed
+      - type: object
+        required:
+        - maturesAtHeight
+        - type
+        properties:
+          maturesAtHeight:
+            type: integer
+            format: int32
+            minimum: 0
+          type:
+            type: string
+            enum:
+            - immature
+      - type: object
+        required:
+        - txId
+        - height
+        - type
+        properties:
+          height:
+            type: integer
+            format: int32
+            minimum: 0
+          txId:
+            type: string
+          type:
+            type: string
+            enum:
+            - spent
+      description: Lifecycle status of a wallet box. Tagged; lean (no full box rendering).
     HealthStatus:
       type: string
       enum:
@@ -1577,6 +1945,66 @@ components:
       - stalled
       - disconnected
       - rejecting
+    NanoErgBreakdownDto:
+      type: object
+      description: |-
+        nanoErg breakdown — all decimal strings.
+
+        Invariant: `available == confirmed.saturating_sub(reserved)` **always**; and
+        `available + reserved == confirmed` iff `reserved <= confirmed`, otherwise
+        `available == 0` and `reserved > confirmed` (flagged by
+        [`ReemissionInfoDto::reserved_exceeds_confirmed`]). `reserved` is never clamped.
+      required:
+      - confirmed
+      - available
+      - reserved
+      - immature
+      properties:
+        available:
+          type: string
+          description: '`confirmed − reserved` (saturating). The factual spendable figure.'
+        confirmed:
+          type: string
+          description: Gross sum of mature (`Confirmed`) box values.
+        immature:
+          type: string
+          description: Sum of immature (mining-reward maturity-window) box values; separate.
+        reserved:
+          type: string
+          description: EIP-27 re-emission holdback estimate (see [`ReemissionInfoDto`]).
+    NativeWalletError:
+      type: object
+      description: The native wallet error body. `detail` is omitted (not `null`) when absent.
+      required:
+      - reason
+      properties:
+        detail:
+          type:
+          - string
+          - 'null'
+          description: Optional human-readable detail; never carries secret material.
+        reason:
+          type: string
+          description: Closed snake_case reason set (see the design §4).
+    NetworkDto:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - mainnet
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - testnet
+      description: The network this wallet is on (from `cfg.network`).
     RawTransactionBytes:
       type: string
       format: binary
@@ -1586,6 +2014,86 @@ components:
         `axum::body::Bytes` and forward it verbatim; this renders that body as
         `application/octet-stream` binary (`type: string, format: binary`) in
         the generated spec. Documentation only — never constructed at runtime.
+    ReemissionInfoDto:
+      type: object
+      description: EIP-27 re-emission reserve detail. `null` off EIP-27 nets or below activation.
+      required:
+      - tokenId
+      - reservedTokenAmount
+      - reservedBoxCount
+      - reservedExceedsConfirmed
+      properties:
+        reservedBoxCount:
+          type: integer
+          format: int32
+          description: |-
+            Number of confirmed wallet boxes carrying the re-emission token. This is the
+            shared obligation's box count — it counts every token-carrying input once the
+            rule is triggered, not only the floor reward boxes that trigger it.
+          minimum: 0
+        reservedExceedsConfirmed:
+          type: boolean
+          description: |-
+            `reserved > confirmed` — the pathological case where the holdback exceeds
+            mature ERG (then `available == 0`).
+        reservedTokenAmount:
+          type: string
+          description: |-
+            Re-emission tokens held across the wallet's confirmed boxes; `== reserved`
+            1:1 (1 nanoErg/token).
+        tokenId:
+          type: string
+          description: 32-byte re-emission token id, hex.
+    RescanStateDto:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - idle
+      - type: object
+        required:
+        - fromHeight
+        - type
+        properties:
+          fromHeight:
+            type: integer
+            format: int32
+            minimum: 0
+          type:
+            type: string
+            enum:
+            - running
+      - type: object
+        required:
+        - detail
+        - type
+        properties:
+          detail:
+            type: string
+          type:
+            type: string
+            enum:
+            - unavailable
+      description: |-
+        Wallet rescan lifecycle phase. `running` is a real full-rebuild-in-progress
+        state; `unavailable` is returned only on a backend that cannot replay blocks.
+    ScopeDto:
+      oneOf:
+      - type: object
+        required:
+        - type
+        properties:
+          type:
+            type: string
+            enum:
+            - singleHop
+      description: |-
+        Scope of an unconfirmed delta. Tagged; `singleHop` is the only reachable
+        variant today (`fullOffChainRegistry` is reserved, additive).
     SyncStateLabel:
       type: string
       enum:
@@ -1593,6 +2101,247 @@ components:
       - syncing
       - at_tip
       - stalled
+    TxPage:
+      type: object
+      description: Paged wallet-transaction list, ordered `(blockHeight desc, txId asc)`.
+      required:
+      - items
+      - total
+      - asOf
+      properties:
+        asOf:
+          type: integer
+          format: int32
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletTransactionSummary'
+        total:
+          type: integer
+          format: int32
+          minimum: 0
+    UnconfirmedDeltaDto:
+      type: object
+      description: |-
+        A labeled single-hop unconfirmed delta. Present only with
+        `?includeUnconfirmed=true`; **never folded** into `confirmed`/`available`.
+      required:
+      - scope
+      - incomingNanoErg
+      - outgoingNanoErg
+      - netNanoErg
+      properties:
+        incomingNanoErg:
+          type: string
+          description: nanoErg arriving in pending pool outputs to the wallet (decimal string).
+        netNanoErg:
+          type: string
+          description: '`incoming − outgoing`, signed decimal string.'
+        outgoingNanoErg:
+          type: string
+          description: nanoErg leaving via confirmed wallet boxes a pool tx already spends.
+        scope:
+          $ref: '#/components/schemas/ScopeDto'
+          description: What the delta covers.
+    WalletAddressDto:
+      type: object
+      description: A tracked wallet address with its derivation metadata.
+      required:
+      - address
+      - derivationPath
+      - index
+      - addedAtHeight
+      properties:
+        addedAtHeight:
+          type: integer
+          format: int32
+          description: Height at which this pubkey was first tracked.
+          minimum: 0
+        address:
+          type: string
+          description: The encoded P2PK address for this network.
+        derivationPath:
+          type: string
+          description: BIP32 derivation path, e.g. `m/44'/429'/0'/0/0`.
+        index:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic tracked-pubkey index (insertion / derivation order). `u64` to
+            match the storage `TrackedAddressMeta.path_idx` exactly — narrowing to
+            `u32` would silently alias distinct addresses past `u32::MAX`.
+          minimum: 0
+        label:
+          type:
+          - string
+          - 'null'
+          description: Operator label, or `null` when unset.
+    WalletAssetDto:
+      type: object
+      description: A token amount. `amount` is a decimal string (token amounts can exceed 2^53).
+      required:
+      - tokenId
+      - amount
+      properties:
+        amount:
+          type: string
+          description: Decimal-string amount.
+        tokenId:
+          type: string
+          description: 32-byte token id, hex.
+    WalletBalanceDto:
+      type: object
+      description: '`GET /api/v1/wallet/balance` response.'
+      required:
+      - height
+      - nanoErg
+      - assets
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletAssetDto'
+          description: |-
+            Confirmed token balances (the re-emission token is omitted — it is
+            accounted for solely by `reserved`/`reemission`).
+        height:
+          type: integer
+          format: int32
+          description: |-
+            `asOf` — the wallet scan height of the single read snapshot this body
+            was computed from.
+          minimum: 0
+        nanoErg:
+          $ref: '#/components/schemas/NanoErgBreakdownDto'
+          description: nanoErg breakdown.
+        reemission:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ReemissionInfoDto'
+            description: |-
+              EIP-27 reserve detail, or `null` off EIP-27 nets / below activation.
+              Serialized as `null` (not omitted) so the field's presence is stable.
+        unconfirmed:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/UnconfirmedDeltaDto'
+            description: Labeled unconfirmed delta, or `null` unless `?includeUnconfirmed=true`.
+    WalletBoxSummary:
+      type: object
+      description: |-
+        A lean wallet box summary — no ergoTree/registers/address (full hydration is
+        an additive follow-up, never a reshape of this summary).
+      required:
+      - boxId
+      - value
+      - assets
+      - creationTxId
+      - creationOutputIndex
+      - creationHeight
+      - status
+      - provenance
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletAssetDto'
+        boxId:
+          type: string
+        creationHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        creationOutputIndex:
+          type: integer
+          format: int32
+          minimum: 0
+        creationTxId:
+          type: string
+        provenance:
+          $ref: '#/components/schemas/BoxProvenanceDto'
+        status:
+          $ref: '#/components/schemas/BoxStatusDto'
+        value:
+          type: string
+          description: Box value in nanoErg (decimal string).
+    WalletStatusDto:
+      type: object
+      description: '`GET /api/v1/wallet/status` — wallet state snapshot.'
+      required:
+      - initialized
+      - locked
+      - scanHeight
+      - tipHeight
+      - network
+      - eip27Active
+      - rescan
+      - scanInvalidated
+      properties:
+        changeAddress:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Current change address, or `null` when unset (never `""`). Surfaced even
+            while locked — it is read from the persisted change-address state, not the
+            in-memory key.
+        eip27Active:
+          type: boolean
+          description: |-
+            EIP-27 is active for the next wallet spend (`cfg.reemission` set AND
+            `tip+1 > activation`) — the same inputs as the balance `reserved` trigger.
+        initialized:
+          type: boolean
+          description: A wallet exists (seed stored), independent of lock state.
+        locked:
+          type: boolean
+          description: The in-memory master key is NOT loaded.
+        network:
+          $ref: '#/components/schemas/NetworkDto'
+          description: The network this wallet is on.
+        rescan:
+          $ref: '#/components/schemas/RescanStateDto'
+          description: Rescan lifecycle phase.
+        scanHeight:
+          type: integer
+          format: int32
+          description: Height the wallet has scanned through (the read snapshot's `asOf`).
+          minimum: 0
+        scanInvalidated:
+          type: boolean
+          description: The wallet scan was invalidated (balances/addresses may be stale until a rescan).
+        tipHeight:
+          type: integer
+          format: int32
+          description: Chain frontier height (so a client can compute the sync gap).
+          minimum: 0
+    WalletTransactionSummary:
+      type: object
+      description: A lean wallet-transaction summary — references only (no full IO/fee/bytes).
+      required:
+      - txId
+      - blockId
+      - blockHeight
+      - walletInputBoxIds
+      - walletOutputBoxIds
+      properties:
+        blockHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        blockId:
+          type: string
+        txId:
+          type: string
+        walletInputBoxIds:
+          type: array
+          items:
+            type: string
+        walletOutputBoxIds:
+          type: array
+          items:
+            type: string
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
@@ -1611,3 +2360,5 @@ tags:
   description: API-key-gated operator routes
 - name: health
   description: Liveness + readiness
+- name: wallet
+  description: Native api-key-gated wallet surface
