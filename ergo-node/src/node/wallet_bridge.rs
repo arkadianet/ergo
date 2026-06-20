@@ -164,6 +164,34 @@ pub enum WalletCommand {
             >,
         >,
     },
+    /// Native `/api/v1/wallet/boxes/select` (burn-aware selection dry-run).
+    NativeSelectBoxes {
+        req: Box<ergo_api::wallet::native::dto::BoxSelectRequest>,
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError>,
+        >,
+    },
+    /// Native `/api/v1/wallet/transactions/build` (burn-aware unsigned build).
+    NativeBuildTransaction {
+        intent: Box<ergo_api::wallet::native::dto::TxIntent>,
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError>,
+        >,
+    },
+    /// Native `/api/v1/wallet/transactions/sign`.
+    NativeSignTransaction {
+        req: Box<ergo_api::wallet::native::dto::SignTxRequest>,
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError>,
+        >,
+    },
+    /// Native `/api/v1/wallet/transactions/send`.
+    NativeSendTransaction {
+        req: Box<ergo_api::wallet::native::dto::SendTxRequest>,
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError>,
+        >,
+    },
     Addresses {
         reply: oneshot::Sender<Result<WalletAddressList, WalletAdminError>>,
     },
@@ -463,6 +491,50 @@ impl WalletAdmin for NodeWalletAdmin {
             .await
     }
 
+    async fn select_boxes(
+        &self,
+        req: ergo_api::wallet::native::dto::BoxSelectRequest,
+    ) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeSelectBoxes {
+            req: Box::new(req),
+            reply,
+        })
+        .await
+    }
+
+    async fn build_transaction(
+        &self,
+        intent: ergo_api::wallet::native::dto::TxIntent,
+    ) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeBuildTransaction {
+            intent: Box::new(intent),
+            reply,
+        })
+        .await
+    }
+
+    async fn sign_transaction(
+        &self,
+        req: ergo_api::wallet::native::dto::SignTxRequest,
+    ) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeSignTransaction {
+            req: Box::new(req),
+            reply,
+        })
+        .await
+    }
+
+    async fn send_transaction(
+        &self,
+        req: ergo_api::wallet::native::dto::SendTxRequest,
+    ) -> Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::NativeSendTransaction {
+            req: Box::new(req),
+            reply,
+        })
+        .await
+    }
+
     async fn addresses(&self) -> Result<WalletAddressList, WalletAdminError> {
         self.send_cmd(|reply| WalletCommand::Addresses { reply })
             .await
@@ -676,6 +748,14 @@ pub trait ChainStateAccessor: Send + Sync {
     /// True if the node is configured with `blocks_to_keep != -1`.
     /// `/wallet/restore` refuses on pruned nodes per Scala parity.
     fn is_pruned(&self) -> bool;
+    /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27 nets,
+    /// e.g. testnet). Built at boot from the chain spec — the same source the
+    /// block/mempool validator uses. The wallet's burn-aware builder and the
+    /// self-verify EIP-27 gate read it here so a built spend can never violate
+    /// consensus. Default `None` (test stubs / non-EIP-27 backends).
+    fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
+        None
+    }
     /// Fetch the block at `height` for rescan replay. Returns `None`
     /// only if pruned past the requested height.
     fn read_block_at(&self, height: u32) -> Option<ergo_state::wallet::scan::RescanBlock>;
@@ -751,15 +831,23 @@ pub struct ChainStateAccessorImpl {
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
     is_pruned: bool,
+    /// EIP-27 re-emission rules (mainnet) or `None` (testnet). See
+    /// [`ChainStateAccessor::reemission_rules`].
+    reemission: Option<ergo_validation::ReemissionRuleInputs>,
 }
 
 impl ChainStateAccessorImpl {
-    pub fn new(db: Arc<redb::Database>, is_pruned: bool) -> Self {
+    pub fn new(
+        db: Arc<redb::Database>,
+        is_pruned: bool,
+        reemission: Option<ergo_validation::ReemissionRuleInputs>,
+    ) -> Self {
         let reader = ergo_state::reader::ChainStoreReader::new_from_db(db.clone());
         Self {
             db,
             reader,
             is_pruned,
+            reemission,
         }
     }
 }
@@ -796,6 +884,10 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 
     fn is_pruned(&self) -> bool {
         self.is_pruned
+    }
+
+    fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
+        self.reemission.as_ref()
     }
 
     fn read_block_at(&self, height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
@@ -1212,6 +1304,18 @@ pub async fn run_wallet_writer(
             WalletCommand::NativeTransactionById { tx_id_hex, reply } => {
                 commands::admin::native_transaction_by_id(&ctx, tx_id_hex, reply).await
             }
+            WalletCommand::NativeSelectBoxes { req, reply } => {
+                commands::send::native_select_boxes(&ctx, *req, reply).await
+            }
+            WalletCommand::NativeBuildTransaction { intent, reply } => {
+                commands::send::native_build_transaction(&ctx, *intent, reply).await
+            }
+            WalletCommand::NativeSignTransaction { req, reply } => {
+                commands::send::native_sign_transaction(&ctx, *req, reply).await
+            }
+            WalletCommand::NativeSendTransaction { req, reply } => {
+                commands::send::native_send_transaction(&ctx, *req, reply).await
+            }
             WalletCommand::Addresses { reply } => commands::admin::addresses(&ctx, reply).await,
             WalletCommand::Boxes { page, reply } => commands::admin::boxes(&ctx, page, reply).await,
             WalletCommand::BoxesUnspent { page, reply } => {
@@ -1308,25 +1412,56 @@ const MIN_FEE: u64 = 1_000_000;
 /// Minimum box value in nanoERG. Mirrors Scala's `BoxUtils.MinBoxValue`.
 const MIN_BOX_VALUE: u64 = 1_000_000;
 
+/// A selected input box, captured for the native `transactions/build` response.
+#[derive(Debug, Clone)]
+struct SelectedInputInfo {
+    box_id: [u8; 32],
+    value: u64,
+    tokens: BTreeMap<[u8; 32], u64>,
+}
+
+/// What [`build_unsigned_tx`] produced: the serialized unsigned tx plus the exact
+/// selection / change / fee / EIP-27 burn it was built from, so the native
+/// `transactions/build` surface can report it precisely without re-deriving it
+/// from the serialized bytes. Compat callers use only [`BuiltTx::bytes`].
+struct BuiltTx {
+    /// Serialized `UnsignedTransaction` bytes.
+    bytes: Vec<u8>,
+    /// Selected inputs (box_id, value, tokens), in input order.
+    selected: Vec<SelectedInputInfo>,
+    /// Emitted change boxes (0 or 1): `(erg, tokens)`. Empty when the change was
+    /// folded into the fee or the selection was exact.
+    change_outputs: Vec<(u64, BTreeMap<[u8; 32], u64>)>,
+    /// Actual miner-fee-box value (includes any folded sub-minimum change; reduced
+    /// by a burn debited from fee on the explicit-input branch).
+    fee: u64,
+    /// EIP-27 burn `(reemission_token_id, to_burn_nanoerg)`, or `None`.
+    reemission_burn: Option<([u8; 32], u64)>,
+    /// Wallet scan height the inputs were read at (`asOf`).
+    as_of: u32,
+}
+
 /// Build an unsigned transaction from payment requests (the shared build path).
 ///
 /// `override_inputs` / `override_data_inputs`: hex box ids supplied by the
 /// caller; `None` means "use automatic box selection".
 /// `fee_override`: explicit fee; `None` uses `MIN_FEE`.
 ///
-/// Returns serialised `UnsignedTransaction` bytes.
+/// Returns the [`BuiltTx`] (serialized bytes + the selection/change/fee/burn plan).
 #[allow(clippy::too_many_arguments)]
 async fn build_unsigned_tx(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
+    change_address_override: Option<&str>,
     state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
-) -> Result<Vec<u8>, WalletAdminError> {
+) -> Result<BuiltTx, WalletAdminError> {
     let state = state.read();
+    let as_of = chain.wallet_scan_height();
 
     // Decode payment requests: address → pubkey → ErgoTree bytes.
     let payment_reqs: Vec<ergo_wallet::tx_builder::PaymentRequest> = requests
@@ -1366,16 +1501,31 @@ async fn build_unsigned_tx(
 
     let fee = fee_override.unwrap_or(MIN_FEE);
 
-    // Resolve change address → ErgoTree bytes.
-    let change_address = state
-        .change_address()
-        .ok_or_else(|| WalletAdminError::Internal("no change address set".into()))?;
-    let change_pubkey = ergo_ser::address::decode_p2pk_address(change_address, network)
-        .map_err(|_| WalletAdminError::Internal("change address decode failed".into()))?;
+    // Resolve change address → ErgoTree bytes. A native caller may override the
+    // persisted change address (`TxIntent.changeAddress`); the override MUST decode
+    // as a P2PK for this network AND be a tracked wallet tree, else
+    // `change_address_untracked(422)` — so change never leaves the wallet.
+    let change_address = match change_address_override {
+        Some(addr) => addr,
+        None => state
+            .change_address()
+            .ok_or_else(|| WalletAdminError::Internal("no change address set".into()))?,
+    };
+    let change_pubkey =
+        ergo_ser::address::decode_p2pk_address(change_address, network).map_err(|_| {
+            if change_address_override.is_some() {
+                WalletAdminError::ChangeAddressUntracked
+            } else {
+                WalletAdminError::Internal("change address decode failed".into())
+            }
+        })?;
     // Canonical (non-segregated) P2PK tree so the change box matches the
     // wallet's own tracked_p2pk_trees and is recognized on the next scan.
     let change_ergo_tree = ergo_ser::address::build_p2pk_tree_bytes(&change_pubkey)
         .map_err(|e| WalletAdminError::Internal(format!("change p2pk tree: {e:?}")))?;
+    if change_address_override.is_some() && !state.is_tracked_tree(&change_ergo_tree) {
+        return Err(WalletAdminError::ChangeAddressUntracked);
+    }
 
     let fee_ergo_tree = ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES.to_vec();
 
@@ -1408,6 +1558,11 @@ async fn build_unsigned_tx(
         let mut input_tokens_total: BTreeMap<[u8; 32], u64> = BTreeMap::new();
         let mut inputs: Vec<ergo_ser::input::UnsignedInput> =
             Vec::with_capacity(explicit_inputs.len());
+        // EIP-27 rules for this net (None off EIP-27); per-input (value, token)
+        // captured for the shared re-emission obligation below.
+        let reemission_rules = chain.reemission_rules();
+        let mut per_input_reemission: Vec<(u64, u64)> = Vec::with_capacity(explicit_inputs.len());
+        let mut selected: Vec<SelectedInputInfo> = Vec::with_capacity(explicit_inputs.len());
 
         for hex_id in explicit_inputs {
             let id: [u8; 32] = hex::decode(hex_id)
@@ -1423,14 +1578,29 @@ async fn build_unsigned_tx(
                 .checked_add(ergo_box.candidate.value)
                 .ok_or_else(|| WalletAdminError::Internal("input ERG overflow".into()))?;
 
+            let mut box_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
             for token in &ergo_box.candidate.tokens {
-                let entry = input_tokens_total
-                    .entry(*token.token_id.as_bytes())
-                    .or_insert(0);
+                let id = *token.token_id.as_bytes();
+                let entry = input_tokens_total.entry(id).or_insert(0);
                 *entry = entry
                     .checked_add(token.amount)
                     .ok_or_else(|| WalletAdminError::Internal("input token overflow".into()))?;
+                *box_tokens.entry(id).or_insert(0) = box_tokens
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(token.amount);
             }
+
+            let reemission_tok = reemission_rules.map_or(0, |r| {
+                box_tokens.get(&r.reemission_token_id).copied().unwrap_or(0)
+            });
+            per_input_reemission.push((ergo_box.candidate.value, reemission_tok));
+            selected.push(SelectedInputInfo {
+                box_id: id,
+                value: ergo_box.candidate.value,
+                tokens: box_tokens,
+            });
 
             inputs.push(ergo_ser::input::UnsignedInput {
                 box_id: ergo_primitives::digest::Digest32::from_bytes(id),
@@ -1472,13 +1642,47 @@ async fn build_unsigned_tx(
         }
 
         // Compute change.
-        let change_erg = input_erg_total - required_erg;
+        let mut change_erg = input_erg_total - required_erg;
         let mut change_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
         for (&id, &input_amt) in &input_tokens_total {
             let required_amt = required_tokens.get(&id).copied().unwrap_or(0);
             let rem = input_amt - required_amt;
             if rem > 0 {
                 change_tokens.insert(id, rem);
+            }
+        }
+
+        // EIP-27 burn-aware adjustment. When this net has re-emission rules and a
+        // selected input is a reward box carrying the token at the candidate
+        // height (`tip+1`, the height the validator runs this tx at), consensus
+        // requires the re-emission tokens to be BURNED (kept on no output) and 1
+        // nanoErg/token paid to the pay-to-reemission contract. Mirror the SHARED
+        // validator obligation so the built tx passes self-verify and the node.
+        // The burn is funded from change first, then the fee (which stays
+        // >= MIN_FEE); an explicit input set that can't fund it is a bad request.
+        let mut fee = fee;
+        let mut reemission_burn: Option<(Vec<u8>, u64)> = None; // (pay2r_tree_bytes, to_burn)
+        if let Some(rules) = reemission_rules {
+            let obl = ergo_validation::reemission_obligation_core(
+                per_input_reemission.iter().copied(),
+                current_height.saturating_add(1),
+                rules.activation_height,
+            );
+            if obl.triggered {
+                // No output may keep the re-emission token.
+                change_tokens.remove(&rules.reemission_token_id);
+                let to_burn = obl.to_burn;
+                let from_change = to_burn.min(change_erg);
+                change_erg -= from_change;
+                let from_fee = to_burn - from_change;
+                if from_fee > fee.saturating_sub(MIN_FEE) {
+                    return Err(WalletAdminError::BadRequest(format!(
+                        "selected inputs cannot fund the {to_burn} nanoErg EIP-27 \
+                         re-emission burn (change + fee slack insufficient)"
+                    )));
+                }
+                fee -= from_fee;
+                reemission_burn = Some((rules.pay_to_reemission_tree.clone(), to_burn));
             }
         }
 
@@ -1543,6 +1747,31 @@ async fn build_unsigned_tx(
             .map_err(|e| WalletAdminError::Internal(format!("ErgoBoxCandidate (fee): {e:?}")))?,
         );
 
+        // EIP-27 pay-to-reemission output (exactly `to_burn` nanoErg = 1 per
+        // burned token). For a real reward box `to_burn` is ERG-scale, so this is
+        // never dust; the value must match `to_burn` exactly (the validator
+        // requires equality, so it cannot be padded to MIN_BOX_VALUE).
+        if let Some((pay2r_tree_bytes, to_burn)) = &reemission_burn {
+            let pay2r_tree = {
+                let mut r = ergo_primitives::reader::VlqReader::new(pay2r_tree_bytes);
+                ergo_ser::ergo_tree::read_ergo_tree(&mut r).map_err(|e| {
+                    WalletAdminError::Internal(format!("pay-to-reemission tree: {e:?}"))
+                })?
+            };
+            output_candidates.push(
+                ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    *to_burn,
+                    pay2r_tree,
+                    current_height,
+                    vec![],
+                    ergo_ser::register::AdditionalRegisters::empty(),
+                )
+                .map_err(|e| {
+                    WalletAdminError::Internal(format!("ErgoBoxCandidate (pay2reemission): {e:?}"))
+                })?,
+            );
+        }
+
         // Change output — emitted unless folded into the fee above. Exact
         // selection (change_erg == 0, no tokens) emits nothing.
         if !change_goes_to_fee && (change_erg > 0 || !change_tokens.is_empty()) {
@@ -1577,7 +1806,31 @@ async fn build_unsigned_tx(
             data_inputs,
             output_candidates,
         };
-        serialize_unsigned_tx(&unsigned_tx)
+        let bytes = serialize_unsigned_tx(&unsigned_tx)?;
+
+        // Mirror the change-output decision above for the response plan.
+        let change_outputs = if !change_goes_to_fee && (change_erg > 0 || !change_tokens.is_empty())
+        {
+            vec![(change_erg, change_tokens.clone())]
+        } else {
+            vec![]
+        };
+        let reemission_burn = reemission_burn.as_ref().map(|(_, to_burn)| {
+            (
+                reemission_rules
+                    .expect("a re-emission burn implies the rules are present")
+                    .reemission_token_id,
+                *to_burn,
+            )
+        });
+        Ok(BuiltTx {
+            bytes,
+            selected,
+            change_outputs,
+            fee: fee_value,
+            reemission_burn,
+            as_of,
+        })
     } else {
         // Automatic box selection from wallet unspent boxes.
         let read_txn = db
@@ -1613,6 +1866,7 @@ async fn build_unsigned_tx(
             })
             .collect::<Result<_, WalletAdminError>>()?;
 
+        let reemission_rules = chain.reemission_rules();
         let selector = ergo_wallet::box_selector::default::DefaultBoxSelector;
         let builder = ergo_wallet::tx_builder::UnsignedTxBuilder {
             available_summaries: &summaries,
@@ -1623,13 +1877,564 @@ async fn build_unsigned_tx(
             current_height,
             min_box_value: MIN_BOX_VALUE,
             data_inputs,
+            // EIP-27 burn rules for this net (None off EIP-27). The obligation is
+            // evaluated at the candidate height `tip + 1` (the height the validator
+            // runs the tx at), while output `creation_height` stays `tip`.
+            reemission: reemission_rules,
+            reemission_height: current_height.saturating_add(1),
         };
 
-        let unsigned_tx = builder
-            .build(&payment_reqs)
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let (unsigned_tx, plan) = builder
+            .build_with_plan(&payment_reqs)
+            .map_err(map_build_error)?;
+        let bytes = serialize_unsigned_tx(&unsigned_tx)?;
 
-        serialize_unsigned_tx(&unsigned_tx)
+        // Reconstruct the response plan from the builder's `SelectionPlan` + the
+        // SHARED change-fold rule, so the reported fee/change match the bytes.
+        let change_has_tokens = !plan.change_tokens.is_empty();
+        let folded = ergo_wallet::tx_builder::change_goes_to_fee(
+            plan.change_erg,
+            change_has_tokens,
+            MIN_BOX_VALUE,
+        );
+        let fee_value = if folded { fee + plan.change_erg } else { fee };
+        let change_outputs = if !folded && (plan.change_erg > 0 || change_has_tokens) {
+            vec![(plan.change_erg, plan.change_tokens.clone())]
+        } else {
+            vec![]
+        };
+        let summary_by_id: std::collections::HashMap<
+            [u8; 32],
+            &ergo_wallet::box_selector::BoxSummary,
+        > = summaries.iter().map(|s| (s.box_id, s)).collect();
+        let selected: Vec<SelectedInputInfo> = plan
+            .selected_ids
+            .iter()
+            .map(|id| {
+                let s = summary_by_id.get(id).ok_or_else(|| {
+                    WalletAdminError::Internal("selected box not in summaries".into())
+                })?;
+                Ok(SelectedInputInfo {
+                    box_id: *id,
+                    value: s.value,
+                    tokens: s.tokens.clone(),
+                })
+            })
+            .collect::<Result<_, WalletAdminError>>()?;
+        let reemission_burn = (plan.to_burn > 0).then(|| {
+            reemission_rules
+                .map(|r| (r.reemission_token_id, plan.to_burn))
+                .expect("a re-emission burn implies the rules are present")
+        });
+
+        Ok(BuiltTx {
+            bytes,
+            selected,
+            change_outputs,
+            fee: fee_value,
+            reemission_burn,
+            as_of,
+        })
+    }
+}
+
+/// Map an `ergo_wallet` build error to a typed [`WalletAdminError`]. A box-selection
+/// shortfall (including a reward-box burn the inputs cannot fund) is a well-formed
+/// request the wallet cannot satisfy → `InsufficientFunds(422)`, not `Internal`.
+fn map_build_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
+    match &e {
+        ergo_wallet::error::WalletError::BoxSelection(m) => {
+            WalletAdminError::InsufficientFunds(m.clone())
+        }
+        _ => WalletAdminError::Internal(e.to_string()),
+    }
+}
+
+// ----- native transaction construction (boxes/select + transactions/build) -----
+
+/// Parse a decimal-string amount into `u64`. A non-numeric / overflowing value is
+/// a client error (`bad_request`), the native amounts being decimal strings.
+fn parse_u64_dec(s: &str, field: &str) -> Result<u64, WalletAdminError> {
+    s.parse::<u64>()
+        .map_err(|_| WalletAdminError::BadRequest(format!("{field}: not a u64 decimal string")))
+}
+
+/// Decode a 32-byte hex id, `bad_request` on a malformed value.
+fn parse_box_id_hex(s: &str) -> Result<[u8; 32], WalletAdminError> {
+    hex::decode(s)
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+        .ok_or_else(|| WalletAdminError::BadRequest(format!("bad 32-byte hex id: {s}")))
+}
+
+/// Native asset list (`token_id` hex + decimal `amount`) → `(id, amount)` map.
+fn parse_native_assets(
+    assets: &[ergo_api::wallet::native::dto::WalletAssetDto],
+) -> Result<BTreeMap<[u8; 32], u64>, WalletAdminError> {
+    let mut out: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    for a in assets {
+        let id = parse_box_id_hex(&a.token_id)?;
+        let amt = parse_u64_dec(&a.amount, "asset.amount")?;
+        let entry = out.entry(id).or_insert(0);
+        *entry = entry
+            .checked_add(amt)
+            .ok_or_else(|| WalletAdminError::BadRequest("asset amount overflow".into()))?;
+    }
+    Ok(out)
+}
+
+/// `(id, amount)` map → native asset DTO list (decimal-string amounts).
+fn assets_map_to_dto(
+    tokens: &BTreeMap<[u8; 32], u64>,
+) -> Vec<ergo_api::wallet::native::dto::WalletAssetDto> {
+    tokens
+        .iter()
+        .map(|(id, amt)| ergo_api::wallet::native::dto::WalletAssetDto {
+            token_id: hex::encode(id),
+            amount: amt.to_string(),
+        })
+        .collect()
+}
+
+/// The `ReemissionBurn` DTO for a `to_burn` (or `None` when no burn). `to_burn > 0`
+/// implies EIP-27 rules are present (the obligation only triggers under them).
+fn reemission_burn_dto(
+    to_burn: u64,
+    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
+) -> Option<ergo_api::wallet::native::dto::ReemissionBurn> {
+    (to_burn > 0).then(|| {
+        let rules = reemission.expect("a re-emission burn implies the rules are present");
+        ergo_api::wallet::native::dto::ReemissionBurn {
+            token_id: hex::encode(rules.reemission_token_id),
+            tokens_burned: to_burn.to_string(),
+            nano_erg_routed: to_burn.to_string(),
+        }
+    })
+}
+
+/// Validate a supplied change address: it must decode as a P2PK for `network` AND
+/// be a tracked wallet tree, else `change_address_untracked(422)`.
+fn validate_tracked_change_address(
+    addr: &str,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    network: ergo_ser::address::NetworkPrefix,
+) -> Result<(), WalletAdminError> {
+    let pubkey = ergo_ser::address::decode_p2pk_address(addr, network)
+        .map_err(|_| WalletAdminError::ChangeAddressUntracked)?;
+    let tree = ergo_ser::address::build_p2pk_tree_bytes(&pubkey)
+        .map_err(|e| WalletAdminError::Internal(format!("change p2pk tree: {e:?}")))?;
+    if !state.read().is_tracked_tree(&tree) {
+        return Err(WalletAdminError::ChangeAddressUntracked);
+    }
+    Ok(())
+}
+
+/// Native `boxes/select`: a read-only, burn-aware selection dry-run over the
+/// wallet's confirmed unspent boxes — real selected inputs, the real change plan,
+/// and the exact EIP-27 burn, all from the SHARED `select_with_reemission`.
+fn select_boxes_impl(
+    req: &ergo_api::wallet::native::dto::BoxSelectRequest,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
+) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
+    use ergo_api::wallet::native::dto as ndto;
+
+    let target_erg = parse_u64_dec(&req.target.nano_erg, "target.nanoErg")?;
+    let target_tokens = parse_native_assets(&req.target.assets)?;
+
+    // Confirmed unspent set → summaries, narrowed by the input source.
+    let read_txn = db
+        .begin_read()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+    let unspent = wallet_reader
+        .unspent_boxes()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let mut summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
+        .iter()
+        .map(|wb| ergo_wallet::box_selector::BoxSummary {
+            box_id: wb.box_id,
+            value: wb.value,
+            tokens: wb.assets.iter().copied().collect(),
+        })
+        .collect();
+
+    match &req.inputs {
+        ndto::InputSource::Auto {
+            min_confirmations,
+            exclude_box_ids,
+        } => {
+            // The dry-run reads confirmed boxes (minConfirmations 0); a pool-inclusive
+            // or N-deep request is a valid shape not yet wired here.
+            if *min_confirmations != 0 {
+                return Err(WalletAdminError::UnsupportedIntent);
+            }
+            let mut excluded: std::collections::HashSet<[u8; 32]> =
+                std::collections::HashSet::new();
+            for id in exclude_box_ids {
+                excluded.insert(parse_box_id_hex(id)?);
+            }
+            summaries.retain(|s| !excluded.contains(&s.box_id));
+        }
+        ndto::InputSource::BoxIds { box_ids } => {
+            let mut wanted: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            for id in box_ids {
+                wanted.insert(parse_box_id_hex(id)?);
+            }
+            summaries.retain(|s| wanted.contains(&s.box_id));
+            // Every requested id must be a wallet unspent box.
+            if summaries.len() != wanted.len() {
+                return Err(WalletAdminError::BoxNotFound);
+            }
+        }
+        ndto::InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
+    }
+
+    if let Some(addr) = &req.change_address {
+        validate_tracked_change_address(addr, state, network)?;
+    }
+
+    let reemission = chain.reemission_rules();
+    let reemission_height = chain.tip_height().saturating_add(1);
+    let plan = ergo_wallet::tx_builder::select_with_reemission(
+        &ergo_wallet::box_selector::default::DefaultBoxSelector,
+        &summaries,
+        target_erg,
+        &target_tokens,
+        MIN_BOX_VALUE,
+        reemission,
+        reemission_height,
+    )
+    .map_err(map_build_error)?;
+
+    if plan.to_burn > 0 && !req.allow_reemission_spend {
+        return Err(WalletAdminError::ReemissionSpendNotAllowed(format!(
+            "selection includes a reward box; {} re-emission token(s) would be burned \
+             (set allowReemissionSpend to permit it)",
+            plan.to_burn
+        )));
+    }
+
+    let summary_by_id: std::collections::HashMap<[u8; 32], &ergo_wallet::box_selector::BoxSummary> =
+        summaries.iter().map(|s| (s.box_id, s)).collect();
+    let inputs_selected = plan
+        .selected_ids
+        .iter()
+        .map(|id| {
+            let s = summary_by_id.get(id).ok_or_else(|| {
+                WalletAdminError::Internal("selected box not in summaries".into())
+            })?;
+            Ok(ndto::SelectedBoxRef {
+                box_id: hex::encode(id),
+                value: s.value.to_string(),
+                assets: assets_map_to_dto(&s.tokens),
+            })
+        })
+        .collect::<Result<_, WalletAdminError>>()?;
+
+    Ok(ndto::BoxSelectResponse {
+        inputs_selected,
+        change: ndto::ChangePlan {
+            nano_erg: plan.change_erg.to_string(),
+            assets: assets_map_to_dto(&plan.change_tokens),
+        },
+        reemission_burn: reemission_burn_dto(plan.to_burn, reemission),
+        as_of: chain.wallet_scan_height(),
+    })
+}
+
+/// Native `transactions/build`: map a [`TxIntent`] to the burn-aware
+/// [`build_unsigned_tx`] and report exactly what was built. `payment` outputs are
+/// load-bearing; `mint`/`burn`/`payment.registers` and inline-serialized box
+/// sources ship `unsupported_intent(422)` until wired (a later 422→200 for the
+/// same well-formed request).
+async fn build_transaction_impl(
+    intent: &ergo_api::wallet::native::dto::TxIntent,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
+) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
+    use ergo_api::wallet::native::dto as ndto;
+
+    if intent.outputs.is_empty() {
+        return Err(WalletAdminError::BadRequest(
+            "at least one output is required".into(),
+        ));
+    }
+    let mut payment_reqs: Vec<PaymentRequestDto> = Vec::with_capacity(intent.outputs.len());
+    for o in &intent.outputs {
+        match o {
+            ndto::OutputIntent::Payment {
+                address,
+                value,
+                assets,
+                registers,
+            } => {
+                if registers.is_some() {
+                    return Err(WalletAdminError::UnsupportedIntent);
+                }
+                let assets = assets
+                    .iter()
+                    .map(|a| {
+                        Ok(ergo_api::wallet::sending::AssetDto {
+                            token_id: a.token_id.clone(),
+                            amount: parse_u64_dec(&a.amount, "output asset amount")?,
+                        })
+                    })
+                    .collect::<Result<_, WalletAdminError>>()?;
+                payment_reqs.push(PaymentRequestDto {
+                    address: address.clone(),
+                    value: parse_u64_dec(value, "output value")?,
+                    assets,
+                });
+            }
+            ndto::OutputIntent::Mint { .. } | ndto::OutputIntent::Burn { .. } => {
+                return Err(WalletAdminError::UnsupportedIntent);
+            }
+        }
+    }
+
+    let fee_override = match &intent.fee {
+        Some(f) => Some(parse_u64_dec(f, "fee")?),
+        None => None,
+    };
+
+    let override_inputs: Option<Vec<String>> = match &intent.inputs {
+        ndto::InputSource::Auto {
+            min_confirmations,
+            exclude_box_ids,
+        } => {
+            // The build path selects over confirmed boxes; pool-inclusive selection
+            // and explicit excludes are valid shapes not yet wired here.
+            if *min_confirmations != 0 || !exclude_box_ids.is_empty() {
+                return Err(WalletAdminError::UnsupportedIntent);
+            }
+            None
+        }
+        ndto::InputSource::BoxIds { box_ids } => Some(box_ids.clone()),
+        ndto::InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
+    };
+    let override_data_inputs: Option<Vec<String>> = match &intent.data_inputs {
+        ndto::DataInputSource::BoxIds { box_ids } => (!box_ids.is_empty()).then(|| box_ids.clone()),
+        ndto::DataInputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
+    };
+
+    let built = build_unsigned_tx(
+        &payment_reqs,
+        override_inputs.as_deref(),
+        override_data_inputs.as_deref(),
+        fee_override,
+        intent.change_address.as_deref(),
+        state,
+        db,
+        chain,
+        network,
+    )
+    .await?;
+
+    // Fail-closed: a reward-box spend (EIP-27 burn) needs explicit opt-in.
+    if built.reemission_burn.is_some() && !intent.allow_reemission_spend {
+        return Err(WalletAdminError::ReemissionSpendNotAllowed(
+            "the build spends a reward box; set allowReemissionSpend to permit it".into(),
+        ));
+    }
+
+    let reemission_burn = built
+        .reemission_burn
+        .map(|(token_id, to_burn)| ndto::ReemissionBurn {
+            token_id: hex::encode(token_id),
+            tokens_burned: to_burn.to_string(),
+            nano_erg_routed: to_burn.to_string(),
+        });
+    let inputs_selected = built
+        .selected
+        .iter()
+        .map(|s| ndto::SelectedBoxRef {
+            box_id: hex::encode(s.box_id),
+            value: s.value.to_string(),
+            assets: assets_map_to_dto(&s.tokens),
+        })
+        .collect();
+    let change_outputs = built
+        .change_outputs
+        .iter()
+        .map(|(erg, tokens)| ndto::ChangePlan {
+            nano_erg: erg.to_string(),
+            assets: assets_map_to_dto(tokens),
+        })
+        .collect();
+
+    Ok(ndto::BuildTxResponse {
+        unsigned_transaction: ndto::TxRepr::from_bytes(&built.bytes),
+        inputs_selected,
+        change_outputs,
+        fee: built.fee.to_string(),
+        reemission_burn,
+        as_of: built.as_of,
+    })
+}
+
+// ----- native transaction sign + send -----
+
+/// Convert a native [`ExternalSecret`](ergo_api::wallet::native::dto::ExternalSecret)
+/// to the compat `ExternalSecretDto` so the single existing prover decoder
+/// ([`decode_external_secret`]) is reused. (`secret` maps to the compat `dlog`/`x`.)
+fn native_external_to_compat(
+    s: &ergo_api::wallet::native::dto::ExternalSecret,
+) -> ergo_api::wallet::sending::ExternalSecretDto {
+    use ergo_api::wallet::native::dto::ExternalSecret as N;
+    use ergo_api::wallet::sending::ExternalSecretDto as C;
+    match s {
+        N::Dlog { secret } => C::Dlog {
+            dlog: secret.clone(),
+        },
+        N::DhTuple { g, h, u, v, secret } => C::DhTuple {
+            g: g.clone(),
+            h: h.clone(),
+            u: u.clone(),
+            v: v.clone(),
+            x: secret.clone(),
+        },
+    }
+}
+
+/// `(transaction, tx_id_hex)` from serialized signed-tx bytes.
+fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError> {
+    let mut r = ergo_primitives::reader::VlqReader::new(signed_bytes);
+    let tx = ergo_ser::transaction::read_transaction(&mut r)
+        .map_err(|e| WalletAdminError::Internal(format!("signed tx decode: {e:?}")))?;
+    let id = ergo_ser::transaction::transaction_id(&tx)
+        .map_err(|e| WalletAdminError::Internal(format!("transaction_id: {e:?}")))?;
+    Ok(hex::encode(id.as_bytes()))
+}
+
+/// Native `transactions/sign`: sign a caller-supplied unsigned tx. Runs NO `Locked`
+/// precondition (works while locked when `externalSecrets` cover all inputs); the
+/// prover's missing-secret surfaces as `missing_secret(422)`. The EIP-27
+/// self-verify gate runs inside [`sign_unsigned_tx`], so an unsigned tx that
+/// violates the burn rule is caught here rather than network-rejected.
+async fn sign_transaction_native_impl(
+    req: &ergo_api::wallet::native::dto::SignTxRequest,
+    storage: &RwLock<ergo_wallet::storage::SecretStorage>,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
+    let externals: Vec<ergo_api::wallet::sending::ExternalSecretDto> = req
+        .external_secrets
+        .iter()
+        .map(native_external_to_compat)
+        .collect();
+    let signed_bytes = transaction_sign_impl(
+        req.unsigned_transaction.bytes_hex(),
+        Some(&externals),
+        None,
+        storage,
+        state,
+        db,
+        chain,
+    )
+    .await?;
+    let tx_id = signed_tx_id_hex(&signed_bytes)?;
+    Ok(ergo_api::wallet::native::dto::SignTxResponse {
+        signed_transaction: ergo_api::wallet::native::dto::TxRepr::from_bytes(&signed_bytes),
+        tx_id,
+    })
+}
+
+/// Map a submit error to a native [`WalletAdminError`]. A `duplicate` reason is the
+/// caller's concern (handled as idempotent-accepted upstream); other reasons are a
+/// client-correctable rejection (`bad_request` carrying the typed reason).
+fn map_submit_error(e: ergo_api::types::SubmitError) -> WalletAdminError {
+    WalletAdminError::BadRequest(match e.detail {
+        Some(d) => format!("submit rejected ({}): {d}", e.reason),
+        None => format!("submit rejected: {}", e.reason),
+    })
+}
+
+/// Native `transactions/send`. **txId-first** idempotency (codex P0-4): compute the
+/// id, short-circuit a known wallet tx BEFORE any UTXO-dependent self-verify, then
+/// submit. `intent` builds (burn-aware) + signs with the wallet's own secrets;
+/// `signed` submits caller-supplied bytes. A `duplicate` submit reason maps to an
+/// idempotent `accepted` (never a 5xx on a re-seen tx).
+#[allow(clippy::too_many_arguments)]
+async fn send_transaction_native_impl(
+    req: &ergo_api::wallet::native::dto::SendTxRequest,
+    storage: &RwLock<ergo_wallet::storage::SecretStorage>,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    submitter: &dyn TxSubmitter,
+    network: ergo_ser::address::NetworkPrefix,
+) -> Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError> {
+    use ergo_api::wallet::native::dto::{SendTxRequest, SendTxResponse};
+
+    // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
+    let signed_bytes = match req {
+        SendTxRequest::Intent { intent } => {
+            let built = build_transaction_impl(intent, state, db, chain, network).await?;
+            // The wallet signs with its own secrets; the EIP-27 self-verify gate runs
+            // inside `sign_unsigned_tx` on a freshly built tx (inputs still in the UTXO
+            // set, so the self-verify lookup succeeds).
+            transaction_sign_impl(
+                built.unsigned_transaction.bytes_hex(),
+                None,
+                None,
+                storage,
+                state,
+                db,
+                chain,
+            )
+            .await?
+        }
+        SendTxRequest::Signed { signed_transaction } => hex::decode(signed_transaction.bytes_hex())
+            .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?,
+    };
+
+    // 2. txId FIRST — so an already-known tx never trips the UTXO-dependent
+    //    self-verify (a confirmed tx's inputs are spent → `lookup_utxo` None).
+    let tx_id_hex = signed_tx_id_hex(&signed_bytes)?;
+    let tx_id: [u8; 32] = hex::decode(&tx_id_hex)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| WalletAdminError::Internal("tx id not 32 bytes".into()))?;
+
+    // Known-tx short-circuit: a confirmed wallet row → idempotent accept with its
+    // summary, no re-submit. (Without an indexer a confirmed non-wallet tx is not
+    // detectable here; it falls through to submit, where `duplicate` is caught.)
+    {
+        let read_txn = db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        if let Some(wt) = reader
+            .transaction_by_id(&tx_id)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        {
+            return Ok(SendTxResponse {
+                tx_id: tx_id_hex,
+                accepted: true,
+                transaction: Some(commands::admin::tx_to_summary(wt)),
+            });
+        }
+    }
+
+    // 3. Submit. A `duplicate` reason (already in-pool) is idempotently accepted.
+    match submitter.submit_transaction(signed_bytes).await {
+        Ok(_) => Ok(SendTxResponse {
+            tx_id: tx_id_hex,
+            accepted: true,
+            transaction: None,
+        }),
+        Err(e) if e.reason == "duplicate" => Ok(SendTxResponse {
+            tx_id: tx_id_hex,
+            accepted: true,
+            transaction: None,
+        }),
+        Err(e) => Err(map_submit_error(e)),
     }
 }
 
@@ -1827,13 +2632,15 @@ fn sign_unsigned_tx(
     ergo_validation::tx::structural::validate_structural(&signed_tx, &protocol_params)
         .map_err(|e| WalletAdminError::BadRequest(format!("transaction rejected: {e}")))?;
 
-    // Mandatory self-verify: reproduces chain validator cost accounting before submission.
+    // Mandatory self-verify: reproduces chain validator cost accounting + the
+    // EIP-27 re-emission burn gate before submission.
     self_verify_signed_tx(
         &signed_tx,
         &boxes_to_spend,
         &data_boxes,
         &state_ctx,
         &params,
+        chain.reemission_rules(),
     )?;
 
     Ok(signed_tx)
@@ -1861,9 +2668,26 @@ fn self_verify_signed_tx(
     data_boxes: &[ergo_ser::ergo_box::ErgoBox],
     state_ctx: &ergo_wallet::tx_context::BlockchainStateContext,
     params: &ergo_wallet::tx_context::BlockchainParameters,
+    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
 ) -> Result<(), WalletAdminError> {
     use ergo_primitives::cost::{CostAccumulator, JitCost};
     use ergo_sigma::reduce::verify_spending_proof_with_context_and_cost;
+
+    // Fail-closed EIP-27 gate: refuse to EMIT a tx that spends reward boxes
+    // without burning the re-emission tokens + paying pay-to-reemission. Uses the
+    // SAME shared validator the node runs (`verify_reemission_spending`), at the
+    // CANDIDATE height (`tip+1` = `state_ctx.sigma_pre_header.height`) the tx will
+    // be validated at — so the wallet never relays/mines a tx the node rejects.
+    // No-op off EIP-27 nets (`reemission` is `None`, e.g. testnet).
+    if let Some(rules) = reemission {
+        ergo_validation::verify_reemission_spending(
+            tx,
+            boxes_to_spend,
+            state_ctx.sigma_pre_header.height,
+            rules,
+        )
+        .map_err(|e| WalletAdminError::ReemissionObligationUnmet(e.to_string()))?;
+    }
 
     let jit_limit = JitCost::from_block_cost(params.max_block_cost)
         .map_err(|e| WalletAdminError::Internal(format!("self-verify cost limit: {e}")))?;
@@ -1958,12 +2782,14 @@ async fn payment_send_impl(
         override_inputs,
         override_data_inputs,
         fee_override,
+        None, // change_address_override (compat path uses the persisted change address)
         state,
         db,
         chain,
         network,
     )
-    .await?;
+    .await?
+    .bytes;
 
     let unsigned_tx = {
         let mut r = ergo_primitives::reader::VlqReader::new(&unsigned_bytes);
@@ -2029,12 +2855,14 @@ async fn transaction_generate_impl(
         override_inputs,
         override_data_inputs,
         fee_override,
+        None, // change_address_override (compat path uses the persisted change address)
         state,
         db,
         chain,
         network,
     )
-    .await?;
+    .await?
+    .bytes;
 
     let unsigned_tx = {
         let mut r = ergo_primitives::reader::VlqReader::new(&unsigned_bytes);
@@ -2078,12 +2906,14 @@ async fn transaction_generate_unsigned_impl(
         override_inputs,
         override_data_inputs,
         fee_override,
+        None, // change_address_override (compat path uses the persisted change address)
         state,
         db,
         chain,
         network,
     )
     .await
+    .map(|built| built.bytes)
 }
 
 /// `TransactionSign` path: decode an unsigned tx hex, sign it, self-verify.
@@ -3540,6 +4370,162 @@ mod scan_invalidation_tests {
         assert!(
             flag_set(&db),
             "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
+        );
+    }
+}
+
+#[cfg(test)]
+mod burn_aware_builder_tests {
+    use super::*;
+    use ergo_ser::address::NetworkPrefix;
+
+    /// Real mainnet pay-to-reemission contract tree (valid; header byte 0x19).
+    const PAY2R_HEX: &str = "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302";
+    const REEMISSION_TOKEN: [u8; 32] = [0x11; 32];
+
+    /// A valid mainnet P2PK address derived from the secp256k1 generator pubkey
+    /// (used as both change + recipient here).
+    fn test_addr() -> String {
+        let pk: [u8; 33] =
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        ergo_wallet::address::pubkey_to_p2pk_address(&pk, NetworkPrefix::Mainnet).unwrap()
+    }
+
+    struct BurnTestChain {
+        reward_id: [u8; 32],
+        reward_box: ergo_ser::ergo_box::ErgoBox,
+        rules: ergo_validation::ReemissionRuleInputs,
+        tip: u32,
+    }
+
+    impl ChainStateAccessor for BurnTestChain {
+        fn wallet_scan_height(&self) -> u32 {
+            self.tip
+        }
+        fn tip_height(&self) -> u32 {
+            self.tip
+        }
+        fn is_pruned(&self) -> bool {
+            false
+        }
+        fn read_block_at(&self, _h: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
+            None
+        }
+        fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
+            Some(&self.rules)
+        }
+        fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
+            (box_id == &self.reward_id).then(|| self.reward_box.clone())
+        }
+    }
+
+    fn p2pk_tree(addr: &str) -> ergo_ser::ergo_tree::ErgoTree {
+        let pk = ergo_ser::address::decode_p2pk_address(addr, NetworkPrefix::Mainnet).unwrap();
+        let bytes = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
+        let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+        ergo_ser::ergo_tree::read_ergo_tree(&mut r).unwrap()
+    }
+
+    /// ORACLE: an explicit-input spend of a reward box (value <= floor, carrying
+    /// the re-emission token) at a height past activation must BURN the token (no
+    /// output keeps it) and pay exactly `to_burn` nanoErg to the pay-to-reemission
+    /// contract — the structure the consensus validator requires.
+    #[tokio::test]
+    async fn explicit_input_reward_box_spend_burns_and_pays_reemission() {
+        let addr = test_addr();
+        let reward_id = [0xAA; 32];
+        let reward_box = ergo_ser::ergo_box::ErgoBox {
+            candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                15_000_000_000, // 15 ERG, <= 100k ERG floor → reward box
+                p2pk_tree(&addr),
+                100,
+                vec![ergo_ser::token::Token {
+                    token_id: ergo_primitives::digest::Digest32::from_bytes(REEMISSION_TOKEN),
+                    amount: 12_000_000_000, // 12e9 re-emission tokens → to_burn = 12e9 nanoErg
+                }],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            transaction_id: ergo_primitives::digest::ModifierId::from(
+                ergo_primitives::digest::Digest32::from_bytes([0xBB; 32]),
+            ),
+            index: 0,
+        };
+        let pay2r_tree = hex::decode(PAY2R_HEX).unwrap();
+        let chain = BurnTestChain {
+            reward_id,
+            reward_box,
+            rules: ergo_validation::ReemissionRuleInputs {
+                activation_height: 100,
+                reemission_token_id: REEMISSION_TOKEN,
+                pay_to_reemission_tree: pay2r_tree.clone(),
+            },
+            tip: 200, // candidate height 201 > activation 100 → burn triggers
+        };
+
+        let mut ws = ergo_wallet::state::WalletState::empty(false);
+        ws.set_change_address(addr.clone());
+        let state = RwLock::new(ws);
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("w.redb")).unwrap();
+
+        let requests = vec![PaymentRequestDto {
+            address: addr.clone(),
+            value: 1_000_000_000,
+            assets: vec![],
+        }];
+        let override_inputs = vec![hex::encode(reward_id)];
+
+        let bytes = build_unsigned_tx(
+            &requests,
+            Some(&override_inputs),
+            None,
+            None,
+            None, // change_address_override
+            &state,
+            &db,
+            &chain,
+            NetworkPrefix::Mainnet,
+        )
+        .await
+        .expect("burn-aware build of a reward-box spend must succeed")
+        .bytes;
+
+        let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+        let utx = ergo_ser::transaction::read_unsigned_transaction(&mut r).unwrap();
+
+        // (a) NO output keeps the re-emission token (it must be burned).
+        for out in &utx.output_candidates {
+            assert!(
+                !out.tokens
+                    .iter()
+                    .any(|t| t.token_id.as_bytes() == &REEMISSION_TOKEN),
+                "no output may keep the re-emission token",
+            );
+        }
+
+        // (b) Exactly `to_burn` (12e9) nanoErg goes to the pay-to-reemission tree.
+        let pay2r_header = pay2r_tree.first().copied();
+        let pay2r_parsed = {
+            let mut pr = ergo_primitives::reader::VlqReader::new(&pay2r_tree);
+            ergo_ser::ergo_tree::read_ergo_tree(&mut pr).unwrap()
+        };
+        let paid: u64 = utx
+            .output_candidates
+            .iter()
+            .filter(|o| {
+                o.ergo_tree_bytes().first().copied() == pay2r_header
+                    && *o.ergo_tree() == pay2r_parsed
+            })
+            .map(|o| o.value)
+            .sum();
+        assert_eq!(
+            paid, 12_000_000_000,
+            "must pay exactly to_burn nanoErg to pay-to-reemission",
         );
     }
 }

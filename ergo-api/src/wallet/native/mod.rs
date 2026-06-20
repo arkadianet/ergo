@@ -596,6 +596,100 @@ pub(crate) async fn rescan(
     Ok(StatusCode::OK)
 }
 
+/// `POST /api/v1/wallet/boxes/select` — burn-aware box-selection dry-run. Returns
+/// the real selected inputs, computed change, and the exact EIP-27 re-emission
+/// burn. Requires an unlocked wallet (design §2).
+#[utoipa::path(
+    post, path = "/api/v1/wallet/boxes/select", tag = "wallet",
+    request_body = dto::BoxSelectRequest,
+    responses(
+        (status = 200, description = "Selection plan", body = dto::BoxSelectResponse),
+        (status = 400, description = "Malformed body", body = error::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 404, description = "A requested box id is not a wallet box", body = error::NativeWalletError),
+        (status = 409, description = "Wallet locked/uninitialized", body = error::NativeWalletError),
+        (status = 422, description = "insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn select_boxes(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::BoxSelectRequest>,
+) -> Result<Json<dto::BoxSelectResponse>, NativeErr> {
+    let resp = admin.select_boxes(req).await.map_err(error::map_err)?;
+    Ok(Json(resp))
+}
+
+/// `POST /api/v1/wallet/transactions/build` — build a burn-aware unsigned tx from
+/// an intent. Returns the unsigned tx plus the selected inputs, change outputs,
+/// fee, and re-emission burn. Requires an unlocked wallet (design §2).
+#[utoipa::path(
+    post, path = "/api/v1/wallet/transactions/build", tag = "wallet",
+    request_body = dto::TxIntent,
+    responses(
+        (status = 200, description = "Built unsigned transaction + plan", body = dto::BuildTxResponse),
+        (status = 400, description = "Malformed body / no outputs", body = error::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 409, description = "Wallet locked/uninitialized", body = error::NativeWalletError),
+        (status = 422, description = "insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn build_transaction(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::TxIntent>,
+) -> Result<Json<dto::BuildTxResponse>, NativeErr> {
+    let resp = admin.build_transaction(req).await.map_err(error::map_err)?;
+    Ok(Json(resp))
+}
+
+/// `POST /api/v1/wallet/transactions/sign` — sign a caller-supplied unsigned tx.
+/// Conditional unlock: succeeds while locked when `externalSecrets` cover all
+/// inputs, else `missing_secret(422)` (never `wallet_locked`). Response is
+/// `Cache-Control: no-store` (it carries signed material).
+#[utoipa::path(
+    post, path = "/api/v1/wallet/transactions/sign", tag = "wallet",
+    request_body = dto::SignTxRequest,
+    responses(
+        (status = 200, description = "Signed transaction + txId", body = dto::SignTxResponse),
+        (status = 400, description = "Malformed body / tx bytes", body = error::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 422, description = "missing_secret / reemission_obligation_unmet / unsupported_script", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn sign_transaction(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::SignTxRequest>,
+) -> Result<NoStoreJson<dto::SignTxResponse>, NativeErr> {
+    let resp = admin.sign_transaction(req).await.map_err(error::map_err)?;
+    Ok(no_store(resp))
+}
+
+/// `POST /api/v1/wallet/transactions/send` — build+sign+submit an intent (needs
+/// unlock) or submit a caller-supplied signed tx (no unlock). txId-first
+/// idempotency: an already-known tx returns `accepted:true` without re-submitting,
+/// and a duplicate submit is an idempotent accept. `Cache-Control: no-store`.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/transactions/send", tag = "wallet",
+    request_body = dto::SendTxRequest,
+    responses(
+        (status = 200, description = "Accepted (fresh or idempotent)", body = dto::SendTxResponse),
+        (status = 400, description = "Malformed body / submit rejected", body = error::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 409, description = "Wallet locked (intent send)", body = error::NativeWalletError),
+        (status = 422, description = "insufficient_funds / reemission_* / missing_secret / unsupported_intent", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn send_transaction(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::SendTxRequest>,
+) -> Result<NoStoreJson<dto::SendTxResponse>, NativeErr> {
+    let resp = admin.send_transaction(req).await.map_err(error::map_err)?;
+    Ok(no_store(resp))
+}
+
 /// Build the native `/api/v1/wallet/*` router. Mirrors
 /// [`crate::wallet::router_with_security`]: the whole subtree is api-key gated
 /// via `route_layer` (never `layer` — see that fn's note on the `/emission/at`
@@ -619,8 +713,12 @@ pub fn router_with_security(
             get(change_address_get).put(change_address_put),
         )
         .route("/api/v1/wallet/boxes", get(boxes))
+        .route("/api/v1/wallet/boxes/select", post(select_boxes))
         .route("/api/v1/wallet/boxes/:box_id", get(box_by_id))
         .route("/api/v1/wallet/transactions", get(transactions))
+        .route("/api/v1/wallet/transactions/build", post(build_transaction))
+        .route("/api/v1/wallet/transactions/sign", post(sign_transaction))
+        .route("/api/v1/wallet/transactions/send", post(send_transaction))
         .route("/api/v1/wallet/transactions/:tx_id", get(transaction_by_id))
         // --- lifecycle (POST) ---
         .route("/api/v1/wallet/init", post(init))

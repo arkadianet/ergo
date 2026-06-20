@@ -1165,9 +1165,14 @@ async fn run_inner_with_backend(
                 // `ChainStateAccessorImpl::tip_height()` now reads the live committed
                 // tip from redb per-call (no captured value), so no boot-time tip is
                 // threaded in.
-                let chain_accessor: Arc<dyn super::wallet_bridge::ChainStateAccessor> = Arc::new(
-                    super::wallet_bridge::ChainStateAccessorImpl::new(db_arc.clone(), is_pruned),
-                );
+                let chain_accessor: Arc<dyn super::wallet_bridge::ChainStateAccessor> =
+                    Arc::new(super::wallet_bridge::ChainStateAccessorImpl::new(
+                        db_arc.clone(),
+                        is_pruned,
+                        // Same EIP-27 rules the validator uses, so the wallet's
+                        // burn-aware builder + self-verify gate share consensus.
+                        build_reemission_rules(&config.chain_spec),
+                    ));
                 let wallet_storage = {
                     let secret_dir = config.data_dir.join("wallet");
                     Arc::new(RwLock::new(ergo_wallet::storage::SecretStorage::open(

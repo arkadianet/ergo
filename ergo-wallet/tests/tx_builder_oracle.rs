@@ -72,6 +72,8 @@ fn builder<'a>(available: &'a [BoxSummary], fee: u64, min_box_value: u64) -> Uns
         current_height: 1_000,
         min_box_value,
         data_inputs: vec![],
+        reemission: None,
+        reemission_height: 0,
     }
 }
 
@@ -291,4 +293,190 @@ fn builder_keeps_subminimum_change_box_when_it_carries_tokens() {
         .map(|t| t.amount)
         .sum();
     assert_eq!(token_change, 600, "token remainder preserved on change box");
+}
+
+// ----- EIP-27 re-emission burn (auto-selection branch) -----
+
+/// Re-emission token id used by the burn fixtures.
+const REEMISSION_TOKEN: u8 = 0xCC;
+/// A distinct, valid ErgoTree used as the pay-to-reemission contract so the burn
+/// output is identifiable: version=0, body=Const(SBoolean=false) → `[0x00,0x01,0x00]`.
+/// Different from `always_true_ergo_tree` (`[0x00,0x01,0x01]`), which the payment,
+/// fee, and change outputs use, so the pay-to-reemission output stands out.
+fn pay_to_reemission_tree() -> Vec<u8> {
+    vec![0x00, 0x01, 0x00]
+}
+
+/// EIP-27 rules with activation at height 100.
+fn reemission_rules() -> ergo_validation::ReemissionRuleInputs {
+    ergo_validation::ReemissionRuleInputs {
+        activation_height: 100,
+        reemission_token_id: [REEMISSION_TOKEN; 32],
+        pay_to_reemission_tree: pay_to_reemission_tree(),
+    }
+}
+
+/// A burn-aware builder: re-emission rules present, obligation evaluated at
+/// `reemission_height`.
+fn burn_builder<'a>(
+    available: &'a [BoxSummary],
+    rules: &'a ergo_validation::ReemissionRuleInputs,
+    fee: u64,
+    min_box_value: u64,
+    reemission_height: u32,
+) -> UnsignedTxBuilder<'a> {
+    UnsignedTxBuilder {
+        available_summaries: available,
+        selector: &DefaultBoxSelector,
+        fee,
+        fee_ergo_tree: always_true_ergo_tree(),
+        change_ergo_tree: always_true_ergo_tree(),
+        current_height: 1_000,
+        min_box_value,
+        data_inputs: vec![],
+        reemission: Some(rules),
+        reemission_height,
+    }
+}
+
+/// Total re-emission tokens carried across all outputs (must be zero after a burn).
+fn reemission_token_on_outputs(tx: &ergo_ser::transaction::UnsignedTransaction) -> u64 {
+    tx.output_candidates
+        .iter()
+        .flat_map(|o| o.tokens.iter())
+        .filter(|t| t.token_id.as_bytes() == &[REEMISSION_TOKEN; 32])
+        .map(|t| t.amount)
+        .sum()
+}
+
+/// nanoErg paid to the pay-to-reemission contract (outputs whose tree is the
+/// pay-to-reemission tree).
+fn paid_to_reemission(tx: &ergo_ser::transaction::UnsignedTransaction) -> u64 {
+    let pay2r = pay_to_reemission_tree();
+    tx.output_candidates
+        .iter()
+        .filter(|o| o.ergo_tree_bytes() == pay2r.as_slice())
+        .map(|o| o.value)
+        .sum()
+}
+
+/// ORACLE: auto-selecting a reward box (value <= the emission floor, carrying the
+/// re-emission token) past activation must BURN the token (no output keeps it) and
+/// pay exactly `to_burn` nanoErg to the pay-to-reemission contract — the structure
+/// the consensus validator (`verify_reemission_spending`) requires. Mirrors the
+/// explicit-input oracle in `wallet_bridge`, here through `UnsignedTxBuilder`.
+#[test]
+fn auto_select_reward_box_burns_and_pays_reemission() {
+    const PAYMENT: u64 = 1_000_000_000; // 1 ERG
+    const FEE: u64 = 1_000_000;
+    const MIN_BOX: u64 = 1_000_000;
+    // 15 ERG reward box (<= 100k ERG floor) carrying 12e9 re-emission tokens.
+    const REWARD_VALUE: u64 = 15_000_000_000;
+    const TOKEN_AMOUNT: u64 = 12_000_000_000; // → to_burn = 12e9 nanoErg
+
+    let available = vec![token_summary(
+        1,
+        REWARD_VALUE,
+        REEMISSION_TOKEN,
+        TOKEN_AMOUNT,
+    )];
+    let rules = reemission_rules();
+    // height 200 > activation 100 → burn triggers.
+    let tx = burn_builder(&available, &rules, FEE, MIN_BOX, 200)
+        .build(&[erg_request(PAYMENT)])
+        .expect("burn-aware auto-select build must succeed");
+
+    // (a) The token is burned: no output carries it.
+    assert_eq!(
+        reemission_token_on_outputs(&tx),
+        0,
+        "no output may keep the re-emission token"
+    );
+    // (b) Exactly `to_burn` nanoErg is paid to pay-to-reemission.
+    assert_eq!(
+        paid_to_reemission(&tx),
+        TOKEN_AMOUNT,
+        "must pay exactly to_burn nanoErg to pay-to-reemission"
+    );
+    // (c) Value is conserved: every input nanoErg lands on an output.
+    let out_total: u64 = tx.output_candidates.iter().map(|o| o.value).sum();
+    assert_eq!(out_total, REWARD_VALUE, "tx must conserve value");
+}
+
+/// Below/at activation the re-emission spending branch does NOT fire (Scala
+/// `height > activationHeight` is strict): the surplus token is ordinary change,
+/// kept on a change box, and nothing is paid to pay-to-reemission.
+#[test]
+fn auto_select_reward_box_at_activation_keeps_token_no_burn() {
+    const PAYMENT: u64 = 1_000_000_000;
+    const FEE: u64 = 1_000_000;
+    const MIN_BOX: u64 = 1_000_000;
+    const REWARD_VALUE: u64 = 15_000_000_000;
+    const TOKEN_AMOUNT: u64 = 12_000_000_000;
+
+    let available = vec![token_summary(
+        1,
+        REWARD_VALUE,
+        REEMISSION_TOKEN,
+        TOKEN_AMOUNT,
+    )];
+    let rules = reemission_rules();
+    // height == activation 100 → NOT strictly above → no burn.
+    let tx = burn_builder(&available, &rules, FEE, MIN_BOX, 100)
+        .build(&[erg_request(PAYMENT)])
+        .expect("build must succeed");
+
+    assert_eq!(
+        paid_to_reemission(&tx),
+        0,
+        "no burn at/below activation: nothing paid to pay-to-reemission"
+    );
+    assert_eq!(
+        reemission_token_on_outputs(&tx),
+        TOKEN_AMOUNT,
+        "the surplus token is kept as ordinary change when the rule does not fire"
+    );
+}
+
+/// Fixed-point reselection: when the burn-blind first selection leaves too little
+/// change to fund the owed burn, the builder reserves the burn and reselects,
+/// pulling in another input. The token:value ratio here is deliberately
+/// exaggerated (5e8 tokens on a 1-ERG box) to force this path; real reward boxes
+/// carry far fewer tokens than nanoErg and fund the burn from the first
+/// selection's change.
+#[test]
+fn auto_select_burn_reselects_when_change_cannot_fund_it() {
+    const PAYMENT: u64 = 900_000_000; // 0.9 ERG
+    const FEE: u64 = 1_000_000;
+    const MIN_BOX: u64 = 1_000_000;
+    // Box A: 1 ERG reward box carrying 5e8 re-emission tokens (→ 5e8 nanoErg burn,
+    // more than the 99e6 change the first A-only selection would leave).
+    // Box B: 1 ERG ordinary box (no re-emission token) to cover the shortfall.
+    let available = vec![
+        token_summary(1, 1_000_000_000, REEMISSION_TOKEN, 500_000_000),
+        erg_summary(2, 1_000_000_000),
+    ];
+    let rules = reemission_rules();
+    let tx = burn_builder(&available, &rules, FEE, MIN_BOX, 200)
+        .build(&[erg_request(PAYMENT)])
+        .expect("build must reselect and succeed");
+
+    // Reselection pulled in the second input to fund the burn.
+    assert_eq!(
+        tx.inputs.len(),
+        2,
+        "the burn reservation must reselect to cover the shortfall"
+    );
+    assert_eq!(reemission_token_on_outputs(&tx), 0, "token burned");
+    assert_eq!(
+        paid_to_reemission(&tx),
+        500_000_000,
+        "the full owed burn is paid to pay-to-reemission"
+    );
+    let in_total: u64 = 2_000_000_000;
+    let out_total: u64 = tx.output_candidates.iter().map(|o| o.value).sum();
+    assert_eq!(
+        out_total, in_total,
+        "tx must conserve value across both inputs"
+    );
 }

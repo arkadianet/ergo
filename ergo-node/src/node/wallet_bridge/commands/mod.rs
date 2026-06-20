@@ -37,9 +37,10 @@ use super::{ChainStateAccessor, TxSubmitter, WriterConfig};
 // each handler file a single one-level `super::<name>` path instead
 // of `super::super::<name>`.
 pub(super) use super::{
-    boxes_collect_impl, derive_key_impl, derive_next_key_impl, extract_hints_impl,
-    generate_commitments_impl, get_private_key_impl, paginate_boxes, paginate_transactions,
-    payment_send_impl, transaction_generate_impl, transaction_generate_unsigned_impl,
+    boxes_collect_impl, build_transaction_impl, derive_key_impl, derive_next_key_impl,
+    extract_hints_impl, generate_commitments_impl, get_private_key_impl, paginate_boxes,
+    paginate_transactions, payment_send_impl, select_boxes_impl, send_transaction_native_impl,
+    sign_transaction_native_impl, transaction_generate_impl, transaction_generate_unsigned_impl,
     transaction_sign_impl, wallet_tx_to_entry,
 };
 

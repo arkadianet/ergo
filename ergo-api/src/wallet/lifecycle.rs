@@ -49,6 +49,17 @@ pub(crate) fn map_err(e: super::WalletAdminError) -> (StatusCode, Json<serde_jso
         E::UnsupportedScript => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_script"),
         E::MissingSecret => (StatusCode::UNPROCESSABLE_ENTITY, "missing_secret"),
         E::UnsupportedIntent => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_intent"),
+        E::ReemissionObligationUnmet(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reemission_obligation_unmet",
+        ),
+        E::InsufficientFunds(_) => (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_funds"),
+        E::ReemissionSpendNotAllowed(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reemission_spend_not_allowed",
+        ),
+        E::TokenBurnNotAllowed(_) => (StatusCode::UNPROCESSABLE_ENTITY, "token_burn_not_allowed"),
+        E::TxNotFound => (StatusCode::NOT_FOUND, "tx_not_found"),
     };
     // Log at the HTTP boundary so a failure is diagnosable from the node log
     // alone — the cause otherwise lived only in the response body. Server

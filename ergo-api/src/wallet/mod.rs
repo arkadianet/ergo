@@ -380,6 +380,57 @@ pub trait WalletAdmin: Send + Sync {
             "native_transaction_by_id not implemented".to_string(),
         ))
     }
+
+    /// Native box-selection dry-run: real selected inputs + computed change plan +
+    /// the exact EIP-27 re-emission burn the selection incurs (from
+    /// `reemission_obligation_core` over the selected inputs at `tip+1`), in one
+    /// read txn. No state mutation, no tx built. Needs an unlocked wallet only for
+    /// the change-address resolution path; the selection itself is read-only.
+    async fn select_boxes(
+        &self,
+        _req: native::dto::BoxSelectRequest,
+    ) -> Result<native::dto::BoxSelectResponse, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "select_boxes not implemented".to_string(),
+        ))
+    }
+
+    /// Native burn-aware unsigned-tx build from a [`native::dto::TxIntent`]. Both
+    /// input branches (auto selection and explicit boxes) are EIP-27 burn-aware
+    /// (the shared `reemission_obligation_core`). Returns the unsigned tx + the
+    /// real selected inputs, change outputs, fee, and the re-emission burn.
+    async fn build_transaction(
+        &self,
+        _intent: native::dto::TxIntent,
+    ) -> Result<native::dto::BuildTxResponse, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "build_transaction not implemented".to_string(),
+        ))
+    }
+
+    /// Native `transactions/sign`: sign a caller-supplied unsigned tx (no `Locked`
+    /// precondition — succeeds while locked when external secrets cover all inputs).
+    /// The EIP-27 self-verify gate runs before returning.
+    async fn sign_transaction(
+        &self,
+        _req: native::dto::SignTxRequest,
+    ) -> Result<native::dto::SignTxResponse, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "sign_transaction not implemented".to_string(),
+        ))
+    }
+
+    /// Native `transactions/send`: build+sign+submit an intent (needs unlock) or
+    /// submit a caller-supplied signed tx. txId-first idempotency; a duplicate is
+    /// an idempotent accept.
+    async fn send_transaction(
+        &self,
+        _req: native::dto::SendTxRequest,
+    ) -> Result<native::dto::SendTxResponse, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "send_transaction not implemented".to_string(),
+        ))
+    }
 }
 
 /// Errors the admin trait can return. Maps to HTTP responses in
@@ -452,6 +503,30 @@ pub enum WalletAdminError {
     /// (`mint`/`registers`). Native 422 (distinct from `bad_request`).
     #[error("unsupported intent")]
     UnsupportedIntent,
+    /// A transaction violates the EIP-27 re-emission burn rule (a reward box is
+    /// spent without burning the re-emission tokens + paying pay-to-reemission).
+    /// Raised by the wallet's fail-closed self-verify gate so it never emits a tx
+    /// the consensus validator would reject. Native 422.
+    #[error("re-emission obligation unmet: {0}")]
+    ReemissionObligationUnmet(String),
+    /// Box selection / build cannot cover the requested target (ERG and/or
+    /// tokens), including the case where the inputs cannot fund their own EIP-27
+    /// re-emission burn. Native 422 (distinct from `bad_request`: the request is
+    /// well-formed, the wallet just lacks the funds).
+    #[error("insufficient funds: {0}")]
+    InsufficientFunds(String),
+    /// A selected input carries the re-emission token (a reward-box spend) while
+    /// the intent left `allowReemissionSpend = false` (fail-closed against an
+    /// accidental reward-box spend). Native 422.
+    #[error("re-emission spend not allowed: {0}")]
+    ReemissionSpendNotAllowed(String),
+    /// A non-re-emission token surplus on the selected inputs would be dropped
+    /// (burned) and the intent left `allowTokenBurn = false`. Native 422.
+    #[error("token burn not allowed: {0}")]
+    TokenBurnNotAllowed(String),
+    /// A referenced transaction id is absent from the wallet/chain. Native 404.
+    #[error("transaction not found")]
+    TxNotFound,
 }
 
 /// Build the `/wallet/*` axum router and, if `security` is `Some`,
