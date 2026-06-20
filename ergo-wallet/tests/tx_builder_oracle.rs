@@ -480,3 +480,31 @@ fn auto_select_burn_reselects_when_change_cannot_fund_it() {
         "tx must conserve value across both inputs"
     );
 }
+
+/// CodeRabbit (#114): a DIRECT builder call must REJECT a burn-triggering build
+/// that also requests the re-emission token on a payment output. The token can
+/// only be burned when a reward box is spent, never delivered — so the builder
+/// itself enforces the invariant (not just the bridge), and the tx that EIP-27
+/// would reject is never produced.
+#[test]
+fn auto_select_rejects_sending_the_reemission_token() {
+    const FEE: u64 = 1_000_000;
+    const MIN_BOX: u64 = 1_000_000;
+    // A reward box carrying the re-emission token; the payment tries to SEND some
+    // of that token while the reward box is spent (burn triggered at height 200).
+    let available = vec![token_summary(
+        1,
+        15_000_000_000,
+        REEMISSION_TOKEN,
+        12_000_000_000,
+    )];
+    let rules = reemission_rules();
+    let req = token_request(1_000_000_000, REEMISSION_TOKEN, 5);
+    let err = burn_builder(&available, &rules, FEE, MIN_BOX, 200)
+        .build(&[req])
+        .expect_err("sending the re-emission token while spending a reward box must be rejected");
+    assert!(
+        matches!(err, WalletError::ReemissionTokenOnOutput(_)),
+        "expected ReemissionTokenOnOutput, got {err:?}"
+    );
+}

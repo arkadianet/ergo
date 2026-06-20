@@ -512,7 +512,9 @@ pub enum OutputIntent {
     /// Pay `value` nanoErg (+ optional `assets`/`registers`) to `address`.
     #[serde(rename_all = "camelCase")]
     Payment {
-        /// Recipient address (P2PK or P2S for this network).
+        /// Recipient P2PK address for this network. P2S (contract) recipients are
+        /// not yet supported — the builder decodes the recipient as P2PK, so a P2S
+        /// address is rejected as a bad address.
         address: String,
         /// nanoErg to send (decimal string).
         value: String,

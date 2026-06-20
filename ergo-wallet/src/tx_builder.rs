@@ -240,6 +240,28 @@ impl<'a> UnsignedTxBuilder<'a> {
         let change_tokens = plan.change_tokens.clone();
         let to_burn = plan.to_burn;
 
+        // EIP-27: when a reward box is spent (burn triggered) the re-emission token
+        // must appear on NO output. `select_with_reemission` already strips it from
+        // change; guard the PAYMENT outputs here too, so a direct builder call can
+        // never emit a tx that pays the burn yet keeps the token on an output (which
+        // the validator rejects). The bridge maps this to `reemission_spend_not_allowed`.
+        if to_burn > 0 {
+            if let Some(rules) = self.reemission {
+                let keeps_token = requests.iter().any(|r| {
+                    r.assets
+                        .get(&rules.reemission_token_id)
+                        .is_some_and(|&a| a > 0)
+                });
+                if keeps_token {
+                    return Err(WalletError::ReemissionTokenOnOutput(
+                        "a payment output requests the re-emission token; it is burned \
+                         when a reward box is spent and may not be sent"
+                            .into(),
+                    ));
+                }
+            }
+        }
+
         // 3. Build output candidates.
         let mut output_candidates: Vec<ErgoBoxCandidate> = Vec::new();
 

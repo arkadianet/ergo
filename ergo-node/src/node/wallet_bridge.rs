@@ -1432,8 +1432,9 @@ struct BuiltTx {
     /// Emitted change boxes (0 or 1): `(erg, tokens)`. Empty when the change was
     /// folded into the fee or the selection was exact.
     change_outputs: Vec<(u64, BTreeMap<[u8; 32], u64>)>,
-    /// Actual miner-fee-box value (includes any folded sub-minimum change; reduced
-    /// by a burn debited from fee on the explicit-input branch).
+    /// Actual miner-fee-box value (the requested fee plus any folded sub-minimum
+    /// change). Both branches preserve the requested fee — an EIP-27 burn is
+    /// debited from change, never the fee.
     fee: u64,
     /// EIP-27 burn `(reemission_token_id, to_burn_nanoerg)`, or `None`.
     reemission_burn: Option<([u8; 32], u64)>,
@@ -1893,29 +1894,13 @@ async fn build_unsigned_tx(
             reemission_height: current_height.saturating_add(1),
         };
 
+        // The builder itself rejects a burn-triggering build that keeps the
+        // re-emission token on a payment output (→ `ReemissionTokenOnOutput`,
+        // mapped to `reemission_spend_not_allowed` by `map_build_error`), so the
+        // invariant holds even on a direct builder call — no extra guard here.
         let (unsigned_tx, plan) = builder
             .build_with_plan(&payment_reqs)
             .map_err(map_build_error)?;
-
-        // No output may keep the re-emission token when a burn is triggered: a
-        // requested SEND of it is rejected (it can only be burned). The builder
-        // already strips it from change; this guards the payment outputs (which the
-        // self-verify gate would otherwise reject downstream).
-        if plan.to_burn > 0 {
-            if let Some(rules) = reemission_rules {
-                if payment_reqs.iter().any(|r| {
-                    r.assets
-                        .get(&rules.reemission_token_id)
-                        .is_some_and(|&a| a > 0)
-                }) {
-                    return Err(WalletAdminError::ReemissionSpendNotAllowed(
-                        "the re-emission token cannot be sent to an output; it is burned \
-                         when a reward box is spent"
-                            .into(),
-                    ));
-                }
-            }
-        }
         let bytes = serialize_unsigned_tx(&unsigned_tx)?;
 
         // Reconstruct the response plan from the builder's `SelectionPlan` + the
@@ -1974,6 +1959,9 @@ fn map_build_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
     match &e {
         ergo_wallet::error::WalletError::BoxSelection(m) => {
             WalletAdminError::InsufficientFunds(m.clone())
+        }
+        ergo_wallet::error::WalletError::ReemissionTokenOnOutput(m) => {
+            WalletAdminError::ReemissionSpendNotAllowed(m.clone())
         }
         _ => WalletAdminError::Internal(e.to_string()),
     }
