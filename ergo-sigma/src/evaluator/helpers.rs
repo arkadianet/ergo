@@ -418,6 +418,8 @@ pub(crate) fn infer_expr_type(
     match expr {
         Expr::Const { tpe, .. } => Some(tpe.clone()),
         Expr::Op(node) => infer_op_type(node, bindings, constants),
+        // No static type for an unparsed (soft-fork-wrapped) body.
+        Expr::Unparsed(_) => None,
     }
 }
 

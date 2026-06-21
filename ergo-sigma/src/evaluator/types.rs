@@ -649,6 +649,16 @@ pub enum EvalError {
         method_id: u8,
         tree_version: u8,
     },
+    /// Evaluation reached an UNPARSED (soft-fork-wrapped) ErgoTree body —
+    /// Scala's `Left(UnparsedErgoTree(_, error))`. `propositionFromErgoTree`
+    /// (`Interpreter.scala`) throws an `InterpreterException` for such a tree
+    /// unless its wrapping error is an *active* soft-fork (`isSoftFork`, default
+    /// `false` — no soft-forked validation rule is currently activated, and this
+    /// node does not model that activation). So a box whose script could not be
+    /// parsed is UNSPENDABLE, not trivially spendable — the box-script readers
+    /// preserve the verbatim bytes and this surfaces the reject at evaluation.
+    #[error("cannot evaluate an unparsed (soft-fork-wrapped) ErgoTree")]
+    UnparsedErgoTree,
 }
 
 // `?` propagation for the cost API. Both impls preserve the typed

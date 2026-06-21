@@ -285,15 +285,21 @@ mod tests {
     // ----- helpers -----
 
     /// A `sigmaProp(true)` proposition — spendable with an empty proof.
+    ///
+    /// The root must be `SSigmaProp`: a non-SigmaProp root (e.g.
+    /// `Const(SBoolean, true)`) fails Scala's
+    /// `CheckDeserializedScriptIsSigmaProp` and is soft-fork-wrapped into
+    /// `Expr::Unparsed` on re-parse (then unspendable), so it would not
+    /// survive the serialize → `parse_tx` round-trip this selector performs.
     fn trivial_tree() -> ErgoTree {
         ErgoTree {
             version: 0,
             has_size: true,
-            constant_segregation: true,
-            constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
+            constant_segregation: false,
+            constants: vec![],
             body: Expr::Const {
-                tpe: SigmaType::SBoolean,
-                val: SigmaValue::Boolean(true),
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(ergo_ser::sigma_value::SigmaBoolean::TrivialProp(true)),
             },
         }
     }

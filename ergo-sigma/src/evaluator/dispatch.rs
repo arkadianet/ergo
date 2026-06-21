@@ -106,7 +106,9 @@ pub fn reduce_expr_traced_with_cost(
 /// with children cannot silently escape the walk.
 pub(crate) fn expr_has_deserialize(expr: &Expr) -> bool {
     let node = match expr {
-        Expr::Const { .. } => return false,
+        // An unparsed (soft-fork-wrapped) body has no AST to inspect; it errors
+        // at evaluation regardless, so the deserialize-substitution path is moot.
+        Expr::Const { .. } | Expr::Unparsed(_) => return false,
         Expr::Op(node) => node,
     };
     match &node.payload {
@@ -264,7 +266,8 @@ pub fn validate_group_element(bytes: [u8; 33]) -> Result<(), EvalError> {
 /// [`expr_has_deserialize`].
 fn inline_placeholders(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Expr {
     let node = match expr {
-        Expr::Const { .. } => return expr.clone(),
+        // Nothing to inline in a constant or an unparsed (verbatim) body.
+        Expr::Const { .. } | Expr::Unparsed(_) => return expr.clone(),
         Expr::Op(node) => node,
     };
     let sub = |e: &Expr| inline_placeholders(e, constants);
@@ -433,6 +436,10 @@ pub(in crate::evaluator) fn eval_expr(
             sigma_to_value_versioned(tpe, val, ctx)
         }
         Expr::Op(node) => eval_op(node, ctx, constants, env, depth, cost, trace),
+        // A soft-fork-wrapped tree body cannot be evaluated — Scala throws on an
+        // `UnparsedErgoTree` (unless its error is an active soft-fork), so the
+        // box is UNSPENDABLE rather than trivially `true`.
+        Expr::Unparsed(_) => Err(EvalError::UnparsedErgoTree),
     };
     *depth -= 1;
     result

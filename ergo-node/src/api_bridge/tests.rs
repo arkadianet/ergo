@@ -713,20 +713,20 @@ fn b4_q5_extension_canonicalization_rewrites_non_canonical_bytes() {
     );
 }
 
-/// **Placeholder/fallback reject path.** A supported-version
-/// ergoTree that hits the synthetic `unparsed_soft_fork_tree` path
-/// inside `read_ergo_tree` (`ergo-ser/src/ergo_tree.rs:128,142`)
-/// must reject with `non_canonical`. Pins the second arm of
-/// `decode_ergo_tree_canonicalize`'s soft-fork rejection — the
-/// `is_placeholder_pattern && canonical != input` branch.
+/// **Soft-fork/unparseable body reject path.** A supported-version
+/// ergoTree that hits the `unparsed_soft_fork_tree` path inside
+/// `read_ergo_tree` must reject with `non_canonical` on submission.
+/// Pins the body-is-`Expr::Unparsed` arm of
+/// `decode_ergo_tree_canonicalize`'s Submit-mode soft-fork rejection.
 ///
 /// Test vector construction: an ergoTree with `has_size=1`
 /// wrapping a body whose root constant is not `SSigmaProp`. The
-/// reader's CheckDeserializedScriptIsSigmaProp equivalent
-/// (line 128) replaces the body with the placeholder
-/// `Const{SBoolean, true}`, but the canonical re-serialization
-/// emits the placeholder bytes (`0101` body) instead of the
-/// original (`0405` Const{SInt} body). Bytes differ → reject.
+/// reader's CheckDeserializedScriptIsSigmaProp equivalent wraps the
+/// tree as `Expr::Unparsed`, preserving the original bytes verbatim
+/// (so it re-serializes byte-identically — mirroring Scala's
+/// `UnparsedErgoTree(propositionBytes)`). The Submit-mode guard
+/// rejects any `Expr::Unparsed` body — such a script is unspendable
+/// and a well-behaved wallet never submits one.
 #[test]
 fn b4_q5_soft_fork_ergo_tree_placeholder_fallback_rejected() {
     // Header byte: 0x18 = 0001 1000

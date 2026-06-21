@@ -59,6 +59,15 @@ pub fn write_expr(w: &mut VlqWriter, expr: &Expr, cseg: bool) -> Result<(), Writ
             w.put_u8(node.opcode);
             write_payload(w, node.opcode, &node.payload, cseg)?;
         }
+        // `Expr::Unparsed` is a whole-tree body (the full original bytes,
+        // including the header), re-emitted only via `write_ergo_tree`; it is
+        // never a sub-expression, so writing it here would corrupt the stream.
+        Expr::Unparsed(_) => {
+            return Err(WriteError::InvalidData(
+                "Expr::Unparsed is a whole-tree body, not a sub-expression; use write_ergo_tree"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }
