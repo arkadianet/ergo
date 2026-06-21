@@ -22,6 +22,12 @@ const CONSTANT_SEGREGATION_FLAG: u8 = 0x10;
 /// parse and must not reject a tree the Scala node would accept.
 const CONSTANTS_VEC_SOFT_CAP: usize = 4096;
 
+/// Scala `SigmaSerializer.MaxPropositionSize` (`SigmaConstants.MaxPropositionBytes`
+/// = 4096). `deserializeErgoTree` bounds the body parse by this position limit —
+/// NOT by the tree's declared size, which it uses only for the `UnparsedErgoTree`
+/// byte count. So the body is structure-delimited up to this cap.
+const MAX_PROPOSITION_BYTES: usize = 4096;
+
 /// Parsed ErgoTree: header byte + optional constants table + parsed
 /// body expression.
 ///
@@ -218,6 +224,36 @@ pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
 /// path — Scala's `tree.template` throws on the unparsed branch, so we
 /// skip recording a template entry rather than emit one bogus hash for
 /// every unparsed tree.
+/// Advance `r` from the body start to the DECLARED-size end and return the
+/// verbatim bytes. Mirrors Scala's wrap path EXACTLY: it computes
+/// `numBytes = bodyPos - startPos + declaredSize`, rewinds (`r.position =
+/// startPos`), then `propositionBytes = r.getBytes(numBytes)` — leaving the
+/// reader at `startPos + numBytes`. Because the declared size is read non-exact
+/// (`getUInt().toInt`) it can be NEGATIVE; Scala still accepts as long as
+/// `numBytes >= 0` and in range (it does NOT reject merely because the size is
+/// negative), and the resulting position can sit BEFORE `body_start`. Errors only
+/// when `numBytes` is negative or past the buffer end, as Scala's `getBytes`
+/// would. Used only when wrapping; the success path advances by the ACTUAL body
+/// length instead. `r` is at `body_start` on entry.
+fn take_unparsed_size_region(
+    r: &mut VlqReader,
+    tree_start: usize,
+    body_start: usize,
+    declared_size: i32,
+) -> Result<Vec<u8>, ReadError> {
+    let num_bytes = (body_start - tree_start) as i64 + declared_size as i64;
+    let buf_end = (body_start + r.remaining()) as i64; // r is at body_start here
+    if num_bytes < 0 || tree_start as i64 + num_bytes > buf_end {
+        return Err(ReadError::InvalidData(format!(
+            "ErgoTree declared size {declared_size} yields an out-of-range \
+             UnparsedErgoTree byte count {num_bytes}"
+        )));
+    }
+    let end = tree_start + num_bytes as usize;
+    r.set_position(end); // Scala: position = startPos + numBytes (may rewind)
+    Ok(r.data_slice(tree_start, end).to_vec())
+}
+
 pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {
@@ -228,86 +264,72 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
     let constant_segregation = header & CONSTANT_SEGREGATION_FLAG != 0;
 
     if has_size {
-        let size = r.get_u32_exact()? as usize;
-        let bounded_data = r.get_bytes(size)?;
-        // Capture the FULL original tree bytes (header + size + body) so a
-        // soft-fork-wrapped tree re-serializes byte-identically (Scala preserves
-        // `propositionBytes` verbatim for an `UnparsedErgoTree`). `data_slice`
-        // borrows the underlying buffer, not `r`, so this coexists with the
-        // later `r.record_group_element` (which mutably borrows `r`).
-        let tree_end = r.position();
-        let full_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
+        // Scala reads the size with `getUInt().toInt` (NON-exact) and uses it ONLY
+        // for the `UnparsedErgoTree` byte count on the wrap path. The body parse is
+        // bounded by `MaxPropositionSize`, and on the SUCCESS path the reader
+        // advances by the ACTUAL body length (structure-delimited) — the declared
+        // size neither bounds the parse nor advances the reader on success. Scala's
+        // box parser reads `creationHeight` immediately after this inline tree
+        // parse (ErgoBoxCandidate.parseBodyWithIndexedDigests), so matching the
+        // advance is consensus-relevant for a box whose declared size ≠ body length.
+        let declared_size = r.get_uint_to_i32()?;
+        let body_start = r.position();
 
-        // A tree whose version exceeds our max is consumed (via get_bytes above)
-        // but not body-parsed. We stay LENIENT here and wrap it — the conformance
-        // hook feeds size-stripped trees and the template-hash path must keep
-        // working — and reject it at the box-script layer via
-        // [`check_tree_version_supported`]. Scala HARD-rejects such a tree at
-        // deserialize: `VersionContext.withVersions(activatedScriptVersion,
-        // treeVersion)` throws when treeVersion > activated, re-thrown as a
-        // `SerializerException` (NOT a soft-fork `ValidationException`). So this
-        // wrap is a parser-internal placeholder, not a consensus acceptance.
+        // A future-version tree is wrapped LENIENTLY here (the conformance hook
+        // feeds size-stripped trees, template-hashing relies on the wrap) and
+        // hard-rejected at the box-script layer via `check_tree_version_supported`.
+        // Scala HARD-rejects it at deserialize (`VersionContext.withVersions`
+        // throws when treeVersion > activated). The reader advances to the
+        // declared-size end, as on every wrap path.
         if version > MAX_SUPPORTED_TREE_VERSION {
+            let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
-                unparsed_soft_fork_tree(version, has_size, constant_segregation, full_tree_bytes),
+                unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
                 true,
             ));
         }
 
-        // Match Scala's sigma.serialization.ErgoTreeSerializer.deserializeErgoTree
-        // (sigmastate-interpreter/.../ErgoTreeSerializer.scala:141-208):
+        // Parse the body on a view of all remaining bytes WITHOUT advancing `r`,
+        // bounded by a POSITION LIMIT of `MaxPropositionSize` (NOT the declared
+        // size). `parse_body` is structure-delimited — it reads exactly the root
+        // expression — so `inner.position()` is the true body length. A body that
+        // would exceed the cap fails the parse and maps to the soft-fork wrap
+        // below, exactly as Scala hits its position limit (`ReaderPositionLimit
+        // Exceeded` → `CheckPositionLimit` `ValidationException`) and wraps.
         //
-        // 1. The `size` field is a position LIMIT (upper bound) for the
-        //    body reader, not an equality constraint. If parse consumes
-        //    fewer bytes than declared, Scala silently accepts — the
-        //    extra bytes inside the size region are not checked. This
-        //    is why we pass `bounded_data` (length = size) to the inner
-        //    reader and then NOT assert `inner.is_empty()` after parse.
-        //
-        // 2. CheckDeserializedScriptIsSigmaProp (ValidationRules.scala:39-52)
-        //    raises ValidationException if the root's type is not
-        //    SigmaProp. The root type is the authoritative check, not
-        //    leftover bytes.
-        //
-        // 3. When ValidationException fires AND has_size is set
-        //    (sizeOpt.isDefined), Scala wraps as UnparsedErgoTree and
-        //    preserves the full declared-size bytes. This is the
-        //    soft-fork-compatible path that lets size-flagged boxes
-        //    containing unknown or malformed content ship without
-        //    breaking historical sync. (See Scala line 197-208.)
-        //
-        // 4. Without has_size, Scala re-raises — so for the non-has_size
-        //    branch below we still propagate errors as before.
-        //
-        // Our parser's untyped IR can only check the root type when it's
-        // a `Const { tpe, ... }` (leaf constant). For `Op(..)` roots we
-        // accept, because (a) proving SigmaProp would require a typechecker
-        // we don't have, and (b) a non-sigma-typed Op tree would fail
-        // downstream at script evaluation anyway, at which point
-        // CheckedTransaction / block validation surfaces the real error.
-        // This is a narrower net than Scala's full typechecker but catches
-        // the observed mainnet malformed trees (Const of a non-SigmaProp
-        // type inside a size-delimited wrapper — e.g. block 1,702,686).
-        let mut inner = VlqReader::new(bounded_data);
-        let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
-        // A size-delimited pre-v3 (version < 3) tree carrying a v6/EIP-50 method
-        // is wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
-        // throws a method-resolution `ValidationException` (the method is absent
-        // from `_v5MethodsMap`), which `deserializeErgoTree` catches under
-        // has_size. The parser recorded the group-element sideband length at the
-        // exact throw point (after the method's receiver + value args). For
-        // version >= 3 the method is valid, so the checkpoint is ignored.
-        let v6_checkpoint = inner.v6_method_checkpoint();
+        // Scala anchors the limit at `startPos + MaxPropositionSize` (set BEFORE
+        // the header + size are read) and checks `position > positionLimit` BEFORE
+        // each read, so a final read that BEGINS exactly at the limit still
+        // proceeds. The reader's `position_limit` mirrors that begin-check
+        // precisely; using it (rather than truncating the view) matches Scala's
+        // boundary byte-for-byte. The limit, relative to the inner view that
+        // starts at `body_start`, is `MaxPropositionSize - (header + size length)`.
+        let body_budget = MAX_PROPOSITION_BYTES.saturating_sub(body_start - tree_start);
+        let (parsed, v6_checkpoint, body_consumed, inner_ges) = {
+            let body_view = r.data_slice(body_start, body_start + r.remaining());
+            let mut inner = VlqReader::new(body_view);
+            inner.set_position_limit(Some(body_budget));
+            let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
+            (
+                parsed,
+                inner.v6_method_checkpoint(),
+                inner.position(),
+                inner.take_group_elements(),
+            )
+        };
+        // A size-delimited pre-v3 (version < 3) tree carrying a v6/EIP-50 method is
+        // wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
+        // throws a method-resolution `ValidationException`, caught under has_size.
+        // The parser recorded the group-element sideband length at the exact throw
+        // point (after the method's receiver + value args). For version >= 3 the
+        // method is valid, so the checkpoint is ignored.
         let pre_v3_v6 = version < 3 && v6_checkpoint.is_some();
-        let inner_ges = inner.take_group_elements();
 
-        // Forward the group elements the inner parse collected onto the OUTER
-        // reader — EVEN when the body is about to be soft-fork-wrapped below.
-        // Scala curve-checks these while deserializing, before producing its
-        // UnparsedErgoTree, so the obligation must survive the wrap (a post-parse
-        // AST walk would lose them). For the pre-v3-v6 wrap, forward ONLY the
-        // prefix Scala reached before it threw at the v6 method — points after
-        // it are never deserialized, hence never curve-checked.
+        // Forward the group elements the inner parse collected onto `r` — EVEN when
+        // about to wrap (Scala curve-checks them while deserializing, before
+        // producing its UnparsedErgoTree). For the pre-v3-v6 wrap, forward ONLY the
+        // prefix Scala reached before it threw at the v6 method; points after it
+        // are never deserialized, hence never curve-checked.
         let forward_upto = if pre_v3_v6 {
             v6_checkpoint.unwrap().min(inner_ges.len())
         } else {
@@ -318,37 +340,26 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         }
         match parsed {
             Ok(tree) => {
-                // Scala wraps the pre-v3 v6-method tree as UnparsedErgoTree, so
-                // box-parse / eval / template-hashing all see the soft-fork
-                // representation (rejected on spend by the evaluator gate).
-                if pre_v3_v6 {
+                // Scala wraps a pre-v3 v6-method tree, and any non-SigmaProp root
+                // (`CheckDeserializedScriptIsSigmaProp`), as `UnparsedErgoTree`. Our
+                // untyped IR can only check the root for an inline `Const` or a
+                // `ConstPlaceholder` (an `Op` root lacks a typechecker and would
+                // fail at eval anyway — this still catches the mainnet block
+                // 1,702,686 case). Both wrap paths advance to the declared-size end.
+                if pre_v3_v6
+                    || determinable_root_type(&tree)
+                        .is_some_and(|tpe| *tpe != crate::sigma_type::SigmaType::SSigmaProp)
+                {
+                    let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                     return Ok((
-                        unparsed_soft_fork_tree(
-                            version,
-                            has_size,
-                            constant_segregation,
-                            full_tree_bytes,
-                        ),
+                        unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
                         true,
                     ));
                 }
-                // CheckDeserializedScriptIsSigmaProp: a root whose statically
-                // known type is not SigmaProp (an inline non-SigmaProp constant,
-                // or a ConstPlaceholder resolving to a non-SigmaProp constant) is
-                // soft-fork-wrapped under has_size, as Scala does.
-                let root_non_sigmaprop = determinable_root_type(&tree)
-                    .is_some_and(|tpe| *tpe != crate::sigma_type::SigmaType::SSigmaProp);
-                if root_non_sigmaprop {
-                    return Ok((
-                        unparsed_soft_fork_tree(
-                            version,
-                            has_size,
-                            constant_segregation,
-                            full_tree_bytes,
-                        ),
-                        true,
-                    ));
-                }
+                // Parsed as SigmaProp: advance `r` by the ACTUAL body length so the
+                // next box field is read from the structural body end, exactly where
+                // Scala leaves the reader on success (the declared size is ignored).
+                let _ = r.get_bytes(body_consumed)?;
                 Ok((tree, false))
             }
             // A tree-depth overflow is Scala's `DeserializeCallDepthExceeded`,
@@ -372,25 +383,19 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // site (ConstantPlaceholder index, ValDef/FunDef id, BlockValue /
             // FuncValue / SigmaAnd-SigmaOr counts, SString length →
             // `ArithmeticException`) or a `getUShort` range overflow — neither a
-            // `ValidationException`, so it must escape the wrap, never become an
-            // `UnparsedErgoTree`. (The has_size SIZE field is read before this
-            // match and propagates its own error directly; see line ~231.)
+            // `ValidationException`, so it must escape the wrap.
             Err(
                 e @ (ReadError::DepthLimitExceeded { .. }
                 | ReadError::HardReject(_)
                 | ReadError::ValueTooLarge { .. }),
             ) => Err(e),
             Err(_) => {
-                // Other parse failures (unknown opcode, invalid type tag) map to
-                // Scala's ValidationException, which under has_size is wrapped
-                // as UnparsedErgoTree (the soft-fork-compatible path).
+                // Other parse failures (unknown opcode, invalid type tag, body
+                // truncated at the MaxPropositionSize view) map to Scala's
+                // ValidationException, wrapped as UnparsedErgoTree under has_size.
+                let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                 Ok((
-                    unparsed_soft_fork_tree(
-                        version,
-                        has_size,
-                        constant_segregation,
-                        full_tree_bytes,
-                    ),
+                    unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
                     true,
                 ))
             }
@@ -953,6 +958,79 @@ mod tests {
         bytes.extend_from_slice(&ergo_primitives::vlq::encode_vlq(i32::MAX as u64));
         let mut r = VlqReader::new(&bytes);
         assert!(read_ergo_tree(&mut r).is_err());
+    }
+
+    /// The declared `has_size` size neither bounds the body parse (Scala bounds
+    /// it by `MaxPropositionSize`) nor advances the reader on success (Scala
+    /// advances by the ACTUAL body length — structure-delimited). So a size that
+    /// is too LARGE, too SMALL, or overflowed still PARSES, and the reader stops
+    /// at the structural body end. Oracle (6.0.2): all four below → PARSED
+    /// SSigmaProp. The old `get_u32_exact` + `get_bytes(size)` made the large /
+    /// overflowed cases reject-valid and desynced a box stream on a wrong size.
+    #[test]
+    fn declared_size_is_not_the_body_bound_nor_the_success_advance() {
+        // body `08d3` = sigmaProp(true), 2 bytes.
+        for hex in [
+            "080208d3",         // size 2 == body
+            "080508d3",         // size 5  > body
+            "080108d3",         // size 1  < body
+            "08808080800808d3", // size 0x80000000 (overflow > i32::MAX)
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let tree = read_ergo_tree(&mut r)
+                .unwrap_or_else(|e| panic!("{hex} must parse (Scala PARSED), got {e:?}"));
+            assert!(
+                matches!(
+                    tree.body,
+                    crate::opcode::Expr::Const {
+                        tpe: crate::sigma_type::SigmaType::SSigmaProp,
+                        ..
+                    }
+                ),
+                "{hex}: expected a parsed SigmaProp root, got {:?}",
+                tree.body
+            );
+        }
+        // STRUCTURE-DELIMITED advance: a tree declaring size 3 but a 2-byte body,
+        // followed by a trailing byte, must consume only the 2-byte body and leave
+        // the trailing byte (where Scala reads the next box field), NOT advance to
+        // the declared-size end.
+        let bytes = hex::decode("080308d3ff").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let _ = read_ergo_tree(&mut r).expect("must parse");
+        assert_eq!(
+            r.remaining(),
+            1,
+            "reader must stop at the structural body end (one trailing byte left)"
+        );
+    }
+
+    /// On the WRAP path Scala preserves `numBytes = bodyPos - startPos +
+    /// declaredSize` bytes — and the declared size, read non-exact, may be
+    /// NEGATIVE while `numBytes` stays in range, in which case Scala wraps (it
+    /// does NOT reject for a negative size). Body `0204` = `Const(SByte)`, a
+    /// non-SigmaProp root → wrap. Oracle (6.0.2): byte counts 5 / 4 / 0.
+    #[test]
+    fn negative_declared_size_wraps_with_scala_numbytes() {
+        for (hex, expected_len) in [
+            ("08ffffffff0f0204", 5usize), // size -1 → numBytes 6 + (-1) = 5
+            ("08feffffff0f0204", 4),      // size -2 → 4
+            ("08faffffff0f0204", 0),      // size -6 → 0 (empty propositionBytes)
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let tree = read_ergo_tree(&mut r)
+                .unwrap_or_else(|e| panic!("{hex} must wrap (Scala UNPARSED), got {e:?}"));
+            match &tree.body {
+                crate::opcode::Expr::Unparsed(raw) => assert_eq!(
+                    raw.len(),
+                    expected_len,
+                    "{hex}: UnparsedErgoTree byte count must match Scala numBytes"
+                ),
+                other => panic!("{hex}: expected Unparsed, got {other:?}"),
+            }
+        }
     }
 
     /// A segregated constants COUNT past i32::MAX is read non-exact (Scala
