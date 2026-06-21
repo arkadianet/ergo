@@ -179,7 +179,7 @@ pub fn verify_spending_proof_with_context_and_cost(
     // spend with a high-bit extension key or an off-curve GE constant is rejected
     // exactly as the reference node does, not silently accepted. Run before any
     // cost is charged, mirroring the throw happening ahead of reduction.
-    super::evaluator::pre_reduction_checks(ctx, &ergo_tree.constants)
+    super::evaluator::pre_reduction_checks(ctx, &ergo_tree.constants, &ergo_tree.body)
         .map_err(VerifySpendingError::Eval)?;
 
     // Deserialize-substitution cost (Scala `Interpreter.reductionWithDeserialize`,

@@ -574,3 +574,107 @@ pub fn method_explicit_type_args_count(type_id: u8, method_id: u8) -> usize {
             | (106, 10) // SGlobal.none[T] (PropertyCall, still carries [T])
     ) as usize
 }
+
+/// `(type_id, method_id)` pairs whose Scala `SMethod` is declared ONLY for
+/// ErgoTree version >= 3 (`isV3OrLaterErgoTreeVersion`, V6 / EIP-50). In a real
+/// pre-v3 (tree-header version 0/1/2) tree, `SMethod.fromIds` -> `methodById`
+/// returns `None` and `CheckAndGetMethodV6` throws a `ValidationException`, so
+/// `deserializeErgoTree` rejects the whole tree — INCLUDING dead branches,
+/// because Scala deserializes the AST eagerly.
+///
+/// Enumerated from the `isV3OrLaterErgoTreeVersion` blocks of Scala
+/// `sigma/ast/methods.scala` (verified pair-for-pair). Numeric methods
+/// (`2..=6`) are re-homed under their concrete type id only at v3; pre-v3 they
+/// live under `SNumericType`, so a concrete-type-id call never resolves before
+/// v3. Excludes pre-v3-legal pairs: `SGlobal.groupGenerator (106,1)` / `xor
+/// (106,2)`, `SBox.getRegV5 (99,7)`, `SContext.getVar (101,11)`, `SHeader
+/// (104,1..15)`, `SPreHeader (105,*)`, `SAvlTree (100,1..15)`, pre-v3
+/// `SCollection` like `indexOf (12,26)` / `zip (12,29)`.
+pub fn is_v3_only_method(type_id: u8, method_id: u8) -> bool {
+    matches!(
+        (type_id, method_id),
+        (2..=5, 1..=13)      // SByte/SShort/SInt/SLong numeric (toByte..shiftRight)
+            | (6, 1..=15)    // SBigInt numeric + toUnsigned/toUnsignedMod
+            | (7, 6)         // SGroupElement.expUnsigned
+            | (9, 1..=19)    // SUnsignedBigInt — v3-only type
+            | (12, 30..=33)  // SCollection reverse/startsWith/endsWith/get
+            | (99, 19)       // SBox.getReg[T]
+            | (100, 16)      // SAvlTree.insertOrUpdate
+            | (101, 12)      // SContext.getVarFromInput[T]
+            | (104, 16)      // SHeader.checkPow
+            | (106, 3..=10) // SGlobal serialize/deserializeTo/fromBigEndianBytes/encodeNbits/decodeNbits/powHit/some/none
+    )
+}
+
+/// First v6/EIP-50 method ([`is_v3_only_method`]) reachable in an ErgoTree body,
+/// or `None`. Walks every expression child — including dead `If` branches and a
+/// `DeserializeRegister` inline default — because Scala deserializes the whole
+/// AST eagerly, so a v6 method in any branch of a real pre-v3 tree must be
+/// rejected. Does NOT descend into constants, `GetVar`, `DeserializeContext`, or
+/// bytes loaded later from a register/context var: those parse headerless and
+/// gate v6 methods at evaluation time (`SoftForkNotActivated`), so this walk
+/// over the parsed body matches Scala's eager deserialize exactly.
+pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
+    let node = match expr {
+        Expr::Const { .. } => return None,
+        Expr::Op(node) => node,
+    };
+    match &node.payload {
+        Payload::MethodCall {
+            type_id,
+            method_id,
+            obj,
+            args,
+            ..
+        } => {
+            if is_v3_only_method(*type_id, *method_id) {
+                return Some((*type_id, *method_id));
+            }
+            find_v3_only_method(obj).or_else(|| args.iter().find_map(find_v3_only_method))
+        }
+        Payload::One(a) => find_v3_only_method(a),
+        Payload::Two(a, b) => find_v3_only_method(a).or_else(|| find_v3_only_method(b)),
+        Payload::Three(a, b, c) => find_v3_only_method(a)
+            .or_else(|| find_v3_only_method(b))
+            .or_else(|| find_v3_only_method(c)),
+        Payload::Four(a, b, c, d) => find_v3_only_method(a)
+            .or_else(|| find_v3_only_method(b))
+            .or_else(|| find_v3_only_method(c))
+            .or_else(|| find_v3_only_method(d)),
+        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => find_v3_only_method(rhs),
+        Payload::BlockValue { items, result } => items
+            .iter()
+            .find_map(find_v3_only_method)
+            .or_else(|| find_v3_only_method(result)),
+        Payload::FuncValue { body, .. } => find_v3_only_method(body),
+        Payload::ConcreteCollection { items, .. }
+        | Payload::Tuple { items }
+        | Payload::SigmaCollection { items } => items.iter().find_map(find_v3_only_method),
+        Payload::SelectField { input, .. }
+        | Payload::ExtractRegisterAs { input, .. }
+        | Payload::NumericCast { input, .. } => find_v3_only_method(input),
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => find_v3_only_method(input)
+            .or_else(|| find_v3_only_method(index))
+            .or_else(|| default.as_deref().and_then(find_v3_only_method)),
+        Payload::FuncApply { func, args } => {
+            find_v3_only_method(func).or_else(|| args.iter().find_map(find_v3_only_method))
+        }
+        Payload::DeserializeRegister { default, .. } => {
+            default.as_deref().and_then(find_v3_only_method)
+        }
+        // Leaves, and nodes whose v6-method gating is eval-time (headerless
+        // payloads loaded later), so not walked here.
+        Payload::Zero
+        | Payload::ValUse { .. }
+        | Payload::ConstPlaceholder { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::DeserializeContext { .. }
+        | Payload::NoneValue { .. } => None,
+    }
+}
