@@ -136,6 +136,9 @@ impl ErgoBoxCandidate {
         let mut tr = VlqReader::new(&ergo_tree_bytes);
         let parsed_tree = read_ergo_tree(&mut tr)
             .map_err(|e| WriteError::InvalidData(format!("ergo_tree_bytes do not parse: {e}")))?;
+        crate::ergo_tree::check_tree_version_supported(&parsed_tree).map_err(|e| {
+            WriteError::InvalidData(format!("ergo_tree_bytes have an unsupported version: {e}"))
+        })?;
         crate::ergo_tree::check_header_size_bit(&parsed_tree).map_err(|e| {
             WriteError::InvalidData(format!("ergo_tree_bytes fail CheckHeaderSizeBit: {e}"))
         })?;
@@ -271,6 +274,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
+    crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_v3_only_methods(&ergo_tree)?;
     let tree_end = r.position();
@@ -349,6 +353,7 @@ pub fn read_ergo_box_candidate_indexed(
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
+    crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_v3_only_methods(&ergo_tree)?;
     let tree_end = r.position();
@@ -468,6 +473,7 @@ pub fn parse_ergo_box_bytes(
     // Parse the tree structure from the known bytes
     let mut tree_reader = VlqReader::new(ergo_tree_bytes);
     let ergo_tree = read_ergo_tree(&mut tree_reader)?;
+    crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_v3_only_methods(&ergo_tree)?;
 

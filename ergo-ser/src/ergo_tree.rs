@@ -116,6 +116,41 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
     Ok(())
 }
 
+/// Reject a tree whose header version exceeds the maximum this node supports
+/// (= the network's activated script version). Scala's `deserializeErgoTree`
+/// wraps the parse in `VersionContext.withVersions(activatedScriptVersion,
+/// treeVersion)`, whose `require(treeVersion <= activatedVersion)` throws an
+/// `IllegalArgumentException` that is re-thrown as a `SerializerException`
+/// ("Tree version (N) is above activated script version") — NOT a
+/// `ValidationException`, so it is never soft-fork-wrapped and the box is
+/// hard-rejected at creation (`ErgoTreeSerializer.scala` deserializeErgoTree
+/// inner catch; confirmed against the 6.0.2 oracle: a v4/v5/v7 tree throws even
+/// with the size bit set).
+///
+/// As with [`check_header_size_bit`], [`read_ergo_tree`] stays lenient (it wraps
+/// a future-version tree so the conformance hook and template-hash paths keep
+/// working); this box-script gate supplies the hard rejection at the consensus
+/// box-parse layer. Uses [`ReadError::HardReject`] so a nested `SBox`-constant
+/// inner tree with a future version also escapes the enclosing tree's soft-fork
+/// wrap. `MAX_SUPPORTED_TREE_VERSION` equals the activated script version this
+/// node is built for; a future activation is a node upgrade that raises it.
+///
+/// We gate on the static max rather than the per-block `activatedScriptVersion`
+/// (matching the static `check_v3_only_methods` gate). The only case the two
+/// disagree is re-validating a historical block at a height where activated was
+/// below 3 with a higher-version tree — unreachable, since a tree of version N
+/// cannot be created until version N is activated, so no such tree exists in
+/// real pre-activation history.
+pub fn check_tree_version_supported(tree: &ErgoTree) -> Result<(), ReadError> {
+    if tree.version > MAX_SUPPORTED_TREE_VERSION {
+        return Err(ReadError::HardReject(format!(
+            "ErgoTree version {} exceeds the maximum supported version {} (above activated script version)",
+            tree.version, MAX_SUPPORTED_TREE_VERSION
+        )));
+    }
+    Ok(())
+}
+
 /// Reject a v6/EIP-50 method ([`crate::opcode::is_v3_only_method`]) carried in a
 /// real pre-v3 (tree-header version < 3) ErgoTree at DESERIALIZE — the box-parse
 /// twin of the evaluator's spend-path gate (`check_v3_only_methods` /
@@ -203,9 +238,15 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         let tree_end = r.position();
         let full_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
-        // Soft-fork: trees with version > our max are accepted without parsing.
-        // The Scala auto-accepts these in Interpreter.checkSoftForkCondition.
-        // We still need to consume the bytes (via get_bytes above) but skip body parsing.
+        // A tree whose version exceeds our max is consumed (via get_bytes above)
+        // but not body-parsed. We stay LENIENT here and wrap it — the conformance
+        // hook feeds size-stripped trees and the template-hash path must keep
+        // working — and reject it at the box-script layer via
+        // [`check_tree_version_supported`]. Scala HARD-rejects such a tree at
+        // deserialize: `VersionContext.withVersions(activatedScriptVersion,
+        // treeVersion)` throws when treeVersion > activated, re-thrown as a
+        // `SerializerException` (NOT a soft-fork `ValidationException`). So this
+        // wrap is a parser-internal placeholder, not a consensus acceptance.
         if version > MAX_SUPPORTED_TREE_VERSION {
             return Ok((
                 unparsed_soft_fork_tree(version, has_size, constant_segregation, full_tree_bytes),
@@ -1325,6 +1366,35 @@ mod tests {
     fn check_v3_only_methods_accepts_valid_sizeless_tree() {
         let tree = parse_tree("0008d3");
         assert!(check_v3_only_methods(&tree).is_ok());
+    }
+
+    /// `check_tree_version_supported` HARD-rejects a tree whose version exceeds
+    /// the activated/max supported version (Scala throws a `SerializerException`
+    /// at deserialize via `VersionContext.withVersions`), and accepts v0..=3.
+    /// Oracle-confirmed against sigma-state 6.0.2: `0c0208d3`/`0d…`/`0f…` (v4/5/7)
+    /// all THROW, `080208d3` (v0) PARSES.
+    #[test]
+    fn check_tree_version_supported_rejects_future_versions() {
+        // read_ergo_tree stays lenient: it wraps v4..=7 trees as Unparsed...
+        for hex in ["0c0208d3", "0d0208d3", "0f0208d3"] {
+            let tree = parse_tree(hex);
+            assert!(tree.version > 3, "{hex}: version {} not > 3", tree.version);
+            // ...but the box-script gate hard-rejects them.
+            assert!(
+                matches!(
+                    check_tree_version_supported(&tree),
+                    Err(ReadError::HardReject(_))
+                ),
+                "{hex}: version {} must hard-reject",
+                tree.version
+            );
+        }
+        // v0..=3 are accepted.
+        for hex in ["080208d3", "0b0208d3"] {
+            let tree = parse_tree(hex);
+            assert!(tree.version <= 3);
+            assert!(check_tree_version_supported(&tree).is_ok());
+        }
     }
 
     /// Regression: an `SBox` constant whose sizeless pre-v3 inner tree carries a
