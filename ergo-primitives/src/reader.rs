@@ -60,6 +60,20 @@ pub enum ReadError {
         /// The depth bound that was exceeded.
         max: usize,
     },
+    /// A hard, NON-soft-forkable deserialization rejection that must propagate
+    /// even out of a size-delimited tree — the Rust analog of a Scala
+    /// `SerializerException` (as opposed to a soft-forkable `ValidationException`,
+    /// which `ErgoTreeSerializer.deserializeErgoTree` catches and turns into an
+    /// `UnparsedErgoTree`). Used for rejections that occur while deserializing a
+    /// NESTED box script (an `SBox` constant's inner ErgoTree): a sizeless
+    /// pre-v3 tree carrying a v6/EIP-50 method, or a `version != 0` tree with no
+    /// size bit (`CheckHeaderSizeBit`, rule 1012). Scala re-raises these as
+    /// `SerializerException`, which the enclosing tree's deserialize does NOT
+    /// catch, so the whole (outer) tree is rejected rather than wrapped.
+    /// [`read_ergo_tree_tracking_wrap`](crate) must re-raise it like
+    /// [`Self::DepthLimitExceeded`], never soft-fork-wrap it.
+    #[error("hard deserialization rejection: {0}")]
+    HardReject(String),
 }
 
 impl<'a> VlqReader<'a> {

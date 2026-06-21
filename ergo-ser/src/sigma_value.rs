@@ -517,6 +517,49 @@ fn write_unsigned_bigint_value(
 /// For size-delimited trees: reads header + size + body_bytes (skips body).
 /// For non-size-delimited trees: reads header + constants (if cseg) +
 ///   falls back to the full opcode parser for the body.
+/// Parse a SIZELESS nested box script's constants + body to find the box-field
+/// boundary, and apply the v6/EIP-50 pre-v3 method gate. Returns SOFT errors
+/// (`InvalidData`) — the caller (`skip_ergo_tree`) hardens them via
+/// [`harden_sizeless_inner_error`], because for a sizeless inner tree Scala
+/// re-raises any inner `ValidationException` as a `SerializerException`. The
+/// rule-1012 / `version != 0` check is done by the caller BEFORE this (Scala
+/// runs `CheckHeaderSizeBit` ahead of constants, outside the inner `try`).
+fn parse_sizeless_inner_box_script(
+    r: &mut VlqReader,
+    version: u8,
+    cseg: bool,
+) -> Result<(), ReadError> {
+    if cseg {
+        let count = r.get_u32_exact()? as usize;
+        if count > 4096 {
+            return Err(ReadError::InvalidData(format!(
+                "unreasonable constant count in inner tree: {count}"
+            )));
+        }
+        for _ in 0..count {
+            let _ = read_constant(r)?;
+        }
+    }
+    let body = crate::opcode::parse_body(r, version)?;
+    if let Some((type_id, method_id)) = crate::opcode::find_v3_only_method(&body) {
+        return Err(ReadError::InvalidData(format!(
+            "nested box script: method ({type_id}, {method_id}) requires ErgoTree version >= 3, got tree version {version}"
+        )));
+    }
+    Ok(())
+}
+
+/// Harden a sizeless inner box-script parse failure to [`ReadError::HardReject`]
+/// (a Scala `SerializerException`), so an enclosing SIZE-DELIMITED outer tree
+/// re-raises it rather than soft-fork-wrapping it into an `UnparsedErgoTree`.
+/// Already-hard errors (`DepthLimitExceeded`, nested `HardReject`) pass through.
+fn harden_sizeless_inner_error(e: ReadError) -> ReadError {
+    match e {
+        e @ (ReadError::DepthLimitExceeded { .. } | ReadError::HardReject(_)) => e,
+        other => ReadError::HardReject(format!("nested sizeless box script: {other}")),
+    }
+}
+
 fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     let tree_start = r.position();
     let header = r.get_u8()?;
@@ -545,19 +588,34 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
             r.record_group_element(ge);
         }
     } else {
-        // Non-size-delimited: must parse constants and body to find boundary.
-        if cseg {
-            let count = r.get_u32_exact()? as usize;
-            if count > 4096 {
-                return Err(ReadError::InvalidData(format!(
-                    "unreasonable constant count in inner tree: {count}"
-                )));
-            }
-            for _ in 0..count {
-                let _ = read_constant(r)?;
-            }
+        // SIZELESS nested box script (an `SBox` constant's inner ErgoTree). This
+        // mirrors Scala `deserializeErgoTree` for `sizeOpt = None`, where the
+        // exception CLASS decides whether an enclosing SIZE-DELIMITED outer tree
+        // wraps the failure (`UnparsedErgoTree`) or is rejected by it:
+        //
+        // - `CheckHeaderSizeBit` (rule 1012, `version != 0`) runs in
+        //   `deserializeHeaderAndSize`, BEFORE constants/body and OUTSIDE the
+        //   inner `try` — so it is a `ValidationException` the OUTER tree's catch
+        //   WRAPS. It is checked FIRST (before any constant is read) and kept
+        //   SOFT (`InvalidData`): a size-delimited outer wraps it; a sizeless
+        //   outer / register / standalone read rejects.
+        // - Everything else (constants, body, and the v6/EIP-50 method check) is
+        //   INSIDE Scala's inner `try`. For `sizeOpt = None`, EVERY
+        //   `ValidationException` thrown there is re-raised as a hard
+        //   `SerializerException`, which the outer catch does NOT catch — so all
+        //   soft failures of the inner parse are hardened to `HardReject`
+        //   (already-hard `DepthLimitExceeded` / nested `HardReject` pass
+        //   through). A size-delimited outer must reject, not wrap.
+        //
+        // Size-delimited nested trees are kept opaque above — Scala wraps an
+        // inner failure as `UnparsedErgoTree`, rejected only on spend, which the
+        // evaluator's spend-path gate handles.
+        if version != 0 {
+            return Err(ReadError::InvalidData(format!(
+                "nested box script: ErgoTree version {version} requires the size bit (CheckHeaderSizeBit, rule 1012)"
+            )));
         }
-        let _ = crate::opcode::parse_body(r, version)?;
+        parse_sizeless_inner_box_script(r, version, cseg).map_err(harden_sizeless_inner_error)?;
     }
     Ok(())
 }
@@ -1791,33 +1849,100 @@ mod tests {
         assert_eq!(w.result(), [0x4D, 0x01]);
     }
 
-    /// Inline `SBox` constant whose proposition is the
-    /// Scala-6.1.2-compiled sizeless v0-header (`0x10`) tree carrying
-    /// the `SGlobal.none[T]` v6 PropertyCall with its trailing explicit
-    /// type byte (oracle vector
-    /// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/`).
-    /// A sizeless tree gives `skip_ergo_tree` no blob length to skip
-    /// by, so finding the box-field boundary walks the v6 body through
-    /// the full parser — the explicit type byte must be consumed or
-    /// every later box field shifts.
-    #[test]
-    fn sbox_constant_with_sizeless_v6_typearg_tree_roundtrips() {
-        let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+    /// Assemble standalone SBox-constant bytes (value + proposition + box tail).
+    fn sbox_constant_bytes(tree: &[u8]) -> Vec<u8> {
         let mut w = VlqWriter::new();
         w.put_u64(1_000_000); // value
-        w.put_bytes(&tree); // proposition (sizeless v0-header v6 tree)
+        w.put_bytes(tree); // proposition
         w.put_u32(100); // creation height
         w.put_u8(0); // token count
         w.put_u8(0); // register count
         w.put_bytes(&[0u8; 32]); // tx id
         w.put_u16(0); // output index
-        let box_bytes = w.result();
+        w.result()
+    }
 
+    /// A SIZELESS pre-v3 (`0x10` = v0 + const-seg) `SBox` constant whose
+    /// proposition carries the `SGlobal.none[T]` v6 PropertyCall is REJECTED at
+    /// deserialize. With no size bit, `skip_ergo_tree` walks the body through
+    /// the full parser to find the box-field boundary, and the mirrored gate
+    /// rejects the v6-only method exactly as Scala's box deserialize does
+    /// (method resolution against the pre-v3 method table; no size bit means the
+    /// `ValidationException` is re-raised as a `SerializerException`). This is an
+    /// accept-invalid the box-script-reader gate alone would miss: a box
+    /// embedded as a CONSTANT is never spent, so the evaluator's spend-path gate
+    /// never fires on its inner tree. The rejection is a `HardReject` so it
+    /// survives an enclosing size-delimited tree's soft-fork wrap.
+    #[test]
+    fn sbox_constant_sizeless_v6_tree_rejected() {
+        let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+        let box_bytes = sbox_constant_bytes(&tree);
         let mut r = VlqReader::new(&box_bytes);
-        let val = read_value(&mut r, &SigmaType::SBox)
-            .expect("SBox constant with embedded v6 tree must parse");
+        let err = read_value(&mut r, &SigmaType::SBox).expect_err(
+            "sizeless pre-v3 SBox constant carrying a v6 method must reject at deserialize",
+        );
+        assert!(
+            matches!(&err, ReadError::HardReject(m) if m.contains("requires ErgoTree version >= 3")),
+            "got {err:?}",
+        );
+    }
+
+    /// A sizeless `version != 0` nested box script violates rule 1012
+    /// (`CheckHeaderSizeBit`). Read standalone (no enclosing tree), the
+    /// rejection propagates and the box is rejected. The error is a SOFT
+    /// `InvalidData` (Scala throws this as a `ValidationException`), so an
+    /// enclosing size-delimited tree would instead WRAP it — see
+    /// `ergo_tree::tests::nested_box_constant_rule1012_in_size_delimited_outer_wraps`.
+    #[test]
+    fn sbox_constant_sizeless_nonzero_version_rejected() {
+        // header 0x01 = version 1, no size bit, no const-seg; body `d3`.
+        let tree = hex::decode("01d3").unwrap();
+        let box_bytes = sbox_constant_bytes(&tree);
+        let mut r = VlqReader::new(&box_bytes);
+        let err = read_value(&mut r, &SigmaType::SBox)
+            .expect_err("sizeless version!=0 nested box script must reject (rule 1012)");
+        assert!(
+            matches!(&err, ReadError::InvalidData(m) if m.contains("rule 1012")),
+            "got {err:?}",
+        );
+    }
+
+    /// A SIZELESS valid `SBox` constant round-trips: `skip_ergo_tree` has no
+    /// blob length to skip by, so it walks the non-size-delimited body to find
+    /// the box-field boundary — the box fields after the tree must still land
+    /// exactly. Uses a minimal v0 `sigmaProp(true)` proposition (no v6 method),
+    /// proving the gate does not over-reject a legitimate sizeless tree.
+    #[test]
+    fn sbox_constant_sizeless_valid_tree_roundtrips() {
+        let tree = hex::decode("0008d3").unwrap();
+        let box_bytes = sbox_constant_bytes(&tree);
+        let mut r = VlqReader::new(&box_bytes);
+        let val =
+            read_value(&mut r, &SigmaType::SBox).expect("valid sizeless SBox constant must parse");
         assert!(r.is_empty(), "box-field boundary must land exactly at end");
         assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
         roundtrip_value(&SigmaType::SBox, &val);
+    }
+
+    /// `harden_sizeless_inner_error` turns ANY soft inner-parse failure of a
+    /// sizeless inner box tree into a `HardReject` (Scala re-raises every inner
+    /// `ValidationException` as a `SerializerException` for `sizeOpt = None`),
+    /// while already-hard errors pass through unchanged.
+    #[test]
+    fn harden_sizeless_inner_error_classifies() {
+        // Soft `InvalidData` (e.g. unknown opcode / bad type / v6 method) -> hard.
+        assert!(matches!(
+            super::harden_sizeless_inner_error(ReadError::InvalidData("x".into())),
+            ReadError::HardReject(_)
+        ));
+        // Already-hard errors are preserved.
+        assert!(matches!(
+            super::harden_sizeless_inner_error(ReadError::DepthLimitExceeded { max: 110 }),
+            ReadError::DepthLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            super::harden_sizeless_inner_error(ReadError::HardReject("y".into())),
+            ReadError::HardReject(_)
+        ));
     }
 }
