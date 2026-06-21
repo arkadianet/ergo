@@ -112,6 +112,12 @@ pub(in crate::evaluator) fn eval_block_value(
                     got: "inline constant".to_string(),
                 })
             }
+            Expr::Unparsed(_) => {
+                return Err(EvalError::TypeError {
+                    expected: "ValDef/FunDef as BlockValue item (Scala asInstanceOf[ValDef])",
+                    got: "unparsed-tree body".to_string(),
+                })
+            }
         }
     }
     let result_val = eval_expr(

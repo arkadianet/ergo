@@ -168,7 +168,7 @@ mod tests {
     use crate::ergo_box::ErgoBoxCandidate;
     use crate::ergo_tree::ErgoTree;
     use crate::input::{ContextExtension, Input, SpendingProof};
-    use crate::opcode::{Body, Expr};
+    use crate::opcode::Expr;
     use crate::register::AdditionalRegisters;
     use crate::sigma_type::SigmaType;
     use crate::sigma_value::SigmaValue;
@@ -176,20 +176,21 @@ mod tests {
 
     // ----- helpers -----
 
-    fn simple_body() -> Body {
-        Expr::Const {
-            tpe: SigmaType::SBoolean,
-            val: SigmaValue::Boolean(true),
-        }
-    }
-
     fn size_delimited_tree() -> ErgoTree {
         ErgoTree {
             version: 0,
             has_size: true,
             constant_segregation: false,
             constants: vec![],
-            body: simple_body(),
+            // Root must be SSigmaProp: under `has_size`, a non-SigmaProp root
+            // (e.g. `Const(SBoolean, true)`) fails Scala's
+            // CheckDeserializedScriptIsSigmaProp and is soft-fork-wrapped into
+            // `Expr::Unparsed` on re-parse, so it would not survive a
+            // round-trip as a parsed body.
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
+            },
         }
     }
 

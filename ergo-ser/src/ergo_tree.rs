@@ -47,6 +47,13 @@ pub struct ErgoTree {
 
 /// Serialize an ErgoTree to bytes.
 pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteError> {
+    // A soft-fork-wrapped (unparsed) tree re-emits its preserved original bytes
+    // verbatim — header + size + body, byte-identical to the wire form — exactly
+    // as Scala re-serializes an `UnparsedErgoTree` from its kept `propositionBytes`.
+    if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
+        w.put_bytes(raw);
+        return Ok(());
+    }
     let header = (tree.version & VERSION_MASK)
         | if tree.has_size { SIZE_FLAG } else { 0 }
         | if tree.constant_segregation {
@@ -142,6 +149,29 @@ pub fn check_v3_only_methods(tree: &ErgoTree) -> Result<(), ReadError> {
     Ok(())
 }
 
+/// The deserialized root's static type WHEN it is trivially determinable from
+/// the parsed IR: an inline `Const` carries its own type, and a
+/// `ConstPlaceholder` resolves to its segregated constant's type (Scala
+/// `ConstantPlaceholderSerializer.parse` gives the placeholder the constant's
+/// `tpe`). Scala's `CheckDeserializedScriptIsSigmaProp` rejects (→ soft-fork
+/// wrap under `has_size`) any root whose type is not `SSigmaProp`. For every
+/// other root shape we have no typechecker and accept — a genuinely non-sigma
+/// `Op` root would fail later at evaluation. Returns `None` when the root type
+/// is not statically known here (including an out-of-range placeholder index,
+/// which we leave to the existing lenient handling).
+fn determinable_root_type(tree: &ErgoTree) -> Option<&crate::sigma_type::SigmaType> {
+    match &tree.body {
+        crate::opcode::Expr::Const { tpe, .. } => Some(tpe),
+        crate::opcode::Expr::Op(node) => match &node.payload {
+            crate::opcode::Payload::ConstPlaceholder { index } => {
+                tree.constants.get(*index as usize).map(|(tpe, _)| tpe)
+            }
+            _ => None,
+        },
+        crate::opcode::Expr::Unparsed(_) => None,
+    }
+}
+
 pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     let (tree, _was_wrapped) = read_ergo_tree_tracking_wrap(r)?;
     Ok(tree)
@@ -156,6 +186,7 @@ pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
 pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {
+    let tree_start = r.position();
     let header = r.get_u8()?;
     let version = header & VERSION_MASK;
     let has_size = header & SIZE_FLAG != 0;
@@ -164,13 +195,20 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
     if has_size {
         let size = r.get_u32_exact()? as usize;
         let bounded_data = r.get_bytes(size)?;
+        // Capture the FULL original tree bytes (header + size + body) so a
+        // soft-fork-wrapped tree re-serializes byte-identically (Scala preserves
+        // `propositionBytes` verbatim for an `UnparsedErgoTree`). `data_slice`
+        // borrows the underlying buffer, not `r`, so this coexists with the
+        // later `r.record_group_element` (which mutably borrows `r`).
+        let tree_end = r.position();
+        let full_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
         // Soft-fork: trees with version > our max are accepted without parsing.
         // The Scala auto-accepts these in Interpreter.checkSoftForkCondition.
         // We still need to consume the bytes (via get_bytes above) but skip body parsing.
         if version > MAX_SUPPORTED_TREE_VERSION {
             return Ok((
-                unparsed_soft_fork_tree(version, has_size, constant_segregation),
+                unparsed_soft_fork_tree(version, has_size, constant_segregation, full_tree_bytes),
                 true,
             ));
         }
@@ -216,20 +254,36 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // about to be soft-fork-wrapped below. Scala curve-checks these while
         // deserializing, before producing its UnparsedErgoTree, so the obligation
         // must survive the wrap (this is the case a post-parse AST walk loses).
+        //
+        // KNOWN DIVERGENCE B (reject-valid, deferred — see
+        // `known_divergence_offcurve_ge_after_v6_method_is_collected`): because
+        // this version-independent parse runs the WHOLE body, it forwards GEs
+        // that sit AFTER a v6-only method in a pre-v3 tree. Scala's parse throws
+        // at that method and never reaches them, so it wraps the tree and never
+        // curve-checks the trailing GE. The sound fix is parser-side
+        // checkpointing of the sideband length at the would-throw point; it
+        // needs Scala oracle vectors and is tracked separately.
         for ge in inner.take_group_elements() {
             r.record_group_element(ge);
         }
         match parsed {
             Ok(tree) => {
-                if let crate::opcode::Expr::Const { tpe, .. } = &tree.body {
-                    if *tpe != crate::sigma_type::SigmaType::SSigmaProp {
-                        // root is a non-SigmaProp constant → Scala's
-                        // CheckDeserializedScriptIsSigmaProp equivalent.
-                        return Ok((
-                            unparsed_soft_fork_tree(version, has_size, constant_segregation),
-                            true,
-                        ));
-                    }
+                // CheckDeserializedScriptIsSigmaProp: a root whose statically
+                // known type is not SigmaProp (an inline non-SigmaProp constant,
+                // or a ConstPlaceholder resolving to a non-SigmaProp constant) is
+                // soft-fork-wrapped under has_size, as Scala does.
+                let root_non_sigmaprop = determinable_root_type(&tree)
+                    .is_some_and(|tpe| *tpe != crate::sigma_type::SigmaType::SSigmaProp);
+                if root_non_sigmaprop {
+                    return Ok((
+                        unparsed_soft_fork_tree(
+                            version,
+                            has_size,
+                            constant_segregation,
+                            full_tree_bytes,
+                        ),
+                        true,
+                    ));
                 }
                 Ok((tree, false))
             }
@@ -251,7 +305,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 // Scala's ValidationException, which under has_size is wrapped
                 // as UnparsedErgoTree (the soft-fork-compatible path).
                 Ok((
-                    unparsed_soft_fork_tree(version, has_size, constant_segregation),
+                    unparsed_soft_fork_tree(
+                        version,
+                        has_size,
+                        constant_segregation,
+                        full_tree_bytes,
+                    ),
                     true,
                 ))
             }
@@ -261,23 +320,29 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
     }
 }
 
-/// Construct a soft-fork-accepted ErgoTree: the outer flags are preserved
-/// (so re-serialization can reproduce the correct header) but the body is
-/// a trivial `true` constant. Used for:
+/// Construct a soft-fork-accepted ErgoTree (Scala's
+/// `Left(UnparsedErgoTree(bytes, error))`): the outer flags are preserved and
+/// the body holds the FULL original tree bytes verbatim
+/// ([`crate::opcode::Expr::Unparsed`]), so re-serialization is byte-identical to
+/// the wire form (matching Scala's preserved `propositionBytes`) and evaluation
+/// hard-errors (Scala throws on an unparsed tree unless its error is an active
+/// soft-fork). Used for:
 /// - trees whose `version > MAX_SUPPORTED_TREE_VERSION` (version-based soft-fork)
-/// - trees with `has_size` whose body fails to parse OR leaves residual
-///   bytes after parsing (validation-triggered soft-fork, matches
-///   Scala's UnparsedErgoTree path)
-fn unparsed_soft_fork_tree(version: u8, has_size: bool, constant_segregation: bool) -> ErgoTree {
+/// - trees with `has_size` whose body fails to parse OR has a non-`SigmaProp`
+///   constant root (validation-triggered soft-fork, matches Scala's
+///   `UnparsedErgoTree` path)
+fn unparsed_soft_fork_tree(
+    version: u8,
+    has_size: bool,
+    constant_segregation: bool,
+    full_tree_bytes: Vec<u8>,
+) -> ErgoTree {
     ErgoTree {
         version,
         has_size,
         constant_segregation,
         constants: vec![],
-        body: crate::opcode::Expr::Const {
-            tpe: crate::sigma_type::SigmaType::SBoolean,
-            val: crate::sigma_value::SigmaValue::Boolean(true),
-        },
+        body: crate::opcode::Expr::Unparsed(full_tree_bytes),
     }
 }
 
@@ -451,10 +516,24 @@ mod tests {
     // ----- helpers -----
 
     /// Simplest valid body: a boolean constant `true` (serializes as 0x01 0x01).
+    /// NOTE: a non-SigmaProp root is only valid under a NON-size-delimited tree.
+    /// Under `has_size`, Scala's `CheckDeserializedScriptIsSigmaProp` soft-fork-
+    /// wraps a non-SigmaProp root into `Expr::Unparsed`, so size-delimited
+    /// fixtures must use [`sigma_prop_body`] instead.
     fn simple_body() -> Body {
         Expr::Const {
             tpe: SigmaType::SBoolean,
             val: SigmaValue::Boolean(true),
+        }
+    }
+
+    /// A valid proposition body for size-delimited (`has_size`) fixtures:
+    /// `sigmaProp(true)` (root type `SSigmaProp`), which survives re-parse
+    /// without being soft-fork-wrapped.
+    fn sigma_prop_body() -> Body {
+        Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
         }
     }
 
@@ -505,7 +584,7 @@ mod tests {
             has_size: true,
             constant_segregation: true,
             constants: vec![],
-            body: simple_body(),
+            body: sigma_prop_body(),
         };
         let bytes = roundtrip_bytes(&tree);
         // version=1, size=0x08, cseg=0x10 => 0x19
@@ -520,7 +599,7 @@ mod tests {
             has_size: true,
             constant_segregation: false,
             constants: vec![],
-            body: simple_body(),
+            body: sigma_prop_body(),
         };
         let bytes = roundtrip_bytes(&tree);
         assert_eq!(bytes[0], 0x08);
@@ -582,12 +661,20 @@ mod tests {
 
     #[test]
     fn cseg_with_constants_and_size() {
+        // The body is `ConstPlaceholder(0)`, so under `has_size` the root's
+        // resolved type IS checked (CheckDeserializedScriptIsSigmaProp): the
+        // placeholder must resolve to a SigmaProp constant or the tree would be
+        // soft-fork-wrapped. constants[0] is therefore `sigmaProp(true)`; the
+        // trailing non-SigmaProp constants still exercise multi-constant cseg.
         let tree = ErgoTree {
             version: 1,
             has_size: true,
             constant_segregation: true,
             constants: vec![
-                (SigmaType::SInt, SigmaValue::Int(-7)),
+                (
+                    SigmaType::SSigmaProp,
+                    SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
+                ),
                 (SigmaType::SBoolean, SigmaValue::Boolean(true)),
                 (
                     SigmaType::SColl(Box::new(SigmaType::SByte)),
@@ -629,7 +716,7 @@ mod tests {
             has_size: true,
             constant_segregation: false,
             constants: vec![],
-            body: simple_body(),
+            body: sigma_prop_body(),
         };
         roundtrip(&tree);
     }
@@ -797,9 +884,11 @@ mod tests {
     /// the declared-size region are ignored — size is a position LIMIT,
     /// not an equality constraint.
     ///
-    /// Our parser must NOT raise on this input. It must accept and
-    /// return a soft-fork-style tree (body = always-true boolean).
-    /// Regression guard for sync stalling at block 1702686.
+    /// Our parser must NOT raise on this input. It must accept and return a
+    /// soft-fork-wrapped tree whose body is [`Expr::Unparsed`], preserving the
+    /// full original tree bytes verbatim (mirroring Scala's
+    /// `UnparsedErgoTree(propositionBytes)`). Regression guard for sync
+    /// stalling at block 1702686.
     #[test]
     fn size_flagged_non_sigmaprop_root_wraps_as_unparsed() {
         let hex = "092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402";
@@ -810,20 +899,70 @@ mod tests {
         assert_eq!(tree.version, 1);
         assert!(tree.has_size);
         assert!(!tree.constant_segregation);
-        // Body should be the always-true placeholder from
-        // unparsed_soft_fork_tree, matching Scala's soft-fork acceptance.
+        // The body holds the FULL original tree bytes verbatim (Scala preserves
+        // an UnparsedErgoTree's propositionBytes), so re-serialization is
+        // byte-identical and evaluation hard-errors rather than silently
+        // succeeding as an always-true proposition.
         match &tree.body {
-            Expr::Const { tpe, val } => {
-                assert_eq!(*tpe, SigmaType::SBoolean);
-                match val {
-                    SigmaValue::Boolean(b) => {
-                        assert!(*b, "unparsed wrap must evaluate to always-true")
-                    }
-                    _ => panic!("unexpected soft-fork body value: {val:?}"),
-                }
-            }
-            other => panic!("expected Const(SBoolean=true) soft-fork body, got {other:?}"),
+            Expr::Unparsed(raw) => assert_eq!(
+                raw, &bytes,
+                "unparsed soft-fork body must preserve the full tree bytes"
+            ),
+            other => panic!("expected Unparsed soft-fork body, got {other:?}"),
         }
+        // Byte-identical re-serialization — the property that closes the wire
+        // round-trip divergence for soft-fork-wrapped scripts.
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).unwrap();
+        assert_eq!(
+            w.result(),
+            bytes,
+            "soft-fork-wrapped tree must re-serialize verbatim"
+        );
+    }
+
+    /// A size-delimited tree whose ROOT is a `ConstPlaceholder` resolving to a
+    /// non-SigmaProp segregated constant fails Scala's
+    /// `CheckDeserializedScriptIsSigmaProp` just like an inline non-SigmaProp
+    /// `Const` root — the placeholder carries the constant's type
+    /// (`ConstantPlaceholderSerializer.parse`). It must soft-fork-wrap to
+    /// `Expr::Unparsed` (byte-preserving), NOT be accepted as a parsed
+    /// `Int`-typed proposition. A placeholder resolving to a SigmaProp constant
+    /// is a valid root and is NOT wrapped.
+    #[test]
+    fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            constants: vec![(SigmaType::SInt, SigmaValue::Int(7))],
+            body: placeholder_body(), // ConstPlaceholder(0) → SInt (non-SigmaProp)
+        };
+        let bytes = roundtrip_bytes(&tree);
+        let decoded = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+        match &decoded.body {
+            Expr::Unparsed(raw) => assert_eq!(
+                raw, &bytes,
+                "non-SigmaProp placeholder root must wrap, preserving bytes"
+            ),
+            other => panic!("expected Unparsed soft-fork body, got {other:?}"),
+        }
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &decoded).unwrap();
+        assert_eq!(w.result(), bytes, "wrapped tree must re-serialize verbatim");
+
+        // A placeholder resolving to a SigmaProp constant is a valid root.
+        let valid = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            constants: vec![(
+                SigmaType::SSigmaProp,
+                SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
+            )],
+            body: placeholder_body(),
+        };
+        roundtrip(&valid);
     }
 
     /// A size-delimited (`has_size`) tree whose body nests past MaxTreeDepth
@@ -1058,6 +1197,95 @@ mod tests {
         assert!(check_v3_only_methods(&tree).is_ok());
     }
 
+    /// KNOWN DIVERGENCE B (reject-valid, adversarial) — pinned, not yet fixed.
+    ///
+    /// A size-flagged pre-v3 tree whose body places an off-curve GroupElement
+    /// constant AFTER a v6-only method (`SBox.getReg[Int]`, 99/19) in
+    /// serialization order. Scala's `deserializeErgoTree` throws the v6 method's
+    /// `ValidationException` while parsing the body and — because `has_size` —
+    /// wraps the tree as `UnparsedErgoTree`, so the trailing off-curve GE is
+    /// NEVER decoded/curve-checked and the box is ACCEPTED at creation
+    /// (ErgoTreeSerializer.scala:166,196; GroupElementSerializer decodes a point
+    /// only once the reader reaches it).
+    ///
+    /// This node parses version-independently (the v6 method id parses fine and
+    /// is gated only at EVAL), so the whole body is read, the off-curve GE is
+    /// recorded on the reader's group-element sideband, and the tree is returned
+    /// PARSED. The downstream tx chokepoint (`validate_group_elements`) then
+    /// curve-rejects that GE → the box is REJECTED at creation. Scala accepts,
+    /// we reject: a reject-valid / liveness stall reachable by a Scala miner.
+    ///
+    /// The SOUND fix is parser-side checkpointing — record the sideband length
+    /// at the exact point Scala would throw (after a v6 method's receiver+args,
+    /// before its type args) and, only at this version-aware layer, wrap as
+    /// `Unparsed` and forward just that GE prefix. A naive "drop every GE after
+    /// the first v6 method" is UNSOUND: Scala throws AFTER the method's own
+    /// receiver/args, so an off-curve GE inside them must still reject (else
+    /// accept-invalid). Deferred pending Scala oracle vectors. This test pins the
+    /// CURRENT (divergent) behavior: the post-method GE IS collected (hence
+    /// rejected downstream).
+    #[test]
+    fn known_divergence_offcurve_ge_after_v6_method_is_collected() {
+        let mut off_curve = [0xffu8; 33];
+        off_curve[0] = 0x02; // off-curve x (cf. trivial_p2pk_offcurve_ge_constant_rejects)
+
+        let v6_method = Expr::Op(crate::opcode::IrNode {
+            opcode: 0xDC,
+            payload: crate::opcode::Payload::MethodCall {
+                type_id: 99,
+                method_id: 19, // SBox.getReg[T] — v6-only
+                obj: Box::new(Expr::Op(crate::opcode::IrNode {
+                    opcode: 0xA7, // Self
+                    payload: crate::opcode::Payload::Zero,
+                })),
+                args: vec![Expr::Op(crate::opcode::IrNode {
+                    opcode: 0xA3, // a 0-arg leaf in the reg-id slot
+                    payload: crate::opcode::Payload::Zero,
+                })],
+                type_args: vec![SigmaType::SInt],
+            },
+        });
+        let ge_after = Expr::Const {
+            tpe: SigmaType::SGroupElement,
+            val: SigmaValue::GroupElement(GroupElement::from_bytes(off_curve)),
+        };
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            constants: vec![],
+            // Plus(v6_method, ge_after): the GE is parsed AFTER the method.
+            body: Expr::Op(crate::opcode::IrNode {
+                opcode: 0x9A,
+                payload: crate::opcode::Payload::Two(Box::new(v6_method), Box::new(ge_after)),
+            }),
+        };
+
+        // The v6 method is present (gated at eval) and box-parse does NOT reject
+        // a size-flagged tree — Scala wraps, we parse; both accept at creation.
+        assert_eq!(
+            crate::opcode::find_v3_only_method(&tree.body),
+            Some((99, 19))
+        );
+        assert!(check_v3_only_methods(&tree).is_ok());
+
+        let bytes = roundtrip_bytes(&tree);
+        let mut r = VlqReader::new(&bytes);
+        let decoded = read_ergo_tree(&mut r).expect("parses version-independently");
+        assert!(
+            !matches!(decoded.body, Expr::Unparsed(_)),
+            "size-flagged v6 tree is parsed, not wrapped (divergence vs Scala's wrap)"
+        );
+        // THE DIVERGENCE: the off-curve GE sitting AFTER the v6 method was still
+        // collected, so the downstream curve-check rejects it — where Scala
+        // wrapped before reaching it and accepts.
+        let collected = r.take_group_elements();
+        assert!(
+            collected.iter().any(|ge| ge == &off_curve),
+            "post-v6-method off-curve GE is collected (would be rejected downstream)"
+        );
+    }
+
     /// A valid sizeless tree with no v6 method passes.
     #[test]
     fn check_v3_only_methods_accepts_valid_sizeless_tree() {
@@ -1141,5 +1369,37 @@ mod tests {
             "the outer tree must be wrapped as UnparsedErgoTree, not parsed",
         );
         let _ = tree;
+    }
+
+    // ----- unparsed (soft-fork-wrapped) tree: verbatim round-trip -----
+
+    /// A size-delimited tree whose body cannot be parsed is wrapped as
+    /// `Expr::Unparsed` holding the FULL original bytes, and re-serializes
+    /// BYTE-IDENTICAL — matching Scala's preserved `propositionBytes`. (The
+    /// prior `Const(true)` substitution lost the bytes, changing the
+    /// `propositionBytes` / boxId on re-serialization.)
+    #[test]
+    fn unparsed_soft_fork_tree_roundtrips_byte_identical() {
+        for hex_str in [
+            "0b01fd",     // v3 + size, 1-byte unknown-opcode body 0xfd
+            "0b03fd0102", // v3 + size, 3-byte unknown-opcode body
+            "1c020008",   // v4 (> MAX_SUPPORTED) + size, opaque body — version soft-fork
+        ] {
+            let bytes = hex::decode(hex_str).unwrap();
+            let tree = read_ergo_tree(&mut VlqReader::new(&bytes))
+                .unwrap_or_else(|e| panic!("{hex_str} must parse (soft-fork wrap): {e:?}"));
+            assert!(
+                matches!(tree.body, crate::opcode::Expr::Unparsed(_)),
+                "{hex_str} must wrap to Expr::Unparsed, got {:?}",
+                tree.body
+            );
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &tree).unwrap();
+            assert_eq!(
+                w.result(),
+                bytes,
+                "{hex_str} must re-serialize byte-identical"
+            );
+        }
     }
 }

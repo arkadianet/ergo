@@ -25,6 +25,19 @@ pub enum Expr {
     Const { tpe: SigmaType, val: SigmaValue },
     /// Opcode node: firstByte is an opcode (> 0x70), followed by pattern-specific data.
     Op(IrNode),
+    /// A tree body that was NOT parsed, kept VERBATIM — Scala's
+    /// `Left(UnparsedErgoTree(bytes, error))`. Produced ONLY as the whole-tree
+    /// body by `crate::ergo_tree::unparsed_soft_fork_tree` for a SIZE-DELIMITED
+    /// tree whose body could not be parsed (a version `> MAX_SUPPORTED`, an
+    /// unknown opcode / unserializable type, or a non-`SigmaProp` constant
+    /// root). It holds the FULL original tree bytes (header + size + body) so
+    /// re-serialization is byte-identical, matching Scala's preserved
+    /// `propositionBytes`. It is never a sub-expression and never produced by
+    /// the body parser; it evaluates to a hard error (Scala throws on an
+    /// unparsed tree unless its error is an *active* soft-fork — which this node
+    /// does not currently model, consistent with not tracking soft-forked
+    /// validation-rule activation).
+    Unparsed(Vec<u8>),
 }
 
 /// One opcode-tagged IR node: the dispatch byte plus the typed payload
@@ -616,7 +629,8 @@ pub fn is_v3_only_method(type_id: u8, method_id: u8) -> bool {
 /// over the parsed body matches Scala's eager deserialize exactly.
 pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
     let node = match expr {
-        Expr::Const { .. } => return None,
+        // An unparsed (soft-fork-wrapped) body has no parsed AST to walk.
+        Expr::Const { .. } | Expr::Unparsed(_) => return None,
         Expr::Op(node) => node,
     };
     match &node.payload {

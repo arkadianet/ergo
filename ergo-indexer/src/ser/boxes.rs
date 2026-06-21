@@ -89,14 +89,19 @@ mod tests {
     use ergo_ser::sigma_value::SigmaValue;
 
     fn size_delimited_tree() -> ErgoTree {
+        // A VALID size-delimited tree: an inline `SSigmaProp` constant
+        // (`sigmaProp(true)`). A non-SigmaProp root (e.g. `Const(SBoolean)`)
+        // would be soft-fork-wrapped on re-parse into `Expr::Unparsed`
+        // (CheckDeserializedScriptIsSigmaProp), so it would not survive a
+        // round-trip as a parsed body.
         ErgoTree {
             version: 0,
             has_size: true,
             constant_segregation: false,
             constants: vec![],
             body: Expr::Const {
-                tpe: SigmaType::SBoolean,
-                val: SigmaValue::Boolean(true),
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(ergo_ser::sigma_value::SigmaBoolean::TrivialProp(true)),
             } as Body,
         }
     }

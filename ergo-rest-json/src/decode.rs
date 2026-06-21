@@ -19,13 +19,11 @@ use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ad_proofs::{write_ad_proofs, ADProofs};
 use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
 use ergo_ser::ergo_box::ErgoBoxCandidate;
-use ergo_ser::ergo_tree::{read_ergo_tree, write_ergo_tree, ErgoTree};
+use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
 use ergo_ser::extension::{write_extension, Extension, ExtensionField};
 use ergo_ser::input::{read_context_extension, ContextExtension, DataInput, Input, SpendingProof};
 use ergo_ser::opcode::Expr;
 use ergo_ser::register::{read_registers, write_registers, AdditionalRegisters};
-use ergo_ser::sigma_type::SigmaType;
-use ergo_ser::sigma_value::SigmaValue;
 use ergo_ser::token::{Token, TokenId};
 use ergo_ser::transaction::{write_transaction, Transaction};
 
@@ -506,25 +504,20 @@ pub fn decode_ergo_tree_canonicalize_with_mode(
     }
 
     if mode == DecodeMode::Submit {
-        // Submit-only: reject placeholder-fallback patterns where
-        // re-emit doesn't roundtrip (defense vs malicious wallets).
-        let mut w = VlqWriter::new();
-        write_ergo_tree(&mut w, &parsed)
-            .map_err(|e| (DESERIALIZE, format!("re-serialize: {e}")))?;
-        let re_emitted = w.result();
-
-        let is_placeholder_pattern = parsed.constants.is_empty()
-            && matches!(
-                &parsed.body,
-                Expr::Const {
-                    tpe: SigmaType::SBoolean,
-                    val: SigmaValue::Boolean(true),
-                }
-            );
-        if is_placeholder_pattern && re_emitted != input {
+        // Submit-only: reject soft-fork / unparseable ergoTree wrappers
+        // (defense vs malicious wallets). `read_ergo_tree` represents any
+        // size-delimited tree it could not fully parse — a non-SigmaProp
+        // root (CheckDeserializedScriptIsSigmaProp) or a body that fails to
+        // parse — as `Expr::Unparsed`, preserving the original bytes verbatim
+        // (so it re-serializes byte-identically, mirroring Scala's
+        // `UnparsedErgoTree(propositionBytes)`). Such a script is unspendable;
+        // a well-behaved wallet never submits one, so reject as non_canonical.
+        // (The `version > max` soft-fork case is already rejected by the
+        // header-version pre-check above.)
+        if matches!(&parsed.body, Expr::Unparsed(_)) {
             return Err((
                 NON_CANONICAL,
-                "ergoTree did not roundtrip — likely soft-fork or unparseable body wrapper"
+                "ergoTree is a soft-fork / unparseable body wrapper — not accepted for submission"
                     .to_string(),
             ));
         }

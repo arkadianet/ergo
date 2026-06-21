@@ -2004,6 +2004,17 @@ fn v6_method_in_dead_branch_rejected_pre_v3_tree() {
 }
 
 #[test]
+fn unparsed_ergo_tree_body_eval_errors_not_true() {
+    // A soft-fork-wrapped (unparsed) tree body must HARD-ERROR on evaluation —
+    // Scala throws on an `UnparsedErgoTree` (no active soft-fork), so such a box
+    // is unspendable, NOT trivially `true` (the prior `Const(true)` substitution
+    // made it spendable — an accept-invalid / fork hazard).
+    let body = Expr::Unparsed(hex::decode("0b01fd").unwrap());
+    let err = run_eval_ctx_err(&body, &ReductionContext::minimal(500_000, 0));
+    assert!(matches!(err, EvalError::UnparsedErgoTree), "got {err:?}");
+}
+
+#[test]
 fn methodcall_box_getregv5_live_eval_errors() {
     // getRegV5 (99, 7) has no runtime implementation in Scala v6.0.x:
     // SMethod.javaMethod falls back to Box.getMethod("getRegV5", Int)

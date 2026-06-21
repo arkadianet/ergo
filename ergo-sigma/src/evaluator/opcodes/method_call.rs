@@ -3043,6 +3043,11 @@ fn expr_put_value_cost(expr: &Expr) -> Result<u64, EvalError> {
                 "Constant, CreateTuple, or ConcreteCollection register value for SGlobal.serialize",
             got: format!("register opcode 0x{opcode:02X}"),
         }),
+        Expr::Unparsed(_) => Err(EvalError::TypeError {
+            expected:
+                "Constant, CreateTuple, or ConcreteCollection register value for SGlobal.serialize",
+            got: "unparsed-tree body".to_string(),
+        }),
     }
 }
 

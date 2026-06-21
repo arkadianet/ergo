@@ -238,6 +238,11 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
             "unsupported expression opcode 0x{:02X} in register value",
             node.opcode
         ))),
+        // A register value is parsed via `parse_expr`, which never yields an
+        // unparsed whole-tree body.
+        Expr::Unparsed(_) => Err(ReadError::InvalidData(
+            "unexpected unparsed-tree body as a register value".into(),
+        )),
     }
 }
 
