@@ -292,7 +292,10 @@ fn write_payload(
         }
 
         Payload::SigmaCollection { items } => {
-            w.put_u16(items.len() as u16);
+            // SigmaAnd/SigmaOr child count is a u32 (`putUInt`), matching Scala's
+            // `getUIntExact` on read — not a u16. For counts that fit a u16 the
+            // VLQ is identical, so this preserves byte parity for real trees.
+            w.put_u32(items.len() as u32);
             for item in items {
                 write_expr(w, item, cseg)?;
             }

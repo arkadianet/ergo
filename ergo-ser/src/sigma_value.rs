@@ -530,7 +530,10 @@ fn parse_sizeless_inner_box_script(
     cseg: bool,
 ) -> Result<(), ReadError> {
     if cseg {
-        let count = r.get_u32_exact()? as usize;
+        // Nested-tree `deserializeConstants` reads the count via `getUInt().toInt`
+        // (non-exact), same as the top-level tree: an overflowed count wraps
+        // negative and yields ZERO constants in Scala, not a hard rejection.
+        let count = r.get_uint_to_i32()?.max(0) as usize;
         if count > 4096 {
             return Err(ReadError::InvalidData(format!(
                 "unreasonable constant count in inner tree: {count}"

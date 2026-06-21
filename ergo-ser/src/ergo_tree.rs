@@ -363,7 +363,23 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // method, or violates rule 1012): Scala re-raises those as
             // `SerializerException` too, so they must escape this size-delimited
             // wrap rather than be swallowed into an `UnparsedErgoTree`.
-            Err(e @ (ReadError::DepthLimitExceeded { .. } | ReadError::HardReject(_))) => Err(e),
+            //
+            // `ValueTooLarge` is a VLQ value that overflowed its declared integer
+            // width during the body parse. After routing the NON-exact
+            // `getUInt().toInt` sites (segregated constants count, `ValUse` id,
+            // `FuncValue` arg ids) through `get_uint_to_i32`, every `ValueTooLarge`
+            // reachable HERE is from a width Scala hard-rejects: a `getUIntExact`
+            // site (ConstantPlaceholder index, ValDef/FunDef id, BlockValue /
+            // FuncValue / SigmaAnd-SigmaOr counts, SString length →
+            // `ArithmeticException`) or a `getUShort` range overflow — neither a
+            // `ValidationException`, so it must escape the wrap, never become an
+            // `UnparsedErgoTree`. (The has_size SIZE field is read before this
+            // match and propagates its own error directly; see line ~231.)
+            Err(
+                e @ (ReadError::DepthLimitExceeded { .. }
+                | ReadError::HardReject(_)
+                | ReadError::ValueTooLarge { .. }),
+            ) => Err(e),
             Err(_) => {
                 // Other parse failures (unknown opcode, invalid type tag) map to
                 // Scala's ValidationException, which under has_size is wrapped
@@ -417,7 +433,13 @@ fn parse_body(
     constant_segregation: bool,
 ) -> Result<ErgoTree, ReadError> {
     let constants = if constant_segregation {
-        let count = r.get_u32_exact()? as usize;
+        // Scala `deserializeConstants` reads the count via `getUInt().toInt`
+        // (ErgoTreeSerializer.scala:248) — NOT `getUIntExact`. A value past
+        // i32::MAX wraps to a negative `Int`, and the `cfor(0)(_ < nConsts)` loop
+        // then yields ZERO constants rather than overflowing. Match that: read
+        // non-exact and treat a negative count as 0 (an overflowed count is a
+        // valid empty-constants tree in Scala, not a hard rejection).
+        let count = r.get_uint_to_i32()?.max(0) as usize;
         let mut consts = Vec::with_capacity(count.min(CONSTANTS_VEC_SOFT_CAP));
         for _ in 0..count {
             let (tpe, val) = read_constant(r)?;
@@ -931,6 +953,81 @@ mod tests {
         bytes.extend_from_slice(&ergo_primitives::vlq::encode_vlq(i32::MAX as u64));
         let mut r = VlqReader::new(&bytes);
         assert!(read_ergo_tree(&mut r).is_err());
+    }
+
+    /// A segregated constants COUNT past i32::MAX is read non-exact (Scala
+    /// `getUInt().toInt`): it wraps negative and yields ZERO constants, so the
+    /// tree PARSES (here to `sigmaProp(true)`), it is NOT hard-rejected. Oracle
+    /// (6.0.2): `1807808080800808d3` → PARSED SSigmaProp. The previous
+    /// `get_u32_exact` raised `ValueTooLarge` here — reject-valid.
+    #[test]
+    fn constants_count_overflow_parses_as_empty_not_rejects() {
+        let bytes = hex::decode("1807808080800808d3").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r).expect("overflowed constants count must parse");
+        assert!(
+            !matches!(tree.body, crate::opcode::Expr::Unparsed(_)),
+            "must parse, not wrap"
+        );
+        assert!(
+            tree.constants.is_empty(),
+            "overflowed count yields 0 constants"
+        );
+    }
+
+    /// A `getUIntExact` site (here a `ConstantPlaceholder` index) past i32::MAX
+    /// HARD-rejects: Scala `toIntExact` throws `ArithmeticException`, caught by
+    /// neither deserialize catch, so it escapes the has_size wrap. Oracle:
+    /// `18070073ffffffff0f` → THROW. (Wrapping it was accept-invalid.)
+    #[test]
+    fn getuintexact_index_overflow_hard_rejects_not_wrapped() {
+        let bytes = hex::decode("18070073ffffffff0f").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let err = read_ergo_tree(&mut r).unwrap_err();
+        assert!(
+            matches!(err, ReadError::ValueTooLarge { .. }),
+            "ConstantPlaceholder index overflow must hard-reject; got {err:?}"
+        );
+    }
+
+    /// A `ValUse` id past i32::MAX is read non-exact (Scala `getUInt.toInt`):
+    /// accepted, kept as the raw u32 so it round-trips byte-identically.
+    #[test]
+    fn valuse_id_overflow_roundtrips() {
+        let tree = ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            constants: vec![],
+            body: crate::opcode::Expr::Op(crate::opcode::IrNode {
+                opcode: 0x72, // ValUse
+                payload: crate::opcode::Payload::ValUse { id: 0xFFFF_FFFF },
+            }),
+        };
+        roundtrip(&tree);
+    }
+
+    /// A `FuncValue` arg id past i32::MAX is read non-exact (Scala
+    /// `getUInt().toInt`) while the arg COUNT stays exact; the id round-trips.
+    #[test]
+    fn funcvalue_arg_id_overflow_roundtrips() {
+        let tree = ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            constants: vec![],
+            body: crate::opcode::Expr::Op(crate::opcode::IrNode {
+                opcode: 0xD9, // FuncValue
+                payload: crate::opcode::Payload::FuncValue {
+                    args: vec![(0xFFFF_FFFF, Some(SigmaType::SInt))],
+                    body: Box::new(crate::opcode::Expr::Op(crate::opcode::IrNode {
+                        opcode: 0xA3, // Height — a valid leaf body
+                        payload: crate::opcode::Payload::Zero,
+                    })),
+                },
+            }),
+        };
+        roundtrip(&tree);
     }
 
     // ----- oracle parity -----
