@@ -4,8 +4,8 @@ use crate::sigma_type::{decode_type, read_type, SigmaType};
 use crate::sigma_value::{read_value_at_depth, SigmaValue};
 
 use super::types::{
-    method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr, IrNode, Payload,
-    LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
+    is_v3_only_method, method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr,
+    IrNode, Payload, LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
 };
 
 /// Parse an ErgoTree body (single root expression) from bytes.
@@ -238,6 +238,14 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let type_id = r.get_u8()?;
             let method_id = r.get_u8()?;
             let obj = parse_expr(r, next, _tree_version)?;
+            // v6 checkpoint: Scala's `PropertyCallSerializer.parse` resolves the
+            // method (and throws for a pre-v3 tree) right after `obj`. Mark the
+            // group-element sideband here so the ErgoTree layer can forward
+            // exactly the GEs Scala curve-checked before wrapping. Recorded
+            // version-independently; the gate stays at the version-aware layer.
+            if is_v3_only_method(type_id, method_id) {
+                r.mark_v6_method_checkpoint();
+            }
             // PropertyCall (0xDB) is the zero-args form, but a v6
             // property-call SMethod can still declare
             // `hasExplicitTypeArgs`: `SGlobal.none[T]` carries `Seq(tT)`.
@@ -272,6 +280,19 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
                 args.push(parse_expr(r, next, _tree_version)?);
+            }
+            // v6 checkpoint: Scala's `MethodCallSerializer.parse` resolves the
+            // method (and throws for a pre-v3 tree) right after the receiver and
+            // value args, before the explicit type args. Mark the group-element
+            // sideband here (see the PropertyCall arm above).
+            //
+            // NOTE: this covers the v6/EIP-50-only methods. Scala wraps under
+            // has_size for ANY method-resolution `ValidationException`, including
+            // a genuinely unknown/future `(type_id, method_id)` pair — the same
+            // GE-ordering shape. Catching those needs the full per-version method
+            // registry and is a tracked follow-up.
+            if is_v3_only_method(type_id, method_id) {
+                r.mark_v6_method_checkpoint();
             }
             // v6 / EIP-50: methods whose Scala `SMethod` sets
             // `hasExplicitTypeArgs = true` write N type bytes after
