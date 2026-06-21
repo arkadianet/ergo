@@ -322,7 +322,21 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // method, or violates rule 1012): Scala re-raises those as
             // `SerializerException` too, so they must escape this size-delimited
             // wrap rather than be swallowed into an `UnparsedErgoTree`.
-            Err(e @ (ReadError::DepthLimitExceeded { .. } | ReadError::HardReject(_))) => Err(e),
+            //
+            // `ValueTooLarge` is a VLQ value that overflowed its declared integer
+            // width (Scala `getUIntExact` / `getUShortExact` → `toIntExact` →
+            // `ArithmeticException`). That exception is caught by neither
+            // `deserializeErgoTree`'s inner catch (ReaderPositionLimitExceeded /
+            // IllegalArgumentException) nor its outer catch (`ValidationException`),
+            // so it propagates as a hard failure — even under has_size. Confirmed
+            // against the 6.0.2 oracle: a `ConstantPlaceholder` index past i32::MAX
+            // throws `ArithmeticException: Int overflow`. Wrapping it here was
+            // accept-invalid.
+            Err(
+                e @ (ReadError::DepthLimitExceeded { .. }
+                | ReadError::HardReject(_)
+                | ReadError::ValueTooLarge { .. }),
+            ) => Err(e),
             Err(_) => {
                 // Other parse failures (unknown opcode, invalid type tag) map to
                 // Scala's ValidationException, which under has_size is wrapped
@@ -1009,6 +1023,25 @@ mod tests {
         assert!(
             matches!(err, ReadError::DepthLimitExceeded { .. }),
             "size-delimited over-depth tree must hard-reject, not soft-fork wrap; got {err:?}"
+        );
+    }
+
+    /// A size-delimited tree whose body overflows a VLQ integer width (here a
+    /// `ConstantPlaceholder` index past i32::MAX) must HARD-REJECT, not wrap.
+    /// Scala's `getUIntExact` → `toIntExact` throws `ArithmeticException`, caught
+    /// by neither `deserializeErgoTree` catch, so it propagates even under
+    /// has_size (6.0.2 oracle: `18070073ffffffff0f` → `ArithmeticException: Int
+    /// overflow`). Wrapping it was accept-invalid.
+    #[test]
+    fn size_flagged_vlq_overflow_hard_rejects_not_wrapped() {
+        // 0x18 = v0, has_size, cseg; size VLQ(7); body: 0x00 (0 constants) +
+        // 0x73 ConstPlaceholder + VLQ(0xFFFFFFFF) = ff ff ff ff 0f (past i32::MAX).
+        let bytes = hex::decode("18070073ffffffff0f").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let err = read_ergo_tree(&mut r).unwrap_err();
+        assert!(
+            matches!(err, ReadError::ValueTooLarge { .. }),
+            "size-delimited VLQ-overflow tree must hard-reject, not soft-fork wrap; got {err:?}"
         );
     }
 
