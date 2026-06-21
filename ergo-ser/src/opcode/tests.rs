@@ -1387,6 +1387,110 @@ fn is_v3_only_method_table_spot_checks() {
     assert!(!is_v3_only_method(12, 26)); // SCollection.indexOf (pre-v3)
 }
 
+// ----- oracle parity -----
+
+/// EXHAUSTIVE: `is_v5_method` / `is_v6_method` must match Scala's `SMethod.fromIds`
+/// for EVERY one of the 65 536 single-byte `(typeId, methodId)` pairs. The expected
+/// column is the external oracle (sigma-state 6.0.2), checked in at
+/// `test-vectors/scala/sigma/method_registry_v5_v6.txt`. Mis-encoding a single arm
+/// is a consensus divergence (reject-valid if a real method is flagged unresolved,
+/// accept-invalid if an unresolved id is treated as known), so the whole space is
+/// pinned — not spot-checked.
+#[test]
+fn method_registry_predicates_match_scala_oracle() {
+    let vectors = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test-vectors/scala/sigma/method_registry_v5_v6.txt"
+    ))
+    .expect("registry oracle vector present");
+
+    // (typeId, methodId) -> (resolves_v5, resolves_v6); absent pair => (false, false).
+    let mut oracle = std::collections::HashMap::new();
+    for line in vectors.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(cols.len(), 4, "malformed registry line: {line:?}");
+        let t: u8 = cols[0].parse().unwrap();
+        let m: u8 = cols[1].parse().unwrap();
+        oracle.insert((t, m), (cols[2] == "1", cols[3] == "1"));
+    }
+    assert!(!oracle.is_empty(), "oracle vector parsed to zero pairs");
+
+    for t in 0u8..=255 {
+        for m in 0u8..=255 {
+            let (exp_v5, exp_v6) = oracle.get(&(t, m)).copied().unwrap_or((false, false));
+            assert_eq!(is_v5_method(t, m), exp_v5, "is_v5_method({t}, {m})");
+            assert_eq!(is_v6_method(t, m), exp_v6, "is_v6_method({t}, {m})");
+
+            // v5 ⊆ v6: resolving at v5 implies resolving at v6 (oracle-verified).
+            assert!(
+                !is_v5_method(t, m) || is_v6_method(t, m),
+                "({t}, {m}) resolves at v5 but not v6 — breaks the subset invariant"
+            );
+            // The v6-only set is exactly "resolves at v6, not at v5".
+            assert_eq!(
+                is_v3_only_method(t, m),
+                is_v6_method(t, m) && !is_v5_method(t, m),
+                "is_v3_only_method disagrees with is_v6 ∧ ¬is_v5 at ({t}, {m})"
+            );
+            // is_known_method routes by the tree-header version split (0/1/2 → v5, 3 → v6).
+            assert_eq!(
+                is_known_method(t, m, 0),
+                exp_v5,
+                "is_known_method v0 ({t}, {m})"
+            );
+            assert_eq!(
+                is_known_method(t, m, 2),
+                exp_v5,
+                "is_known_method v2 ({t}, {m})"
+            );
+            assert_eq!(
+                is_known_method(t, m, 3),
+                exp_v6,
+                "is_known_method v3 ({t}, {m})"
+            );
+        }
+    }
+}
+
+/// `find_unresolved_v5_method` flags both a v6-only method AND a genuinely unknown
+/// id, but never a pre-v3-legal one — the superset relationship the box-deserialize
+/// sizeless gate relies on.
+#[test]
+fn find_unresolved_v5_method_flags_v6_only_and_unknown() {
+    let global = || {
+        Expr::Op(IrNode {
+            opcode: 0xDD,
+            payload: Payload::Zero,
+        })
+    };
+    let prop = |type_id, method_id| {
+        Expr::Op(IrNode {
+            opcode: 0xDB,
+            payload: Payload::MethodCall {
+                type_id,
+                method_id,
+                obj: Box::new(global()),
+                args: vec![],
+                type_args: vec![],
+            },
+        })
+    };
+    // v6-only (SGlobal.none, 106/10) — unresolved at v5.
+    assert_eq!(find_unresolved_v5_method(&prop(106, 10)), Some((106, 10)));
+    // genuinely unknown id (SGlobal has no method 42) — unresolved at v5,
+    // and previously MISSED by the v6-only-specific walk.
+    assert_eq!(find_unresolved_v5_method(&prop(106, 42)), Some((106, 42)));
+    assert!(!is_v3_only_method(106, 42)); // not v6-only — the gap this closes
+                                          // method on a type with no methods at all (SBoolean, type 1).
+    assert_eq!(find_unresolved_v5_method(&prop(1, 1)), Some((1, 1)));
+    // pre-v3-legal (SGlobal.groupGenerator, 106/1) — NOT flagged.
+    assert_eq!(find_unresolved_v5_method(&prop(106, 1)), None);
+}
+
 #[test]
 fn find_v3_only_method_walks_dead_branch_and_skips_clean_tree() {
     let global = || {

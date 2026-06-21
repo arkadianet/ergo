@@ -142,7 +142,7 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
 /// node is built for; a future activation is a node upgrade that raises it.
 ///
 /// We gate on the static max rather than the per-block `activatedScriptVersion`
-/// (matching the static `check_v3_only_methods` gate). The only case the two
+/// (matching the static `check_resolvable_methods` gate). The only case the two
 /// disagree is re-validating a historical block at a height where activated was
 /// below 3 with a higher-version tree — unreachable, since a tree of version N
 /// cannot be created until version N is activated, so no such tree exists in
@@ -157,32 +157,34 @@ pub fn check_tree_version_supported(tree: &ErgoTree) -> Result<(), ReadError> {
     Ok(())
 }
 
-/// Reject a v6/EIP-50 method ([`crate::opcode::is_v3_only_method`]) carried in a
-/// real pre-v3 (tree-header version < 3) ErgoTree at DESERIALIZE — the box-parse
-/// twin of the evaluator's spend-path gate (`check_v3_only_methods` /
-/// `EvalError::PreV3V6Method`). Scala resolves the method table against the
-/// tree-header version (`MethodsContainer._methodsMap`, methods.scala): a
-/// v6-only id in a v0/v1/v2 tree is absent from `_v5MethodsMap`, so
-/// `MethodCallSerializer.parse` throws a `ValidationException`.
+/// Reject a method a sizeless ErgoTree's registry cannot resolve
+/// ([`crate::opcode::find_unresolved_v5_method`]) at DESERIALIZE. Scala resolves
+/// methods against the tree-header version (`MethodsContainer._methodsMap`,
+/// methods.scala); an id absent from `_v5MethodsMap` makes
+/// `MethodCallSerializer.parse` throw a `ValidationException`. This covers both a
+/// v6/EIP-50-only id ([`crate::opcode::is_v3_only_method`]) AND a genuinely
+/// unknown/future `(type_id, method_id)` pair — the latter would otherwise be
+/// accept-invalid (the node parses any id as a generic `MethodCall`).
 ///
 /// **Gated on the SIZELESS case only.** When the size bit is set,
 /// `ErgoTreeSerializer.deserializeErgoTree` CATCHES that `ValidationException`
-/// and wraps the tree as `UnparsedErgoTree` (stored verbatim, rejected later on
-/// spend — which the evaluator gate already does); only WITHOUT the size bit is
-/// it re-raised as a hard `SerializerException` that rejects the box at parse
-/// (`ErgoTreeSerializer.scala:196-209`). Gating a size-flagged tree here would
-/// be reject-valid. Since rule 1012 already rejects a sizeless `version != 0`
-/// tree, the reachable case is a sizeless v0 tree carrying a v6 method.
+/// and wraps the tree as `UnparsedErgoTree` (stored verbatim; the size-delimited
+/// wrap path handles it); only WITHOUT the size bit is it re-raised as a hard
+/// `SerializerException` that rejects the box at parse
+/// (`ErgoTreeSerializer.scala:196-209`). Gating a size-flagged tree here would be
+/// reject-valid. Since rule 1012 already rejects a sizeless `version != 0` tree,
+/// the reachable case is a sizeless v0 tree, which resolves against the v5
+/// registry — hence [`find_unresolved_v5_method`](crate::opcode::find_unresolved_v5_method).
 ///
 /// Enforced at the box-script readers (alongside [`check_header_size_bit`]):
 /// `read_ergo_tree` stays lenient, so an OUTPUT box storing such a tree —
 /// never spent, so the evaluator gate never fires — is still rejected at the
 /// creating transaction's parse, matching Scala's eager box-deserialize reject.
-pub fn check_v3_only_methods(tree: &ErgoTree) -> Result<(), ReadError> {
+pub fn check_resolvable_methods(tree: &ErgoTree) -> Result<(), ReadError> {
     if !tree.has_size && tree.version < 3 {
-        if let Some((type_id, method_id)) = crate::opcode::find_v3_only_method(&tree.body) {
+        if let Some((type_id, method_id)) = crate::opcode::find_unresolved_v5_method(&tree.body) {
             return Err(ReadError::InvalidData(format!(
-                "method ({type_id}, {method_id}) requires ErgoTree version >= 3, got tree version {} (CheckAndGetMethod at deserialize)",
+                "method ({type_id}, {method_id}) does not resolve in the v5 registry for tree version {} (method-resolution ValidationException at deserialize)",
                 tree.version
             )));
         }
@@ -305,50 +307,67 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // boundary byte-for-byte. The limit, relative to the inner view that
         // starts at `body_start`, is `MaxPropositionSize - (header + size length)`.
         let body_budget = MAX_PROPOSITION_BYTES.saturating_sub(body_start - tree_start);
-        let (parsed, v6_checkpoint, body_consumed, inner_ges) = {
+        let (parsed, unresolved_checkpoint, body_consumed, inner_ges) = {
             let body_view = r.data_slice(body_start, body_start + r.remaining());
             let mut inner = VlqReader::new(body_view);
             inner.set_position_limit(Some(body_budget));
             let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
             (
                 parsed,
-                inner.v6_method_checkpoint(),
+                inner.unresolved_method_checkpoint(),
                 inner.position(),
                 inner.take_group_elements(),
             )
         };
-        // A size-delimited pre-v3 (version < 3) tree carrying a v6/EIP-50 method is
-        // wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
+        // A size-delimited tree carrying a method the tree's registry cannot resolve
+        // is wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
         // throws a method-resolution `ValidationException`, caught under has_size.
-        // The parser recorded the group-element sideband length at the exact throw
-        // point (after the method's receiver + value args). For version >= 3 the
-        // method is valid, so the checkpoint is ignored.
-        let pre_v3_v6 = version < 3 && v6_checkpoint.is_some();
+        // The parser keyed that on the tree-header version (v6-only method in a
+        // pre-v3 tree, or a genuinely unknown id at any version) and recorded the
+        // group-element sideband length at the exact throw point (after the method's
+        // receiver + value args).
+        let unresolved_method_wrap = unresolved_checkpoint.is_some();
 
         // Forward the group elements the inner parse collected onto `r` — EVEN when
         // about to wrap (Scala curve-checks them while deserializing, before
-        // producing its UnparsedErgoTree). For the pre-v3-v6 wrap, forward ONLY the
-        // prefix Scala reached before it threw at the v6 method; points after it
-        // are never deserialized, hence never curve-checked.
-        let forward_upto = if pre_v3_v6 {
-            v6_checkpoint.unwrap().min(inner_ges.len())
+        // producing its UnparsedErgoTree). For the unresolved-method wrap, forward
+        // ONLY the prefix Scala reached before it threw at the method; points after
+        // it are never deserialized, hence never curve-checked.
+        let forward_upto = if unresolved_method_wrap {
+            unresolved_checkpoint.unwrap().min(inner_ges.len())
         } else {
             inner_ges.len()
         };
         for ge in &inner_ges[..forward_upto] {
             r.record_group_element(*ge);
         }
+
+        // Once the parser has passed a method the registry cannot resolve, Scala has
+        // already thrown the method-resolution `ValidationException` — right after the
+        // method's receiver + value args (oracle-confirmed: the obj/args, including any
+        // group elements, ARE decoded first; resolution is the next step) — and, under
+        // has_size, caught it and wrapped WITHOUT reading the rest of the body. So the
+        // outcome is a wrap REGARDLESS of whether the trailing bytes then parsed cleanly
+        // OR hit a hard error (depth / overflow / nested HardReject) Scala never reaches.
+        // Checked BEFORE the `parsed` match so such a later hard error cannot override it.
+        if unresolved_method_wrap {
+            let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
+            return Ok((
+                unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
+                true,
+            ));
+        }
+
         match parsed {
             Ok(tree) => {
-                // Scala wraps a pre-v3 v6-method tree, and any non-SigmaProp root
-                // (`CheckDeserializedScriptIsSigmaProp`), as `UnparsedErgoTree`. Our
+                // Scala wraps any non-SigmaProp root
+                // (`CheckDeserializedScriptIsSigmaProp`) as `UnparsedErgoTree`. Our
                 // untyped IR can only check the root for an inline `Const` or a
                 // `ConstPlaceholder` (an `Op` root lacks a typechecker and would
                 // fail at eval anyway — this still catches the mainnet block
-                // 1,702,686 case). Both wrap paths advance to the declared-size end.
-                if pre_v3_v6
-                    || determinable_root_type(&tree)
-                        .is_some_and(|tpe| *tpe != crate::sigma_type::SigmaType::SSigmaProp)
+                // 1,702,686 case). The wrap path advances to the declared-size end.
+                if determinable_root_type(&tree)
+                    .is_some_and(|tpe| *tpe != crate::sigma_type::SigmaType::SSigmaProp)
                 {
                     let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                     return Ok((
@@ -362,6 +381,8 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 let _ = r.get_bytes(body_consumed)?;
                 Ok((tree, false))
             }
+            // Reached only when NO unresolved method preceded the error (that case
+            // wrapped above) — so this hard error is the FIRST thing Scala hits too.
             // A tree-depth overflow is Scala's `DeserializeCallDepthExceeded`,
             // a `SerializerException` that `deserializeErgoTree` does NOT catch
             // (it only wraps ReaderPositionLimitExceeded / IllegalArgumentException
@@ -1402,7 +1423,7 @@ mod tests {
         }
     }
 
-    // ----- check_v3_only_methods (box-deserialize v6-in-pre-v3 gate) -----
+    // ----- check_resolvable_methods (box-deserialize method-resolution gate) -----
 
     fn parse_tree(hex_str: &str) -> ErgoTree {
         let bytes = hex::decode(hex_str).unwrap();
@@ -1413,13 +1434,13 @@ mod tests {
     /// is rejected — Scala re-raises the method-resolution `ValidationException`
     /// because there is no size bit to soft-fork-wrap it.
     #[test]
-    fn check_v3_only_methods_rejects_sizeless_pre_v3_v6() {
+    fn check_resolvable_methods_rejects_sizeless_pre_v3_v6() {
         let tree = parse_tree("1000d1efe6db6a0add04");
         assert_eq!(tree.version, 0);
         assert!(!tree.has_size);
-        let err = check_v3_only_methods(&tree).expect_err("sizeless v0 + v6 method must reject");
+        let err = check_resolvable_methods(&tree).expect_err("sizeless v0 + v6 method must reject");
         assert!(
-            matches!(&err, ReadError::InvalidData(m) if m.contains("requires ErgoTree version >= 3")),
+            matches!(&err, ReadError::InvalidData(m) if m.contains("does not resolve in the v5 registry")),
             "got {err:?}",
         );
     }
@@ -1428,9 +1449,9 @@ mod tests {
     /// during `read_ergo_tree` (Scala catches the v6-method `ValidationException`
     /// under has_size), so the box parses (creation accepted, matching Scala) and
     /// is rejected later on spend by the evaluator gate. The sizeless-only
-    /// `check_v3_only_methods` box-parse gate must therefore NOT fire here.
+    /// `check_resolvable_methods` box-parse gate must therefore NOT fire here.
     #[test]
-    fn check_v3_only_methods_accepts_size_flagged_pre_v3_v6() {
+    fn check_resolvable_methods_accepts_size_flagged_pre_v3_v6() {
         let tree = parse_tree("180900d1efe6db6a0add04");
         assert_eq!(tree.version, 0);
         assert!(tree.has_size);
@@ -1438,7 +1459,7 @@ mod tests {
             matches!(tree.body, crate::opcode::Expr::Unparsed(_)),
             "size-flagged pre-v3 v6-method tree wraps as Unparsed"
         );
-        assert!(check_v3_only_methods(&tree).is_ok());
+        assert!(check_resolvable_methods(&tree).is_ok());
     }
 
     /// DIVERGENCE B fixed — GE-ordering past a v6 method (oracle-validated).
@@ -1536,11 +1557,164 @@ mod tests {
         );
     }
 
-    /// A valid sizeless tree with no v6 method passes.
+    /// A hard parse error in bytes AFTER an unresolved method must NOT override the
+    /// wrap: Scala throws the method-resolution `ValidationException` at the method
+    /// (right after its receiver + args) and, under has_size, wraps there — it never
+    /// reads the trailing bytes, so the hard error is unreachable. The node parses the
+    /// whole body generically, so it WOULD hit the trailing error; the wrap decision is
+    /// therefore made BEFORE the parse-result match. Holds at v0 (v5 registry) and v3
+    /// (v6 registry).
+    ///
+    /// `Plus(PropertyCall(106, 42, Global), ConstPlaceholder(0x80000000))`: the
+    /// placeholder index is read via `get_u32_exact` (Scala `getUIntExact` ->
+    /// `ArithmeticException`), a HARD error. Oracle (sigma-state 6.0.2): both header
+    /// versions are `UNPARSED bytes=13`; the same trailing error WITHOUT a preceding
+    /// unknown method THROWs (`ArithmeticException: Int overflow`) — hard reject.
     #[test]
-    fn check_v3_only_methods_accepts_valid_sizeless_tree() {
+    fn unresolved_method_wrap_survives_trailing_hard_error() {
+        // (header) + Plus(0x9a) + PropertyCall(db 6a 2a) Global(dd)
+        //         + ConstPlaceholder(0x73) index-vlq(80 80 80 80 08).
+        for (hex_str, version) in [
+            ("080b9adb6a2add738080808008", 0u8),
+            ("0b0b9adb6a2add738080808008", 3u8),
+        ] {
+            let bytes = hex::decode(hex_str).unwrap();
+            let decoded =
+                read_ergo_tree(&mut VlqReader::new(&bytes)).expect("must wrap, not hard-reject");
+            assert_eq!(decoded.version, version);
+            assert!(
+                matches!(decoded.body, Expr::Unparsed(_)),
+                "v{version}: unknown method before a trailing hard error must still wrap (Scala UNPARSED)"
+            );
+            // Wrap preserves the bytes verbatim.
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &decoded).unwrap();
+            assert_eq!(w.result(), bytes);
+        }
+        // Control: the SAME trailing hard error with NO preceding unknown method is a
+        // genuine hard reject (Scala THROWs `Int overflow`), so the wrap must NOT fire.
+        let control = hex::decode("08089add738080808008").unwrap();
+        assert!(
+            read_ergo_tree(&mut VlqReader::new(&control)).is_err(),
+            "trailing hard error with no unresolved method must hard-reject"
+        );
+    }
+
+    /// UNKNOWN-method generalization of divergence B. A genuinely unknown
+    /// `(type_id, method_id)` — not in EITHER the v5 or v6 registry — makes Scala's
+    /// `deserializeErgoTree` throw the same method-resolution `ValidationException`
+    /// as a v6-only method, so a size-flagged tree carrying one wraps as
+    /// `UnparsedErgoTree` and curve-checks ONLY the group elements decoded before
+    /// the throw. The node previously knew only v6-only ids, so a trailing off-curve
+    /// GE after an unknown method was curve-checked (reject-valid). This holds at
+    /// BOTH a pre-v3 header (v5 registry) and a v3 header (v6 registry) — only the
+    /// unknown id, not a v6-only one, wraps at v3.
+    ///
+    /// Bytes confirmed UNPARSED against the Scala oracle (sigma-state 6.0.2); see
+    /// the PR description.
+    #[test]
+    fn unknown_method_size_flagged_wraps_and_drops_trailing_ge() {
+        let mut off_curve = [0xffu8; 33];
+        off_curve[0] = 0x02; // off-curve x
+        let off_curve_ge = || Expr::Const {
+            tpe: SigmaType::SGroupElement,
+            val: SigmaValue::GroupElement(GroupElement::from_bytes(off_curve)),
+        };
+        // SGlobal (type 106) has methods 1..=10; method 42 resolves in NO registry.
+        // Receiver is GE-free (Global) so the trailing GE is the only group element,
+        // entirely after the method subtree regardless of the exact throw point.
+        let unknown_method = || {
+            Expr::Op(crate::opcode::IrNode {
+                opcode: 0xDB, // PropertyCall
+                payload: crate::opcode::Payload::MethodCall {
+                    type_id: 106,
+                    method_id: 42,
+                    obj: Box::new(Expr::Op(crate::opcode::IrNode {
+                        opcode: 0xDD, // Global
+                        payload: crate::opcode::Payload::Zero,
+                    })),
+                    args: vec![],
+                    type_args: vec![],
+                },
+            })
+        };
+        let tree = |version: u8| {
+            ErgoTree {
+                version,
+                has_size: true,
+                constant_segregation: false,
+                constants: vec![],
+                // Plus(unknown_method, off_curve_ge): the off-curve GE is decoded
+                // AFTER the method, so Scala never reaches it.
+                body: Expr::Op(crate::opcode::IrNode {
+                    opcode: 0x9A,
+                    payload: crate::opcode::Payload::Two(
+                        Box::new(unknown_method()),
+                        Box::new(off_curve_ge()),
+                    ),
+                }),
+            }
+        };
+
+        // The exact bytes were run through the Scala oracle: both are
+        // `UNPARSED bytes=41 err=ValidationException` (wrap, trailing GE never reached).
+        let expected_hex = [
+            (0u8, "08279adb6a2add0702ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+            (3u8, "0b279adb6a2add0702ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        ];
+        for (version, oracle_hex) in expected_hex {
+            let t = tree(version);
+            let bytes = roundtrip_bytes(&t);
+            assert_eq!(
+                hex::encode(&bytes),
+                oracle_hex,
+                "v{version} oracle-validated bytes"
+            );
+            let mut r = VlqReader::new(&bytes);
+            let decoded = read_ergo_tree(&mut r).expect("parses version-independently");
+            let ges = r.take_group_elements();
+            assert!(
+                matches!(decoded.body, Expr::Unparsed(_)),
+                "v{version} unknown-method tree must wrap as Unparsed (Scala parity)"
+            );
+            assert!(
+                !ges.iter().any(|ge| ge == &off_curve),
+                "v{version}: off-curve GE AFTER the unknown method must be dropped"
+            );
+            // The wrap preserves the bytes verbatim.
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &decoded).unwrap();
+            assert_eq!(w.result(), bytes, "v{version} wrap is byte-exact");
+        }
+    }
+
+    /// A SIZELESS v0 tree carrying an UNKNOWN method is HARD-rejected by
+    /// `check_resolvable_methods` (Scala re-raises the method-resolution
+    /// `ValidationException` with no size bit to wrap it). Without the registry
+    /// generalization this was accept-invalid: the node parsed the unknown id as a
+    /// generic `MethodCall` and the v6-only-specific gate did not fire.
+    ///
+    /// Bytes confirmed THROW against the Scala oracle (sigma-state 6.0.2).
+    #[test]
+    fn check_resolvable_methods_rejects_sizeless_unknown_method() {
+        // header 00 (v0, sizeless) + PropertyCall(106, 42, Global): db 6a 2a dd.
+        let bytes = hex::decode("00db6a2add").unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).expect("parses leniently");
+        assert_eq!(tree.version, 0);
+        assert!(!tree.has_size);
+        let err = check_resolvable_methods(&tree)
+            .expect_err("sizeless v0 + unknown method must hard-reject");
+        assert!(
+            matches!(&err, ReadError::InvalidData(m) if m.contains("does not resolve in the v5 registry")),
+            "got {err:?}",
+        );
+    }
+
+    /// A valid sizeless tree with no unresolved method passes.
+    #[test]
+    fn check_resolvable_methods_accepts_valid_sizeless_tree() {
         let tree = parse_tree("0008d3");
-        assert!(check_v3_only_methods(&tree).is_ok());
+        assert!(check_resolvable_methods(&tree).is_ok());
     }
 
     /// `check_tree_version_supported` HARD-rejects a tree whose version exceeds

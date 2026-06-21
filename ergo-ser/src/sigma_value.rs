@@ -543,10 +543,21 @@ fn parse_sizeless_inner_box_script(
             let _ = read_constant(r)?;
         }
     }
-    let body = crate::opcode::parse_body(r, version)?;
-    if let Some((type_id, method_id)) = crate::opcode::find_v3_only_method(&body) {
+    // A nested box-constant script is its OWN deserialization scope: an unresolved
+    // method inside it is hard-rejected here (Scala re-raises the sizeless
+    // `ValidationException` as a `SerializerException`), NOT folded into the enclosing
+    // size-delimited tree's wrap. So it must not mark the OUTER reader's
+    // unresolved-method checkpoint — save and restore around the nested body parse.
+    let saved_checkpoint = r.unresolved_method_checkpoint();
+    let body = crate::opcode::parse_body(r, version);
+    r.restore_unresolved_method_checkpoint(saved_checkpoint);
+    let body = body?;
+    // Sizeless inner tree => version 0 (the caller ran rule 1012 first), so methods
+    // resolve against the v5 registry; a v6-only OR genuinely-unknown id makes Scala
+    // throw a method-resolution `ValidationException`, hardened by the caller.
+    if let Some((type_id, method_id)) = crate::opcode::find_unresolved_v5_method(&body) {
         return Err(ReadError::InvalidData(format!(
-            "nested box script: method ({type_id}, {method_id}) requires ErgoTree version >= 3, got tree version {version}"
+            "nested box script: method ({type_id}, {method_id}) does not resolve in the v5 registry for tree version {version}"
         )));
     }
     Ok(())
@@ -1885,7 +1896,7 @@ mod tests {
             "sizeless pre-v3 SBox constant carrying a v6 method must reject at deserialize",
         );
         assert!(
-            matches!(&err, ReadError::HardReject(m) if m.contains("requires ErgoTree version >= 3")),
+            matches!(&err, ReadError::HardReject(m) if m.contains("does not resolve in the v5 registry")),
             "got {err:?}",
         );
     }
