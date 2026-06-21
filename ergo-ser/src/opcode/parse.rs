@@ -118,7 +118,12 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         }
 
         ArgPattern::ValUse => {
-            let id = r.get_u32_exact()?;
+            // Scala `ValUseSerializer` reads the id via `getUInt.toInt`
+            // (ValUseSerializer.scala:13) — NOT `getUIntExact`. A value past
+            // i32::MAX wraps to a negative `Int` and is ACCEPTED (it simply
+            // references no ValDef and fails at eval). Read non-exact and keep
+            // the raw u32 so the id round-trips byte-identically.
+            let id = r.get_uint_to_i32()? as u32;
             Payload::ValUse { id }
         }
 
@@ -222,7 +227,12 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             }
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
-                let id = r.get_u32_exact()?;
+                // Scala `FuncValueSerializer` reads each arg id via `getUInt().toInt`
+                // (FuncValueSerializer.scala:36) — NOT `getUIntExact` (which it uses
+                // only for the arg COUNT on line 30). A value past i32::MAX wraps to
+                // a negative `Int` and is accepted. Read non-exact, keep the raw u32
+                // for byte-identical round-trip.
+                let id = r.get_uint_to_i32()? as u32;
                 // FuncValue always writes arg types (they define the function signature).
                 let tpe = Some(read_type(r)?);
                 args.push((id, tpe));
@@ -409,8 +419,14 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         }
 
         ArgPattern::SigmaCollection => {
-            let count = r.get_u16()? as usize;
-            let mut items = Vec::with_capacity(count);
+            // Scala `SigmaTransformerSerializer` (SigmaAnd/SigmaOr) reads the
+            // child count with `getUIntExact` (SigmaTransformerSerializer.scala:21)
+            // — a u32, NOT a u16. Match the width (an overflow past i32::MAX is a
+            // hard `ArithmeticException` in Scala, surfaced here as `ValueTooLarge`).
+            // The reservation is soft-capped to avoid OOM on a hostile count; the
+            // loop still reads `count` items and fails on truncated input.
+            let count = r.get_u32_exact()? as usize;
+            let mut items = Vec::with_capacity(count.min(4096));
             for _ in 0..count {
                 items.push(parse_expr(r, next, _tree_version)?);
             }
