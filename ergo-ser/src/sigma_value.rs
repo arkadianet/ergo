@@ -571,31 +571,25 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     let cseg = header & 0x10 != 0;
 
     if has_size {
-        // Size-delimited: advance past the body blob (we keep the box opaque for
-        // round-trip fidelity), then re-parse the captured tree so an over-depth
-        // embedded tree HARD-REJECTS. Scala deserializes the box proposition via
-        // ErgoTreeSerializer, which depth-checks it; `read_ergo_tree_tracking_wrap`
-        // re-raises `DepthLimitExceeded` and soft-forks every other failure, so
-        // unknown/soft-forkable content still parses while depth overflow is
-        // surfaced rather than swallowed as opaque bytes.
-        let size = r.get_u32_exact()? as usize;
-        let _ = r.get_bytes(size)?;
-        let tree_bytes = r.data_slice(tree_start, r.position()).to_vec();
-        // Re-parse the captured (size-delimited) inner tree on a sub-reader, then
-        // forward its group elements onto the outer reader's sideband — otherwise
-        // an off-curve point inside a nested SBox's size-delimited script would be
-        // lost (the JVM curve-checks it while deserializing the nested box).
-        let mut sub = VlqReader::new(&tree_bytes);
-        let (sub_tree, _) = crate::ergo_tree::read_ergo_tree_tracking_wrap(&mut sub)?;
+        // Size-delimited: Scala deserializes the nested box's proposition INLINE via
+        // `ErgoTreeSerializer.deserializeErgoTree`, which is structure-delimited —
+        // the declared size does NOT bound the parse or advance the reader on
+        // success (it leaves the reader at the actual body end, where the box's
+        // next field is read). Rewind to before the header and delegate to
+        // `read_ergo_tree_tracking_wrap`, which (since #123) advances `r` by the
+        // true body length on success or to Scala's `numBytes` boundary on a wrap,
+        // forwards the inner tree's group elements onto `r` (the JVM curve-checks an
+        // off-curve point inside a nested box while deserializing it), and re-raises
+        // `DepthLimitExceeded` / `HardReject` so they escape the enclosing tree's
+        // soft-fork wrap. The box stays opaque for round-trip fidelity via the
+        // caller's preserved bytes; only the reader advance moves here. (The old
+        // `get_bytes(size)` skip desynced the box tail when size != body length.)
+        r.set_position(tree_start);
+        let (sub_tree, _) = crate::ergo_tree::read_ergo_tree_tracking_wrap(r)?;
         // A future-version inner tree is HARD-rejected (Scala's
-        // VersionContext.withVersions throws a SerializerException at deserialize,
-        // which the enclosing tree does not catch — so it must escape the outer
-        // soft-fork wrap, like the v6-method / depth-limit cases). `read_ergo_tree`
-        // wrapped it leniently above; reject it here.
+        // `VersionContext.withVersions` throws a `SerializerException` the enclosing
+        // tree does not catch). `read_ergo_tree` wrapped it leniently; reject here.
         crate::ergo_tree::check_tree_version_supported(&sub_tree)?;
-        for ge in sub.take_group_elements() {
-            r.record_group_element(ge);
-        }
     } else {
         // SIZELESS nested box script (an `SBox` constant's inner ErgoTree). This
         // mirrors Scala `deserializeErgoTree` for `sizeOpt = None`, where the
@@ -1953,5 +1947,25 @@ mod tests {
             super::harden_sizeless_inner_error(ReadError::HardReject("y".into())),
             ReadError::HardReject(_)
         ));
+    }
+
+    /// A nested `SBox`-constant SIZE-delimited inner tree is skipped by STRUCTURE,
+    /// not the declared size (matching Scala's inline `deserializeErgoTree`): a
+    /// tree declaring size 5 but a 2-byte body (`08d3` = sigmaProp(true)),
+    /// followed by trailing box bytes, must advance only past the 2-byte body so
+    /// the box's next field is read from the right offset. The old
+    /// `get_bytes(size)` skip would consume 5 bytes (two of the trailing field),
+    /// desyncing the box.
+    #[test]
+    fn skip_ergo_tree_size_delimited_advances_by_body_not_declared_size() {
+        // header 08 | size 05 | body 08d3 (2 bytes) | trailing aabbcc (3 bytes)
+        let bytes = hex::decode("080508d3aabbcc").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        super::skip_ergo_tree(&mut r).expect("nested size-delimited tree must skip");
+        assert_eq!(
+            r.remaining(),
+            3,
+            "must advance by the 2-byte body, leaving the 3 trailing box bytes"
+        );
     }
 }
