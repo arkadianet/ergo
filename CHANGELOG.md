@@ -19,13 +19,89 @@ infrastructure.
 ## [0.4.3] - 2026-06-21
 
 A consensus-parity release driven by the SANTA/vixen differential conformance
-suite against the Scala reference (sigma-state 6.0.3). It closes a cluster of
-node-vs-Scala divergences in the v6 / EIP-50 evaluator and box-deserialize
-paths. As always for this node: re-verify its verdicts against the Scala
-reference node before relying on it for funds.
+suite and a new wire-decoder fuzzer against the Scala reference (sigma-state
+6.0.x). It enforces EIP-27 re-emission burning across block, mempool, and
+mining; closes a cluster of node-vs-Scala divergences across the v6 / EIP-50
+evaluator, ErgoTree wire-deserialization, and cost paths; and adds a native
+`/api/v1/wallet` REST surface with an EIP-27-correct balance. As always for this
+node: re-verify its verdicts against the Scala reference node before relying on
+it for funds.
+
+### Added
+
+- **API: native `/api/v1/wallet` read surface with EIP-27-correct balance
+  (#112).** The bundled operator UI over-reported spendable ERG by showing the
+  gross confirmed balance, ignoring the EIP-27 re-emission holdback and immature
+  reward boxes — the same blind spot behind the invalid reward-consolidation tx
+  fixed in #109 / #111. Adds seven native, api-key-gated read endpoints
+  (`balance`, `status`, `addresses`, `boxes`, `boxes/{boxId}`, `transactions`,
+  `transactions/{txId}`) where balance is the factual
+  `{confirmed, available, reserved, immature}` with `available = confirmed -
+  reserved`, `reserved` computed at candidate height `tip+1` against a live redb
+  tip. The re-emission obligation is hoisted into a shared
+  `reemission_obligation_core` that the consensus validator, wallet balance, and
+  burn-aware builder all call, so the figures cannot drift; behaviour-preserving
+  for the consensus path (the re-emission oracle tests still pin it).
+- **API: native `/api/v1/wallet` lifecycle + key-derivation surface (#113).**
+  Adds the write side of the native wallet API (`POST init` / `restore` /
+  `unlock` / `lock` / `mnemonic/verify` / `addresses` / `rescan`, `GET` / `PUT
+  change-address`), all api-key-gated thin adapters over the existing
+  `WalletAdmin` methods. Bodies go through a new `StrictJson<T>` extractor
+  (`deny_unknown_fields`, empty body treated as `{}`, no-store for
+  secret-bearing responses). Shared correctness fixes: `init` / `restore` refuse
+  to overwrite an existing wallet (`WalletExists`) instead of persisting a
+  second secret file (a data-loss guard), and derive / rescan errors return
+  `400` / `409` instead of `500`. Not a consensus path.
+- **Wallet: native `/api/v1/wallet` tx construction + EIP-27 burn-aware builder
+  (#114).** Completes the native wallet transaction family (`boxes/select`,
+  `transactions/build` / `sign` / `send`) and makes every wallet tx-building
+  path EIP-27 burn-aware — the root fix for the wallet previously building
+  invalid reward-consolidation txs that the node's own validator (#109 / #111)
+  rejects. The owed burn comes from the same
+  `ergo_validation::reemission_obligation_core` the consensus validator and
+  balance use, so the figures cannot drift; a fixed-point reselection loop
+  reserves the burn (which can pull in another reward box) until the reservation
+  covers it. The re-emission token is stripped from change and rejected on any
+  payment output, exactly `to_burn` nanoErg is routed to the pay-to-reemission
+  contract, and `send` is txId-first idempotent. Wallet-side construction only —
+  not a change to node block validation.
 
 ### Fixed
 
+- **Consensus parity: signed-byte header/block version comparisons (#106).**
+  Follow-up to the signed-`Byte` header-serializer gate (#103): four remaining
+  version comparisons still read the header/block version as unsigned `u8` where
+  Scala uses a signed `Byte` — the `ergo-ser` v2+ block-marker gate, the
+  `SGlobal.serialize(SHeader)` cost gate, and the rule-124 (HardeningVersion) and
+  rule-414 (Interpreter60) height/voting gates. They agree for all real versions
+  (1–4) and diverge only for a malformed version > 127, where the direction
+  differs per gate (both reject-valid and accept-invalid arise) — computationally
+  unreachable, since such a version cannot ride a PoW-valid header. Now matched
+  via signed casts; `activated_script_version` (`= version - 1`) is left as
+  documented unreachable parity.
+- **Consensus parity: signed-byte `FunDef` nTpeArgs bound (#107).** The ErgoTree
+  opcode parser read `FunDef`'s `nTpeArgs` count as an unsigned `u8` and looped
+  that many `STypeVar` reads, so wire bytes `0x80..=0xFF` parsed and evaluated.
+  Scala reads `nTpeArgs` as a signed `Byte` and hands it to
+  `safeNewArray[STypeVar]`, which throws `NegativeArraySizeException` and fails
+  the deserialize. That was an accept-invalid divergence on the consensus
+  `read_ergo_tree` path (box scripts are non-opaque): a crafted high-bit count
+  was accepted here while every Scala node rejects it. `nTpeArgs > 0x7f` is now
+  rejected (accept `0..=127`, reject `128..=255`).
+- **Consensus parity: short-circuit `Coll`-equality cost at first mismatch
+  (#108).** `EQ` / `NEQ` on a primitive collection (`Coll[Byte]` / `Bool` /
+  `Int` / `Long` / `Short`, `SString`) charged the per-item `PerItemCost` over
+  the full left-operand length, but Scala's `DataValueComparer.equalCOA_Prim`
+  short-circuits both value and cost at the first unequal element — for
+  equal-length colls differing at index `k < len`, Scala bills `chunks(k+1)`
+  while the node billed `chunks(len)`. This is an over-charge only, a
+  reject-valid divergence: an input whose true cost sits just under the cost
+  limit but whose equality short-circuits early could be over-billed past the
+  limit and rejected where Scala accepts — and `Coll[Byte]` equality (token ids,
+  `propositionBytes`, digests) is pervasive. The primitive carriers in
+  `eq_with_cost_inner` now walk both arrays, stop at the first mismatch, and
+  charge over that compared prefix; all-equal and length-mismatch costs are
+  unchanged, and `Box` / `Header` / `Tokens` colls are untouched.
 - **Consensus: Scala-faithful token-equality cost (#115).** `Coll[(Coll[Byte],
   Long)]` (`tokens`) equality diverged from `DataValueComparer` on three counts:
   two spurious `MatchType` units, no first-mismatch short-circuit, and a
@@ -34,6 +110,27 @@ reference node before relying on it for funds.
   undercharge (accept-invalid). Token equality (`SELF.tokens == OUTPUT.tokens`)
   is pervasive in real contracts. Found via 17 captured mainnet/testnet spend
   vectors that graded a +1/+2 cost over the blessed value.
+- **Consensus: enforce EIP-27 re-emission burning across block, mempool, and
+  mining (#109, #111).** The validator never implemented Scala's
+  `ErgoTransaction.verifyReemissionSpending`: a transaction spending a
+  mining-reward box holding EIP-27 re-emission tokens was accepted even when it
+  kept the tokens on an output or underpaid the pay-to-reemission contract — an
+  accept-invalid (P0) a malicious miner could use to fork every Rust node off
+  mainnet, observed on a Rust-wallet reward-consolidation tx. Above the
+  activation height, a non-emission input (value `<= 100K` ERG) carrying the
+  re-emission token must now burn it (no output keeps it) and pay the
+  pay-to-reemission contract exactly 1 nanoErg per token spent; pay-to-reemission
+  outputs are matched by `ErgoTree` structural equality (header byte + constants
+  + root), not serialized bytes, so a non-canonical re-encoding is neither
+  reject-valid nor accept-invalid. The check lives inside the shared
+  `validate_transaction` (after scripts, before sealing — Scala's
+  `validateStateful` order), gated on a `TxValidationRules` bundle that
+  block-apply, mempool, and mining/candidate assembly all thread by construction
+  — closing the candidate-assembly seam where a locally-built storage-rent tx
+  could otherwise carry an EIP-27-invalid spend that block validation later
+  rejects. Soak: 172 real on-chain reward-box re-emission burns over heights
+  1,761,000–1,762,000 accepted, 0 reject-valid; the emission-box branch is a
+  tracked follow-up (the value floor guarantees it never triggers here).
 - **Consensus: reject a v6 / EIP-50 method in a pre-v3 ErgoTree, spend path
   (#116).** A v6-only method id (e.g. `SGlobal.none` / `serialize`,
   `SBox.getReg[T]`) used in a real pre-v3 (tree-header version < 3) tree must be
@@ -43,14 +140,121 @@ reference node before relying on it for funds.
   `true` for such a dead branch — an accept-invalid / fork hazard. Enforced as a
   depth-0 whole-tree gate at reduction (the spend path).
 - **Consensus: reject a pre-v3 v6 method at box deserialize, output-box /
-  box-constant parity.** Completes the spend-path gate above for boxes that are
-  *stored but never spent*: Scala rejects a SIZELESS pre-v3 tree carrying a v6
-  method at box deserialize (with the size bit set it instead wraps the tree as
-  `UnparsedErgoTree` and rejects only on spend, so the gate is conditioned on the
-  sizeless case). The check is enforced at the box-script readers (alongside the
-  rule-1012 size-bit check) and mirrored on the nested box-constant / register /
-  context-extension carriers, so a malformed output box is rejected at the
-  creating transaction's parse, matching the reference.
+  box-constant parity (#117).** Completes the spend-path gate above for boxes
+  that are *stored but never spent*: Scala rejects a SIZELESS pre-v3 tree
+  carrying a v6 method at box deserialize (with the size bit set it instead wraps
+  the tree as `UnparsedErgoTree` and rejects only on spend, so the gate is
+  conditioned on the sizeless case). The check is enforced at the box-script
+  readers (alongside the rule-1012 size-bit check) and mirrored on the nested
+  box-constant / register / context-extension carriers, so a malformed output box
+  is rejected at the creating transaction's parse, matching the reference.
+- **Consensus: faithful `UnparsedErgoTree` — preserve bytes + eval-error
+  (#118).** A soft-fork-wrapped `ErgoTree` (Scala's `Left(UnparsedErgoTree(bytes,
+  error))`) was both reduced to `true` on spend and re-serialized from a
+  synthetic `Const(SBoolean, true)` placeholder body. Scala's
+  `propositionFromErgoTree` returns `TrueSigmaProp` only when `isSoftFork(error)`
+  holds — and `isSoftFork` defaults false (true only for a rule the active block
+  extensions replaced via voting), which the node models nowhere — so reducing an
+  unparsed tree to `true` was a spend-path accept-invalid, and the placeholder
+  body diverged byte-for-byte from the wrapped `propositionBytes`. The wrapped
+  body is now an `Expr::Unparsed(Vec<u8>)` holding the verbatim original tree
+  bytes: `eval_expr` hard-errors with `EvalError::UnparsedErgoTree`,
+  `write_ergo_tree` re-emits them byte-identically, and group elements collected
+  before the wrap are still forwarded for the deserialize-time curve-check.
+  `CheckDeserializedScriptIsSigmaProp` now also resolves a `ConstPlaceholder` root
+  against the segregated constants table, so a placeholder pointing at a
+  non-`SigmaProp` constant wraps as unspendable like an inline one.
+- **Consensus parity: curve-check only pre-method `GroupElement`s in pre-v3
+  v6-method trees (#119).** A size-delimited pre-v3 (`has_size && version < 3`)
+  `ErgoTree` carrying a v6/EIP-50 method is wrapped by Scala as
+  `UnparsedErgoTree`: `MethodCallSerializer.parse` fails to resolve the method
+  against `_v5MethodsMap` and throws *before* decoding anything later in the
+  body, so a group element positioned after the method is never curve-checked and
+  the box is accepted. The node parses version-independently and had curve-checked
+  *every* collected group element, rejecting a box Scala accepts — a reject-valid
+  / liveness stall a Scala miner could trigger. The parse now records a sideband
+  checkpoint at the exact group-element count where Scala's resolution throws
+  (after the method's receiver and value args, before its type args); the
+  version-aware layer wraps such trees as `Unparsed` and forwards only group
+  elements up to that checkpoint, so an off-curve point inside the method's own
+  receiver/args (or earlier, or segregated) still rejects while one after the
+  method is dropped and accepted. For `version >= 3` the method is valid and
+  parsing is unchanged. Oracle-validated against sigma-state 6.0.2
+  `deserializeErgoTree` across group-element positions on versions 0 and 3.
+- **Consensus: reject `ErgoTree` versions above the activated script version
+  (#120).** Scala's `deserializeErgoTree` runs `VersionContext.withVersions`,
+  whose `require(treeVersion <= activatedVersion)` throws a `SerializerException`
+  — not a `ValidationException` — so a future-version tree is hard-rejected at
+  deserialize even with the size bit set. The node instead wrapped a
+  `version > MAX_SUPPORTED_TREE_VERSION` tree as `UnparsedErgoTree` and accepted
+  the box: accept-invalid. The consensus box-script readers now hard-reject it via
+  a new `check_tree_version_supported`, with the nested `SBox`-constant path using
+  `HardReject` so an inner future-version tree escapes the enclosing soft-fork
+  wrap exactly as Scala's `SerializerException` does; `read_ergo_tree` stays
+  lenient for the conformance hook and template-hash path. The
+  `tree_version_oracle_parity` test confirms box-parse accept/reject matches the
+  sigma-state 6.0.2 oracle for versions 0, 3 (accept) and 4, 5, 7 (reject).
+- **Consensus: match Scala `getUInt().toInt` vs `getUIntExact` for ErgoTree
+  count/id fields (#122).** The node read every VLQ count/id field with
+  `get_u32_exact` (rejects past `i32::MAX`), but Scala uses two readers and the
+  node diverged on both. Non-exact (`getUInt().toInt`) sites were reject-valid: an
+  overflowed segregated constants count, `ValUse` id, or `FuncValue` arg id is
+  accepted by Scala (count wraps to 0; ids fail only at eval) but the node raised
+  `ValueTooLarge` and soft-fork-wrapped, rejecting on spend a box Scala spends
+  (reachable across two blocks). Exact (`getUIntExact`) sites were accept-invalid:
+  an overflowed `ConstantPlaceholder` index was wrapped/accepted where Scala
+  throws and hard-rejects. Non-exact sites now route through `get_uint_to_i32`,
+  exact sites keep `get_u32_exact` with hardened `ValueTooLarge` rejection, and
+  `SigmaAnd` / `SigmaOr` child counts are read/written as u32 (not u16) to match.
+  Oracle-checked against sigma-state 6.0.2: `1807808080800808d3` parses,
+  `18070073ffffffff0f` throws.
+- **Consensus: structure-delimited `has_size` ErgoTree parse (#123).** The node
+  parsed a size-delimited ErgoTree by reading the declared size with
+  `get_u32_exact` and consuming exactly that many bytes; Scala's
+  `deserializeErgoTree` ignores the declared size for the body, bounding it
+  instead by a `MaxPropositionSize` (4096) position limit and leaving the reader
+  at the actual structural body end (the declared size only sizes the
+  `UnparsedErgoTree` on the wrap path). This diverged for any box whose declared
+  size ≠ the true body length — adversarial-only, since honest serializers write
+  `size == body`. Both directions: a size past `i32::MAX` or exceeding available
+  bytes made the node reject a body Scala parses (reject-valid), while a size
+  larger or smaller than the body made the node consume trailing box fields as
+  padding (mis-reading `creationHeight`) or truncate the body, parsing a structure
+  Scala does not (accept-invalid). Body parsing now runs over all remaining bytes
+  under a `position_limit` mirroring Scala's pre-read `position > positionLimit`
+  check, advancing by the true consumed length and only repositioning to the
+  `numBytes` boundary on the soft-fork wrap; oracle-validated against sigma-state
+  6.0.2 including negative-size wrap byte counts.
+- **Consensus parity: structure-delimit the nested `SBox`-constant inner tree
+  skip (#124).** Following #123, the nested `SBox`-constant path still skipped a
+  nested box's size-delimited inner tree by its *declared* size (`skip_ergo_tree`
+  did `get_bytes(size)`), but Scala deserializes a nested box's proposition inline
+  via `ErgoTreeSerializer.deserializeErgoTree` (`ErgoBoxCandidate.parseBody`) —
+  structure-delimited, leaving the reader at the actual body end where
+  `creationHeight` is read next. For any nested box whose declared tree size ≠ its
+  body length (adversarial-only; honest trees match), the node consumed the wrong
+  byte count and desynced the box and the enclosing tree's parse — a reject-valid
+  / accept-invalid divergence depending on whether the declared size over- or
+  under-runs the real body. The skip now rewinds and delegates to
+  `read_ergo_tree_tracking_wrap`, advancing by the true body length (or Scala's
+  `numBytes` soft-fork boundary), forwarding inner group elements for
+  curve-checking, and re-raising `DepthLimitExceeded` / `HardReject`.
+- **Consensus: per-version `ErgoTree` method-resolution gates (#125).** The node
+  only knew the v6/EIP-50-only method ids (`is_v3_only_method`), so genuinely
+  unknown/future `(typeId, methodId)` pairs parsed as generic method nodes and
+  slipped past both gates, whereas Scala's `deserializeErgoTree` resolves every
+  `MethodCall` / `PropertyCall` against the tree-header version's registry (v5 for
+  header 0/1/2, v6 for 3+) and throws on any absent id. Two divergences:
+  reject-valid for a size-flagged tree (Scala wraps it as `UnparsedErgoTree` at
+  the throw and never curve-checks a trailing off-curve group element; the node
+  curve-checked it and rejected the block — now also covering v3 trees), and
+  accept-invalid for a sizeless v0 tree (Scala hard-rejects the uncaught
+  `ValidationException`; the node accepted it). New `is_v5_method` /
+  `is_v6_method` / `is_known_method` predicates are extracted from
+  `SMethod.fromIds` (sigma-state 6.0.2) and pinned against a checked-in oracle
+  over all 65,536 pairs; the wrap is now decided before the parse-result match so
+  a hard parse error in unreachable trailing bytes cannot override it. The
+  evaluator's v6-only spend-path gate is unchanged.
 
 ## [0.4.2] - 2026-06-19
 
