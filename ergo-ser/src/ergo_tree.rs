@@ -249,25 +249,48 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // type inside a size-delimited wrapper — e.g. block 1,702,686).
         let mut inner = VlqReader::new(bounded_data);
         let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
-        // Forward the group elements the inner parse collected (constants + body
-        // up to any failure point) onto the OUTER reader — EVEN when the body is
-        // about to be soft-fork-wrapped below. Scala curve-checks these while
-        // deserializing, before producing its UnparsedErgoTree, so the obligation
-        // must survive the wrap (this is the case a post-parse AST walk loses).
-        //
-        // KNOWN DIVERGENCE B (reject-valid, deferred — see
-        // `known_divergence_offcurve_ge_after_v6_method_is_collected`): because
-        // this version-independent parse runs the WHOLE body, it forwards GEs
-        // that sit AFTER a v6-only method in a pre-v3 tree. Scala's parse throws
-        // at that method and never reaches them, so it wraps the tree and never
-        // curve-checks the trailing GE. The sound fix is parser-side
-        // checkpointing of the sideband length at the would-throw point; it
-        // needs Scala oracle vectors and is tracked separately.
-        for ge in inner.take_group_elements() {
-            r.record_group_element(ge);
+        // A size-delimited pre-v3 (version < 3) tree carrying a v6/EIP-50 method
+        // is wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
+        // throws a method-resolution `ValidationException` (the method is absent
+        // from `_v5MethodsMap`), which `deserializeErgoTree` catches under
+        // has_size. The parser recorded the group-element sideband length at the
+        // exact throw point (after the method's receiver + value args). For
+        // version >= 3 the method is valid, so the checkpoint is ignored.
+        let v6_checkpoint = inner.v6_method_checkpoint();
+        let pre_v3_v6 = version < 3 && v6_checkpoint.is_some();
+        let inner_ges = inner.take_group_elements();
+
+        // Forward the group elements the inner parse collected onto the OUTER
+        // reader — EVEN when the body is about to be soft-fork-wrapped below.
+        // Scala curve-checks these while deserializing, before producing its
+        // UnparsedErgoTree, so the obligation must survive the wrap (a post-parse
+        // AST walk would lose them). For the pre-v3-v6 wrap, forward ONLY the
+        // prefix Scala reached before it threw at the v6 method — points after
+        // it are never deserialized, hence never curve-checked.
+        let forward_upto = if pre_v3_v6 {
+            v6_checkpoint.unwrap().min(inner_ges.len())
+        } else {
+            inner_ges.len()
+        };
+        for ge in &inner_ges[..forward_upto] {
+            r.record_group_element(*ge);
         }
         match parsed {
             Ok(tree) => {
+                // Scala wraps the pre-v3 v6-method tree as UnparsedErgoTree, so
+                // box-parse / eval / template-hashing all see the soft-fork
+                // representation (rejected on spend by the evaluator gate).
+                if pre_v3_v6 {
+                    return Ok((
+                        unparsed_soft_fork_tree(
+                            version,
+                            has_size,
+                            constant_segregation,
+                            full_tree_bytes,
+                        ),
+                        true,
+                    ));
+                }
                 // CheckDeserializedScriptIsSigmaProp: a root whose statically
                 // known type is not SigmaProp (an inline non-SigmaProp constant,
                 // or a ConstPlaceholder resolving to a non-SigmaProp constant) is
@@ -1185,104 +1208,115 @@ mod tests {
         );
     }
 
-    /// The SAME body with the SIZE bit set must NOT be rejected here: Scala
-    /// catches the `ValidationException` and stores the tree as
-    /// `UnparsedErgoTree` (rejected later on spend, which the evaluator gate
-    /// handles). Gating it at box-parse would be reject-valid.
+    /// The SAME body with the SIZE bit set is wrapped as `UnparsedErgoTree`
+    /// during `read_ergo_tree` (Scala catches the v6-method `ValidationException`
+    /// under has_size), so the box parses (creation accepted, matching Scala) and
+    /// is rejected later on spend by the evaluator gate. The sizeless-only
+    /// `check_v3_only_methods` box-parse gate must therefore NOT fire here.
     #[test]
     fn check_v3_only_methods_accepts_size_flagged_pre_v3_v6() {
         let tree = parse_tree("180900d1efe6db6a0add04");
         assert_eq!(tree.version, 0);
         assert!(tree.has_size);
+        assert!(
+            matches!(tree.body, crate::opcode::Expr::Unparsed(_)),
+            "size-flagged pre-v3 v6-method tree wraps as Unparsed"
+        );
         assert!(check_v3_only_methods(&tree).is_ok());
     }
 
-    /// KNOWN DIVERGENCE B (reject-valid, adversarial) — pinned, not yet fixed.
+    /// DIVERGENCE B fixed — GE-ordering past a v6 method (oracle-validated).
     ///
-    /// A size-flagged pre-v3 tree whose body places an off-curve GroupElement
-    /// constant AFTER a v6-only method (`SBox.getReg[Int]`, 99/19) in
-    /// serialization order. Scala's `deserializeErgoTree` throws the v6 method's
-    /// `ValidationException` while parsing the body and — because `has_size` —
-    /// wraps the tree as `UnparsedErgoTree`, so the trailing off-curve GE is
-    /// NEVER decoded/curve-checked and the box is ACCEPTED at creation
-    /// (ErgoTreeSerializer.scala:166,196; GroupElementSerializer decodes a point
-    /// only once the reader reaches it).
+    /// A size-flagged pre-v3 tree carrying a v6-only method (`SBox.getReg[Int]`,
+    /// 99/19) is wrapped by Scala as `UnparsedErgoTree`:
+    /// `MethodCallSerializer.parse` throws the method-resolution
+    /// `ValidationException`, caught under has_size. Scala curve-checks only the
+    /// group elements it deserialized BEFORE that throw (the method's receiver +
+    /// args, and anything earlier); points AFTER are never reached.
     ///
-    /// This node parses version-independently (the v6 method id parses fine and
-    /// is gated only at EVAL), so the whole body is read, the off-curve GE is
-    /// recorded on the reader's group-element sideband, and the tree is returned
-    /// PARSED. The downstream tx chokepoint (`validate_group_elements`) then
-    /// curve-rejects that GE → the box is REJECTED at creation. Scala accepts,
-    /// we reject: a reject-valid / liveness stall reachable by a Scala miner.
-    ///
-    /// The SOUND fix is parser-side checkpointing — record the sideband length
-    /// at the exact point Scala would throw (after a v6 method's receiver+args,
-    /// before its type args) and, only at this version-aware layer, wrap as
-    /// `Unparsed` and forward just that GE prefix. A naive "drop every GE after
-    /// the first v6 method" is UNSOUND: Scala throws AFTER the method's own
-    /// receiver/args, so an off-curve GE inside them must still reject (else
-    /// accept-invalid). Deferred pending Scala oracle vectors. This test pins the
-    /// CURRENT (divergent) behavior: the post-method GE IS collected (hence
-    /// rejected downstream).
+    /// Both vectors below were confirmed against the Scala oracle (sigma-state
+    /// 6.0.2 `deserializeErgoTree`): the GE-after vector is `UNPARSED`
+    /// (accepted), the GE-before vector throws (`SerializerException`, the
+    /// off-curve point decoded before the method). We reproduce the accept/reject
+    /// outcome: wrap as `Unparsed`, and forward exactly the GE prefix Scala
+    /// reached — so an off-curve GE AFTER the method is dropped (accepted), while
+    /// one BEFORE it is still forwarded (rejected downstream).
     #[test]
-    fn known_divergence_offcurve_ge_after_v6_method_is_collected() {
+    fn pre_v3_v6_method_size_flagged_wraps_and_forwards_only_pre_method_ges() {
         let mut off_curve = [0xffu8; 33];
         off_curve[0] = 0x02; // off-curve x (cf. trivial_p2pk_offcurve_ge_constant_rejects)
-
-        let v6_method = Expr::Op(crate::opcode::IrNode {
-            opcode: 0xDC,
-            payload: crate::opcode::Payload::MethodCall {
-                type_id: 99,
-                method_id: 19, // SBox.getReg[T] — v6-only
-                obj: Box::new(Expr::Op(crate::opcode::IrNode {
-                    opcode: 0xA7, // Self
-                    payload: crate::opcode::Payload::Zero,
-                })),
-                args: vec![Expr::Op(crate::opcode::IrNode {
-                    opcode: 0xA3, // a 0-arg leaf in the reg-id slot
-                    payload: crate::opcode::Payload::Zero,
-                })],
-                type_args: vec![SigmaType::SInt],
-            },
-        });
-        let ge_after = Expr::Const {
+        let off_curve_ge = || Expr::Const {
             tpe: SigmaType::SGroupElement,
             val: SigmaValue::GroupElement(GroupElement::from_bytes(off_curve)),
         };
-        let tree = ErgoTree {
+        let v6_method = || {
+            Expr::Op(crate::opcode::IrNode {
+                opcode: 0xDC,
+                payload: crate::opcode::Payload::MethodCall {
+                    type_id: 99,
+                    method_id: 19, // SBox.getReg[T] — v6-only
+                    obj: Box::new(Expr::Op(crate::opcode::IrNode {
+                        opcode: 0xA7, // Self
+                        payload: crate::opcode::Payload::Zero,
+                    })),
+                    args: vec![Expr::Op(crate::opcode::IrNode {
+                        opcode: 0xA3, // a 0-arg leaf in the reg-id slot
+                        payload: crate::opcode::Payload::Zero,
+                    })],
+                    type_args: vec![SigmaType::SInt],
+                },
+            })
+        };
+        let size_flagged_v0 = |body: Body| ErgoTree {
             version: 0,
             has_size: true,
             constant_segregation: false,
             constants: vec![],
-            // Plus(v6_method, ge_after): the GE is parsed AFTER the method.
-            body: Expr::Op(crate::opcode::IrNode {
-                opcode: 0x9A,
-                payload: crate::opcode::Payload::Two(Box::new(v6_method), Box::new(ge_after)),
-            }),
+            body,
+        };
+        let read = |tree: &ErgoTree| {
+            let bytes = roundtrip_bytes(tree);
+            let mut r = VlqReader::new(&bytes);
+            let decoded = read_ergo_tree(&mut r).expect("parses version-independently");
+            let ges = r.take_group_elements();
+            (bytes, decoded, ges)
         };
 
-        // The v6 method is present (gated at eval) and box-parse does NOT reject
-        // a size-flagged tree — Scala wraps, we parse; both accept at creation.
-        assert_eq!(
-            crate::opcode::find_v3_only_method(&tree.body),
-            Some((99, 19))
+        // GE AFTER the v6 method — Scala wraps before reaching it (UNPARSED).
+        // We must wrap and DROP the trailing off-curve GE (accept at creation).
+        let after = size_flagged_v0(Expr::Op(crate::opcode::IrNode {
+            opcode: 0x9A, // Plus(v6_method, off_curve_ge)
+            payload: crate::opcode::Payload::Two(Box::new(v6_method()), Box::new(off_curve_ge())),
+        }));
+        let (after_bytes, after_decoded, after_ges) = read(&after);
+        assert!(
+            matches!(after_decoded.body, Expr::Unparsed(_)),
+            "pre-v3 v6-method tree must wrap as Unparsed (Scala parity)"
         );
-        assert!(check_v3_only_methods(&tree).is_ok());
+        assert!(
+            !after_ges.iter().any(|ge| ge == &off_curve),
+            "off-curve GE AFTER the v6 method must be dropped (Scala never reaches it)"
+        );
+        // Wrap preserves the bytes verbatim.
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &after_decoded).unwrap();
+        assert_eq!(w.result(), after_bytes);
 
-        let bytes = roundtrip_bytes(&tree);
-        let mut r = VlqReader::new(&bytes);
-        let decoded = read_ergo_tree(&mut r).expect("parses version-independently");
+        // GE BEFORE the v6 method — Scala decodes it first and throws. The GE is
+        // within the checkpoint prefix, so it is still forwarded (rejected
+        // downstream by the curve check).
+        let before = size_flagged_v0(Expr::Op(crate::opcode::IrNode {
+            opcode: 0x9A, // Plus(off_curve_ge, v6_method)
+            payload: crate::opcode::Payload::Two(Box::new(off_curve_ge()), Box::new(v6_method())),
+        }));
+        let (_, before_decoded, before_ges) = read(&before);
         assert!(
-            !matches!(decoded.body, Expr::Unparsed(_)),
-            "size-flagged v6 tree is parsed, not wrapped (divergence vs Scala's wrap)"
+            matches!(before_decoded.body, Expr::Unparsed(_)),
+            "pre-v3 v6-method tree wraps regardless of GE position"
         );
-        // THE DIVERGENCE: the off-curve GE sitting AFTER the v6 method was still
-        // collected, so the downstream curve-check rejects it — where Scala
-        // wrapped before reaching it and accepts.
-        let collected = r.take_group_elements();
         assert!(
-            collected.iter().any(|ge| ge == &off_curve),
-            "post-v6-method off-curve GE is collected (would be rejected downstream)"
+            before_ges.iter().any(|ge| ge == &off_curve),
+            "off-curve GE BEFORE the v6 method must still be forwarded (rejected downstream)"
         );
     }
 
