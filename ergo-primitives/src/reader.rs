@@ -23,16 +23,16 @@ pub struct VlqReader<'a> {
     /// [`record_group_element`](Self::record_group_element).
     group_elements: Vec<[u8; 33]>,
     /// Sideband: the [`group_elements`](Self::group_elements) count at the moment
-    /// the parser resolved the FIRST v6/EIP-50-only method (after that method's
-    /// receiver + value args, before its type args — the exact point Scala's
-    /// `MethodCallSerializer.parse` throws a method-resolution `ValidationException`
-    /// for a pre-v3 tree). `None` until the first such method is seen. Recorded
-    /// version-independently; only the version-aware ErgoTree layer acts on it,
-    /// so the wire parser stays version-agnostic. Used to forward exactly the
-    /// group elements Scala curve-checked before it wrapped a size-delimited
-    /// pre-v3 tree carrying a v6 method as `UnparsedErgoTree` — the points AFTER
-    /// that method are never reached by Scala and must not be curve-checked here.
-    v6_method_checkpoint: Option<usize>,
+    /// the parser hit the FIRST method that does not resolve in the tree's method
+    /// registry (after that method's receiver + value args, before its type args —
+    /// the exact point Scala's `MethodCallSerializer.parse` throws a method-resolution
+    /// `ValidationException`). `None` until the first such method is seen. The
+    /// version-vs-registry decision is made by the caller (the parser knows the
+    /// tree-header version); this only records WHERE the throw lands. Used to forward
+    /// exactly the group elements Scala curve-checked before it wrapped a size-delimited
+    /// tree as `UnparsedErgoTree` — the points AFTER that method are never reached by
+    /// Scala and must not be curve-checked here.
+    unresolved_method_checkpoint: Option<usize>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -96,7 +96,7 @@ impl<'a> VlqReader<'a> {
             pos: 0,
             position_limit: None,
             group_elements: Vec::new(),
-            v6_method_checkpoint: None,
+            unresolved_method_checkpoint: None,
         }
     }
 
@@ -117,26 +117,38 @@ impl<'a> VlqReader<'a> {
     }
 
     /// Take the recorded group elements, leaving the sideband empty (and
-    /// clearing the v6-method checkpoint, which indexes into the drained list).
+    /// clearing the unresolved-method checkpoint, which indexes into the drained
+    /// list).
     pub fn take_group_elements(&mut self) -> Vec<[u8; 33]> {
-        self.v6_method_checkpoint = None;
+        self.unresolved_method_checkpoint = None;
         std::mem::take(&mut self.group_elements)
     }
 
-    /// Record that the parser just resolved a v6/EIP-50-only method (after its
-    /// receiver + value args). Captures the current group-element count the
-    /// FIRST time only — Scala throws at the first such method, so later ones
-    /// are irrelevant. See [`v6_method_checkpoint`](Self::v6_method_checkpoint).
-    pub fn mark_v6_method_checkpoint(&mut self) {
-        if self.v6_method_checkpoint.is_none() {
-            self.v6_method_checkpoint = Some(self.group_elements.len());
+    /// Record that the parser just passed a method that does not resolve in the
+    /// tree's registry (after its receiver + value args). Captures the current
+    /// group-element count the FIRST time only — Scala throws at the first such
+    /// method, so later ones are irrelevant. See
+    /// [`unresolved_method_checkpoint`](Self::unresolved_method_checkpoint).
+    pub fn mark_unresolved_method_checkpoint(&mut self) {
+        if self.unresolved_method_checkpoint.is_none() {
+            self.unresolved_method_checkpoint = Some(self.group_elements.len());
         }
     }
 
-    /// The group-element count at the first v6/EIP-50-only method's resolution
-    /// point, or `None` if the body carried no such method.
-    pub fn v6_method_checkpoint(&self) -> Option<usize> {
-        self.v6_method_checkpoint
+    /// The group-element count at the first unresolved method's resolution point,
+    /// or `None` if every method in the body resolved.
+    pub fn unresolved_method_checkpoint(&self) -> Option<usize> {
+        self.unresolved_method_checkpoint
+    }
+
+    /// Restore the unresolved-method checkpoint to a previously saved value. Scopes
+    /// the checkpoint to ONE tree body: a nested box-constant script is its own
+    /// deserialization scope (hard-rejected on its own when sizeless, never folded
+    /// into the enclosing tree's soft-fork wrap), so an unresolved method inside it
+    /// must NOT mark the outer tree's checkpoint. Save before parsing the nested
+    /// body, restore after.
+    pub fn restore_unresolved_method_checkpoint(&mut self, saved: Option<usize>) {
+        self.unresolved_method_checkpoint = saved;
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped

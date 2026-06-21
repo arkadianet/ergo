@@ -619,15 +619,93 @@ pub fn is_v3_only_method(type_id: u8, method_id: u8) -> bool {
     )
 }
 
-/// First v6/EIP-50 method ([`is_v3_only_method`]) reachable in an ErgoTree body,
-/// or `None`. Walks every expression child — including dead `If` branches and a
-/// `DeserializeRegister` inline default — because Scala deserializes the whole
-/// AST eagerly, so a v6 method in any branch of a real pre-v3 tree must be
-/// rejected. Does NOT descend into constants, `GetVar`, `DeserializeContext`, or
-/// bytes loaded later from a register/context var: those parse headerless and
-/// gate v6 methods at evaluation time (`SoftForkNotActivated`), so this walk
-/// over the parsed body matches Scala's eager deserialize exactly.
-pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
+/// Does Scala's `SMethod.fromIds(typeId, methodId)` RESOLVE under a pre-v3
+/// (tree-header version 0/1/2) `VersionContext` — i.e. against the v5 method
+/// registry (`_v5MethodsMap`)? A `false` result is exactly the case where
+/// `MethodCallSerializer.parse` throws a method-resolution `ValidationException`
+/// at a pre-v3 tree: a v6/EIP-50-only id ([`is_v3_only_method`]) OR a genuinely
+/// unknown/future `(typeId, methodId)` pair (no `MethodsContainer`, or an id past
+/// the type's method count).
+///
+/// The table is EXTRACTED from the reference, not transcribed: `oracle/registry.sc`
+/// enumerates `SMethod.fromIds` over the full single-byte range against sigma-state
+/// 6.0.2; `test-vectors/scala/sigma/method_registry_v5_v6.txt` pins the result and
+/// `method_registry_predicates_match_scala_oracle` asserts this predicate against
+/// every one of the 65 536 pairs. Tree versions 0/1/2 share this v5 registry
+/// (verified). See [`is_v6_method`] for v3+.
+pub fn is_v5_method(type_id: u8, method_id: u8) -> bool {
+    matches!(
+        (type_id, method_id),
+        (7, 2..=5)                              // SGroupElement (no expUnsigned pre-v3)
+            | (8, 1..=2)                        // SSigmaProp
+            | (12, 1..=10 | 14..=15 | 19..=21 | 26 | 29) // SCollection (pre-v3 subset)
+            | (36, 2..=4 | 7..=8)               // SOption
+            | (99, 1..=18)                      // SBox (no getReg[T] pre-v3)
+            | (100, 1..=15)                     // SAvlTree (no insertOrUpdate pre-v3)
+            | (101, 1..=11)                     // SContext (no getVarFromInput pre-v3)
+            | (104, 1..=15)                     // SHeader (no checkPow pre-v3)
+            | (105, 1..=7)                      // SPreHeader
+            | (106, 1..=2)                      // SGlobal: groupGenerator, xor
+    )
+}
+
+/// Does Scala's `SMethod.fromIds(typeId, methodId)` RESOLVE under a v3+ (tree-header
+/// version >= 3, EIP-50 / V6) `VersionContext` — i.e. against the v6 method registry
+/// (`_v6MethodsMap`)? A `false` result is the case where a v3+ tree's
+/// `MethodCallSerializer.parse` throws a method-resolution `ValidationException` —
+/// only a genuinely unknown/future pair, since every v6-only method DOES resolve at
+/// v3+.
+///
+/// `is_v5_method ⊆ is_v6_method` (verified: no pair resolves at v5 but not v6), so
+/// `!is_v6_method ⟹ !is_v5_method`. Extracted and oracle-pinned the same way as
+/// [`is_v5_method`]; `is_v6_method ∧ ¬is_v5_method` reproduces [`is_v3_only_method`]
+/// exactly (asserted by the registry test).
+pub fn is_v6_method(type_id: u8, method_id: u8) -> bool {
+    matches!(
+        (type_id, method_id),
+        (2..=5, 1..=13)                         // SByte/SShort/SInt/SLong (numeric, re-homed at v3)
+            | (6, 1..=15)                       // SBigInt
+            | (7, 2..=6)                         // SGroupElement (+ expUnsigned)
+            | (8, 1..=2)                         // SSigmaProp
+            | (9, 1..=19)                        // SUnsignedBigInt (v3-only type)
+            | (12, 1..=10 | 14..=15 | 19..=21 | 26 | 29..=33) // SCollection (+ reverse/startsWith/endsWith/get)
+            | (36, 2..=4 | 7..=8)               // SOption
+            | (99, 1..=19)                       // SBox (+ getReg[T])
+            | (100, 1..=16)                     // SAvlTree (+ insertOrUpdate)
+            | (101, 1..=12)                     // SContext (+ getVarFromInput)
+            | (104, 1..=16)                     // SHeader (+ checkPow)
+            | (105, 1..=7)                      // SPreHeader
+            | (106, 1..=10)                     // SGlobal (+ serialize..none)
+    )
+}
+
+/// Does `(type_id, method_id)` resolve in the method registry Scala selects for a
+/// tree of header version `tree_version`? `deserializeErgoTree` resolves methods
+/// against the TREE-HEADER version (`isV3OrLaterErgoTreeVersion`): versions 0/1/2
+/// use the v5 registry, version 3+ uses v6. A `false` is precisely where
+/// `MethodCallSerializer.parse` / `PropertyCallSerializer.parse` throws a
+/// method-resolution `ValidationException` — caught and wrapped as
+/// `UnparsedErgoTree` under has_size, re-raised as a hard `SerializerException`
+/// without it.
+pub fn is_known_method(type_id: u8, method_id: u8, tree_version: u8) -> bool {
+    if tree_version < 3 {
+        is_v5_method(type_id, method_id)
+    } else {
+        is_v6_method(type_id, method_id)
+    }
+}
+
+/// First `MethodCall`/`PropertyCall` in an ErgoTree body whose `(type_id,
+/// method_id)` satisfies `flag`, or `None`. Walks every expression child —
+/// including dead `If` branches and a `DeserializeRegister` inline default —
+/// because Scala deserializes the whole AST eagerly, so a method-resolution
+/// throw in any branch of a real pre-v3 tree rejects the whole tree. Does NOT
+/// descend into constants, `GetVar`, `DeserializeContext`, or bytes loaded later
+/// from a register/context var: those parse headerless and gate methods at
+/// evaluation time (`SoftForkNotActivated`), so this walk over the parsed body
+/// matches Scala's eager deserialize exactly.
+fn find_method_matching<F: Fn(u8, u8) -> bool + Copy>(expr: &Expr, flag: F) -> Option<(u8, u8)> {
+    let find = |e: &Expr| find_method_matching(e, flag);
     let node = match expr {
         // An unparsed (soft-fork-wrapped) body has no parsed AST to walk.
         Expr::Const { .. } | Expr::Unparsed(_) => return None,
@@ -641,46 +719,39 @@ pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
             args,
             ..
         } => {
-            if is_v3_only_method(*type_id, *method_id) {
+            if flag(*type_id, *method_id) {
                 return Some((*type_id, *method_id));
             }
-            find_v3_only_method(obj).or_else(|| args.iter().find_map(find_v3_only_method))
+            find(obj).or_else(|| args.iter().find_map(find))
         }
-        Payload::One(a) => find_v3_only_method(a),
-        Payload::Two(a, b) => find_v3_only_method(a).or_else(|| find_v3_only_method(b)),
-        Payload::Three(a, b, c) => find_v3_only_method(a)
-            .or_else(|| find_v3_only_method(b))
-            .or_else(|| find_v3_only_method(c)),
-        Payload::Four(a, b, c, d) => find_v3_only_method(a)
-            .or_else(|| find_v3_only_method(b))
-            .or_else(|| find_v3_only_method(c))
-            .or_else(|| find_v3_only_method(d)),
-        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => find_v3_only_method(rhs),
-        Payload::BlockValue { items, result } => items
-            .iter()
-            .find_map(find_v3_only_method)
-            .or_else(|| find_v3_only_method(result)),
-        Payload::FuncValue { body, .. } => find_v3_only_method(body),
+        Payload::One(a) => find(a),
+        Payload::Two(a, b) => find(a).or_else(|| find(b)),
+        Payload::Three(a, b, c) => find(a).or_else(|| find(b)).or_else(|| find(c)),
+        Payload::Four(a, b, c, d) => find(a)
+            .or_else(|| find(b))
+            .or_else(|| find(c))
+            .or_else(|| find(d)),
+        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => find(rhs),
+        Payload::BlockValue { items, result } => {
+            items.iter().find_map(find).or_else(|| find(result))
+        }
+        Payload::FuncValue { body, .. } => find(body),
         Payload::ConcreteCollection { items, .. }
         | Payload::Tuple { items }
-        | Payload::SigmaCollection { items } => items.iter().find_map(find_v3_only_method),
+        | Payload::SigmaCollection { items } => items.iter().find_map(find),
         Payload::SelectField { input, .. }
         | Payload::ExtractRegisterAs { input, .. }
-        | Payload::NumericCast { input, .. } => find_v3_only_method(input),
+        | Payload::NumericCast { input, .. } => find(input),
         Payload::ByIndex {
             input,
             index,
             default,
-        } => find_v3_only_method(input)
-            .or_else(|| find_v3_only_method(index))
-            .or_else(|| default.as_deref().and_then(find_v3_only_method)),
-        Payload::FuncApply { func, args } => {
-            find_v3_only_method(func).or_else(|| args.iter().find_map(find_v3_only_method))
-        }
-        Payload::DeserializeRegister { default, .. } => {
-            default.as_deref().and_then(find_v3_only_method)
-        }
-        // Leaves, and nodes whose v6-method gating is eval-time (headerless
+        } => find(input)
+            .or_else(|| find(index))
+            .or_else(|| default.as_deref().and_then(find)),
+        Payload::FuncApply { func, args } => find(func).or_else(|| args.iter().find_map(find)),
+        Payload::DeserializeRegister { default, .. } => default.as_deref().and_then(find),
+        // Leaves, and nodes whose method gating is eval-time (headerless
         // payloads loaded later), so not walked here.
         Payload::Zero
         | Payload::ValUse { .. }
@@ -691,4 +762,21 @@ pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
         | Payload::DeserializeContext { .. }
         | Payload::NoneValue { .. } => None,
     }
+}
+
+/// First v6/EIP-50-only method ([`is_v3_only_method`]) reachable in an ErgoTree
+/// body, or `None`. Backs the EVALUATOR spend-path gate (`EvalError::PreV3V6Method`),
+/// which rejects a v6 method used in a real pre-v3 tree.
+pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
+    find_method_matching(expr, is_v3_only_method)
+}
+
+/// First method reachable in an ErgoTree body that the v5 (pre-v3) registry cannot
+/// resolve ([`is_v5_method`] is false), or `None`. Backs the box-DESERIALIZE
+/// sizeless gate: a sizeless tree is version 0 (rule 1012 rejects sizeless v != 0),
+/// so it resolves against v5; a v6-only OR genuinely-unknown method there makes
+/// Scala throw a `ValidationException` that — being uncaught without a size bit —
+/// hard-rejects the box. Superset of [`find_v3_only_method`] (adds unknown methods).
+pub fn find_unresolved_v5_method(expr: &Expr) -> Option<(u8, u8)> {
+    find_method_matching(expr, |t, m| !is_v5_method(t, m))
 }

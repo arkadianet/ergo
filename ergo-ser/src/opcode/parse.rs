@@ -4,7 +4,7 @@ use crate::sigma_type::{decode_type, read_type, SigmaType};
 use crate::sigma_value::{read_value_at_depth, SigmaValue};
 
 use super::types::{
-    is_v3_only_method, method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr,
+    is_known_method, method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr,
     IrNode, Payload, LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
 };
 
@@ -248,13 +248,15 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let type_id = r.get_u8()?;
             let method_id = r.get_u8()?;
             let obj = parse_expr(r, next, _tree_version)?;
-            // v6 checkpoint: Scala's `PropertyCallSerializer.parse` resolves the
-            // method (and throws for a pre-v3 tree) right after `obj`. Mark the
-            // group-element sideband here so the ErgoTree layer can forward
-            // exactly the GEs Scala curve-checked before wrapping. Recorded
-            // version-independently; the gate stays at the version-aware layer.
-            if is_v3_only_method(type_id, method_id) {
-                r.mark_v6_method_checkpoint();
+            // Unresolved-method checkpoint: Scala's `PropertyCallSerializer.parse`
+            // resolves the method (and throws a `ValidationException` when it is not
+            // in this tree-version's registry) right after `obj`. Mark the
+            // group-element sideband here so the ErgoTree layer forwards exactly the
+            // GEs Scala curve-checked before wrapping. `is_known_method` keys on the
+            // tree-header version (v5 for pre-v3, v6 for v3+), so this catches both a
+            // v6-only method in a pre-v3 tree and a genuinely unknown id at any version.
+            if !is_known_method(type_id, method_id, _tree_version) {
+                r.mark_unresolved_method_checkpoint();
             }
             // PropertyCall (0xDB) is the zero-args form, but a v6
             // property-call SMethod can still declare
@@ -291,18 +293,16 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             for _ in 0..n_args {
                 args.push(parse_expr(r, next, _tree_version)?);
             }
-            // v6 checkpoint: Scala's `MethodCallSerializer.parse` resolves the
-            // method (and throws for a pre-v3 tree) right after the receiver and
-            // value args, before the explicit type args. Mark the group-element
-            // sideband here (see the PropertyCall arm above).
-            //
-            // NOTE: this covers the v6/EIP-50-only methods. Scala wraps under
-            // has_size for ANY method-resolution `ValidationException`, including
-            // a genuinely unknown/future `(type_id, method_id)` pair — the same
-            // GE-ordering shape. Catching those needs the full per-version method
-            // registry and is a tracked follow-up.
-            if is_v3_only_method(type_id, method_id) {
-                r.mark_v6_method_checkpoint();
+            // Unresolved-method checkpoint: Scala's `MethodCallSerializer.parse`
+            // resolves the method (and throws a `ValidationException` when it is not
+            // in this tree-version's registry) right after the receiver and value
+            // args, before the explicit type args. Mark the group-element sideband
+            // here (see the PropertyCall arm above). `is_known_method` keys on the
+            // tree-header version, so this covers both a v6/EIP-50-only method in a
+            // pre-v3 tree AND a genuinely unknown/future `(type_id, method_id)` pair
+            // at any version — both wrap under has_size with the same GE-ordering shape.
+            if !is_known_method(type_id, method_id, _tree_version) {
+                r.mark_unresolved_method_checkpoint();
             }
             // v6 / EIP-50: methods whose Scala `SMethod` sets
             // `hasExplicitTypeArgs = true` write N type bytes after

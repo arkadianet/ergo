@@ -8,11 +8,11 @@
 //! Each `scala` label was blessed against the Scala oracle (sigma-state 6.0.2,
 //! activated version 3): a v0/v3 size-delimited `sigmaProp(true)` tree PARSES;
 //! v4/v5/v7 THROW. The node's box-script gate (`check_tree_version_supported`,
-//! alongside `check_header_size_bit` / `check_v3_only_methods`) must agree.
+//! alongside `check_header_size_bit` / `check_resolvable_methods`) must agree.
 
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_tree::{
-    check_header_size_bit, check_tree_version_supported, check_v3_only_methods, read_ergo_tree,
+    check_header_size_bit, check_resolvable_methods, check_tree_version_supported, read_ergo_tree,
 };
 use ergo_sigma::evaluator::validate_group_element;
 
@@ -27,7 +27,7 @@ fn box_accepts(hexs: &str) -> bool {
     };
     if check_tree_version_supported(&tree).is_err()
         || check_header_size_bit(&tree).is_err()
-        || check_v3_only_methods(&tree).is_err()
+        || check_resolvable_methods(&tree).is_err()
     {
         return false;
     }

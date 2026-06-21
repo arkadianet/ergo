@@ -142,9 +142,9 @@ impl ErgoBoxCandidate {
         crate::ergo_tree::check_header_size_bit(&parsed_tree).map_err(|e| {
             WriteError::InvalidData(format!("ergo_tree_bytes fail CheckHeaderSizeBit: {e}"))
         })?;
-        crate::ergo_tree::check_v3_only_methods(&parsed_tree).map_err(|e| {
+        crate::ergo_tree::check_resolvable_methods(&parsed_tree).map_err(|e| {
             WriteError::InvalidData(format!(
-                "ergo_tree_bytes carry a v3-only method pre-v3: {e}"
+                "ergo_tree_bytes carry a method the tree's registry cannot resolve: {e}"
             ))
         })?;
         if !tr.is_empty() {
@@ -276,7 +276,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     let ergo_tree = read_ergo_tree(r)?;
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
-    crate::ergo_tree::check_v3_only_methods(&ergo_tree)?;
+    crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
     let creation_height = r.get_u32_exact()?;
@@ -355,7 +355,7 @@ pub fn read_ergo_box_candidate_indexed(
     let ergo_tree = read_ergo_tree(r)?;
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
-    crate::ergo_tree::check_v3_only_methods(&ergo_tree)?;
+    crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
@@ -475,7 +475,7 @@ pub fn parse_ergo_box_bytes(
     let ergo_tree = read_ergo_tree(&mut tree_reader)?;
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
-    crate::ergo_tree::check_v3_only_methods(&ergo_tree)?;
+    crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
 
     let creation_height = r.get_u32_exact()?;
     let token_count = r.get_u8()? as usize;
