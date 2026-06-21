@@ -4073,19 +4073,19 @@ fn opcode_deserialize_context_v6_typearg_payload_truncated_errors() {
     assert!(matches!(err, EvalError::TypeError { .. }), "got {err:?}");
 }
 
-/// End-to-end: an inline `SBox` constant whose proposition is the
-/// Scala-6.1.2-compiled sizeless v0-header (`0x10`) tree carrying the
-/// `SGlobal.none[T]` v6 PropertyCall (oracle vector
-/// `test-vectors/scala/sigma/v6_methodcall_typeargs_v0_header/`).
-/// `skip_ergo_tree` has no size field to skip by, so capturing the
-/// box-byte boundary walks the v6 body through the full parser; the
-/// evaluator then rehydrates the `OpaqueBoxBytes` via `read_ergo_box`.
+/// End-to-end: an inline `SBox` constant whose proposition is a minimal
+/// sizeless v0 `sigmaProp(true)` tree (`0008d3`). `skip_ergo_tree` has no size
+/// field to skip by, so capturing the box-byte boundary walks the body through
+/// the full parser; the evaluator then rehydrates the `OpaqueBoxBytes` via
+/// `read_ergo_box`. (A v6-method proposition in a sizeless pre-v3 tree is now
+/// rejected at parse — see `sbox_constant_sizeless_v6_tree_rejected` in
+/// ergo-ser.)
 #[test]
-fn opcode_extract_amount_sbox_constant_with_sizeless_v6_typearg_tree() {
-    let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+fn opcode_extract_amount_sbox_constant_sizeless_tree() {
+    let tree = hex::decode("0008d3").unwrap();
     let mut w = ergo_primitives::writer::VlqWriter::new();
     w.put_u64(1_000_000); // value
-    w.put_bytes(&tree); // proposition (sizeless v0-header v6 tree)
+    w.put_bytes(&tree); // proposition (sizeless v0 sigmaProp(true))
     w.put_u32(100); // creation height
     w.put_u8(0); // token count
     w.put_u8(0); // register count
@@ -4111,7 +4111,7 @@ fn opcode_extract_amount_sbox_constant_with_sizeless_v6_typearg_tree() {
 fn sbox_constant_preserves_txid_and_index_in_creation_info() {
     let txid = [0xABu8; 32];
     let index: u16 = 22588; // 0x583C; big-endian 2-byte = [0x58, 0x3C]
-    let tree = hex::decode("1000d1efe6db6a0add04").unwrap();
+    let tree = hex::decode("0008d3").unwrap(); // sizeless v0 sigmaProp(true)
     let mut w = ergo_primitives::writer::VlqWriter::new();
     w.put_u64(1_000_000); // value
     w.put_bytes(&tree); // proposition
@@ -11654,10 +11654,14 @@ fn unpack_collection_accepts_native_coll_header() {
 // + DataSerializer cost; CreateTuple(0x86) -> put(opcode)=1 + putUByte(count)=1
 // + Σ item putValue.
 
-/// Scala-6.1.2 sizeless v6 proposition tree (10 bytes); parses via the
-/// `read_ergo_box` full-walk so `read_ergo_box_candidate` finds the boundary.
+/// Minimal valid sizeless v0 proposition tree (3 bytes): header `0x00` (v0, no
+/// segregation, no size) + inline `SSigmaProp` constant (type `0x08`) value
+/// `TrivialProp(true)` (`0xd3`). Carries NO v6 method, so it parses cleanly
+/// through the box-script readers' `check_v3_only_methods` gate. (The previous
+/// fixture `1000d1efe6db6a0add04` carried a v6 `SGlobal.none[Int]` in a pre-v3
+/// tree — now rejected at box deserialize, like Scala.)
 fn ser_box_tree() -> Vec<u8> {
-    hex::decode("1000d1efe6db6a0add04").unwrap()
+    hex::decode("0008d3").unwrap()
 }
 
 /// Assemble standalone box bytes (candidate body + 32-byte txId + VLQ index)
@@ -11722,8 +11726,8 @@ fn ser_box_cost(bytes: Vec<u8>) -> u64 {
 
 #[test]
 fn serialize_put_cost_box_minimal() {
-    // 3(value) + chunk(10)=13(tree) + 0(height) + 1(nTok) + 1(nRegs)
-    // + 35(txId) + 3(index) = 56.
+    // 3(value) + chunk(3)=6(tree) + 0(height) + 1(nTok) + 1(nRegs)
+    // + 35(txId) + 3(index) = 49.
     let b = build_box(
         1_000_000,
         &ser_box_tree(),
@@ -11733,7 +11737,7 @@ fn serialize_put_cost_box_minimal() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(b), 56);
+    assert_eq!(ser_box_cost(b), 49);
 }
 
 #[test]
@@ -11748,7 +11752,7 @@ fn serialize_put_cost_box_with_tokens() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(one), 56 + 38);
+    assert_eq!(ser_box_cost(one), 49 + 38);
     let two = build_box(
         1_000_000,
         &ser_box_tree(),
@@ -11758,7 +11762,7 @@ fn serialize_put_cost_box_with_tokens() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(two), 56 + 76);
+    assert_eq!(ser_box_cost(two), 49 + 76);
 }
 
 #[test]
@@ -11766,7 +11770,7 @@ fn serialize_put_cost_box_with_int_register() {
     // R4 = Int(42) CONSTANT: type_enc(SInt)=1 + DataSerializer(SInt)=3 = 4.
     let reg = reg_const(&SigmaType::SInt, &SigmaValue::Int(42));
     let b = build_box(1_000_000, &ser_box_tree(), 100, &[], &reg, &[0xAB; 32], 7);
-    assert_eq!(ser_box_cost(b), 56 + 4);
+    assert_eq!(ser_box_cost(b), 49 + 4);
 }
 
 #[test]
@@ -11783,7 +11787,7 @@ fn serialize_put_cost_box_with_const_tuple_registers() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(b4), 56 + 9);
+    assert_eq!(ser_box_cost(b4), 49 + 9);
 
     // R4 = 5-tuple of Byte CONSTANT: type_enc(tuple5)=7 + data(5) = 12.
     let tpe5 = SigmaType::STuple(vec![SigmaType::SByte; 5]);
@@ -11797,7 +11801,7 @@ fn serialize_put_cost_box_with_const_tuple_registers() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(b5), 56 + 12);
+    assert_eq!(ser_box_cost(b5), 49 + 12);
 }
 
 #[test]
@@ -11820,7 +11824,7 @@ fn serialize_put_cost_box_with_expr_tuple_register() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(b), 56 + 6);
+    assert_eq!(ser_box_cost(b), 49 + 6);
 }
 
 #[test]
@@ -11839,7 +11843,7 @@ fn serialize_put_cost_nested_box_int_tuple() {
     );
     let tpe = SigmaType::STuple(vec![SigmaType::SBox, SigmaType::SInt]);
     let val = SigmaValue::Tuple(vec![SigmaValue::OpaqueBoxBytes(b), SigmaValue::Int(7)]);
-    assert_eq!(serialize_put_cost(&tpe, &val).unwrap(), 56 + 3);
+    assert_eq!(serialize_put_cost(&tpe, &val).unwrap(), 49 + 3);
 }
 
 #[test]
@@ -11866,7 +11870,7 @@ fn serialize_put_cost_box_with_nested_expr_tuple_register() {
         &[0xAB; 32],
         7,
     );
-    assert_eq!(ser_box_cost(b), 56 + 14);
+    assert_eq!(ser_box_cost(b), 49 + 14);
 }
 
 #[test]
@@ -11897,7 +11901,7 @@ fn serialize_put_cost_box_with_concrete_collection_register() {
     write_expr(&mut w, &cc, false).unwrap();
     let reg = w.result();
     let b = build_box(1_000_000, &ser_box_tree(), 100, &[], &reg, &[0xAB; 32], 7);
-    assert_eq!(ser_box_cost(b), 56 + 13);
+    assert_eq!(ser_box_cost(b), 49 + 13);
 }
 
 #[test]
@@ -11927,12 +11931,12 @@ fn value_to_typed_sigma_inline_box_surfaces_opaque_bytes() {
 #[test]
 fn methodcall_global_serialize_box_value_and_cost() {
     // End-to-end: SGlobal.serialize(box constant) -> Coll[Byte] equal to the
-    // box bytes (verbatim raw_bytes), AND the total JitCost = 80:
+    // box bytes (verbatim raw_bytes), AND the total JitCost = 73:
     //   14 shared MethodCall framing (SGlobal receiver 0xDD + 0xDC dispatch +
     //      the SBox arg const) — the same 14 documented in
     //      methodcall_deserialize_to_cost_matches_v6_0_2
-    //   + StartWriterCost(10) + serialize_put_cost(SBox minimal)=56
-    //   (56 is pinned independently by serialize_put_cost_box_minimal).
+    //   + StartWriterCost(10) + serialize_put_cost(SBox minimal)=49
+    //   (49 is pinned independently by serialize_put_cost_box_minimal).
     let bytes = build_box(
         1_000_000,
         &ser_box_tree(),
@@ -11964,7 +11968,7 @@ fn methodcall_global_serialize_box_value_and_cost() {
     let mut trace = None;
     let v = eval_expr(&ser, &cx, &[], &mut env, &mut depth, &mut acc, &mut trace).unwrap();
     assert_eq!(v, Value::CollBytes(bytes));
-    assert_eq!(acc.total().value(), 80);
+    assert_eq!(acc.total().value(), 73);
 }
 
 // ── Coll.flatMap cost = PerItemCost(60,10,8) over OUTPUT length ──────────────

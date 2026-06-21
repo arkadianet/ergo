@@ -16,6 +16,42 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-21
+
+A consensus-parity release driven by the SANTA/vixen differential conformance
+suite against the Scala reference (sigma-state 6.0.3). It closes a cluster of
+node-vs-Scala divergences in the v6 / EIP-50 evaluator and box-deserialize
+paths. As always for this node: re-verify its verdicts against the Scala
+reference node before relying on it for funds.
+
+### Fixed
+
+- **Consensus: Scala-faithful token-equality cost (#115).** `Coll[(Coll[Byte],
+  Long)]` (`tokens`) equality diverged from `DataValueComparer` on three counts:
+  two spurious `MatchType` units, no first-mismatch short-circuit, and a
+  cross-carrier undercharge (`CollGeneric == Tokens`). Over-charge is a
+  reject-valid risk at the block cost limit; the cross-carrier case was an
+  undercharge (accept-invalid). Token equality (`SELF.tokens == OUTPUT.tokens`)
+  is pervasive in real contracts. Found via 17 captured mainnet/testnet spend
+  vectors that graded a +1/+2 cost over the blessed value.
+- **Consensus: reject a v6 / EIP-50 method in a pre-v3 ErgoTree, spend path
+  (#116).** A v6-only method id (e.g. `SGlobal.none` / `serialize`,
+  `SBox.getReg[T]`) used in a real pre-v3 (tree-header version < 3) tree must be
+  rejected: Scala resolves the method table against the tree-header version and
+  throws a `ValidationException` eagerly over the whole AST — so even a v6 method
+  in a *dead* `If` branch rejects at deserialize. Our lazy evaluator returned
+  `true` for such a dead branch — an accept-invalid / fork hazard. Enforced as a
+  depth-0 whole-tree gate at reduction (the spend path).
+- **Consensus: reject a pre-v3 v6 method at box deserialize, output-box /
+  box-constant parity.** Completes the spend-path gate above for boxes that are
+  *stored but never spent*: Scala rejects a SIZELESS pre-v3 tree carrying a v6
+  method at box deserialize (with the size bit set it instead wraps the tree as
+  `UnparsedErgoTree` and rejects only on spend, so the gate is conditioned on the
+  sizeless case). The check is enforced at the box-script readers (alongside the
+  rule-1012 size-bit check) and mirrored on the nested box-constant / register /
+  context-extension carriers, so a malformed output box is rejected at the
+  creating transaction's parse, matching the reference.
+
 ## [0.4.2] - 2026-06-19
 
 A consensus-hardening release. A new differential + invariant fuzzer for the

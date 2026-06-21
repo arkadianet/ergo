@@ -109,6 +109,39 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
     Ok(())
 }
 
+/// Reject a v6/EIP-50 method ([`crate::opcode::is_v3_only_method`]) carried in a
+/// real pre-v3 (tree-header version < 3) ErgoTree at DESERIALIZE — the box-parse
+/// twin of the evaluator's spend-path gate (`check_v3_only_methods` /
+/// `EvalError::PreV3V6Method`). Scala resolves the method table against the
+/// tree-header version (`MethodsContainer._methodsMap`, methods.scala): a
+/// v6-only id in a v0/v1/v2 tree is absent from `_v5MethodsMap`, so
+/// `MethodCallSerializer.parse` throws a `ValidationException`.
+///
+/// **Gated on the SIZELESS case only.** When the size bit is set,
+/// `ErgoTreeSerializer.deserializeErgoTree` CATCHES that `ValidationException`
+/// and wraps the tree as `UnparsedErgoTree` (stored verbatim, rejected later on
+/// spend — which the evaluator gate already does); only WITHOUT the size bit is
+/// it re-raised as a hard `SerializerException` that rejects the box at parse
+/// (`ErgoTreeSerializer.scala:196-209`). Gating a size-flagged tree here would
+/// be reject-valid. Since rule 1012 already rejects a sizeless `version != 0`
+/// tree, the reachable case is a sizeless v0 tree carrying a v6 method.
+///
+/// Enforced at the box-script readers (alongside [`check_header_size_bit`]):
+/// `read_ergo_tree` stays lenient, so an OUTPUT box storing such a tree —
+/// never spent, so the evaluator gate never fires — is still rejected at the
+/// creating transaction's parse, matching Scala's eager box-deserialize reject.
+pub fn check_v3_only_methods(tree: &ErgoTree) -> Result<(), ReadError> {
+    if !tree.has_size && tree.version < 3 {
+        if let Some((type_id, method_id)) = crate::opcode::find_v3_only_method(&tree.body) {
+            return Err(ReadError::InvalidData(format!(
+                "method ({type_id}, {method_id}) requires ErgoTree version >= 3, got tree version {} (CheckAndGetMethod at deserialize)",
+                tree.version
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     let (tree, _was_wrapped) = read_ergo_tree_tracking_wrap(r)?;
     Ok(tree)
@@ -206,7 +239,13 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // / ValidationException). So it must HARD-REJECT even under has_size,
             // not become an UnparsedErgoTree — otherwise a size-delimited tree
             // nested past MaxTreeDepth would be accept-invalid vs Scala.
-            Err(e @ ReadError::DepthLimitExceeded { .. }) => Err(e),
+            //
+            // `HardReject` carries the same semantics for a NESTED box script
+            // (an `SBox` constant whose sizeless pre-v3 inner tree carries a v6
+            // method, or violates rule 1012): Scala re-raises those as
+            // `SerializerException` too, so they must escape this size-delimited
+            // wrap rather than be swallowed into an `UnparsedErgoTree`.
+            Err(e @ (ReadError::DepthLimitExceeded { .. } | ReadError::HardReject(_))) => Err(e),
             Err(_) => {
                 // Other parse failures (unknown opcode, invalid type tag) map to
                 // Scala's ValidationException, which under has_size is wrapped
@@ -983,5 +1022,124 @@ mod tests {
                 tv.source
             );
         }
+    }
+
+    // ----- check_v3_only_methods (box-deserialize v6-in-pre-v3 gate) -----
+
+    fn parse_tree(hex_str: &str) -> ErgoTree {
+        let bytes = hex::decode(hex_str).unwrap();
+        read_ergo_tree(&mut VlqReader::new(&bytes)).expect("tree parses")
+    }
+
+    /// A SIZELESS pre-v3 tree carrying a v6 method (`SGlobal.none[Int]`, 106/10)
+    /// is rejected — Scala re-raises the method-resolution `ValidationException`
+    /// because there is no size bit to soft-fork-wrap it.
+    #[test]
+    fn check_v3_only_methods_rejects_sizeless_pre_v3_v6() {
+        let tree = parse_tree("1000d1efe6db6a0add04");
+        assert_eq!(tree.version, 0);
+        assert!(!tree.has_size);
+        let err = check_v3_only_methods(&tree).expect_err("sizeless v0 + v6 method must reject");
+        assert!(
+            matches!(&err, ReadError::InvalidData(m) if m.contains("requires ErgoTree version >= 3")),
+            "got {err:?}",
+        );
+    }
+
+    /// The SAME body with the SIZE bit set must NOT be rejected here: Scala
+    /// catches the `ValidationException` and stores the tree as
+    /// `UnparsedErgoTree` (rejected later on spend, which the evaluator gate
+    /// handles). Gating it at box-parse would be reject-valid.
+    #[test]
+    fn check_v3_only_methods_accepts_size_flagged_pre_v3_v6() {
+        let tree = parse_tree("180900d1efe6db6a0add04");
+        assert_eq!(tree.version, 0);
+        assert!(tree.has_size);
+        assert!(check_v3_only_methods(&tree).is_ok());
+    }
+
+    /// A valid sizeless tree with no v6 method passes.
+    #[test]
+    fn check_v3_only_methods_accepts_valid_sizeless_tree() {
+        let tree = parse_tree("0008d3");
+        assert!(check_v3_only_methods(&tree).is_ok());
+    }
+
+    /// Regression: an `SBox` constant whose sizeless pre-v3 inner tree carries a
+    /// v6 method, embedded in the constants table of a SIZE-DELIMITED outer
+    /// tree, must REJECT. The nested `HardReject` must NOT be swallowed into an
+    /// `UnparsedErgoTree` by the outer tree's soft-fork wrap (Scala re-raises the
+    /// nested `SerializerException`, which the enclosing tree's deserialize does
+    /// not catch).
+    #[test]
+    fn nested_box_constant_v6_in_size_delimited_outer_hard_rejects() {
+        // Inner box: sizeless v0 tree carrying SGlobal.none[Int].
+        let mut bw = ergo_primitives::writer::VlqWriter::new();
+        bw.put_u64(1_000_000);
+        bw.put_bytes(&hex::decode("1000d1efe6db6a0add04").unwrap());
+        bw.put_u32(100);
+        bw.put_u8(0);
+        bw.put_u8(0);
+        bw.put_bytes(&[0u8; 32]);
+        bw.put_u16(0);
+        let inner_box = bw.result();
+
+        let outer = ErgoTree {
+            version: 0,
+            has_size: true, // SIZE-DELIMITED outer — the soft-fork-wrap path
+            constant_segregation: true,
+            constants: vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(inner_box))],
+            body: placeholder_body(),
+        };
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        write_ergo_tree(&mut w, &outer).unwrap();
+        let outer_bytes = w.result();
+
+        let err = read_ergo_tree(&mut VlqReader::new(&outer_bytes)).expect_err(
+            "a nested v6 box constant under a size-delimited outer tree must hard-reject",
+        );
+        assert!(matches!(err, ReadError::HardReject(_)), "got {err:?}");
+    }
+
+    /// Contrast with the v6 case: a nested `SBox` constant whose inner tree
+    /// violates rule 1012 (`version != 0`, sizeless) is a Scala
+    /// `ValidationException` (thrown in `deserializeHeaderAndSize`, before the
+    /// inner catch), so a SIZE-DELIMITED outer tree WRAPS it as
+    /// `UnparsedErgoTree` rather than rejecting — the rule-1012 nested rejection
+    /// must therefore be SOFT (`InvalidData`), not `HardReject`. Rejecting here
+    /// would be reject-valid.
+    #[test]
+    fn nested_box_constant_rule1012_in_size_delimited_outer_wraps() {
+        // Inner box: sizeless version-1 tree (header 0x01) — rule-1012 violation.
+        let mut bw = ergo_primitives::writer::VlqWriter::new();
+        bw.put_u64(1_000_000);
+        bw.put_bytes(&hex::decode("01d3").unwrap());
+        bw.put_u32(100);
+        bw.put_u8(0);
+        bw.put_u8(0);
+        bw.put_bytes(&[0u8; 32]);
+        bw.put_u16(0);
+        let inner_box = bw.result();
+
+        let outer = ErgoTree {
+            version: 0,
+            has_size: true, // SIZE-DELIMITED outer — must WRAP a nested ValidationException
+            constant_segregation: true,
+            constants: vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(inner_box))],
+            body: placeholder_body(),
+        };
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        write_ergo_tree(&mut w, &outer).unwrap();
+        let outer_bytes = w.result();
+
+        let (tree, was_wrapped) = read_ergo_tree_tracking_wrap(&mut VlqReader::new(&outer_bytes))
+            .expect(
+            "a nested rule-1012 box constant under a size-delimited outer must WRAP, not reject",
+        );
+        assert!(
+            was_wrapped,
+            "the outer tree must be wrapped as UnparsedErgoTree, not parsed",
+        );
+        let _ = tree;
     }
 }
