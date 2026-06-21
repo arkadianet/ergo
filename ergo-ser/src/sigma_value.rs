@@ -583,7 +583,13 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
         // an off-curve point inside a nested SBox's size-delimited script would be
         // lost (the JVM curve-checks it while deserializing the nested box).
         let mut sub = VlqReader::new(&tree_bytes);
-        crate::ergo_tree::read_ergo_tree_tracking_wrap(&mut sub)?;
+        let (sub_tree, _) = crate::ergo_tree::read_ergo_tree_tracking_wrap(&mut sub)?;
+        // A future-version inner tree is HARD-rejected (Scala's
+        // VersionContext.withVersions throws a SerializerException at deserialize,
+        // which the enclosing tree does not catch — so it must escape the outer
+        // soft-fork wrap, like the v6-method / depth-limit cases). `read_ergo_tree`
+        // wrapped it leniently above; reject it here.
+        crate::ergo_tree::check_tree_version_supported(&sub_tree)?;
         for ge in sub.take_group_elements() {
             r.record_group_element(ge);
         }
