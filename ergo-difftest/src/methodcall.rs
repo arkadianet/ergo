@@ -310,8 +310,9 @@ pub struct Probe {
     pub name: String,
     /// The oracle's `mc_root` answer (`SIGMA` / `WRAP` / `WRAPOTHER` / `THROW ...`).
     pub oracle: String,
-    /// The node's own classification of the same tree (`SIGMA` / `WRAP` / `THROW`),
-    /// via `read_ergo_tree` — the rule-1001 typer under test.
+    /// The node's own classification of the same tree
+    /// (`SIGMA` / `WRAP` / `LENIENT` / `THROW`), via `read_ergo_tree` — the rule-1001
+    /// typer under test (`LENIENT` = root type not statically determinable).
     pub rust: String,
     /// `true` iff the oracle matched the pass's expectation AND the node agrees with
     /// the oracle (the real differential check).
