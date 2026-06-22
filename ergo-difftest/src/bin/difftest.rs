@@ -197,21 +197,23 @@ fn run_methodcall(script: Option<String>) -> ExitCode {
     // method, which must not exist).
     let mut sigma = 0u32;
     let mut wrap = 0u32;
-    let mut throw = 0u32;
+    // Everything else: THROW *or* WRAPOTHER (a non-rule-1001 wrap), both of which
+    // are construction failures — hence `other`, not `throw`.
+    let mut other = 0u32;
     for p in &report.self_pass {
         match p.verdict.as_str() {
             "SIGMA" => sigma += 1,
             "WRAP" => wrap += 1,
-            _ => throw += 1,
+            _ => other += 1,
         }
     }
     println!(
-        "SELF pass ({} methods, wrong-type receiver): WRAP={wrap} THROW={throw} SIGMA={sigma} (all must WRAP)",
+        "SELF pass ({} methods, wrong-type receiver): WRAP={wrap} OTHER={other} SIGMA={sigma} (all must WRAP)",
         report.self_pass.len()
     );
     for p in report.self_pass.iter().filter(|p| !p.ok) {
-        // SIGMA = unconditionally SigmaProp (impossible per the dump); THROW = a
-        // mis-constructed probe that never reached the rule-1001 classification.
+        // SIGMA = unconditionally SigmaProp (impossible per the dump); THROW /
+        // WRAPOTHER = a probe that never reached the rule-1001 classification.
         println!(
             "  [FAIL] ({}, {}) {} -> {} (need WRAP)",
             p.type_id, p.method_id, p.name, p.verdict
