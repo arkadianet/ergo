@@ -23,6 +23,7 @@
 
 import scala.io.StdIn
 import scorex.util.encode.Base16
+import sigma.VersionContext
 import sigma.serialization.{ConstantSerializer, ErgoTreeSerializer, SigmaSerializer, TypeSerializer}
 import sigma.ast.DeserializationSigmaBuilder
 import org.ergoplatform.ErgoBoxCandidate
@@ -48,6 +49,14 @@ object ErgoSerdeOracle {
       case scala.util.Failure(_) => "ERR not-hex"
       case scala.util.Success(bytes) =>
         try
+          // Match the consensus node's runtime: activatedVersion = 3 (mainnet
+          // 6.0.2, = MAX_SUPPORTED_TREE_VERSION). WITHOUT this the oracle runs at
+          // the default activatedVersion = 1, whose `withVersions` require
+          // short-circuits, so a tree whose header version exceeds the activated
+          // version is NEVER rejected — a false ACCEPT vs the node, which rejects
+          // it (#120). deserializeErgoTree overrides the tree-version arg from the
+          // header; only the activated version (first arg) matters here.
+          VersionContext.withVersions(3.toByte, 0.toByte) {
           surface match {
             case "ergo_tree" =>
               val t = tree.deserializeErgoTree(bytes)
@@ -75,6 +84,7 @@ object ErgoSerdeOracle {
               val h = HeaderSerializer.parseBytes(bytes)
               acc(hex(HeaderSerializer.toBytes(h)))
             case other => "ERR unsupported-surface:" + other
+          }
           }
         catch {
           case e: Throwable => "REJECT " + e.getClass.getSimpleName
