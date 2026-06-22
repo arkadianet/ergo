@@ -145,8 +145,10 @@ mod tests {
     use ergo_state::store::StateStore;
 
     fn dummy_pk_tree() -> (Vec<u8>, ergo_ser::ergo_tree::ErgoTree) {
-        // ErgoTree of minimal `SBoolean true`: header 0x00 + body 0x01 0x01.
-        let bytes = vec![0x00u8, 0x01, 0x01];
+        // Minimal SigmaProp-rooted script: header 0x00 + body `08 d3` =
+        // Const(SSigmaProp, TrivialProp::true). A bare Boolean root is rejected at
+        // box parse by CheckDeserializedScriptIsSigmaProp (rule 1001).
+        let bytes = vec![0x00u8, 0x08, 0xd3];
         let mut r = VlqReader::new(&bytes);
         let tree = read_ergo_tree(&mut r).unwrap();
         (bytes, tree)

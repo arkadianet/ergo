@@ -16,6 +16,36 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Consensus: reject a box script whose deserialized root is not `SigmaProp`
+  (`CheckDeserializedScriptIsSigmaProp`, validation rule 1001).** The lenient
+  `read_ergo_tree` codec accepted a sizeless ErgoTree whose root statically types
+  to a non-`SigmaProp` value — a bare `Const(SBoolean/SLong/…)` or a `TrueLeaf` /
+  `FalseLeaf` boolean leaf — and coerced it to a trivial proposition, where the
+  Scala reference hard-rejects it at `deserializeErgoTree` (a `ValidationException`
+  with no size bit to wrap into an `UnparsedErgoTree`, re-raised as a
+  `SerializerException`). A block carrying such an output box would have been
+  accepted by this node and rejected by every Scala node (accept-invalid / fork).
+  Adds a `check_sigma_prop_root` gate alongside the existing box-script gates
+  (`check_header_size_bit`, `check_tree_version_supported`,
+  `check_resolvable_methods`) at every consensus box reader; the `has_size` wrap
+  path already handled the same case. Found by the new `reduce` eval/cost
+  differential (below) and pinned against the 6.0.2 oracle.
+
+### Added
+
+- **Test: a `reduce` eval/cost differential surface in `ergo-difftest`.** Extends
+  the JVM-oracle fuzzer to deserialize an ErgoTree, reduce its root to the
+  on-chain sigma proposition + raw JIT cost under a minimal dummy context, and
+  diff the `(prop, cost)` pair byte-for-byte against the Scala reference's
+  reduction — surfacing accept/reject and cost divergences that the
+  deserialize-only surfaces cannot see (the reject-arm of conformance). The node
+  half mirrors the consensus box-script path (full deserialize gates + the
+  tx-validation GroupElement curve-check, scoped to this surface). Also: the
+  `--surface` filter now works in `--oracle` mode, and the deserialize gate logic
+  is shared between the `ergo_tree` and `reduce` surfaces.
+
 ## [0.4.3] - 2026-06-21
 
 A consensus-parity release driven by the SANTA/vixen differential conformance

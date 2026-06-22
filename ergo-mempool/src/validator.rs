@@ -366,7 +366,9 @@ mod tests {
         use ergo_ser::register::AdditionalRegisters;
         use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
 
-        let tree_bytes = vec![0x00u8, 0x01, 0x01];
+        // `00 08 d3` = Const(SSigmaProp, TrivialProp::true): a SigmaProp root
+        // (a bare Boolean root is rejected by CheckDeserializedScriptIsSigmaProp).
+        let tree_bytes = vec![0x00u8, 0x08, 0xd3];
         let mut r = VlqReader::new(&tree_bytes);
         let tree = read_ergo_tree(&mut r).unwrap();
         let tx = Transaction {

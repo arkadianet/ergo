@@ -28,8 +28,9 @@ fn ge_zero() -> GroupElement {
 }
 
 fn minimal_ergo_tree() -> ErgoTree {
-    // v0 header, body = 0x01 0x01 (SBoolean true).
-    let bytes = vec![0x00u8, 0x01, 0x01];
+    // v0 header, body = `08 d3` (Const(SSigmaProp, TrivialProp::true)). A bare
+    // Boolean root is rejected at box parse by CheckDeserializedScriptIsSigmaProp.
+    let bytes = vec![0x00u8, 0x08, 0xd3];
     let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
     read_ergo_tree(&mut r).unwrap()
 }

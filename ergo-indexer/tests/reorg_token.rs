@@ -36,7 +36,7 @@ use ergo_ser::input::{ContextExtension, Input, SpendingProof};
 use ergo_ser::opcode::{Body, Expr};
 use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::sigma_type::SigmaType;
-use ergo_ser::sigma_value::SigmaValue;
+use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 use ergo_ser::token::Token;
 use ergo_ser::transaction::{transaction_id, Transaction};
 use tempfile::TempDir;
@@ -50,14 +50,17 @@ use ergo_indexer_types::{IndexedErgoBox, IndexedErgoTransaction};
 // ---------- shared fixtures ---------------------------------------------
 
 fn parseable_tree_true() -> ErgoTree {
+    // A SigmaProp-rooted "always true" script (`08 d3` = Const(SSigmaProp,
+    // TrivialProp::true)). A bare Boolean root is rejected at box parse by
+    // `CheckDeserializedScriptIsSigmaProp` (rule 1001), just as Scala rejects it.
     ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
         constants: vec![],
         body: Expr::Const {
-            tpe: SigmaType::SBoolean,
-            val: SigmaValue::Boolean(true),
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
         } as Body,
     }
 }

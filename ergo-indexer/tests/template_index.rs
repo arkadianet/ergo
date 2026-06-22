@@ -21,7 +21,7 @@ use ergo_ser::input::{ContextExtension, Input, SpendingProof};
 use ergo_ser::opcode::{Body, Expr};
 use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::sigma_type::SigmaType;
-use ergo_ser::sigma_value::SigmaValue;
+use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 use ergo_ser::transaction::{transaction_id, Transaction};
 use tempfile::TempDir;
 
@@ -29,6 +29,9 @@ use ergo_indexer::{apply_block, rollback_one_block, IndexerBlock, IndexerMeta, I
 
 /// Parseable v0 tree without `has_size` — `template_hash_from_bytes`
 /// returns `Ok(...)` for these (no soft-fork wrap path triggers).
+// SigmaProp-rooted "always true"/"always false" scripts (`08 d3` / `08 d2` =
+// Const(SSigmaProp, TrivialProp)). A bare Boolean root is rejected at box parse
+// by `CheckDeserializedScriptIsSigmaProp` (rule 1001), as Scala rejects it.
 fn parseable_tree_true() -> ErgoTree {
     ErgoTree {
         version: 0,
@@ -36,8 +39,8 @@ fn parseable_tree_true() -> ErgoTree {
         constant_segregation: false,
         constants: vec![],
         body: Expr::Const {
-            tpe: SigmaType::SBoolean,
-            val: SigmaValue::Boolean(true),
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
         } as Body,
     }
 }
@@ -49,8 +52,8 @@ fn parseable_tree_false() -> ErgoTree {
         constant_segregation: false,
         constants: vec![],
         body: Expr::Const {
-            tpe: SigmaType::SBoolean,
-            val: SigmaValue::Boolean(false),
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(false)),
         } as Body,
     }
 }

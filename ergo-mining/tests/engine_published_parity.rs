@@ -187,7 +187,9 @@ impl Regime {
 /// input verifies with an empty spending proof — the same shape the
 /// `ergo-mining::emission_box` discovery test relies on.
 fn trivial_true_tree() -> (Vec<u8>, ergo_ser::ergo_tree::ErgoTree) {
-    let bytes = vec![0x00u8, 0x01, 0x01];
+    // `00 08 d3` = Const(SSigmaProp, TrivialProp::true): a SigmaProp root, the
+    // only kind a box script may have (CheckDeserializedScriptIsSigmaProp).
+    let bytes = vec![0x00u8, 0x08, 0xd3];
     let mut r = VlqReader::new(&bytes);
     let tree = read_ergo_tree(&mut r).expect("trivial-true tree decodes");
     (bytes, tree)
