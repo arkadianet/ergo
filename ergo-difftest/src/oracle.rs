@@ -167,10 +167,13 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
     ]
 }
 
-/// `ergo_tree`: the CONSENSUS surface = `read_ergo_tree` + `check_header_size_bit`
-/// (rule 1012), which the box readers enforce after parsing. Using bare
-/// `read_ergo_tree` here would report false divergences for `version != 0`
-/// no-size trees the JVM rejects but the box layer also rejects.
+/// `ergo_tree`: the CONSENSUS surface = `read_ergo_tree` + the three gates the
+/// box-script readers enforce after parsing: `check_header_size_bit` (rule 1012),
+/// `check_tree_version_supported` (tree version > activated, #120), and
+/// `check_resolvable_methods` (a method the tree's registry can't resolve, #125).
+/// Bare `read_ergo_tree` is lenient (it wraps a future-version tree), so without
+/// these gates this surface reports false divergences against the JVM oracle —
+/// which now runs at activatedVersion = 3 and rejects exactly these.
 fn ergo_tree_verdict(bytes: &[u8]) -> (Verdict, usize) {
     let mut r = VlqReader::new(bytes);
     match ergo_ser::ergo_tree::read_ergo_tree(&mut r) {
@@ -178,6 +181,12 @@ fn ergo_tree_verdict(bytes: &[u8]) -> (Verdict, usize) {
         Ok(tree) => {
             let consumed = r.position();
             if let Err(e) = ergo_ser::ergo_tree::check_header_size_bit(&tree) {
+                return (Verdict::Reject(format!("{e:?}")), consumed);
+            }
+            if let Err(e) = ergo_ser::ergo_tree::check_tree_version_supported(&tree) {
+                return (Verdict::Reject(format!("{e:?}")), consumed);
+            }
+            if let Err(e) = ergo_ser::ergo_tree::check_resolvable_methods(&tree) {
                 return (Verdict::Reject(format!("{e:?}")), consumed);
             }
             let mut w = VlqWriter::new();
