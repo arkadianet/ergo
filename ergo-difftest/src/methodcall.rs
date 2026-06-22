@@ -9,14 +9,17 @@
 //! the registry ships:
 //!
 //!  - it constructs a `MethodCall`-root tree for each method, programmatically via
-//!    the node's own ergo-ser writer (no fragile hand-hex), and asks the oracle's
-//!    `mc_root` surface to classify the deserialized root: `SIGMA` (root IS
-//!    `SigmaProp`), `WRAP` (wrapped specifically by rule 1001
-//!    `CheckDeserializedScriptIsSigmaProp` — the MethodCall reached the root
-//!    classification and its result is non-`SigmaProp`), `WRAPOTHER` (wrapped for
-//!    another reason, e.g. method-not-found — the probe never reached rule 1001), or
-//!    `THROW`. Only `WRAP`/`SIGMA` are accepted, so a stale/mis-constructed probe
-//!    cannot pass;
+//!    the node's own ergo-ser writer (no fragile hand-hex), classifies its root BOTH
+//!    with the node's rule-1001 typer (`read_ergo_tree` + `determinable_root_type_of`)
+//!    AND the oracle's `mc_root` surface, and DIFFS them. The oracle answers `SIGMA`
+//!    (root IS `SigmaProp`), `WRAP` (wrapped by rule 1001 — the MethodCall reached
+//!    the root classification and its result is non-`SigmaProp`), `WRAPOTHER`
+//!    (wrapped for another reason, e.g. method-not-found — the probe never reached
+//!    rule 1001), or `THROW`; the node answers `SIGMA` / `WRAP` / `LENIENT` (root
+//!    type not statically determinable — the safe, never-reject direction) /
+//!    `THROW`. A probe passes iff the oracle matched the pass's expectation AND the
+//!    node's verdict is reject-valid-safe against it (it never `WRAP`s a tree the
+//!    oracle accepts as `SigmaProp`). This is the end-to-end Phase-3 verification;
 //!  - the **SELF pass** gives every method a receiver of the wrong type (`SELF`, a
 //!    `Box`). Scala's `specializeFor` degrades to the unspecialized template, whose
 //!    result is never `SigmaProp`, so EVERY method must answer `WRAP`. This proves
@@ -305,10 +308,66 @@ pub struct Probe {
     pub type_id: u8,
     pub method_id: u8,
     pub name: String,
-    /// The oracle's `mc_root` answer (`SIGMA` / `WRAP` / `THROW ...`).
-    pub verdict: String,
-    /// `true` if the answer matched what the harness expected.
+    /// The oracle's `mc_root` answer (`SIGMA` / `WRAP` / `WRAPOTHER` / `THROW ...`).
+    pub oracle: String,
+    /// The node's own classification of the same tree (`SIGMA` / `WRAP` / `THROW`),
+    /// via `read_ergo_tree` — the rule-1001 typer under test.
+    pub rust: String,
+    /// `true` iff the oracle matched the pass's expectation AND the node agrees with
+    /// the oracle (the real differential check).
     pub ok: bool,
+}
+
+/// The node's rule-1001 classification of a has_size MethodCall-root tree, via the
+/// SAME path the box reader uses (`read_ergo_tree` + `determinable_root_type_of`):
+///   `SIGMA`   root statically typed `SigmaProp` (parses);
+///   `WRAP`    root statically non-`SigmaProp` (soft-fork-wrapped → `Unparsed`);
+///   `LENIENT` root type not statically determinable (parses — the safe direction,
+///             can never reject a tree the JVM accepts);
+///   `THROW`   the tree did not parse.
+fn rust_verdict(bytes: &[u8]) -> &'static str {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::ergo_tree::{determinable_root_type_of, read_ergo_tree};
+    use ergo_ser::sigma_type::SigmaType;
+    let mut r = VlqReader::new(bytes);
+    match read_ergo_tree(&mut r) {
+        Ok(tree) => match &tree.body {
+            Expr::Unparsed(_) => "WRAP",
+            body => match determinable_root_type_of(body, &tree.constants) {
+                Some(SigmaType::SSigmaProp) => "SIGMA",
+                Some(_) => "WRAP",
+                None => "LENIENT",
+            },
+        },
+        Err(_) => "THROW",
+    }
+}
+
+/// Build a probe: query the oracle, classify with the node, and pass iff the oracle
+/// answered `expected_oracle` AND the node's verdict is in `allowed_rust`. The
+/// reject-valid case (node `WRAP` while the oracle says `SIGMA`) is excluded from
+/// every `allowed_rust` set, so it always fails. A `WRAPOTHER` oracle answer (a
+/// non-rule-1001 wrap — the probe never reached the classification) fails
+/// `expected_oracle`.
+fn probe(
+    oracle: &mut Oracle,
+    type_id: u8,
+    method_id: u8,
+    name: &str,
+    bytes: &[u8],
+    expected_oracle: &str,
+    allowed_rust: &[&str],
+) -> std::io::Result<Probe> {
+    let oracle_verdict = oracle.query_raw("mc_root", bytes)?;
+    let rust = rust_verdict(bytes).to_string();
+    Ok(Probe {
+        type_id,
+        method_id,
+        name: name.to_string(),
+        ok: oracle_verdict == expected_oracle && allowed_rust.contains(&rust.as_str()),
+        oracle: oracle_verdict,
+        rust,
+    })
 }
 
 /// Result of a full scan.
@@ -342,40 +401,44 @@ impl Report {
 pub fn run(oracle: &mut Oracle) -> std::io::Result<Report> {
     let methods = methods();
 
-    // SELF pass: wrong-type receiver, dummy args. Expect NOT SIGMA for every one.
+    // SELF pass: wrong-type receiver, dummy args. Expect WRAP for every one — a
+    // THROW means the probe never reached the rule-1001 classification (see `probe`).
     let mut self_pass = Vec::with_capacity(methods.len());
     for m in &methods {
         let args: Vec<Expr> = (1..m.arity).map(|_| int_const(0)).collect();
         let type_args: Vec<SigmaType> = (0..m.n_type_args).map(|_| SigmaType::SInt).collect();
         let bytes = build_tree(m.type_id, m.method_id, self_box(), args, type_args);
-        let verdict = oracle.query_raw("mc_root", &bytes)?;
-        self_pass.push(Probe {
-            type_id: m.type_id,
-            method_id: m.method_id,
-            name: m.name.clone(),
-            // Require WRAP: a THROW means the probe did not actually reach the
-            // rule-1001 classification, so it proves nothing (a future method whose
-            // dummy probe throws must be flagged, not silently passed).
-            ok: verdict == "WRAP",
-            verdict,
-        });
+        // Oracle WRAPs (template non-SigmaProp). The node WRAPs a non-landmine (its
+        // result is `SAny`) or is LENIENT for a landmine whose `Box` receiver it
+        // cannot read as a Coll/Option — both are reject-valid-safe.
+        self_pass.push(probe(
+            oracle,
+            m.type_id,
+            m.method_id,
+            &m.name,
+            &bytes,
+            "WRAP",
+            &["WRAP", "LENIENT"],
+        )?);
     }
 
-    // Landmine pass: SigmaProp-instantiated receivers. Expect SIGMA for every one.
+    // Landmine pass: SigmaProp-instantiated receivers. Oracle AND node must both
+    // type the root SIGMA (the node's projection determines SigmaProp).
     let mut landmine_pass = Vec::new();
     for (type_id, method_id, name, bytes) in landmines() {
-        let verdict = oracle.query_raw("mc_root", &bytes)?;
-        landmine_pass.push(Probe {
+        landmine_pass.push(probe(
+            oracle,
             type_id,
             method_id,
-            name: name.to_string(),
-            ok: verdict == "SIGMA",
-            verdict,
-        });
+            name,
+            &bytes,
+            "SIGMA",
+            &["SIGMA"],
+        )?);
     }
 
-    // Wrapper pass: every OTHER type-variable method, type var -> SigmaProp.
-    // Expect NOT SIGMA (the result is an Option/Coll wrapper, never SigmaProp).
+    // Wrapper pass: every OTHER type-variable method, type var -> SigmaProp. Expect
+    // WRAP (an Option[SigmaProp]/Coll[SigmaProp] wrapper is never SigmaProp).
     let mut wrapper_pass = Vec::new();
     for m in methods
         .iter()
@@ -390,18 +453,18 @@ pub fn run(oracle: &mut Oracle) -> std::io::Result<Report> {
             args,
             type_args,
         );
-        let verdict = oracle.query_raw("mc_root", &bytes)?;
-        wrapper_pass.push(Probe {
-            type_id: m.type_id,
-            method_id: m.method_id,
-            name: m.name.clone(),
-            // Require WRAP, not merely "not SIGMA": a THROW means the probe was
-            // mis-constructed and did NOT prove the result is a non-SigmaProp
-            // wrapper, so it must FAIL (else an omitted landmine whose probe throws
-            // would be silently passed). Every wrapper probe must be a valid tree.
-            ok: verdict == "WRAP",
-            verdict,
-        });
+        // A non-landmine's result is `SAny`, so the node WRAPs (it does not stay
+        // lenient) — matching the oracle's WRAP and confirming Phase 3 closes the
+        // accept-invalid for these `Option`/`Coll`-wrapper methods.
+        wrapper_pass.push(probe(
+            oracle,
+            m.type_id,
+            m.method_id,
+            &m.name,
+            &bytes,
+            "WRAP",
+            &["WRAP"],
+        )?);
     }
 
     Ok(Report {

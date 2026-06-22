@@ -168,6 +168,16 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// Print the failing probes of a pass, showing the oracle vs node verdicts.
+fn print_fails(probes: &[ergo_difftest::methodcall::Probe]) {
+    for p in probes.iter().filter(|p| !p.ok) {
+        println!(
+            "  [FAIL] ({}, {}) {} -> oracle={} node={}",
+            p.type_id, p.method_id, p.name, p.oracle, p.rust
+        );
+    }
+}
+
 /// MethodCall typechecker-registry verification harness: construct a
 /// MethodCall-root tree for every `(type_id, method_id)` and classify its root
 /// against the JVM oracle (`mc_root`). See `ergo_difftest::methodcall`.
@@ -201,57 +211,44 @@ fn run_methodcall(script: Option<String>) -> ExitCode {
     // are construction failures — hence `other`, not `throw`.
     let mut other = 0u32;
     for p in &report.self_pass {
-        match p.verdict.as_str() {
+        match p.oracle.as_str() {
             "SIGMA" => sigma += 1,
             "WRAP" => wrap += 1,
             _ => other += 1,
         }
     }
     println!(
-        "SELF pass ({} methods, wrong-type receiver): WRAP={wrap} OTHER={other} SIGMA={sigma} (all must WRAP)",
+        "SELF pass ({} methods, wrong-type receiver): WRAP={wrap} OTHER={other} SIGMA={sigma} (all must WRAP, node==oracle)",
         report.self_pass.len()
     );
-    for p in report.self_pass.iter().filter(|p| !p.ok) {
-        // SIGMA = unconditionally SigmaProp (impossible per the dump); THROW /
-        // WRAPOTHER = a probe that never reached the rule-1001 classification.
-        println!(
-            "  [FAIL] ({}, {}) {} -> {} (need WRAP)",
-            p.type_id, p.method_id, p.name, p.verdict
-        );
-    }
+    print_fails(&report.self_pass);
 
     println!(
-        "landmine pass ({} type-variable methods, SigmaProp receiver): all must answer SIGMA",
+        "landmine pass ({} type-variable methods, SigmaProp receiver): all must answer SIGMA (node==oracle)",
         report.landmine_pass.len()
     );
     for p in &report.landmine_pass {
         let mark = if p.ok { "ok" } else { "FAIL" };
         println!(
-            "  [{mark}] ({}, {}) {} -> {}",
-            p.type_id, p.method_id, p.name, p.verdict
+            "  [{mark}] ({}, {}) {} -> oracle={} node={}",
+            p.type_id, p.method_id, p.name, p.oracle, p.rust
         );
     }
 
     // Wrapper pass: count and only print FAILs (a polymorphic method that becomes
-    // SigmaProp but is not a known landmine — i.e. an incomplete landmine set).
+    // SigmaProp but is not a known landmine, or a node/oracle disagreement).
     let wrap_ok = report.wrapper_pass.iter().filter(|p| p.ok).count();
     println!(
-        "wrapper pass ({} other type-variable methods, type var -> SigmaProp): {wrap_ok} answered WRAP (Option/Coll wrapper), must be all",
+        "wrapper pass ({} other type-variable methods, type var -> SigmaProp): {wrap_ok} WRAP & node==oracle, must be all",
         report.wrapper_pass.len()
     );
-    for p in report.wrapper_pass.iter().filter(|p| !p.ok) {
-        // SIGMA = a SigmaProp-capable method missing from the landmine set;
-        // THROW = a mis-constructed probe that did not prove the wrapper claim.
-        println!(
-            "  [FAIL] ({}, {}) {} -> {} (need WRAP)",
-            p.type_id, p.method_id, p.name, p.verdict
-        );
-    }
+    print_fails(&report.wrapper_pass);
 
     let failures = report.failures();
     if failures == 0 {
         println!(
-            "methodcall: OK — no method is unconditionally SigmaProp; exactly the {} landmines are SigmaProp-capable (every other type-variable method stays an Option/Coll wrapper)",
+            "methodcall: OK — node agrees with the JVM oracle on all {} probes; no method is unconditionally SigmaProp; exactly the {} landmines are SigmaProp-capable",
+            report.self_pass.len() + report.landmine_pass.len() + report.wrapper_pass.len(),
             report.landmine_pass.len()
         );
         ExitCode::SUCCESS
