@@ -73,9 +73,21 @@ fn main() -> ExitCode {
     }
 
     // Reject a misspelled/unsupported --surface so a typo can't silently run
-    // zero checks and look clean.
+    // zero checks and look clean. The valid surface set depends on the execution
+    // path: only the oracle CAMPAIGN (`--oracle` without `--repro`) uses the
+    // oracle surfaces (a comparable subset, plus the oracle-only `reduce` surface);
+    // `--repro` always runs the hermetic `run_input`, even under `--oracle`, so it
+    // must validate against the hermetic registry (otherwise `--oracle --repro X
+    // --surface reduce` would pass validation but run zero hermetic checks).
     if let Some(s) = &only {
-        let known = ergo_difftest::surfaces::names();
+        let known: Vec<&str> = if oracle_mode && repro.is_none() {
+            ergo_difftest::oracle::oracle_surfaces()
+                .iter()
+                .map(|spec| spec.name)
+                .collect()
+        } else {
+            ergo_difftest::surfaces::names()
+        };
         if !known.contains(&s.as_str()) {
             eprintln!(
                 "--surface: unknown surface {s:?}; known: {}",
@@ -114,7 +126,7 @@ fn main() -> ExitCode {
     };
 
     if oracle_mode {
-        return run_oracle(seed, iters, oracle_script, &corpus);
+        return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus);
     }
 
     println!(
@@ -145,8 +157,16 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Differential campaign against the JVM reference oracle (ergo_tree surface).
-fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>]) -> ExitCode {
+/// Differential campaign against the JVM reference oracle. Without `only` it
+/// diffs every oracle surface per input; with `only` it restricts to that one
+/// (already validated against the oracle surface set in `main`).
+fn run_oracle(
+    seed: u64,
+    iters: u64,
+    script: Option<String>,
+    only: Option<&str>,
+    corpus: &[Vec<u8>],
+) -> ExitCode {
     use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
     use ergo_difftest::rng::Rng;
 
@@ -162,7 +182,10 @@ fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>])
         }
     };
 
-    let surfaces = oracle_surfaces();
+    let surfaces: Vec<_> = oracle_surfaces()
+        .into_iter()
+        .filter(|spec| only.is_none_or(|o| spec.name == o))
+        .collect();
     let mut rng = Rng::new(seed);
     // Dedup by root-cause signature so a soak reports unique CLASSES (with a
     // count + one representative), not thousands of instances of the same bug.

@@ -10,6 +10,7 @@ publish    = false
 [dependencies]
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
+ergo-sigma      = { workspace = true }
 
 [[bin]]
 name = "difftest"

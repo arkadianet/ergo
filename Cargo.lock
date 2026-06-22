@@ -668,6 +668,7 @@ version = "0.4.3"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
+ "ergo-sigma",
 ]
 
 [[package]]
