@@ -247,18 +247,239 @@ fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_type::SigmaTyp
 /// [`determinable_root_type`] over a raw `(body, constants)` pair — so the nested
 /// `SBox`-constant inner-script path (which parses a body + constants without
 /// building an [`ErgoTree`]) can run the same rule-1001 root-type judgement.
+/// Entry point: the root is typed in an empty binding environment.
 pub(crate) fn determinable_root_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+) -> Option<crate::sigma_type::SigmaType> {
+    let scan = scan_tree(body, constants);
+    infer_type(
+        body,
+        &[],
+        &InferCtx {
+            constants,
+            scan: &scan,
+        },
+    )
+}
+
+/// The set of binding ids (`ValDef` / `FunDef` / `FuncValue` arg) that occur more
+/// than once anywhere in the tree. Walks EVERY child (not just the type-
+/// determining spine) so a rebinding buried in an off-spine subtree is recorded.
+///
+/// Scala's `ValUse.tpe` is read from a FLAT, never-popped, last-write-wins
+/// `valDefTypeStore` keyed by id, SHARED across the whole reader. Two things make
+/// our post-parse lexical [`infer_type`] env disagree with it, and [`scan_tree`]
+/// detects both so a `ValUse` can fall back to `None` (lenient) rather than trust a
+/// stale type and REJECT a tree Scala accepts (a reject-valid):
+///
+///  - REUSED binding ids ([`BindingScan::dup_ids`]). A `ValUse` of a reused id is
+///    resolved to `None` (lenient). Matching Scala here would require its exact
+///    POSITION-AWARE store evolution: the value of a reused id depends on how many
+///    of its rebinds have been parsed at the point of the `ValUse`, and a rebind can
+///    sit in an off-spine subtree our type recursion never visits. Every cheaper
+///    approximation we tried (trust the lexical env / the whole-tree last write)
+///    reject-valid'd a real Scala-accepted shape — e.g.
+///    `{ val x = sigmaProp; val y = x; val x = 0L; y }`, where Scala fixes `y` to
+///    SigmaProp BEFORE the rebind. Since a reused binding id NEVER occurs in a
+///    legitimately compiled tree, we take the safe direction (lenient) and accept a
+///    residual ACCEPT-invalid on adversarial duplicate-id trees whose root type is
+///    statically determinable (e.g. `{ val x = 0L; val x = 0L; x }`, which Scala
+///    rejects). The leniency is scoped to a `ValUse` of the reused id, so a
+///    duplicate-id tree whose ROOT is independent of it (e.g. a Boolean block
+///    result) is still classified and rule-1001-rejected.
+///  - A constant that MATERIALIZES a box value ([`BindingScan::has_box_const`], by
+///    [`value_contains_box`] — value, not type, so an empty `Coll[SBox]` does not
+///    count). Scala parses a box's NESTED ErgoTree on the SAME reader, whose
+///    `valDefTypeStore` is shared and NOT restored
+///    (`ErgoTreeSerializer.deserializeErgoTree` saves `constantStore`/
+///    `wasDeserialize` but not `valDefTypeStore`); so the inner script's `ValDef`s
+///    — invisible to our body walk — can rebind an id the outer body uses. With a
+///    box value present we therefore trust no `ValUse`.
+///
+/// Legitimate Scala-produced trees reuse no id and rarely embed box constants, so
+/// for them `dup_ids` is empty and `has_box_const` is false.
+struct BindingScan {
+    dup_ids: std::collections::HashSet<u32>,
+    has_box_const: bool,
+}
+
+/// `true` if `val` MATERIALIZES at least one box value (possibly nested in a
+/// collection / option / tuple). A box value is the only constant whose bytes embed
+/// a nested ErgoTree, which Scala parses on the shared reader — so only an actual
+/// box can pollute `valDefTypeStore`. We key on the VALUE, not the type: an empty
+/// `Coll[SBox]` has a box-bearing type but materializes no box and changes nothing,
+/// so it must NOT trigger `ValUse` leniency (which would be an accept-invalid).
+fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
+    use crate::sigma_value::{CollValue, SigmaValue};
+    match val {
+        SigmaValue::OpaqueBoxBytes(_) => true,
+        // `BoolBits` / `Bytes` collections never hold boxes; only `Values` can.
+        SigmaValue::Coll(CollValue::Values(items)) | SigmaValue::Tuple(items) => {
+            items.iter().any(value_contains_box)
+        }
+        SigmaValue::Opt(Some(inner)) => value_contains_box(inner),
+        _ => false,
+    }
+}
+
+/// Whole-tree scan (every child, not just the type spine) collecting reused binding
+/// ids and whether any constant — inline in `body` or in the segregated `constants`
+/// table — materializes a box value. See [`BindingScan`] for why both matter.
+fn scan_tree(
+    body: &crate::opcode::Expr,
+    constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+) -> BindingScan {
+    use crate::opcode::Payload;
+    fn walk(
+        e: &crate::opcode::Expr,
+        seen: &mut std::collections::HashSet<u32>,
+        dups: &mut std::collections::HashSet<u32>,
+        has_box: &mut bool,
+    ) {
+        let node = match e {
+            crate::opcode::Expr::Unparsed(_) => return,
+            crate::opcode::Expr::Const { val, .. } => {
+                *has_box |= value_contains_box(val);
+                return;
+            }
+            crate::opcode::Expr::Op(node) => node,
+        };
+        let mut record = |id: u32| {
+            if !seen.insert(id) {
+                dups.insert(id);
+            }
+        };
+        match &node.payload {
+            Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
+                record(*id);
+                walk(rhs, seen, dups, has_box);
+            }
+            Payload::FuncValue { args, body } => {
+                for (id, _) in args {
+                    record(*id);
+                }
+                walk(body, seen, dups, has_box);
+            }
+            Payload::BlockValue { items, result } => {
+                for item in items {
+                    walk(item, seen, dups, has_box);
+                }
+                walk(result, seen, dups, has_box);
+            }
+            Payload::MethodCall { obj, args, .. } => {
+                walk(obj, seen, dups, has_box);
+                for a in args {
+                    walk(a, seen, dups, has_box);
+                }
+            }
+            Payload::One(a) => walk(a, seen, dups, has_box),
+            Payload::Two(a, b) => {
+                walk(a, seen, dups, has_box);
+                walk(b, seen, dups, has_box);
+            }
+            Payload::Three(a, b, c) => {
+                walk(a, seen, dups, has_box);
+                walk(b, seen, dups, has_box);
+                walk(c, seen, dups, has_box);
+            }
+            Payload::Four(a, b, c, d) => {
+                walk(a, seen, dups, has_box);
+                walk(b, seen, dups, has_box);
+                walk(c, seen, dups, has_box);
+                walk(d, seen, dups, has_box);
+            }
+            Payload::ConcreteCollection { items, .. }
+            | Payload::Tuple { items }
+            | Payload::SigmaCollection { items } => {
+                for i in items {
+                    walk(i, seen, dups, has_box);
+                }
+            }
+            Payload::SelectField { input, .. }
+            | Payload::ExtractRegisterAs { input, .. }
+            | Payload::NumericCast { input, .. } => walk(input, seen, dups, has_box),
+            Payload::ByIndex {
+                input,
+                index,
+                default,
+            } => {
+                walk(input, seen, dups, has_box);
+                walk(index, seen, dups, has_box);
+                if let Some(d) = default.as_deref() {
+                    walk(d, seen, dups, has_box);
+                }
+            }
+            Payload::FuncApply { func, args } => {
+                walk(func, seen, dups, has_box);
+                for a in args {
+                    walk(a, seen, dups, has_box);
+                }
+            }
+            Payload::DeserializeRegister { default, .. } => {
+                if let Some(d) = default.as_deref() {
+                    walk(d, seen, dups, has_box);
+                }
+            }
+            // Leaves and id-free payloads: no binding ids, nothing to recurse.
+            Payload::Zero
+            | Payload::ValUse { .. }
+            | Payload::ConstPlaceholder { .. }
+            | Payload::TaggedVar { .. }
+            | Payload::BoolCollection { .. }
+            | Payload::GetVar { .. }
+            | Payload::DeserializeContext { .. }
+            | Payload::NoneValue { .. } => {}
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = std::collections::HashSet::new();
+    // A segregated constant pollutes the shared store the same way an inline one
+    // does, even when no `ConstPlaceholder` references it (the whole table is
+    // parsed), so seed the box flag from the constants table too.
+    let mut has_box = constants.iter().any(|(_, val)| value_contains_box(val));
+    walk(body, &mut seen, &mut dups, &mut has_box);
+    BindingScan {
+        dup_ids: dups,
+        has_box_const: has_box,
+    }
+}
+
+/// Immutable context threaded through [`infer_type`] for the whole judgement: the
+/// segregated `constants` table (for `ConstPlaceholder`) plus the [`BindingScan`]
+/// flags that make a `ValUse` fall back to `None`.
+struct InferCtx<'a> {
+    constants: &'a [(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+    scan: &'a BindingScan,
+}
+
+/// A binding environment frame: `(binding id, its static type)` pairs, threaded
+/// through [`infer_type`] so a `ValUse` can recover the type of the `ValDef` /
+/// `FunDef` it references (Scala's `ValUse.tpe` reads a type the wire does NOT
+/// carry for us). A `ValUse` flagged ambiguous by the [`BindingScan`] is resolved
+/// to `None` instead, so the at-most-one-relevant-entry-per-id assumption the
+/// newest-first scan relies on holds for every id it actually returns.
+type TypeEnv<'a> = &'a [(u32, crate::sigma_type::SigmaType)];
+
+/// Recursive static-type inference over the ErgoTree IR — the rule-1001
+/// (`CheckDeserializedScriptIsSigmaProp`) root typechecker, computing the same
+/// `Value.tpe` Scala derives bottom-up at deserialize. Returns the type when it
+/// is STATICALLY DETERMINABLE, or `None` (treated as lenient/accept by the gate)
+/// — so an as-yet-unhandled shape can never reject a tree Scala accepts.
+fn infer_type(
+    body: &crate::opcode::Expr,
+    env: TypeEnv,
+    ctx: &InferCtx,
 ) -> Option<crate::sigma_type::SigmaType> {
     use crate::opcode::Payload;
     use crate::sigma_type::SigmaType;
     match body {
         crate::opcode::Expr::Const { tpe, .. } => Some(tpe.clone()),
         crate::opcode::Expr::Op(node) => match &node.payload {
-            Payload::ConstPlaceholder { index } => {
-                constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
-            }
+            Payload::ConstPlaceholder { index } => ctx
+                .constants
+                .get(*index as usize)
+                .map(|(tpe, _)| tpe.clone()),
             // Payloads carrying their result type EXPLICITLY in the IR.
             // `Deserialize{Context,Register}[T]` return `T` DIRECTLY, so they CAN
             // be SigmaProp (accept iff T == SSigmaProp); `NumericCast`'s target is
@@ -298,50 +519,83 @@ pub(crate) fn determinable_root_type_of(
             Payload::Two(left, _right)
                 if matches!(node.opcode, 0x99 | 0x9A | 0x9C | 0x9D | 0x9E | 0xA1 | 0xA2) =>
             {
-                determinable_root_type_of(left, constants)
+                infer_type(left, env, ctx)
             }
             // If: `If.tpe = trueBranch.tpe` (the then-branch, child 1; Scala does
             // NOT unify the branches at deserialize).
             Payload::Three(_cond, then_branch, _else) if node.opcode == 0x95 => {
-                determinable_root_type_of(then_branch, constants)
+                infer_type(then_branch, env, ctx)
             }
             // Fold: result = the accumulator type = the `zero` arg (child 1).
-            Payload::Three(_coll, zero, _op) if node.opcode == 0xB0 => {
-                determinable_root_type_of(zero, constants)
+            Payload::Three(_coll, zero, _op) if node.opcode == 0xB0 => infer_type(zero, env, ctx),
+            // BlockValue `{ vals...; result }`: type = the result expression's type,
+            // typed under an environment extended with each `ValDef` / `FunDef`
+            // binding (in order; a later item may reference an earlier one). Both
+            // bind their id to their RHS type — Scala's `ValUse.tpe` reads the
+            // referenced definition's value type, and a `FunDef` RHS is NOT always a
+            // function (e.g. `fun x = sigmaProp`), so deriving it from the RHS keeps
+            // a `ValUse` of a SigmaProp-RHS binding accepting (oracle-verified).
+            // A non-determinable RHS is skipped, so a `ValUse` of it stays lenient.
+            Payload::BlockValue { items, result } => {
+                let mut scope = env.to_vec();
+                for item in items {
+                    if let crate::opcode::Expr::Op(item_node) = item {
+                        if let Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } =
+                            &item_node.payload
+                        {
+                            if let Some(t) = infer_type(rhs, &scope, ctx) {
+                                scope.push((*id, t));
+                            }
+                        }
+                    }
+                }
+                infer_type(result, &scope, ctx)
             }
-            // BlockValue `{ vals...; result }`: type = the result expression's type.
-            Payload::BlockValue { result, .. } => determinable_root_type_of(result, constants),
+            // ValUse: the type of the `ValDef`/`FunDef` it binds. We cannot match
+            // Scala's flat, shared, last-write-wins store for an ambiguous id, so go
+            // lenient (`None`) for: a REUSED id (its value is position-dependent and
+            // may be rebound off-spine), or ANY `ValUse` once an `SBox` constant is
+            // present (its nested script can rebind ids on the shared reader with
+            // bindings we cannot see). A unique id in a box-free tree resolves from
+            // the lexical env. See [`BindingScan`].
+            Payload::ValUse { id } => {
+                if ctx.scan.has_box_const || ctx.scan.dup_ids.contains(id) {
+                    return None;
+                }
+                env.iter()
+                    .rev()
+                    .find(|(i, _)| i == id)
+                    .map(|(_, t)| t.clone())
+            }
+            // A function literal is never SigmaProp (its type is `SFunc`), so a
+            // `FuncValue` root fails rule 1001 (oracle-verified: a FuncValue-rooted
+            // tree rejects).
+            Payload::FuncValue { .. } => Some(SigmaType::SAny),
             // SelectField `tuple._i`: the i-th component type of the input tuple
             // (1-based). Only resolvable when the input's type is a determinable
             // `STuple` (e.g. a tuple constant); otherwise lenient.
-            Payload::SelectField { input, field_idx } => {
-                match determinable_root_type_of(input, constants) {
-                    Some(SigmaType::STuple(items)) => (*field_idx as usize)
-                        .checked_sub(1)
-                        .and_then(|i| items.get(i))
-                        .cloned(),
-                    _ => None,
-                }
-            }
+            Payload::SelectField { input, field_idx } => match infer_type(input, env, ctx) {
+                Some(SigmaType::STuple(items)) => (*field_idx as usize)
+                    .checked_sub(1)
+                    .and_then(|i| items.get(i))
+                    .cloned(),
+                _ => None,
+            },
             // ByIndex `coll(i)`: the element type of the input collection.
-            Payload::ByIndex { input, .. } => match determinable_root_type_of(input, constants) {
+            Payload::ByIndex { input, .. } => match infer_type(input, env, ctx) {
                 Some(SigmaType::SColl(elem)) => Some(*elem),
                 _ => None,
             },
             // OptionGet `opt.get` / OptionGetOrElse `opt.getOrElse(d)`: the option's
             // element type (the option is child 0 in both).
-            Payload::One(opt) if node.opcode == 0xE4 => {
-                match determinable_root_type_of(opt, constants) {
-                    Some(SigmaType::SOption(elem)) => Some(*elem),
-                    _ => None,
-                }
-            }
-            Payload::Two(opt, _default) if node.opcode == 0xE5 => {
-                match determinable_root_type_of(opt, constants) {
-                    Some(SigmaType::SOption(elem)) => Some(*elem),
-                    _ => None,
-                }
-            }
+            Payload::One(opt) if node.opcode == 0xE4 => match infer_type(opt, env, ctx) {
+                Some(SigmaType::SOption(elem)) => Some(*elem),
+                _ => None,
+            },
+            Payload::Two(opt, _default) if node.opcode == 0xE5 => match infer_type(opt, env, ctx) {
+                Some(SigmaType::SOption(elem)) => Some(*elem),
+                _ => None,
+            },
             // A zero-argument (leaf) opcode root has a statically-known type and
             // NONE of them is `SSigmaProp` (see [`zero_arg_root_type`]), so a
             // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
@@ -1569,6 +1823,19 @@ mod tests {
             "00957f010108d3", // If(true, then=Boolean, else=sigma) -> then=Boolean
             "0095a3a4a5",     // If(Height, Inputs, Outputs) -> then=Coll[Box]
             "00d8000101",     // BlockValue(result = Boolean const)
+            // Env-threaded (Stage A): a ValUse resolves to its binding's type.
+            "00d801d60105007201", // { val x = Long(0); x } -> SLong
+            // FunDef binds its id to its RHS type (Phase 2): a non-SigmaProp RHS
+            // makes the ValUse — and the block result — non-SigmaProp (oracle REJECT).
+            "00d801d7010005007201", // { fun x = Long(0); x } -> SLong
+            // Duplicate-id block whose RESULT is independent of the reused binding:
+            // `{ val x = sigmaProp; val x = sigmaProp; true }` -> SBoolean. The id is
+            // ambiguous but the root (a Boolean const) does not resolve through it,
+            // so rule 1001 is still enforced (oracle REJECT — the dup-id leniency is
+            // scoped to a ValUse of the reused id, not the whole tree).
+            "00d802d60108d3d60108d30101",
+            // FuncValue root -> SFunc (a function is never SigmaProp).
+            "00d90101017201", // FuncValue(arg: Bool, body: ValUse) -> SFunc
         ] {
             assert!(
                 check_sigma_prop_root(&parse(op)).is_err(),
@@ -1615,12 +1882,107 @@ mod tests {
             // ArithOp.tpe = left.tpe: a SigmaProp LEFT operand makes Plus SigmaProp
             // (Scala accepts; a fixed-numeric classification would reject-valid).
             "009a08d308d3",   // Plus(sigma, sigma) -> left=SigmaProp
+            // Env-threaded (Stage A): { val x = sigmaProp; x } -> result=ValUse=SigmaProp.
+            "00d801d60108d37201",
+            // FunDef RHS is NOT always a function: { fun x = sigmaProp; x } binds x
+            // to SigmaProp, so the ValUse result IS SigmaProp (oracle ACCEPT — a
+            // FunDef->SAny classification here would reject-valid, codex P1).
+            "00d801d7010008d37201",
+            // REUSED-ID ValUse -> lenient (a reused binding id never occurs in a
+            // legitimately compiled tree; matching Scala's position-aware shared
+            // store is intractable from the parsed AST, so we take the safe
+            // direction). All four are oracle ACCEPT, and lenient resolution accepts
+            // them — three because Scala also accepts (no reject-valid), the last as
+            // a deliberate, documented accept-invalid. See `BindingScan`.
+            //   reject-valid avoided — Scala's last write makes `x` SigmaProp:
+            "00d802d6010500d601d101017201", // { val x=Long; val x=BoolToSigmaProp; x }
+            //   ...same, but the rebinding is buried off-spine in an `Eq` operand:
+            "00d802d6010500d60293d801d601d10101050005007201",
+            //   ...forward reference: Scala fixes `y` to SigmaProp BEFORE the rebind
+            //   (a whole-tree last-write would wrongly reject this):
+            "00d803d60108d3d6027201d60105007202", // { val x=sigma; val y=x; val x=0L; y }
+            //   documented ACCEPT-invalid: Scala rejects (last-write SLong), we are
+            //   lenient — the safe direction on an adversarial determinable dup-id tree:
+            "00d802d6010500d60105007201", // { val x=0L; val x=0L; x }
         ] {
             assert!(
                 check_sigma_prop_root(&parse(op)).is_ok(),
                 "SigmaProp(-capable) root {op} must pass (no reject-valid)"
             );
         }
+    }
+
+    /// `value_contains_box` keys on the VALUE: it sees an actual box through `Coll`
+    /// / `Option` / tuple nesting, but a box-FREE value — including an EMPTY
+    /// box-typed collection — must NOT count (codex P1: an empty `Coll[SBox]`
+    /// materializes no box and cannot pollute the shared store).
+    #[test]
+    fn value_contains_box_keys_on_value_not_type() {
+        use crate::sigma_value::{CollValue, SigmaValue};
+        assert!(value_contains_box(&SigmaValue::OpaqueBoxBytes(vec![1, 2])));
+        assert!(value_contains_box(&SigmaValue::Coll(CollValue::Values(
+            vec![SigmaValue::OpaqueBoxBytes(vec![])]
+        ))));
+        assert!(value_contains_box(&SigmaValue::Tuple(vec![
+            SigmaValue::Long(1),
+            SigmaValue::OpaqueBoxBytes(vec![])
+        ])));
+        assert!(value_contains_box(&SigmaValue::Opt(Some(Box::new(
+            SigmaValue::OpaqueBoxBytes(vec![])
+        )))));
+        // box-free, incl. an EMPTY box-typed collection and a None option:
+        assert!(!value_contains_box(&SigmaValue::Coll(CollValue::Values(
+            vec![]
+        ))));
+        assert!(!value_contains_box(&SigmaValue::Opt(None)));
+        assert!(!value_contains_box(&SigmaValue::Coll(CollValue::Bytes(
+            vec![1, 2]
+        ))));
+        assert!(!value_contains_box(&SigmaValue::Long(0)));
+    }
+
+    /// Reject-valid guard (codex P1): a box VALUE constant's nested script is parsed
+    /// on the SAME reader, whose `valDefTypeStore` is shared and never restored, so
+    /// it can rebind an id the outer body uses. Once a box value is present we trust
+    /// no `ValUse` — `{ val x = Long; x }`, which alone rejects (root `SLong`), must
+    /// go lenient so Scala's box-polluted `ValUse(1).tpe` (potentially `SigmaProp`)
+    /// is never rejected. But a box-typed constant with NO box value (empty
+    /// `Coll[SBox]`) changes nothing and must STILL reject (codex P1 accept-invalid).
+    #[test]
+    fn box_value_forces_valuse_root_leniency_but_empty_box_coll_does_not() {
+        use crate::sigma_value::{CollValue, SigmaValue};
+        let parse = |hex: &str| {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            read_ergo_tree(&mut r).expect("lenient codec parses")
+        };
+        // Baseline: `{ val x = Long(0); x }` -> SLong root, rejected by rule 1001.
+        let base = parse("00d801d60105007201");
+        assert!(
+            check_sigma_prop_root(&base).is_err(),
+            "baseline val-x-equals-Long block must reject (root SLong)"
+        );
+        // A real box value pollutes the shared store -> the ValUse can no longer be
+        // trusted -> lenient (accept).
+        let mut with_box = base.clone();
+        with_box
+            .constants
+            .push((SigmaType::SBox, SigmaValue::OpaqueBoxBytes(vec![])));
+        assert!(
+            check_sigma_prop_root(&with_box).is_ok(),
+            "a box value must force ValUse-root leniency (reject-valid guard)"
+        );
+        // An EMPTY Coll[SBox] materializes no box, so the store is unchanged and the
+        // SLong root must STILL reject (no spurious leniency).
+        let mut with_empty_box_coll = base.clone();
+        with_empty_box_coll.constants.push((
+            SigmaType::SColl(Box::new(SigmaType::SBox)),
+            SigmaValue::Coll(CollValue::Values(vec![])),
+        ));
+        assert!(
+            check_sigma_prop_root(&with_empty_box_coll).is_err(),
+            "an empty Coll[SBox] constant must NOT trigger leniency (codex P1)"
+        );
     }
 
     /// A SIZE-flagged tree whose root is a boolean-literal leaf (`TrueLeaf`) is a
