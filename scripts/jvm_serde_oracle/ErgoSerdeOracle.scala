@@ -162,6 +162,29 @@ object ErgoSerdeOracle {
               val h = HeaderSerializer.parseBytes(bytes)
               acc(hex(HeaderSerializer.toBytes(h)))
             case "reduce" => reduce(bytes)
+            case "mc_root" =>
+              // MethodCall-root classifier for the typechecker-registry harness:
+              // deserialize (checkType = true, like the box reader) and report
+              // whether the root static type is SigmaProp.
+              //   SIGMA      root parses (root.isRight) -> static type IS SigmaProp;
+              //   WRAP       soft-fork-wrapped by rule 1001 (CheckDeserializedScript-
+              //              IsSigmaProp) -> the MethodCall classified and its root is
+              //              non-SigmaProp;
+              //   WRAPOTHER  wrapped for ANOTHER reason (e.g. method-not-found / a
+              //              malformed size-delimited probe) -> the tree NEVER reached
+              //              the rule-1001 root classification, so it proves nothing;
+              //   THROW      a throw (a sizeless non-sigma root, or a malformed tree).
+              // The harness requires WRAP (not merely root.isLeft) so a stale/mis-
+              // constructed probe cannot pass as a non-SigmaProp wrapper.
+              try {
+                val t = tree.deserializeErgoTree(bytes)
+                t.root match {
+                  case scala.util.Right(_) => "SIGMA"
+                  case scala.util.Left(u) =>
+                    if (u.error.rule.id == 1001) "WRAP"
+                    else "WRAPOTHER rule=" + u.error.rule.id
+                }
+              } catch { case e: Throwable => "THROW " + e.getClass.getSimpleName }
             case other => "ERR unsupported-surface:" + other
           }
           }

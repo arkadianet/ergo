@@ -81,6 +81,14 @@ impl Oracle {
 
     /// Ask the JVM reference for its verdict on `bytes` at `surface`.
     pub fn query(&mut self, surface: &str, bytes: &[u8]) -> io::Result<Verdict> {
+        Ok(parse_verdict(&self.query_raw(surface, bytes)?))
+    }
+
+    /// Ask the JVM reference and return its RAW response line (trimmed). Used by
+    /// surfaces whose reply is not an ACCEPT/REJECT verdict — e.g. `mc_root`, which
+    /// answers `SIGMA` / `WRAP` / `THROW <exc>` for the MethodCall typechecker-
+    /// registry harness.
+    pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
         writeln!(self.stdin, "{surface} {}", to_hex(bytes))?;
         self.stdin.flush()?;
         let mut line = String::new();
@@ -91,7 +99,7 @@ impl Oracle {
                 "oracle closed its output",
             ));
         }
-        Ok(parse_verdict(line.trim()))
+        Ok(line.trim().to_string())
     }
 }
 

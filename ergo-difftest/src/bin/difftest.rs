@@ -22,6 +22,7 @@ fn main() -> ExitCode {
     let mut repro: Option<String> = None;
     let mut oracle_mode = false;
     let mut oracle_script: Option<String> = None;
+    let mut methodcall_mode = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -46,6 +47,9 @@ fn main() -> ExitCode {
             }
             "--oracle-script" => {
                 oracle_script = Some(take_next(&args, &mut i, "--oracle-script"));
+            }
+            "--methodcall" => {
+                methodcall_mode = true;
             }
             "--selftest" => {
                 return match ergo_difftest::selftest() {
@@ -123,6 +127,10 @@ fn main() -> ExitCode {
         };
     }
 
+    if methodcall_mode {
+        return run_methodcall(oracle_script);
+    }
+
     let corpus = match &corpus_dir {
         Some(dir) => load_corpus(dir),
         None => Vec::new(),
@@ -158,6 +166,97 @@ fn main() -> ExitCode {
         );
     }
     ExitCode::FAILURE
+}
+
+/// MethodCall typechecker-registry verification harness: construct a
+/// MethodCall-root tree for every `(type_id, method_id)` and classify its root
+/// against the JVM oracle (`mc_root`). See `ergo_difftest::methodcall`.
+fn run_methodcall(script: Option<String>) -> ExitCode {
+    use ergo_difftest::methodcall;
+    use ergo_difftest::oracle::Oracle;
+
+    let script = script.unwrap_or_else(|| "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala".into());
+    eprintln!("methodcall: spawning `scala-cli run {script}` (first query resolves deps)...");
+    let mut oracle = match Oracle::spawn(&script) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("methodcall: spawn failed: {e}\n(is scala-cli on PATH?)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let report = match methodcall::run(&mut oracle) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("methodcall: oracle pipe error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // SELF pass: tally verdicts; any SIGMA is a FAIL (an unconditionally-SigmaProp
+    // method, which must not exist).
+    let mut sigma = 0u32;
+    let mut wrap = 0u32;
+    let mut throw = 0u32;
+    for p in &report.self_pass {
+        match p.verdict.as_str() {
+            "SIGMA" => sigma += 1,
+            "WRAP" => wrap += 1,
+            _ => throw += 1,
+        }
+    }
+    println!(
+        "SELF pass ({} methods, wrong-type receiver): WRAP={wrap} THROW={throw} SIGMA={sigma} (all must WRAP)",
+        report.self_pass.len()
+    );
+    for p in report.self_pass.iter().filter(|p| !p.ok) {
+        // SIGMA = unconditionally SigmaProp (impossible per the dump); THROW = a
+        // mis-constructed probe that never reached the rule-1001 classification.
+        println!(
+            "  [FAIL] ({}, {}) {} -> {} (need WRAP)",
+            p.type_id, p.method_id, p.name, p.verdict
+        );
+    }
+
+    println!(
+        "landmine pass ({} type-variable methods, SigmaProp receiver): all must answer SIGMA",
+        report.landmine_pass.len()
+    );
+    for p in &report.landmine_pass {
+        let mark = if p.ok { "ok" } else { "FAIL" };
+        println!(
+            "  [{mark}] ({}, {}) {} -> {}",
+            p.type_id, p.method_id, p.name, p.verdict
+        );
+    }
+
+    // Wrapper pass: count and only print FAILs (a polymorphic method that becomes
+    // SigmaProp but is not a known landmine — i.e. an incomplete landmine set).
+    let wrap_ok = report.wrapper_pass.iter().filter(|p| p.ok).count();
+    println!(
+        "wrapper pass ({} other type-variable methods, type var -> SigmaProp): {wrap_ok} answered WRAP (Option/Coll wrapper), must be all",
+        report.wrapper_pass.len()
+    );
+    for p in report.wrapper_pass.iter().filter(|p| !p.ok) {
+        // SIGMA = a SigmaProp-capable method missing from the landmine set;
+        // THROW = a mis-constructed probe that did not prove the wrapper claim.
+        println!(
+            "  [FAIL] ({}, {}) {} -> {} (need WRAP)",
+            p.type_id, p.method_id, p.name, p.verdict
+        );
+    }
+
+    let failures = report.failures();
+    if failures == 0 {
+        println!(
+            "methodcall: OK — no method is unconditionally SigmaProp; exactly the {} landmines are SigmaProp-capable (every other type-variable method stays an Option/Coll wrapper)",
+            report.landmine_pass.len()
+        );
+        ExitCode::SUCCESS
+    } else {
+        println!("methodcall: {failures} FAILURE(s)");
+        ExitCode::FAILURE
+    }
 }
 
 /// Differential campaign against the JVM reference oracle. Without `only` it
@@ -394,6 +493,7 @@ fn print_help() {
          \x20 --repro HEX      run a single hex input through all surfaces\n\
          \x20 --oracle         differential campaign vs the JVM reference (ergo_tree)\n\
          \x20 --oracle-script P  path to ErgoSerdeOracle.scala\n\
+         \x20 --methodcall     verify the MethodCall typechecker registry vs the JVM oracle\n\
          \x20 --selftest       verify the harness's own bug-detection has teeth\n"
     );
 }
