@@ -529,6 +529,38 @@ fn parse_sizeless_inner_box_script(
     version: u8,
     cseg: bool,
 ) -> Result<(), ReadError> {
+    // A nested box-constant script is its OWN deserialization scope, parsed on the
+    // SAME reader as the enclosing tree, so two pieces of version-scoped reader state
+    // are saved/set/restored around the ENTIRE inner parse — segregated constants AND
+    // body — so the inner tree uses ITS OWN header version, not the outer's:
+    //  - `ergo_tree_version`: the embeddable type-code gate must resolve against the
+    //    inner version (a sizeless inner is v0). An `SUnsignedBigInt` (code 9) type in
+    //    a v0 script nested under a v3+ outer tree must reject, whether it appears in a
+    //    segregated constant or the body; without scoping it inherits the outer
+    //    `Some(3)` and is accepted — accept-invalid. It is therefore set BEFORE the
+    //    constants are read. (The has_size nested path recurses through
+    //    `read_ergo_tree_tracking_wrap`, which scopes its own inner reader.)
+    //  - the unresolved-method checkpoint: an unresolved method inside the inner tree
+    //    is hard-rejected here (Scala re-raises the sizeless `ValidationException` as a
+    //    `SerializerException`), NOT folded into the enclosing size-delimited tree's
+    //    wrap, so it must not mark the OUTER reader's checkpoint.
+    let saved_checkpoint = r.unresolved_method_checkpoint();
+    let saved_version = r.ergo_tree_version();
+    r.set_ergo_tree_version(Some(version));
+    let result = parse_sizeless_inner_box_script_scoped(r, version, cseg);
+    r.set_ergo_tree_version(saved_version);
+    r.restore_unresolved_method_checkpoint(saved_checkpoint);
+    result
+}
+
+/// Inner of [`parse_sizeless_inner_box_script`], run with the reader's
+/// `ergo_tree_version` already set to the inner tree's version so the embeddable
+/// type gate applies to the segregated constants and the body alike.
+fn parse_sizeless_inner_box_script_scoped(
+    r: &mut VlqReader,
+    version: u8,
+    cseg: bool,
+) -> Result<(), ReadError> {
     if cseg {
         // Nested-tree `deserializeConstants` reads the count via `getUInt().toInt`
         // (non-exact), same as the top-level tree: an overflowed count wraps
@@ -543,15 +575,7 @@ fn parse_sizeless_inner_box_script(
             let _ = read_constant(r)?;
         }
     }
-    // A nested box-constant script is its OWN deserialization scope: an unresolved
-    // method inside it is hard-rejected here (Scala re-raises the sizeless
-    // `ValidationException` as a `SerializerException`), NOT folded into the enclosing
-    // size-delimited tree's wrap. So it must not mark the OUTER reader's
-    // unresolved-method checkpoint — save and restore around the nested body parse.
-    let saved_checkpoint = r.unresolved_method_checkpoint();
-    let body = crate::opcode::parse_body(r, version);
-    r.restore_unresolved_method_checkpoint(saved_checkpoint);
-    let body = body?;
+    let body = crate::opcode::parse_body(r, version)?;
     // Sizeless inner tree => version 0 (the caller ran rule 1012 first), so methods
     // resolve against the v5 registry; a v6-only OR genuinely-unknown id makes Scala
     // throw a method-resolution `ValidationException`, hardened by the caller.
@@ -1899,6 +1923,40 @@ mod tests {
             matches!(&err, ReadError::HardReject(m) if m.contains("does not resolve in the v5 registry")),
             "got {err:?}",
         );
+    }
+
+    /// A sizeless v0 nested `SBox`-constant script carrying the v6-only embeddable
+    /// type `SUnsignedBigInt` (code 9) must be gated against the INNER tree's own
+    /// version (0), NOT the enclosing tree's. We pre-set the reader's
+    /// `ergo_tree_version` to `Some(3)` (a v3+ outer context); the nested parse must
+    /// still reject code 9 because its own header is v0. Without the per-nested-tree
+    /// version scoping, the inner script would inherit `Some(3)` and wrongly accept —
+    /// accept-invalid (codex P1).
+    #[test]
+    fn sbox_constant_sizeless_unsigned_bigint_gated_by_inner_version() {
+        // The v6-only type must reject under the INNER v0 version whether it appears
+        // inline in the body OR as a segregated constant (which is read BEFORE the
+        // body) — both are within the nested tree's own version scope.
+        let inners = [
+            // inline: header 0x00 + Const(SUnsignedBigInt) (type 0x09 + len 0x00).
+            "000900",
+            // const-segregated: header 0x10 (v0+cseg) + count 0x01 + segregated
+            // Const(SUnsignedBigInt) (09 00) + body ConstPlaceholder(0) (73 00).
+            "100109007300",
+        ];
+        for inner_hex in inners {
+            let inner = hex::decode(inner_hex).unwrap();
+            let box_bytes = sbox_constant_bytes(&inner);
+            let mut r = VlqReader::new(&box_bytes);
+            r.set_ergo_tree_version(Some(3)); // simulate a v3+ enclosing tree
+            let err = read_value(&mut r, &SigmaType::SBox).expect_err(&format!(
+                "sizeless v0 nested script ({inner_hex}) with SUnsignedBigInt must reject under inner version 0",
+            ));
+            assert!(
+                matches!(&err, ReadError::HardReject(m) if m.contains("SUnsignedBigInt")),
+                "inner {inner_hex}: got {err:?}",
+            );
+        }
     }
 
     /// A sizeless `version != 0` nested box script violates rule 1012
