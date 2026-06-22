@@ -561,6 +561,7 @@ fn parse_sizeless_inner_box_script_scoped(
     version: u8,
     cseg: bool,
 ) -> Result<(), ReadError> {
+    let mut constants = Vec::new();
     if cseg {
         // Nested-tree `deserializeConstants` reads the count via `getUInt().toInt`
         // (non-exact), same as the top-level tree: an overflowed count wraps
@@ -571,8 +572,9 @@ fn parse_sizeless_inner_box_script_scoped(
                 "unreasonable constant count in inner tree: {count}"
             )));
         }
+        constants.reserve(count.min(4096));
         for _ in 0..count {
-            let _ = read_constant(r)?;
+            constants.push(read_constant(r)?);
         }
     }
     let body = crate::opcode::parse_body(r, version)?;
@@ -583,6 +585,19 @@ fn parse_sizeless_inner_box_script_scoped(
         return Err(ReadError::InvalidData(format!(
             "nested box script: method ({type_id}, {method_id}) does not resolve in the v5 registry for tree version {version}"
         )));
+    }
+    // CheckDeserializedScriptIsSigmaProp (rule 1001): the inner box script is
+    // deserialized with `checkType = true` too, so a determinable non-SigmaProp
+    // root (bare Boolean/Long `Const`, `TrueLeaf`/`FalseLeaf`, or a placeholder
+    // resolving to one) is a sizeless `ValidationException` Scala re-raises as a
+    // `SerializerException` — hardened by the caller. Mirrors the box-reader
+    // `check_sigma_prop_root` gate for the top-level tree.
+    if let Some(tpe) = crate::ergo_tree::determinable_root_type_of(&body, &constants) {
+        if tpe != crate::sigma_type::SigmaType::SSigmaProp {
+            return Err(ReadError::InvalidData(format!(
+                "nested box script: sizeless root has type {tpe:?}, expected SigmaProp (CheckDeserializedScriptIsSigmaProp, rule 1001)"
+            )));
+        }
     }
     Ok(())
 }
@@ -1994,6 +2009,22 @@ mod tests {
         assert!(r.is_empty(), "box-field boundary must land exactly at end");
         assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
         roundtrip_value(&SigmaType::SBox, &val);
+    }
+
+    /// A nested `SBox`-constant whose inner script is a sizeless Boolean-root tree
+    /// (`00 01 73` = Const(SBoolean, true)) must REJECT, matching Scala's
+    /// `CheckDeserializedScriptIsSigmaProp` (rule 1001) on the inner root — the
+    /// same gate `check_sigma_prop_root` enforces for a top-level box script. The
+    /// valid SigmaProp-root case above proves this does not over-reject.
+    #[test]
+    fn sbox_constant_sizeless_non_sigmaprop_root_rejects() {
+        let tree = hex::decode("000173").unwrap();
+        let box_bytes = sbox_constant_bytes(&tree);
+        let mut r = VlqReader::new(&box_bytes);
+        assert!(
+            read_value(&mut r, &SigmaType::SBox).is_err(),
+            "nested sizeless Boolean-root box script must reject (rule 1001)"
+        );
     }
 
     /// `harden_sizeless_inner_error` turns ANY soft inner-parse failure of a

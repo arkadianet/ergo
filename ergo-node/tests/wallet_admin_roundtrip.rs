@@ -118,9 +118,11 @@ impl TxSubmitter for RejectingSubmitter {
 /// always-true output) + its computed tx id. Enough to drive the `send.signed`
 /// path (txId computation + idempotency); it is never actually validated here.
 fn minimal_signed_tx() -> (Vec<u8>, [u8; 32]) {
+    // `00 08 d3` = Const(SSigmaProp, TrivialProp::true): a SigmaProp root, the
+    // only kind a box script may have (CheckDeserializedScriptIsSigmaProp).
     let tree =
         ergo_ser::ergo_tree::read_ergo_tree(&mut ergo_primitives::reader::VlqReader::new(&[
-            0x00, 0x01, 0x01,
+            0x00, 0x08, 0xd3,
         ]))
         .unwrap();
     let out = ergo_ser::ergo_box::ErgoBoxCandidate::new(

@@ -72,10 +72,20 @@ fn main() -> ExitCode {
         i += 1;
     }
 
-    // Reject a misspelled/unsupported --surface so a typo can't silently run
-    // zero checks and look clean.
+    // Reject a misspelled/unsupported --surface so a typo can't silently run zero
+    // checks and look clean. `--oracle` (campaign OR repro) uses the oracle
+    // surfaces (a comparable subset, plus the oracle-only `reduce` surface); the
+    // hermetic paths use the hermetic registry. Both `--repro` modes follow their
+    // selected execution mode below, so oracle-only surfaces stay replayable.
     if let Some(s) = &only {
-        let known = ergo_difftest::surfaces::names();
+        let known: Vec<&str> = if oracle_mode {
+            ergo_difftest::oracle::oracle_surfaces()
+                .iter()
+                .map(|spec| spec.name)
+                .collect()
+        } else {
+            ergo_difftest::surfaces::names()
+        };
         if !known.contains(&s.as_str()) {
             eprintln!(
                 "--surface: unknown surface {s:?}; known: {}",
@@ -85,12 +95,17 @@ fn main() -> ExitCode {
         }
     }
 
-    // --repro: triage a single input and exit.
+    // --repro: triage a single input and exit. Under `--oracle` it replays the one
+    // input against the JVM oracle (so a `reduce` finding can be reproduced from
+    // the CLI); otherwise it runs the hermetic decoders.
     if let Some(hex) = repro {
         let Some(bytes) = from_hex(&hex) else {
             eprintln!("--repro: not valid hex");
             return ExitCode::from(2);
         };
+        if oracle_mode {
+            return run_oracle_repro(&bytes, oracle_script, only.as_deref());
+        }
         let mut any_bug = false;
         for (name, outcome) in run_input(&bytes, only.as_deref()) {
             match outcome {
@@ -114,7 +129,7 @@ fn main() -> ExitCode {
     };
 
     if oracle_mode {
-        return run_oracle(seed, iters, oracle_script, &corpus);
+        return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus);
     }
 
     println!(
@@ -145,8 +160,16 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Differential campaign against the JVM reference oracle (ergo_tree surface).
-fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>]) -> ExitCode {
+/// Differential campaign against the JVM reference oracle. Without `only` it
+/// diffs every oracle surface per input; with `only` it restricts to that one
+/// (already validated against the oracle surface set in `main`).
+fn run_oracle(
+    seed: u64,
+    iters: u64,
+    script: Option<String>,
+    only: Option<&str>,
+    corpus: &[Vec<u8>],
+) -> ExitCode {
     use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
     use ergo_difftest::rng::Rng;
 
@@ -162,7 +185,10 @@ fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>])
         }
     };
 
-    let surfaces = oracle_surfaces();
+    let surfaces: Vec<_> = oracle_surfaces()
+        .into_iter()
+        .filter(|spec| only.is_none_or(|o| spec.name == o))
+        .collect();
     let mut rng = Rng::new(seed);
     // Dedup by root-cause signature so a soak reports unique CLASSES (with a
     // count + one representative), not thousands of instances of the same bug.
@@ -215,6 +241,53 @@ fn run_oracle(seed: u64, iters: u64, script: Option<String>, corpus: &[Vec<u8>])
         );
     }
     ExitCode::FAILURE
+}
+
+/// Replay a SINGLE input against the JVM oracle (the `--oracle --repro` path), so
+/// a campaign finding — including an oracle-only surface like `reduce` — can be
+/// reproduced and triaged from the CLI. Diffs every oracle surface (or just
+/// `only`) for the one input and prints the node vs JVM verdicts.
+fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) -> ExitCode {
+    use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
+
+    let script = script.unwrap_or_else(|| "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala".into());
+    eprintln!(
+        "oracle: spawning `scala-cli run {script}` (first run resolves deps, may take ~1 min)..."
+    );
+    let mut oracle = match Oracle::spawn(&script) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("oracle: spawn failed: {e}\n(is scala-cli on PATH?)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let surfaces: Vec<_> = oracle_surfaces()
+        .into_iter()
+        .filter(|spec| only.is_none_or(|o| spec.name == o))
+        .collect();
+    let mut any_divergence = false;
+    for spec in &surfaces {
+        match diff(spec, bytes, &mut oracle) {
+            Ok(None) => println!("  [{:>13}]  {}", "agree", spec.name),
+            Ok(Some(d)) => {
+                any_divergence = true;
+                println!(
+                    "  [{:?}] {}\n    rust={:?}\n    jvm ={:?}",
+                    d.kind, spec.name, d.rust, d.jvm
+                );
+            }
+            Err(e) => {
+                eprintln!("oracle: pipe error on surface {}: {e}", spec.name);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if any_divergence {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// Root-cause signature for deduping divergences: surface + kind + each side's

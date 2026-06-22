@@ -23,12 +23,22 @@
 
 import scala.io.StdIn
 import scorex.util.encode.Base16
-import sigma.VersionContext
-import sigma.serialization.{ConstantSerializer, ErgoTreeSerializer, SigmaSerializer, TypeSerializer}
+import scorex.util.bytesToId
+import sigma.{Colls, Header, PreHeader, VersionContext}
+import sigma.crypto.CryptoConstants
+import sigma.data.{AvlTreeData, SigmaBoolean, CSigmaProp}
+import sigma.interpreter.ContextExtension
+import sigma.ast.{ErgoTree, JitCost}
+import sigma.serialization.{ConstantSerializer, ErgoTreeSerializer, GroupElementSerializer, SigmaSerializer, TypeSerializer}
 import sigma.ast.DeserializationSigmaBuilder
-import org.ergoplatform.ErgoBoxCandidate
+import sigma.util.Extensions.EcpOps
+import org.ergoplatform.{ErgoBox, ErgoBoxCandidate, ErgoLikeContext, ErgoLikeTransaction}
+import org.ergoplatform.validation.ValidationRules
 import org.ergoplatform.modifiers.mempool.ErgoTransactionSerializer
 import org.ergoplatform.modifiers.history.header.HeaderSerializer
+import sigmastate.eval.CPreHeader
+import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator}
+import sigmastate.interpreter.CErgoTreeEvaluator.DefaultEvalSettings
 
 object ErgoSerdeOracle {
   private val tree = ErgoTreeSerializer.DefaultSerializer
@@ -43,6 +53,74 @@ object ErgoSerdeOracle {
   private def acc(canon: => String): String =
     try "ACCEPT " + canon
     catch { case _: Throwable => "ACCEPT" }
+
+  // ── reduce surface: deserialize + reduce-to-crypto, diff (sigma prop, JIT cost) ──
+  // Replicates the SANTA blesser EvalCore.dummyContext (the test-scoped
+  // ErgoLikeContextTesting.dummy isn't in the published jar): the SELF box IS the
+  // tree at value 1M, the sole input; no data/outputs; empty extension; activated=3.
+  // The node's `reduce_expr_with_cost` over a matching ReductionContext is the twin.
+  private val dummyPubkey: Array[Byte] =
+    GroupElementSerializer.toBytes(CryptoConstants.dlogGroup.generator)
+
+  private def dummyPreHeader(height: Int, activated: Byte): PreHeader = CPreHeader(
+    version = (activated + 1).toByte,
+    parentId = Colls.fromArray(Array.fill(32)(0: Byte)),
+    timestamp = 3L,
+    nBits = 0L,
+    height = height,
+    minerPk = GroupElementSerializer.parse(SigmaSerializer.startReader(dummyPubkey)).toGroupElement,
+    votes = Colls.fromArray(Array.fill(3)(0: Byte))
+  )
+
+  private def dummyReduceContext(tree: ErgoTree, activatedVersion: Byte): ErgoLikeContext = {
+    val selfBox = new ErgoBox(
+      value = 1000000L, ergoTree = tree,
+      transactionId = bytesToId(Array.fill(32)(0: Byte)), index = 0.toShort, creationHeight = 0)
+    new ErgoLikeContext(
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      headers = Colls.emptyColl[Header],
+      preHeader = dummyPreHeader(0, activatedVersion),
+      dataBoxes = IndexedSeq.empty,
+      boxesToSpend = IndexedSeq(selfBox),
+      spendingTransaction = ErgoLikeTransaction(IndexedSeq(), IndexedSeq()),
+      selfIndex = 0,
+      extension = ContextExtension.empty,
+      validationSettings = ValidationRules.currentSettings,
+      costLimit = DefaultEvalSettings.scriptCostLimitInEvaluator,
+      initCost = 0L,
+      activatedScriptVersion = activatedVersion
+    ).withErgoTreeVersion(tree.version)
+  }
+
+  // Canonical repr of the reduced root: a SigmaProp → its SigmaBoolean bytes (what
+  // gets proven on-chain). A Bool root is coerced to TrivialProp(true/false), exactly
+  // as the node's `reduce_expr_with_cost` coerces `Value::Bool` → `SigmaBoolean`, so
+  // both sides emit the same `P:` form. A non-prop/non-bool reduced root is REJECTED
+  // (a box script with such a root is rejected at deserialize by
+  // CheckDeserializedScriptIsSigmaProp anyway) by throwing — propagated to `handle`
+  // as a REJECT — so the oracle does not ACCEPT a value the node's `reduce_verdict`
+  // rejects (its `reduce_expr_with_cost` errors on a non-SigmaProp/Bool root).
+  private def reduceRepr(v: Any): String = v match {
+    case sp: CSigmaProp => "P:" + Base16.encode(SigmaBoolean.serializer.toBytes(sp.sigmaTree))
+    case b: Boolean     => "P:" + Base16.encode(SigmaBoolean.serializer.toBytes(
+      if (b) sigma.data.TrivialProp.TrueProp else sigma.data.TrivialProp.FalseProp))
+    case other          =>
+      throw new IllegalArgumentException("reduced root is not SigmaProp/Bool: " + other.getClass.getSimpleName)
+  }
+
+  private def reduce(bytes: Array[Byte]): String = {
+    val t = tree.deserializeErgoTree(bytes)
+    VersionContext.withVersions(3.toByte, t.version) {
+      val ctx = dummyReduceContext(t, 3.toByte)
+      val accu = new CostAccumulator(
+        JitCost.fromBlockCost(0),
+        Some(JitCost.fromBlockCost(Math.toIntExact(ctx.costLimit))))
+      val (v, _blockCost) = CErgoTreeEvaluator.eval(
+        ctx.toSigmaContext(), accu, t.constants,
+        t.toProposition(t.isConstantSegregation && t.hasDeserialize), DefaultEvalSettings)
+      "ACCEPT " + reduceRepr(v) + "|" + accu.totalCost.value
+    }
+  }
 
   def handle(surface: String, hexStr: String): String =
     Base16.decode(hexStr) match {
@@ -83,6 +161,7 @@ object ErgoSerdeOracle {
             case "header" =>
               val h = HeaderSerializer.parseBytes(bytes)
               acc(hex(HeaderSerializer.toBytes(h)))
+            case "reduce" => reduce(bytes)
             case other => "ERR unsupported-surface:" + other
           }
           }

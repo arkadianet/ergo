@@ -1,11 +1,22 @@
-//! Consensus parity for ill-formed UTF-8 in `STypeVar` names: the Scala
-//! reference node decodes the name with the JVM's lossy `new String(UTF_8)`,
-//! so an ErgoTree carrying such a name must parse (not reject) and, when
-//! re-serialized from structure, reproduce the JVM-canonical bytes.
+//! Consensus parity for `STypeVar`-bearing trees whose ROOT is non-`SigmaProp`.
 //!
-//! Oracle: the `expected_bytes_hex` column is the JVM (`rudolph`)
-//! re-serialization shipped in the SANTA `STypeVar.name_utf8_roundtrip`
-//! wire vector — an external oracle, never computed from this crate.
+//! Each vector is a v3 (header `0x1b` = v3 + has_size + const-segregation) tree
+//! whose body is a `BlockValue` of a polymorphic `FunDef`/`FuncValue` (the only
+//! place an ill-formed-UTF-8 `STypeVar` name occurs on the wire) with a non-
+//! SigmaProp result. Because the root is non-`SigmaProp`, the Scala reference's
+//! `deserializeErgoTree` (checkType = true) fails `CheckDeserializedScriptIsSigma`
+//! `Prop` (rule 1001) and, under has_size, SOFT-FORK-WRAPS the tree as an
+//! `UnparsedErgoTree`, preserving the proposition bytes VERBATIM (so the
+//! ill-formed name is NOT lossily decoded). The node must match: with the
+//! rule-1001 root typing complete (`determinable_root_type` recurses into the
+//! `BlockValue` result), `read_ergo_tree` wraps these the same way and
+//! re-serializes byte-identically to the input.
+//!
+//! Oracle: each `expected_hex` is the JVM `ergo_tree`-surface re-serialization
+//! (sigma-state 6.0.2, activated v3) — verified to echo the input verbatim. The
+//! lossy `new String(UTF_8)` decode itself (which fires only when an STypeVar is
+//! actually PARSED, i.e. in a SigmaProp-rooted/sizeless context) is unit-tested
+//! in `ergo-ser/src/jvm_utf8.rs`.
 
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
@@ -24,43 +35,47 @@ fn to_hex(b: &[u8]) -> String {
 
 // ----- oracle parity -----
 
-/// SANTA `STypeVar.name_utf8_roundtrip` vectors (input -> JVM-canonical).
-/// All inputs are header 0x1b = v3 + has_size + const-segregation.
+/// `(name, input_hex, expected_hex)` — `expected_hex` is the JVM-verbatim
+/// (soft-fork-wrapped) re-serialization, which equals the input for these
+/// non-SigmaProp-rooted has_size trees.
 const VECTORS: &[(&str, &str, &str)] = &[
     (
         "ff",
         "1b1501040ad801d701016701ffd901026701ff72027300",
-        "1b1901040ad801d701016703efbfbdd901026703efbfbd72027300",
+        "1b1501040ad801d701016701ffd901026701ff72027300",
     ),
     (
         "e282",
         "1b1701040ad801d701016702e282d901026702e28272027300",
-        "1b1901040ad801d701016703efbfbdd901026703efbfbd72027300",
+        "1b1701040ad801d701016702e282d901026702e28272027300",
     ),
     (
         "c080",
         "1b1701040ad801d701016702c080d901026702c08072027300",
-        "1b1f01040ad801d701016706efbfbdefbfbdd901026706efbfbdefbfbd72027300",
+        "1b1701040ad801d701016702c080d901026702c08072027300",
     ),
     (
         "eda080",
         "1b1901040ad801d701016703eda080d901026703eda08072027300",
-        "1b1901040ad801d701016703efbfbdd901026703efbfbd72027300",
+        "1b1901040ad801d701016703eda080d901026703eda08072027300",
     ),
     (
         "61ff62",
         "1b1901040ad801d70101670361ff62d90102670361ff6272027300",
-        "1b1d01040ad801d70101670561efbfbd62d90102670561efbfbd6272027300",
+        "1b1901040ad801d70101670361ff62d90102670361ff6272027300",
     ),
 ];
 
+/// A non-SigmaProp-rooted has_size tree soft-fork-wraps (rule 1001) and
+/// re-serializes VERBATIM, matching the JVM — the ill-formed STypeVar name is
+/// preserved, not lossily decoded, because the wrapped body is never parsed.
 #[test]
-fn stypevar_illformed_name_parses_and_reserializes_to_jvm_canonical() {
+fn stypevar_nonsigma_root_softfork_wraps_verbatim_matching_jvm() {
     for (name, input_hex, expected_hex) in VECTORS {
         let input = hx(input_hex);
         let mut r = VlqReader::new(&input);
         let tree = read_ergo_tree(&mut r)
-            .unwrap_or_else(|e| panic!("[{name}] expected lossy parse to accept, got {e:?}"));
+            .unwrap_or_else(|e| panic!("[{name}] expected soft-fork wrap to accept, got {e:?}"));
 
         let mut w = VlqWriter::new();
         write_ergo_tree(&mut w, &tree)
@@ -68,7 +83,7 @@ fn stypevar_illformed_name_parses_and_reserializes_to_jvm_canonical() {
         assert_eq!(
             to_hex(&w.result()),
             *expected_hex,
-            "[{name}] re-serialization must match the JVM-canonical bytes"
+            "[{name}] non-SigmaProp-root has_size tree must re-serialize verbatim (JVM wrap)"
         );
     }
 }

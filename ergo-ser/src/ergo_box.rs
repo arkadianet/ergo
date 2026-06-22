@@ -147,6 +147,9 @@ impl ErgoBoxCandidate {
                 "ergo_tree_bytes carry a method the tree's registry cannot resolve: {e}"
             ))
         })?;
+        crate::ergo_tree::check_sigma_prop_root(&parsed_tree).map_err(|e| {
+            WriteError::InvalidData(format!("ergo_tree_bytes have a non-SigmaProp root: {e}"))
+        })?;
         if !tr.is_empty() {
             return Err(WriteError::InvalidData(
                 "ergo_tree_bytes have trailing content after parse".into(),
@@ -277,6 +280,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
+    crate::ergo_tree::check_sigma_prop_root(&ergo_tree)?;
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
     let creation_height = r.get_u32_exact()?;
@@ -356,6 +360,7 @@ pub fn read_ergo_box_candidate_indexed(
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
+    crate::ergo_tree::check_sigma_prop_root(&ergo_tree)?;
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
@@ -476,6 +481,7 @@ pub fn parse_ergo_box_bytes(
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
+    crate::ergo_tree::check_sigma_prop_root(&ergo_tree)?;
 
     let creation_height = r.get_u32_exact()?;
     let token_count = r.get_u8()? as usize;
@@ -580,11 +586,13 @@ mod tests {
 
     /// A version-0 script with no size bit is the COMMON, valid case (P2PK etc.) —
     /// CheckHeaderSizeBit only requires the bit for version != 0, so it must parse.
+    /// The body must still be a SigmaProp root (`CheckDeserializedScriptIsSigmaProp`,
+    /// rule 1001): here `08 d3` is `Const(SSigmaProp, TrueProp)`.
     #[test]
     fn box_candidate_v0_script_without_size_bit_ok() {
-        // value(VLQ 1000) ++ tree `00 05 01` (v0, no-size, body Const(SLong,-1))
+        // value(VLQ 1000) ++ tree `00 08 d3` (v0, no-size, body Const(SSigmaProp,true))
         // ++ height(0) ++ 0 tokens ++ 0 regs.
-        let bytes = [0xE8u8, 0x07, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00];
+        let bytes = [0xE8u8, 0x07, 0x00, 0x08, 0xD3, 0x00, 0x00, 0x00];
         let mut r = VlqReader::new(&bytes);
         let res = read_ergo_box_candidate(&mut r);
         assert!(res.is_ok(), "v0-no-size box script must parse, got {res:?}");
