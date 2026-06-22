@@ -329,7 +329,7 @@ fn deserialize_box_script(
 fn build_dummy_self_box(
     tree: &ergo_ser::ergo_tree::ErgoTree,
     script_bytes: Vec<u8>,
-) -> ergo_sigma::evaluator::EvalBox {
+) -> Result<ergo_sigma::evaluator::EvalBox, String> {
     use ergo_primitives::digest::ModifierId;
     use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox, ErgoBoxCandidate};
     use ergo_ser::register::AdditionalRegisters;
@@ -351,9 +351,17 @@ fn build_dummy_self_box(
         transaction_id: ModifierId::from_bytes([0u8; 32]),
         index: 0,
     };
-    let raw_bytes = serialize_ergo_box(&boxed).unwrap_or_default();
-    let id = boxed.box_id().map(|d| *d.as_bytes()).unwrap_or([0u8; 32]);
-    EvalBox {
+    // Surface a serialization/id failure rather than masking it as empty
+    // `SELF.bytes` / a zero `SELF.id` (which would be a false reduce result for a
+    // contract that inspects them). The box is well-formed here, so this is a
+    // harness invariant — a failure is a real bug to report, not to swallow.
+    let raw_bytes = serialize_ergo_box(&boxed)
+        .map_err(|e| format!("dummy SELF box serialization failed: {e:?}"))?;
+    let id = boxed
+        .box_id()
+        .map(|d| *d.as_bytes())
+        .map_err(|e| format!("dummy SELF box id failed: {e:?}"))?;
+    Ok(EvalBox {
         value: 1_000_000,
         script_bytes,
         creation_height: 0,
@@ -364,7 +372,7 @@ fn build_dummy_self_box(
         tokens: vec![],
         raw_bytes,
         register_bytes,
-    }
+    })
 }
 
 fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
@@ -387,7 +395,10 @@ fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
     // `SELF.bytes` / `SELF.id` reduces to the SAME value on both sides (the bare
     // `EvalBox::simple` has empty bytes / zero id → a false divergence).
     let script_bytes = bytes[..consumed].to_vec();
-    let self_box = build_dummy_self_box(&tree, script_bytes);
+    let self_box = match build_dummy_self_box(&tree, script_bytes) {
+        Ok(b) => b,
+        Err(e) => return (Verdict::Reject(e), consumed),
+    };
     let inputs = [self_box];
     // Mirror EvalCore.dummyContext field-for-field so a script reading context
     // (preHeader.timestamp, minerPubkey, lastBlockUtxoRoot) reduces to the SAME

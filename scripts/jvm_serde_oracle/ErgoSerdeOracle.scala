@@ -95,13 +95,17 @@ object ErgoSerdeOracle {
   // Canonical repr of the reduced root: a SigmaProp → its SigmaBoolean bytes (what
   // gets proven on-chain). A Bool root is coerced to TrivialProp(true/false), exactly
   // as the node's `reduce_expr_with_cost` coerces `Value::Bool` → `SigmaBoolean`, so
-  // both sides emit the same `P:` form. Non-prop/bool roots (rejected at box
-  // deserialize by CheckDeserializedScriptIsSigmaProp anyway) → the runtime kind.
+  // both sides emit the same `P:` form. A non-prop/non-bool reduced root is REJECTED
+  // (a box script with such a root is rejected at deserialize by
+  // CheckDeserializedScriptIsSigmaProp anyway) by throwing — propagated to `handle`
+  // as a REJECT — so the oracle does not ACCEPT a value the node's `reduce_verdict`
+  // rejects (its `reduce_expr_with_cost` errors on a non-SigmaProp/Bool root).
   private def reduceRepr(v: Any): String = v match {
     case sp: CSigmaProp => "P:" + Base16.encode(SigmaBoolean.serializer.toBytes(sp.sigmaTree))
     case b: Boolean     => "P:" + Base16.encode(SigmaBoolean.serializer.toBytes(
       if (b) sigma.data.TrivialProp.TrueProp else sigma.data.TrivialProp.FalseProp))
-    case other          => "V:" + other.getClass.getSimpleName
+    case other          =>
+      throw new IllegalArgumentException("reduced root is not SigmaProp/Bool: " + other.getClass.getSimpleName)
   }
 
   private def reduce(bytes: Array[Byte]): String = {
