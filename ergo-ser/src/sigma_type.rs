@@ -410,18 +410,10 @@ pub fn decode_type(r: &mut VlqReader, byte: u8) -> Result<SigmaType, ReadError> 
 fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<SigmaType, ReadError> {
     let next = depth + 1;
     match byte {
-        // Primitive embeddable types (1..=11)
-        1 => Ok(SigmaType::SBoolean),
-        2 => Ok(SigmaType::SByte),
-        3 => Ok(SigmaType::SShort),
-        4 => Ok(SigmaType::SInt),
-        5 => Ok(SigmaType::SLong),
-        6 => Ok(SigmaType::SBigInt),
-        7 => Ok(SigmaType::SGroupElement),
-        8 => Ok(SigmaType::SSigmaProp),
-        9 => Ok(SigmaType::SUnsignedBigInt),
-        10 => Ok(SigmaType::SReserved10),
-        11 => Ok(SigmaType::SReserved11),
+        // Primitive embeddable types (1..=11), version-gated exactly like Scala's
+        // `getEmbeddableType` (embeddableV5 = codes 1..=8 pre-v3; embeddableV6 adds
+        // SUnsignedBigInt = code 9 at v3+).
+        1..=11 => prim_from_code(byte, embeddable_gate_version(r)),
 
         // Special non-embeddable
         SANY_CODE => Ok(SigmaType::SAny),
@@ -509,6 +501,7 @@ fn decode_constructor_at_depth(
     let constr_id = byte / PRIM_RANGE;
     let prim_id = byte % PRIM_RANGE;
     let next = depth + 1;
+    let gate_v = embeddable_gate_version(r);
 
     match constr_id {
         // constrId 1: Coll[T]
@@ -516,7 +509,7 @@ fn decode_constructor_at_depth(
             let elem = if prim_id == 0 {
                 read_type_at_depth(r, next)?
             } else {
-                prim_from_code(prim_id)?
+                prim_from_code(prim_id, gate_v)?
             };
             Ok(SigmaType::SColl(Box::new(elem)))
         }
@@ -526,7 +519,7 @@ fn decode_constructor_at_depth(
             let inner = if prim_id == 0 {
                 read_type_at_depth(r, next)?
             } else {
-                prim_from_code(prim_id)?
+                prim_from_code(prim_id, gate_v)?
             };
             Ok(SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(
                 inner,
@@ -538,7 +531,7 @@ fn decode_constructor_at_depth(
             let elem = if prim_id == 0 {
                 read_type_at_depth(r, next)?
             } else {
-                prim_from_code(prim_id)?
+                prim_from_code(prim_id, gate_v)?
             };
             Ok(SigmaType::SOption(Box::new(elem)))
         }
@@ -548,7 +541,7 @@ fn decode_constructor_at_depth(
             let inner = if prim_id == 0 {
                 read_type_at_depth(r, next)?
             } else {
-                prim_from_code(prim_id)?
+                prim_from_code(prim_id, gate_v)?
             };
             Ok(SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(
                 inner,
@@ -562,7 +555,7 @@ fn decode_constructor_at_depth(
                 let t2 = read_type_at_depth(r, next)?;
                 Ok(SigmaType::STuple(vec![t1, t2]))
             } else {
-                let t1 = prim_from_code(prim_id)?;
+                let t1 = prim_from_code(prim_id, gate_v)?;
                 let t2 = read_type_at_depth(r, next)?;
                 Ok(SigmaType::STuple(vec![t1, t2]))
             }
@@ -578,7 +571,7 @@ fn decode_constructor_at_depth(
                 Ok(SigmaType::STuple(vec![t1, t2, t3]))
             } else {
                 let t1 = read_type_at_depth(r, next)?;
-                let t2 = prim_from_code(prim_id)?;
+                let t2 = prim_from_code(prim_id, gate_v)?;
                 Ok(SigmaType::STuple(vec![t1, t2]))
             }
         }
@@ -593,7 +586,7 @@ fn decode_constructor_at_depth(
                 let t4 = read_type_at_depth(r, next)?;
                 Ok(SigmaType::STuple(vec![t1, t2, t3, t4]))
             } else {
-                let t = prim_from_code(prim_id)?;
+                let t = prim_from_code(prim_id, gate_v)?;
                 Ok(SigmaType::STuple(vec![t.clone(), t]))
             }
         }
@@ -604,7 +597,22 @@ fn decode_constructor_at_depth(
     }
 }
 
-fn prim_from_code(code: u8) -> Result<SigmaType, ReadError> {
+/// ErgoTree version at/above which the v6/EIP-50 embeddable set (`embeddableV6`,
+/// adding `SUnsignedBigInt` = code 9) is in effect; below it Scala uses
+/// `embeddableV5` (codes 1..=8). Matches `isV3OrLaterErgoTreeVersion`.
+const V6_EMBEDDABLE_TREE_VERSION: u8 = 3;
+
+/// The version used to gate embeddable type codes: the body's header version when
+/// parsing inside a tree, else the activated/v6 set (a headerless register /
+/// context-var value deserializes under the activated version, where the v6 set
+/// applies and `SUnsignedBigInt` values are instead rejected by the V6-type value
+/// gate). Mirrors Scala `TypeSerializer.getEmbeddableType` selecting
+/// `embeddableV5` vs `embeddableV6` by `VersionContext.current`.
+fn embeddable_gate_version(r: &VlqReader) -> u8 {
+    r.ergo_tree_version().unwrap_or(V6_EMBEDDABLE_TREE_VERSION)
+}
+
+fn prim_from_code(code: u8, gate_version: u8) -> Result<SigmaType, ReadError> {
     match code {
         1 => Ok(SigmaType::SBoolean),
         2 => Ok(SigmaType::SByte),
@@ -614,7 +622,16 @@ fn prim_from_code(code: u8) -> Result<SigmaType, ReadError> {
         6 => Ok(SigmaType::SBigInt),
         7 => Ok(SigmaType::SGroupElement),
         8 => Ok(SigmaType::SSigmaProp),
-        9 => Ok(SigmaType::SUnsignedBigInt),
+        // `SUnsignedBigInt` (code 9) is in `embeddableV6` only: a pre-v3 tree's
+        // `getEmbeddableType` selects `embeddableV5` (length 9 → code 9 out of
+        // range) and throws a soft `ValidationException` (rule 1016), which
+        // `deserializeErgoTree` catches → `UnparsedErgoTree` under has_size, and
+        // hard-rejects sizeless. The node previously accepted code 9 at any
+        // version and then hard-rejected on the bigint value read — a reject-valid.
+        9 if gate_version >= V6_EMBEDDABLE_TREE_VERSION => Ok(SigmaType::SUnsignedBigInt),
+        9 => Err(ReadError::InvalidData(format!(
+            "embeddable type SUnsignedBigInt (code 9) requires ErgoTree version >= {V6_EMBEDDABLE_TREE_VERSION}, got tree version {gate_version}"
+        ))),
         10 => Ok(SigmaType::SReserved10),
         11 => Ok(SigmaType::SReserved11),
         _ => Err(ReadError::InvalidData(format!(
@@ -633,6 +650,41 @@ mod tests {
         let mut w = VlqWriter::new();
         write_type(&mut w, t).unwrap();
         w.result()
+    }
+
+    // ----- oracle parity -----
+
+    /// `SUnsignedBigInt` (embeddable code 9) is in `embeddableV6` only: Scala's
+    /// `getEmbeddableType` selects `embeddableV5` (codes 1..=8) for a pre-v3 tree
+    /// and throws, vs `embeddableV6` (adds code 9) at v3+. The version-gated
+    /// `prim_from_code` must match: reject code 9 below v3, accept at v3+. Codes
+    /// 1..=8 are version-independent.
+    #[test]
+    fn unsigned_bigint_embeddable_code_gated_by_tree_version() {
+        for v in 0u8..=2 {
+            assert!(
+                prim_from_code(9, v).is_err(),
+                "code 9 (SUnsignedBigInt) must be rejected at tree version {v} (embeddableV5)"
+            );
+        }
+        for v in 3u8..=4 {
+            assert_eq!(
+                prim_from_code(9, v).unwrap(),
+                SigmaType::SUnsignedBigInt,
+                "code 9 must resolve at tree version {v} (embeddableV6)"
+            );
+        }
+        // The v5 embeddables (1..=8) are version-independent.
+        for code in 1u8..=8 {
+            assert!(prim_from_code(code, 0).is_ok());
+            assert!(prim_from_code(code, 3).is_ok());
+        }
+        // A headerless context (None → v6 default) admits code 9 at the TYPE layer
+        // (the value gate rejects the unsigned-bigint value separately).
+        let mut r = VlqReader::new(&[]);
+        assert_eq!(embeddable_gate_version(&r), V6_EMBEDDABLE_TREE_VERSION);
+        r.set_ergo_tree_version(Some(1));
+        assert_eq!(embeddable_gate_version(&r), 1);
     }
 
     fn roundtrip(t: &SigmaType) {

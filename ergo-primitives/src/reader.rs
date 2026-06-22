@@ -33,6 +33,14 @@ pub struct VlqReader<'a> {
     /// tree as `UnparsedErgoTree` — the points AFTER that method are never reached by
     /// Scala and must not be curve-checked here.
     unresolved_method_checkpoint: Option<usize>,
+    /// The ErgoTree header version of the body currently being parsed, or `None`
+    /// for a headerless context (register / context-var values, which deserialize
+    /// under the activated version, not a tree-header version). Read by the type
+    /// decoder to version-gate embeddable type codes exactly as Scala's
+    /// `TypeSerializer.getEmbeddableType` selects `embeddableV5` vs `embeddableV6`
+    /// by `isV3OrLaterErgoTreeVersion`. Set by the ErgoTree body parser around the
+    /// body (and segregated constants); `None` defaults to the v6/activated set.
+    ergo_tree_version: Option<u8>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -97,6 +105,7 @@ impl<'a> VlqReader<'a> {
             position_limit: None,
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
+            ergo_tree_version: None,
         }
     }
 
@@ -149,6 +158,20 @@ impl<'a> VlqReader<'a> {
     /// body, restore after.
     pub fn restore_unresolved_method_checkpoint(&mut self, saved: Option<usize>) {
         self.unresolved_method_checkpoint = saved;
+    }
+
+    /// The ErgoTree header version of the body being parsed (`None` = headerless
+    /// context → activated/v6 type set). Read by the type decoder to gate
+    /// embeddable type codes per version. See [`ergo_tree_version`](Self::ergo_tree_version).
+    pub fn ergo_tree_version(&self) -> Option<u8> {
+        self.ergo_tree_version
+    }
+
+    /// Set the ErgoTree header version for the body about to be parsed. Save the
+    /// prior value and restore it afterwards when the reader continues past the
+    /// tree (a box reader parses the tree then headerless register values).
+    pub fn set_ergo_tree_version(&mut self, version: Option<u8>) {
+        self.ergo_tree_version = version;
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped

@@ -311,6 +311,10 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             let body_view = r.data_slice(body_start, body_start + r.remaining());
             let mut inner = VlqReader::new(body_view);
             inner.set_position_limit(Some(body_budget));
+            // Gate embeddable type codes (e.g. SUnsignedBigInt, v6-only) against
+            // this tree's header version, like Scala's version-scoped
+            // `getEmbeddableType`. Covers segregated constants + the body.
+            inner.set_ergo_tree_version(Some(version));
             let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
             (
                 parsed,
@@ -422,7 +426,16 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             }
         }
     } else {
-        parse_body(r, version, has_size, constant_segregation).map(|tree| (tree, false))
+        // Sizeless body parses directly on `r`; scope the version gate to the body
+        // and restore it so subsequent reads (box fields, an enclosing tree) are
+        // unaffected. A v6-only embeddable type in a sizeless v<3 tree errors
+        // (`InvalidData`); the box-script readers propagate it as a reject, matching
+        // Scala re-raising the uncaught `ValidationException` as a hard reject.
+        let saved_v = r.ergo_tree_version();
+        r.set_ergo_tree_version(Some(version));
+        let parsed = parse_body(r, version, has_size, constant_segregation);
+        r.set_ergo_tree_version(saved_v);
+        parsed.map(|tree| (tree, false))
     }
 }
 
@@ -1715,6 +1728,30 @@ mod tests {
     fn check_resolvable_methods_accepts_valid_sizeless_tree() {
         let tree = parse_tree("0008d3");
         assert!(check_resolvable_methods(&tree).is_ok());
+    }
+
+    /// A size-delimited pre-v3 tree whose body carries the v6-only embeddable type
+    /// `SUnsignedBigInt` (code 9, here `Coll[SUnsignedBigInt]`) wraps as
+    /// `UnparsedErgoTree` — Scala's `getEmbeddableType` selects `embeddableV5`
+    /// (codes 1..=8) at version 1 and throws a soft `ValidationException` caught
+    /// under has_size. Oracle (sigma-state 6.0.2): `09061501f0a20400` →
+    /// `UNPARSED bytes=8`. The node previously accepted the type and hard-rejected
+    /// on the over-large bigint value read — a reject-valid.
+    #[test]
+    fn pre_v3_unsigned_bigint_embeddable_type_wraps_unparsed() {
+        // header 0x09 (v1, has_size), size 6, body = Coll[SUnsignedBigInt](0x15)
+        // + coll count 1 + over-large bigint length VLQ (f0a204) + 0x00.
+        let bytes = hex::decode("09061501f0a20400").unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).expect("wraps, not rejects");
+        assert_eq!(tree.version, 1);
+        assert!(
+            matches!(tree.body, crate::opcode::Expr::Unparsed(_)),
+            "pre-v3 SUnsignedBigInt-typed tree must wrap as Unparsed (Scala parity)"
+        );
+        // Wrap preserves the bytes verbatim.
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).unwrap();
+        assert_eq!(w.result(), bytes);
     }
 
     /// `check_tree_version_supported` HARD-rejects a tree whose version exceeds
