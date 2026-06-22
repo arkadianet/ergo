@@ -247,8 +247,11 @@ fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_type::SigmaTyp
 /// [`determinable_root_type`] over a raw `(body, constants)` pair — so the nested
 /// `SBox`-constant inner-script path (which parses a body + constants without
 /// building an [`ErgoTree`]) can run the same rule-1001 root-type judgement.
-/// Entry point: the root is typed in an empty binding environment.
-pub(crate) fn determinable_root_type_of(
+/// Entry point: the root is typed in an empty binding environment. `Some(SSigmaProp)`
+/// accepts, `Some(other)` is the wrap/reject verdict, and `None` is lenient (the
+/// root type is not statically determinable). Public so the `difftest --methodcall`
+/// harness can diff this exact verdict against the JVM reference.
+pub fn determinable_root_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
@@ -507,9 +510,10 @@ fn infer_type(
             // type-determining child — `determinable_root_type_of` only ever yields
             // an oracle-verified concrete type or `None`, so a non-determinable
             // child maps to `None` (lenient) and this can NEVER reject a tree Scala
-            // accepts. The heavier arg-dependent roots (MethodCall/PropertyCall —
-            // need the method-signature registry; ValUse/FuncApply — need a binding
-            // environment) stay lenient via the fallback below.
+            // accepts. `MethodCall`/`PropertyCall` are typed by
+            // [`method_call_result_type`] (the harness-verified registry);
+            // `FuncApply` still needs a binding environment and stays lenient via the
+            // fallback below.
             //
             // ArithOp (Minus/Plus/Multiply/Division/Modulo/Min/Max): `tpe =
             // left.tpe` and Scala does NOT type-check the operands at deserialize,
@@ -596,6 +600,17 @@ fn infer_type(
                 Some(SigmaType::SOption(elem)) => Some(*elem),
                 _ => None,
             },
+            // MethodCall / PropertyCall: the method's result static type, classified
+            // by the (type_id, method_id) registry the `difftest --methodcall`
+            // harness verified end-to-end against the JVM reference. See
+            // [`method_call_result_type`].
+            Payload::MethodCall {
+                type_id,
+                method_id,
+                obj,
+                args,
+                type_args,
+            } => method_call_result_type(*type_id, *method_id, obj, args, type_args, env, ctx),
             // A zero-argument (leaf) opcode root has a statically-known type and
             // NONE of them is `SSigmaProp` (see [`zero_arg_root_type`]), so a
             // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
@@ -609,6 +624,200 @@ fn infer_type(
     }
 }
 
+/// The result static type of a `MethodCall` / `PropertyCall`, for the rule-1001
+/// root judgement. Scala computes `MethodCall.tpe` as the SMethod's result type
+/// specialized for the receiver/arg types; the only methods whose specialized
+/// result can be `SigmaProp` are the 7 the `difftest --methodcall` harness verified
+/// END-TO-END against the JVM reference (every other of the 199 registered methods
+/// returns a concrete type or an `Option`/`Coll`/tuple wrapper — structurally never
+/// `SigmaProp`). Each of the 7 is a projection of the receiver / args / explicit
+/// type, exactly mirroring the `ByIndex` / `OptionGet` / `Fold` / `Deserialize`
+/// arms above. A result type VARIABLE that occurs more than once (`getOrElse`'s
+/// receiver + default, `fold`'s zero + op range) is reconciled with
+/// [`unify_occurrences`] — Scala `unifyTypeLists` makes the result `SigmaProp` only
+/// when ALL occurrences are, so checking just one would accept a tree Scala rejects.
+///
+/// (A determinable occurrence MISMATCH actually makes Scala THROW at deserialize —
+/// `specializeFor`'s `IllegalArgumentException` — which our structural parser does
+/// not replicate at parse time. The rule-1001 verdict still matches where it is
+/// enforced: this returns `SAny` (non-`SigmaProp`), so a SIZELESS conflict root is
+/// rejected as Scala rejects it. A has_size conflict tree is soft-fork-wrapped here
+/// vs hard-rejected by Scala — a pre-existing parse-layer accept-invalid, the safe
+/// direction, outside this rule-1001 root typer.)
+///
+/// Reject-valid-safe by construction:
+///  - a non-determinable projection returns `None` (lenient), so a SigmaProp-capable
+///    method whose receiver type we cannot pin never gets rejected;
+///  - every OTHER `(type_id, method_id)` returns `SAny` (non-`SigmaProp`). For the
+///    192 known non-landmine methods this is the harness's verified result; an
+///    UNKNOWN method is rejected by Scala at method resolution (so a non-`SigmaProp`
+///    root verdict matches). The landmine set MUST stay complete — adding a method
+///    here that can return `SigmaProp` without listing it would be a reject-valid.
+fn method_call_result_type(
+    type_id: u8,
+    method_id: u8,
+    obj: &crate::opcode::Expr,
+    args: &[crate::opcode::Expr],
+    type_args: &[crate::sigma_type::SigmaType],
+    env: TypeEnv,
+    ctx: &InferCtx,
+) -> Option<crate::sigma_type::SigmaType> {
+    use crate::sigma_type::SigmaType;
+    let arg_ty = |i: usize| args.get(i).and_then(|a| infer_type(a, env, ctx));
+    // The receiver's Coll / Option element type (the result type variable `IV`/`T`).
+    // Computed LAZILY and AT MOST ONCE per call — inferring the receiver eagerly for
+    // every MethodCall (including the non-landmine fallback) re-walks a nested
+    // MethodCall receiver chain on each level, which is exponential (a parse-time
+    // CPU DoS). The non-landmine / Global arms never touch the receiver.
+    let coll_elem = || match infer_type(obj, env, ctx) {
+        Some(SigmaType::SColl(elem)) => Some(*elem),
+        _ => None,
+    };
+    let opt_elem = || match infer_type(obj, env, ctx) {
+        Some(SigmaType::SOption(elem)) => Some(*elem),
+        _ => None,
+    };
+    // Each landmine's result is the receiver/explicit projection, GATED on every
+    // signature constraint Scala's `specializeFor` (`unifyTypeLists`) enforces: a
+    // FIXED-type arg must equal its signature type, and every additional occurrence
+    // of the result type variable must agree with the receiver/zero. A determinable
+    // violation leaves the variable unbound -> non-`SigmaProp` (`SAny`, reject); an
+    // undeterminable one -> `None` (lenient). See [`gated`] / [`agree`].
+    let int = Some(SigmaType::SInt);
+    match (type_id, method_id) {
+        // Coll.apply(index: SInt): IV. `IV` is only in the receiver, but the index
+        // must be SInt (else specializeFor fails and IV stays unbound).
+        (12, 10) => gated(coll_elem(), &[agree(arg_ty(0), int)]),
+        // Coll.getOrElse(index: SInt, default: IV): IV. index = SInt; default = IV.
+        (12, 2) => {
+            let elem = coll_elem();
+            gated(
+                elem.clone(),
+                &[agree(arg_ty(0), int), agree(elem, arg_ty(1))],
+            )
+        }
+        // Coll.fold(zero: OV, op: (OV, IV) => OV): OV. OV = zero = op arg0 = op range;
+        // IV (receiver elem) = op arg1.
+        (12, 5) => {
+            let zero = arg_ty(0);
+            let (op_a0, op_a1) = args.get(1).map_or((None, None), func_value_arg_types);
+            let op_range = args.get(1).and_then(|op| func_value_range(op, env, ctx));
+            gated(
+                zero.clone(),
+                &[
+                    agree(zero.clone(), op_range),
+                    agree(zero, op_a0),
+                    agree(coll_elem(), op_a1),
+                ],
+            )
+        }
+        // Option.get: the receiver Option's element type (`T` only in the receiver).
+        (36, 3) => opt_elem(),
+        // Option.getOrElse(default: T): T. T = receiver elem = default.
+        (36, 4) => {
+            let elem = opt_elem();
+            gated(elem.clone(), &[agree(elem, arg_ty(0))])
+        }
+        // Global.deserializeTo[T] / fromBigEndianBytes[T]: the explicit type arg `T`.
+        // Scala applies the EXPLICIT type subst (T -> ...) to the method BEFORE
+        // `specializeFor`, and `specializeFor` returns that already-substituted method
+        // even when `unifyTypeLists` fails — so the result is `T` REGARDLESS of the
+        // receiver or the `Coll[Byte]` value arg. Oracle-verified: a has_size
+        // `deserializeTo[SigmaProp]` on a `Global`, a `Box`(SELF), or with an `Int`
+        // value arg ALL classify SIGMA. Hence no receiver/arg gating here.
+        (106, 4) | (106, 5) => type_args.first().cloned(),
+        // Every other method (and any unknown one) is non-SigmaProp.
+        _ => Some(SigmaType::SAny),
+    }
+}
+
+/// Three-state result of comparing two inferred types for `specializeFor`
+/// unification: `Some(Match)` they are equal, `Some(Mismatch)` a determinable
+/// conflict (Scala fails to unify), `None`-side -> `Unknown` (non-determinable).
+#[derive(PartialEq)]
+enum Unify {
+    Match,
+    Mismatch,
+    Unknown,
+}
+
+/// Compare two occurrences of a unified type (or an arg against its fixed signature
+/// type, passed as `b`): equal -> `Match`, both PRECISELY determinable but different
+/// -> `Mismatch`, otherwise `Unknown`. `SAny` is the typer's "non-`SigmaProp`, but
+/// precise type not tracked" sentinel (returned for a non-landmine `MethodCall`, a
+/// `Tuple`, a non-`SigmaProp` operator, …), NOT a literal `SAny` — so it is treated
+/// as `Unknown`, never a `Mismatch`. Reporting `Mismatch` for it would reject a tree
+/// Scala accepts, e.g. `Coll[SigmaProp].apply(coll.size)` whose `SInt` index the
+/// sentinel hides (a reject-valid).
+fn agree(
+    a: Option<crate::sigma_type::SigmaType>,
+    b: Option<crate::sigma_type::SigmaType>,
+) -> Unify {
+    use crate::sigma_type::SigmaType::SAny;
+    match (a, b) {
+        (Some(SAny), _) | (_, Some(SAny)) | (None, _) | (_, None) => Unify::Unknown,
+        (Some(x), Some(y)) if x == y => Unify::Match,
+        (Some(_), Some(_)) => Unify::Mismatch,
+    }
+}
+
+/// Fold a landmine's projected `result` with its signature `checks`: any determinable
+/// `Mismatch` makes `specializeFor` fail -> non-`SigmaProp` (`SAny`, reject); else any
+/// `Unknown` -> lenient (`None`); else the projected result.
+fn gated(
+    result: Option<crate::sigma_type::SigmaType>,
+    checks: &[Unify],
+) -> Option<crate::sigma_type::SigmaType> {
+    if checks.contains(&Unify::Mismatch) {
+        Some(crate::sigma_type::SigmaType::SAny)
+    } else if checks.contains(&Unify::Unknown) {
+        None
+    } else {
+        result
+    }
+}
+
+/// The first two declared argument types of a `FuncValue` operand (e.g.
+/// `Coll.fold`'s `(OV, IV) => OV` reducer). `(None, None)` for a non-`FuncValue`.
+fn func_value_arg_types(
+    op: &crate::opcode::Expr,
+) -> (
+    Option<crate::sigma_type::SigmaType>,
+    Option<crate::sigma_type::SigmaType>,
+) {
+    if let crate::opcode::Expr::Op(node) = op {
+        if let crate::opcode::Payload::FuncValue { args, .. } = &node.payload {
+            let a0 = args.first().and_then(|(_, t)| t.clone());
+            let a1 = args.get(1).and_then(|(_, t)| t.clone());
+            return (a0, a1);
+        }
+    }
+    (None, None)
+}
+
+/// The RANGE type of a `FuncValue` operand (e.g. `Coll.fold`'s `(OV, IV) => OV`
+/// reducer): its body typed under the function's declared arg types. `None` for a
+/// non-`FuncValue` arg or a non-determinable body — leaving the caller lenient.
+fn func_value_range(
+    op: &crate::opcode::Expr,
+    env: TypeEnv,
+    ctx: &InferCtx,
+) -> Option<crate::sigma_type::SigmaType> {
+    let crate::opcode::Expr::Op(node) = op else {
+        return None;
+    };
+    let crate::opcode::Payload::FuncValue { args, body } = &node.payload else {
+        return None;
+    };
+    let mut scope = env.to_vec();
+    for (id, tpe) in args {
+        if let Some(t) = tpe {
+            scope.push((*id, t.clone()));
+        }
+    }
+    infer_type(body, &scope, ctx)
+}
+
 /// A non-`SSigmaProp` result type for operator (generic `One`/`Two`/`Three`
 /// payload) opcodes whose result is UNCONDITIONALLY non-SigmaProp regardless of
 /// argument types. Returns `Some(SAny)` for those (the gate only needs
@@ -619,12 +828,13 @@ fn infer_type(
 /// `SigmaProp` (`ProveDlog`/`ProveDHTuple` 0xCD/0xCE, `BoolToSigmaProp` 0xD1,
 /// `AtLeast` 0x98, `SigmaAnd`/`SigmaOr` 0xEA/0xEB — all oracle-verified to ACCEPT)
 /// and those whose result type DEPENDS on their arguments (`If` 0x95,
-/// `BlockValue`/`FuncValue`/`FuncApply`, `MethodCall`/`PropertyCall`,
-/// `SelectField`/`ByIndex`/`ValUse`/`OptionGet`, `TaggedVar` 0x71). Adding any of
-/// those would reject a Scala-accepted (SigmaProp-rooted) tree — a reject-valid.
-/// Payloads carrying an explicit static type (`ConcreteCollection`, `Tuple`,
-/// `GetVar`, `ExtractRegisterAs`, `NumericCast`, `Deserialize{Context,Register}`)
-/// are classified by [`determinable_root_type_of`] BEFORE this fallback.
+/// `BlockValue`/`FuncValue`/`FuncApply`, `SelectField`/`ByIndex`/`ValUse`/
+/// `OptionGet`, `TaggedVar` 0x71). Adding any of those would reject a
+/// Scala-accepted (SigmaProp-rooted) tree — a reject-valid. Payloads carrying an
+/// explicit static type (`ConcreteCollection`, `Tuple`, `GetVar`,
+/// `ExtractRegisterAs`, `NumericCast`, `Deserialize{Context,Register}`) and
+/// `MethodCall`/`PropertyCall` (see [`method_call_result_type`]) are classified by
+/// [`determinable_root_type_of`] BEFORE this fallback.
 fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
     let never_sigma = matches!(
         opcode,
@@ -836,11 +1046,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         match parsed {
             Ok(tree) => {
                 // Scala wraps any non-SigmaProp root
-                // (`CheckDeserializedScriptIsSigmaProp`) as `UnparsedErgoTree`. Our
-                // untyped IR can only check the root for an inline `Const` or a
-                // `ConstPlaceholder` (an `Op` root lacks a typechecker and would
-                // fail at eval anyway — this still catches the mainnet block
-                // 1,702,686 case). The wrap path advances to the declared-size end.
+                // (`CheckDeserializedScriptIsSigmaProp`) as `UnparsedErgoTree`.
+                // `determinable_root_type` is the rule-1001 typer — it covers inline
+                // `Const`/`ConstPlaceholder`, the zero-arg + operator + binding +
+                // MethodCall roots — and returns `None` (lenient, no wrap) only for a
+                // shape it cannot yet type. The wrap path advances to the
+                // declared-size end.
                 if determinable_root_type(&tree)
                     .is_some_and(|tpe| tpe != crate::sigma_type::SigmaType::SSigmaProp)
                 {
@@ -1836,6 +2047,23 @@ mod tests {
             "00d802d60108d3d60108d30101",
             // FuncValue root -> SFunc (a function is never SigmaProp).
             "00d90101017201", // FuncValue(arg: Bool, body: ValUse) -> SFunc
+            // MethodCall/PropertyCall roots (Phase 3, harness-verified registry):
+            // a NON-landmine method is non-SigmaProp -> reject.
+            "00db6301a7", // SBox.value (99,1) -> SLong  (PropertyCall)
+            "00db0c01a7", // Coll.size (12,1) -> SInt    (PropertyCall)
+            // ...and a LANDMINE with a NON-SigmaProp receiver: Coll[Long].apply(0)
+            // -> SLong (the projection is the receiver element type).
+            "00dc0c0a8301050500010400",
+            // Type-variable UNIFICATION (codex P1): getOrElse/fold have the result
+            // variable in TWO places; a determinable conflict -> non-SigmaProp ->
+            // reject. Oracle REJECT (the receiver/zero is SigmaProp but the
+            // default/op is not):
+            "00dc2404e30008010500",         // Option[Sigma].getOrElse(0L)
+            "00dc0c0283010808d30204000500", // Coll[Sigma].getOrElse(0, 0L)
+            "00dc0c0583010808d30208d3d902010502057201", // Coll.fold(sigmaZero, Long-op)
+            // ...and a FIXED-type arg mismatch (codex P1): Coll[Sigma].apply needs an
+            // SInt index; a Long index makes specializeFor fail -> non-SigmaProp.
+            "00dc0c0a83010808d3010500", // Coll[Sigma].apply(0L) -> reject
         ] {
             assert!(
                 check_sigma_prop_root(&parse(op)).is_err(),
@@ -1882,6 +2110,22 @@ mod tests {
             // ArithOp.tpe = left.tpe: a SigmaProp LEFT operand makes Plus SigmaProp
             // (Scala accepts; a fixed-numeric classification would reject-valid).
             "009a08d308d3",   // Plus(sigma, sigma) -> left=SigmaProp
+            // MethodCall/PropertyCall LANDMINES with a SigmaProp receiver/arg (Phase
+            // 3): the projection yields SigmaProp, so these MUST pass (rejecting them
+            // would be a reject-valid). Oracle-verified ACCEPT.
+            "00dc0c0a83010808d3010400", // Coll[SigmaProp].apply(0) -> SigmaProp
+            "00db2403e30008",           // Option[SigmaProp].get -> SigmaProp (PropertyCall)
+            // getOrElse/fold where BOTH occurrences of the result variable are
+            // SigmaProp -> SigmaProp -> accept (the unification check must not
+            // reject-valid these). Oracle ACCEPT:
+            "00dc2404e300080108d3",                     // Option[Sigma].getOrElse(sigma)
+            "00dc0c0283010808d302040008d3",             // Coll[Sigma].getOrElse(0, sigma)
+            "00dc0c0583010808d30208d3d902010802087201", // Coll.fold(sigmaZero, sigma-op)
+            // An arg whose type is the SAny "non-SigmaProp sentinel" (a non-landmine
+            // MethodCall, here Coll.size -> SInt) must NOT be read as a mismatch:
+            // Coll[Sigma].apply(coll.size) has an SInt index -> SigmaProp -> accept
+            // (rejecting it would be a reject-valid; the sentinel hides the real type).
+            "00dc0c0a83010808d301db0c0183010808d3",
             // Env-threaded (Stage A): { val x = sigmaProp; x } -> result=ValUse=SigmaProp.
             "00d801d60108d37201",
             // FunDef RHS is NOT always a function: { fun x = sigmaProp; x } binds x
@@ -1982,6 +2226,44 @@ mod tests {
         assert!(
             check_sigma_prop_root(&with_empty_box_coll).is_err(),
             "an empty Coll[SBox] constant must NOT trigger leniency (codex P1)"
+        );
+    }
+
+    /// A deeply-nested MethodCall receiver chain must type in LINEAR time (codex P1
+    /// DoS): `method_call_result_type` infers the receiver lazily, so a non-landmine
+    /// root (`SBox.value`) returns `SAny` WITHOUT walking the chain. The eager
+    /// version re-walked the receiver twice per level — exponential, a parse-time
+    /// CPU DoS — and would hang this test well before 100 levels.
+    #[test]
+    fn nested_methodcall_receiver_types_in_linear_time() {
+        // 100 levels of `SBox.value` (PropertyCall 0xDB, type 99, method 1) over SELF.
+        let mut hex = String::from("00");
+        for _ in 0..100 {
+            hex.push_str("db6301");
+        }
+        hex.push_str("a7");
+        let bytes = hex::decode(&hex).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r).expect("lenient codec parses");
+        // SBox.value root is non-SigmaProp -> rejected — and returns ~instantly.
+        assert!(check_sigma_prop_root(&tree).is_err());
+    }
+
+    /// `Global.deserializeTo[T]`'s result is the EXPLICIT type `T` regardless of the
+    /// receiver / value-arg types (Scala applies the type subst before
+    /// `specializeFor`, which returns the substituted method even on unify failure).
+    /// Oracle-verified SIGMA for a `Global`, a `Box`(SELF), and an `Int` value arg —
+    /// so the node must type a has_size `deserializeTo[SigmaProp]` on SELF as a
+    /// SigmaProp root (NOT soft-fork-wrapped), matching the reference.
+    #[test]
+    fn global_deserialize_to_result_is_the_explicit_type_regardless_of_receiver() {
+        // has_size v3: deserializeTo[SigmaProp](SELF, Coll[Byte] empty).
+        let bytes = hex::decode("0b08dc6a04a7010e0008").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r).expect("lenient codec parses");
+        assert!(
+            !matches!(tree.body, Expr::Unparsed(_)),
+            "deserializeTo[SigmaProp] root is SigmaProp (explicit type) -> not wrapped"
         );
     }
 
