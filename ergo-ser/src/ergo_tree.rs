@@ -251,17 +251,102 @@ pub(crate) fn determinable_root_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
+    use crate::opcode::Payload;
+    use crate::sigma_type::SigmaType;
     match body {
         crate::opcode::Expr::Const { tpe, .. } => Some(tpe.clone()),
         crate::opcode::Expr::Op(node) => match &node.payload {
-            crate::opcode::Payload::ConstPlaceholder { index } => {
+            Payload::ConstPlaceholder { index } => {
                 constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
+            }
+            // Payloads carrying their result type EXPLICITLY in the IR.
+            // `Deserialize{Context,Register}[T]` return `T` DIRECTLY, so they CAN
+            // be SigmaProp (accept iff T == SSigmaProp); `NumericCast`'s target is
+            // always a numeric type (never SigmaProp). Returning the declared type
+            // lets the gate accept/reject exactly as Scala does (oracle-verified:
+            // `DeserializeRegister[SigmaProp]` accepts, `[SLong]` rejects).
+            Payload::DeserializeContext { tpe, .. }
+            | Payload::DeserializeRegister { tpe, .. }
+            | Payload::NumericCast { tpe, .. } => Some(tpe.clone()),
+            // `getVar[T]` / `box.RX[T]` statically return `Option[T]` — never
+            // SigmaProp, even for T = SigmaProp (oracle-verified).
+            Payload::GetVar { tpe, .. } | Payload::ExtractRegisterAs { tpe, .. } => {
+                Some(SigmaType::SOption(Box::new(tpe.clone())))
+            }
+            // Collection / tuple literals — `Coll[..]` / a tuple — are never
+            // SigmaProp even when every element is SigmaProp (oracle-verified:
+            // `Coll[SigmaProp]` and `(SigmaProp, SigmaProp)` both reject).
+            Payload::ConcreteCollection { elem_type, .. } => {
+                Some(SigmaType::SColl(Box::new(elem_type.clone())))
+            }
+            Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
+            Payload::Tuple { .. } => Some(SigmaType::SAny),
+            // ARG-DEPENDENT roots whose type is a PROJECTION of a child's type
+            // (Scala computes these bottom-up at deserialize). RECURSE into the
+            // type-determining child — `determinable_root_type_of` only ever yields
+            // an oracle-verified concrete type or `None`, so a non-determinable
+            // child maps to `None` (lenient) and this can NEVER reject a tree Scala
+            // accepts. The heavier arg-dependent roots (MethodCall/PropertyCall —
+            // need the method-signature registry; ValUse/FuncApply — need a binding
+            // environment) stay lenient via the fallback below.
+            //
+            // ArithOp (Minus/Plus/Multiply/Division/Modulo/Min/Max): `tpe =
+            // left.tpe` and Scala does NOT type-check the operands at deserialize,
+            // so a SigmaProp LEFT operand makes the op SigmaProp (oracle-verified:
+            // `Plus(sigma, x)` accepts, `Plus(Long, Long)` rejects). Recurse into
+            // the left operand (child 0 of the `Two` payload).
+            Payload::Two(left, _right)
+                if matches!(node.opcode, 0x99 | 0x9A | 0x9C | 0x9D | 0x9E | 0xA1 | 0xA2) =>
+            {
+                determinable_root_type_of(left, constants)
+            }
+            // If: `If.tpe = trueBranch.tpe` (the then-branch, child 1; Scala does
+            // NOT unify the branches at deserialize).
+            Payload::Three(_cond, then_branch, _else) if node.opcode == 0x95 => {
+                determinable_root_type_of(then_branch, constants)
+            }
+            // Fold: result = the accumulator type = the `zero` arg (child 1).
+            Payload::Three(_coll, zero, _op) if node.opcode == 0xB0 => {
+                determinable_root_type_of(zero, constants)
+            }
+            // BlockValue `{ vals...; result }`: type = the result expression's type.
+            Payload::BlockValue { result, .. } => determinable_root_type_of(result, constants),
+            // SelectField `tuple._i`: the i-th component type of the input tuple
+            // (1-based). Only resolvable when the input's type is a determinable
+            // `STuple` (e.g. a tuple constant); otherwise lenient.
+            Payload::SelectField { input, field_idx } => {
+                match determinable_root_type_of(input, constants) {
+                    Some(SigmaType::STuple(items)) => (*field_idx as usize)
+                        .checked_sub(1)
+                        .and_then(|i| items.get(i))
+                        .cloned(),
+                    _ => None,
+                }
+            }
+            // ByIndex `coll(i)`: the element type of the input collection.
+            Payload::ByIndex { input, .. } => match determinable_root_type_of(input, constants) {
+                Some(SigmaType::SColl(elem)) => Some(*elem),
+                _ => None,
+            },
+            // OptionGet `opt.get` / OptionGetOrElse `opt.getOrElse(d)`: the option's
+            // element type (the option is child 0 in both).
+            Payload::One(opt) if node.opcode == 0xE4 => {
+                match determinable_root_type_of(opt, constants) {
+                    Some(SigmaType::SOption(elem)) => Some(*elem),
+                    _ => None,
+                }
+            }
+            Payload::Two(opt, _default) if node.opcode == 0xE5 => {
+                match determinable_root_type_of(opt, constants) {
+                    Some(SigmaType::SOption(elem)) => Some(*elem),
+                    _ => None,
+                }
             }
             // A zero-argument (leaf) opcode root has a statically-known type and
             // NONE of them is `SSigmaProp` (see [`zero_arg_root_type`]), so a
             // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
             // like an inline non-SigmaProp `Const`.
-            crate::opcode::Payload::Zero => Some(zero_arg_root_type(node.opcode)),
+            Payload::Zero => Some(zero_arg_root_type(node.opcode)),
             // An operator root whose result type is unconditionally non-SigmaProp
             // (regardless of its argument types) — relations, arithmetic, etc.
             _ => op_root_non_sigma_type(node.opcode),
@@ -270,34 +355,55 @@ pub(crate) fn determinable_root_type_of(
     }
 }
 
-/// A non-`SSigmaProp` result type for operator (non-leaf) opcodes whose result is
-/// UNCONDITIONALLY non-SigmaProp regardless of argument types: relations (→
-/// `SBoolean`), arithmetic / group ops (→ numeric / `SGroupElement`), byte &
-/// numeric conversions, `SizeOf` (→ `SInt`), the hashes (→ `Coll[SByte]`), the
-/// box-field extractors, and `SigmaPropIsProven` / `SigmaPropBytes`. Returns
-/// `Some(SAny)` for those (the gate only needs `!= SSigmaProp`); `None` otherwise.
+/// A non-`SSigmaProp` result type for operator (generic `One`/`Two`/`Three`
+/// payload) opcodes whose result is UNCONDITIONALLY non-SigmaProp regardless of
+/// argument types. Returns `Some(SAny)` for those (the gate only needs
+/// `!= SSigmaProp`); `None` otherwise. Every listed opcode is oracle-verified to
+/// reject a well-formed sizeless root (Scala 6.0.2, rule 1001).
 ///
-/// Operators that CAN be `SigmaProp` — `ProveDlog`/`ProveDHTuple` (0xCD/0xCE),
-/// `BoolToSigmaProp` (0xD1), `AtLeast` (0x98), `SigmaAnd`/`SigmaOr` — and those
-/// whose result type DEPENDS on their arguments — `If` (0x95), `BlockValue` /
-/// `FuncValue` / `Apply`, `MethodCall`, `SelectField` / `Select1..5` / `ByIndex`,
-/// `DeserializeRegister` / `DeserializeContext`, `And`/`Or`/`Xor` (Bool-vs-Sigma
-/// overload risk) — are deliberately NOT listed: classifying them needs a real
-/// typechecker, so they stay lenient (a non-sigma one fails at evaluation
-/// instead). Oracle-verified: a tree rooted at a listed opcode is rejected by
-/// Scala 6.0.2 under rule 1001.
+/// NOT listed — and therefore left lenient (`None`) — are opcodes that CAN be
+/// `SigmaProp` (`ProveDlog`/`ProveDHTuple` 0xCD/0xCE, `BoolToSigmaProp` 0xD1,
+/// `AtLeast` 0x98, `SigmaAnd`/`SigmaOr` 0xEA/0xEB — all oracle-verified to ACCEPT)
+/// and those whose result type DEPENDS on their arguments (`If` 0x95,
+/// `BlockValue`/`FuncValue`/`FuncApply`, `MethodCall`/`PropertyCall`,
+/// `SelectField`/`ByIndex`/`ValUse`/`OptionGet`, `TaggedVar` 0x71). Adding any of
+/// those would reject a Scala-accepted (SigmaProp-rooted) tree — a reject-valid.
+/// Payloads carrying an explicit static type (`ConcreteCollection`, `Tuple`,
+/// `GetVar`, `ExtractRegisterAs`, `NumericCast`, `Deserialize{Context,Register}`)
+/// are classified by [`determinable_root_type_of`] BEFORE this fallback.
 fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
     let never_sigma = matches!(
         opcode,
         0x8F..=0x94                    // Lt Le Gt Ge Eq Neq -> SBoolean
-        | 0x99 | 0x9A | 0x9C | 0x9D | 0x9E  // Minus Plus Multiply Division Modulo
-        | 0x9F | 0xA0                  // Exponentiate -> SGroupElement, MultiplyGroup
-        | 0xA1 | 0xA2                  // Min Max
+        // NB: ArithOp (Minus 0x99, Plus 0x9A, Multiply 0x9C, Division 0x9D,
+        // Modulo 0x9E, Min 0xA1, Max 0xA2) is NOT here: Scala types it as
+        // `left.tpe` with NO operand type-check, so a SigmaProp left operand makes
+        // the whole op SigmaProp (oracle-verified ACCEPT). It is handled by the
+        // arg-dependent left-operand recursion in `determinable_root_type_of`.
+        | 0x9F | 0xA0                  // Exponentiate / MultiplyGroup (operand-typed -> reject sigma)
         | 0x7A | 0x7B | 0x7C           // LongToByteArray ByteArrayToBigInt ByteArrayToLong
         | 0xB1                         // SizeOf -> SInt
         | 0xCB | 0xCC                  // CalcBlake2b256 CalcSha256 -> Coll[SByte]
         | 0xC1 | 0xC2 | 0xC3 | 0xC4 | 0xC5 | 0xC7  // Extract{Amount,ScriptBytes,Bytes,BytesNoRef,Id,CreationInfo}
-        | 0xCF | 0xD0 // SigmaPropIsProven -> SBoolean, SigmaPropBytes -> Coll[SByte]
+        | 0xCF | 0xD0                  // SigmaPropIsProven -> SBoolean, SigmaPropBytes -> Coll[SByte]
+        // Boolean-result operators (predicates / Bool logic) -> SBoolean.
+        | 0x96 | 0x97                  // And Or (Bool BinAnd/BinOr over Coll[Boolean]; NOT SigmaAnd/Or 0xEA/0xEB)
+        | 0xAE | 0xAF                  // Exists ForAll
+        | 0xE6                         // OptionIsDefined
+        | 0xEC | 0xED | 0xEF | 0xF4 | 0xFF  // BinOr BinAnd LogicalNot BinXor XorOf
+        // Numeric / byte-collection-result operators -> never SigmaProp.
+        | 0x9B                         // Xor (byte-array)
+        | 0xE7 | 0xE8 | 0xE9           // ModQ PlusModQ MinusModQ
+        | 0xF0 | 0xF1 | 0xF2 | 0xF3 | 0xF5 | 0xF6 | 0xF7 | 0xF8  // Negation BitInversion BitOr BitAnd BitXor BitShift{Right,Left,RightZeroed}
+        // Fixed-result structural ops.
+        | 0x74                         // SubstConstants -> Coll[SByte]
+        | 0xB7                         // TreeLookup -> Option[Coll[SByte]]
+        | 0xEE                         // DecodePoint -> SGroupElement
+        | 0xB3 | 0xB5                  // Append Filter -> Coll
+        | 0xAD | 0xB4 // MapCollection Slice -> Coll
+                      // NB: Fold (0xB0) / ByIndex (0xB2) / OptionGet (0xE4) / OptionGetOrElse
+                      // (0xE5) are arg-dependent (result = accumulator / element type) and stay
+                      // lenient — they CAN be SigmaProp.
     );
     never_sigma.then_some(crate::sigma_type::SigmaType::SAny)
 }
@@ -1447,30 +1553,74 @@ mod tests {
             "00c2a7",       // ExtractScriptBytes(Self)
             "00cf08d3",     // SigmaPropIsProven(sigmaProp)
             "00d008d3",     // SigmaPropBytes(sigmaProp)
+            // More fixed-result operator roots (oracle-verified REJECT).
+            "0096968300020101010101", // And(Coll[Boolean]) -> Boolean
+            "00ae8300020404000400d90101040101", // Exists -> Boolean
+            "00ef0101",               // LogicalNot -> Boolean
+            "009b0e01000e0100",       // Xor(byte arrays) -> Coll[Byte]
+            "00f00400",               // Negation -> numeric
+            "00740e0100100100100100", // SubstConstants -> Coll[Byte]
+            "00ee0e0102",             // DecodePoint -> SGroupElement
+            "00b4a504000400",         // Slice(Outputs, 0, 0) -> Coll
+            "00ada5d901010ec172010100", // MapCollection(Outputs, f) -> Coll
+            // ARG-DEPENDENT roots typed by recursion (oracle-verified REJECT — the
+            // type-determining child is non-SigmaProp).
+            "00957f7f80",     // If(true, true, false) -> then=Boolean
+            "00957f010108d3", // If(true, then=Boolean, else=sigma) -> then=Boolean
+            "0095a3a4a5",     // If(Height, Inputs, Outputs) -> then=Coll[Box]
+            "00d8000101",     // BlockValue(result = Boolean const)
         ] {
             assert!(
                 check_sigma_prop_root(&parse(op)).is_err(),
                 "sizeless operator root {op} must reject (rule 1001)"
             );
         }
-        // ...but `BoolToSigmaProp` (0xD1) IS SigmaProp-typed → accepted (not
-        // over-rejected), confirming the gate does not classify SigmaProp ops.
-        assert!(
-            check_sigma_prop_root(&parse("00d108d3")).is_ok(),
-            "BoolToSigmaProp root is SigmaProp and must pass"
-        );
-        // Sizeless SigmaProp roots → accepted (the common, valid case).
-        assert!(
-            check_sigma_prop_root(&parse("0008d3")).is_ok(),
-            "SigmaProp constant root must pass"
-        );
-        assert!(
-            check_sigma_prop_root(&parse(
-                "0008cd02000a518dc9761306f048c70ad44e1a7fc9e4ce2ceeea529646f73aada1ea6640"
-            ))
-            .is_ok(),
-            "P2PK (SigmaProp) root must pass"
-        );
+        // Payloads carrying an explicit static type (oracle-verified REJECT — none
+        // is SigmaProp, even when the element/declared type IS SigmaProp, because
+        // the result is a Coll/tuple/Option, not a SigmaProp).
+        for op in [
+            "0083000108d3",   // ConcreteCollection: Coll[SigmaProp] literal
+            "0085000101",     // BoolCollection: Coll[Boolean]
+            "00860208d308d3", // Tuple: (SigmaProp, SigmaProp)
+            "00e30008",       // getVar[SigmaProp] -> Option[SigmaProp]
+            "00c6a70408",     // box.R4[SigmaProp] -> Option[SigmaProp]
+            "007d050004",     // Downcast (numeric)
+            "00d40500",       // deserializeContext[Long]
+            "00d5040500",     // deserializeRegister[Long]
+        ] {
+            assert!(
+                check_sigma_prop_root(&parse(op)).is_err(),
+                "sizeless explicit-type root {op} must reject (rule 1001)"
+            );
+        }
+        // SigmaProp-rooted / SigmaProp-capable roots → accepted (oracle-verified
+        // ACCEPT). These are the reject-valid landmines the gate must NOT reject.
+        for op in [
+            "00d10101",   // BoolToSigmaProp(true) — well-typed: child IS a Boolean
+            "0008d3",     // SigmaProp constant
+            "00d40801",   // deserializeContext[SigmaProp] — type tag = SigmaProp
+            "00d5040800", // deserializeRegister[SigmaProp]
+            "00710108",   // TaggedVar[SigmaProp] (type-tag dependent → lenient)
+            // P2PK (ProveDlog) root.
+            "0008cd02000a518dc9761306f048c70ad44e1a7fc9e4ce2ceeea529646f73aada1ea6640",
+            // SigmaAnd / SigmaOr / AtLeast of ProveDlogs — common multisig roots.
+            "00ea02cd070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "0098040002cd070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            // ARG-DEPENDENT roots typed by recursion whose type IS SigmaProp — these
+            // MUST pass (rejecting them would be a reject-valid). `If` uses the
+            // then-branch type; `BlockValue` uses its result type.
+            "00957f08d308d3", // If(true, sigma, sigma) -> then=SigmaProp
+            "00957f08d30101", // If(true, then=sigma, else=Boolean) -> then=SigmaProp
+            "00d80008d3",     // BlockValue(result = SigmaProp const)
+            // ArithOp.tpe = left.tpe: a SigmaProp LEFT operand makes Plus SigmaProp
+            // (Scala accepts; a fixed-numeric classification would reject-valid).
+            "009a08d308d3",   // Plus(sigma, sigma) -> left=SigmaProp
+        ] {
+            assert!(
+                check_sigma_prop_root(&parse(op)).is_ok(),
+                "SigmaProp(-capable) root {op} must pass (no reject-valid)"
+            );
+        }
     }
 
     /// A SIZE-flagged tree whose root is a boolean-literal leaf (`TrueLeaf`) is a
