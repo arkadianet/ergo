@@ -228,6 +228,9 @@ pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
             Action::Penalize { peer, penalty } => {
                 penalize_peer(state, peer, penalty, now);
             }
+            Action::NoteDeliveryOutcome { peer, succeeded } => {
+                state.peer_manager.note_delivery_outcome(&peer, succeeded);
+            }
             _ => {} // ValidateHeader, PersistSection, AssembleBlock handled by executor
         }
     }

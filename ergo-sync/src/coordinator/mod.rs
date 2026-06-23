@@ -50,6 +50,13 @@ pub enum Action {
     },
     /// Penalize a peer.
     Penalize { peer: PeerId, penalty: Penalty },
+    /// Record a requested-modifier delivery outcome for download-quality
+    /// tracking: `succeeded: false` on a delivery timeout, `true` on an
+    /// accepted delivery. Consumed by the peer manager to deprioritize peers
+    /// that repeatedly fail to deliver (see `peer::DELIVERY_DEGRADE_STREAK`).
+    /// Distinct from `Penalize { NonDelivery }`, whose decaying score cannot
+    /// catch a peer that only ever times out.
+    NoteDeliveryOutcome { peer: PeerId, succeeded: bool },
     /// A header has been received and should be validated + persisted.
     /// The caller runs PoW check, chain linkage, difficulty adjustment.
     ValidateHeader { peer: PeerId, header_bytes: Vec<u8> },
@@ -794,6 +801,13 @@ impl SyncCoordinator {
         match action {
             DeliveryAction::Accept => {
                 self.delivery.mark_received(&modifier_id);
+                // Reset this peer's download-failure streak — it answered a
+                // request (the delivering peer, which on a late/hedge win may
+                // differ from the original owner).
+                actions.push(Action::NoteDeliveryOutcome {
+                    peer,
+                    succeeded: true,
+                });
             }
             DeliveryAction::Ignore => {
                 return actions; // duplicate
@@ -965,6 +979,12 @@ impl SyncCoordinator {
             actions.push(Action::Penalize {
                 peer: *failed_peer,
                 penalty: Penalty::NonDelivery,
+            });
+            // Download-quality streak (separate from the decaying score,
+            // which NonDelivery can't move past DEGRADED_THRESHOLD).
+            actions.push(Action::NoteDeliveryOutcome {
+                peer: *failed_peer,
+                succeeded: false,
             });
             info!(peer = %failed_peer, count = ids.len(), "modifier delivery timed out, retrying with other peers");
             all_retryable.extend_from_slice(ids);
