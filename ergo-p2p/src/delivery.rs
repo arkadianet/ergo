@@ -1135,18 +1135,26 @@ mod tests {
         let id0 = id(1);
         tracker.request(peer(9000), 102, &[id0], now);
 
+        // Advance the clock per hedge so the timeout assertion below is taken
+        // relative to the LAST successful reassign — this catches a regression
+        // where an over-budget (refused) reassign accidentally refreshes
+        // `requested_at`.
+        let mut last_successful_reassign = now;
         for i in 0..MAX_HEDGES {
+            last_successful_reassign += DELIVERY_TIMEOUT / 2;
             assert!(
-                tracker.reassign(&id0, peer(9001 + u16::from(i)), now),
+                tracker.reassign(&id0, peer(9001 + u16::from(i)), last_successful_reassign),
                 "reassign #{i} within budget should succeed"
             );
         }
+        let refused_at = last_successful_reassign + DELIVERY_TIMEOUT / 2;
         assert!(
-            !tracker.reassign(&id0, peer(9099), now),
+            !tracker.reassign(&id0, peer(9099), refused_at),
             "reassign past MAX_HEDGES must be refused so the section can time out"
         );
 
-        let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
+        let result = tracker
+            .check_timeouts(last_successful_reassign + DELIVERY_TIMEOUT + Duration::from_millis(1));
         assert_eq!(
             result.retryable.len(),
             1,

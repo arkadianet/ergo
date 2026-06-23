@@ -1645,8 +1645,9 @@ impl SyncExecutor {
     ///
     /// Hedge peers come from `block_section_capable_peers` (full archive), not
     /// the broader `eligible_download_peers`: capability is the hard filter,
-    /// so we never reassign a section to a peer that can't serve it (and that
-    /// set is already kept clear of delivery-degraded peers).
+    /// so we never reassign a section to a peer that can't serve it. That set
+    /// prefers non-delivery-degraded archive peers but falls back to degraded
+    /// archive peers rather than route sections to incapable peers.
     pub fn check_hol_hedges(
         &mut self,
         best_full_block_height: u32,

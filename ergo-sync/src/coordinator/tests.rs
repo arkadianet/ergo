@@ -1778,9 +1778,19 @@ fn hol_hedge_win_does_not_failure_mark_the_slow_peer() {
         "the winning hedge peer must be credited with a success outcome"
     );
 
-    // A later timeout sweep must NOT emit any failure outcome — the slow peer
-    // is never penalized for losing the race.
+    // A later timeout sweep must neither penalize nor failure-mark the slow
+    // peer — it only lost the race.
     let sweep = coord.check_timeouts(t0 + Duration::from_secs(20), &[p_fast]);
+    assert!(
+        !sweep.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                peer,
+                penalty: Penalty::NonDelivery,
+            } if *peer == p_slow
+        )),
+        "no NonDelivery penalty after a hedge win — the slow peer only lost the race"
+    );
     assert!(
         !sweep.iter().any(|a| matches!(
             a,
