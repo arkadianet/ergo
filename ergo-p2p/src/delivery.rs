@@ -2,8 +2,13 @@
 //!
 //! Per P2P protocol spec Section 11:
 //! - Each RequestModifier is tagged with (peer_id, request_time, modifier_ids)
-//! - Delivery timeout: 10s (matches Scala's `deliveryTimeout`; non-archive peers
-//!   silently drop requests for pruned sections, so 30s was 3× too long)
+//! - Delivery timeout: 3s. Diverges from Scala's 10s `deliveryTimeout`
+//!   deliberately (node-local policy, not consensus): combined with the
+//!   sub-timeout head-of-line hedge it bounds block-body apply latency to a
+//!   few seconds. 3s is generous for a body on a healthy peer; we do NOT go
+//!   lower (large blocks / slow links need headroom, and an over-tight
+//!   timeout causes false timeouts -> wasted re-requests + spurious
+//!   NonDelivery penalties / body-streak increments).
 //! - On timeout: NonDelivery penalty, reassign to different peer
 //! - On duplicate delivery: ignore, no penalty
 //! - On partial delivery: accept what arrived, re-request remainder
@@ -20,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::peer::PeerId;
 
-pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Max in-flight modifier IDs per peer.
 ///
@@ -33,6 +38,15 @@ pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_IN_FLIGHT_PER_PEER: usize = 1200;
 /// Max retry attempts per modifier before giving up.
 pub const MAX_RETRIES: u8 = 3;
+/// Max head-of-line hedge reassignments per request cycle before a section
+/// falls through to the normal timeout/retry path. `reassign` resets the
+/// inflight clock, so without this cap a section that no capable peer answers
+/// could be re-hedged every tick and never reach `DELIVERY_TIMEOUT` — i.e.
+/// never accrue a `NonDelivery` penalty / body-delivery-streak increment and
+/// never get bucketed-redistributed, stalling block apply when the tip
+/// reaches it. After the budget is spent the section stays with its current
+/// owner until the normal timeout fires.
+pub const MAX_HEDGES: u8 = 2;
 /// Max entries in the received set before oldest entries are pruned.
 /// 10,000 matches Scala's invalidation cache size [inherited].
 const MAX_RECEIVED_ENTRIES: usize = 10_000;
@@ -97,6 +111,10 @@ struct InflightRequest {
     peer: PeerId,
     requested_at: Instant,
     modifier_type: u8,
+    /// HOL-hedge reassignments so far in this request cycle. Bounded by
+    /// [`MAX_HEDGES`]; reset to 0 by a fresh `request` (re-entry after a
+    /// timeout), not by `reassign`.
+    hedge_count: u8,
 }
 
 /// Tracks modifier delivery state across all peers.
@@ -249,6 +267,7 @@ impl DeliveryTracker {
                     peer,
                     requested_at: now,
                     modifier_type,
+                    hedge_count: 0,
                 },
             );
             registered.push(*id);
@@ -451,6 +470,14 @@ impl DeliveryTracker {
             if req.peer == new_peer {
                 return false;
             }
+            if req.hedge_count >= MAX_HEDGES {
+                // Hedge budget spent — leave the section with its current
+                // owner so its inflight clock reaches DELIVERY_TIMEOUT and the
+                // normal timeout/retry/degradation path takes over instead of
+                // re-hedging forever.
+                return false;
+            }
+            req.hedge_count += 1;
             let old_peer = req.peer;
             req.peer = new_peer;
             req.requested_at = now;
@@ -681,8 +708,8 @@ mod tests {
         let p = peer(9030);
 
         tracker.request(p, 101, &[id(1), id(2)], now);
-        // Before timeout
-        let result = tracker.check_timeouts(now + Duration::from_secs(5));
+        // Before timeout (relative to the const so it survives retuning).
+        let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT / 2);
         assert!(result.retryable.is_empty() && result.exhausted.is_empty());
         // After timeout (first attempt — retryable)
         let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
@@ -1095,5 +1122,43 @@ mod tests {
         assert!(!tracker.reassign(&id(1), full, now));
         assert_eq!(tracker.inflight_count(&old), 1);
         assert_eq!(tracker.inflight_count(&full), MAX_IN_FLIGHT_PER_PEER);
+    }
+
+    #[test]
+    fn reassign_capped_at_max_hedges_so_stuck_section_can_time_out() {
+        // Liveness guard: a section that no peer answers must not be
+        // re-hedged forever (each reassign resets the inflight clock). After
+        // MAX_HEDGES reassigns the next is refused, so the section stays put
+        // and reaches the normal timeout/retry path.
+        let mut tracker = DeliveryTracker::new();
+        let now = Instant::now();
+        let id0 = id(1);
+        tracker.request(peer(9000), 102, &[id0], now);
+
+        // Advance the clock per hedge so the timeout assertion below is taken
+        // relative to the LAST successful reassign — this catches a regression
+        // where an over-budget (refused) reassign accidentally refreshes
+        // `requested_at`.
+        let mut last_successful_reassign = now;
+        for i in 0..MAX_HEDGES {
+            last_successful_reassign += DELIVERY_TIMEOUT / 2;
+            assert!(
+                tracker.reassign(&id0, peer(9001 + u16::from(i)), last_successful_reassign),
+                "reassign #{i} within budget should succeed"
+            );
+        }
+        let refused_at = last_successful_reassign + DELIVERY_TIMEOUT / 2;
+        assert!(
+            !tracker.reassign(&id0, peer(9099), refused_at),
+            "reassign past MAX_HEDGES must be refused so the section can time out"
+        );
+
+        let result = tracker
+            .check_timeouts(last_successful_reassign + DELIVERY_TIMEOUT + Duration::from_millis(1));
+        assert_eq!(
+            result.retryable.len(),
+            1,
+            "a hedge-capped section must fall through to the timeout/retry path"
+        );
     }
 }

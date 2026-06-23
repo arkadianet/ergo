@@ -1666,6 +1666,144 @@ fn hol_repair_revives_failed_head_section() {
 }
 
 #[test]
+fn hol_hedge_covers_non_head_of_line_in_window_block() {
+    // A stuck section several blocks deep (not best+1) must still be hedged —
+    // it gates assembly once the tip catches up. Previously only the
+    // head-of-line block was repaired.
+    let (mut coord, _chain) = setup_n_pending_blocks_with_window(3, 3);
+    let p_old = peer(9030);
+    let p_new = peer(9031);
+    let t0 = Instant::now();
+
+    // Request only the THIRD pending block's sections (height 103; the
+    // head-of-line is 101) from p_old, then let them go stuck.
+    let deep_header = mk32(3);
+    let sections = coord
+        .assembly
+        .expected_section_ids(&deep_header)
+        .expect("registered sections");
+    for (type_id, section_id) in &sections {
+        coord.delivery.request(p_old, *type_id, &[*section_id], t0);
+    }
+
+    let actions = coord.check_hol_hedges(
+        100,
+        Duration::from_secs(2),
+        t0 + Duration::from_secs(3),
+        &[p_new],
+    );
+    let (tx_sent, ext_sent) = count_by_type(&actions);
+    assert!(
+        tx_sent >= 1 && ext_sent >= 1,
+        "a non-head-of-line in-window block's stuck sections must be hedged, got tx={tx_sent} ext={ext_sent}"
+    );
+}
+
+#[test]
+fn hol_hedge_spreads_reassigns_across_capable_peers() {
+    // When one peer holds multiple stuck sections, reassigns spread across
+    // capable peers (least-in-flight) instead of piling onto the first.
+    let (mut coord, _chain) = setup_n_pending_blocks_with_window(1, 1);
+    let p_old = peer(9030);
+    let p_a = peer(9031);
+    let p_b = peer(9032);
+    let t0 = Instant::now();
+
+    let sections = coord
+        .assembly
+        .expected_section_ids(&mk32(1))
+        .expect("registered sections");
+    for (type_id, section_id) in &sections {
+        coord.delivery.request(p_old, *type_id, &[*section_id], t0);
+    }
+
+    let actions = coord.check_hol_hedges(
+        100,
+        Duration::from_secs(2),
+        t0 + Duration::from_secs(3),
+        &[p_a, p_b],
+    );
+    let targets: std::collections::HashSet<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer { peer, .. } => Some(*peer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        targets.len(),
+        2,
+        "the two hedged sections must land on two distinct capable peers, got {targets:?}"
+    );
+}
+
+#[test]
+fn hol_hedge_win_does_not_failure_mark_the_slow_peer() {
+    // Key interaction with #133/#134: when a hedge peer wins the race, the
+    // slow original owner must NOT be penalized or body-streak-incremented.
+    // `reassign` removes the old peer's inflight entry (keeping it merely
+    // late-acceptable), so it never times out and never produces a failure
+    // outcome.
+    let (mut coord, _chain) = setup_n_pending_blocks_with_window(1, 1);
+    let p_slow = peer(9030);
+    let p_fast = peer(9031);
+    let t0 = Instant::now();
+
+    let tx_type = ModifierTypeId::BlockTransactions.as_byte();
+    let tx_section = coord
+        .assembly
+        .expected_section_ids(&mk32(1))
+        .expect("registered sections")
+        .into_iter()
+        .find_map(|(t, id)| (t == tx_type).then_some(id))
+        .expect("tx section");
+    coord.delivery.request(p_slow, tx_type, &[tx_section], t0);
+
+    // HOL hedge reassigns the stuck section to p_fast (p_slow stays
+    // late-acceptable, not timed out).
+    let _ = coord.check_hol_hedges(
+        100,
+        Duration::from_secs(2),
+        t0 + Duration::from_secs(3),
+        &[p_fast],
+    );
+
+    // p_fast wins the race: credited with a success outcome.
+    let win = coord.on_modifier_received(p_fast, tx_type, tx_section, vec![1]);
+    assert!(
+        win.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome { peer, succeeded: true } if *peer == p_fast
+        )),
+        "the winning hedge peer must be credited with a success outcome"
+    );
+
+    // A later timeout sweep must neither penalize nor failure-mark the slow
+    // peer — it only lost the race.
+    let sweep = coord.check_timeouts(t0 + Duration::from_secs(20), &[p_fast]);
+    assert!(
+        !sweep.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                peer,
+                penalty: Penalty::NonDelivery,
+            } if *peer == p_slow
+        )),
+        "no NonDelivery penalty after a hedge win — the slow peer only lost the race"
+    );
+    assert!(
+        !sweep.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome {
+                succeeded: false,
+                ..
+            }
+        )),
+        "no failure outcome after a hedge win — the slow peer must not be penalized"
+    );
+}
+
+#[test]
 fn s3_bucketed_partial_capacity_two_free_slots() {
     // 2 free slots across two types → 1 tx + 1 ext via div_ceil(2/2).
     let cap = ergo_p2p::delivery::MAX_IN_FLIGHT_PER_PEER;
