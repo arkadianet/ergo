@@ -191,9 +191,46 @@ fn on_modifier_received_accepts_requested() {
 }
 
 #[test]
-fn on_modifier_received_records_delivery_success_outcome() {
-    // An accepted delivery emits a success outcome for the delivering peer
-    // so the peer manager can clear its download-failure streak.
+fn block_section_accept_records_delivery_success_outcome() {
+    // An accepted block-BODY section emits a success outcome for the
+    // delivering peer so the peer manager can clear its download streak.
+    let mut coord = SyncCoordinator::new(100);
+    let chain = MockChain::new(101, 100);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+    let tx_id = expected.transactions_id;
+    let recent_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
+
+    let inv = InvData {
+        type_id: ModifierTypeId::BlockTransactions.as_byte(),
+        ids: vec![tx_id],
+    };
+    coord.on_inv(p, &inv, &chain, now);
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::BlockTransactions.as_byte(),
+        tx_id,
+        vec![1],
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome { peer, succeeded: true } if *peer == p
+        )),
+        "accepted block section must emit a success outcome for the delivering peer"
+    );
+}
+
+#[test]
+fn header_accept_does_not_record_delivery_outcome() {
+    // Body-only scoping: an accepted HEADER must NOT reset the streak, or a
+    // body-stalling peer could dodge degradation by riding the header flow.
     let mut coord = SyncCoordinator::new(0);
     let chain = MockChain::new(0, 0);
     let now = Instant::now();
@@ -204,15 +241,45 @@ fn on_modifier_received_records_delivery_success_outcome() {
         ids: vec![mk(1)],
     };
     coord.on_inv(p, &inv, &chain, now);
-
     let actions =
         coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(1), vec![10, 20, 30]);
     assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            Action::NoteDeliveryOutcome { peer, succeeded: true } if *peer == p
-        )),
-        "accepted delivery must emit a success outcome for the delivering peer"
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::NoteDeliveryOutcome { .. })),
+        "header delivery must not emit a delivery outcome (body-only streak)"
+    );
+}
+
+#[test]
+fn mislabeled_header_delivery_does_not_reset_streak() {
+    // A peer can't dodge body-download deprioritization by delivering a
+    // HEADER while claiming a body-section wire type: the reset is classified
+    // by the REQUESTED type (Header), so no success outcome is emitted.
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    // We requested mk(1) as a Header.
+    let inv = InvData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        ids: vec![mk(1)],
+    };
+    coord.on_inv(p, &inv, &chain, now);
+
+    // Peer delivers it but lies about the type (claims BlockTransactions).
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::BlockTransactions.as_byte(),
+        mk(1),
+        vec![10, 20, 30],
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::NoteDeliveryOutcome { .. })),
+        "a header delivery mislabeled as a section must not reset the body streak"
     );
 }
 
@@ -467,10 +534,37 @@ fn timeout_produces_penalty() {
 }
 
 #[test]
-fn timeout_records_delivery_failure_outcome() {
-    // Alongside the NonDelivery penalty, a timeout emits a failure outcome
-    // for the failed peer so the peer manager can grow its download-failure
-    // streak (the signal the decaying score can't provide).
+fn block_section_timeout_records_delivery_failure_outcome() {
+    // Alongside the NonDelivery penalty, a block-BODY section timeout emits a
+    // failure outcome for the failed peer so the peer manager can grow its
+    // download-failure streak (the signal the decaying score can't provide).
+    let mut coord = SyncCoordinator::new(100);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+    let recent_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    // Registers the header and requests its body sections from p.
+    coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome { peer, succeeded: false } if *peer == p
+        )),
+        "a block-section timeout must emit a failure outcome for the failed peer"
+    );
+}
+
+#[test]
+fn header_timeout_records_no_delivery_outcome() {
+    // Body-only scoping: a HEADER request timeout still penalizes (NonDelivery)
+    // but must NOT emit a delivery-streak outcome — only body sections count.
     let mut coord = SyncCoordinator::new(0);
     let chain = MockChain::new(0, 0);
     let now = Instant::now();
@@ -485,11 +579,14 @@ fn timeout_records_delivery_failure_outcome() {
     let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
     let actions = coord.check_timeouts(later, &[]);
     assert!(
-        actions.iter().any(|a| matches!(
-            a,
-            Action::NoteDeliveryOutcome { peer, succeeded: false } if *peer == p
-        )),
-        "a delivery timeout must emit a failure outcome for the failed peer"
+        actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "header timeout should still penalize"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::NoteDeliveryOutcome { .. })),
+        "header timeout must not emit a delivery-streak outcome (body-only)"
     );
 }
 
