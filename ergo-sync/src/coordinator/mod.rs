@@ -800,14 +800,27 @@ impl SyncCoordinator {
         let action = self.delivery.on_received(&modifier_id, &peer);
         match action {
             DeliveryAction::Accept => {
+                // Body-only streak reset: only an accepted block-BODY section
+                // clears the download-failure streak. A header or mempool-tx
+                // delivery must NOT reset it, or a peer that stalls on bodies
+                // could dodge degradation by riding the constant header/tx
+                // flow. Classify by the REQUESTED type (what we asked this
+                // peer for, read before mark_received evicts the entry) — not
+                // the peer's wire-claimed type_id — symmetric with the timeout
+                // side and so the class can't be spoofed. The delivering peer
+                // is reset (on a late/hedge win it may differ from the
+                // original owner — correct attribution).
+                let delivered_body = self
+                    .delivery
+                    .modifier_type(&modifier_id)
+                    .is_some_and(ModifierTypeId::is_block_body_section);
                 self.delivery.mark_received(&modifier_id);
-                // Reset this peer's download-failure streak — it answered a
-                // request (the delivering peer, which on a late/hedge win may
-                // differ from the original owner).
-                actions.push(Action::NoteDeliveryOutcome {
-                    peer,
-                    succeeded: true,
-                });
+                if delivered_body {
+                    actions.push(Action::NoteDeliveryOutcome {
+                        peer,
+                        succeeded: true,
+                    });
+                }
             }
             DeliveryAction::Ignore => {
                 return actions; // duplicate
@@ -980,12 +993,23 @@ impl SyncCoordinator {
                 peer: *failed_peer,
                 penalty: Penalty::NonDelivery,
             });
-            // Download-quality streak (separate from the decaying score,
-            // which NonDelivery can't move past DEGRADED_THRESHOLD).
-            actions.push(Action::NoteDeliveryOutcome {
-                peer: *failed_peer,
-                succeeded: false,
-            });
+            // Body-only download-quality streak (separate from the decaying
+            // score, which NonDelivery can't move past DEGRADED_THRESHOLD).
+            // Only block-BODY section timeouts count: a peer that stalls on
+            // bodies but keeps answering the constant header/mempool-tx flow
+            // must still accrue toward degradation. The just-timed-out ids
+            // sit in the delivery tracker's recently-released shadow, so
+            // `modifier_type` still resolves their requested class here.
+            if ids.iter().any(|id| {
+                self.delivery
+                    .modifier_type(id)
+                    .is_some_and(ModifierTypeId::is_block_body_section)
+            }) {
+                actions.push(Action::NoteDeliveryOutcome {
+                    peer: *failed_peer,
+                    succeeded: false,
+                });
+            }
             info!(peer = %failed_peer, count = ids.len(), "modifier delivery timed out, retrying with other peers");
             all_retryable.extend_from_slice(ids);
             failed_peers.push(*failed_peer);

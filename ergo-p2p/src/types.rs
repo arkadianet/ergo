@@ -44,6 +44,21 @@ impl ModifierTypeId {
     pub fn is_block_section(type_id_byte: u8) -> bool {
         (type_id_byte as i8) >= 50
     }
+
+    /// `true` only for the three block-BODY sections
+    /// (`BlockTransactions` 102, `ADProofs` 104, `Extension` 108) — the
+    /// parts of a full block's body, EXCLUDING the header. Unlike
+    /// [`Self::is_block_section`] (id ≥ 50, which also matches the header
+    /// and any unknown high id), this is the strict body-only set used for
+    /// body-download quality tracking, where a peer's reliability at
+    /// delivering bodies must be measured separately from the fast,
+    /// constantly-flowing header and mempool-tx streams.
+    pub fn is_block_body_section(type_id_byte: u8) -> bool {
+        matches!(
+            Self::from_byte(type_id_byte),
+            Some(Self::BlockTransactions | Self::ADProofs | Self::Extension)
+        )
+    }
 }
 
 /// Inventory data — shared payload of `Inv` (code 55) and
@@ -85,4 +100,34 @@ pub struct NipopowProofData {
     pub k: i32,
     /// Anchor header id. `None` means "from the requester's known tip".
     pub header_id_opt: Option<[u8; 32]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- happy path -----
+
+    #[test]
+    fn is_block_body_section_matches_only_the_three_body_sections() {
+        // The three block-body parts (BlockTransactions, ADProofs, Extension).
+        assert!(ModifierTypeId::is_block_body_section(102));
+        assert!(ModifierTypeId::is_block_body_section(104));
+        assert!(ModifierTypeId::is_block_body_section(108));
+        // Header (101) and mempool tx (2) are NOT block bodies.
+        assert!(!ModifierTypeId::is_block_body_section(101));
+        assert!(!ModifierTypeId::is_block_body_section(2));
+        // Unknown ids.
+        assert!(!ModifierTypeId::is_block_body_section(0));
+        assert!(!ModifierTypeId::is_block_body_section(255));
+    }
+
+    #[test]
+    fn is_block_body_section_is_stricter_than_is_block_section_for_header() {
+        // The crucial distinction for body-only download tracking: the
+        // header passes the broad `is_block_section` (id >= 50) but is NOT a
+        // body section.
+        assert!(ModifierTypeId::is_block_section(101));
+        assert!(!ModifierTypeId::is_block_body_section(101));
+    }
 }
