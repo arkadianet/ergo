@@ -21,7 +21,7 @@ use crate::address_book::{AddressBook, BanRecord, LastDirection};
 use crate::handshake::PeerSpec;
 use crate::peer::{
     ConnectionState, Direction, PeerId, PeerInfo, PeerRejectReason, Penalty, PenaltyOutcome,
-    DEGRADED_THRESHOLD,
+    DEGRADED_THRESHOLD, DELIVERY_DEGRADE_STREAK,
 };
 
 pub mod limits;
@@ -358,6 +358,16 @@ impl PeerManager {
         }
     }
 
+    /// Record a requested-modifier delivery outcome for a peer: `true`
+    /// resets its consecutive-failure streak, `false` (a delivery timeout)
+    /// increments it. Drives download deprioritization via
+    /// [`DELIVERY_DEGRADE_STREAK`]. No-op for an unknown peer.
+    pub fn note_delivery_outcome(&mut self, addr: &PeerId, succeeded: bool) {
+        if let Some(peer) = self.peers.get_mut(addr) {
+            peer.note_delivery_outcome(succeeded);
+        }
+    }
+
     // ---- Queries ----
 
     pub fn get(&self, addr: &PeerId) -> Option<&PeerInfo> {
@@ -505,7 +515,11 @@ impl PeerManager {
         let mut preferred: Vec<PeerId> = self
             .peers
             .values()
-            .filter(|p| p.is_connected() && p.score.effective_score(now) < DEGRADED_THRESHOLD)
+            .filter(|p| {
+                p.is_connected()
+                    && p.score.effective_score(now) < DEGRADED_THRESHOLD
+                    && p.delivery_failure_streak() < DELIVERY_DEGRADE_STREAK
+            })
             .map(|p| p.addr)
             .collect();
         if !preferred.is_empty() {
@@ -552,7 +566,13 @@ impl PeerManager {
     /// == -1` (full archive — only mode that's guaranteed to have all
     /// historical sections).
     pub fn block_section_capable_peers(&self, now: Instant) -> Vec<PeerId> {
-        let mut peers: Vec<PeerId> = self
+        // Capability (full archive) is a HARD requirement — only these peers
+        // are guaranteed to hold every section. The delivery-failure streak
+        // is a soft preference layered on top, WITH a fallback to all capable
+        // peers: a delivery-degraded archive peer still beats a headers-only
+        // peer that simply doesn't have the data, so a run of degraded
+        // archives must never route sections to incapable peers.
+        let capable: Vec<&PeerInfo> = self
             .peers
             .values()
             .filter(|p| p.is_connected() && p.score.effective_score(now) < DEGRADED_THRESHOLD)
@@ -570,10 +590,23 @@ impl PeerManager {
                 }),
                 None => false,
             })
+            .collect();
+
+        let mut preferred: Vec<PeerId> = capable
+            .iter()
+            .copied()
+            .filter(|p| p.delivery_failure_streak() < DELIVERY_DEGRADE_STREAK)
             .map(|p| p.addr)
             .collect();
-        peers.sort();
-        peers
+        let mut out = if preferred.is_empty() {
+            // Every capable peer is delivery-degraded — still prefer them
+            // over incapable peers rather than stalling section download.
+            capable.iter().map(|p| p.addr).collect::<Vec<_>>()
+        } else {
+            std::mem::take(&mut preferred)
+        };
+        out.sort();
+        out
     }
 
     /// Peers eligible to serve a NiPoPoW proof (`GetNipopowProof`

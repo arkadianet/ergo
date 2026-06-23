@@ -288,6 +288,10 @@ pub(super) fn handle_message(
                             use ergo_p2p::delivery::DeliveryAction as DA;
                             match state.coordinator.on_transaction_received(peer, &mod_id) {
                                 DA::Accept => {
+                                    // Answered our request — clear the
+                                    // download-failure streak (symmetric with
+                                    // the timeout increment in check_timeouts).
+                                    state.peer_manager.note_delivery_outcome(&peer, true);
                                     let mut admission_actions =
                                         admit_transaction(state, peer, &bytes, now);
                                     actions.append(&mut admission_actions);

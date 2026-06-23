@@ -903,6 +903,115 @@ fn eligible_download_peers_excludes_not_yet_handshaked() {
     );
 }
 
+#[test]
+fn eligible_download_peers_deprioritizes_delivery_degraded_peer() {
+    // A peer that repeatedly times out on delivery (but never accrues
+    // enough score to degrade) is dropped from the preferred pool once its
+    // streak reaches DELIVERY_DEGRADE_STREAK, and restored the moment it
+    // delivers. The same gate also fronts block_section_capable_peers.
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let a1 = addr(10, 0, 0, 1, 9030);
+    let a2 = addr(10, 0, 1, 1, 9030);
+    for a in [a1, a2] {
+        mgr.register_outbound(a, now).unwrap();
+        mgr.mark_tcp_connected(&a);
+        mgr.complete_handshake(&a, spec(), None, now).unwrap();
+    }
+
+    // a2 fails to deliver up to the streak threshold. Its score stays clear
+    // of DEGRADED (no penalize call), so only the streak gate can exclude it.
+    for _ in 0..DELIVERY_DEGRADE_STREAK {
+        mgr.note_delivery_outcome(&a2, false);
+    }
+    assert_eq!(
+        mgr.eligible_download_peers(now),
+        vec![a1],
+        "delivery-degraded a2 must be excluded from the preferred pool"
+    );
+
+    // One accepted delivery clears the streak and restores a2.
+    mgr.note_delivery_outcome(&a2, true);
+    assert_eq!(
+        mgr.eligible_download_peers(now),
+        vec![a1, a2],
+        "a2 must rejoin the preferred pool after a successful delivery"
+    );
+}
+
+#[test]
+fn eligible_download_peers_falls_back_when_all_delivery_degraded() {
+    // If every connected peer is delivery-degraded, fall back to using them
+    // rather than stalling sync — mirrors the score-degraded fallback.
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let a1 = addr(10, 0, 0, 1, 9030);
+    mgr.register_outbound(a1, now).unwrap();
+    mgr.mark_tcp_connected(&a1);
+    mgr.complete_handshake(&a1, spec(), None, now).unwrap();
+
+    for _ in 0..DELIVERY_DEGRADE_STREAK {
+        mgr.note_delivery_outcome(&a1, false);
+    }
+    assert_eq!(
+        mgr.eligible_download_peers(now),
+        vec![a1],
+        "delivery-degraded fallback must yield a1 when it's the only peer"
+    );
+}
+
+#[test]
+fn block_section_capable_peers_falls_back_to_delivery_degraded_archives() {
+    // Capability (full archive) is a hard requirement; the streak is a soft
+    // preference. When every archive peer is delivery-degraded we must still
+    // return them — they're the only peers that have the sections — rather
+    // than an empty set that would route requests to incapable peers.
+    let archive_spec = || {
+        let mut s = spec();
+        s.features = vec![crate::handshake::PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        }];
+        s
+    };
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let a1 = addr(10, 0, 0, 1, 9030);
+    let a2 = addr(10, 0, 1, 1, 9030);
+    for a in [a1, a2] {
+        mgr.register_outbound(a, now).unwrap();
+        mgr.mark_tcp_connected(&a);
+        mgr.complete_handshake(&a, archive_spec(), None, now)
+            .unwrap();
+    }
+
+    // Both healthy archives → both preferred.
+    assert_eq!(mgr.block_section_capable_peers(now), vec![a1, a2]);
+
+    // Degrade a2 only → healthy a1 preferred, degraded a2 excluded.
+    for _ in 0..DELIVERY_DEGRADE_STREAK {
+        mgr.note_delivery_outcome(&a2, false);
+    }
+    assert_eq!(
+        mgr.block_section_capable_peers(now),
+        vec![a1],
+        "healthy archive preferred; degraded archive excluded"
+    );
+
+    // Degrade a1 too → all archives degraded → fall back to ALL capable
+    // peers (never empty, or sections would go to peers without the data).
+    for _ in 0..DELIVERY_DEGRADE_STREAK {
+        mgr.note_delivery_outcome(&a1, false);
+    }
+    assert_eq!(
+        mgr.block_section_capable_peers(now),
+        vec![a1, a2],
+        "all archives degraded → fall back to all capable, not empty"
+    );
+}
+
 // ---- Routability filter (tip-hardening) ----
 
 #[test]

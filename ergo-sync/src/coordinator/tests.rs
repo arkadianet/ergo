@@ -191,6 +191,32 @@ fn on_modifier_received_accepts_requested() {
 }
 
 #[test]
+fn on_modifier_received_records_delivery_success_outcome() {
+    // An accepted delivery emits a success outcome for the delivering peer
+    // so the peer manager can clear its download-failure streak.
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    let inv = InvData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        ids: vec![mk(1)],
+    };
+    coord.on_inv(p, &inv, &chain, now);
+
+    let actions =
+        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(1), vec![10, 20, 30]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome { peer, succeeded: true } if *peer == p
+        )),
+        "accepted delivery must emit a success outcome for the delivering peer"
+    );
+}
+
+#[test]
 fn on_header_validated_requests_sections_with_correct_types() {
     let mut coord = SyncCoordinator::new(100);
     let now = Instant::now();
@@ -438,6 +464,33 @@ fn timeout_produces_penalty() {
             ..
         }
     )));
+}
+
+#[test]
+fn timeout_records_delivery_failure_outcome() {
+    // Alongside the NonDelivery penalty, a timeout emits a failure outcome
+    // for the failed peer so the peer manager can grow its download-failure
+    // streak (the signal the decaying score can't provide).
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    let inv = InvData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        ids: vec![mk(1)],
+    };
+    coord.on_inv(p, &inv, &chain, now);
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome { peer, succeeded: false } if *peer == p
+        )),
+        "a delivery timeout must emit a failure outcome for the failed peer"
+    );
 }
 
 #[test]

@@ -867,6 +867,10 @@ impl SyncExecutor {
                 // Pass through to the network loop as-is.
                 vec![action]
             }
+            Action::NoteDeliveryOutcome { .. } => {
+                // Peer-state bookkeeping — pass through to the action loop.
+                vec![action]
+            }
             Action::SendToPeer { .. } => {
                 // Network I/O — the caller sends this over the connection.
                 vec![action]
@@ -907,7 +911,12 @@ impl SyncExecutor {
             let batch_actions =
                 self.batch_validate_headers(headers_to_validate, store, coordinator, now);
             for a in batch_actions {
-                if matches!(a, Action::SendToPeer { .. } | Action::Penalize { .. }) {
+                if matches!(
+                    a,
+                    Action::SendToPeer { .. }
+                        | Action::Penalize { .. }
+                        | Action::NoteDeliveryOutcome { .. }
+                ) {
                     network_actions.push(a);
                 } else {
                     remaining.push_back(a);
@@ -918,7 +927,12 @@ impl SyncExecutor {
         // Process remaining non-header actions
         while let Some(action) = remaining.pop_front() {
             for a in self.execute(action, store, coordinator, now, wallet_wiring) {
-                if matches!(a, Action::SendToPeer { .. } | Action::Penalize { .. }) {
+                if matches!(
+                    a,
+                    Action::SendToPeer { .. }
+                        | Action::Penalize { .. }
+                        | Action::NoteDeliveryOutcome { .. }
+                ) {
                     network_actions.push(a);
                 } else {
                     remaining.push_back(a);

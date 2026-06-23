@@ -31,6 +31,26 @@ pub const BAN_THRESHOLD: i32 = 500;
 pub const SCORE_DECAY_PER_INTERVAL: i32 = 10;
 pub const SCORE_DECAY_INTERVAL: Duration = Duration::from_secs(600); // 10 min
 
+/// Consecutive modifier-delivery timeouts (with no successful delivery in
+/// between) at which a peer is dropped from the *preferred* download-peer
+/// set — a download-quality signal that lives OUTSIDE the decaying score.
+///
+/// The decaying score cannot deprioritize a peer that only ever times out:
+/// `NonDelivery` (=2) within [`SAFE_INTERVAL`] does not stack, so its max
+/// accrual (~2 per 120s) is at or below the decay rate
+/// ([`SCORE_DECAY_PER_INTERVAL`]/[`SCORE_DECAY_INTERVAL`] = 10 per 600s),
+/// and `effective_score` never reaches [`DEGRADED_THRESHOLD`]. A peer that
+/// holds our `RequestModifier`s open until timeout, forever, therefore
+/// stays download-eligible and keeps being handed sections.
+///
+/// This streak closes that gap: it counts consecutive delivery timeouts and
+/// resets to 0 on the peer's next accepted delivery. It only DEPRIORITIZES
+/// (the peer stays in the degraded-fallback tier and still answers
+/// header-announced body requests) and never bans, so it cannot collapse
+/// the peer pool under ordinary slow-peer churn — a slow-but-working peer
+/// resets the moment it delivers anything.
+pub const DELIVERY_DEGRADE_STREAK: u32 = 4;
+
 /// Minimum peer version for interop (peers below this get a 1-year ban
 /// via [`PeerScore::apply_permanent_ban`] — historically named "permanent"
 /// but the actual expiry is one year, not forever).
@@ -237,6 +257,13 @@ pub struct PeerInfo {
     pub score: PeerScore,
     pub connected_at: Instant,
     pub last_seen: Instant,
+    /// Consecutive modifier-delivery timeouts since this peer last delivered
+    /// an accepted modifier. Drives download-peer deprioritization once it
+    /// reaches [`DELIVERY_DEGRADE_STREAK`]; reset to 0 on any accepted
+    /// delivery. Lives here (not in [`PeerScore`]) so it stays clear of the
+    /// Scala-parity decaying score. A fresh `PeerInfo` (reconnect) starts at
+    /// 0, giving a returning peer a clean slate.
+    delivery_failure_streak: u32,
     /// Populated after handshake completes.
     pub peer_spec: Option<PeerSpec>,
     /// Determined from peer_spec.version after handshake.
@@ -261,6 +288,7 @@ impl PeerInfo {
             score: PeerScore::new(now),
             connected_at: now,
             last_seen: now,
+            delivery_failure_streak: 0,
             peer_spec: None,
             sync_version: SyncVersion::V2, // default until handshake
             bytes_in: Arc::new(AtomicU64::new(0)),
@@ -281,6 +309,7 @@ impl PeerInfo {
             score: PeerScore::new(now),
             connected_at: now,
             last_seen: now,
+            delivery_failure_streak: 0,
             peer_spec: None,
             sync_version: SyncVersion::V2,
             bytes_in: Arc::new(AtomicU64::new(0)),
@@ -358,6 +387,24 @@ impl PeerInfo {
     /// Mark peer as seen (received valid message).
     pub fn touch(&mut self, now: Instant) {
         self.last_seen = now;
+    }
+
+    /// Record the outcome of a requested-modifier delivery. A success resets
+    /// the consecutive-failure streak; a timeout increments it (saturating).
+    /// See [`DELIVERY_DEGRADE_STREAK`].
+    pub fn note_delivery_outcome(&mut self, succeeded: bool) {
+        if succeeded {
+            self.delivery_failure_streak = 0;
+        } else {
+            self.delivery_failure_streak = self.delivery_failure_streak.saturating_add(1);
+        }
+    }
+
+    /// Consecutive modifier-delivery timeouts since this peer's last accepted
+    /// delivery. A peer at or above [`DELIVERY_DEGRADE_STREAK`] is dropped
+    /// from the preferred download set.
+    pub fn delivery_failure_streak(&self) -> u32 {
+        self.delivery_failure_streak
     }
 
     /// Check if connection has timed out based on current state.
@@ -495,6 +542,44 @@ mod tests {
         score.apply_penalty(Penalty::NonDelivery, soon); // +2 within safe interval
                                                          // NonDelivery(2) is below Misbehavior(10), so score stays.
         assert_eq!(score.effective_score(soon), 10);
+    }
+
+    #[test]
+    fn delivery_failure_streak_increments_and_resets_on_success() {
+        let now = Instant::now();
+        let mut p = PeerInfo::new_outbound(test_addr(9040), now);
+        assert_eq!(p.delivery_failure_streak(), 0);
+
+        p.note_delivery_outcome(false);
+        p.note_delivery_outcome(false);
+        assert_eq!(p.delivery_failure_streak(), 2);
+
+        // A single accepted delivery wipes the streak — a slow-but-working
+        // peer is never sidelined.
+        p.note_delivery_outcome(true);
+        assert_eq!(p.delivery_failure_streak(), 0);
+    }
+
+    #[test]
+    fn timeout_only_peer_crosses_delivery_streak_while_score_stays_clear() {
+        // The bug this guards: a peer that only ever times out cannot be
+        // degraded by the decaying score (NonDelivery within SAFE_INTERVAL
+        // doesn't stack, accrual <= decay), yet the delivery streak catches
+        // it. Apply NonDelivery penalties + delivery failures on the same
+        // ~per-block cadence and assert: score never reaches DEGRADED, streak
+        // does reach DELIVERY_DEGRADE_STREAK.
+        let start = Instant::now();
+        let mut p = PeerInfo::new_outbound(test_addr(9041), start);
+        for i in 0..DELIVERY_DEGRADE_STREAK {
+            let t = start + SAFE_INTERVAL * i; // one event per safe interval
+            p.penalize(Penalty::NonDelivery, t);
+            p.note_delivery_outcome(false);
+            assert!(
+                p.score.effective_score(t) < DEGRADED_THRESHOLD,
+                "score must never reach DEGRADED from NonDelivery alone"
+            );
+        }
+        assert!(p.delivery_failure_streak() >= DELIVERY_DEGRADE_STREAK);
     }
 
     #[test]
