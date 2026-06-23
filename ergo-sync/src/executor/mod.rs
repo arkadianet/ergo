@@ -130,12 +130,14 @@ const LAST_HEADERS_WINDOW: usize = 50;
 /// Kept as an internal constant; promote to a TOML knob when live-sync
 /// evidence justifies operator tuning.
 const DRAIN_WATERMARK: usize = 64;
-/// If the next sequential block's sections have been inflight this long,
-/// early-reassign them to a different peer instead of waiting for the full
-/// 10 s DELIVERY_TIMEOUT. Cuts typical HOL stalls: fires on the first
-/// 1 s sync tick past the threshold, well before the timeout prunes the
-/// whole batch.
-const HOL_HEDGE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+/// If an in-window pending block's sections have been inflight this long,
+/// early-reassign them to a capable peer instead of waiting for the full
+/// `DELIVERY_TIMEOUT`. Fires on the first 1 s sync tick past the threshold,
+/// so a "1.5 s" hedge actually lands ~2 s in — leaving real slack before the
+/// 3 s `DELIVERY_TIMEOUT` for the hedge peer to win. Lower than the timeout
+/// but not so low that healthy bodies (which arrive in well under 1.5 s) get
+/// needlessly duplicated.
+const HOL_HEDGE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(1500);
 /// Cap on total buffered orphan headers. Sized for Step D's
 /// anchor-spacing scheduler: with `ANCHOR_SPACING = 4_000` and
 /// `MAX_ANCHOR_AHEAD = 60_000`, up to ~14 peers can hold
@@ -1636,9 +1638,15 @@ impl SyncExecutor {
         coordinator.check_timeouts(now, &peers)
     }
 
-    /// HOL hedge: early-reassign sections for the next sequential block
-    /// if they've been inflight longer than `HOL_HEDGE_THRESHOLD`.
-    /// Called every sync tick; acts only when a section is actually stuck.
+    /// HOL hedge: early-reassign stuck sections for any in-window pending
+    /// block (inflight longer than `HOL_HEDGE_THRESHOLD`) to a *capable*
+    /// peer. Called every sync tick; acts only when a section is actually
+    /// stuck.
+    ///
+    /// Hedge peers come from `block_section_capable_peers` (full archive), not
+    /// the broader `eligible_download_peers`: capability is the hard filter,
+    /// so we never reassign a section to a peer that can't serve it (and that
+    /// set is already kept clear of delivery-degraded peers).
     pub fn check_hol_hedges(
         &mut self,
         best_full_block_height: u32,
@@ -1646,7 +1654,7 @@ impl SyncExecutor {
         peer_mgr: &PeerManager,
         now: Instant,
     ) -> Vec<Action> {
-        let peers = peer_mgr.eligible_download_peers(now);
+        let peers = peer_mgr.block_section_capable_peers(now);
         coordinator.check_hol_hedges(best_full_block_height, HOL_HEDGE_THRESHOLD, now, &peers)
     }
 

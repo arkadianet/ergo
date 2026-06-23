@@ -1379,17 +1379,23 @@ impl SyncCoordinator {
         actions
     }
 
-    /// HOL (head-of-line) hedge: if the sections for the next sequential
-    /// block have been inflight longer than `hol_threshold`, early-reassign
-    /// them to a different peer without waiting for the full 10 s
-    /// `DELIVERY_TIMEOUT`.
+    /// HOL (head-of-line) hedge: for every pending block within the download
+    /// window whose body sections have been inflight longer than
+    /// `hol_threshold`, early-reassign them to a different capable peer
+    /// without waiting for the full `DELIVERY_TIMEOUT`. `reassign` keeps the
+    /// slow peer late-acceptable, so the first valid delivery wins and the
+    /// loser is never penalized — this composes cleanly with the body
+    /// delivery-failure streak.
     ///
-    /// Called every sync tick (1 s). With `hol_threshold = 5 s`, a stuck
-    /// HOL section gets reassigned on the first tick after crossing the
-    /// threshold — roughly half the full DELIVERY_TIMEOUT.
+    /// Covers ALL in-window pending blocks, not just the head of line: a
+    /// section several blocks deep still gates assembly once the tip catches
+    /// up. Work is self-limiting — only sections actually stuck past
+    /// `hol_threshold` are touched, and reassigns spread across `peers` by
+    /// least in-flight count.
     ///
-    /// Only block-section types (tx, extension) are hedged; headers use
-    /// the normal timeout path.
+    /// Only block-section types (tx, extension) are hedged; headers use the
+    /// normal timeout path. `peers` is expected to be the capability-filtered
+    /// section-peer set (see the executor wrapper).
     pub fn check_hol_hedges(
         &mut self,
         best_full_block_height: u32,
@@ -1397,23 +1403,27 @@ impl SyncCoordinator {
         now: Instant,
         peers: &[PeerId],
     ) -> Vec<Action> {
-        let hol_height = best_full_block_height.saturating_add(1);
-
-        // Find pending block at the head-of-line height.
-        let header_id = match self
+        // Snapshot in-window pending header ids first, releasing the
+        // sync_state borrow before the delivery/assembly mutations below.
+        let window = self.sync_state.download_window() as u32;
+        let limit = best_full_block_height.saturating_add(window);
+        let header_ids: Vec<[u8; 32]> = self
             .sync_state
             .pending_blocks_iter()
-            .find(|b| b.height == hol_height)
+            .filter(|b| b.height > best_full_block_height && b.height <= limit)
             .map(|b| b.header_id)
-        {
-            Some(id) => id,
-            None => return Vec::new(),
-        };
+            .collect();
 
-        let section_ids = match self.assembly.expected_section_ids(&header_id) {
-            Some(ids) => ids,
-            None => return Vec::new(),
-        };
+        // Flatten every expected body section across those blocks.
+        let mut section_ids: Vec<(u8, [u8; 32])> = Vec::new();
+        for header_id in header_ids {
+            if let Some(ids) = self.assembly.expected_section_ids(&header_id) {
+                section_ids.extend(ids);
+            }
+        }
+        if section_ids.is_empty() {
+            return Vec::new();
+        }
 
         let mut by_peer_type: std::collections::HashMap<(PeerId, u8), Vec<[u8; 32]>> =
             std::collections::HashMap::new();
@@ -1438,7 +1448,8 @@ impl SyncCoordinator {
                     let Some(new_peer) = peers
                         .iter()
                         .copied()
-                        .find(|p| *p != old_peer && self.delivery.peer_has_capacity(p))
+                        .filter(|p| *p != old_peer && self.delivery.peer_has_capacity(p))
+                        .min_by_key(|p| self.delivery.inflight_count(p))
                     else {
                         continue;
                     };
@@ -1454,7 +1465,8 @@ impl SyncCoordinator {
                     let Some(peer) = peers
                         .iter()
                         .copied()
-                        .find(|p| self.delivery.peer_has_capacity(p))
+                        .filter(|p| self.delivery.peer_has_capacity(p))
+                        .min_by_key(|p| self.delivery.inflight_count(p))
                     else {
                         continue;
                     };
@@ -1485,7 +1497,7 @@ impl SyncCoordinator {
             }
         }
         if hedged > 0 || revived_failed > 0 {
-            debug!(height = hol_height, hedged, revived_failed, "HOL repair");
+            debug!(hedged, revived_failed, "HOL repair");
         }
         actions
     }
