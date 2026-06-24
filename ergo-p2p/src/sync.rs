@@ -292,6 +292,17 @@ impl SyncState {
         self.headers_chain_synced
     }
 
+    /// Flip the one-way headers-chain-synced latch from the
+    /// "caught up to peers" fallback path (see
+    /// `SyncCoordinator::try_mark_caught_up_to_peers`). Distinct from the
+    /// edge-triggered freshness flip in [`Self::check_headers_synced`]:
+    /// this lets block download start on an idle/stale tip that the
+    /// `header.isNew` freshness test can never recognize. Idempotent;
+    /// only ever sets true.
+    pub fn mark_headers_chain_synced(&mut self) {
+        self.headers_chain_synced = true;
+    }
+
     /// Force headers_chain_synced for tests with old mainnet headers.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_headers_chain_synced(&mut self) {

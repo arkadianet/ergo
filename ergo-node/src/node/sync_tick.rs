@@ -101,6 +101,23 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
         flush_actions(state, actions);
     }
 
+    // 2.5 Level-triggered headers-synced fallback (deliberate, consensus-safe
+    // divergence from Scala). `check_headers_synced` flips the latch only on
+    // the edge of validating a header that is *fresh* per `header.isNew`; on an
+    // idle/stale tip (common when syncing a quiet testnet from genesis) that
+    // edge never fires and the entire block-download pipeline below stays
+    // gated off forever. If we have demonstrably caught up to the network —
+    // a majority of peers confirm our exact CURRENT tip — start block
+    // downloads anyway. Blocks are still fully validated, so this only affects
+    // WHEN download begins, never WHAT is accepted.
+    let current_best_header_id = state.store.chain_state_meta().best_header_id;
+    if state
+        .coordinator
+        .try_mark_caught_up_to_peers(now, current_best_header_id)
+    {
+        info!("headers chain synced — caught up to peers (level-triggered fallback)");
+    }
+
     // 3. Try to apply the next sequential block if sections are available.
     if state.coordinator.sync_state().headers_chain_synced() {
         // Startup recovery bailed with "headers not near tip" when
