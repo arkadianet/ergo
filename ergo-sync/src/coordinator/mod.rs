@@ -188,6 +188,11 @@ pub struct PeerSyncSnapshot {
     /// Last update timestamp (monotonic). Lets observers age out
     /// stale entries after the peer disconnects.
     pub observed_at: std::time::Instant,
+    /// Our best header id at the moment this status was computed. `Equal`
+    /// means "peer tip == THIS id"; if our tip later advances/reorgs, the
+    /// snapshot no longer confirms the current tip. The caught-up fallback
+    /// uses this to discount stale `Equal` observations.
+    pub observed_best_header_id: [u8; 32],
 }
 
 pub struct SyncCoordinator {
@@ -222,6 +227,19 @@ pub struct SyncCoordinator {
     /// sync from `snapshot_height + 1` can proceed.
     bootstrap_in_progress: bool,
 }
+
+/// Minimum number of distinct peers that must report our exact tip
+/// (`PeerChainStatus::Equal`, a header-id match in V2) before the
+/// "caught up to peers" fallback flips the headers-synced latch. Requiring
+/// more than one guards against a single stale or lying peer triggering the
+/// flip. See [`SyncCoordinator::try_mark_caught_up_to_peers`].
+const MIN_CAUGHT_UP_EQUAL_PEERS: usize = 2;
+
+/// How recent a per-peer SyncInfo observation must be to count toward the
+/// "caught up to peers" decision. Active peers refresh their entry on every
+/// SyncInfo exchange, so a stale (silent) peer's `Equal`/`Older` status ages
+/// out of the decision after this window instead of latching forever.
+const CAUGHT_UP_PEER_FRESHNESS: Duration = Duration::from_secs(30);
 
 impl SyncCoordinator {
     /// Construct with the default download window.
@@ -351,6 +369,83 @@ impl SyncCoordinator {
     }
     pub fn sync_state_mut(&mut self) -> &mut SyncState {
         &mut self.sync_state
+    }
+
+    /// Level-triggered "caught up to peers" fallback for the headers-synced
+    /// latch. **Deliberate, consensus-safe divergence from Scala** (whose
+    /// latch — like ours in [`SyncState::check_headers_synced`] — flips ONLY
+    /// on the edge of validating a header fresh per `header.isNew`).
+    ///
+    /// On an idle / stale tip (e.g. a quiet testnet synced from genesis) the
+    /// chain tip header is older than `block_interval * header_chain_diff`, so
+    /// the freshness edge never fires and block download never starts — the
+    /// node sits at header-tip applying zero blocks. This fallback flips the
+    /// latch when we have demonstrably caught up to the network instead:
+    ///   * at least [`MIN_CAUGHT_UP_EQUAL_PEERS`] distinct peers report our
+    ///     exact CURRENT tip (`Equal` whose `observed_best_header_id` equals
+    ///     `current_best_header_id` — a header-id match under V2, not a bare
+    ///     height compare, so forks/cumulative-difficulty ambiguity can't fake
+    ///     it, and a stale `Equal` from before a tip advance/reorg doesn't
+    ///     count), observed within [`CAUGHT_UP_PEER_FRESHNESS`], AND
+    ///   * those `Equal` peers are a strict MAJORITY of all peers heard from
+    ///     within that window.
+    ///
+    /// The majority test counts every non-`Equal` fresh peer against the flip,
+    /// not just `Older`. V2 classification is lossy: a non-overlapping/forked/
+    /// garbage SyncInfo defaults to `Older`, while a peer slightly ahead with
+    /// an overlapping `[H+1, H, …]` SyncInfo is recorded as `Younger` — so
+    /// neither status alone reliably means "ahead." Requiring `Equal` to be the
+    /// majority (a) tolerates a minority of noisy/lying peers — fixing the
+    /// single-peer DoS where one peer could veto forever — and (b) still defers
+    /// the flip whenever most peers are NOT confirming our tip (real mid-IBD,
+    /// whether they read as `Older` or overlapping-`Younger`). On the idle
+    /// stall this fix targets, every peer sits at the same tip → all `Equal` →
+    /// trivially a majority.
+    ///
+    /// Only block *download timing* is affected — every block is still fully
+    /// validated, so a premature flip can at worst download valid blocks we
+    /// already hold headers for. Returns `true` iff it flipped the latch this
+    /// call (so the caller logs once). No-op once already synced.
+    pub fn try_mark_caught_up_to_peers(
+        &mut self,
+        now: Instant,
+        current_best_header_id: [u8; 32],
+    ) -> bool {
+        if self.sync_state.headers_chain_synced() {
+            return false;
+        }
+        // Headers-only (Mode 6) and mid-bootstrap (Mode 2) deliberately
+        // suppress block-section download. The fallback exists only to START
+        // that download, so it must not open the latch for them — otherwise
+        // the gated pipeline would register pending blocks and request
+        // sections those modes are required to withhold. The latch reopens
+        // naturally once bootstrap completes (`bootstrap_in_progress` clears).
+        if self.should_skip_block_sections() {
+            return false;
+        }
+        let mut fresh_equal = 0usize;
+        let mut fresh_total = 0usize;
+        for snap in self.peer_sync.values() {
+            if now.duration_since(snap.observed_at) > CAUGHT_UP_PEER_FRESHNESS {
+                continue;
+            }
+            fresh_total += 1;
+            // Only an `Equal` observed against our CURRENT tip confirms it. A
+            // stale `Equal` (our tip advanced/reorged since) still counts in
+            // the denominator — a non-confirming vote — so it makes the
+            // majority harder to reach, never easier.
+            if snap.status == PeerChainStatus::Equal
+                && snap.observed_best_header_id == current_best_header_id
+            {
+                fresh_equal += 1;
+            }
+        }
+        if fresh_equal >= MIN_CAUGHT_UP_EQUAL_PEERS && 2 * fresh_equal > fresh_total {
+            self.sync_state.mark_headers_chain_synced();
+            true
+        } else {
+            false
+        }
     }
     pub fn delivery(&self) -> &DeliveryTracker {
         &self.delivery
@@ -533,6 +628,7 @@ impl SyncCoordinator {
                 status,
                 peer_height: inferred_peer_height,
                 observed_at: now,
+                observed_best_header_id: chain.best_header_id(),
             },
         );
 

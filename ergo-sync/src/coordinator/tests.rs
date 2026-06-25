@@ -2149,6 +2149,200 @@ fn on_sync_info_v2_equal_no_inv() {
     assert_eq!(inv_count, 0, "Equal peer must not get an Inv extension");
 }
 
+// ----- caught-up-to-peers headers-synced fallback -----
+
+/// A MockChain whose tip == the returned peer bytes' id, so a peer echoing
+/// those bytes classifies as `Equal` (header-id match).
+fn equal_tip_chain() -> (MockChain, Vec<u8>) {
+    let mut chain = MockChain::new(100, 100);
+    let peer_bytes = fake_header_bytes([0x77u8; 32]);
+    let our_tip_id = id_for_bytes(&peer_bytes);
+    chain.best_header_id = our_tip_id;
+    chain.add_best_chain_header(100, our_tip_id);
+    (chain, peer_bytes)
+}
+
+fn note_equal_peer(
+    coord: &mut SyncCoordinator,
+    chain: &MockChain,
+    bytes: &[u8],
+    port: u16,
+    now: Instant,
+) {
+    coord.on_sync_info(
+        peer(port),
+        SyncVersion::V2,
+        &SyncInfo::V2 {
+            headers: vec![bytes.to_vec()],
+        },
+        chain,
+        now,
+    );
+}
+
+#[test]
+fn caught_up_fallback_flips_latch_with_multiple_equal_and_no_older() {
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    assert!(!coord.sync_state().headers_chain_synced());
+
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
+    assert!(
+        !coord.sync_state().headers_chain_synced(),
+        "on_sync_info must not flip the latch on its own"
+    );
+
+    assert!(
+        coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "two fresh Equal peers and no Older must flip the latch"
+    );
+    assert!(coord.sync_state().headers_chain_synced());
+    assert!(
+        !coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "already-synced must be a no-op (returns false)"
+    );
+}
+
+#[test]
+fn caught_up_fallback_discounts_equal_against_a_superseded_tip() {
+    // codex round-4 guard: Equal is relative to the tip it was observed
+    // against. If our tip advances/reorgs, those (still time-fresh) Equal
+    // snapshots must not be counted as confirming the NEW tip.
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
+
+    // Our tip is now a different header than the one those peers confirmed.
+    let new_tip = [0xEEu8; 32];
+    assert_ne!(new_tip, chain.best_header_id);
+    assert!(
+        !coord.try_mark_caught_up_to_peers(t0, new_tip),
+        "Equal observed against the old tip must not confirm a superseded tip"
+    );
+    // Against the tip they actually observed, they still count.
+    assert!(coord.try_mark_caught_up_to_peers(t0, chain.best_header_id));
+}
+
+#[test]
+fn caught_up_fallback_requires_multiple_equal_peers() {
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    assert!(
+        !coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "a single Equal peer must not flip the latch (one stale/lying peer guard)"
+    );
+}
+
+#[test]
+fn caught_up_fallback_tolerates_a_single_noisy_older_peer() {
+    // The DoS guard: a single peer sending non-overlapping/garbage V2 SyncInfo
+    // is classified Older, but two honest Equal peers outnumber it, so the
+    // fallback still flips (the stall isn't held hostage by one noisy peer).
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
+    // No-overlap header → on_sync_info's Older default.
+    let older_bytes = fake_header_bytes([0x99u8; 32]);
+    note_equal_peer(&mut coord, &chain, &older_bytes, 9032, t0);
+    assert!(
+        coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "two Equal peers must outvote one noisy Older peer and flip the latch"
+    );
+}
+
+#[test]
+fn caught_up_fallback_blocked_when_older_peers_outnumber_equal() {
+    // A genuine majority ahead of us (real mid-IBD) must still defer the flip.
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
+    // Three peers ahead of us (Older) > two Equal.
+    for (i, port) in [9032u16, 9033, 9034].iter().enumerate() {
+        let older_bytes = fake_header_bytes([0x90u8 + i as u8; 32]);
+        note_equal_peer(&mut coord, &chain, &older_bytes, *port, t0);
+    }
+    assert!(
+        !coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "an Older majority (we're genuinely behind) must defer the flip"
+    );
+}
+
+/// A chain with our tip at height 105 plus a lower header at 100 on our best
+/// chain. A peer echoing the height-105 bytes reads `Equal`; one echoing the
+/// height-100 bytes reads `Younger` (overlaps our chain, newest != our tip).
+fn tip_chain_with_lower_overlap() -> (MockChain, Vec<u8>, Vec<u8>) {
+    let mut chain = MockChain::new(105, 105);
+    let equal_bytes = fake_header_bytes([0x55u8; 32]);
+    let tip_id = id_for_bytes(&equal_bytes);
+    chain.best_header_id = tip_id;
+    chain.add_best_chain_header(105, tip_id);
+    let younger_bytes = fake_header_bytes([0x44u8; 32]);
+    let younger_id = id_for_bytes(&younger_bytes);
+    chain.add_best_chain_header(100, younger_id);
+    (chain, equal_bytes, younger_bytes)
+}
+
+#[test]
+fn caught_up_fallback_blocked_when_younger_peers_are_a_majority() {
+    // codex round-3 guard: a peer slightly ahead with an overlapping
+    // `[H+1, H, ...]` SyncInfo classifies as Younger, NOT Older. The majority
+    // test must count every non-Equal fresh peer, so two Equal peers must not
+    // outvote three Younger ones.
+    let (chain, equal_bytes, younger_bytes) = tip_chain_with_lower_overlap();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &equal_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &equal_bytes, 9031, t0);
+    for port in [9032u16, 9033, 9034] {
+        note_equal_peer(&mut coord, &chain, &younger_bytes, port, t0);
+    }
+    assert!(
+        !coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "Equal must be a strict majority of ALL fresh peers (Younger peers count)"
+    );
+}
+
+#[test]
+fn caught_up_fallback_suppressed_in_headers_only_mode() {
+    // Mode 6 (headers-only) must never start block-section download, even
+    // when fully caught up — the fallback must not open the latch there.
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new_with_window_and_mode(0, 100, true);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
+    assert!(
+        !coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
+        "headers-only mode must not flip the latch via the caught-up fallback"
+    );
+    assert!(!coord.sync_state().headers_chain_synced());
+}
+
+#[test]
+fn caught_up_fallback_ignores_stale_observations() {
+    let (chain, peer_bytes) = equal_tip_chain();
+    let mut coord = SyncCoordinator::new(0);
+    let t0 = Instant::now();
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
+    note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
+    // Past the freshness window, those Equal observations no longer count.
+    let later = t0 + Duration::from_secs(31);
+    assert!(
+        !coord.try_mark_caught_up_to_peers(later, chain.best_header_id),
+        "stale Equal observations must not flip the latch"
+    );
+}
+
 #[test]
 fn on_sync_info_v2_unknown_peer_falls_through_to_older_path() {
     // Peer's headers are NOT on our chain (Fork or Unknown). We
