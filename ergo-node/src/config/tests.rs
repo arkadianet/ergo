@@ -709,7 +709,14 @@ fn logging_file_dot_dir_resolves_to_logs_subdir() {
     // itself, scattering rotating log files among the redb state files and
     // reading as "no file logging". They must normalize to the same
     // <data_dir>/logs default an unset dir uses.
-    for dot in [".", "./", ""] {
+    let mut cases: Vec<&str> = vec![".", "./", ""];
+    if cfg!(windows) {
+        // ".\" is a current-directory spelling only where `\` is a path
+        // separator; on Unix it is an ordinary one-char filename, so this
+        // case is Windows-only.
+        cases.push(".\\");
+    }
+    for dot in cases {
         let path = write_toml(&format!(
             "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
              [logging.file]\ndir = {dot:?}\n"
