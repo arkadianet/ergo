@@ -740,6 +740,30 @@ impl SyncExecutor {
             }
         }
 
+        // Mode 6 (headers-only) AND Mode 2 (mid-bootstrap) defense-in-depth:
+        // these modes must not download or assemble block sections, so register
+        // no pending blocks for them — even when the edge-triggered latch
+        // flipped on a fresh header (which bypasses on_header_validated's own
+        // should_skip gate). Mirrors the apply-path guard in
+        // `try_apply_next_blocks`. NB: this returns AFTER the header-synced
+        // auto-detection above, on purpose — recovery may still OPEN the latch
+        // from a fresh persisted tip (harmless while suppressed, since every
+        // section path is guarded) so the pipeline starts promptly once
+        // bootstrap clears, while we still register nothing here.
+        if coordinator.should_skip_block_sections() {
+            // Permanent headers-only (Mode 6) has nothing to recover, ever —
+            // mark recovery done so sync_tick stops re-calling every tick (the
+            // `headers_chain_synced && !recovery_done` gate) and the API stops
+            // reporting recovery_done=false. Mid-bootstrap is TRANSIENT: the
+            // install path calls `reset_recovery_done` when it clears, after
+            // which a normal recovery seeds the post-snapshot blocks — so leave
+            // its latch untouched here.
+            if coordinator.is_headers_only() {
+                self.recovery_done = true;
+            }
+            return Ok(0);
+        }
+
         // Only recover blocks within the download window.
         let recovery_limit = cs
             .best_full_block_height

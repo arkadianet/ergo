@@ -1266,6 +1266,87 @@ fn setup_n_pending_blocks_with_window(n: u32, window: usize) -> (SyncCoordinator
     (coord, chain)
 }
 
+/// Like `setup_n_pending_blocks_with_window` but lets the caller pick the
+/// suppression mode and registers pending blocks DIRECTLY (bypassing
+/// `on_header_validated`'s own guard) so the defense-in-depth guards on the
+/// request path are exercised even when a block "somehow" got registered.
+fn setup_pending_with_mode(
+    n: u32,
+    headers_only: bool,
+    bootstrap: bool,
+) -> (SyncCoordinator, MockChain) {
+    let mut coord = SyncCoordinator::new_with_window_and_mode(100, 384, headers_only);
+    coord.set_bootstrap_in_progress(bootstrap);
+    let chain = MockChain::new(100 + n, 100);
+    let recent_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    coord.sync_state_mut().check_headers_synced(recent_ts);
+    for i in 0..n {
+        let height = 101 + i;
+        let header_id = mk32(1 + i);
+        let exp = ExpectedSections::from_header(
+            &header_id,
+            &mk32(10_000 + i),
+            &mk32(20_000 + i),
+            &mk32(30_000 + i),
+        );
+        coord.sync_state_mut().set_best_known_header(height);
+        coord.sync_state_mut().add_pending_block(height, header_id);
+        coord.assembly_mut().register_header(exp);
+    }
+    (coord, chain)
+}
+
+#[test]
+fn request_missing_sections_bucketed_suppressed_in_headers_only() {
+    // Mode 6 (headers-only) must request no block sections, even if pending
+    // blocks were registered and the headers-synced latch is set.
+    let (mut coord, chain) = setup_pending_with_mode(3, true, false);
+    let peers = [peer(9030), peer(9031)];
+    let actions = coord.request_missing_sections_bucketed(&chain, Instant::now(), &peers);
+    assert!(
+        actions.is_empty(),
+        "headers-only must not request block sections, got {actions:?}"
+    );
+}
+
+#[test]
+fn request_missing_sections_bucketed_suppressed_during_bootstrap() {
+    // Mode 2 (mid-bootstrap) suppresses section download until install completes.
+    let (mut coord, chain) = setup_pending_with_mode(3, false, true);
+    let peers = [peer(9030), peer(9031)];
+    let actions = coord.request_missing_sections_bucketed(&chain, Instant::now(), &peers);
+    assert!(
+        actions.is_empty(),
+        "mid-bootstrap must not request block sections, got {actions:?}"
+    );
+}
+
+#[test]
+fn request_missing_sections_closure_suppressed_in_headers_only() {
+    let (mut coord, chain) = setup_pending_with_mode(3, true, false);
+    let actions = coord.request_missing_sections(&chain, Instant::now(), |_t| Some(peer(9030)));
+    assert!(
+        actions.is_empty(),
+        "headers-only must not request block sections (closure variant), got {actions:?}"
+    );
+}
+
+#[test]
+fn request_missing_sections_bucketed_emits_when_not_suppressed() {
+    // Contrast: the identical pending blocks DO produce requests in normal
+    // mode, proving the empties above come from the suppression guard.
+    let (mut coord, chain) = setup_pending_with_mode(3, false, false);
+    let peers = [peer(9030), peer(9031)];
+    let actions = coord.request_missing_sections_bucketed(&chain, Instant::now(), &peers);
+    assert!(
+        !actions.is_empty(),
+        "normal mode must request sections for pending blocks"
+    );
+}
+
 #[test]
 fn s1_bucketed_empty_peers_emits_no_actions() {
     let (mut coord, chain) = setup_n_pending_blocks(5);
