@@ -812,3 +812,54 @@ fn executor_disconnect_reassigns_via_peer_manager() {
         "both cancelled requests should be reassigned to p2"
     );
 }
+
+#[test]
+fn recover_coordinator_marks_done_in_headers_only_mode() {
+    // Permanent headers-only (Mode 6): recovery registers nothing, but must be
+    // marked done so sync_tick (headers_chain_synced && !recovery_done) stops
+    // re-calling it every tick and the API stops reporting recovery_done=false.
+    let store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new_with_window_and_mode(0, 100, true);
+    // Latch open, as it would be after the persisted-tip freshness detection.
+    coordinator.sync_state_mut().mark_headers_chain_synced();
+
+    assert!(!executor.recovery_done());
+    let recovered = executor
+        .recover_coordinator(&store, &mut coordinator)
+        .unwrap();
+    assert_eq!(recovered, 0, "headers-only must register no pending blocks");
+    assert!(
+        executor.recovery_done(),
+        "headers-only recovery must be marked done so sync_tick stops re-calling it"
+    );
+}
+
+#[test]
+fn recover_coordinator_leaves_done_unset_during_bootstrap() {
+    // Mid-bootstrap is transient: recovery_done must stay unset so a normal
+    // recovery runs once the install path clears bootstrap (and resets it).
+    let store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    coordinator.set_bootstrap_in_progress(true);
+    coordinator.sync_state_mut().mark_headers_chain_synced();
+
+    let recovered = executor
+        .recover_coordinator(&store, &mut coordinator)
+        .unwrap();
+    assert_eq!(
+        recovered, 0,
+        "mid-bootstrap must register no pending blocks"
+    );
+    assert!(
+        !executor.recovery_done(),
+        "mid-bootstrap must leave recovery_done unset so it re-runs after the install resets it"
+    );
+}

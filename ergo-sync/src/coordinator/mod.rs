@@ -1183,6 +1183,11 @@ impl SyncCoordinator {
         select_peer: impl Fn(u8) -> Option<PeerId>,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+        // Mode 6 / Mode 2 defense-in-depth (see
+        // `request_missing_sections_bucketed`).
+        if self.should_skip_block_sections() {
+            return actions;
+        }
         let blocks_to_download = self.sync_state.blocks_to_download();
 
         // Collect section IDs by type, then send batched RequestModifier messages.
@@ -1322,6 +1327,12 @@ impl SyncCoordinator {
         peers: &[PeerId],
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+        // Mode 6 (headers-only) / Mode 2 (mid-bootstrap) defense-in-depth:
+        // never request block sections while section download is suppressed,
+        // regardless of how the headers-synced latch got set.
+        if self.should_skip_block_sections() {
+            return actions;
+        }
         if peers.is_empty() {
             return actions;
         }
