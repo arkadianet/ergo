@@ -704,6 +704,37 @@ fn logging_file_relative_dir_resolves_against_data_dir() {
 }
 
 #[test]
+fn logging_file_dot_dir_resolves_to_logs_subdir() {
+    // `dir = "."` (and ""/"./") would otherwise resolve to the data dir
+    // itself, scattering rotating log files among the redb state files and
+    // reading as "no file logging". They must normalize to the same
+    // <data_dir>/logs default an unset dir uses.
+    let mut cases: Vec<&str> = vec![".", "./", ""];
+    if cfg!(windows) {
+        // ".\" is a current-directory spelling only where `\` is a path
+        // separator; on Unix it is an ordinary one-char filename, so this
+        // case is Windows-only.
+        cases.push(".\\");
+    }
+    for dot in cases {
+        let path = write_toml(&format!(
+            "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+             [logging.file]\ndir = {dot:?}\n"
+        ));
+        let mut cli = minimal_cli(Some(&path));
+        let data_dir = std::env::temp_dir().join("ergo-cfg-logfile-dot");
+        cli.data_dir = Some(data_dir.clone());
+        let cfg = NodeConfig::load(cli).expect("load");
+        let file = cfg.logging.file.expect("file enabled");
+        assert_eq!(
+            file.dir,
+            data_dir.join("logs"),
+            "dir={dot:?} must normalize to <data_dir>/logs"
+        );
+    }
+}
+
+#[test]
 fn logging_file_absolute_dir_preserved() {
     let abs = if cfg!(windows) {
         "C:/var/log/ergo-test"

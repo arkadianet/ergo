@@ -735,6 +735,21 @@ impl NodeConfig {
             };
             let file = if let Some(tf) = &tl.file {
                 let dir = match tf.dir.as_deref() {
+                    // A current-directory-only dir ("", ".", "./", and the
+                    // Windows ".\") resolves to the data dir itself, which
+                    // would scatter rotating log files in amongst the redb
+                    // state files and reads as "no file logging" if you look
+                    // in a `logs/` subdir. Treat any dot-only path as "unset"
+                    // → the same `<data_dir>/logs` default the `None` arm uses.
+                    // Component-based, so the native path separator is handled
+                    // on each platform (empty `components()` → vacuously true).
+                    Some(d)
+                        if std::path::Path::new(d)
+                            .components()
+                            .all(|c| c == std::path::Component::CurDir) =>
+                    {
+                        data_dir.join("logs")
+                    }
                     Some(d) => {
                         let p = PathBuf::from(d);
                         if p.is_absolute() {
