@@ -88,6 +88,9 @@ pub fn on_tip_change(
         }
     }
     if !removed_for_revoke.is_empty() {
+        actions.push(MempoolAction::RevokeBroadcast {
+            tx_ids: removed_for_revoke.clone(),
+        });
         actions.push(MempoolAction::Observe {
             event: ObservedEvent::Evicted {
                 tx_ids: removed_for_revoke.clone(),
@@ -329,15 +332,31 @@ mod tests {
         let (tip, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert!(!pool.contains(&d(1)));
         assert_eq!(tip, tip_100());
-        assert!(actions.iter().any(|a| matches!(
-            a,
-            MempoolAction::Observe {
-                event: ObservedEvent::Evicted {
-                    reason: EvictionReason::Confirmed,
-                    ..
+        // Confirmed removals revoke relay state and record the eviction, in
+        // that order — `RevokeBroadcast` must precede `Observe(Evicted)` (same
+        // as the input-conflict path).
+        let revoke_pos = actions.iter().position(|a| {
+            matches!(
+                a,
+                MempoolAction::RevokeBroadcast { tx_ids } if tx_ids.contains(&d(1))
+            )
+        });
+        let evicted_pos = actions.iter().position(|a| {
+            matches!(
+                a,
+                MempoolAction::Observe {
+                    event: ObservedEvent::Evicted {
+                        reason: EvictionReason::Confirmed,
+                        ..
+                    }
                 }
-            }
-        )));
+            )
+        });
+        assert!(
+            matches!((revoke_pos, evicted_pos), (Some(r), Some(e)) if r < e),
+            "RevokeBroadcast must precede Observe(Evicted::Confirmed); \
+             got revoke={revoke_pos:?} evicted={evicted_pos:?}"
+        );
         pool.check_invariants();
     }
 
