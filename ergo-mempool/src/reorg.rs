@@ -88,6 +88,9 @@ pub fn on_tip_change(
         }
     }
     if !removed_for_revoke.is_empty() {
+        actions.push(MempoolAction::RevokeBroadcast {
+            tx_ids: removed_for_revoke.clone(),
+        });
         actions.push(MempoolAction::Observe {
             event: ObservedEvent::Evicted {
                 tx_ids: removed_for_revoke.clone(),
@@ -337,6 +340,12 @@ mod tests {
                     ..
                 }
             }
+        )));
+        // Confirmed removals also revoke relay state, like input-conflict
+        // evictions do, so both signals stay in sync.
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            MempoolAction::RevokeBroadcast { tx_ids } if tx_ids.contains(&d(1))
         )));
         pool.check_invariants();
     }
