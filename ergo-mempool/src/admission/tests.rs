@@ -1495,6 +1495,95 @@ fn pool_output_map_feeds_overlay_for_child_tx() {
 }
 
 #[test]
+fn admit_child_credits_in_pool_parent_weight_via_process() {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::ergo_box::ErgoBoxCandidate;
+    use ergo_ser::ergo_tree::read_ergo_tree;
+    use ergo_ser::register::AdditionalRegisters;
+
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let w = ByCost;
+
+    let tree_bytes = vec![0x00u8, 0x01, 0x01];
+    let mut r = VlqReader::new(&tree_bytes);
+    let tree = read_ergo_tree(&mut r).unwrap();
+    let parent_output = ErgoBox {
+        candidate: ErgoBoxCandidate::new(1_000_000, tree, 0, vec![], AdditionalRegisters::empty())
+            .unwrap(),
+        transaction_id: id(1).into(),
+        index: 0,
+    };
+    // Low-weight parent seeded directly (own weight 500), creates box 0xBB.
+    let parent_entry = Entry::new(
+        id(1),
+        Arc::from(vec![1u8; 50].into_boxed_slice()),
+        vec![id(0x10)],
+        vec![id(0xBB)],
+        vec![],
+        5_000_000,
+        500,
+        50,
+        100_000,
+        TxSource::Api,
+    )
+    .with_output_boxes(vec![parent_output]);
+    pool.insert(parent_entry).unwrap();
+
+    // High-fee child spending the parent's output. ByCost weight =
+    // fee*1024/cost = 3_000_000*1024/12_000 = 256_000 (>> parent's own 500).
+    let child = MockValidator::new().plan(
+        b"child".to_vec(),
+        MockPlan {
+            result: Ok(Validated {
+                tx_id: id(2),
+                input_box_ids: vec![id(0xBB)],
+                output_box_ids: vec![id(0xCC)],
+                outputs: vec![],
+                fee: 3_000_000,
+                size_bytes: 5,
+                consumed_cost: 12_000,
+            }),
+            charge: 12_000,
+            peek_fee: None,
+            peek_tx_id: None,
+        },
+    );
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(b"child", TxSource::Api, Instant::now(), &mut cx, &child);
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+
+    let child_w = pool.get(&id(2)).unwrap().weight;
+    assert_eq!(child_w, 256_000, "child's own ByCost weight");
+    // Admission's family credit boosted the parent by the child's own weight
+    // (Scala put → updateFamily(+weight)): 500 + 256_000.
+    assert_eq!(
+        pool.get(&id(1)).unwrap().weight,
+        256_500,
+        "low-fee parent boosted by its high-fee child"
+    );
+    // And the boost flips priority order: parent now ahead of child.
+    let order: Vec<_> = pool.iter_prioritized().map(|e| e.tx_id).collect();
+    assert_eq!(
+        order,
+        vec![id(1), id(2)],
+        "boosted parent sorts before child"
+    );
+    pool.check_invariants();
+}
+
+#[test]
 fn api_source_bypasses_per_peer_budget() {
     let utxo = EmptyUtxo;
     let c = ctx();

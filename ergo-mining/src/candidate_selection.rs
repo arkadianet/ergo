@@ -600,6 +600,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn family_boosted_parent_selected_before_high_fee_child() {
+        // CPFP: a low-fee parent whose family weight was boosted by its
+        // high-fee child sorts AHEAD of that child, so the greedy pass takes
+        // the parent first and includes the whole family. Without the boost
+        // the high-fee child would sort first and be skipped (see
+        // `child_before_parent_skips_child`). The snapshot reflects the
+        // post-boost pool order: parent weight (own + child) > child weight.
+        let in_box = box_at(1_000_000_000, HEIGHT, 0x01);
+        let utxo = MapUtxo::new(std::slice::from_ref(&in_box));
+        let tx_parent = spend_tx(&in_box, 1_000_000_000, HEIGHT);
+        let parent_id = transaction_id(&tx_parent).unwrap();
+        let parent_out = ErgoBox {
+            candidate: tx_parent.output_candidates[0].clone(),
+            transaction_id: parent_id,
+            index: 0,
+        };
+        let tx_child = spend_tx(&parent_out, 1_000_000_000, HEIGHT);
+
+        // Child's own weight is high (990); the parent, boosted by the child,
+        // is 10 + 990 = 1000 and therefore ordered first.
+        let snap = MempoolReadSnapshot::from_entries(vec![
+            entry(&tx_parent, 1000, 100, 0xA0),
+            entry(&tx_child, 990, 100, 0xB0),
+        ]);
+
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let params = ProtocolParams::mainnet_default();
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &params,
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sel.checked.len(),
+            2,
+            "boosted parent first → whole CPFP family included",
+        );
+    }
+
     // ----- budgets -----
 
     #[test]

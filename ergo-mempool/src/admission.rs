@@ -28,7 +28,7 @@ use tracing::warn;
 use crate::budget::{BudgetVerdict, CostBudgets};
 use crate::invalidation::{InvalidationCache, InvalidationReason};
 use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
-use crate::pool::{Entry, OrderedPool, PoolError};
+use crate::pool::{Entry, FamilyBounds, OrderedPool, PoolError};
 use crate::types::{
     EvictionReason, MempoolAction, MempoolConfig, ObservedEvent, PenaltyKind, TipPointer, TxId,
     TxSource,
@@ -800,84 +800,79 @@ fn commit(
 ) -> AdmissionOutcome {
     let peer = source.peer();
 
-    // ── Step 15 — Commit.
-    let mut removed_for_actions: Vec<TxId> = Vec::new();
-    // Capture per-loser weight before removal so the `Replaced`
-    // observation can carry the weight delta without a second read.
-    // Only direct conflicts (entries in `replaced_ids`) are losers in
-    // the replacement decision; CPFP descendants are collateral and
-    // surface via the `Evicted` event below.
-    let mut replaced_losers: Vec<(TxId, u64)> = Vec::with_capacity(replaced_ids.len());
-    for id in &replaced_ids {
-        let loser_weight = cx.pool.get(id).map(|e| e.weight).unwrap_or(0);
-        replaced_losers.push((*id, loser_weight));
-        let removed = cx
+    // ── Step 15 — Commit. The new tx is inserted, its ancestors are
+    //    family-credited, then the post-boost lowest is evicted if over budget
+    //    (Scala `OrderedTxPool.put` evicts `orderedTransactions.last` only after
+    //    `updateFamily`, so victim selection sees boosted weights). A commit
+    //    that can evict — a replacement or an overflowing insert — runs on a
+    //    clone and swaps into the live pool only if the new tx survives, so a
+    //    rejected admission never mutates the pool; the common path mutates in
+    //    place.
+    let bounds = FamilyBounds::new(
+        cx.config.max_family_depth,
+        cx.config.max_family_ops,
+        cx.config.max_family_update_ms,
+    );
+    let needs_staging = !replaced_ids.is_empty()
+        || cx.pool.len().saturating_add(1) > cx.config.max_pool_size
+        || cx
             .pool
-            .remove_with_descendants(id, cx.config.cpfp_max_family_depth);
-        for e in removed {
-            removed_for_actions.push(e.tx_id);
-        }
-    }
-    // Evict lowest-priority entries until both count and byte budgets fit.
-    // Replacements are already removed, so pool state is current. The
-    // pre-checks above guarantee the new tx itself is <= max_pool_bytes
-    // and is heavier than any remaining minimum, so this loop terminates.
-    while cx.pool.len() + 1 > cx.config.max_pool_size
-        || cx.pool.total_bytes() + validated.size_bytes as usize > cx.config.max_pool_bytes
-    {
-        if let Some(id) = cx.pool.lowest_tx_id() {
-            let removed = cx
-                .pool
-                .remove_with_descendants(&id, cx.config.cpfp_max_family_depth);
-            for e in removed {
-                removed_for_actions.push(e.tx_id);
-            }
-        } else {
-            break; // pool empty; new tx alone fits (pre-checked above)
-        }
-    }
+            .total_bytes()
+            .saturating_add(validated.size_bytes as usize)
+            > cx.config.max_pool_bytes;
 
-    // Compute parents_in_pool now that removals are done.
-    let parents_in_pool: Vec<TxId> = {
-        let mut seen = std::collections::HashSet::new();
-        let mut parents = Vec::new();
-        for input in &validated.input_box_ids {
-            if let Some(parent) = cx.pool.parent_for_output(input) {
-                if seen.insert(parent) {
-                    parents.push(parent);
-                }
+    let CommitOutcome {
+        removed_for_actions,
+        replaced_losers,
+    } = if needs_staging {
+        let mut staged = cx.pool.clone_for_staging();
+        match apply_commit(
+            &mut staged,
+            &validated,
+            weight,
+            &replaced_ids,
+            bounds,
+            cx.config,
+            tx_bytes,
+            source,
+        ) {
+            Err(reason) => return AdmissionOutcome::Rejected { reason },
+            Ok(outcome) if staged.contains(&validated.tx_id) => {
+                *cx.pool = staged;
+                outcome
+            }
+            Ok(_) => {
+                // The new tx was its own post-boost eviction victim. Discard
+                // the staged pool: a rejected admission must leave the live
+                // pool untouched. (Scala would trim-and-report-Accepted; we
+                // prefer a clean reject with no side effects.)
+                actions.push(MempoolAction::Observe {
+                    event: ObservedEvent::DroppedPoolFull {
+                        tx_id: validated.tx_id,
+                    },
+                });
+                return AdmissionOutcome::Rejected {
+                    reason: RejectReason::PoolFull,
+                };
             }
         }
-        parents
+    } else {
+        // Fast path: no replacement and the insert cannot overflow, so no
+        // eviction runs and the new tx always survives — mutate in place.
+        match apply_commit(
+            cx.pool,
+            &validated,
+            weight,
+            &replaced_ids,
+            bounds,
+            cx.config,
+            tx_bytes,
+            source,
+        ) {
+            Err(reason) => return AdmissionOutcome::Rejected { reason },
+            Ok(outcome) => outcome,
+        }
     };
-
-    let entry = Entry::new(
-        validated.tx_id,
-        Arc::from(tx_bytes.to_vec().into_boxed_slice()),
-        validated.input_box_ids.clone(),
-        validated.output_box_ids.clone(),
-        parents_in_pool,
-        validated.fee,
-        weight,
-        validated.size_bytes,
-        validated.consumed_cost,
-        source.clone(),
-    )
-    .with_output_boxes(validated.outputs.clone());
-    match cx.pool.insert(entry) {
-        Ok(()) => {}
-        Err(PoolError::Duplicate(_)) => {
-            // Unreachable: step 8 checked. Fail safe.
-            return AdmissionOutcome::Rejected {
-                reason: RejectReason::Duplicate,
-            };
-        }
-        Err(PoolError::OutputCollision(_)) => {
-            return AdmissionOutcome::Rejected {
-                reason: RejectReason::InsertCollision,
-            };
-        }
-    }
 
     // ── Step 17 — Emit actions.
     if !removed_for_actions.is_empty() {
@@ -925,6 +920,109 @@ fn commit(
         fee: validated.fee,
         size: validated.size_bytes,
     }
+}
+
+/// Result of [`apply_commit`]: ids removed (for `RevokeBroadcast`/`Evicted`)
+/// and per-loser weights (for the `Replaced` observation).
+struct CommitOutcome {
+    removed_for_actions: Vec<TxId>,
+    replaced_losers: Vec<(TxId, u64)>,
+}
+
+/// Apply the commit mutations to `pool`: remove double-spend losers (debiting
+/// their ancestors), insert the new tx, family-credit its ancestors, then evict
+/// the post-boost lowest until both budgets fit. Run on the live pool (fast
+/// path) or on a clone the caller swaps in only if the new tx survives. Returns
+/// `Err` on an (unreachable, fail-safe) insert collision — the caller maps it
+/// to a rejection; on the staged path the clone is simply discarded.
+#[allow(clippy::too_many_arguments)]
+fn apply_commit(
+    pool: &mut OrderedPool,
+    validated: &Validated,
+    weight: u64,
+    replaced_ids: &[TxId],
+    bounds: FamilyBounds,
+    config: &MempoolConfig,
+    tx_bytes: &[u8],
+    source: &TxSource,
+) -> Result<CommitOutcome, RejectReason> {
+    let mut removed_for_actions: Vec<TxId> = Vec::new();
+
+    // 15a — remove direct double-spend losers (+ their CPFP descendants),
+    //       debiting each removed subtree out of its surviving ancestors.
+    //       Capture per-loser weight first for the `Replaced` observation.
+    //
+    //       Losers are removed before the winner is inserted, whereas Scala
+    //       `ErgoMemPool.process` removes them after (`put(new).remove(conflicts)`):
+    //       `by_input` holds one spender per box, so the winner and a conflicting
+    //       loser cannot coexist in the pool. With a full pool this keeps an
+    //       unrelated lowest tx that Scala's pre-removal capacity eviction would
+    //       drop — a one-tx mempool-membership difference, never a consensus one;
+    //       ordering is unaffected.
+    let mut replaced_losers: Vec<(TxId, u64)> = Vec::with_capacity(replaced_ids.len());
+    for id in replaced_ids {
+        let loser_weight = pool.get(id).map(|e| e.weight).unwrap_or(0);
+        replaced_losers.push((*id, loser_weight));
+        for e in pool.remove_with_descendants_debiting(id, config.max_family_depth, bounds) {
+            removed_for_actions.push(e.tx_id);
+        }
+    }
+
+    // 15b — compute parents_in_pool now that loser removals are done.
+    let parents_in_pool: Vec<TxId> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut parents = Vec::new();
+        for input in &validated.input_box_ids {
+            if let Some(parent) = pool.parent_for_output(input) {
+                if seen.insert(parent) {
+                    parents.push(parent);
+                }
+            }
+        }
+        parents
+    };
+
+    let entry = Entry::new(
+        validated.tx_id,
+        Arc::<[u8]>::from(tx_bytes),
+        validated.input_box_ids.clone(),
+        validated.output_box_ids.clone(),
+        parents_in_pool,
+        validated.fee,
+        weight,
+        validated.size_bytes,
+        validated.consumed_cost,
+        source.clone(),
+    )
+    .with_output_boxes(validated.outputs.clone());
+    match pool.insert(entry) {
+        Ok(()) => {}
+        // Unreachable: step 8 checked duplicates. Fail safe.
+        Err(PoolError::Duplicate(_)) => return Err(RejectReason::Duplicate),
+        Err(PoolError::OutputCollision(_)) => return Err(RejectReason::InsertCollision),
+    }
+
+    // 15c — CPFP family credit: propagate the new tx's own weight up to its
+    //       in-pool ancestors (Scala `put` → `updateFamily(+weight)`).
+    pool.update_family(&validated.input_box_ids, i128::from(weight), bounds);
+
+    // 15d — evict the post-boost lowest until both budgets fit. Runs after
+    //       insert+credit so a boosted parent is no longer the victim; each
+    //       eviction debits its ancestors. The new tx may itself be the lowest
+    //       (Scala parity); the caller's staging discards the commit if so.
+    while pool.len() > config.max_pool_size || pool.total_bytes() > config.max_pool_bytes {
+        let Some(id) = pool.lowest_tx_id() else {
+            break; // pool empty; new tx alone fits (pre-checked in `check`)
+        };
+        for e in pool.remove_with_descendants_debiting(&id, config.max_family_depth, bounds) {
+            removed_for_actions.push(e.tx_id);
+        }
+    }
+
+    Ok(CommitOutcome {
+        removed_for_actions,
+        replaced_losers,
+    })
 }
 
 enum ReplacementDecision {

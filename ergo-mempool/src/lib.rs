@@ -369,13 +369,15 @@ impl Mempool {
     }
 
     /// Monotonic candidate-visible pool revision (bumped on every pool
-    /// mutation — admission, eviction, reorg demotion, revalidation re-admit,
-    /// and priority reweights — all route through `OrderedPool::insert`/
-    /// `remove`). The off-loop candidate engine compares this against the
-    /// revision its last build reflected to decide whether a same-tip rebuild
-    /// is due; see `OrderedPool`'s `revision` field for why reweights (which
-    /// occur only during a tip change) cannot cause a spurious same-tip
-    /// rebuild.
+    /// mutation — admission, eviction, reorg removal, revalidation re-admit,
+    /// and CPFP family-weight credits/debits — which route through
+    /// `OrderedPool::insert`/`remove`/`rekey_weight`). The off-loop candidate
+    /// engine compares this against the revision its last build reflected to
+    /// decide whether a same-tip rebuild is due. A family-weight credit
+    /// reweights ancestors *during* an admission (same tip), but that
+    /// admission already advances the revision and warrants a rebuild, so the
+    /// extra per-ancestor bumps coalesce into that one pending rebuild rather
+    /// than triggering a spurious extra one.
     pub fn revision(&self) -> u64 {
         self.pool.revision()
     }
@@ -570,7 +572,6 @@ impl Mempool {
             &mut self.pool,
             &mut self.budgets,
             &mut self.revalidation,
-            &*self.weight_fn,
         );
         self.tip = Some(new_tip);
 

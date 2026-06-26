@@ -49,7 +49,10 @@ impl WeightFunction for ByCost {
     }
 }
 
-/// Fee per byte. Matches Scala's default behavior.
+/// Fee per byte (`fee × 1024 / size`) — Scala `SortingOption.FeePerByte`.
+/// NOTE: this is *not* this node's default (that is `ByCost`), nor is it
+/// Scala's stock default: Scala ships `mempoolSorting = "random"`, a
+/// per-startup coin-flip between `FeePerByte` and `FeePerCycle`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BySize;
 
