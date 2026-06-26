@@ -2,16 +2,17 @@
 //!
 //! Ordering matters:
 //!
-//!   1. Snapshot `children_of[parent]` for every confirmed-parent
-//!      **before** any index mutation. Otherwise step 2 drops the
-//!      edges and step 4 can't discover the children.
-//!   2. Remove confirmed txs. Do NOT cascade to descendants — the
-//!      parent-confirmation case keeps children valid.
+//!   1. Snapshot each confirmed parent's surviving children **before**
+//!      any index mutation. Otherwise step 2 drops the
+//!      `parents_in_pool` edges and step 4 can't discover the children.
+//!   2. Remove confirmed txs (no descendant cascade — the
+//!      parent-confirmation case keeps children valid), debiting each
+//!      removed tx's family weight out of its surviving ancestors.
 //!   3. Evict pool txs by `applied_spent_inputs`: any pool tx whose
 //!      inputs conflict with an applied block tx (including ones the
-//!      pool never saw) must go, with CPFP descendants.
-//!   4. Re-weight surviving descendants of confirmed parents — they
-//!      lose their CPFP boost.
+//!      pool never saw) must go, with CPFP descendants (debited too).
+//!   4. Detach confirmed parents from surviving children (edge cleanup;
+//!      survivors keep the family-weight boost from their own descendants).
 //!   5. Enqueue demoted txs (raw bytes preserved).
 //!   6. Reset `CostBudgets`.
 //!   7. Initial drain of the revalidation queue, bounded per-tick.
@@ -25,60 +26,63 @@ use ergo_primitives::digest::Digest32;
 use crate::admission::TipContext;
 use crate::admission::{process, AdmissionCtx, Validator};
 use crate::budget::CostBudgets;
-use crate::pool::{Entry, OrderedPool};
+use crate::pool::{FamilyBounds, OrderedPool};
 use crate::revalidation::RevalidationQueue;
 use crate::types::{
     EvictionReason, MempoolAction, MempoolConfig, ObservedEvent, TipPointer, TxDiff, TxId, TxSource,
 };
-use crate::weight::{WeightFunction, WeightInputs};
 
 /// Apply a state-change diff to the pool. Returns emitted actions
 /// (broadcast revocations, observations) and updates `last_seen` to
 /// `diff.new_tip`. Callers should follow up with `tick_revalidation`
 /// on their usual cadence.
-#[allow(clippy::too_many_arguments)]
 pub fn on_tip_change(
     diff: &TxDiff,
     config: &MempoolConfig,
     pool: &mut OrderedPool,
     budgets: &mut CostBudgets,
     revalidation: &mut RevalidationQueue,
-    weight_fn: &dyn WeightFunction,
 ) -> (TipPointer, Vec<MempoolAction>) {
     let mut actions: Vec<MempoolAction> = Vec::new();
+    // Bounds for every family-weight debit in this tip change (Step 2/3).
+    let bounds = FamilyBounds::new(
+        config.max_family_depth,
+        config.max_family_ops,
+        config.max_family_update_ms,
+    );
 
-    // ── Step 1 — Snapshot children_of for every confirmed parent. ──
-    // Safe to read before any removal; indexes untouched so far.
-    let mut descendants_to_rewight: HashMap<TxId, Vec<TxId>> = HashMap::new();
-    for a in &diff.applied {
-        if pool.contains(&a.tx_id) {
-            if let Some(entry) = pool.get(&a.tx_id) {
-                // Entry has no direct children list; use the pool's
-                // by_output reverse lookup to discover children that
-                // spent this tx's outputs.
-                let mut children = Vec::new();
-                for out_id in &entry.outputs {
-                    // by_output maps box_id → tx that created it; the
-                    // children are those whose `parents_in_pool`
-                    // contains this confirmed tx. Walk entries once.
-                    let _ = out_id; // silence unused in this inner loop
+    // ── Step 1 — Snapshot each confirmed parent's surviving children BEFORE
+    //    any removal (Step 2 drops the `parents_in_pool` edges). Entries carry
+    //    no child list, so do a single pass over the pool grouping each tx
+    //    under any in-pool confirmed parent it names.
+    let confirmed_in_pool: HashSet<TxId> = diff
+        .applied
+        .iter()
+        .map(|a| a.tx_id)
+        .filter(|id| pool.contains(id))
+        .collect();
+    let mut confirmed_parent_children: HashMap<TxId, Vec<TxId>> = HashMap::new();
+    if !confirmed_in_pool.is_empty() {
+        for e in pool.iter_prioritized() {
+            for parent in &e.parents_in_pool {
+                if confirmed_in_pool.contains(parent) {
+                    confirmed_parent_children
+                        .entry(*parent)
+                        .or_default()
+                        .push(e.tx_id);
                 }
-                // Simpler: walk entries whose parents_in_pool contains a.tx_id.
-                for e in pool.iter_prioritized() {
-                    if e.parents_in_pool.contains(&a.tx_id) {
-                        children.push(e.tx_id);
-                    }
-                }
-                descendants_to_rewight.insert(a.tx_id, children);
             }
         }
     }
 
-    // ── Step 2 — Remove confirmed txs (no descendant cascade). ────
+    // ── Step 2 — Remove confirmed txs (no descendant cascade), debiting
+    //    each removed tx's weight out of its surviving ancestors (Scala
+    //    `remove` → `updateFamily(-weight)`). For a confirmed root the
+    //    debit is a no-op (its parents are on-chain, not in the pool).
     let mut removed_for_revoke: Vec<TxId> = Vec::new();
     for a in &diff.applied {
         if pool.contains(&a.tx_id) {
-            if let Some(entry) = pool.remove(&a.tx_id) {
+            if let Some(entry) = pool.remove_debiting(&a.tx_id, bounds) {
                 removed_for_revoke.push(entry.tx_id);
             }
         }
@@ -106,7 +110,8 @@ pub fn on_tip_change(
             if already_evicted.contains(&tx_id) {
                 continue;
             }
-            let removed = pool.remove_with_descendants(&tx_id, config.cpfp_max_family_depth);
+            let removed =
+                pool.remove_with_descendants_debiting(&tx_id, config.max_family_depth, bounds);
             for e in removed {
                 if already_evicted.insert(e.tx_id) {
                     conflict_evictions.push(e.tx_id);
@@ -126,50 +131,18 @@ pub fn on_tip_change(
         });
     }
 
-    // ── Step 4 — Re-weight surviving descendants. ─────────────────
-    // Children of confirmed parents keep their place in the pool but
-    // lose any CPFP boost. Recompute weight from the child's own
-    // (fee, size, cost). Re-key the BTreeMap entry only if the
-    // weight changed.
-    for child_ids in descendants_to_rewight.values() {
+    // ── Step 4 — Detach confirmed parents from surviving children. ─
+    // A surviving child of a now-confirmed parent KEEPS the family-weight
+    // boost it earned from its own descendants — only its edge to the
+    // confirmed parent is stale. The confirmed parent's own weight was
+    // already de-propagated in Step 2 (`remove_debiting` debits the parent's
+    // ancestors, not its children). So here we only strip the confirmed
+    // parent from each surviving child's `parents_in_pool`; we do NOT reset
+    // the child to its base weight (that would wrongly strip the boost it
+    // earned from its grandchildren).
+    for (confirmed_parent, child_ids) in &confirmed_parent_children {
         for child in child_ids {
-            if let Some(entry_ref) = pool.get(child) {
-                let new_weight = weight_fn.compute(WeightInputs {
-                    tx_id: &entry_ref.tx_id,
-                    fee: entry_ref.fee,
-                    size_bytes: entry_ref.size_bytes,
-                    cost: entry_ref.cost,
-                });
-                if new_weight != entry_ref.weight {
-                    // Re-key by removing + re-inserting with the new
-                    // weight. The entry keeps all other state
-                    // (output_boxes, parents_in_pool, etc.).
-                    if let Some(mut removed) = pool.remove(child) {
-                        removed.weight = new_weight;
-                        // parents_in_pool may still include the now-
-                        // confirmed parent. Strip it so the next
-                        // re-key walks a cleaner graph.
-                        removed.parents_in_pool.retain(|p| pool.contains(p));
-                        let new_entry = Entry {
-                            tx_id: removed.tx_id,
-                            bytes: removed.bytes.clone(),
-                            inputs: removed.inputs.clone(),
-                            outputs: removed.outputs.clone(),
-                            parents_in_pool: removed.parents_in_pool.clone(),
-                            fee: removed.fee,
-                            weight: new_weight,
-                            size_bytes: removed.size_bytes,
-                            cost: removed.cost,
-                            created_at: removed.created_at,
-                            last_checked_at: removed.last_checked_at,
-                            source: removed.source.clone(),
-                            output_boxes: removed.output_boxes.clone(),
-                        };
-                        // Ignore duplicate/collision: we just removed it.
-                        let _ = pool.insert(new_entry);
-                    }
-                }
-            }
+            pool.detach_parent(child, confirmed_parent);
         }
     }
 
@@ -353,7 +326,7 @@ mod tests {
         let cfg = MempoolConfig::default();
 
         let diff = mk_diff(tip_100(), vec![(1, vec![0x10])], vec![]);
-        let (tip, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        let (tip, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert!(!pool.contains(&d(1)));
         assert_eq!(tip, tip_100());
         assert!(actions.iter().any(|a| matches!(
@@ -380,7 +353,7 @@ mod tests {
 
         // Applied tx with id 99 (not in pool) spent box 0xAA.
         let diff = mk_diff(tip_100(), vec![(99, vec![0xAA])], vec![]);
-        let (_, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        let (_, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert!(
             !pool.contains(&d(7)),
             "pool tx sharing an input with a block tx must be evicted"
@@ -409,9 +382,48 @@ mod tests {
         // NOT in applied_spent_inputs because the applied tx is the
         // parent — it spent 0x10, not 0x11.
         let diff = mk_diff(tip_100(), vec![(1, vec![0x10])], vec![]);
-        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert!(!pool.contains(&d(1)), "parent removed");
         assert!(pool.contains(&d(2)), "child retained");
+        pool.check_invariants();
+    }
+
+    #[test]
+    fn parent_confirmed_child_keeps_its_own_descendant_boost() {
+        // P <- C <- GC. C carries a family-weight boost from GC. When P
+        // confirms, C must KEEP that boost: Step 4 only strips the confirmed
+        // parent edge; it must NOT reset C to its base weight (which would
+        // wrongly discard GC's contribution — the pre-fix behavior).
+        let mut pool = OrderedPool::with_capacity(8);
+        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut rq = RevalidationQueue::new(100);
+        // Seed the post-boost state directly. 777/333 are deliberately not the
+        // ByCost recompute of these entries' fee/cost, so a reset-to-base
+        // regression would visibly change them.
+        seed_entry(&mut pool, 1, 0x10, 0x11, 900, vec![]); // P
+        seed_entry(&mut pool, 2, 0x11, 0x22, 777, vec![d(1)]); // C (boosted by GC)
+        seed_entry(&mut pool, 3, 0x22, 0x33, 333, vec![d(2)]); // GC
+        let cfg = MempoolConfig::default();
+
+        // Parent tx 1 confirms (spent box 0x10).
+        let diff = mk_diff(tip_100(), vec![(1, vec![0x10])], vec![]);
+        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
+
+        assert!(!pool.contains(&d(1)), "confirmed parent removed");
+        let c = pool.get(&d(2)).expect("child retained");
+        assert_eq!(
+            c.weight, 777,
+            "child keeps its grandchild boost (no reset to base)"
+        );
+        assert!(
+            !c.parents_in_pool.contains(&d(1)),
+            "confirmed parent stripped from child's parents_in_pool"
+        );
+        assert_eq!(
+            pool.get(&d(3)).expect("grandchild retained").weight,
+            333,
+            "grandchild untouched"
+        );
         pool.check_invariants();
     }
 
@@ -426,7 +438,7 @@ mod tests {
             vec![],
             vec![(50, vec![1, 2, 3]), (51, vec![4, 5, 6])],
         );
-        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert_eq!(rq.len(), 2);
     }
 
@@ -439,7 +451,7 @@ mod tests {
         assert_eq!(b.global_consumed(), 500_000);
         let cfg = MempoolConfig::default();
         let diff = mk_diff(tip_100(), vec![], vec![]);
-        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert_eq!(b.global_consumed(), 0);
     }
 
@@ -664,7 +676,7 @@ mod tests {
         pool.insert(entry).unwrap();
         let cfg = MempoolConfig::default();
         let diff = mk_diff(tip_100(), vec![(99, vec![0xAA, 0xBB])], vec![]);
-        let (_, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        let (_, actions) = on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         // tx 1 evicted exactly once.
         let revokes: Vec<_> = actions
             .iter()
@@ -695,7 +707,7 @@ mod tests {
             vec![(0xBB, vec![0x10])],
             vec![(0xAA, a_bytes.clone())],
         );
-        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq, &ByCost);
+        on_tip_change(&diff, &cfg, &mut pool, &mut b, &mut rq);
         assert_eq!(rq.len(), 1);
 
         let v = MockValidator::new().plan(

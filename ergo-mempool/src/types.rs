@@ -226,9 +226,17 @@ pub struct MempoolConfig {
     pub notifier_poll_ms: u64,
     pub revalidation_per_tick: usize,
     pub revalidation_max_depth: usize,
-    pub cpfp_max_family_depth: usize,
-    pub cpfp_max_family_ops: usize,
-    pub cpfp_max_family_update_ms: u64,
+    /// Max ancestors a family-weight (CPFP) walk visits before bailing.
+    /// Mirrors Scala `OrderedTxPool.MaxParentScanDepth`; also caps the
+    /// downward cascade in `remove_with_descendants`.
+    pub max_family_depth: usize,
+    /// Rust-only safety cap on total re-keys per family-weight walk (no
+    /// Scala counterpart — Scala bounds only by depth and time). Guards
+    /// against pathological diamond fan-out, which has no global visited-set.
+    pub max_family_ops: usize,
+    /// Wall-clock budget (ms) for a single family-weight walk before it
+    /// bails. Mirrors Scala `OrderedTxPool.MaxParentScanTime`.
+    pub max_family_update_ms: u64,
     pub global_cost_budget: u64,
     pub per_peer_cost_budget: u64,
     pub unresolved_cache_size: usize,
@@ -250,9 +258,9 @@ impl Default for MempoolConfig {
             notifier_poll_ms: 250,
             revalidation_per_tick: 100,
             revalidation_max_depth: 10_000,
-            cpfp_max_family_depth: 500,
-            cpfp_max_family_ops: 10_000,
-            cpfp_max_family_update_ms: 500,
+            max_family_depth: 500,
+            max_family_ops: 10_000,
+            max_family_update_ms: 500,
             global_cost_budget: 12_000_000,
             per_peer_cost_budget: 10_000_000,
             unresolved_cache_size: 4_096,

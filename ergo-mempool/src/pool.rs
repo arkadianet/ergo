@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
@@ -128,6 +128,40 @@ impl Ord for WeightedKey {
     }
 }
 
+/// Bounds for one family-weight (CPFP) walk. Mirrors Scala
+/// `OrderedTxPool`'s `MaxParentScanDepth` (`max_depth`) and
+/// `MaxParentScanTime` (`deadline`); `max_ops` is a Rust-only safety cap
+/// on total re-keys with no Scala counterpart (Scala bounds only by depth
+/// and time). The depth/time guards gate *descent* — a bailed recursion
+/// returns but its caller keeps re-keying remaining siblings, matching
+/// Scala's `foldLeft`; only `max_ops` is a hard stop of the whole walk.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FamilyBounds {
+    max_depth: usize,
+    max_ops: usize,
+    max_update_ms: u64,
+}
+
+impl FamilyBounds {
+    pub(crate) fn new(max_depth: usize, max_ops: usize, max_update_ms: u64) -> Self {
+        Self {
+            max_depth,
+            max_ops,
+            max_update_ms,
+        }
+    }
+}
+
+/// Apply a signed `delta` to a `u64` weight without overflow or wrap:
+/// widen to `i128`, floor at 0, ceil at `u64::MAX`. Scala uses a signed
+/// `Long` and lets weights drift negative on bounded partial walks; we
+/// clamp to keep the `u64` key well-formed (see the underflow note in the
+/// family-weight design — a bounded walk may legitimately under-subtract).
+fn saturating_apply(weight: u64, delta: i128) -> u64 {
+    let r = i128::from(weight) + delta;
+    u64::try_from(r.max(0)).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Error)]
 pub enum PoolError {
     #[error("tx already in pool: {0:?}")]
@@ -148,16 +182,18 @@ pub struct OrderedPool {
     /// when either endpoint leaves the pool.
     children_of: HashMap<TxId, Vec<TxId>>,
     total_bytes: usize,
-    /// Monotonic counter bumped on every pool mutation (`insert` / `remove`,
-    /// and thus every admission, eviction, reorg demotion, and revalidation
-    /// re-admit — all route through these two). An insert/remove changes the
-    /// candidate-visible pool's MEMBERSHIP or, for a reweight (remove+insert
-    /// of a surviving tx), its priority ORDERING — both feed the candidate's
-    /// tx-selection order, so the off-loop engine (via `Mempool::revision`)
-    /// treats any advance as "rebuild due". A reorg reweight advances the
-    /// counter for a tx that stays in the pool, but reweights happen only
-    /// during a tip change, whose rebuild already subsumes the signal — so
-    /// this can never produce a spurious *same-tip* rebuild.
+    /// Monotonic counter bumped on every candidate-visible pool mutation:
+    /// `insert`, `remove`, and the family-weight walk's `rekey_weight` (which
+    /// moves a surviving tx's slot in `ordered`). It thus advances on every
+    /// admission, eviction, reorg removal, revalidation re-admit, and CPFP
+    /// family credit/debit. `insert`/`remove` change the pool's MEMBERSHIP; a
+    /// `rekey_weight` changes its priority ORDERING — both feed the
+    /// candidate's tx-selection order, so the off-loop engine (via
+    /// `Mempool::revision`) treats any advance as "rebuild due". Family-weight
+    /// credits reweight ancestors *during* an admission, so their bumps
+    /// coalesce into the rebuild that admission already warrants — never a
+    /// spurious *extra* one. (`detach_parent` mutates only `parents_in_pool`,
+    /// which is not candidate-visible, so it deliberately does not bump.)
     revision: u64,
 }
 
@@ -174,6 +210,23 @@ impl OrderedPool {
         }
     }
 
+    /// Deep copy for transactional admission staging: a commit that may evict
+    /// the new tx itself is applied to this clone and swapped into the live
+    /// pool only if the tx survives, so a rejected admission never mutates the
+    /// live pool. Kept `pub(crate)` (rather than a public `Clone` impl) so the
+    /// expensive full-pool copy is not part of the crate's external API.
+    pub(crate) fn clone_for_staging(&self) -> Self {
+        Self {
+            ordered: self.ordered.clone(),
+            by_tx_id: self.by_tx_id.clone(),
+            by_input: self.by_input.clone(),
+            by_output: self.by_output.clone(),
+            children_of: self.children_of.clone(),
+            total_bytes: self.total_bytes,
+            revision: self.revision,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.ordered.len()
     }
@@ -186,8 +239,8 @@ impl OrderedPool {
         self.total_bytes
     }
 
-    /// Monotonic membership-revision counter (bumped on every insert /
-    /// remove). See the `revision` field.
+    /// Monotonic candidate-visible revision counter, bumped on every `insert`,
+    /// `remove`, and family-weight `rekey_weight`. See the `revision` field.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -266,7 +319,7 @@ impl OrderedPool {
     /// Remove a single entry. Descendants are NOT removed — use
     /// `remove_with_descendants` for cascading eviction. Returns the
     /// removed entry or `None` if absent.
-    pub fn remove(&mut self, tx_id: &TxId) -> Option<Entry> {
+    pub(crate) fn remove(&mut self, tx_id: &TxId) -> Option<Entry> {
         let key = self.by_tx_id.remove(tx_id)?;
         let entry = self.ordered.remove(&key)?;
         for b in &entry.inputs {
@@ -299,7 +352,7 @@ impl OrderedPool {
     /// family walks. Returns removed entries in removal order (parent
     /// last — children are removed first so their `parents_in_pool`
     /// backreferences stay consistent during the sweep).
-    pub fn remove_with_descendants(&mut self, tx_id: &TxId, max_depth: usize) -> Vec<Entry> {
+    pub(crate) fn remove_with_descendants(&mut self, tx_id: &TxId, max_depth: usize) -> Vec<Entry> {
         if !self.contains(tx_id) {
             return Vec::new();
         }
@@ -331,6 +384,146 @@ impl OrderedPool {
             if let Some(e) = self.remove(&id) {
                 removed.push(e);
             }
+        }
+        removed
+    }
+
+    /// Re-key a single in-pool tx to `new_weight`, moving only its slot in
+    /// `ordered` and its `by_tx_id` mapping. The weight-independent indexes
+    /// (`by_input`/`by_output`/`children_of`/`total_bytes`) are untouched —
+    /// so, unlike `remove`+`insert`, this preserves a non-leaf node's own
+    /// `children_of` edges. No-op if the tx is absent. Used only by the
+    /// family-weight walk.
+    fn rekey_weight(&mut self, tx_id: &TxId, new_weight: u64) {
+        let Some(old_key) = self.by_tx_id.get(tx_id).copied() else {
+            return;
+        };
+        if old_key.weight() == new_weight {
+            return; // no ordering change — skip the churn (and revision bump)
+        }
+        let Some(mut entry) = self.ordered.remove(&old_key) else {
+            return;
+        };
+        entry.weight = new_weight;
+        let new_key = WeightedKey::new(new_weight, *tx_id);
+        self.by_tx_id.insert(*tx_id, new_key);
+        self.ordered.insert(new_key, entry);
+        self.revision += 1;
+    }
+
+    /// Strip a now-confirmed/removed `parent` from `child`'s
+    /// `parents_in_pool`, in place. `parents_in_pool` is not part of the
+    /// ordering key, so the slot in `ordered` is unaffected — no re-key and
+    /// no `remove`+`insert` (which would drop `child`'s own `children_of`
+    /// edges). No-op if `child` is absent.
+    pub(crate) fn detach_parent(&mut self, child: &TxId, parent: &TxId) {
+        let Some(key) = self.by_tx_id.get(child).copied() else {
+            return;
+        };
+        if let Some(entry) = self.ordered.get_mut(&key) {
+            entry.parents_in_pool.retain(|p| p != parent);
+        }
+    }
+
+    /// Family-weight (CPFP) walk: add `delta` to every in-pool ancestor of
+    /// the tx whose inputs are `seed_inputs`, recursively up the spend graph.
+    /// Faithful port of Scala `OrderedTxPool.updateFamily`
+    /// (`OrderedTxPool.scala:185-212`): parents are re-derived from the live
+    /// `by_output` map at each level, the *same* `delta` propagates to every
+    /// ancestor, and there is no global visited-set (a diamond ancestor is
+    /// intentionally credited once per path). `delta` is `+own_weight` on
+    /// admission (credit) and `-current_weight` on removal (debit). Bounded
+    /// by `bounds`.
+    pub(crate) fn update_family(
+        &mut self,
+        seed_inputs: &[Digest32],
+        delta: i128,
+        bounds: FamilyBounds,
+    ) {
+        // Stamp the time budget per top-level walk, matching Scala's
+        // per-`updateFamily` `startTime` (`OrderedTxPool.scala:189`).
+        let deadline = Instant::now() + Duration::from_millis(bounds.max_update_ms);
+        let mut ops: usize = 0;
+        self.update_family_rec(seed_inputs, delta, bounds, deadline, 0, &mut ops);
+    }
+
+    fn update_family_rec(
+        &mut self,
+        seed_inputs: &[Digest32],
+        delta: i128,
+        bounds: FamilyBounds,
+        deadline: Instant,
+        depth: usize,
+        ops: &mut usize,
+    ) {
+        // Depth/time guard gates DESCENT (Scala :191): a bailed call returns,
+        // but its caller's loop keeps re-keying remaining sibling parents —
+        // matching Scala's `foldLeft`, not a single global stop.
+        if depth > bounds.max_depth || Instant::now() > deadline {
+            tracing::warn!(
+                depth,
+                "mempool family-weight walk: depth/time bound hit, stopping descent"
+            );
+            return;
+        }
+        // Direct parents at this level, captured (id + weight + inputs) BEFORE
+        // re-keying any of them — mirroring Scala materializing `parentTxs`
+        // before its `foldLeft`, so each direct parent is boosted from its
+        // call-start weight even if an earlier sibling's recursion already
+        // touched it. Deduped per call (Scala `.toSet`); deliberately NO global
+        // visited-set across branches (a diamond ancestor reached via recursion
+        // is still credited once per path).
+        let mut seen: std::collections::HashSet<TxId> = std::collections::HashSet::new();
+        let parents: Vec<(TxId, u64, Vec<Digest32>)> = seed_inputs
+            .iter()
+            .filter_map(|box_id| self.by_output.get(box_id).copied())
+            .filter(|id| seen.insert(*id))
+            .filter_map(|id| self.get(&id).map(|e| (id, e.weight, e.inputs.clone())))
+            .collect();
+        for (parent, captured_weight, parent_inputs) in parents {
+            // Rust-only total-rekey cap — a hard stop for the whole walk.
+            if *ops >= bounds.max_ops {
+                tracing::warn!(
+                    ops = *ops,
+                    "mempool family-weight walk: ops cap hit, stopping"
+                );
+                return;
+            }
+            self.rekey_weight(&parent, saturating_apply(captured_weight, delta));
+            *ops += 1;
+            self.update_family_rec(&parent_inputs, delta, bounds, deadline, depth + 1, ops);
+        }
+    }
+
+    /// Remove a single tx and debit its weight from its surviving ancestors
+    /// (the de-propagation half of Scala `remove` → `updateFamily(-weight)`).
+    /// No-op if absent.
+    pub(crate) fn remove_debiting(&mut self, tx_id: &TxId, bounds: FamilyBounds) -> Option<Entry> {
+        let removed = self.remove(tx_id)?;
+        // `removed` is owned and already out of the pool; its inputs still
+        // point at the surviving parents' outputs in `by_output`, so the debit
+        // reaches them.
+        self.update_family(&removed.inputs, -i128::from(removed.weight), bounds);
+        Some(removed)
+    }
+
+    /// Remove a tx and its whole descendant subtree, then debit EACH removed
+    /// tx's weight from its surviving ancestors (Scala `remove` →
+    /// `updateFamily(-weight)`, applied per tx). Ancestors *inside* the removed
+    /// subtree are already gone from `by_output`, so each debit reaches only
+    /// still-live parent paths. Per-entry (not just the root) is required for
+    /// DAG families: a removed child whose OTHER parent survives must still
+    /// debit that parent — debiting only the root's accumulated weight would
+    /// leave a phantom boost on the surviving co-parent.
+    pub(crate) fn remove_with_descendants_debiting(
+        &mut self,
+        tx_id: &TxId,
+        max_depth: usize,
+        bounds: FamilyBounds,
+    ) -> Vec<Entry> {
+        let removed = self.remove_with_descendants(tx_id, max_depth);
+        for entry in &removed {
+            self.update_family(&entry.inputs, -i128::from(entry.weight), bounds);
         }
         removed
     }
@@ -746,5 +939,240 @@ mod tests {
         let map = p.input_map();
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(&digest(20)), Some(&digest(2)));
+    }
+
+    // ----- oracle parity (CPFP family weight; Scala OrderedTxPool.updateFamily) -----
+    //
+    // Box ids use the 100+ range so they never collide with the small tx-id
+    // bytes. Expected weights are derived from Scala's arithmetic
+    // (`newWtx.weight = wtx.weight + weight`, recursive), not from a self-oracle.
+
+    /// Bounds wide enough that none of these walks bail — exercises the exact
+    /// completed-walk arithmetic.
+    fn wide_bounds() -> FamilyBounds {
+        FamilyBounds::new(500, 10_000, 500)
+    }
+
+    #[test]
+    fn update_family_credit_boosts_in_pool_parent_weight() {
+        let mut p = OrderedPool::with_capacity(8);
+        // P: own weight 10, creates box 110.
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap();
+        // C: own weight 50, spends P's output (box 110).
+        p.insert(mk_entry(2, 50, &[110], &[111], &[1])).unwrap();
+        // Admission credit: propagate C's own weight up from C's inputs.
+        p.update_family(&[digest(110)], i128::from(50u64), wide_bounds());
+        // Scala: parent.weight = own + child = 10 + 50.
+        assert_eq!(p.get(&digest(1)).unwrap().weight, 60);
+        assert_eq!(p.get(&digest(2)).unwrap().weight, 50, "child unchanged");
+        // Parent now outranks child in priority order.
+        let order: Vec<_> = p.iter_prioritized().map(|e| e.tx_id).collect();
+        assert_eq!(order, vec![digest(1), digest(2)]);
+        p.check_invariants();
+    }
+
+    #[test]
+    fn update_family_debit_returns_parent_to_own_weight() {
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap();
+        p.insert(mk_entry(2, 50, &[110], &[111], &[1])).unwrap();
+        p.update_family(&[digest(110)], i128::from(50u64), wide_bounds());
+        assert_eq!(p.get(&digest(1)).unwrap().weight, 60);
+        // Remove the child, debiting its current weight back out of P.
+        let removed = p.remove_debiting(&digest(2), wide_bounds());
+        assert!(removed.is_some());
+        assert_eq!(
+            p.get(&digest(1)).unwrap().weight,
+            10,
+            "parent restored to its own weight after child leaves"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn update_family_credit_propagates_through_grandparent_chain() {
+        let mut p = OrderedPool::with_capacity(8);
+        // P(10) <- C(20) <- GC(40); boxes 110, 111, 112.
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap();
+        p.insert(mk_entry(2, 20, &[110], &[111], &[1])).unwrap();
+        p.update_family(&[digest(110)], i128::from(20u64), wide_bounds());
+        p.insert(mk_entry(3, 40, &[111], &[112], &[2])).unwrap();
+        p.update_family(&[digest(111)], i128::from(40u64), wide_bounds());
+        // Scala recursive fold: the grandchild's weight reaches C AND P.
+        assert_eq!(p.get(&digest(3)).unwrap().weight, 40, "grandchild own");
+        assert_eq!(p.get(&digest(2)).unwrap().weight, 20 + 40, "child own + gc");
+        assert_eq!(
+            p.get(&digest(1)).unwrap().weight,
+            10 + 20 + 40,
+            "parent own + child + grandchild"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn update_family_depth_bound_rekeys_siblings_but_stops_descent() {
+        // C has two direct parents P1, P2 (a sibling level); P1 has a
+        // grandparent GP1. depth bound 0 lets the direct-parent level re-key
+        // (both siblings) but stops descent to GP1.
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(4, 5, &[201], &[130], &[])).unwrap(); // GP1, creates box 130
+        p.insert(mk_entry(1, 10, &[130], &[110], &[4])).unwrap(); // P1, spends 130
+        p.insert(mk_entry(2, 20, &[200], &[111], &[])).unwrap(); // P2
+        p.insert(mk_entry(3, 50, &[110, 111], &[112], &[1, 2]))
+            .unwrap(); // C spends P1+P2
+        let bounds = FamilyBounds::new(0, 10_000, 500);
+        p.update_family(&[digest(110), digest(111)], i128::from(50u64), bounds);
+        assert_eq!(p.get(&digest(1)).unwrap().weight, 60, "sibling P1 re-keyed");
+        assert_eq!(p.get(&digest(2)).unwrap().weight, 70, "sibling P2 re-keyed");
+        assert_eq!(
+            p.get(&digest(4)).unwrap().weight,
+            5,
+            "grandparent NOT reached: depth bound gates descent"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn update_family_ops_bound_stops_the_whole_walk_including_siblings() {
+        // Same sibling shape, but the ops cap (1) is a global stop: only the
+        // first sibling is re-keyed; the second is not (contrast the depth test).
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap();
+        p.insert(mk_entry(2, 20, &[201], &[111], &[])).unwrap();
+        p.insert(mk_entry(3, 50, &[110, 111], &[112], &[1, 2]))
+            .unwrap();
+        let bounds = FamilyBounds::new(500, 1, 500);
+        p.update_family(&[digest(110), digest(111)], i128::from(50u64), bounds);
+        let p1 = p.get(&digest(1)).unwrap().weight;
+        let p2 = p.get(&digest(2)).unwrap().weight;
+        // Exactly one sibling was re-keyed (ops cap = 1); the other is untouched.
+        assert!(
+            (p1 == 60 && p2 == 20) || (p1 == 10 && p2 == 70),
+            "ops cap should re-key exactly one sibling, got p1={p1} p2={p2}"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn update_family_diamond_ancestor_credited_once_per_path() {
+        // G has two children P1, P2 (spending distinct G outputs); C spends
+        // both. No global visited-set, so C's credit reaches G via BOTH paths.
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110, 111], &[])).unwrap(); // G, two outputs
+        p.insert(mk_entry(2, 20, &[110], &[120], &[1])).unwrap(); // P1
+        p.insert(mk_entry(3, 30, &[111], &[121], &[1])).unwrap(); // P2
+        p.insert(mk_entry(4, 7, &[120, 121], &[122], &[2, 3]))
+            .unwrap(); // C
+        p.update_family(&[digest(120), digest(121)], i128::from(7u64), wide_bounds());
+        assert_eq!(p.get(&digest(2)).unwrap().weight, 27, "P1 own + C");
+        assert_eq!(p.get(&digest(3)).unwrap().weight, 37, "P2 own + C");
+        assert_eq!(
+            p.get(&digest(1)).unwrap().weight,
+            10 + 7 + 7,
+            "diamond grandparent credited once per path (2x)"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn remove_with_descendants_debiting_undoes_whole_subtree_boost() {
+        // P(10) <- C(20) <- GC(40); fully boosted (P=70, C=60). Removing C's
+        // subtree debits P by C's accumulated weight (60), restoring P to 10.
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap();
+        p.insert(mk_entry(2, 20, &[110], &[111], &[1])).unwrap();
+        p.update_family(&[digest(110)], i128::from(20u64), wide_bounds());
+        p.insert(mk_entry(3, 40, &[111], &[112], &[2])).unwrap();
+        p.update_family(&[digest(111)], i128::from(40u64), wide_bounds());
+        assert_eq!(p.get(&digest(1)).unwrap().weight, 70);
+        let removed = p.remove_with_descendants_debiting(&digest(2), 500, wide_bounds());
+        let removed_ids: Vec<_> = removed.iter().map(|e| e.tx_id).collect();
+        assert!(removed_ids.contains(&digest(2)) && removed_ids.contains(&digest(3)));
+        assert_eq!(
+            p.get(&digest(1)).unwrap().weight,
+            10,
+            "subtree removal debits the whole subtree's contribution from P"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn rekey_weight_preserves_children_of_for_a_nonleaf_node() {
+        // Regression guard: re-keying a node that is itself a parent must NOT
+        // drop its children_of edges (the remove+insert bug). Proven via a
+        // subsequent cascade removal still reaching the child.
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap(); // P
+        p.insert(mk_entry(2, 20, &[110], &[111], &[1])).unwrap(); // C, child of P
+        p.rekey_weight(&digest(1), 999);
+        assert_eq!(p.get(&digest(1)).unwrap().weight, 999);
+        let removed = p.remove_with_descendants(&digest(1), 500);
+        let ids: Vec<_> = removed.iter().map(|e| e.tx_id).collect();
+        assert!(
+            ids.contains(&digest(2)),
+            "child edge survived the re-key: cascade still removes the child"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn detach_parent_strips_edge_without_changing_weight_or_position() {
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap();
+        p.insert(mk_entry(2, 20, &[110], &[111], &[1])).unwrap();
+        let before = p.get(&digest(2)).unwrap().weight;
+        p.detach_parent(&digest(2), &digest(1));
+        let child = p.get(&digest(2)).unwrap();
+        assert!(
+            !child.parents_in_pool.contains(&digest(1)),
+            "confirmed parent stripped from parents_in_pool"
+        );
+        assert_eq!(
+            child.weight, before,
+            "weight and ordering position unchanged"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn remove_with_descendants_debiting_debits_surviving_co_parent_in_a_diamond() {
+        // P1 and P2 each create a box; C spends BOTH (a DAG/diamond child).
+        // Removing P1's subtree also removes C (P1's child), and the surviving
+        // co-parent P2 must lose C's boost — debiting only the removed root P1
+        // would leave a phantom boost on P2.
+        let mut p = OrderedPool::with_capacity(8);
+        p.insert(mk_entry(1, 10, &[200], &[110], &[])).unwrap(); // P1, box 110
+        p.insert(mk_entry(2, 20, &[201], &[111], &[])).unwrap(); // P2, box 111
+        p.insert(mk_entry(3, 7, &[110, 111], &[112], &[1, 2]))
+            .unwrap(); // C spends both
+        p.update_family(&[digest(110), digest(111)], i128::from(7u64), wide_bounds());
+        assert_eq!(p.get(&digest(1)).unwrap().weight, 17, "P1 own + C");
+        assert_eq!(p.get(&digest(2)).unwrap().weight, 27, "P2 own + C");
+        // Remove P1's subtree (P1 + its child C); P2 survives.
+        let removed = p.remove_with_descendants_debiting(&digest(1), 500, wide_bounds());
+        let ids: Vec<_> = removed.iter().map(|e| e.tx_id).collect();
+        assert!(
+            ids.contains(&digest(1)) && ids.contains(&digest(3)),
+            "P1 and C removed"
+        );
+        assert!(!p.contains(&digest(3)), "C gone");
+        assert_eq!(
+            p.get(&digest(2)).unwrap().weight,
+            20,
+            "surviving co-parent P2 de-boosted back to its own weight"
+        );
+        p.check_invariants();
+    }
+
+    #[test]
+    fn saturating_apply_floors_at_zero_and_ceils_at_u64_max() {
+        assert_eq!(saturating_apply(10, 5), 15);
+        assert_eq!(saturating_apply(10, -100), 0, "under-debit floors at 0");
+        assert_eq!(
+            saturating_apply(u64::MAX - 5, 100),
+            u64::MAX,
+            "over-credit ceils at u64::MAX"
+        );
+        assert_eq!(saturating_apply(u64::MAX, -i128::from(u64::MAX)), 0);
     }
 }

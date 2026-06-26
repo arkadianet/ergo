@@ -148,9 +148,11 @@ relay/reorg policy, not transaction-acceptance rules.
   resolve it; conflict detection is the separate `by_input` path
   (`src/overlay.rs:34`).
 - **Reorg ordering is fixed.** `on_tip_change` snapshots confirmed-parent
-  children before any index mutation, then: remove confirmed (no cascade) →
-  evict input-conflicts (with CPFP cascade) → re-weight surviving descendants
-  (lose CPFP boost) → enqueue demoted → reset budgets (`src/reorg.rs:1`).
+  children before any index mutation, then: remove confirmed (no cascade,
+  debiting ancestors) → evict input-conflicts (with CPFP cascade, debiting
+  ancestors) → detach confirmed parents from surviving children (survivors keep
+  their own-descendant boost) → enqueue demoted → reset budgets
+  (`src/reorg.rs:1`).
 - **Demoted txs never re-enter the pool directly.** Rolled-back txs go to the
   bounded `RevalidationQueue` and re-run full admission via
   `TxSource::DemotedFromBlock` on `tick_revalidation`; demoted source bypasses
@@ -159,9 +161,11 @@ relay/reorg policy, not transaction-acceptance rules.
 - **Budgets reset every block.** `CostBudgets::reset` runs on every tip change
   and on `demote_all_for_revalidation` (`src/budget.rs:90`, `src/reorg.rs:188`,
   `src/lib.rs:699`).
-- **Bounded family walks.** CPFP descendant eviction is capped at
-  `cpfp_max_family_depth`; the revalidation queue is capped at
-  `revalidation_max_depth` (oldest dropped on overflow rather than OOM)
+- **Bounded family walks.** The family-weight (CPFP) boost/debit walk and the
+  descendant eviction cascade are both capped at `max_family_depth` (plus a
+  Rust-only `max_family_ops` and a `max_family_update_ms` time budget on the
+  weight walk); the revalidation queue is capped at `revalidation_max_depth`
+  (oldest dropped on overflow rather than OOM)
   (`src/pool.rs:302`, `src/revalidation.rs:36`).
 - **`peek_fee`/`validate` consistency.** For the same bytes both must return
   identical `(tx_id, fee)`; divergence is a validator bug, caught by
