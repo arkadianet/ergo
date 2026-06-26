@@ -959,10 +959,14 @@ fn apply_commit(
     //       unrelated lowest tx that Scala's pre-removal capacity eviction would
     //       drop — a one-tx mempool-membership difference, never a consensus one;
     //       ordering is unaffected.
-    let mut replaced_losers: Vec<(TxId, u64)> = Vec::with_capacity(replaced_ids.len());
+    // Capture every loser's weight BEFORE any removal: one conflict can be a
+    // descendant of another, and removing the first as a subtree would zero a
+    // later loser's recorded weight.
+    let replaced_losers: Vec<(TxId, u64)> = replaced_ids
+        .iter()
+        .map(|id| (*id, pool.get(id).map(|e| e.weight).unwrap_or(0)))
+        .collect();
     for id in replaced_ids {
-        let loser_weight = pool.get(id).map(|e| e.weight).unwrap_or(0);
-        replaced_losers.push((*id, loser_weight));
         for e in pool.remove_with_descendants_debiting(id, config.max_family_depth, bounds) {
             removed_for_actions.push(e.tx_id);
         }
