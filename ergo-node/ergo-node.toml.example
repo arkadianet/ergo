@@ -110,6 +110,7 @@ public_bind = false
 # max_tx_size_bytes = 98304  # matches Scala maxTransactionSize
 # max_tx_cost = 4900000      # matches Scala mainnet.conf maxTransactionCost
 # ibd_gate_block_lag = 10   # auto-pause mempool when > N blocks behind tip
+# rebroadcast_count = 3      # surviving unconfirmed txs re-advertised per tip-change recheck (Scala MempoolAuditor rebroadcastCount); 0 disables
 
 [api]
 # Submission routes (POST /api/v1/mempool/{submit,check},

@@ -490,6 +490,7 @@ fn mempool_knobs_from_toml() {
          max_pool_size = 500\n\
          min_relay_fee_nano_erg = 2000000\n\
          ibd_gate_block_lag = 20\n\
+         rebroadcast_count = 7\n\
          \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
     );
     let cli = minimal_cli(Some(&path));
@@ -497,11 +498,22 @@ fn mempool_knobs_from_toml() {
     assert_eq!(cfg.mempool_config.max_pool_size, 500);
     assert_eq!(cfg.mempool_config.min_relay_fee_nano_erg, 2_000_000);
     assert_eq!(cfg.mempool_config.ibd_gate_block_lag, 20);
+    assert_eq!(cfg.mempool_config.rebroadcast_count, 7);
     // unset fields still default
     assert_eq!(
         cfg.mempool_config.max_pool_bytes,
         MempoolConfig::default().max_pool_bytes
     );
+}
+
+#[test]
+fn rebroadcast_count_defaults_to_scala_value() {
+    // Unset [mempool].rebroadcast_count -> Scala application.conf default of 3.
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.mempool_config.rebroadcast_count, 3);
+    assert_eq!(MempoolConfig::default().rebroadcast_count, 3);
 }
 
 #[test]

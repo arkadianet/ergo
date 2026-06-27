@@ -189,6 +189,10 @@ pub(super) struct TomlMempool {
     pub(super) max_tx_size_bytes: Option<usize>,
     pub(super) max_tx_cost: Option<u64>,
     pub(super) ibd_gate_block_lag: Option<u32>,
+    /// Count of surviving unconfirmed txs to re-advertise on each tip-change
+    /// recheck (Scala `MempoolAuditor` `rebroadcastCount`, default 3). 0
+    /// disables re-broadcast.
+    pub(super) rebroadcast_count: Option<usize>,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]

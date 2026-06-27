@@ -247,6 +247,15 @@ pub struct MempoolConfig {
     /// to later blocks (oldest-`last_checked_at` first). Functional/end-result
     /// parity with Scala `CleanupWorker`, not its 30s actor throttle.
     pub mempool_cleanup_cost_mult: u64,
+    /// How many SURVIVING unconfirmed txs to re-advertise (Inv) on each
+    /// tip-change recheck pass — the re-broadcast half of Scala
+    /// `MempoolAuditor.rebroadcastTransactions` (`rebroadcastCount`,
+    /// `application.conf` default 3). Gossip is lossy: a tx is otherwise
+    /// Inv-advertised only once at admission, so peers that missed it never
+    /// learn of it. Selection rotates oldest-`last_checked_at` first (Scala
+    /// uses random selection; the rotation is functionally equivalent for
+    /// load-spreading and is deterministic/testable). 0 disables re-broadcast.
+    pub rebroadcast_count: usize,
     pub global_cost_budget: u64,
     pub per_peer_cost_budget: u64,
     pub unresolved_cache_size: usize,
@@ -272,6 +281,7 @@ impl Default for MempoolConfig {
             max_family_ops: 10_000,
             max_family_update_ms: 500,
             mempool_cleanup_cost_mult: 6,
+            rebroadcast_count: 3, // Scala application.conf default
             global_cost_budget: 12_000_000,
             per_peer_cost_budget: 10_000_000,
             unresolved_cache_size: 4_096,
