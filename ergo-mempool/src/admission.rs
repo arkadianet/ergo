@@ -530,6 +530,18 @@ pub fn check<V: Validator>(
     let mut actions: Vec<MempoolAction> = Vec::new();
     let peer = source.peer();
 
+    // Demoted txs (our OWN, re-admitted after a rollback / epoch-demote) bypass
+    // the anti-DoS cost budget just as they bypass the IBD gate below: they are
+    // not adversarial traffic, and the drain is already bounded by
+    // `revalidation_per_tick`. For `DemotedFromBlock`, `peer` is `None`, so only
+    // the GLOBAL cap ever applied — disabling that gate (and its charge) is what
+    // keeps a multi-tick drain from tripping `GlobalExhausted` and stranding the
+    // popped-but-not-re-admitted tail (those entries are already off the queue,
+    // so a budget reject would silently lose a valid tx). Scoped to demoted
+    // only: `Wallet` (also peer-less) stays gated — it's new local work a
+    // rejection simply bounces back to the caller, not an irreversible drain.
+    let budget_exempt = matches!(source, TxSource::DemotedFromBlock);
+
     // ── Step 0 — IBD gate (skipped for demoted revalidation) ─────────
     // Demoted txs are re-entering from our own rollback path; we are
     // by definition already at tip for them.
@@ -547,24 +559,26 @@ pub fn check<V: Validator>(
         );
     }
 
-    // ── Step 1 — Pre-validation budget gate ──────────────────────────
-    match cx.budgets.pre_admission_check(peer) {
-        BudgetVerdict::Ok => {}
-        BudgetVerdict::PeerExhausted => {
-            return (
-                CheckOutcome::Rejected {
-                    reason: RejectReason::PeerBudgetExhausted,
-                },
-                actions,
-            );
-        }
-        BudgetVerdict::GlobalExhausted => {
-            return (
-                CheckOutcome::Rejected {
-                    reason: RejectReason::GlobalBudgetExhausted,
-                },
-                actions,
-            );
+    // ── Step 1 — Pre-validation budget gate (skipped for demoted) ────
+    if !budget_exempt {
+        match cx.budgets.pre_admission_check(peer) {
+            BudgetVerdict::Ok => {}
+            BudgetVerdict::PeerExhausted => {
+                return (
+                    CheckOutcome::Rejected {
+                        reason: RejectReason::PeerBudgetExhausted,
+                    },
+                    actions,
+                );
+            }
+            BudgetVerdict::GlobalExhausted => {
+                return (
+                    CheckOutcome::Rejected {
+                        reason: RejectReason::GlobalBudgetExhausted,
+                    },
+                    actions,
+                );
+            }
         }
     }
 
@@ -702,9 +716,11 @@ pub fn check<V: Validator>(
     let validated = match validator.validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx) {
         Ok(v) => v,
         Err(err) => {
-            // Charge whatever cost the validator consumed.
-            let consumed = cost.consumed();
-            cx.budgets.charge(peer, consumed);
+            // Charge whatever cost the validator consumed (skipped for demoted
+            // re-admission — see `budget_exempt`).
+            if !budget_exempt {
+                cx.budgets.charge(peer, cost.consumed());
+            }
 
             // Classify the error for routing + peer penalty.
             let (reason, penalty) = classify(&err, cx.tip_ctx);
@@ -794,8 +810,10 @@ pub fn check<V: Validator>(
         if (weight as u128) > avg {
             ReplacementDecision::Replace(conflicts.clone())
         } else {
-            // Losing the double-spend still charges cost.
-            cx.budgets.charge(peer, validated.consumed_cost);
+            // Losing the double-spend still charges cost (skipped for demoted).
+            if !budget_exempt {
+                cx.budgets.charge(peer, validated.consumed_cost);
+            }
             actions.push(MempoolAction::Observe {
                 event: ObservedEvent::DroppedDoubleSpendLoser {
                     tx_id: validated.tx_id,
@@ -811,7 +829,9 @@ pub fn check<V: Validator>(
     };
 
     // ── Step 14 — Charge cost, check capacity plan.
-    cx.budgets.charge(peer, validated.consumed_cost);
+    if !budget_exempt {
+        cx.budgets.charge(peer, validated.consumed_cost);
+    }
 
     // Capacity plan: check whether the new tx can fit after replacements.
     // Commit step loops evictions until both budgets clear; this phase

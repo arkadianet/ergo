@@ -385,33 +385,39 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
         }
     };
 
-    // Proactive tip-revalidation, gated on FULLY SYNCED (header tip ==
+    // Proactive mempool maintenance, all gated on FULLY SYNCED (header tip ==
     // full-block tip, same height AND id): during catch-up the applied tip lags
-    // the header tip, so a recheck would validate against a stale intermediate
-    // tip and could evict txs valid at the real chain tip — Scala only audits at
-    // the tip. The empty-pool short-circuit then avoids building a tip context
-    // for nothing (the common IBD case, since admission is IBD-gated so the pool
-    // is empty until we are caught up).
+    // the header tip, so validating against a stale intermediate tip could
+    // wrongly evict (A/B) or re-admit against a UTXO view many blocks behind
+    // (the drain) — Scala only audits/at-tip. `build_tip_context` (below)
+    // additionally returns `None` in the cold pre-first-block window.
     let cs = state.store.chain_state_meta();
     let fully_synced = cs.best_full_block_height > 0
         && cs.best_header_height == cs.best_full_block_height
         && cs.best_header_id == cs.best_full_block_id;
-    if !(fully_synced && state.mempool.size() > 0) {
+    if !fully_synced {
         return;
     }
 
     // Always drain the off-loop builder's suspect slot so it never goes stale.
     // On a TIP CHANGE we discard it: Component A's full `recheck_and_evict`
-    // below re-validates the WHOLE pool (the suspect set is a subset), so a
-    // separate suspect pass would be redundant. BETWEEN blocks (no tip change)
-    // A does not run, so this is where Component B earns its keep: re-validate
-    // just the build-flagged suspects (txs whose consensus re-validation failed
-    // during candidate assembly) and evict the still-invalid ones — catching a
-    // tx A's cost-capped pass deferred without waiting for the next tip. Both
-    // paths share the SAME live tip+1 context, validator, and eviction sink.
+    // re-validates the WHOLE pool (the suspect set is a subset), so a separate
+    // suspect pass would be redundant. BETWEEN blocks (no tip change) A does not
+    // run, so that is where Component B earns its keep.
     let suspects = mining_handle.map(|h| h.take_suspects()).unwrap_or_default();
-    if !tip_changed && suspects.is_empty() {
-        return; // between blocks with nothing flagged — nothing to do
+
+    // Three independent maintenance passes this tick:
+    //  - recheck (A): full-pool recheck-and-evict on a tip change.
+    //  - suspects (B): re-validate the off-loop build's flagged ids between blocks.
+    //  - drain (§7): re-admit demoted/rolled-back txs from the revalidation
+    //    queue. Gated on the QUEUE being non-empty, NOT the pool — an epoch
+    //    `demote_all` empties the pool INTO the queue, so the drain must run with
+    //    `pool.size() == 0`.
+    let need_recheck = tip_changed && state.mempool.size() > 0;
+    let need_suspects = !tip_changed && !suspects.is_empty();
+    let need_drain = state.mempool.revalidation_pending() > 0;
+    if !(need_recheck || need_suspects || need_drain) {
+        return;
     }
 
     let Some(owned) = build_tip_context(state) else {
@@ -425,21 +431,40 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
                 .as_utxo()
                 .expect("utxo-only: mempool subsystem is gated off in digest mode"),
         );
-        if tip_changed {
+        let mut actions = Vec::new();
+        // A or B first (clean the existing pool)...
+        if need_recheck {
             // Component A: full-pool recheck-and-evict — the Scala
             // `MempoolAuditor`/`CleanupWorker` end-result via a per-block full
             // pass (anti-DoS cost-capped) instead of Scala's 30s throttle.
-            // After an epoch-boundary demote above the pool is empty, so this is
-            // a no-op on those ticks.
-            state
-                .mempool
-                .recheck_and_evict(now, &tip_ctx, &ErgoValidator)
-        } else {
+            actions.extend(
+                state
+                    .mempool
+                    .recheck_and_evict(now, &tip_ctx, &ErgoValidator),
+            );
+        } else if need_suspects {
             // Component B: re-validate just the off-loop build's suspects.
-            state
-                .mempool
-                .recheck_ids(now, &tip_ctx, &ErgoValidator, &suspects)
+            actions.extend(
+                state
+                    .mempool
+                    .recheck_ids(now, &tip_ctx, &ErgoValidator, &suspects),
+            );
         }
+        // ...THEN drain the revalidation queue, re-admitting demoted/rolled-back
+        // txs. After A so A never re-validates freshly re-admitted txs (no
+        // double work, no broadcast-then-revoke on the same id within a tick).
+        // Bounded per call by `revalidation_per_tick`; a large epoch-demoted
+        // pool refills over several ticks. Re-admission resolves a child against
+        // its already-re-admitted parent's pool output (demote order is
+        // topological — see `demote_all_for_revalidation`).
+        if need_drain {
+            actions.extend(
+                state
+                    .mempool
+                    .tick_revalidation(now, &tip_ctx, &ErgoValidator),
+            );
+        }
+        actions
     };
     if !actions.is_empty() {
         let routed = route_mempool_actions(state, actions);
@@ -457,10 +482,9 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
 /// quarantine the WHOLE active pool into the revalidation queue, so no
 /// possibly-confirmed/stale tx is served (`MempoolSnapshot::capture`) or
 /// relayed. (This is intentionally conservative: a benign forward jump may
-/// quarantine still-valid txs, which are then re-admitted on relay — strictly
-/// safer than serving confirmed txs. The earlier claim that the pool
-/// "self-heals on the next sync_tick" was false: `tick_revalidation` has no
-/// production caller; draining the revalidation queue is a separate gap.)
+/// quarantine still-valid txs, which the revalidation-queue drain in
+/// `handle_mempool_tick` re-admits on a later fully-synced tick — strictly
+/// safer than serving confirmed txs.)
 ///
 /// Returns the number of txs quarantined (0 when the pool was empty — the
 /// common IBD case, since the pool is IBD-gated).
