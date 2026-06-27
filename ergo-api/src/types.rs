@@ -173,6 +173,28 @@ pub struct ApiStatus {
     /// Session-scoped — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub block_apply_errors_total: u64,
+    /// Monotonic count of unconfirmed-tx ids this node REQUESTED from peers
+    /// in response to a tx-typed `Inv` (the
+    /// `ergo_node_mempool_tx_requested_total` Prometheus counter source).
+    /// Counts ids passed to the coordinator's `request_transactions`, i.e.
+    /// the `unknown` (not-already-pooled / not-invalidated) advertised set.
+    /// Session-scoped — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub mempool_tx_requested_total: u64,
+    /// Monotonic count of peer-sourced (`TxSource::Peer`) transactions
+    /// ADMITTED to the mempool (the
+    /// `ergo_node_mempool_peer_tx_admitted_total` Prometheus counter
+    /// source). API/Wallet-sourced admissions are excluded. Session-scoped
+    /// — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub mempool_peer_tx_admitted_total: u64,
+    /// Monotonic count of peer-sourced (`TxSource::Peer`) transactions
+    /// REJECTED by admission (the
+    /// `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter
+    /// source). API/Wallet-sourced rejections are excluded. Session-scoped
+    /// — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub mempool_peer_tx_rejected_total: u64,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct
@@ -520,6 +542,17 @@ pub struct ApiPeer {
     /// Peer's own best-block height as advertised in the most recent
     /// `SyncInfo` exchange. `None` until the sync layer plumbs it through.
     pub peer_height: Option<u32>,
+    /// Peer's advertised REST API URL (the `RestApiUrl` handshake
+    /// feature), verbatim as the peer sent it. `None` when the peer
+    /// advertised none. Identity/observability only — not validated
+    /// here beyond what the handshake parser already did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_api_url: Option<String>,
+    /// Peer's declared public address (`ip:port`) from its `PeerSpec`,
+    /// what it advertises as reachable. `None` when the peer declared no
+    /// address (anonymous / not gossipable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_address: Option<String>,
 }
 
 /// Which side initiated the peer connection.
@@ -635,6 +668,17 @@ pub struct ApiRecentBlock {
     pub ts_unix_ms: u64,
     pub txs: u32,
     pub size_bytes: u64,
+    /// Socket address (`ip:port`) of the FIRST peer that delivered this
+    /// block's header to us — the peer whose `Modifier` carried the
+    /// header bytes we accepted. A freshly-mined block is typically
+    /// announced first by the miner/pool's node, so this attributes a
+    /// block → peer (→ pool, with out-of-band peer↔pool knowledge).
+    /// `None` when the deliverer is unknown: the block was synced before
+    /// the bounded first-deliverer ring captured it, the entry has since
+    /// been FIFO-evicted, or the block was applied locally (self-mined).
+    /// Pure observability — never affects validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_by: Option<String>,
 }
 
 /// Active mempool priority-weight function. Wire strings match

@@ -618,6 +618,102 @@ fn timeout_reassigns_to_different_peer() {
 }
 
 #[test]
+fn timed_out_transaction_is_forgotten_without_penalty() {
+    // Scala parity (checkDelivery): a timed-out MEMPOOL TRANSACTION is just
+    // forgotten — a tx may legitimately have left the peer's mempool, so the
+    // peer is NOT penalized and the tx is NOT re-requested. The tracker must
+    // also stop tracking the forgotten id entirely.
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let p1 = peer(9030);
+    let p2 = peer(9031);
+    let tx_id = mk(7);
+
+    // Register an in-flight Transaction request to p1.
+    let (req, requested) = coord.request_transactions(p1, &[tx_id], now);
+    assert_eq!(requested, 1, "one id should be registered for p1");
+    assert!(
+        req.iter()
+            .any(|a| matches!(a, Action::SendToPeer { peer, code: 22, .. } if *peer == p1)),
+        "tx request should be sent to p1"
+    );
+
+    // Advance past the timeout with p2 available as a re-request candidate.
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[p2]);
+
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::NonDelivery,
+                ..
+            }
+        )),
+        "a timed-out tx must NOT penalize the peer"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::SendToPeer { code: 22, .. })),
+        "a timed-out tx must NOT be re-requested"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::NoteDeliveryOutcome { .. })),
+        "a timed-out tx must NOT emit a delivery-streak outcome"
+    );
+
+    // The tracker no longer tracks the forgotten tx.
+    assert_eq!(
+        coord.delivery.status(&tx_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown,
+        "forgotten tx should return to Unknown status"
+    );
+    assert_eq!(
+        coord.delivery.modifier_type(&tx_id),
+        None,
+        "forgotten tx should leave no residual type record in the tracker"
+    );
+}
+
+#[test]
+fn timed_out_block_modifier_still_penalizes_and_rerequests() {
+    // Regression guard: a timed-out HEADER (or any block modifier) keeps the
+    // aggressive penalize + re-request behavior — only mempool txs are forgotten.
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p1 = peer(9030);
+    let p2 = peer(9031);
+
+    let inv = InvData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        ids: vec![mk(1)],
+    };
+    coord.on_inv(p1, &inv, &chain, now);
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[p2]);
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize { peer, penalty: Penalty::NonDelivery } if *peer == p1
+        )),
+        "a timed-out header must still penalize the failed peer"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::SendToPeer { peer, code: 22, .. } if *peer == p2
+        )),
+        "a timed-out header must still be re-requested from another peer"
+    );
+}
+
+#[test]
 fn orphan_parent_request_revives_exhausted_header_id() {
     // Scala-parity (2Q): after MAX_RETRIES the modifier returns
     // to Unknown status (not the old permanent-Failed state).
@@ -2518,8 +2614,9 @@ fn on_sync_info_v2_younger_caps_at_400_ids() {
 fn request_transactions_sends_serialized_request_modifier() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    let actions = coord.request_transactions(peer(1), &[mk(10), mk(11)], now);
+    let (actions, requested) = coord.request_transactions(peer(1), &[mk(10), mk(11)], now);
     assert_eq!(actions.len(), 1);
+    assert_eq!(requested, 2, "both fresh ids should be reported requested");
     match &actions[0] {
         Action::SendToPeer {
             peer: p,
@@ -2540,19 +2637,24 @@ fn request_transactions_sends_serialized_request_modifier() {
 fn request_transactions_dedupes_against_in_flight() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    coord.request_transactions(peer(1), &[mk(20), mk(21)], now);
+    let (_, first) = coord.request_transactions(peer(1), &[mk(20), mk(21)], now);
+    assert_eq!(first, 2, "both ids registered on the first request");
     // Same ids from a different peer: DeliveryTracker should
     // filter them as already in-flight, leaving nothing to
-    // register and thus no SendToPeer action.
-    let actions = coord.request_transactions(peer(2), &[mk(20), mk(21)], now);
+    // register and thus no SendToPeer action and a zero count.
+    let (actions, requested) = coord.request_transactions(peer(2), &[mk(20), mk(21)], now);
     assert!(actions.is_empty());
+    assert_eq!(
+        requested, 0,
+        "in-flight ids must not be re-counted as requested",
+    );
 }
 
 #[test]
 fn on_transaction_received_accepts_from_requesting_peer() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    coord.request_transactions(peer(1), &[mk(30)], now);
+    let _ = coord.request_transactions(peer(1), &[mk(30)], now);
     let verdict = coord.on_transaction_received(peer(1), &mk(30));
     assert!(matches!(
         verdict,
@@ -2575,7 +2677,7 @@ fn on_transaction_received_rejects_unsolicited() {
 fn on_transaction_received_ignores_duplicate_after_accept() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    coord.request_transactions(peer(1), &[mk(40)], now);
+    let _ = coord.request_transactions(peer(1), &[mk(40)], now);
     let _ = coord.on_transaction_received(peer(1), &mk(40));
     let verdict = coord.on_transaction_received(peer(1), &mk(40));
     assert!(matches!(
@@ -2587,8 +2689,9 @@ fn on_transaction_received_ignores_duplicate_after_accept() {
 #[test]
 fn request_transactions_empty_ids_emits_nothing() {
     let mut coord = SyncCoordinator::new(0);
-    let actions = coord.request_transactions(peer(1), &[], Instant::now());
+    let (actions, requested) = coord.request_transactions(peer(1), &[], Instant::now());
     assert!(actions.is_empty());
+    assert_eq!(requested, 0, "no ids → nothing requested");
 }
 
 // ----- verify_section_modifier_id (Scala-parity receive-time check) -----
@@ -2710,5 +2813,38 @@ fn verify_section_modifier_id_rejects_trailing_bytes() {
     assert!(
         result.as_ref().unwrap_err().contains("trailing bytes"),
         "error must name the trailing-bytes case: {result:?}",
+    );
+}
+
+// ----- first-deliverer accumulation -----
+
+/// `on_header_validated` records the delivering peer for the accepted
+/// header into the drain buffer that the node folds into its first-
+/// deliverer ring. The observation is recorded for EVERY accepted header
+/// (here on a pre-synced coordinator that takes the early return before
+/// any section request), and `take_first_deliverers` drains it once.
+#[test]
+fn on_header_validated_accumulates_first_deliverer_and_drains_once() {
+    // best_full_block_height 0, stale-by-default timestamp keeps the
+    // coordinator below headers_chain_synced — exercises the early-return
+    // path, proving the observation is recorded BEFORE the section gates.
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let p = peer(9030);
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+
+    // Stale timestamp (epoch) so headers_chain_synced stays false.
+    let _ = coord.on_header_validated(p, mk(1), 1, 0, expected, now);
+
+    let drained = coord.take_first_deliverers();
+    assert_eq!(
+        drained,
+        vec![(mk(1), p)],
+        "the accepted header's delivering peer must be recorded",
+    );
+    // Draining is destructive — a second drain is empty.
+    assert!(
+        coord.take_first_deliverers().is_empty(),
+        "take_first_deliverers must drain (mem::take) the buffer",
     );
 }

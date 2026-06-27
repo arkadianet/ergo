@@ -121,7 +121,34 @@ pub(super) fn handle_message(
                         if unknown.is_empty() {
                             Vec::new()
                         } else {
-                            state.coordinator.request_transactions(peer, &unknown, now)
+                            // P2 observability: this branch was previously
+                            // silent. Count only the ids ACTUALLY requested
+                            // (always-on, mainnet-safe aggregate via
+                            // `/metrics`) and emit a per-tx-batch `debug`
+                            // trace so an operator can see, at default `info`,
+                            // whether a given tx was requested at all (counter)
+                            // and which peer/how many (debug).
+                            //
+                            // The counter must reflect ids for which a
+                            // RequestModifier was truly emitted, NOT the
+                            // advertised `unknown.len()`: the coordinator
+                            // dedupes against in-flight/failed ids and applies
+                            // a per-peer cap, so a repeated Inv for an
+                            // already-in-flight id would otherwise overcount
+                            // "requested" with no matching RequestModifier
+                            // sent. `request_transactions` returns the real
+                            // post-dedupe/cap count alongside its actions.
+                            let (actions, requested) =
+                                state.coordinator.request_transactions(peer, &unknown, now);
+                            state.mempool_tx_requested_total = state
+                                .mempool_tx_requested_total
+                                .saturating_add(requested as u64);
+                            debug!(
+                                peer = %peer,
+                                requested,
+                                "requesting unconfirmed txs from peer",
+                            );
+                            actions
                         }
                     } else {
                         let actions = state.coordinator.on_inv(peer, &inv, &state.store, now);

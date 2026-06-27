@@ -136,7 +136,9 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     // `state.peer_manager`, so the `&mut state.recent_blocks_cache` borrow
     // has no live aliases; the two arguments touch disjoint `NodeState`
     // fields.
-    let recent_blocks = match ChainStoreReader::new_from_db(state.store.db_arc()).committed_tip() {
+    let recent_blocks_committed = match ChainStoreReader::new_from_db(state.store.db_arc())
+        .committed_tip()
+    {
         Ok(Some((tip_height, tip_id))) => recent_blocks_for_tip(
             &mut state.recent_blocks_cache,
             &state.store,
@@ -151,6 +153,14 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             Arc::new(Vec::new())
         }
     };
+    // Merge the transient first-deliverer fact onto the committed,
+    // tip-cached tail. The cache holds committed-state only (so its Arc
+    // can be reused across ticks until the tip advances); `delivered_by`
+    // is a live P2P observation that can land AFTER the tip cached, so it
+    // is layered on here at serve-build time. Returns the same Arc
+    // untouched when no block in the window has a recorded deliverer (the
+    // steady-state synced case), so the common path stays allocation-free.
+    let recent_blocks = merge_delivered_by(recent_blocks_committed, &state.first_deliverer_ring);
     let download_window = state.coordinator.sync_state().download_window() as u32;
     let pending_blocks = state.coordinator.sync_state().pending_count() as u32;
     let headers_chain_synced = state.coordinator.sync_state().headers_chain_synced();
@@ -327,6 +337,9 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             .collect(),
         last_block_apply_error,
         block_apply_errors_total,
+        mempool_tx_requested_total: state.mempool_tx_requested_total,
+        mempool_peer_tx_admitted_total: state.mempool_peer_tx_admitted_total,
+        mempool_peer_tx_rejected_total: state.mempool_peer_tx_rejected_total,
     };
 
     if let Some(pub_) = state.snapshot_publisher.as_mut() {
@@ -396,6 +409,59 @@ fn recent_blocks_for_tip(
         });
     }
     blocks
+}
+
+/// Layer the transient `delivered_by` first-deliverer fact onto a
+/// committed (tip-cached) recent-blocks tail.
+///
+/// The tip-keyed `recent_blocks` cache holds committed-state only — its
+/// `Arc` is reused across ticks until the full-block tip advances. The
+/// first deliverer of a block, by contrast, is a live P2P observation
+/// that can be recorded AFTER the tip was cached, so it is merged in here
+/// at serve-build time rather than baked into the cache (which would pin a
+/// stale or absent deliverer until the next tip change).
+///
+/// For each block whose `header_id` (hex) resolves in the ring, sets
+/// `delivered_by` to the first deliverer's socket address; blocks not in
+/// the ring keep `None`. Returns the input `Arc` UNCHANGED when no block
+/// in the window has a recorded deliverer — the steady-state synced case,
+/// kept allocation-free — and only clones into a fresh `Vec` when at least
+/// one deliverer is found.
+fn merge_delivered_by(
+    committed: Arc<Vec<ApiRecentBlock>>,
+    ring: &super::first_deliverer::FirstDelivererRing,
+) -> Arc<Vec<ApiRecentBlock>> {
+    // First pass: does any block in the window have a recorded deliverer?
+    // Avoids allocating a new Vec on the common (fully-synced, ring-cold-
+    // for-this-window) path where every lookup misses.
+    let any = committed.iter().any(|b| {
+        decode_header_id(&b.header_id)
+            .map(|id| ring.get(&id).is_some())
+            .unwrap_or(false)
+    });
+    if !any {
+        return committed;
+    }
+    let merged: Vec<ApiRecentBlock> = committed
+        .iter()
+        .map(|b| {
+            let delivered_by = decode_header_id(&b.header_id)
+                .and_then(|id| ring.get(&id).map(|d| d.peer.to_string()));
+            ApiRecentBlock {
+                delivered_by,
+                ..b.clone()
+            }
+        })
+        .collect();
+    Arc::new(merged)
+}
+
+/// Decode a 64-char lowercase-hex header id back to its 32 bytes for a
+/// ring lookup. Returns `None` on any malformed input (wrong length / non-
+/// hex) — those simply miss the ring and surface `delivered_by = None`.
+fn decode_header_id(hex_id: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hex_id).ok()?;
+    bytes.try_into().ok()
 }
 
 /// Walk the canonical full-block chain backwards from the best full block,
@@ -574,6 +640,11 @@ fn try_recent_block(
         ts_unix_ms: header.timestamp,
         txs: bt.transactions.len() as u32,
         size_bytes: (header_len + tx_bytes.len() + ext_len + adp_len) as u64,
+        // `delivered_by` is merged in at snapshot-assembly time from the
+        // first-deliverer ring (a transient P2P fact), NOT baked into the
+        // tip-keyed recent-blocks cache (committed-state only). See
+        // `merge_delivered_by` at the `publish_snapshot` call site.
+        delivered_by: None,
     })
 }
 
@@ -1322,6 +1393,64 @@ mod tests {
         assert_eq!(
             select_bootstrap_phase(&verified, &phase_inputs(false, true, false, false)),
             ergo_api::types::ApiBootstrapPhase::Installing
+        );
+    }
+
+    // ----- delivered_by merge -----
+
+    fn recent_block_stub(header_id: [u8; 32], height: u32) -> ApiRecentBlock {
+        ApiRecentBlock {
+            height,
+            header_id: hex::encode(header_id),
+            ts_unix_ms: 0,
+            txs: 0,
+            size_bytes: 0,
+            delivered_by: None,
+        }
+    }
+
+    /// `delivered_by` is populated from the first-deliverer ring for a
+    /// block whose header id is recorded, and stays `None` for one that
+    /// isn't. Proves the serve-build-time merge layers the transient P2P
+    /// fact onto the committed (deliverer-free) recent-blocks tail.
+    #[test]
+    fn merge_delivered_by_populates_from_ring_and_none_when_absent() {
+        use crate::node::first_deliverer::FirstDelivererRing;
+        let mut ring = FirstDelivererRing::new();
+        let known = [0xAAu8; 32];
+        let unknown = [0xBBu8; 32];
+        let peer: std::net::SocketAddr = "203.0.113.7:9030".parse().unwrap();
+        ring.record(known, peer, Instant::now());
+
+        let committed = Arc::new(vec![
+            recent_block_stub(known, 100),
+            recent_block_stub(unknown, 99),
+        ]);
+        let merged = merge_delivered_by(committed, &ring);
+
+        assert_eq!(
+            merged[0].delivered_by.as_deref(),
+            Some("203.0.113.7:9030"),
+            "recorded header id must surface its first deliverer",
+        );
+        assert_eq!(
+            merged[1].delivered_by, None,
+            "header id absent from the ring must stay None",
+        );
+    }
+
+    /// When no block in the window has a recorded deliverer, the input
+    /// `Arc` is returned UNCHANGED (no reallocation) — the steady-state
+    /// synced path stays allocation-free.
+    #[test]
+    fn merge_delivered_by_returns_same_arc_when_no_match() {
+        use crate::node::first_deliverer::FirstDelivererRing;
+        let ring = FirstDelivererRing::new(); // empty
+        let committed = Arc::new(vec![recent_block_stub([0x11u8; 32], 1)]);
+        let merged = merge_delivered_by(committed.clone(), &ring);
+        assert!(
+            Arc::ptr_eq(&committed, &merged),
+            "no deliverer in window must reuse the input Arc, not reallocate",
         );
     }
 }

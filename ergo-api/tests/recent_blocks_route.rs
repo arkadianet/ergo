@@ -49,6 +49,9 @@ impl NodeReadState for StubReadState {
             bootstrap: None,
             last_block_apply_error: None,
             block_apply_errors_total: 0,
+            mempool_tx_requested_total: 0,
+            mempool_peer_tx_admitted_total: 0,
+            mempool_peer_tx_rejected_total: 0,
         }
     }
     fn tip(&self) -> ApiTip {
@@ -127,6 +130,7 @@ fn block(height: u32) -> ApiRecentBlock {
         ts_unix_ms: 1_700_000_000_000 + height as u64,
         txs: height,
         size_bytes: 1000 + height as u64,
+        delivered_by: None,
     }
 }
 

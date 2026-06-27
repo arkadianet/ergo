@@ -137,6 +137,29 @@ pub(crate) struct NodeState {
     pub(super) req_messages_total: u64,
     pub(super) req_ids_total: u64,
     pub(super) sections_received_total: u64,
+    /// Observability counters surfaced as Prometheus counters via the
+    /// operator-API snapshot (`ApiStatus` → `/metrics`). They make
+    /// inbound mempool-tx gossip diagnosable at the default `info` log
+    /// level, where the per-tx admit/reject/request traces only fire at
+    /// `debug`. Session-scoped (reset on restart; `rate()` handles that).
+    ///
+    /// Count of unconfirmed-tx ids actually REQUESTED from peers in
+    /// response to a tx-typed `Inv` — the POST-dedupe count returned by
+    /// `request_transactions` (after it drops already-in-flight/failed ids
+    /// and applies the per-peer cap), NOT the raw advertised set, so it
+    /// matches one-for-one the `RequestModifier`s actually sent. Bumped in
+    /// `messaging::handle_message`'s tx-Inv→request branch; surfaced in
+    /// `ApiStatus`/Prometheus.
+    pub(super) mempool_tx_requested_total: u64,
+    /// Count of peer-sourced (`TxSource::Peer`) txs ADMITTED to the
+    /// mempool. Bumped on an `Admitted` outcome in
+    /// `admission::admit_transaction` (peer path only — API/Wallet
+    /// admissions are not counted).
+    pub(super) mempool_peer_tx_admitted_total: u64,
+    /// Count of peer-sourced (`TxSource::Peer`) txs REJECTED by admission.
+    /// Bumped on a `Rejected` outcome in `admission::admit_transaction`
+    /// (peer path only — API/Wallet rejections are not counted).
+    pub(super) mempool_peer_tx_rejected_total: u64,
     pub(super) last_beat_req_messages: u64,
     pub(super) last_beat_req_ids: u64,
     pub(super) last_beat_sections_received: u64,
@@ -286,4 +309,12 @@ pub(crate) struct NodeState {
     /// when `best_full_block_id` differs from the cached tip and otherwise
     /// re-publishes the cached `Arc`. `None` before the first publish.
     pub(super) recent_blocks_cache: Option<crate::snapshot::RecentBlocksCache>,
+    /// First-block-deliverer ring: `header_id → (first peer, instant)`.
+    /// Records the FIRST peer that delivered each recently-validated
+    /// header (its `Modifier` carried the header bytes we accepted), so
+    /// an operator can attribute a block → peer → pool. Bounded
+    /// (FIFO-evicted at `FirstDelivererRing::CAP`), first-deliverer-only,
+    /// pure observability — never feeds sync / consensus / scoring.
+    /// Read at snapshot build time to populate `ApiRecentBlock.delivered_by`.
+    pub(super) first_deliverer_ring: super::first_deliverer::FirstDelivererRing,
 }

@@ -118,8 +118,18 @@ pub(super) fn admit_transaction(
             &tip_ctx,
             &ErgoValidator,
         );
+        // P2 observability: this is the peer-sourced admission path
+        // (`TxSource::Peer`), so every outcome here counts toward the
+        // peer-tx admit/reject Prometheus counters surfaced via
+        // `/metrics`. The per-tx `debug` traces stay at `debug` (no `info`
+        // promotion) — the always-on counters give aggregate visibility,
+        // the debug lines give per-tx detail when needed. API/Wallet
+        // admissions go through `admit_api_transaction` and are not counted
+        // here.
         match &outcome {
             AdmissionOutcome::Admitted { tx_id, fee, .. } => {
+                state.mempool_peer_tx_admitted_total =
+                    state.mempool_peer_tx_admitted_total.saturating_add(1);
                 debug!(
                     tx = %hex::encode(tx_id.as_bytes()),
                     peer = %peer,
@@ -130,6 +140,8 @@ pub(super) fn admit_transaction(
                 );
             }
             AdmissionOutcome::Rejected { reason } => {
+                state.mempool_peer_tx_rejected_total =
+                    state.mempool_peer_tx_rejected_total.saturating_add(1);
                 debug!(
                     peer = %peer,
                     size = size,

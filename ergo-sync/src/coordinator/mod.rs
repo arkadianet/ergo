@@ -226,6 +226,14 @@ pub struct SyncCoordinator {
     /// flips off after `state_install` completes so normal block
     /// sync from `snapshot_height + 1` can proceed.
     bootstrap_in_progress: bool,
+    /// First-deliverer observations accumulated since the last drain:
+    /// `(header_id, delivering peer)` for each header `on_header_validated`
+    /// accepted. Drained by the action loop via [`take_first_deliverers`]
+    /// into the node's bounded first-deliverer ring. Pure observability —
+    /// never read by sync. Bounded by the per-tick validated-header batch
+    /// (drained every action-loop tick), same drain pattern as
+    /// [`take_net_stats`].
+    first_deliverers: Vec<([u8; 32], PeerId)>,
 }
 
 /// Minimum number of distinct peers that must report our exact tip
@@ -272,6 +280,7 @@ impl SyncCoordinator {
             headers_only,
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
+            first_deliverers: Vec::new(),
         }
     }
 
@@ -301,6 +310,7 @@ impl SyncCoordinator {
             headers_only,
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
+            first_deliverers: Vec::new(),
         }
     }
 
@@ -341,6 +351,15 @@ impl SyncCoordinator {
     /// Drain the per-tick pipeline counters for the heartbeat.
     pub fn take_net_stats(&mut self) -> NetStats {
         std::mem::take(&mut self.net_stats)
+    }
+
+    /// Drain the first-deliverer observations accumulated since the last
+    /// call: `(header_id, delivering peer)` for each header accepted by
+    /// `on_header_validated`. The action loop folds these into its bounded
+    /// first-deliverer ring after each `execute_all`. Same drain pattern
+    /// as [`take_net_stats`] — pure observability, never read by sync.
+    pub fn take_first_deliverers(&mut self) -> Vec<([u8; 32], PeerId)> {
+        std::mem::take(&mut self.first_deliverers)
     }
 
     /// Mark a peer as having sent us a non-tx Modifier in this tick.
@@ -487,34 +506,43 @@ impl SyncCoordinator {
     // peer inflight caps + dedup against in-flight/failed state) and
     // produces the corresponding `RequestModifier` payload.
 
-    /// Register a RequestModifier for `tx_ids` to `peer`. Returns a
-    /// `SendToPeer` action with the serialized RequestModifier, or an
-    /// empty vec if every requested id was already in-flight / failed
-    /// or the per-peer cap blocks further requests.
+    /// Register a RequestModifier for `tx_ids` to `peer`. Returns the
+    /// `(actions, requested_count)` pair: `actions` holds the `SendToPeer`
+    /// with the serialized RequestModifier (or is empty if every id was
+    /// already in-flight / failed or the per-peer cap blocks further
+    /// requests, or serialization fails), and `requested_count` is the
+    /// number of ids ACTUALLY registered + emitted in that RequestModifier.
+    /// Callers use the count for observability; it never exceeds the number
+    /// of `tx_ids` passed in and reflects the post-dedupe/cap reality, not
+    /// the advertised set. The count is `0` exactly when `actions` is empty.
     pub fn request_transactions(
         &mut self,
         peer: PeerId,
         tx_ids: &[[u8; 32]],
         now: Instant,
-    ) -> Vec<Action> {
+    ) -> (Vec<Action>, usize) {
         let type_id = ModifierTypeId::Transaction.as_byte();
         let registered = self.delivery.request(peer, type_id, tx_ids, now);
         if registered.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
+        let requested_count = registered.len();
         let request = InvData {
             type_id,
             ids: registered,
         };
         match message::serialize_inv(&request) {
-            Ok(payload) => vec![Action::SendToPeer {
-                peer,
-                code: message::CODE_REQUEST_MODIFIER,
-                payload,
-            }],
+            Ok(payload) => (
+                vec![Action::SendToPeer {
+                    peer,
+                    code: message::CODE_REQUEST_MODIFIER,
+                    payload,
+                }],
+                requested_count,
+            ),
             Err(e) => {
                 warn!(error = %e, "failed to serialize tx RequestModifier");
-                Vec::new()
+                (Vec::new(), 0)
             }
         }
     }
@@ -979,6 +1007,14 @@ impl SyncCoordinator {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
+        // First-deliverer observability: record the peer whose Modifier
+        // carried this just-accepted header. Recorded BEFORE the
+        // headers-synced / mode gates below (which only govern section
+        // requests) so every accepted header is attributable, including
+        // those validated during header-only sync. The node's bounded
+        // ring keeps only the FIRST deliverer per id; pure observability.
+        self.first_deliverers.push((header_id, peer));
+
         self.sync_state.set_best_known_header(height);
         self.sync_state.check_headers_synced(header_timestamp_ms);
 
@@ -1082,9 +1118,31 @@ impl SyncCoordinator {
         let mut actions = Vec::new();
         let result = self.delivery.check_timeouts(now);
 
+        let tx_type = ModifierTypeId::Transaction.as_byte();
         let mut all_retryable: Vec<[u8; 32]> = Vec::new();
         let mut failed_peers: Vec<PeerId> = Vec::new();
         for (failed_peer, ids) in &result.retryable {
+            // Scala parity (checkDelivery, ErgoNodeViewSynchronizer.scala):
+            // a timed-out MEMPOOL TRANSACTION is just forgotten — it may
+            // legitimately have left the peer's mempool, so there is "no
+            // reason to penalize the peer" and no re-request. Block sections
+            // and headers keep the aggressive penalize + re-request path.
+            // The just-timed-out ids sit in the tracker's recently-released
+            // shadow, so `modifier_type` still resolves their requested class.
+            let (tx_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = ids
+                .iter()
+                .partition(|id| self.delivery.modifier_type(id) == Some(tx_type));
+            for tx_id in &tx_ids {
+                // Fully drop the forgotten tx so the tracker stops tracking
+                // it (no recently-released shadow, no retry count, no late
+                // allowance) and never re-requests it.
+                self.delivery.forget_timed_out(tx_id);
+            }
+            // If only txs timed out for this peer, there is nothing to
+            // penalize or re-request — leave the peer untouched.
+            if block_ids.is_empty() {
+                continue;
+            }
             actions.push(Action::Penalize {
                 peer: *failed_peer,
                 penalty: Penalty::NonDelivery,
@@ -1093,10 +1151,8 @@ impl SyncCoordinator {
             // score, which NonDelivery can't move past DEGRADED_THRESHOLD).
             // Only block-BODY section timeouts count: a peer that stalls on
             // bodies but keeps answering the constant header/mempool-tx flow
-            // must still accrue toward degradation. The just-timed-out ids
-            // sit in the delivery tracker's recently-released shadow, so
-            // `modifier_type` still resolves their requested class here.
-            if ids.iter().any(|id| {
+            // must still accrue toward degradation.
+            if block_ids.iter().any(|id| {
                 self.delivery
                     .modifier_type(id)
                     .is_some_and(ModifierTypeId::is_block_body_section)
@@ -1106,8 +1162,8 @@ impl SyncCoordinator {
                     succeeded: false,
                 });
             }
-            info!(peer = %failed_peer, count = ids.len(), "modifier delivery timed out, retrying with other peers");
-            all_retryable.extend_from_slice(ids);
+            info!(peer = %failed_peer, count = block_ids.len(), "modifier delivery timed out, retrying with other peers");
+            all_retryable.extend_from_slice(&block_ids);
             failed_peers.push(*failed_peer);
         }
 

@@ -1869,6 +1869,15 @@ ergo_node_snapshot_age_ms {snap_age}
 # HELP ergo_node_block_apply_errors_total Block-apply rejections since node start.
 # TYPE ergo_node_block_apply_errors_total counter
 ergo_node_block_apply_errors_total {apply_errs}
+# HELP ergo_node_mempool_tx_requested_total Unconfirmed-tx ids requested from peers since node start.
+# TYPE ergo_node_mempool_tx_requested_total counter
+ergo_node_mempool_tx_requested_total {tx_requested}
+# HELP ergo_node_mempool_peer_tx_admitted_total Peer-sourced txs admitted to the mempool since node start.
+# TYPE ergo_node_mempool_peer_tx_admitted_total counter
+ergo_node_mempool_peer_tx_admitted_total {peer_tx_admitted}
+# HELP ergo_node_mempool_peer_tx_rejected_total Peer-sourced txs rejected by admission since node start.
+# TYPE ergo_node_mempool_peer_tx_rejected_total counter
+ergo_node_mempool_peer_tx_rejected_total {peer_tx_rejected}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -1882,6 +1891,9 @@ ergo_node_block_apply_errors_total {apply_errs}
         revalidating = mempool.revalidation_pending,
         snap_age = status.snapshot_age_ms,
         apply_errs = status.block_apply_errors_total,
+        tx_requested = status.mempool_tx_requested_total,
+        peer_tx_admitted = status.mempool_peer_tx_admitted_total,
+        peer_tx_rejected = status.mempool_peer_tx_rejected_total,
     );
 
     (

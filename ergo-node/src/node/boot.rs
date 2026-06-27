@@ -1425,6 +1425,9 @@ async fn run_inner_with_backend(
         req_messages_total: 0,
         req_ids_total: 0,
         sections_received_total: 0,
+        mempool_tx_requested_total: 0,
+        mempool_peer_tx_admitted_total: 0,
+        mempool_peer_tx_rejected_total: 0,
         last_beat_req_messages: 0,
         last_beat_req_ids: 0,
         last_beat_sections_received: 0,
@@ -1485,6 +1488,7 @@ async fn run_inner_with_backend(
         mining_enabled: mining_handle.is_some(),
         api_weight_function,
         recent_blocks_cache: None,
+        first_deliverer_ring: crate::node::first_deliverer::FirstDelivererRing::new(),
     };
 
     // Spawn the Step B anchor-map builder. Background task that

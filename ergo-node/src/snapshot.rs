@@ -211,6 +211,9 @@ impl NodeSnapshot {
                 snapshot_age_ms: 0,
                 last_block_apply_error: None,
                 block_apply_errors_total: 0,
+                mempool_tx_requested_total: 0,
+                mempool_peer_tx_admitted_total: 0,
+                mempool_peer_tx_rejected_total: 0,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -475,6 +478,15 @@ pub struct SnapshotParts<'a> {
     /// OBS-1: monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     pub block_apply_errors_total: u64,
+    /// P2: monotonic count of unconfirmed-tx ids requested from peers, for
+    /// the `ergo_node_mempool_tx_requested_total` Prometheus counter.
+    pub mempool_tx_requested_total: u64,
+    /// P2: monotonic count of peer-sourced txs admitted to the mempool, for
+    /// the `ergo_node_mempool_peer_tx_admitted_total` Prometheus counter.
+    pub mempool_peer_tx_admitted_total: u64,
+    /// P2: monotonic count of peer-sourced txs rejected by admission, for
+    /// the `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter.
+    pub mempool_peer_tx_rejected_total: u64,
 }
 
 fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64) -> NodeSnapshot {
@@ -525,6 +537,9 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         bootstrap: p.bootstrap.clone(),
         last_block_apply_error: p.last_block_apply_error.clone(),
         block_apply_errors_total: p.block_apply_errors_total,
+        mempool_tx_requested_total: p.mempool_tx_requested_total,
+        mempool_peer_tx_admitted_total: p.mempool_peer_tx_admitted_total,
+        mempool_peer_tx_rejected_total: p.mempool_peer_tx_rejected_total,
     };
 
     let tip = ApiTip {
@@ -648,6 +663,23 @@ fn project_peer(
         ),
         None => (None, None, None),
     };
+    // Parsed-but-previously-dropped peer identity from the handshake
+    // PeerSpec: the advertised REST URL feature and the declared public
+    // address. Both are observability/identity only — never fed into sync
+    // or scoring. Surfaced on the native peer DTO; the legacy
+    // `/peers/connected` Scala-compat surface is intentionally left as-is.
+    let (rest_api_url, declared_address) = match &pi.peer_spec {
+        Some(spec) => (
+            spec.features.iter().find_map(|f| match f {
+                ergo_p2p::handshake::PeerFeature::RestApiUrl { url } => Some(url.clone()),
+                _ => None,
+            }),
+            spec.declared_address
+                .as_ref()
+                .and_then(format_declared_address),
+        ),
+        None => (None, None),
+    };
     let connected_seconds = now.saturating_duration_since(pi.connected_at).as_secs();
     let last_seen_seconds = now.saturating_duration_since(pi.last_seen).as_secs();
     // peer_height comes from the per-peer sync-info projection
@@ -672,7 +704,40 @@ fn project_peer(
         bytes_in: Some(pi.bytes_in()),
         bytes_out: Some(pi.bytes_out()),
         peer_height,
+        rest_api_url,
+        declared_address,
     }
+}
+
+/// Format a handshake-declared address (`addr` bytes + wire `u32` port) as
+/// an `ip:port` string, or `None` when the advertised value is malformed.
+/// Handles the two valid Ergo declared-address byte widths — 4 (IPv4) and
+/// 16 (IPv6); any other width yields `None` rather than a misparsed address.
+///
+/// `declared_address` is peer-influenced and untrusted: the wire port is a
+/// `u32` (see `handshake.rs`), so a hostile/buggy peer can advertise a value
+/// outside the valid `u16` port range (e.g. `65536`). Rather than silently
+/// truncate it with `as u16` — which would fabricate a wrong `:0` — an
+/// out-of-range port yields `None`: better to omit an untrusted address than
+/// to surface one that was never real. `Scala`'s declared address is an
+/// `InetSocketAddress`; the in-range case renders the same `host:port` shape.
+fn format_declared_address(d: &ergo_p2p::handshake::DeclaredAddress) -> Option<String> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let ip: std::net::IpAddr = match d.addr.len() {
+        4 => {
+            let b: [u8; 4] = d.addr[..4].try_into().expect("len checked == 4");
+            std::net::IpAddr::V4(Ipv4Addr::from(b))
+        }
+        16 => {
+            let b: [u8; 16] = d.addr[..16].try_into().expect("len checked == 16");
+            std::net::IpAddr::V6(Ipv6Addr::from(b))
+        }
+        // Non-standard width: omit rather than fabricate a misparsed address.
+        _ => return None,
+    };
+    // Reject (omit) a port outside the valid u16 range instead of truncating.
+    let port = u16::try_from(d.port).ok()?;
+    Some(std::net::SocketAddr::new(ip, port).to_string())
 }
 
 /// Compute the canonical `now_unix_ms` for snapshot timestamps.
@@ -718,6 +783,118 @@ mod tests {
         let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
         assert_eq!(api.bytes_in, Some(42));
         assert_eq!(api.bytes_out, Some(7));
+    }
+
+    /// `ApiPeer` surfaces the parsed-but-previously-dropped peer identity:
+    /// the `RestApiUrl` handshake feature → `rest_api_url`, and the
+    /// `PeerSpec.declared_address` → `declared_address` (`ip:port`). Both
+    /// are `None` when the spec carries neither.
+    #[test]
+    fn project_peer_surfaces_rest_url_and_declared_address() {
+        use ergo_p2p::handshake::{DeclaredAddress, PeerFeature, PeerSpec, Version};
+        use std::collections::HashMap;
+
+        let mut pi = ergo_p2p::peer::PeerInfo::new_outbound(
+            "127.0.0.1:9030".parse().unwrap(),
+            std::time::Instant::now(),
+        );
+        pi.peer_spec = Some(PeerSpec {
+            agent_name: "ergoref".into(),
+            version: Version {
+                major: 5,
+                minor: 0,
+                patch: 0,
+            },
+            node_name: "node".into(),
+            declared_address: Some(DeclaredAddress {
+                addr: vec![203, 0, 113, 9],
+                port: 9030,
+            }),
+            features: vec![PeerFeature::RestApiUrl {
+                url: "http://203.0.113.9:9053".into(),
+            }],
+        });
+
+        let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
+        assert_eq!(
+            api.rest_api_url.as_deref(),
+            Some("http://203.0.113.9:9053"),
+            "RestApiUrl feature must surface on rest_api_url",
+        );
+        assert_eq!(
+            api.declared_address.as_deref(),
+            Some("203.0.113.9:9030"),
+            "declared address must surface as ip:port",
+        );
+    }
+
+    /// With no peer_spec (pre-handshake) both new identity fields are
+    /// `None` — the absent case the additive serde-skip relies on.
+    #[test]
+    fn project_peer_identity_fields_none_without_spec() {
+        use std::collections::HashMap;
+        let pi = ergo_p2p::peer::PeerInfo::new_outbound(
+            "127.0.0.1:9030".parse().unwrap(),
+            std::time::Instant::now(),
+        );
+        let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
+        assert_eq!(api.rest_api_url, None);
+        assert_eq!(api.declared_address, None);
+    }
+
+    /// P3 (accuracy): the declared port is a peer-advertised wire `u32`.
+    /// An in-range port renders `ip:port`; an out-of-range port (> 65535,
+    /// malformed/hostile) yields `None` rather than a silently-truncated
+    /// `:0`. Fail-first against the old `as u16` cast, where `65536` wrapped
+    /// to `0` and surfaced a fabricated `203.0.113.9:0`.
+    #[test]
+    fn format_declared_address_handles_port_range() {
+        use ergo_p2p::handshake::DeclaredAddress;
+
+        // In-range IPv4 → ip:port.
+        let v4 = DeclaredAddress {
+            addr: vec![203, 0, 113, 9],
+            port: 9030,
+        };
+        assert_eq!(
+            format_declared_address(&v4).as_deref(),
+            Some("203.0.113.9:9030"),
+        );
+
+        // In-range IPv6 → bracketed [ip]:port (SocketAddr's V6 rendering).
+        let v6 = DeclaredAddress {
+            addr: vec![0; 16],
+            port: 9030,
+        };
+        assert_eq!(format_declared_address(&v6).as_deref(), Some("[::]:9030"));
+
+        // Max valid u16 port still renders.
+        let max = DeclaredAddress {
+            addr: vec![203, 0, 113, 9],
+            port: 65535,
+        };
+        assert_eq!(
+            format_declared_address(&max).as_deref(),
+            Some("203.0.113.9:65535"),
+        );
+
+        // Out-of-range port (one past u16::MAX) → None, NOT a truncated `:0`.
+        let bad = DeclaredAddress {
+            addr: vec![203, 0, 113, 9],
+            port: 65536,
+        };
+        assert_eq!(
+            format_declared_address(&bad),
+            None,
+            "out-of-range declared port must be omitted, not truncated to :0",
+        );
+
+        // Non-standard address width also yields None (IPv4/IPv6 only).
+        let weird = DeclaredAddress {
+            addr: vec![1, 2, 3],
+            port: 9030,
+        };
+        assert_eq!(format_declared_address(&weird), None);
     }
 
     fn make_parts<'a>(
@@ -775,6 +952,9 @@ mod tests {
             snapshot_manifests: Vec::new(),
             last_block_apply_error: None,
             block_apply_errors_total: 0,
+            mempool_tx_requested_total: 0,
+            mempool_peer_tx_admitted_total: 0,
+            mempool_peer_tx_rejected_total: 0,
         }
     }
 
@@ -1013,6 +1193,12 @@ mod tests {
         assert_eq!(snap.status.block_apply_errors_total, 3);
         assert_eq!(snap.health.status, HealthStatus::Rejecting);
 
+        // No rejection set above ⇒ the three new mempool-gossip counters
+        // default to 0 on this publish path.
+        assert_eq!(snap.status.mempool_tx_requested_total, 0);
+        assert_eq!(snap.status.mempool_peer_tx_admitted_total, 0);
+        assert_eq!(snap.status.mempool_peer_tx_rejected_total, 0);
+
         // No rejection: None on status, and health is NOT Rejecting.
         let mut publisher2 =
             SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
@@ -1020,6 +1206,29 @@ mod tests {
         let snap2 = publisher2.handle().load_full();
         assert!(snap2.status.last_block_apply_error.is_none());
         assert_ne!(snap2.health.status, HealthStatus::Rejecting);
+    }
+
+    /// P2: the three mempool-tx-gossip observability counters travel from
+    /// `SnapshotParts` through `build_snapshot` onto `ApiStatus` (the
+    /// `/metrics` source). Same threading guard as
+    /// `build_snapshot_surfaces_block_apply_rejection_and_health`: a field
+    /// added to one struct but not threaded would silently fall back to 0
+    /// here, leaving the Prometheus counter stuck at zero.
+    #[test]
+    fn build_snapshot_carries_mempool_tx_gossip_counters() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.mempool_tx_requested_total = 11;
+        parts.mempool_peer_tx_admitted_total = 7;
+        parts.mempool_peer_tx_rejected_total = 4;
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        assert_eq!(snap.status.mempool_tx_requested_total, 11);
+        assert_eq!(snap.status.mempool_peer_tx_admitted_total, 7);
+        assert_eq!(snap.status.mempool_peer_tx_rejected_total, 4);
     }
 
     /// `max_peer_height` and `mining_enabled` travel from `SnapshotParts`

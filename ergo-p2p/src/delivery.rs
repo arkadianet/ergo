@@ -322,6 +322,34 @@ impl DeliveryTracker {
         removed
     }
 
+    /// Fully forget a modifier that just timed out, dropping every
+    /// residual tracking record so it is neither re-requested nor
+    /// remembered.
+    ///
+    /// By the time `check_timeouts` returns, the `inflight` entry is
+    /// already gone (it was moved into the `recently_released` type
+    /// shadow and a `retry_count` bump). This clears those leftovers,
+    /// returning the modifier to `Unknown` status — but DELIBERATELY
+    /// leaves the `late_acceptable` allowance that `check_timeouts`
+    /// recorded (`allow_late_delivery`) in place: a tx the peer was slow
+    /// on may still arrive, and that late delivery must be ACCEPTED, not
+    /// `RejectSpam`-penalized — penalizing it would defeat the very
+    /// "no reason to penalize" goal of forgetting. `mark_received` clears
+    /// the allowance when the tx actually arrives. (Leaving it matches
+    /// how block sections already behave; the entry is otherwise dropped
+    /// on arrival or, for a never-arriving tx, persists like any other
+    /// un-received modifier's allowance.)
+    ///
+    /// Scala parity: `checkDelivery` forgets a timed-out mempool
+    /// transaction via `clearStatusForModifier(id, txTypeId, Requested)`
+    /// — a tx may legitimately have left the peer's mempool, so the
+    /// peer is not penalized and the tx is not re-requested
+    /// (ErgoNodeViewSynchronizer.scala, "no reason to penalize").
+    pub fn forget_timed_out(&mut self, modifier_id: &[u8; 32]) {
+        self.recently_released.remove(modifier_id);
+        self.retry_count.remove(modifier_id);
+    }
+
     /// Check for timed-out requests. Returns a `TimeoutResult` with:
     /// - `retryable`: (peer, ids) that can be re-requested from a different peer
     /// - `exhausted`: ids that have exceeded MAX_RETRIES (marked as Failed)
@@ -1096,6 +1124,27 @@ mod tests {
 
         // The request timed out locally, but the peer is still answering a
         // request we actually sent. Accepting this can rescue HOL progress.
+        assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+    }
+
+    #[test]
+    fn forget_timed_out_keeps_late_acceptance_so_a_late_tx_is_not_penalized() {
+        // P1 forgets a timed-out mempool tx without penalty/re-request. But
+        // `check_timeouts` records the timed-out peer in `late_acceptable`
+        // (allow_late_delivery), so a slow peer that delivers the tx LATE
+        // must still be ACCEPTED — if `forget_timed_out` cleared
+        // late_acceptable, on_received would return RejectSpam and penalize
+        // an honest peer, defeating the "no reason to penalize" goal.
+        let mut tracker = DeliveryTracker::new();
+        let now = Instant::now();
+        let p = peer(9030);
+
+        tracker.request(p, 2 /* Transaction */, &[id(1)], now);
+        tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
+        // The coordinator's tx-timeout path forgets it (no penalty, no re-request).
+        tracker.forget_timed_out(&id(1));
+
+        // A late delivery from the originally-requested peer is still accepted.
         assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
     }
 

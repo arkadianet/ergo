@@ -839,6 +839,11 @@ impl Mempool {
         let mut cost_acc: u128 = 0;
         let mut rechecked: usize = 0;
         let mut removed_for_actions: Vec<TxId> = Vec::new();
+        // Ids that PASSED recheck this pass (verdict Ok — all inputs in place),
+        // in visit (oldest-`last_checked_at` first) order. The re-broadcast
+        // candidate set; filtered to those still pooled (not cascade-evicted by
+        // a later tx) below.
+        let mut passed_ids: Vec<TxId> = Vec::new();
 
         for (_, id) in ids {
             if cost_acc >= cost_cap {
@@ -858,6 +863,7 @@ impl Mempool {
                 max_family_depth,
                 bounds,
                 &mut removed_for_actions,
+                &mut passed_ids,
             )));
         }
 
@@ -873,6 +879,39 @@ impl Mempool {
                 },
             });
         }
+
+        // Re-broadcast half of Scala `MempoolAuditor.rebroadcastTransactions`:
+        // after the eviction pass, re-advertise up to `rebroadcast_count`
+        // SURVIVORS — txs that PASSED recheck this pass (verdict Ok, so all
+        // inputs resolve: the exact `inputIds.forall(boxById(_).isDefined)`
+        // precondition Scala re-broadcasts under) and are still pooled. Scala
+        // selects `random(rebroadcastCount)`; we reuse the pass's
+        // oldest-`last_checked_at` visit order, which is functionally equivalent
+        // for load-spreading and is deterministic/testable: a cost-capped pass
+        // refreshes only its rechecked survivors' clocks, so coverage rotates
+        // across blocks. Excluded: evicted txs (revoked above), kept-but-failed
+        // txs (unresolved/Other — inputs NOT in place), and the budget-deferred
+        // tail (never rechecked this pass). Reuses the survivor set the loop
+        // already established — no extra validation pass.
+        let rebroadcast_count = self.config.rebroadcast_count;
+        if rebroadcast_count > 0 {
+            let mut rebroadcast = 0usize;
+            for id in passed_ids {
+                if rebroadcast >= rebroadcast_count {
+                    break;
+                }
+                // A passed id can still be cascade-evicted by a LATER tx's
+                // hard-invalid removal; only still-pooled survivors are relayed.
+                if self.pool.contains(&id) {
+                    actions.push(MempoolAction::BroadcastInv {
+                        tx_id: id,
+                        except: None,
+                    });
+                    rebroadcast += 1;
+                }
+            }
+        }
+
         emit_tracing_for_pool_actions(&actions);
         info!(
             event = "mempool_recheck_completed",
@@ -909,9 +948,12 @@ impl Mempool {
     ///   never cached.
     ///
     /// `pool_outputs` is the once-per-pass overlay map, pruned in place on
-    /// eviction. Removed tx ids are appended to `removed_for_actions`. Returns
-    /// the validation cost the caller charges to its per-pass budget. A no-op
-    /// returning 0 if `id` is no longer pooled (already cascade-evicted).
+    /// eviction. Removed tx ids are appended to `removed_for_actions`; ids that
+    /// PASSED cleanly (verdict Ok — all inputs in place) are appended to
+    /// `passed_ids` for the full pass's re-broadcast selection (a kept-but-FAILED
+    /// non-hard-invalid tx is NOT recorded). Returns the validation cost the
+    /// caller charges to its per-pass budget. A no-op returning 0 if `id` is no
+    /// longer pooled (already cascade-evicted).
     #[allow(clippy::too_many_arguments)]
     fn recheck_one<V: Validator>(
         &mut self,
@@ -927,6 +969,7 @@ impl Mempool {
         max_family_depth: usize,
         bounds: crate::pool::FamilyBounds,
         removed_for_actions: &mut Vec<TxId>,
+        passed_ids: &mut Vec<TxId>,
     ) -> u64 {
         let Some(bytes) = self.pool.get(&id).map(|e| e.bytes.clone()) else {
             return 0; // already gone (cascade-evicted, or a stale suspect id)
@@ -936,6 +979,11 @@ impl Mempool {
         match verdict {
             Ok(()) => {
                 self.pool.touch_rechecked(&id, now);
+                // Passed cleanly (all inputs in place) — a re-broadcast candidate.
+                // A kept-but-FAILED tx (non-hard-invalid: unresolved / Other) is
+                // deliberately NOT recorded: Scala only re-broadcasts txs whose
+                // inputs all resolve, which a non-resolution failure violates.
+                passed_ids.push(id);
             }
             Err(ref err) if !admission::is_hard_invalid(err) => {
                 self.pool.touch_rechecked(&id, now);
@@ -1020,6 +1068,10 @@ impl Mempool {
         let mut cost_acc: u128 = 0;
         let mut rechecked: usize = 0;
         let mut removed_for_actions: Vec<TxId> = Vec::new();
+        // The targeted suspect pass (Component B) is eviction-only; it does NOT
+        // re-broadcast (that is the full `MempoolAuditor` pass's job), so the
+        // passed-id set is collected and discarded.
+        let mut passed_ids: Vec<TxId> = Vec::new();
 
         for id in ids {
             if cost_acc >= cost_cap {
@@ -1039,6 +1091,7 @@ impl Mempool {
                 max_family_depth,
                 bounds,
                 &mut removed_for_actions,
+                &mut passed_ids,
             )));
         }
 
@@ -1336,6 +1389,22 @@ mod recheck_tests {
         v
     }
 
+    /// True if any action is an eviction signal (`RevokeBroadcast` or an
+    /// `Evicted` observe). The full recheck pass also emits `BroadcastInv`
+    /// re-broadcasts for survivors, so "no eviction happened" can no longer be
+    /// expressed as "no actions at all".
+    fn no_evictions(actions: &[MempoolAction]) -> bool {
+        !actions.iter().any(|a| {
+            matches!(
+                a,
+                MempoolAction::RevokeBroadcast { .. }
+                    | MempoolAction::Observe {
+                        event: ObservedEvent::Evicted { .. },
+                    }
+            )
+        })
+    }
+
     fn evicted_ids(actions: &[MempoolAction]) -> Vec<TxId> {
         actions
             .iter()
@@ -1372,9 +1441,11 @@ mod recheck_tests {
 
         assert!(mp.contains(&d(1)), "valid tx must survive the recheck");
         assert!(
-            actions.is_empty(),
+            no_evictions(&actions),
             "no eviction actions for an all-valid pool"
         );
+        // The lone survivor is re-broadcast (default rebroadcast_count = 3).
+        assert_eq!(broadcast_ids(&actions), vec![d(1)]);
         assert!(
             !mp.is_invalidated(&d(1)),
             "valid tx must not be blacklisted"
@@ -1410,7 +1481,9 @@ mod recheck_tests {
 
         assert_eq!(v.validate_call_count(), 4, "every tx visited in one pass");
         assert_eq!(mp.size(), 4, "all valid txs retained");
-        assert!(actions.is_empty());
+        assert!(no_evictions(&actions), "all valid: nothing evicted");
+        // 4 survivors > rebroadcast_count(3) -> exactly 3 re-broadcast.
+        assert_eq!(broadcast_ids(&actions).len(), 3);
         mp.pool().check_invariants();
     }
 
@@ -1474,7 +1547,12 @@ mod recheck_tests {
             mp_ok.contains(&d(1)),
             "claim valid at its own creation height survives the recheck"
         );
-        assert!(actions_ok.is_empty());
+        assert!(no_evictions(&actions_ok), "survivor: nothing evicted");
+        assert_eq!(
+            broadcast_ids(&actions_ok),
+            vec![d(1)],
+            "survivor re-broadcast"
+        );
         assert!(!mp_ok.is_invalidated(&d(1)));
     }
 
@@ -1719,6 +1797,176 @@ mod recheck_tests {
         mp.pool().check_invariants();
     }
 
+    // ----- re-broadcast of surviving unconfirmed txs (MempoolAuditor parity) -----
+
+    /// `BroadcastInv` tx ids in emission order, for re-broadcast assertions.
+    fn broadcast_ids(actions: &[MempoolAction]) -> Vec<TxId> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                MempoolAction::BroadcastInv {
+                    tx_id,
+                    except: None,
+                } => Some(*tx_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recheck_rebroadcasts_up_to_count_survivors() {
+        // Pool of 5 valid txs > rebroadcast_count(3); all survive a full pass,
+        // so exactly min(3, 5) = 3 BroadcastInv actions are emitted, each for a
+        // still-pooled survivor id, with except: None (fan-out to all peers).
+        let cfg = MempoolConfig {
+            rebroadcast_count: 3,
+            ..MempoolConfig::default()
+        };
+        let mut mp = mempool_with(cfg);
+        let base = Instant::now();
+        for b in 1..=5u8 {
+            seed(&mut mp, b, 0x10 + b, 0x40 + b, 100, vec![]);
+            set_checked(&mut mp, b, base + Duration::from_millis(u64::from(b)));
+        }
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = validator((1..=5u8).map(|b| ok_plan(b, 10_000)).collect());
+
+        let actions = mp.recheck_and_evict(base + Duration::from_secs(10), &tip.view(&utxo), &v);
+
+        let bcast = broadcast_ids(&actions);
+        assert_eq!(bcast.len(), 3, "exactly min(rebroadcast_count, survivors)");
+        for id in &bcast {
+            assert!(
+                mp.contains(id),
+                "re-broadcast id must be a still-pooled survivor"
+            );
+        }
+        // Oldest-first rotation: the three least-recently-checked are chosen.
+        assert_eq!(bcast, vec![d(1), d(2), d(3)]);
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn recheck_does_not_rebroadcast_evicted() {
+        // d(3) is tip-invalid (evicted); the surviving valid txs are re-broadcast
+        // but the evicted one is NOT — it is revoked instead.
+        let cfg = MempoolConfig {
+            rebroadcast_count: 3,
+            ..MempoolConfig::default()
+        };
+        let mut mp = mempool_with(cfg);
+        let base = Instant::now();
+        for b in 1..=5u8 {
+            seed(&mut mp, b, 0x10 + b, 0x40 + b, 100, vec![]);
+            set_checked(&mut mp, b, base + Duration::from_millis(u64::from(b)));
+        }
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = validator(
+            (1..=5u8)
+                .map(|b| {
+                    if b == 3 {
+                        err_plan(b, 10_000)
+                    } else {
+                        ok_plan(b, 10_000)
+                    }
+                })
+                .collect(),
+        );
+
+        let actions = mp.recheck_and_evict(base + Duration::from_secs(10), &tip.view(&utxo), &v);
+
+        let bcast = broadcast_ids(&actions);
+        assert!(
+            !bcast.contains(&d(3)),
+            "evicted tx must not be re-broadcast"
+        );
+        assert!(
+            !mp.contains(&d(3)),
+            "the tip-invalid tx was evicted from the pool"
+        );
+        // d(3) appears in the RevokeBroadcast (eviction) set instead.
+        let revoked: Vec<TxId> = actions
+            .iter()
+            .find_map(|a| match a {
+                MempoolAction::RevokeBroadcast { tx_ids } => Some(tx_ids.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(revoked.contains(&d(3)), "evicted tx is revoked");
+        // Only survivors are re-broadcast: oldest-first d(1), d(2), then d(4)
+        // (d(3) skipped as evicted), capped at rebroadcast_count = 3.
+        assert_eq!(bcast, vec![d(1), d(2), d(4)]);
+        for id in &bcast {
+            assert!(mp.contains(id), "re-broadcast id is a survivor");
+        }
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn rebroadcast_count_zero_disables() {
+        let cfg = MempoolConfig {
+            rebroadcast_count: 0,
+            ..MempoolConfig::default()
+        };
+        let mut mp = mempool_with(cfg);
+        let base = Instant::now();
+        for b in 1..=3u8 {
+            seed(&mut mp, b, 0x10 + b, 0x40 + b, 100, vec![]);
+            set_checked(&mut mp, b, base + Duration::from_millis(u64::from(b)));
+        }
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = validator((1..=3u8).map(|b| ok_plan(b, 10_000)).collect());
+
+        let actions = mp.recheck_and_evict(base + Duration::from_secs(10), &tip.view(&utxo), &v);
+
+        assert!(
+            broadcast_ids(&actions).is_empty(),
+            "rebroadcast_count = 0 disables re-broadcast"
+        );
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn rebroadcast_rotates_by_last_checked_at() {
+        // Selection is the oldest-`last_checked_at`-first rotation the recheck
+        // pass already computes, so consecutive passes cover different survivors.
+        // A per-pass cost cap (mult 1 × max_block_cost 100_000, each tx charging
+        // 60_000) recks exactly two txs per pass; only the rechecked survivors
+        // have their clocks refreshed, so the un-rechecked tail stays "oldest"
+        // and rotates to the front on the next pass.
+        let cfg = MempoolConfig {
+            rebroadcast_count: 2,
+            mempool_cleanup_cost_mult: 1,
+            ..MempoolConfig::default()
+        };
+        let mut mp = mempool_with(cfg);
+        let base = Instant::now();
+        for b in 1..=4u8 {
+            seed(&mut mp, b, 0x10 + b, 0x40 + b, 100, vec![]);
+            set_checked(&mut mp, b, base + Duration::from_millis(u64::from(b)));
+        }
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new().with_max_block_cost(100_000);
+        let v = validator((1..=4u8).map(|b| ok_plan(b, 60_000)).collect());
+
+        // Pass 1: the two oldest survivors d(1), d(2) are rechecked (cap binds at
+        // two) and re-broadcast, with last_checked_at refreshed to now1.
+        let now1 = base + Duration::from_secs(10);
+        let a1 = mp.recheck_and_evict(now1, &tip.view(&utxo), &v);
+        assert_eq!(broadcast_ids(&a1), vec![d(1), d(2)]);
+
+        // Pass 2: d(1)/d(2) are now the most-recently-checked; d(3), d(4) are
+        // still on their older seed clocks, so they rotate to the front, get
+        // rechecked, and are re-broadcast instead — different survivors covered.
+        let now2 = now1 + Duration::from_secs(10);
+        let a2 = mp.recheck_and_evict(now2, &tip.view(&utxo), &v);
+        assert_eq!(broadcast_ids(&a2), vec![d(3), d(4)]);
+        mp.pool().check_invariants();
+    }
+
     // ----- view-content recording probe (overlay / pruning pins) -----
 
     /// Validator that, for the `probe_tx`, RECORDS whether `box_id` resolves in
@@ -1827,7 +2075,7 @@ mod recheck_tests {
             Some(false),
             "data inputs use the committed-only view (pool-created 0xCC invisible)"
         );
-        assert!(actions.is_empty(), "both txs valid, nothing evicted");
+        assert!(no_evictions(&actions), "both txs valid, nothing evicted");
         assert!(mp.contains(&d(1)) && mp.contains(&d(2)));
 
         // Contrapositive: when 0xCC is a COMMITTED box, the data-input view DOES
