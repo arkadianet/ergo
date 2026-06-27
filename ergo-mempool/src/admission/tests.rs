@@ -201,6 +201,83 @@ fn pre_admission_budget_exhausted_short_circuits() {
 }
 
 #[test]
+fn demoted_source_exempt_from_global_budget_gate() {
+    // A demoted tx (our own, re-admitted after rollback/epoch-demote) bypasses
+    // the global anti-DoS budget — admits despite an exhausted global cap and
+    // does NOT charge the budget (mirrors the Step-0 IBD exemption).
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    b.charge(None, 1_000_000_000_000); // exhaust the global budget
+    let before = b.global_consumed();
+    let cfg = default_config();
+    let w = ByCost;
+    let v = validator_accepting(b"bytes", id(1), 5_000_000);
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(
+        b"bytes",
+        TxSource::DemotedFromBlock,
+        Instant::now(),
+        &mut cx,
+        &v,
+    );
+    assert!(
+        matches!(out, AdmissionOutcome::Admitted { .. }),
+        "demoted tx admits despite an exhausted global budget"
+    );
+    assert_eq!(pool.len(), 1);
+    assert_eq!(
+        b.global_consumed(),
+        before,
+        "demoted re-admission must not charge the budget"
+    );
+}
+
+#[test]
+fn wallet_source_still_gated_by_global_budget() {
+    // The exemption is scoped to DemotedFromBlock ONLY. Wallet is also
+    // peer-less (so also only hits the global gate), but it is new local work —
+    // a rejection just bounces back to the caller, not an irreversible drain —
+    // so it STILL gets GlobalBudgetExhausted. Keeps the anti-DoS backstop.
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    b.charge(None, 1_000_000_000_000); // exhaust the global budget
+    let cfg = default_config();
+    let w = ByCost;
+    let v = validator_accepting(b"bytes", id(1), 5_000_000); // never reached
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(b"bytes", TxSource::Wallet, Instant::now(), &mut cx, &v);
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::GlobalBudgetExhausted
+            }
+        ),
+        "Wallet stays gated by the global budget (exemption is demoted-only)"
+    );
+}
+
+#[test]
 fn size_cap_rejects_with_penalty() {
     let utxo = EmptyUtxo;
     let c = ctx();

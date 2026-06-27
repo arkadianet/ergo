@@ -609,6 +609,141 @@ mod tests {
     }
 
     #[test]
+    fn demoted_tx_readmits_with_global_budget_exhausted() {
+        // A demoted tx must re-admit even when the GLOBAL budget is already
+        // exhausted (e.g. by between-block peer admission this tip interval).
+        // Otherwise it is popped off the queue, rejected GlobalExhausted, and
+        // stranded — demoted re-admission is budget-exempt.
+        let mut pool = OrderedPool::with_capacity(4);
+        let global_cap = 1_000_000;
+        let mut b = CostBudgets::new(global_cap, global_cap);
+        b.charge(None, global_cap); // exhaust the global budget BEFORE the drain
+        assert_eq!(b.global_consumed(), global_cap);
+        let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
+        let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
+        let mut rq = RevalidationQueue::new(100);
+        let cfg = MempoolConfig::default();
+
+        let bytes = vec![0xAB; 16];
+        rq.push(crate::types::DemotedTx {
+            tx_id: d(42),
+            bytes: Arc::from(bytes.clone().into_boxed_slice()),
+        });
+        let v = MockValidator::new().plan(
+            bytes,
+            MockPlan {
+                result: Ok(Validated {
+                    tx_id: d(42),
+                    input_box_ids: vec![d(0xCA)],
+                    output_box_ids: vec![d(0xDE)],
+                    outputs: vec![],
+                    fee: 5_000_000,
+                    size_bytes: 16,
+                    consumed_cost: 10_000,
+                }),
+                charge: 10_000,
+                peek_fee: None,
+                peek_tx_id: None,
+            },
+        );
+        let utxo = EmptyUtxo;
+        let ctx = TestCtx::new();
+        let tip = ctx.view(&utxo);
+        let mut cx = AdmissionCtx {
+            tip_ctx: &tip,
+            config: &cfg,
+            pool: &mut pool,
+            budgets: &mut b,
+            invalidated: &mut inv,
+            unresolved: &mut unr,
+            weight_fn: &ByCost,
+        };
+        let _ = tick_revalidation(Instant::now(), &mut cx, &mut rq, &v);
+        assert!(
+            pool.contains(&d(42)),
+            "demoted tx re-admitted despite exhausted global budget"
+        );
+        assert!(rq.is_empty(), "queue fully drained");
+        assert_eq!(
+            b.global_consumed(),
+            global_cap,
+            "demoted re-admission does not charge the budget"
+        );
+    }
+
+    #[test]
+    fn large_demoted_batch_drains_across_ticks_under_budget_pressure_none_stranded() {
+        // A batch larger than revalidation_per_tick drains over successive
+        // ticks; the per-tick cap DEFERS the remainder (never drops). Even with
+        // the global budget kept exhausted before every tick (simulating
+        // between-block peer traffic), all demoted txs re-admit — none stranded.
+        let mut pool = OrderedPool::with_capacity(16);
+        let global_cap = 1_000_000;
+        let mut b = CostBudgets::new(global_cap, global_cap);
+        let mut inv = InvalidationCache::new(64, Duration::from_secs(60), Duration::from_secs(1));
+        let mut unr = UnresolvedCache::new(64, Duration::from_secs(60));
+        let mut rq = RevalidationQueue::new(100);
+        let cfg = MempoolConfig {
+            revalidation_per_tick: 3,
+            ..MempoolConfig::default()
+        };
+
+        let mut v_builder = MockValidator::new();
+        for i in 0..10u8 {
+            let bytes = vec![i; 16];
+            rq.push(crate::types::DemotedTx {
+                tx_id: d(i),
+                bytes: Arc::from(bytes.clone().into_boxed_slice()),
+            });
+            v_builder = v_builder.plan(
+                bytes,
+                MockPlan {
+                    result: Ok(Validated {
+                        tx_id: d(i),
+                        input_box_ids: vec![d(100 + i)],
+                        output_box_ids: vec![d(200 + i)],
+                        outputs: vec![],
+                        fee: 5_000_000,
+                        size_bytes: 16,
+                        consumed_cost: 10_000,
+                    }),
+                    charge: 10_000,
+                    peek_fee: None,
+                    peek_tx_id: None,
+                },
+            );
+        }
+        let v = v_builder;
+        let utxo = EmptyUtxo;
+        let ctx = TestCtx::new();
+        let tip = ctx.view(&utxo);
+
+        let mut ticks = 0;
+        while !rq.is_empty() {
+            b.charge(None, global_cap); // keep the global budget exhausted
+            {
+                let mut cx = AdmissionCtx {
+                    tip_ctx: &tip,
+                    config: &cfg,
+                    pool: &mut pool,
+                    budgets: &mut b,
+                    invalidated: &mut inv,
+                    unresolved: &mut unr,
+                    weight_fn: &ByCost,
+                };
+                let _ = tick_revalidation(Instant::now(), &mut cx, &mut rq, &v);
+            }
+            ticks += 1;
+            assert!(ticks <= 10, "drain must terminate");
+        }
+        assert_eq!(
+            pool.len(),
+            10,
+            "all 10 demoted txs re-admitted across ticks, none stranded"
+        );
+    }
+
+    #[test]
     fn demoted_source_bypasses_ibd_gate() {
         // Simulate "we're behind tip" — normal admission would drop.
         // Demoted revalidation must still succeed.
