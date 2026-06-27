@@ -367,7 +367,16 @@ pub fn build_and_publish(
             // still-invalid ones. Only on publish: a DroppedStale build's
             // suspects were computed against a parent the chain has moved off,
             // and the next build for the live tip will recompute them.
-            handle.record_suspects(suspects);
+            //
+            // ONLY a Full build (which ran mempool selection) carries meaningful
+            // suspect information. A Minimal build (emission-only, no selection)
+            // produces an empty `suspects`; recording it would CLEAR a pending
+            // Full-build set the loop hasn't drained yet (latest-wins replace),
+            // silently dropping those suspects. So Minimal publishes leave the
+            // slot untouched.
+            if mode == BuildMode::Full {
+                handle.record_suspects(suspects);
+            }
             Ok(BuildOutcome::Published { timings })
         }
         None => Ok(BuildOutcome::DroppedStale),
