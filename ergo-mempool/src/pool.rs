@@ -425,6 +425,23 @@ impl OrderedPool {
         }
     }
 
+    /// Refresh a surviving tx's `last_checked_at` after a tip re-validation
+    /// pass, marking it as visited this pass so the oldest-first rotation moves
+    /// on. Updates ONLY the rotation clock — NOT `cost`/`weight`: the recheck is
+    /// a validity check, not a re-pricing, and writing a fresh consumed cost
+    /// here without re-keying would desync `Entry.cost` from the `ByCost`
+    /// `WeightedKey` (and feed stale weights to later #139 debits). Priority
+    /// stays owned by admission. `last_checked_at` is not part of `WeightedKey`,
+    /// so the `ordered` slot is unchanged (no re-key). No-op if absent.
+    pub(crate) fn touch_rechecked(&mut self, tx_id: &TxId, now: Instant) {
+        let Some(key) = self.by_tx_id.get(tx_id).copied() else {
+            return;
+        };
+        if let Some(entry) = self.ordered.get_mut(&key) {
+            entry.last_checked_at = now;
+        }
+    }
+
     /// Family-weight (CPFP) walk: add `delta` to every in-pool ancestor of
     /// the tx whose inputs are `seed_inputs`, recursively up the spend graph.
     /// Faithful port of Scala `OrderedTxPool.updateFamily`
