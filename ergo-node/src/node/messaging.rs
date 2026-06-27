@@ -121,6 +121,21 @@ pub(super) fn handle_message(
                         if unknown.is_empty() {
                             Vec::new()
                         } else {
+                            // P2 observability: this branch was previously
+                            // silent. Count the requested ids (always-on,
+                            // mainnet-safe aggregate via `/metrics`) and emit
+                            // a per-tx-batch `debug` trace so an operator can
+                            // see, at default `info`, whether a given tx was
+                            // requested at all (counter) and which peer/how
+                            // many (debug).
+                            state.mempool_tx_requested_total = state
+                                .mempool_tx_requested_total
+                                .saturating_add(unknown.len() as u64);
+                            debug!(
+                                peer = %peer,
+                                requested = unknown.len(),
+                                "requesting unconfirmed txs from peer",
+                            );
                             state.coordinator.request_transactions(peer, &unknown, now)
                         }
                     } else {

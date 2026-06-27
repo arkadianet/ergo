@@ -173,6 +173,28 @@ pub struct ApiStatus {
     /// Session-scoped — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub block_apply_errors_total: u64,
+    /// Monotonic count of unconfirmed-tx ids this node REQUESTED from peers
+    /// in response to a tx-typed `Inv` (the
+    /// `ergo_node_mempool_tx_requested_total` Prometheus counter source).
+    /// Counts ids passed to the coordinator's `request_transactions`, i.e.
+    /// the `unknown` (not-already-pooled / not-invalidated) advertised set.
+    /// Session-scoped — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub mempool_tx_requested_total: u64,
+    /// Monotonic count of peer-sourced (`TxSource::Peer`) transactions
+    /// ADMITTED to the mempool (the
+    /// `ergo_node_mempool_peer_tx_admitted_total` Prometheus counter
+    /// source). API/Wallet-sourced admissions are excluded. Session-scoped
+    /// — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub mempool_peer_tx_admitted_total: u64,
+    /// Monotonic count of peer-sourced (`TxSource::Peer`) transactions
+    /// REJECTED by admission (the
+    /// `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter
+    /// source). API/Wallet-sourced rejections are excluded. Session-scoped
+    /// — resets on restart, which `rate()` handles.
+    #[serde(default)]
+    pub mempool_peer_tx_rejected_total: u64,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct

@@ -2007,9 +2007,40 @@ components:
               fork-from-network signal (the node refused a block its peers may have
               accepted). `None` when no rejection has occurred this session. A
               persistent `Some(_)` is an operator page.
+        mempool_peer_tx_admitted_total:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic count of peer-sourced (`TxSource::Peer`) transactions
+            ADMITTED to the mempool (the
+            `ergo_node_mempool_peer_tx_admitted_total` Prometheus counter
+            source). API/Wallet-sourced admissions are excluded. Session-scoped
+            — resets on restart, which `rate()` handles.
+          minimum: 0
+        mempool_peer_tx_rejected_total:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic count of peer-sourced (`TxSource::Peer`) transactions
+            REJECTED by admission (the
+            `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter
+            source). API/Wallet-sourced rejections are excluded. Session-scoped
+            — resets on restart, which `rate()` handles.
+          minimum: 0
         mempool_size:
           type: integer
           format: int32
+          minimum: 0
+        mempool_tx_requested_total:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic count of unconfirmed-tx ids this node REQUESTED from peers
+            in response to a tx-typed `Inv` (the
+            `ergo_node_mempool_tx_requested_total` Prometheus counter source).
+            Counts ids passed to the coordinator's `request_transactions`, i.e.
+            the `unknown` (not-already-pooled / not-invalidated) advertised set.
+            Session-scoped — resets on restart, which `rate()` handles.
           minimum: 0
         peer_count:
           type: integer

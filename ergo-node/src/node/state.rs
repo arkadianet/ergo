@@ -137,6 +137,26 @@ pub(crate) struct NodeState {
     pub(super) req_messages_total: u64,
     pub(super) req_ids_total: u64,
     pub(super) sections_received_total: u64,
+    /// Observability counters surfaced as Prometheus counters via the
+    /// operator-API snapshot (`ApiStatus` → `/metrics`). They make
+    /// inbound mempool-tx gossip diagnosable at the default `info` log
+    /// level, where the per-tx admit/reject/request traces only fire at
+    /// `debug`. Session-scoped (reset on restart; `rate()` handles that).
+    ///
+    /// Count of unconfirmed-tx ids REQUESTED from peers in response to a
+    /// tx-typed `Inv` — the `unknown` (not-already-pooled, not-invalidated)
+    /// advertised ids passed to `request_transactions`. Bumped in
+    /// `messaging::handle_message`'s tx-Inv→request branch.
+    pub(super) mempool_tx_requested_total: u64,
+    /// Count of peer-sourced (`TxSource::Peer`) txs ADMITTED to the
+    /// mempool. Bumped on an `Admitted` outcome in
+    /// `admission::admit_transaction` (peer path only — API/Wallet
+    /// admissions are not counted).
+    pub(super) mempool_peer_tx_admitted_total: u64,
+    /// Count of peer-sourced (`TxSource::Peer`) txs REJECTED by admission.
+    /// Bumped on a `Rejected` outcome in `admission::admit_transaction`
+    /// (peer path only — API/Wallet rejections are not counted).
+    pub(super) mempool_peer_tx_rejected_total: u64,
     pub(super) last_beat_req_messages: u64,
     pub(super) last_beat_req_ids: u64,
     pub(super) last_beat_sections_received: u64,

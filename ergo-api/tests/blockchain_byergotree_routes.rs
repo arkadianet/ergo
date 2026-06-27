@@ -821,6 +821,9 @@ impl NodeReadState for StubReadState {
             bootstrap: None,
             last_block_apply_error: None,
             block_apply_errors_total: 0,
+            mempool_tx_requested_total: 0,
+            mempool_peer_tx_admitted_total: 0,
+            mempool_peer_tx_rejected_total: 0,
         }
     }
     fn tip(&self) -> ApiTip {

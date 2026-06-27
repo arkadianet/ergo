@@ -211,6 +211,9 @@ impl NodeSnapshot {
                 snapshot_age_ms: 0,
                 last_block_apply_error: None,
                 block_apply_errors_total: 0,
+                mempool_tx_requested_total: 0,
+                mempool_peer_tx_admitted_total: 0,
+                mempool_peer_tx_rejected_total: 0,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -475,6 +478,15 @@ pub struct SnapshotParts<'a> {
     /// OBS-1: monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     pub block_apply_errors_total: u64,
+    /// P2: monotonic count of unconfirmed-tx ids requested from peers, for
+    /// the `ergo_node_mempool_tx_requested_total` Prometheus counter.
+    pub mempool_tx_requested_total: u64,
+    /// P2: monotonic count of peer-sourced txs admitted to the mempool, for
+    /// the `ergo_node_mempool_peer_tx_admitted_total` Prometheus counter.
+    pub mempool_peer_tx_admitted_total: u64,
+    /// P2: monotonic count of peer-sourced txs rejected by admission, for
+    /// the `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter.
+    pub mempool_peer_tx_rejected_total: u64,
 }
 
 fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64) -> NodeSnapshot {
@@ -525,6 +537,9 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         bootstrap: p.bootstrap.clone(),
         last_block_apply_error: p.last_block_apply_error.clone(),
         block_apply_errors_total: p.block_apply_errors_total,
+        mempool_tx_requested_total: p.mempool_tx_requested_total,
+        mempool_peer_tx_admitted_total: p.mempool_peer_tx_admitted_total,
+        mempool_peer_tx_rejected_total: p.mempool_peer_tx_rejected_total,
     };
 
     let tip = ApiTip {
@@ -775,6 +790,9 @@ mod tests {
             snapshot_manifests: Vec::new(),
             last_block_apply_error: None,
             block_apply_errors_total: 0,
+            mempool_tx_requested_total: 0,
+            mempool_peer_tx_admitted_total: 0,
+            mempool_peer_tx_rejected_total: 0,
         }
     }
 
@@ -1013,6 +1031,12 @@ mod tests {
         assert_eq!(snap.status.block_apply_errors_total, 3);
         assert_eq!(snap.health.status, HealthStatus::Rejecting);
 
+        // No rejection set above ⇒ the three new mempool-gossip counters
+        // default to 0 on this publish path.
+        assert_eq!(snap.status.mempool_tx_requested_total, 0);
+        assert_eq!(snap.status.mempool_peer_tx_admitted_total, 0);
+        assert_eq!(snap.status.mempool_peer_tx_rejected_total, 0);
+
         // No rejection: None on status, and health is NOT Rejecting.
         let mut publisher2 =
             SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
@@ -1020,6 +1044,29 @@ mod tests {
         let snap2 = publisher2.handle().load_full();
         assert!(snap2.status.last_block_apply_error.is_none());
         assert_ne!(snap2.health.status, HealthStatus::Rejecting);
+    }
+
+    /// P2: the three mempool-tx-gossip observability counters travel from
+    /// `SnapshotParts` through `build_snapshot` onto `ApiStatus` (the
+    /// `/metrics` source). Same threading guard as
+    /// `build_snapshot_surfaces_block_apply_rejection_and_health`: a field
+    /// added to one struct but not threaded would silently fall back to 0
+    /// here, leaving the Prometheus counter stuck at zero.
+    #[test]
+    fn build_snapshot_carries_mempool_tx_gossip_counters() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.mempool_tx_requested_total = 11;
+        parts.mempool_peer_tx_admitted_total = 7;
+        parts.mempool_peer_tx_rejected_total = 4;
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        assert_eq!(snap.status.mempool_tx_requested_total, 11);
+        assert_eq!(snap.status.mempool_peer_tx_admitted_total, 7);
+        assert_eq!(snap.status.mempool_peer_tx_rejected_total, 4);
     }
 
     /// `max_peer_height` and `mining_enabled` travel from `SnapshotParts`
