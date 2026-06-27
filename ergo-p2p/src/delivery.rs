@@ -322,6 +322,27 @@ impl DeliveryTracker {
         removed
     }
 
+    /// Fully forget a modifier that just timed out, dropping every
+    /// residual tracking record so it is neither re-requested nor
+    /// remembered.
+    ///
+    /// By the time `check_timeouts` returns, the `inflight` entry is
+    /// already gone (it was moved into the `recently_released` type
+    /// shadow and a `retry_count` bump). This clears those leftovers
+    /// (plus any `late_acceptable` allowance), returning the modifier
+    /// to `Unknown` status with no state held against it.
+    ///
+    /// Scala parity: `checkDelivery` forgets a timed-out mempool
+    /// transaction via `clearStatusForModifier(id, txTypeId, Requested)`
+    /// — a tx may legitimately have left the peer's mempool, so the
+    /// peer is not penalized and the tx is not re-requested
+    /// (ErgoNodeViewSynchronizer.scala, "no reason to penalize").
+    pub fn forget_timed_out(&mut self, modifier_id: &[u8; 32]) {
+        self.recently_released.remove(modifier_id);
+        self.retry_count.remove(modifier_id);
+        self.late_acceptable.remove(modifier_id);
+    }
+
     /// Check for timed-out requests. Returns a `TimeoutResult` with:
     /// - `retryable`: (peer, ids) that can be re-requested from a different peer
     /// - `exhausted`: ids that have exceeded MAX_RETRIES (marked as Failed)

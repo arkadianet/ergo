@@ -618,6 +618,101 @@ fn timeout_reassigns_to_different_peer() {
 }
 
 #[test]
+fn timed_out_transaction_is_forgotten_without_penalty() {
+    // Scala parity (checkDelivery): a timed-out MEMPOOL TRANSACTION is just
+    // forgotten — a tx may legitimately have left the peer's mempool, so the
+    // peer is NOT penalized and the tx is NOT re-requested. The tracker must
+    // also stop tracking the forgotten id entirely.
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let p1 = peer(9030);
+    let p2 = peer(9031);
+    let tx_id = mk(7);
+
+    // Register an in-flight Transaction request to p1.
+    let req = coord.request_transactions(p1, &[tx_id], now);
+    assert!(
+        req.iter()
+            .any(|a| matches!(a, Action::SendToPeer { peer, code: 22, .. } if *peer == p1)),
+        "tx request should be sent to p1"
+    );
+
+    // Advance past the timeout with p2 available as a re-request candidate.
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[p2]);
+
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::NonDelivery,
+                ..
+            }
+        )),
+        "a timed-out tx must NOT penalize the peer"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::SendToPeer { code: 22, .. })),
+        "a timed-out tx must NOT be re-requested"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::NoteDeliveryOutcome { .. })),
+        "a timed-out tx must NOT emit a delivery-streak outcome"
+    );
+
+    // The tracker no longer tracks the forgotten tx.
+    assert_eq!(
+        coord.delivery.status(&tx_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown,
+        "forgotten tx should return to Unknown status"
+    );
+    assert_eq!(
+        coord.delivery.modifier_type(&tx_id),
+        None,
+        "forgotten tx should leave no residual type record in the tracker"
+    );
+}
+
+#[test]
+fn timed_out_block_modifier_still_penalizes_and_rerequests() {
+    // Regression guard: a timed-out HEADER (or any block modifier) keeps the
+    // aggressive penalize + re-request behavior — only mempool txs are forgotten.
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p1 = peer(9030);
+    let p2 = peer(9031);
+
+    let inv = InvData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        ids: vec![mk(1)],
+    };
+    coord.on_inv(p1, &inv, &chain, now);
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[p2]);
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize { peer, penalty: Penalty::NonDelivery } if *peer == p1
+        )),
+        "a timed-out header must still penalize the failed peer"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::SendToPeer { peer, code: 22, .. } if *peer == p2
+        )),
+        "a timed-out header must still be re-requested from another peer"
+    );
+}
+
+#[test]
 fn orphan_parent_request_revives_exhausted_header_id() {
     // Scala-parity (2Q): after MAX_RETRIES the modifier returns
     // to Unknown status (not the old permanent-Failed state).

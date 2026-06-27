@@ -1082,9 +1082,31 @@ impl SyncCoordinator {
         let mut actions = Vec::new();
         let result = self.delivery.check_timeouts(now);
 
+        let tx_type = ModifierTypeId::Transaction.as_byte();
         let mut all_retryable: Vec<[u8; 32]> = Vec::new();
         let mut failed_peers: Vec<PeerId> = Vec::new();
         for (failed_peer, ids) in &result.retryable {
+            // Scala parity (checkDelivery, ErgoNodeViewSynchronizer.scala):
+            // a timed-out MEMPOOL TRANSACTION is just forgotten — it may
+            // legitimately have left the peer's mempool, so there is "no
+            // reason to penalize the peer" and no re-request. Block sections
+            // and headers keep the aggressive penalize + re-request path.
+            // The just-timed-out ids sit in the tracker's recently-released
+            // shadow, so `modifier_type` still resolves their requested class.
+            let (tx_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = ids
+                .iter()
+                .partition(|id| self.delivery.modifier_type(id) == Some(tx_type));
+            for tx_id in &tx_ids {
+                // Fully drop the forgotten tx so the tracker stops tracking
+                // it (no recently-released shadow, no retry count, no late
+                // allowance) and never re-requests it.
+                self.delivery.forget_timed_out(tx_id);
+            }
+            // If only txs timed out for this peer, there is nothing to
+            // penalize or re-request — leave the peer untouched.
+            if block_ids.is_empty() {
+                continue;
+            }
             actions.push(Action::Penalize {
                 peer: *failed_peer,
                 penalty: Penalty::NonDelivery,
@@ -1093,10 +1115,8 @@ impl SyncCoordinator {
             // score, which NonDelivery can't move past DEGRADED_THRESHOLD).
             // Only block-BODY section timeouts count: a peer that stalls on
             // bodies but keeps answering the constant header/mempool-tx flow
-            // must still accrue toward degradation. The just-timed-out ids
-            // sit in the delivery tracker's recently-released shadow, so
-            // `modifier_type` still resolves their requested class here.
-            if ids.iter().any(|id| {
+            // must still accrue toward degradation.
+            if block_ids.iter().any(|id| {
                 self.delivery
                     .modifier_type(id)
                     .is_some_and(ModifierTypeId::is_block_body_section)
@@ -1106,8 +1126,8 @@ impl SyncCoordinator {
                     succeeded: false,
                 });
             }
-            info!(peer = %failed_peer, count = ids.len(), "modifier delivery timed out, retrying with other peers");
-            all_retryable.extend_from_slice(ids);
+            info!(peer = %failed_peer, count = block_ids.len(), "modifier delivery timed out, retrying with other peers");
+            all_retryable.extend_from_slice(&block_ids);
             failed_peers.push(*failed_peer);
         }
 
