@@ -143,10 +143,13 @@ pub(crate) struct NodeState {
     /// level, where the per-tx admit/reject/request traces only fire at
     /// `debug`. Session-scoped (reset on restart; `rate()` handles that).
     ///
-    /// Count of unconfirmed-tx ids REQUESTED from peers in response to a
-    /// tx-typed `Inv` — the `unknown` (not-already-pooled, not-invalidated)
-    /// advertised ids passed to `request_transactions`. Bumped in
-    /// `messaging::handle_message`'s tx-Inv→request branch.
+    /// Count of unconfirmed-tx ids actually REQUESTED from peers in
+    /// response to a tx-typed `Inv` — the POST-dedupe count returned by
+    /// `request_transactions` (after it drops already-in-flight/failed ids
+    /// and applies the per-peer cap), NOT the raw advertised set, so it
+    /// matches one-for-one the `RequestModifier`s actually sent. Bumped in
+    /// `messaging::handle_message`'s tx-Inv→request branch; surfaced in
+    /// `ApiStatus`/Prometheus.
     pub(super) mempool_tx_requested_total: u64,
     /// Count of peer-sourced (`TxSource::Peer`) txs ADMITTED to the
     /// mempool. Bumped on an `Admitted` outcome in
