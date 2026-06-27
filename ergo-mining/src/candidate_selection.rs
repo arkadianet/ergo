@@ -147,6 +147,14 @@ pub struct Selected {
     pub total_cost: u64,
     /// Sum of selected transactions' serialized sizes (bytes).
     pub total_size: u64,
+    /// Pooled txs whose CONSENSUS re-validation failed against the candidate's
+    /// frozen tip+1 context (Component B's "suspect" feed). These are the only
+    /// skip class that maps to a provable invalidity; the node re-validates each
+    /// against the live tip and evicts the still-invalid ones
+    /// (`Mempool::recheck_ids`). Resolve/conflict/budget skips are deliberately
+    /// NOT collected — they are in-block ordering / fit losses, not tx
+    /// invalidity, and would be re-validated as non-hard-invalid (kept) anyway.
+    pub suspects: Vec<Digest32>,
 }
 
 /// Greedily select mempool transactions into the candidate.
@@ -231,7 +239,16 @@ pub fn select_user_txs(
                 &mut cx,
             ) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => {
+                    // Consensus re-validation failed against the candidate's
+                    // tip+1 context: this tx is (likely) invalid at the new tip.
+                    // Flag it as a suspect so the node re-validates it live and
+                    // evicts it if still invalid — instead of it lingering until
+                    // the next full recheck pass. (Only this skip class is
+                    // collected; see `Selected::suspects`.)
+                    sel.suspects.push(entry.tx_id);
+                    continue;
+                }
             }
         };
 
@@ -449,6 +466,46 @@ mod tests {
         .unwrap();
 
         assert_eq!(sel.checked.len(), 1, "a valid mempool tx must be selected");
+        assert!(sel.suspects.is_empty(), "a selected tx is not a suspect");
+    }
+
+    // ----- suspect feed (Component B) -----
+
+    #[test]
+    fn revalidation_failure_is_collected_as_suspect() {
+        // A tx that parses and resolves but FAILS consensus re-validation
+        // (output value exceeds input — ERG not conserved) is skipped from the
+        // candidate AND recorded in `suspects`, so the node can re-validate it
+        // against the live tip and evict it if still invalid. This is the only
+        // skip class that maps to a provable invalidity.
+        let in_box = box_at(1_000_000_000, HEIGHT, 0x01);
+        let utxo = MapUtxo::new(std::slice::from_ref(&in_box));
+        let tx = spend_tx(&in_box, 2_000_000_000, HEIGHT); // out > in: not conserved
+        let snap = MempoolReadSnapshot::from_entries(vec![entry(&tx, 0, 100, 0xA0)]);
+
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let params = ProtocolParams::mainnet_default();
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &params,
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            sel.checked.is_empty(),
+            "a non-conserving tx must not be selected",
+        );
+        assert_eq!(
+            sel.suspects,
+            vec![Digest32::from_bytes([0xA0; 32])],
+            "a consensus-revalidation failure is recorded as a suspect",
+        );
     }
 
     // ----- conflict exclusion (the rent-claim core) -----
@@ -484,6 +541,10 @@ mod tests {
         assert!(
             sel.checked.is_empty(),
             "a tx conflicting with a pinned (rent) input must be excluded",
+        );
+        assert!(
+            sel.suspects.is_empty(),
+            "a conflict/double-spend skip is an in-block race loss, not tip-invalidity — not a suspect",
         );
     }
 
@@ -597,6 +658,10 @@ mod tests {
             sel.checked.len(),
             1,
             "child-before-parent: only the parent is included this block",
+        );
+        assert!(
+            sel.suspects.is_empty(),
+            "an input-resolve skip is in-block ordering, not tip-invalidity — not a suspect",
         );
     }
 

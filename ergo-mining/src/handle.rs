@@ -19,7 +19,9 @@
 //! single writer on publish) so both the engine task and each axum handler
 //! closure can clone the Arc.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+use ergo_primitives::digest::Digest32;
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_state::store::StateStore;
@@ -136,6 +138,15 @@ pub struct MiningHandle {
     /// API read state (so `GET /api/v1/votes` reflects live edits), and the
     /// admin write path — so a runtime change is seen by all three at once.
     voting_targets: Arc<RwLock<std::collections::BTreeMap<u8, i64>>>,
+    /// Component B: ids of pooled txs whose consensus re-validation failed
+    /// during the most recent published Full build (suspected tip-invalid). The
+    /// off-loop build worker records them here ([`MiningHandle::record_suspects`])
+    /// and the action loop drains them ([`MiningHandle::take_suspects`]) to
+    /// re-validate against the live tip and evict the still-invalid ones. A
+    /// SEPARATE `Mutex` (not the serve `cache` `RwLock`) so this best-effort pool
+    /// hint never contends with — or couples to — the consensus serve path.
+    /// Latest-wins: each published build replaces the slot.
+    suspects: Arc<Mutex<Vec<Digest32>>>,
 }
 
 impl MiningHandle {
@@ -182,6 +193,26 @@ impl MiningHandle {
             claim_storage_rent: false,
             max_storage_rent_claims: 0,
             voting_targets: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
+            suspects: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Record the suspect ids from a just-published Full build (Component B).
+    /// Latest-wins: replaces any undrained set, since the newest build's
+    /// suspects supersede an older build's against a now-stale tip. A poisoned
+    /// lock is ignored (best-effort hint; never panic the build worker).
+    pub fn record_suspects(&self, suspects: Vec<Digest32>) {
+        if let Ok(mut slot) = self.suspects.lock() {
+            *slot = suspects;
+        }
+    }
+
+    /// Drain (take + clear) the recorded suspect ids for the action loop to
+    /// re-validate against the live tip. Returns empty when nothing is pending.
+    pub fn take_suspects(&self) -> Vec<Digest32> {
+        match self.suspects.lock() {
+            Ok(mut slot) => std::mem::take(&mut *slot),
+            Err(_) => Vec::new(),
         }
     }
 

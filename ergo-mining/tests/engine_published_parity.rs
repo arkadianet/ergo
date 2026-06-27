@@ -472,6 +472,7 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("on-loop generate_candidate ok")
     .expect("on-loop candidate is Some");
@@ -808,6 +809,7 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -942,6 +944,7 @@ fn generate_candidate_measures_phase_timings() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -1037,6 +1040,7 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect_err("non-genesis parent without interlinks must fail the build");
 
@@ -1093,6 +1097,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("minimal generate_candidate ok")
     .expect("minimal candidate is Some");
@@ -1110,6 +1115,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
@@ -1169,6 +1175,86 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
     );
 }
 
+/// Component B regression: a Minimal publish must NOT clobber the suspect slot a
+/// prior Full build recorded but the loop hasn't drained. Only a Full build runs
+/// mempool selection and owns the suspect set; a Minimal build (emission-only)
+/// has none, so `build_and_publish` must skip `record_suspects` for it — else its
+/// empty set would clear the pending Full suspects via latest-wins.
+#[test]
+fn minimal_publish_does_not_clobber_pending_full_suspects() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    // Stand in for a prior Full build's still-undrained suspects.
+    let pending = vec![Digest32::from_bytes([0x7Au8; 32])];
+    handle.record_suspects(pending.clone());
+
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &build_intent(tip, regime.parent_height),
+        BuildMode::Minimal,
+        None,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+        &mut None,
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "minimal build must publish, got {outcome:?}",
+    );
+    assert_eq!(
+        handle.take_suspects(),
+        pending,
+        "a Minimal publish must leave a pending Full-build suspect set intact",
+    );
+}
+
+/// Component B: a Full publish OWNS the suspect slot and replaces it (latest-
+/// wins) — even with an empty mempool (no suspects), so a stale set from an
+/// earlier build is cleared rather than lingering.
+#[test]
+fn full_publish_replaces_suspect_slot() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+
+    // A stale suspect set from an earlier build.
+    handle.record_suspects(vec![Digest32::from_bytes([0x7Au8; 32])]);
+
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &build_intent(tip, regime.parent_height),
+        BuildMode::Full,
+        None,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+        &mut None,
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "full build must publish, got {outcome:?}",
+    );
+    assert!(
+        handle.take_suspects().is_empty(),
+        "a Full publish with an empty mempool replaces the slot, clearing stale suspects",
+    );
+}
+
 /// Mainnet / post-EIP-27 twin of `minimal_build_equals_full_build_on_quiet_chain`:
 /// same assertions under `reemission = Some(mainnet)` and candidate height 777_300.
 /// On mainnet (post-activation), both `Minimal` and `Full` with an empty mempool
@@ -1197,6 +1283,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("minimal generate_candidate ok")
     .expect("minimal candidate is Some");
@@ -1214,6 +1301,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
@@ -1300,6 +1388,7 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("off-loop generate_candidate ok")
     .expect("off-loop candidate is Some");
@@ -1426,6 +1515,7 @@ fn generated_candidate_emits_configured_param_votes() {
         &[],
         &targets,
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
@@ -1456,6 +1546,7 @@ fn generated_candidate_emits_neutral_votes_without_targets() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
     )
     .expect("generate_candidate ok")
     .expect("candidate is Some");
