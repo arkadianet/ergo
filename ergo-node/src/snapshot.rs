@@ -663,6 +663,21 @@ fn project_peer(
         ),
         None => (None, None, None),
     };
+    // Parsed-but-previously-dropped peer identity from the handshake
+    // PeerSpec: the advertised REST URL feature and the declared public
+    // address. Both are observability/identity only — never fed into sync
+    // or scoring. Surfaced on the native peer DTO; the legacy
+    // `/peers/connected` Scala-compat surface is intentionally left as-is.
+    let (rest_api_url, declared_address) = match &pi.peer_spec {
+        Some(spec) => (
+            spec.features.iter().find_map(|f| match f {
+                ergo_p2p::handshake::PeerFeature::RestApiUrl { url } => Some(url.clone()),
+                _ => None,
+            }),
+            spec.declared_address.as_ref().map(format_declared_address),
+        ),
+        None => (None, None),
+    };
     let connected_seconds = now.saturating_duration_since(pi.connected_at).as_secs();
     let last_seen_seconds = now.saturating_duration_since(pi.last_seen).as_secs();
     // peer_height comes from the per-peer sync-info projection
@@ -687,6 +702,38 @@ fn project_peer(
         bytes_in: Some(pi.bytes_in()),
         bytes_out: Some(pi.bytes_out()),
         peer_height,
+        rest_api_url,
+        declared_address,
+    }
+}
+
+/// Format a handshake-declared address (`addr` bytes + `port`) as an
+/// `ip:port` string. Handles the two valid Ergo declared-address byte
+/// widths — 4 (IPv4) and 16 (IPv6); any other width yields `None` rather
+/// than a misparsed address. `Scala`'s declared address is an
+/// `InetSocketAddress`; this renders the same `host:port` shape.
+fn format_declared_address(d: &ergo_p2p::handshake::DeclaredAddress) -> String {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let ip: Option<std::net::IpAddr> = match d.addr.len() {
+        4 => {
+            let b: [u8; 4] = d.addr[..4].try_into().expect("len checked == 4");
+            Some(std::net::IpAddr::V4(Ipv4Addr::from(b)))
+        }
+        16 => {
+            let b: [u8; 16] = d.addr[..16].try_into().expect("len checked == 16");
+            Some(std::net::IpAddr::V6(Ipv6Addr::from(b)))
+        }
+        _ => None,
+    };
+    match ip {
+        Some(ip) => std::net::SocketAddr::new(ip, d.port as u16).to_string(),
+        // Non-standard width: surface the raw shape rather than fabricate
+        // an address, so an operator sees something is off.
+        None => format!(
+            "<malformed declared addr: {} bytes>:{}",
+            d.addr.len(),
+            d.port
+        ),
     }
 }
 
@@ -733,6 +780,63 @@ mod tests {
         let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
         assert_eq!(api.bytes_in, Some(42));
         assert_eq!(api.bytes_out, Some(7));
+    }
+
+    /// `ApiPeer` surfaces the parsed-but-previously-dropped peer identity:
+    /// the `RestApiUrl` handshake feature → `rest_api_url`, and the
+    /// `PeerSpec.declared_address` → `declared_address` (`ip:port`). Both
+    /// are `None` when the spec carries neither.
+    #[test]
+    fn project_peer_surfaces_rest_url_and_declared_address() {
+        use ergo_p2p::handshake::{DeclaredAddress, PeerFeature, PeerSpec, Version};
+        use std::collections::HashMap;
+
+        let mut pi = ergo_p2p::peer::PeerInfo::new_outbound(
+            "127.0.0.1:9030".parse().unwrap(),
+            std::time::Instant::now(),
+        );
+        pi.peer_spec = Some(PeerSpec {
+            agent_name: "ergoref".into(),
+            version: Version {
+                major: 5,
+                minor: 0,
+                patch: 0,
+            },
+            node_name: "node".into(),
+            declared_address: Some(DeclaredAddress {
+                addr: vec![203, 0, 113, 9],
+                port: 9030,
+            }),
+            features: vec![PeerFeature::RestApiUrl {
+                url: "http://203.0.113.9:9053".into(),
+            }],
+        });
+
+        let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
+        assert_eq!(
+            api.rest_api_url.as_deref(),
+            Some("http://203.0.113.9:9053"),
+            "RestApiUrl feature must surface on rest_api_url",
+        );
+        assert_eq!(
+            api.declared_address.as_deref(),
+            Some("203.0.113.9:9030"),
+            "declared address must surface as ip:port",
+        );
+    }
+
+    /// With no peer_spec (pre-handshake) both new identity fields are
+    /// `None` — the absent case the additive serde-skip relies on.
+    #[test]
+    fn project_peer_identity_fields_none_without_spec() {
+        use std::collections::HashMap;
+        let pi = ergo_p2p::peer::PeerInfo::new_outbound(
+            "127.0.0.1:9030".parse().unwrap(),
+            std::time::Instant::now(),
+        );
+        let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
+        assert_eq!(api.rest_api_url, None);
+        assert_eq!(api.declared_address, None);
     }
 
     fn make_parts<'a>(

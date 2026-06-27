@@ -1488,6 +1488,7 @@ async fn run_inner_with_backend(
         mining_enabled: mining_handle.is_some(),
         api_weight_function,
         recent_blocks_cache: None,
+        first_deliverer_ring: crate::node::first_deliverer::FirstDelivererRing::new(),
     };
 
     // Spawn the Step B anchor-map builder. Background task that

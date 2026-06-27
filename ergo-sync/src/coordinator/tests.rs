@@ -2807,3 +2807,36 @@ fn verify_section_modifier_id_rejects_trailing_bytes() {
         "error must name the trailing-bytes case: {result:?}",
     );
 }
+
+// ----- first-deliverer accumulation -----
+
+/// `on_header_validated` records the delivering peer for the accepted
+/// header into the drain buffer that the node folds into its first-
+/// deliverer ring. The observation is recorded for EVERY accepted header
+/// (here on a pre-synced coordinator that takes the early return before
+/// any section request), and `take_first_deliverers` drains it once.
+#[test]
+fn on_header_validated_accumulates_first_deliverer_and_drains_once() {
+    // best_full_block_height 0, stale-by-default timestamp keeps the
+    // coordinator below headers_chain_synced — exercises the early-return
+    // path, proving the observation is recorded BEFORE the section gates.
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let p = peer(9030);
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+
+    // Stale timestamp (epoch) so headers_chain_synced stays false.
+    let _ = coord.on_header_validated(p, mk(1), 1, 0, expected, now);
+
+    let drained = coord.take_first_deliverers();
+    assert_eq!(
+        drained,
+        vec![(mk(1), p)],
+        "the accepted header's delivering peer must be recorded",
+    );
+    // Draining is destructive — a second drain is empty.
+    assert!(
+        coord.take_first_deliverers().is_empty(),
+        "take_first_deliverers must drain (mem::take) the buffer",
+    );
+}

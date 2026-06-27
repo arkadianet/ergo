@@ -226,6 +226,14 @@ pub struct SyncCoordinator {
     /// flips off after `state_install` completes so normal block
     /// sync from `snapshot_height + 1` can proceed.
     bootstrap_in_progress: bool,
+    /// First-deliverer observations accumulated since the last drain:
+    /// `(header_id, delivering peer)` for each header `on_header_validated`
+    /// accepted. Drained by the action loop via [`take_first_deliverers`]
+    /// into the node's bounded first-deliverer ring. Pure observability —
+    /// never read by sync. Bounded by the per-tick validated-header batch
+    /// (drained every action-loop tick), same drain pattern as
+    /// [`take_net_stats`].
+    first_deliverers: Vec<([u8; 32], PeerId)>,
 }
 
 /// Minimum number of distinct peers that must report our exact tip
@@ -272,6 +280,7 @@ impl SyncCoordinator {
             headers_only,
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
+            first_deliverers: Vec::new(),
         }
     }
 
@@ -301,6 +310,7 @@ impl SyncCoordinator {
             headers_only,
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
+            first_deliverers: Vec::new(),
         }
     }
 
@@ -341,6 +351,15 @@ impl SyncCoordinator {
     /// Drain the per-tick pipeline counters for the heartbeat.
     pub fn take_net_stats(&mut self) -> NetStats {
         std::mem::take(&mut self.net_stats)
+    }
+
+    /// Drain the first-deliverer observations accumulated since the last
+    /// call: `(header_id, delivering peer)` for each header accepted by
+    /// `on_header_validated`. The action loop folds these into its bounded
+    /// first-deliverer ring after each `execute_all`. Same drain pattern
+    /// as [`take_net_stats`] — pure observability, never read by sync.
+    pub fn take_first_deliverers(&mut self) -> Vec<([u8; 32], PeerId)> {
+        std::mem::take(&mut self.first_deliverers)
     }
 
     /// Mark a peer as having sent us a non-tx Modifier in this tick.
@@ -978,6 +997,14 @@ impl SyncCoordinator {
         now: Instant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+
+        // First-deliverer observability: record the peer whose Modifier
+        // carried this just-accepted header. Recorded BEFORE the
+        // headers-synced / mode gates below (which only govern section
+        // requests) so every accepted header is attributable, including
+        // those validated during header-only sync. The node's bounded
+        // ring keeps only the FIRST deliverer per id; pure observability.
+        self.first_deliverers.push((header_id, peer));
 
         self.sync_state.set_best_known_header(height);
         self.sync_state.check_headers_synced(header_timestamp_ms);

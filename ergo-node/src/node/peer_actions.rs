@@ -154,6 +154,18 @@ pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAd
 
 pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
     let now = Instant::now();
+    // Fold any first-deliverer observations the coordinator accumulated
+    // during the just-completed execute batch into the bounded ring. The
+    // coordinator records `(header_id, peer)` in `on_header_validated`
+    // (the spot where both the header id and the delivering peer are
+    // known); draining here — after every execute path — keeps the ring
+    // current without scattering the drain across each `execute_all`
+    // call site. The ring keeps only the FIRST deliverer per id and is
+    // FIFO-bounded; pure observability, no sync/consensus effect. Cheap
+    // when nothing accumulated (an empty-Vec swap).
+    for (header_id, peer) in state.coordinator.take_first_deliverers() {
+        state.first_deliverer_ring.record(header_id, peer, now);
+    }
     // Count RequestModifier messages AND their ID payloads
     // separately. Messages = how many SendToPeer(RequestModifier)
     // actions we're about to emit. IDs = how many sections we're

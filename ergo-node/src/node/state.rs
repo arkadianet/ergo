@@ -306,4 +306,12 @@ pub(crate) struct NodeState {
     /// when `best_full_block_id` differs from the cached tip and otherwise
     /// re-publishes the cached `Arc`. `None` before the first publish.
     pub(super) recent_blocks_cache: Option<crate::snapshot::RecentBlocksCache>,
+    /// First-block-deliverer ring: `header_id → (first peer, instant)`.
+    /// Records the FIRST peer that delivered each recently-validated
+    /// header (its `Modifier` carried the header bytes we accepted), so
+    /// an operator can attribute a block → peer → pool. Bounded
+    /// (FIFO-evicted at `FirstDelivererRing::CAP`), first-deliverer-only,
+    /// pure observability — never feeds sync / consensus / scoring.
+    /// Read at snapshot build time to populate `ApiRecentBlock.delivered_by`.
+    pub(super) first_deliverer_ring: super::first_deliverer::FirstDelivererRing,
 }
