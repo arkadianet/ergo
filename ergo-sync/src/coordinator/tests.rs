@@ -630,7 +630,8 @@ fn timed_out_transaction_is_forgotten_without_penalty() {
     let tx_id = mk(7);
 
     // Register an in-flight Transaction request to p1.
-    let req = coord.request_transactions(p1, &[tx_id], now);
+    let (req, requested) = coord.request_transactions(p1, &[tx_id], now);
+    assert_eq!(requested, 1, "one id should be registered for p1");
     assert!(
         req.iter()
             .any(|a| matches!(a, Action::SendToPeer { peer, code: 22, .. } if *peer == p1)),
@@ -2613,8 +2614,9 @@ fn on_sync_info_v2_younger_caps_at_400_ids() {
 fn request_transactions_sends_serialized_request_modifier() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    let actions = coord.request_transactions(peer(1), &[mk(10), mk(11)], now);
+    let (actions, requested) = coord.request_transactions(peer(1), &[mk(10), mk(11)], now);
     assert_eq!(actions.len(), 1);
+    assert_eq!(requested, 2, "both fresh ids should be reported requested");
     match &actions[0] {
         Action::SendToPeer {
             peer: p,
@@ -2635,19 +2637,24 @@ fn request_transactions_sends_serialized_request_modifier() {
 fn request_transactions_dedupes_against_in_flight() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    coord.request_transactions(peer(1), &[mk(20), mk(21)], now);
+    let (_, first) = coord.request_transactions(peer(1), &[mk(20), mk(21)], now);
+    assert_eq!(first, 2, "both ids registered on the first request");
     // Same ids from a different peer: DeliveryTracker should
     // filter them as already in-flight, leaving nothing to
-    // register and thus no SendToPeer action.
-    let actions = coord.request_transactions(peer(2), &[mk(20), mk(21)], now);
+    // register and thus no SendToPeer action and a zero count.
+    let (actions, requested) = coord.request_transactions(peer(2), &[mk(20), mk(21)], now);
     assert!(actions.is_empty());
+    assert_eq!(
+        requested, 0,
+        "in-flight ids must not be re-counted as requested",
+    );
 }
 
 #[test]
 fn on_transaction_received_accepts_from_requesting_peer() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    coord.request_transactions(peer(1), &[mk(30)], now);
+    let _ = coord.request_transactions(peer(1), &[mk(30)], now);
     let verdict = coord.on_transaction_received(peer(1), &mk(30));
     assert!(matches!(
         verdict,
@@ -2670,7 +2677,7 @@ fn on_transaction_received_rejects_unsolicited() {
 fn on_transaction_received_ignores_duplicate_after_accept() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
-    coord.request_transactions(peer(1), &[mk(40)], now);
+    let _ = coord.request_transactions(peer(1), &[mk(40)], now);
     let _ = coord.on_transaction_received(peer(1), &mk(40));
     let verdict = coord.on_transaction_received(peer(1), &mk(40));
     assert!(matches!(
@@ -2682,8 +2689,9 @@ fn on_transaction_received_ignores_duplicate_after_accept() {
 #[test]
 fn request_transactions_empty_ids_emits_nothing() {
     let mut coord = SyncCoordinator::new(0);
-    let actions = coord.request_transactions(peer(1), &[], Instant::now());
+    let (actions, requested) = coord.request_transactions(peer(1), &[], Instant::now());
     assert!(actions.is_empty());
+    assert_eq!(requested, 0, "no ids → nothing requested");
 }
 
 // ----- verify_section_modifier_id (Scala-parity receive-time check) -----

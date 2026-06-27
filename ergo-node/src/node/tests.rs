@@ -342,6 +342,47 @@ fn tx_inv_increments_requested_counter_and_requests_unknown() {
     assert_eq!(*code, message::CODE_REQUEST_MODIFIER);
 }
 
+/// P2 (accuracy): re-advertising tx ids that are ALREADY in-flight must not
+/// re-bump `mempool_tx_requested_total`. The coordinator dedupes the second
+/// Inv's ids against in-flight delivery state and emits no RequestModifier,
+/// so the counter — which is supposed to track ids ACTUALLY requested — must
+/// stay put. Pins the fix where the increment uses the post-dedupe count
+/// returned by `request_transactions`, not the advertised `unknown.len()`.
+/// Fail-first against the old `unknown.len()` increment, which double-counted
+/// the second Inv (counter would reach 6, not 3).
+#[test]
+fn tx_inv_does_not_recount_already_in_flight_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    assert_eq!(state.mempool_tx_requested_total, 0);
+
+    let ids = [mid(1), mid(2), mid(3)];
+    let payload = message::serialize_inv(&InvData {
+        type_id: ModifierTypeId::Transaction.as_byte(),
+        ids: ids.to_vec(),
+    })
+    .unwrap();
+    let now = Instant::now();
+
+    // First Inv: all three ids are unknown and get registered + requested.
+    let first = handle_message(&mut state, test_peer(), message::CODE_INV, &payload, now);
+    assert_eq!(state.mempool_tx_requested_total, 3);
+    assert_eq!(first.len(), 1, "first Inv emits a RequestModifier");
+
+    // Second Inv (same ids, still in-flight from the first): the coordinator
+    // dedupes them all away, so nothing new is requested. The counter must
+    // NOT advance and no RequestModifier is emitted.
+    let second = handle_message(&mut state, test_peer(), message::CODE_INV, &payload, now);
+    assert_eq!(
+        state.mempool_tx_requested_total, 3,
+        "in-flight ids must not be re-counted as requested",
+    );
+    assert!(
+        second.is_empty(),
+        "no RequestModifier for already-in-flight ids",
+    );
+}
+
 /// P2: with the mempool disabled the tx-Inv branch returns early before the
 /// `unknown` filter, so a tx-typed `Inv` neither advances the request
 /// counter nor emits a request. Pins that the counter is scoped to the

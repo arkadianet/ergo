@@ -674,7 +674,9 @@ fn project_peer(
                 ergo_p2p::handshake::PeerFeature::RestApiUrl { url } => Some(url.clone()),
                 _ => None,
             }),
-            spec.declared_address.as_ref().map(format_declared_address),
+            spec.declared_address
+                .as_ref()
+                .and_then(format_declared_address),
         ),
         None => (None, None),
     };
@@ -707,34 +709,35 @@ fn project_peer(
     }
 }
 
-/// Format a handshake-declared address (`addr` bytes + `port`) as an
-/// `ip:port` string. Handles the two valid Ergo declared-address byte
-/// widths — 4 (IPv4) and 16 (IPv6); any other width yields `None` rather
-/// than a misparsed address. `Scala`'s declared address is an
-/// `InetSocketAddress`; this renders the same `host:port` shape.
-fn format_declared_address(d: &ergo_p2p::handshake::DeclaredAddress) -> String {
+/// Format a handshake-declared address (`addr` bytes + wire `u32` port) as
+/// an `ip:port` string, or `None` when the advertised value is malformed.
+/// Handles the two valid Ergo declared-address byte widths — 4 (IPv4) and
+/// 16 (IPv6); any other width yields `None` rather than a misparsed address.
+///
+/// `declared_address` is peer-influenced and untrusted: the wire port is a
+/// `u32` (see `handshake.rs`), so a hostile/buggy peer can advertise a value
+/// outside the valid `u16` port range (e.g. `65536`). Rather than silently
+/// truncate it with `as u16` — which would fabricate a wrong `:0` — an
+/// out-of-range port yields `None`: better to omit an untrusted address than
+/// to surface one that was never real. `Scala`'s declared address is an
+/// `InetSocketAddress`; the in-range case renders the same `host:port` shape.
+fn format_declared_address(d: &ergo_p2p::handshake::DeclaredAddress) -> Option<String> {
     use std::net::{Ipv4Addr, Ipv6Addr};
-    let ip: Option<std::net::IpAddr> = match d.addr.len() {
+    let ip: std::net::IpAddr = match d.addr.len() {
         4 => {
             let b: [u8; 4] = d.addr[..4].try_into().expect("len checked == 4");
-            Some(std::net::IpAddr::V4(Ipv4Addr::from(b)))
+            std::net::IpAddr::V4(Ipv4Addr::from(b))
         }
         16 => {
             let b: [u8; 16] = d.addr[..16].try_into().expect("len checked == 16");
-            Some(std::net::IpAddr::V6(Ipv6Addr::from(b)))
+            std::net::IpAddr::V6(Ipv6Addr::from(b))
         }
-        _ => None,
+        // Non-standard width: omit rather than fabricate a misparsed address.
+        _ => return None,
     };
-    match ip {
-        Some(ip) => std::net::SocketAddr::new(ip, d.port as u16).to_string(),
-        // Non-standard width: surface the raw shape rather than fabricate
-        // an address, so an operator sees something is off.
-        None => format!(
-            "<malformed declared addr: {} bytes>:{}",
-            d.addr.len(),
-            d.port
-        ),
-    }
+    // Reject (omit) a port outside the valid u16 range instead of truncating.
+    let port = u16::try_from(d.port).ok()?;
+    Some(std::net::SocketAddr::new(ip, port).to_string())
 }
 
 /// Compute the canonical `now_unix_ms` for snapshot timestamps.
@@ -837,6 +840,61 @@ mod tests {
         let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
         assert_eq!(api.rest_api_url, None);
         assert_eq!(api.declared_address, None);
+    }
+
+    /// P3 (accuracy): the declared port is a peer-advertised wire `u32`.
+    /// An in-range port renders `ip:port`; an out-of-range port (> 65535,
+    /// malformed/hostile) yields `None` rather than a silently-truncated
+    /// `:0`. Fail-first against the old `as u16` cast, where `65536` wrapped
+    /// to `0` and surfaced a fabricated `203.0.113.9:0`.
+    #[test]
+    fn format_declared_address_handles_port_range() {
+        use ergo_p2p::handshake::DeclaredAddress;
+
+        // In-range IPv4 → ip:port.
+        let v4 = DeclaredAddress {
+            addr: vec![203, 0, 113, 9],
+            port: 9030,
+        };
+        assert_eq!(
+            format_declared_address(&v4).as_deref(),
+            Some("203.0.113.9:9030"),
+        );
+
+        // In-range IPv6 → bracketed [ip]:port (SocketAddr's V6 rendering).
+        let v6 = DeclaredAddress {
+            addr: vec![0; 16],
+            port: 9030,
+        };
+        assert_eq!(format_declared_address(&v6).as_deref(), Some("[::]:9030"));
+
+        // Max valid u16 port still renders.
+        let max = DeclaredAddress {
+            addr: vec![203, 0, 113, 9],
+            port: 65535,
+        };
+        assert_eq!(
+            format_declared_address(&max).as_deref(),
+            Some("203.0.113.9:65535"),
+        );
+
+        // Out-of-range port (one past u16::MAX) → None, NOT a truncated `:0`.
+        let bad = DeclaredAddress {
+            addr: vec![203, 0, 113, 9],
+            port: 65536,
+        };
+        assert_eq!(
+            format_declared_address(&bad),
+            None,
+            "out-of-range declared port must be omitted, not truncated to :0",
+        );
+
+        // Non-standard address width also yields None (IPv4/IPv6 only).
+        let weird = DeclaredAddress {
+            addr: vec![1, 2, 3],
+            port: 9030,
+        };
+        assert_eq!(format_declared_address(&weird), None);
     }
 
     fn make_parts<'a>(

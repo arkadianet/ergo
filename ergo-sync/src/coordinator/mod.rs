@@ -506,34 +506,43 @@ impl SyncCoordinator {
     // peer inflight caps + dedup against in-flight/failed state) and
     // produces the corresponding `RequestModifier` payload.
 
-    /// Register a RequestModifier for `tx_ids` to `peer`. Returns a
-    /// `SendToPeer` action with the serialized RequestModifier, or an
-    /// empty vec if every requested id was already in-flight / failed
-    /// or the per-peer cap blocks further requests.
+    /// Register a RequestModifier for `tx_ids` to `peer`. Returns the
+    /// `(actions, requested_count)` pair: `actions` holds the `SendToPeer`
+    /// with the serialized RequestModifier (or is empty if every id was
+    /// already in-flight / failed or the per-peer cap blocks further
+    /// requests, or serialization fails), and `requested_count` is the
+    /// number of ids ACTUALLY registered + emitted in that RequestModifier.
+    /// Callers use the count for observability; it never exceeds the number
+    /// of `tx_ids` passed in and reflects the post-dedupe/cap reality, not
+    /// the advertised set. The count is `0` exactly when `actions` is empty.
     pub fn request_transactions(
         &mut self,
         peer: PeerId,
         tx_ids: &[[u8; 32]],
         now: Instant,
-    ) -> Vec<Action> {
+    ) -> (Vec<Action>, usize) {
         let type_id = ModifierTypeId::Transaction.as_byte();
         let registered = self.delivery.request(peer, type_id, tx_ids, now);
         if registered.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
+        let requested_count = registered.len();
         let request = InvData {
             type_id,
             ids: registered,
         };
         match message::serialize_inv(&request) {
-            Ok(payload) => vec![Action::SendToPeer {
-                peer,
-                code: message::CODE_REQUEST_MODIFIER,
-                payload,
-            }],
+            Ok(payload) => (
+                vec![Action::SendToPeer {
+                    peer,
+                    code: message::CODE_REQUEST_MODIFIER,
+                    payload,
+                }],
+                requested_count,
+            ),
             Err(e) => {
                 warn!(error = %e, "failed to serialize tx RequestModifier");
-                Vec::new()
+                (Vec::new(), 0)
             }
         }
     }
