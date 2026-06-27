@@ -169,6 +169,105 @@ pub trait Validator {
     ) -> Result<Validated, ValidationErr>;
 }
 
+/// Re-validate an already-pooled tx against a tip+1 context for the proactive
+/// recheck-and-evict pass (the mempool-tip-revalidation feature). Runs ONLY the
+/// stateful validation — the same `Validator::validate` path `check` uses, with
+/// the same `PoolUtxoOverlay` (regular inputs) + `CommittedOnly` (data inputs)
+/// views — WITHOUT admission's duplicate/conflict/replacement/capacity/insert
+/// machinery (the tx is already in the pool). Returns the cost the validator
+/// actually consumed (available on BOTH the `Ok` and `Err` paths so the caller
+/// charges it to its per-pass budget regardless of verdict) together with the
+/// pass/fail verdict. `pool_outputs` is built ONCE per pass by the caller —
+/// `OrderedPool::output_map` is O(pool), so it must not be rebuilt per tx.
+pub fn revalidate_pooled<V: Validator>(
+    tx_bytes: &[u8],
+    tip_ctx: &TipContext<'_>,
+    pool_outputs: &HashMap<Digest32, ErgoBox>,
+    max_tx_cost: u64,
+    validator: &V,
+) -> (u64, Result<(), ValidationErr>) {
+    let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, pool_outputs);
+    let committed_view = CommittedOnly::new(tip_ctx.utxo);
+    let cap = match JitCost::from_block_cost(max_tx_cost) {
+        Ok(c) => c,
+        // Misconfig (max_tx_cost above the JitCost bound): treat as a cost
+        // failure rather than panic — mirrors `check`'s handling.
+        Err(_) => return (0, Err(ValidationErr::CostExceeded)),
+    };
+    let mut cost = CostAccumulator::new(cap);
+    let mut tx_cx = TxValidationCtx {
+        ctx: tip_ctx.tx_context,
+        params: tip_ctx.params,
+        cost: &mut cost,
+        last_headers: tip_ctx.last_headers,
+        rules: TxValidationRules {
+            reemission: tip_ctx.reemission,
+        },
+    };
+    let verdict = validator
+        .validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx)
+        .map(|_| ());
+    (cost.consumed(), verdict)
+}
+
+/// Route a failed tx into the right anti-DoS cache. This is the SINGLE
+/// classification policy shared by admission (`check`) and the proactive
+/// recheck (`Mempool::recheck_and_evict`), so the two paths never diverge on
+/// "what does a failure mean for relay":
+///
+/// * `UnresolvedInput` / `UnresolvedDataInput` → the unresolved-bytes cache,
+///   NOT the blacklist: the input may become resolvable later (a parent tx
+///   arrives, or a reorg restores a spent box), so the tx stays re-admittable.
+/// * `Deserialize` / `NonCanonical` → neither cache: the only id available is
+///   computed from the *parsed* form, so a blacklist entry would also damn a
+///   canonical re-encoding. Scala likewise skips `invalidatedTxIds` for
+///   re-parse failures (`ErgoMemPool.process`).
+/// * everything else (hard-invalid: script/monetary/structural/cost) → the
+///   invalidation cache, keyed by the canonical `tx_id`, so the Inv path stops
+///   re-fetching these bytes (`Mempool::is_invalidated`). Mirrors Scala
+///   `OrderedTxPool.invalidate`.
+pub(crate) fn record_failed_tx(
+    invalidated: &mut InvalidationCache,
+    unresolved: &mut crate::unresolved::UnresolvedCache,
+    tx_id: TxId,
+    tx_bytes: &[u8],
+    err: &ValidationErr,
+    now: Instant,
+) {
+    match err {
+        ValidationErr::UnresolvedInput | ValidationErr::UnresolvedDataInput => {
+            unresolved.insert(tx_bytes, now);
+        }
+        ValidationErr::Deserialize | ValidationErr::NonCanonical => {}
+        _ => {
+            invalidated.insert(tx_id, InvalidationReason::ValidationFailed, now);
+        }
+    }
+}
+
+/// Is `err` a PROVABLE consensus invalidity (script/monetary/structural/cost),
+/// as opposed to a non-resolution (`UnresolvedInput`/`UnresolvedDataInput`) or
+/// parse-class (`Deserialize`/`NonCanonical`) failure?
+///
+/// The proactive recheck (`Mempool::recheck_and_evict`) evicts a pooled tx
+/// ONLY when this returns true. A non-resolution failure is NOT proof the tx is
+/// invalid at the new tip: it can be a transient reorg-dependency (a demoted
+/// parent pending re-admission) — losing such a tx to the unresolved-bytes
+/// cache (a suppression filter, not a re-admit queue) would drop a valid tx —
+/// or it is a confirmed double-spend already evicted by `on_tip_change`'s
+/// input-conflict cascade. Parse-class failures cannot occur on already-pooled
+/// canonical bytes. The boundary is exactly `record_failed_tx`'s blacklist arm:
+/// recheck evicts precisely the failures admission blacklists.
+pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
+    !matches!(
+        err,
+        ValidationErr::UnresolvedInput
+            | ValidationErr::UnresolvedDataInput
+            | ValidationErr::Deserialize
+            | ValidationErr::NonCanonical
+    )
+}
+
 /// Test-only validator: returns canned decisions per (tx_id, bytes).
 /// Exposed at the crate root behind `feature = "test-support"` so
 /// integration tests can inject predictable outcomes without leaking
@@ -593,37 +692,19 @@ pub fn check<V: Validator>(
             if let (Some(p), Some(k)) = (peer, penalty) {
                 actions.push(MempoolAction::Penalize { peer: p, kind: k });
             }
-            // Record in invalidation cache so the Inv path skips
-            // re-fetching these bytes from peers (`Mempool::
-            // is_invalidated`). Exception: UnresolvedInput goes to the
-            // unresolved-bytes cache, not invalidation (it may be
-            // resolvable later).
-            match &err {
-                ValidationErr::UnresolvedInput | ValidationErr::UnresolvedDataInput => {
-                    cx.unresolved.insert(tx_bytes, now);
-                }
-                ValidationErr::Deserialize | ValidationErr::NonCanonical => {
-                    // Parse-class failures are not blacklisted. The only id
-                    // available is computed from the *parsed* form, so a
-                    // cache entry would also damn a canonical re-encoding
-                    // of the same tx. Scala likewise skips invalidatedTxIds
-                    // for re-parse failures (ErgoMemPool.process:
-                    // parseBytesTry Failure returns `this` without
-                    // pool.invalidate).
-                }
-                _ => {
-                    // Key by the canonical tx_id computed during the
-                    // step-3.5 peek — the same key the step-5 record_hit
-                    // below and the Inv-skip gate in ergo-node messaging
-                    // look up. Mirrors Scala OrderedTxPool.invalidate
-                    // (invalidatedTxIds.put(tx.id), proof-excluded id).
-                    cx.invalidated.insert(
-                        peek_fee_value.tx_id,
-                        InvalidationReason::ValidationFailed,
-                        now,
-                    );
-                }
-            }
+            // Route the failed tx into the right anti-DoS cache (blacklist
+            // vs unresolved vs neither). Shared with the proactive recheck
+            // so the two paths never diverge — the canonical tx_id is the
+            // step-3.5 peek id, the same key the step-5 record_hit below and
+            // the Inv-skip gate in ergo-node messaging look up.
+            record_failed_tx(
+                cx.invalidated,
+                cx.unresolved,
+                peek_fee_value.tx_id,
+                tx_bytes,
+                &err,
+                now,
+            );
             return (CheckOutcome::Rejected { reason }, actions);
         }
     };

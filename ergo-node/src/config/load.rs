@@ -623,6 +623,7 @@ impl NodeConfig {
             max_family_depth: def.max_family_depth,
             max_family_ops: def.max_family_ops,
             max_family_update_ms: def.max_family_update_ms,
+            mempool_cleanup_cost_mult: def.mempool_cleanup_cost_mult,
             global_cost_budget: def.global_cost_budget,
             per_peer_cost_budget: def.per_peer_cost_budget,
             unresolved_cache_size: def.unresolved_cache_size,

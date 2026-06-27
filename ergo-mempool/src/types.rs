@@ -117,6 +117,9 @@ pub enum EvictionReason {
     ByteBudget,
     Confirmed,
     InputConflict,
+    /// Evicted by the proactive tip-revalidation pass: the tx (or a cascade
+    /// descendant of one) is no longer valid at the new tip.
+    TipInvalid,
 }
 
 /// Pointer to a committed-state tip. Carried by the notifier so
@@ -237,6 +240,13 @@ pub struct MempoolConfig {
     /// Wall-clock budget (ms) for a single family-weight walk before it
     /// bails. Mirrors Scala `OrderedTxPool.MaxParentScanTime`.
     pub max_family_update_ms: u64,
+    /// Per-pass budget for the proactive tip-revalidation (recheck-and-evict)
+    /// pass, as a MULTIPLIER applied to the live `max_block_cost` at recheck
+    /// time (cap = `mempool_cleanup_cost_mult × params.max_block_cost`). Bounds
+    /// the pass on the single-threaded action loop; over-budget txs are deferred
+    /// to later blocks (oldest-`last_checked_at` first). Functional/end-result
+    /// parity with Scala `CleanupWorker`, not its 30s actor throttle.
+    pub mempool_cleanup_cost_mult: u64,
     pub global_cost_budget: u64,
     pub per_peer_cost_budget: u64,
     pub unresolved_cache_size: usize,
@@ -261,6 +271,7 @@ impl Default for MempoolConfig {
             max_family_depth: 500,
             max_family_ops: 10_000,
             max_family_update_ms: 500,
+            mempool_cleanup_cost_mult: 6,
             global_cost_budget: 12_000_000,
             per_peer_cost_budget: 10_000_000,
             unresolved_cache_size: 4_096,

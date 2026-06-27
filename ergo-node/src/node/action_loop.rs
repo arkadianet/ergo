@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant};
 
+use ergo_mempool::ErgoValidator;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -26,6 +27,7 @@ use super::mining_dispatch::{
 };
 use super::peer_actions::{connect_to_address, flush_actions, try_dial_peers};
 use super::sync_tick::handle_sync_tick;
+use super::tip_context::build_tip_context;
 use super::{NodeError, NodeState};
 
 use ergo_mining::engine::BuildReason;
@@ -373,6 +375,46 @@ fn handle_mempool_tick(state: &mut NodeState) {
                 }
                 state.last_seen_active_params = now_active.clone();
                 state.last_seen_validation_settings = now_settings.clone();
+            }
+
+            // Proactive tip-revalidation (recheck-and-evict). Re-validate
+            // the surviving pool against the new tip+1 and evict any tx no
+            // longer valid — the Scala `MempoolAuditor`/`CleanupWorker`
+            // end-result, reached via a per-block full pass (bounded by an
+            // anti-DoS cost cap) instead of Scala's 30s throttle. After an
+            // epoch-boundary demote above the pool is empty, so this is a
+            // no-op on those ticks — the demoted txs re-run full admission
+            // through the revalidation queue instead.
+            //
+            // Gated on FULLY SYNCED (header tip == full-block tip, same
+            // height AND id): during catch-up the applied tip lags the
+            // header tip, so a recheck would validate survivors against a
+            // stale intermediate tip and could evict txs that are valid at
+            // the real chain tip — Scala only audits at the tip. The
+            // empty-pool short-circuit then avoids building a tip context
+            // for nothing (the common IBD case, since admission is
+            // IBD-gated so the pool is empty until we are caught up).
+            let cs = state.store.chain_state_meta();
+            let fully_synced = cs.best_full_block_height > 0
+                && cs.best_header_height == cs.best_full_block_height
+                && cs.best_header_id == cs.best_full_block_id;
+            if fully_synced && state.mempool.size() > 0 {
+                if let Some(owned) = build_tip_context(state) {
+                    let now = Instant::now();
+                    let recheck_actions = {
+                        let tip_ctx =
+                            owned.as_mempool_ctx(state.store.as_utxo().expect(
+                                "utxo-only: mempool subsystem is gated off in digest mode",
+                            ));
+                        state
+                            .mempool
+                            .recheck_and_evict(now, &tip_ctx, &ErgoValidator)
+                    };
+                    if !recheck_actions.is_empty() {
+                        let routed = route_mempool_actions(state, recheck_actions);
+                        flush_actions(state, routed);
+                    }
+                }
             }
         }
         PollOutcome::Error { tip, error } => {
