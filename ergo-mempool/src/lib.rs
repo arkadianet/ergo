@@ -686,11 +686,14 @@ impl Mempool {
     /// Eviction policy: a tx is evicted ONLY when it is PROVABLY invalid at the
     /// new tip — a hard consensus failure (script/monetary/structural/cost),
     /// per `admission::is_hard_invalid`. A non-resolution failure
-    /// (`UnresolvedInput`/`UnresolvedDataInput`) or a parse-class failure does
-    /// NOT evict: an unresolved input can be a transient reorg-dependency (a
+    /// (`UnresolvedInput`/`UnresolvedDataInput`), a parse-class failure, or the
+    /// validator's catch-all `Other(_)` (an internal/contract error — resolved-
+    /// inputs mismatch / internal-invariant violation — not a consensus verdict)
+    /// does NOT evict: an unresolved input can be a transient reorg-dependency (a
     /// demoted parent pending re-admission via the future revalidation-queue
-    /// drain, §7), and a genuine confirmed double-spend is already evicted by
-    /// `on_tip_change`'s input-conflict cascade — so such txs are left in place
+    /// drain, §7), a genuine confirmed double-spend is already evicted by
+    /// `on_tip_change`'s input-conflict cascade, and an `Other(_)` is not safe
+    /// proof to drop an already-accepted tx — so such txs are left in place
     /// (rotation clock advanced) rather than dropped to the unresolved-bytes
     /// cache (a suppression filter, not a re-admit queue). Eviction goes through
     /// the family-weight debiting wrapper (PR #139) and routes the FAILED ROOT
@@ -794,20 +797,22 @@ impl Mempool {
                 }
                 Err(ref err) if !admission::is_hard_invalid(err) => {
                     // Not PROVABLY invalid — a non-resolution failure
-                    // (UnresolvedInput/DataInput) or a parse-class failure.
-                    // Do NOT evict: an unresolved input can be a transient
-                    // reorg-dependency (a demoted parent pending re-admission
-                    // via the future revalidation-queue drain), and evicting it
-                    // to the unresolved-bytes cache — a suppression filter, not
-                    // a re-admit queue — would DROP a valid tx before its parent
-                    // returns. A genuine confirmed double-spend is already
-                    // evicted by `on_tip_change`'s input-conflict cascade. Leave
-                    // the tx in place; only advance its rotation clock so the
-                    // pass moves on. (Residual: a genuinely-orphaned tx lingers
-                    // until its input is confirmed-spent or it is re-admitted —
-                    // closed by the §7 queue-drain PR, which re-admits demoted
-                    // parents before the recheck so the remainder can be safely
-                    // evicted.)
+                    // (UnresolvedInput/DataInput), a parse-class failure, or the
+                    // validator's catch-all Other(_) (an internal/contract error,
+                    // not a consensus verdict). Do NOT evict: an unresolved input
+                    // can be a transient reorg-dependency (a demoted parent
+                    // pending re-admission via the future revalidation-queue
+                    // drain), and evicting it to the unresolved-bytes cache — a
+                    // suppression filter, not a re-admit queue — would DROP a
+                    // valid tx before its parent returns; a genuine confirmed
+                    // double-spend is already evicted by `on_tip_change`'s
+                    // input-conflict cascade; and an Other(_) is not safe proof
+                    // to drop an already-accepted tx. Leave the tx in place; only
+                    // advance its rotation clock so the pass moves on. (Residual:
+                    // a genuinely-orphaned tx lingers until its input is
+                    // confirmed-spent or it is re-admitted — closed by the §7
+                    // queue-drain PR, which re-admits demoted parents before the
+                    // recheck so the remainder can be safely evicted.)
                     self.pool.touch_rechecked(&id, now);
                 }
                 Err(err) => {
@@ -1697,6 +1702,48 @@ mod recheck_tests {
             mp.pool().get(&d(1)).unwrap().last_checked_at,
             now,
             "rotation clock advances even when the tx is kept"
+        );
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn recheck_other_failure_left_in_pool_not_evicted() {
+        // ValidationErr::Other(_) is the validator's catch-all for INTERNAL /
+        // contract failures (resolved-inputs mismatch, internal-invariant
+        // violation — see validator.rs map_validation_error), NOT a provable
+        // consensus invalidity. The recheck must treat it like a non-resolution
+        // failure: LEAVE the tx in the pool (not evicted, not blacklisted), only
+        // advancing the rotation clock — matching the positive `is_hard_invalid`
+        // allowlist {Structural, ScriptFailed, MonetaryFailed, CostExceeded}.
+        let mut mp = mempool_with(MempoolConfig::default());
+        seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+        let base = Instant::now();
+        set_checked(&mut mp, 1, base);
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = AlwaysErr {
+            err: ValidationErr::Other("validator catch-all".into()),
+        };
+
+        let now = base + Duration::from_secs(10);
+        let actions = mp.recheck_and_evict(now, &tip.view(&utxo), &v);
+
+        assert!(
+            mp.contains(&d(1)),
+            "Other(_) failure must keep the tx (not a provable invalidity)"
+        );
+        assert!(
+            !mp.is_invalidated(&d(1)),
+            "kept tx must NOT be blacklisted on an Other(_) failure"
+        );
+        assert!(
+            actions.is_empty(),
+            "no eviction/revoke action for an Other(_)-kept tx"
+        );
+        assert_eq!(
+            mp.pool().get(&d(1)).unwrap().last_checked_at,
+            now,
+            "rotation clock advances even when the Other(_) tx is kept"
         );
         mp.pool().check_invariants();
     }

@@ -210,10 +210,15 @@ pub fn revalidate_pooled<V: Validator>(
     (cost.consumed(), verdict)
 }
 
-/// Route a failed tx into the right anti-DoS cache. This is the SINGLE
-/// classification policy shared by admission (`check`) and the proactive
-/// recheck (`Mempool::recheck_and_evict`), so the two paths never diverge on
-/// "what does a failure mean for relay":
+/// Route a failed tx into the right anti-DoS CACHE. This is the classification
+/// policy shared by admission (`check`) and the proactive recheck
+/// (`Mempool::recheck_and_evict`) for the caching decision ("what does a failure
+/// mean for relay"). The two paths agree on caching, with ONE deliberate
+/// asymmetry on the separate EVICTION decision: a `ValidationErr::Other(_)` is
+/// blacklisted here (so admission stops re-fetching a rejected new tx) but is
+/// NOT a recheck eviction trigger (`is_hard_invalid` excludes it), so an
+/// already-pooled tx hitting an internal/contract `Other(_)` is kept rather than
+/// dropped + blacklisted.
 ///
 /// * `UnresolvedInput` / `UnresolvedDataInput` → the unresolved-bytes cache,
 ///   NOT the blacklist: the input may become resolvable later (a parent tx
@@ -222,10 +227,12 @@ pub fn revalidate_pooled<V: Validator>(
 ///   computed from the *parsed* form, so a blacklist entry would also damn a
 ///   canonical re-encoding. Scala likewise skips `invalidatedTxIds` for
 ///   re-parse failures (`ErgoMemPool.process`).
-/// * everything else (hard-invalid: script/monetary/structural/cost) → the
-///   invalidation cache, keyed by the canonical `tx_id`, so the Inv path stops
-///   re-fetching these bytes (`Mempool::is_invalidated`). Mirrors Scala
-///   `OrderedTxPool.invalidate`.
+/// * everything else (script/monetary/structural/cost, plus the validator's
+///   catch-all `Other`) → the invalidation cache, keyed by the canonical
+///   `tx_id`, so the Inv path stops re-fetching these bytes
+///   (`Mempool::is_invalidated`). Mirrors Scala `OrderedTxPool.invalidate`.
+///   NB: this set is NOT identical to `is_hard_invalid` — it additionally
+///   includes `Other`, which admission blacklists but recheck does not evict on.
 pub(crate) fn record_failed_tx(
     invalidated: &mut InvalidationCache,
     unresolved: &mut crate::unresolved::UnresolvedCache,
@@ -245,26 +252,38 @@ pub(crate) fn record_failed_tx(
     }
 }
 
-/// Is `err` a PROVABLE consensus invalidity (script/monetary/structural/cost),
-/// as opposed to a non-resolution (`UnresolvedInput`/`UnresolvedDataInput`) or
-/// parse-class (`Deserialize`/`NonCanonical`) failure?
+/// Is `err` a PROVABLE consensus invalidity — a hard rule failure the tx itself
+/// caused (script/monetary/structural/cost), reproducible at any tip? Returns
+/// true for exactly that set; false for everything else: non-resolution
+/// failures (`UnresolvedInput`/`UnresolvedDataInput`), parse-class failures
+/// (`Deserialize`/`NonCanonical`), AND the validator's catch-all `Other(_)`.
 ///
-/// The proactive recheck (`Mempool::recheck_and_evict`) evicts a pooled tx
-/// ONLY when this returns true. A non-resolution failure is NOT proof the tx is
-/// invalid at the new tip: it can be a transient reorg-dependency (a demoted
-/// parent pending re-admission) — losing such a tx to the unresolved-bytes
-/// cache (a suppression filter, not a re-admit queue) would drop a valid tx —
-/// or it is a confirmed double-spend already evicted by `on_tip_change`'s
-/// input-conflict cascade. Parse-class failures cannot occur on already-pooled
-/// canonical bytes. The boundary is exactly `record_failed_tx`'s blacklist arm:
-/// recheck evicts precisely the failures admission blacklists.
+/// The proactive recheck (`Mempool::recheck_and_evict`) evicts a pooled tx ONLY
+/// when this returns true. The excluded classes are NOT proof the tx is invalid
+/// at the new tip:
+/// * A non-resolution failure can be a transient reorg-dependency (a demoted
+///   parent pending re-admission) — dropping such a tx to the unresolved-bytes
+///   cache (a suppression filter, not a re-admit queue) would lose a valid tx —
+///   or it is a confirmed double-spend already evicted by `on_tip_change`'s
+///   input-conflict cascade. Parse-class failures cannot occur on
+///   already-pooled canonical bytes.
+/// * `Other(_)` is the validator's catch-all for INTERNAL/contract failures
+///   (resolved-inputs mismatch, internal-invariant violation — see
+///   `validator.rs` `map_validation_error`), not a consensus verdict on the tx,
+///   so it is not safe proof to drop + blacklist an already-accepted pooled tx.
+///
+/// Enumerated as a positive allowlist (not a negation) so any future
+/// `ValidationErr` variant is excluded — and thus NOT evicted on — until it is
+/// explicitly judged a provable invalidity. This set is intentionally NARROWER
+/// than `record_failed_tx`'s blacklist arm, which also blacklists `Other(_)` on
+/// a rejected new tx in admission; see that fn for the (intentional) asymmetry.
 pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
-    !matches!(
+    matches!(
         err,
-        ValidationErr::UnresolvedInput
-            | ValidationErr::UnresolvedDataInput
-            | ValidationErr::Deserialize
-            | ValidationErr::NonCanonical
+        ValidationErr::Structural
+            | ValidationErr::ScriptFailed
+            | ValidationErr::MonetaryFailed
+            | ValidationErr::CostExceeded
     )
 }
 
