@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use ergo_mempool::MempoolReadSnapshot;
+use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
@@ -299,6 +300,11 @@ pub fn build_and_publish(
     // Snapshot the operator's current voting targets once for this build (read
     // under the shared lock); both build paths pass it by reference.
     let voting_targets = handle.voting_targets();
+    // Component B: ids of pooled txs whose consensus re-validation failed during
+    // selection (suspected tip-invalid). Populated by `generate_candidate` on
+    // the Full path; recorded to the handle on publish so the node loop can
+    // re-validate and evict them. Empty for Minimal builds.
+    let mut suspects: Vec<Digest32> = Vec::new();
     let built = match base {
         Some(slot) => {
             let view = CachedSnapshotView::new(&snapshot, slot);
@@ -314,6 +320,7 @@ pub fn build_and_publish(
                 eligible_rent_boxes.as_slice(),
                 &voting_targets,
                 handle.voting_settings(),
+                &mut suspects,
             );
             // Read disposition from the view regardless of whether the build
             // succeeded — the path taken (Hit/Advanced/Rehydrated/…) is
@@ -333,6 +340,7 @@ pub fn build_and_publish(
             eligible_rent_boxes.as_slice(),
             &voting_targets,
             handle.voting_settings(),
+            &mut suspects,
         )?,
     };
     let Some((candidate, work, timings)) = built else {
@@ -353,7 +361,15 @@ pub fn build_and_publish(
         now_ms,
         intent.reason,
     ) {
-        Some(_) => Ok(BuildOutcome::Published { timings }),
+        Some(_) => {
+            // Record the suspect ids alongside the published candidate so the
+            // node loop can re-validate them against the live tip and evict the
+            // still-invalid ones. Only on publish: a DroppedStale build's
+            // suspects were computed against a parent the chain has moved off,
+            // and the next build for the live tip will recompute them.
+            handle.record_suspects(suspects);
+            Ok(BuildOutcome::Published { timings })
+        }
         None => Ok(BuildOutcome::DroppedStale),
     }
 }

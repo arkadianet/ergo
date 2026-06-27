@@ -772,81 +772,21 @@ impl Mempool {
             if cost_acc >= cost_cap {
                 break; // per-pass budget spent; remainder deferred to next block
             }
-            let Some(bytes) = self.pool.get(&id).map(|e| e.bytes.clone()) else {
+            if !self.pool.contains(&id) {
                 continue; // already cascade-evicted earlier this pass
-            };
-            rechecked += 1;
-            let (consumed, verdict) = admission::revalidate_pooled(
-                &bytes,
-                tip_ctx,
-                &pool_outputs,
-                max_tx_cost,
-                validator,
-            );
-            // Charge actual consumed cost on BOTH pass and fail so an expensive
-            // failing pool cannot over-run the cap.
-            cost_acc = cost_acc.saturating_add(u128::from(consumed));
-            match verdict {
-                Ok(()) => {
-                    // Still valid: keep it, refresh only the rotation clock.
-                    // Deliberately NOT the cost/weight — re-pricing on a
-                    // validity check would desync `Entry.cost` from the
-                    // `ByCost` weight key (and feed stale weights to later #139
-                    // debits). Priority is owned by admission.
-                    self.pool.touch_rechecked(&id, now);
-                }
-                Err(ref err) if !admission::is_hard_invalid(err) => {
-                    // Not PROVABLY invalid — a non-resolution failure
-                    // (UnresolvedInput/DataInput), a parse-class failure, or the
-                    // validator's catch-all Other(_) (an internal/contract error,
-                    // not a consensus verdict). Do NOT evict: an unresolved input
-                    // can be a transient reorg-dependency (a demoted parent
-                    // pending re-admission via the future revalidation-queue
-                    // drain), and evicting it to the unresolved-bytes cache — a
-                    // suppression filter, not a re-admit queue — would DROP a
-                    // valid tx before its parent returns; a genuine confirmed
-                    // double-spend is already evicted by `on_tip_change`'s
-                    // input-conflict cascade; and an Other(_) is not safe proof
-                    // to drop an already-accepted tx. Leave the tx in place; only
-                    // advance its rotation clock so the pass moves on. (Residual:
-                    // a genuinely-orphaned tx lingers until its input is
-                    // confirmed-spent or it is re-admitted — closed by the §7
-                    // queue-drain PR, which re-admits demoted parents before the
-                    // recheck so the remainder can be safely evicted.)
-                    self.pool.touch_rechecked(&id, now);
-                }
-                Err(err) => {
-                    // Provably invalid at the new tip (script/monetary/
-                    // structural/cost): evict it + its now-orphaned descendants
-                    // (debiting ancestors per #139), and prune the pass overlay
-                    // so a later tx can't resolve a gone output.
-                    let removed =
-                        self.pool
-                            .remove_with_descendants_debiting(&id, max_family_depth, bounds);
-                    for e in &removed {
-                        for out in &e.outputs {
-                            pool_outputs.remove(out);
-                        }
-                    }
-                    // Route ONLY the failed root id through admission's shared
-                    // classifier (here always the blacklist arm, since we only
-                    // reach this branch for hard-invalid failures). Cascade
-                    // descendants are dependency-evicted, never cached — they
-                    // re-admit if later valid. Matches Scala's per-failed-id
-                    // invalidate.
-                    admission::record_failed_tx(
-                        &mut self.invalidation,
-                        &mut self.unresolved,
-                        id,
-                        &bytes,
-                        &err,
-                        now,
-                    );
-                    for e in removed {
-                        removed_for_actions.push(e.tx_id);
-                    }
-                }
             }
+            rechecked += 1;
+            cost_acc = cost_acc.saturating_add(u128::from(self.recheck_one(
+                id,
+                now,
+                tip_ctx,
+                validator,
+                &mut pool_outputs,
+                max_tx_cost,
+                max_family_depth,
+                bounds,
+                &mut removed_for_actions,
+            )));
         }
 
         let evicted = removed_for_actions.len();
@@ -869,6 +809,188 @@ impl Mempool {
             pool_size = self.pool.len(),
             duration_ms = t0.elapsed().as_millis() as u64,
             "mempool tip recheck completed",
+        );
+        actions
+    }
+
+    /// Re-validate ONE pooled tx (`id`) against `tip_ctx` and apply the recheck
+    /// eviction policy. The single shared per-id core of both the full-pool pass
+    /// (`recheck_and_evict`) and the targeted suspect pass (`recheck_ids`), so
+    /// the two have byte-identical validity/eviction/debit/cache semantics.
+    ///
+    /// * `Ok` (still valid) → keep; refresh only the rotation clock
+    ///   (`touch_rechecked`) — deliberately NOT cost/weight, since re-pricing on
+    ///   a validity check would desync `Entry.cost` from the `ByCost` weight key.
+    /// * `Err` that is NOT `is_hard_invalid` (non-resolution / parse-class /
+    ///   validator catch-all `Other(_)`) → keep, only advancing the rotation
+    ///   clock. Such a failure is not proof of invalidity: an unresolved input
+    ///   can be a transient reorg-dependency, dropping it to the unresolved-bytes
+    ///   cache (a suppression filter, not a re-admit queue) would lose a valid
+    ///   tx; a confirmed double-spend is already evicted by `on_tip_change`'s
+    ///   input-conflict cascade; an `Other(_)` is an internal/contract error,
+    ///   not a consensus verdict.
+    /// * hard-invalid `Err` (script/monetary/structural/cost) → evict it + its
+    ///   now-orphaned descendants (debiting ancestors per #139), prune the pass
+    ///   overlay so a later tx can't resolve a gone output, and route ONLY the
+    ///   failed root through the shared `record_failed_tx` classifier (here
+    ///   always the blacklist arm). Cascade descendants are dependency-evicted,
+    ///   never cached.
+    ///
+    /// `pool_outputs` is the once-per-pass overlay map, pruned in place on
+    /// eviction. Removed tx ids are appended to `removed_for_actions`. Returns
+    /// the validation cost the caller charges to its per-pass budget. A no-op
+    /// returning 0 if `id` is no longer pooled (already cascade-evicted).
+    #[allow(clippy::too_many_arguments)]
+    fn recheck_one<V: Validator>(
+        &mut self,
+        id: TxId,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+        pool_outputs: &mut std::collections::HashMap<
+            ergo_primitives::digest::Digest32,
+            ergo_ser::ergo_box::ErgoBox,
+        >,
+        max_tx_cost: u64,
+        max_family_depth: usize,
+        bounds: crate::pool::FamilyBounds,
+        removed_for_actions: &mut Vec<TxId>,
+    ) -> u64 {
+        let Some(bytes) = self.pool.get(&id).map(|e| e.bytes.clone()) else {
+            return 0; // already gone (cascade-evicted, or a stale suspect id)
+        };
+        let (consumed, verdict) =
+            admission::revalidate_pooled(&bytes, tip_ctx, pool_outputs, max_tx_cost, validator);
+        match verdict {
+            Ok(()) => {
+                self.pool.touch_rechecked(&id, now);
+            }
+            Err(ref err) if !admission::is_hard_invalid(err) => {
+                self.pool.touch_rechecked(&id, now);
+            }
+            Err(err) => {
+                let removed =
+                    self.pool
+                        .remove_with_descendants_debiting(&id, max_family_depth, bounds);
+                for e in &removed {
+                    for out in &e.outputs {
+                        pool_outputs.remove(out);
+                    }
+                }
+                admission::record_failed_tx(
+                    &mut self.invalidation,
+                    &mut self.unresolved,
+                    id,
+                    &bytes,
+                    &err,
+                    now,
+                );
+                for e in removed {
+                    removed_for_actions.push(e.tx_id);
+                }
+            }
+        }
+        consumed
+    }
+
+    /// Targeted recheck of a SPECIFIC set of pooled tx ids — Component B's
+    /// suspect feed from off-loop mining candidate assembly. The candidate
+    /// builder skips a tx whose consensus re-validation fails against the build
+    /// snapshot; those ids are forwarded here so a tx that has gone tip-invalid
+    /// is evicted THIS block instead of waiting for the next full
+    /// `recheck_and_evict` pass — purely a latency win, since the full pass would
+    /// catch the same txs on the next tip change.
+    ///
+    /// Suspects are an ADVISORY hint computed against a possibly-stale build
+    /// snapshot, so every id is RE-VALIDATED against the live `tip_ctx` here
+    /// (via the shared [`Self::recheck_one`]): a suspect that is valid at the
+    /// current tip is kept; only still-hard-invalid ones are evicted, with the
+    /// exact eviction/debit/blacklist semantics of the full pass. Ids no longer
+    /// pooled (confirmed/already-evicted) are skipped. Bounded by the same
+    /// anti-DoS per-pass cost budget. The caller must gate on fully-synced (as
+    /// the `recheck_and_evict` hook does) so a catching-up node doesn't act on a
+    /// stale tip. Returns the emitted actions for the caller to route.
+    pub fn recheck_ids<V: Validator>(
+        &mut self,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+        ids: &[TxId],
+    ) -> Vec<MempoolAction> {
+        let mut actions: Vec<MempoolAction> = Vec::new();
+        if ids.is_empty() || self.pool.is_empty() {
+            return actions;
+        }
+
+        let max_tx_cost = self.config.max_tx_cost;
+        let max_family_depth = self.config.max_family_depth;
+        // Same misconfig guard as the full pass (see `recheck_and_evict`): a
+        // max_tx_cost above the JitCost bound would make every revalidation a
+        // zero-cost CostExceeded and mass-evict; refuse to run instead.
+        if ergo_primitives::cost::JitCost::from_block_cost(max_tx_cost).is_err() {
+            debug!(
+                max_tx_cost,
+                "mempool suspect recheck skipped: max_tx_cost exceeds the JitCost bound (misconfig)",
+            );
+            return actions;
+        }
+        let t0 = std::time::Instant::now();
+
+        let bounds = crate::pool::FamilyBounds::new(
+            self.config.max_family_depth,
+            self.config.max_family_ops,
+            self.config.max_family_update_ms,
+        );
+        let cost_cap: u128 = u128::from(self.config.mempool_cleanup_cost_mult)
+            .saturating_mul(u128::from(tip_ctx.params.max_block_cost));
+        let mut pool_outputs = self.pool.output_map();
+
+        let mut cost_acc: u128 = 0;
+        let mut rechecked: usize = 0;
+        let mut removed_for_actions: Vec<TxId> = Vec::new();
+
+        for id in ids {
+            if cost_acc >= cost_cap {
+                break; // per-pass budget spent; suspects re-surface on the next build
+            }
+            if !self.pool.contains(id) {
+                continue; // suspect already confirmed / evicted / never pooled
+            }
+            rechecked += 1;
+            cost_acc = cost_acc.saturating_add(u128::from(self.recheck_one(
+                *id,
+                now,
+                tip_ctx,
+                validator,
+                &mut pool_outputs,
+                max_tx_cost,
+                max_family_depth,
+                bounds,
+                &mut removed_for_actions,
+            )));
+        }
+
+        let evicted = removed_for_actions.len();
+        if !removed_for_actions.is_empty() {
+            actions.push(MempoolAction::RevokeBroadcast {
+                tx_ids: removed_for_actions.clone(),
+            });
+            actions.push(MempoolAction::Observe {
+                event: ObservedEvent::Evicted {
+                    tx_ids: removed_for_actions,
+                    reason: EvictionReason::TipInvalid,
+                },
+            });
+        }
+        emit_tracing_for_pool_actions(&actions);
+        info!(
+            event = "mempool_suspect_recheck_completed",
+            suspects = ids.len(),
+            rechecked,
+            evicted,
+            pool_size = self.pool.len(),
+            duration_ms = t0.elapsed().as_millis() as u64,
+            "mempool suspect recheck completed",
         );
         actions
     }
@@ -1899,6 +2021,94 @@ mod recheck_tests {
                 "higher tx_id d({b}) deferred under the tie-break"
             );
         }
+    }
+
+    // ----- suspect-targeted recheck (recheck_ids / Component B) -----
+
+    #[test]
+    fn recheck_ids_evicts_hard_invalid_suspect_and_scopes_to_the_list() {
+        // A suspect that is hard-invalid at the live tip is evicted + blacklisted
+        // through the same sink as the full pass. A hard-invalid tx NOT in the
+        // suspect list is left untouched — `recheck_ids` is scoped to the ids it
+        // is given (the full-pool sweep is `recheck_and_evict`'s job).
+        let mut mp = mempool_with(MempoolConfig::default());
+        seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+        seed(&mut mp, 2, 0x20, 0x21, 100, vec![]);
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = validator(vec![err_plan(1, 10_000), err_plan(2, 10_000)]);
+
+        let actions = mp.recheck_ids(Instant::now(), &tip.view(&utxo), &v, &[d(1)]);
+
+        assert!(!mp.contains(&d(1)), "hard-invalid suspect evicted");
+        assert!(mp.is_invalidated(&d(1)), "and blacklisted");
+        assert_eq!(evicted_ids(&actions), vec![d(1)]);
+        assert!(
+            mp.contains(&d(2)) && !mp.is_invalidated(&d(2)),
+            "a tx not in the suspect list is never rechecked"
+        );
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn recheck_ids_keeps_suspect_valid_at_live_tip() {
+        // Suspects are an ADVISORY hint from a possibly-stale build snapshot.
+        // One that re-validates clean against the live tip must be KEPT — this
+        // is the staleness guard (a tip advance/reorg between build and drain
+        // collapses to a no-op).
+        let mut mp = mempool_with(MempoolConfig::default());
+        seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = validator(vec![ok_plan(1, 10_000)]);
+
+        let actions = mp.recheck_ids(Instant::now(), &tip.view(&utxo), &v, &[d(1)]);
+
+        assert!(mp.contains(&d(1)), "suspect valid at the live tip is kept");
+        assert!(!mp.is_invalidated(&d(1)));
+        assert!(actions.is_empty());
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn recheck_ids_keeps_unresolved_suspect_not_blacklisted() {
+        // The suspect path shares the full pass's hard-invalid-only policy: an
+        // UnresolvedInput re-validation is not provable invalidity → kept, not
+        // blacklisted (could be a reorg-dependency).
+        let mut mp = mempool_with(MempoolConfig::default());
+        seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = AlwaysErr {
+            err: ValidationErr::UnresolvedInput,
+        };
+
+        let actions = mp.recheck_ids(Instant::now(), &tip.view(&utxo), &v, &[d(1)]);
+
+        assert!(mp.contains(&d(1)), "unresolved suspect kept");
+        assert!(!mp.is_invalidated(&d(1)));
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn recheck_ids_skips_unpooled_suspect_and_empty_is_noop() {
+        let mut mp = mempool_with(MempoolConfig::default());
+        seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        let v = validator(vec![ok_plan(1, 10_000)]);
+
+        // A suspect id no longer in the pool (confirmed/already-evicted) is a
+        // safe no-op, not a panic.
+        let actions = mp.recheck_ids(Instant::now(), &tip.view(&utxo), &v, &[d(9)]);
+        assert!(actions.is_empty(), "unpooled suspect is a no-op");
+        assert!(mp.contains(&d(1)));
+
+        // Empty suspect list is also a no-op.
+        let actions = mp.recheck_ids(Instant::now(), &tip.view(&utxo), &v, &[]);
+        assert!(actions.is_empty());
+        assert!(mp.contains(&d(1)));
+        mp.pool().check_invariants();
     }
 
     // ----- height-dependent validator (used by the recreate-claim test) -----

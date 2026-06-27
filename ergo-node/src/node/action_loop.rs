@@ -31,6 +31,7 @@ use super::tip_context::build_tip_context;
 use super::{NodeError, NodeState};
 
 use ergo_mining::engine::BuildReason;
+use ergo_mining::handle::MiningHandle;
 
 /// Mirrors the pre-refactor inline loop one-for-one: signal arms are
 /// replaced by a single `shutdown_rx` arm, and the cleanup runs inside
@@ -155,7 +156,7 @@ pub(super) async fn action_loop(
                 mining_votes_dirty = true;
             }
             _ = mempool_tick.tick() => {
-                handle_mempool_tick(&mut state);
+                handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
             }
             Some(first) = event_rx.recv() => {
                 // INGEST COALESCE: drain additional queued events
@@ -331,7 +332,7 @@ pub(super) async fn action_loop(
     shutdown_result.map_err(|e| Box::new(e) as NodeError)
 }
 
-fn handle_mempool_tick(state: &mut NodeState) {
+fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
     if !state.mempool.config().enabled {
         return;
     }
@@ -345,8 +346,8 @@ fn handle_mempool_tick(state: &mut NodeState) {
             .as_utxo()
             .expect("utxo-only: mempool subsystem is gated off in digest mode"),
     );
-    match outcome {
-        PollOutcome::Initialized(_) | PollOutcome::NoChange => {}
+    let tip_changed = match outcome {
+        PollOutcome::Initialized(_) | PollOutcome::NoChange => false,
         PollOutcome::Emit(state_diff) => {
             let mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
             let mempool_actions = state.mempool.on_tip_change(&mempool_diff);
@@ -376,50 +377,73 @@ fn handle_mempool_tick(state: &mut NodeState) {
                 state.last_seen_active_params = now_active.clone();
                 state.last_seen_validation_settings = now_settings.clone();
             }
-
-            // Proactive tip-revalidation (recheck-and-evict). Re-validate
-            // the surviving pool against the new tip+1 and evict any tx no
-            // longer valid — the Scala `MempoolAuditor`/`CleanupWorker`
-            // end-result, reached via a per-block full pass (bounded by an
-            // anti-DoS cost cap) instead of Scala's 30s throttle. After an
-            // epoch-boundary demote above the pool is empty, so this is a
-            // no-op on those ticks — the demoted txs re-run full admission
-            // through the revalidation queue instead.
-            //
-            // Gated on FULLY SYNCED (header tip == full-block tip, same
-            // height AND id): during catch-up the applied tip lags the
-            // header tip, so a recheck would validate survivors against a
-            // stale intermediate tip and could evict txs that are valid at
-            // the real chain tip — Scala only audits at the tip. The
-            // empty-pool short-circuit then avoids building a tip context
-            // for nothing (the common IBD case, since admission is
-            // IBD-gated so the pool is empty until we are caught up).
-            let cs = state.store.chain_state_meta();
-            let fully_synced = cs.best_full_block_height > 0
-                && cs.best_header_height == cs.best_full_block_height
-                && cs.best_header_id == cs.best_full_block_id;
-            if fully_synced && state.mempool.size() > 0 {
-                if let Some(owned) = build_tip_context(state) {
-                    let now = Instant::now();
-                    let recheck_actions = {
-                        let tip_ctx =
-                            owned.as_mempool_ctx(state.store.as_utxo().expect(
-                                "utxo-only: mempool subsystem is gated off in digest mode",
-                            ));
-                        state
-                            .mempool
-                            .recheck_and_evict(now, &tip_ctx, &ErgoValidator)
-                    };
-                    if !recheck_actions.is_empty() {
-                        let routed = route_mempool_actions(state, recheck_actions);
-                        flush_actions(state, routed);
-                    }
-                }
-            }
+            true
         }
         PollOutcome::Error { tip, error } => {
             reconcile_on_diff_error(&mut state.mempool, tip, &error);
+            return;
         }
+    };
+
+    // Proactive tip-revalidation, gated on FULLY SYNCED (header tip ==
+    // full-block tip, same height AND id): during catch-up the applied tip lags
+    // the header tip, so a recheck would validate against a stale intermediate
+    // tip and could evict txs valid at the real chain tip — Scala only audits at
+    // the tip. The empty-pool short-circuit then avoids building a tip context
+    // for nothing (the common IBD case, since admission is IBD-gated so the pool
+    // is empty until we are caught up).
+    let cs = state.store.chain_state_meta();
+    let fully_synced = cs.best_full_block_height > 0
+        && cs.best_header_height == cs.best_full_block_height
+        && cs.best_header_id == cs.best_full_block_id;
+    if !(fully_synced && state.mempool.size() > 0) {
+        return;
+    }
+
+    // Always drain the off-loop builder's suspect slot so it never goes stale.
+    // On a TIP CHANGE we discard it: Component A's full `recheck_and_evict`
+    // below re-validates the WHOLE pool (the suspect set is a subset), so a
+    // separate suspect pass would be redundant. BETWEEN blocks (no tip change)
+    // A does not run, so this is where Component B earns its keep: re-validate
+    // just the build-flagged suspects (txs whose consensus re-validation failed
+    // during candidate assembly) and evict the still-invalid ones — catching a
+    // tx A's cost-capped pass deferred without waiting for the next tip. Both
+    // paths share the SAME live tip+1 context, validator, and eviction sink.
+    let suspects = mining_handle.map(|h| h.take_suspects()).unwrap_or_default();
+    if !tip_changed && suspects.is_empty() {
+        return; // between blocks with nothing flagged — nothing to do
+    }
+
+    let Some(owned) = build_tip_context(state) else {
+        return;
+    };
+    let now = Instant::now();
+    let actions = {
+        let tip_ctx = owned.as_mempool_ctx(
+            state
+                .store
+                .as_utxo()
+                .expect("utxo-only: mempool subsystem is gated off in digest mode"),
+        );
+        if tip_changed {
+            // Component A: full-pool recheck-and-evict — the Scala
+            // `MempoolAuditor`/`CleanupWorker` end-result via a per-block full
+            // pass (anti-DoS cost-capped) instead of Scala's 30s throttle.
+            // After an epoch-boundary demote above the pool is empty, so this is
+            // a no-op on those ticks.
+            state
+                .mempool
+                .recheck_and_evict(now, &tip_ctx, &ErgoValidator)
+        } else {
+            // Component B: re-validate just the off-loop build's suspects.
+            state
+                .mempool
+                .recheck_ids(now, &tip_ctx, &ErgoValidator, &suspects)
+        }
+    };
+    if !actions.is_empty() {
+        let routed = route_mempool_actions(state, actions);
+        flush_actions(state, routed);
     }
 }
 

@@ -175,6 +175,13 @@ pub fn generate_candidate<V: CandidateStateView>(
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &BTreeMap<u8, i64>,
     voting_settings: &VotingSettings,
+    // Component B side-output: ids of pooled txs whose consensus re-validation
+    // failed during selection (suspected tip-invalid). Written only on the Full
+    // path that runs mempool selection; left untouched for Minimal builds. The
+    // engine forwards these to the node, which re-validates each against the live
+    // tip and evicts the still-invalid ones. A side-output (not part of the
+    // Candidate) because suspects are diagnostic, not consensus artifacts.
+    suspects_out: &mut Vec<Digest32>,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
@@ -502,6 +509,11 @@ pub fn generate_candidate<V: CandidateStateView>(
             size_budget,
             reemission_rules,
         )?;
+
+        // Component B: forward consensus-revalidation-failure suspects to the
+        // caller. Copied (Digest32 is Copy) so `selected` stays intact for the
+        // fee-trim below.
+        suspects_out.extend(selected.suspects.iter().copied());
 
         // 9e. Decide the final user set + fee tx. Trim the lowest-priority user
         //     tx (rebuilding the fee tx) until the assembled block fits BOTH the
