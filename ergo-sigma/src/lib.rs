@@ -38,6 +38,19 @@
 //! * `cost_trace` (feature `cost-trace`) — debug-only per-step cost
 //!   recorder for diagnosing divergence against the Scala oracle.
 
+// The AVL verifier wrapper (`avl`) isolates panics from the upstream
+// `ergo_avltree_rust` crate via `catch_unwind`, converting a malformed-proof
+// panic into a fail-closed `Err` (Scala parity). `catch_unwind` is a no-op
+// under `panic = "abort"`, so building this consensus crate with abort would
+// turn an attacker-supplied malformed-proof transaction back into a node crash
+// (consensus DoS). Refuse to compile under abort.
+#[cfg(panic = "abort")]
+compile_error!(
+    "ergo-sigma requires panic = \"unwind\": the AVL verifier panic isolation in \
+     `avl.rs` relies on catch_unwind, which does nothing under panic=abort — a \
+     malformed-proof transaction would crash the node instead of failing closed."
+);
+
 pub mod avl;
 pub mod cost_table;
 #[cfg(feature = "cost-trace")]

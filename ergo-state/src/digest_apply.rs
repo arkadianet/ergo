@@ -375,20 +375,21 @@ impl DigestProofVerifier {
         // follow. `to_lookup` carries the data-input box ids in that exact
         // order, duplicates included.
         //
-        // No `catch_unwind` around these ops. The upstream crate's known panic
-        // site is proof-graph rebuild in `new()`, guarded at construction (see
-        // `VerifierConstructionPanic`). No operation-time panic has been
-        // demonstrated on a constructed verifier: `ergo-sigma`'s
-        // `constructed_verifier_adversarial_ops_return_err_not_panic` (valid
-        // proof; first ops AND ops after partial proof-stream consumption, on
-        // uncovered keys across the whole op surface) and
-        // `remove_with_presence_uncovered_key_returns_err` exercise the op path
-        // and observe only `Ok`/`Err`. Exhaustively proving that NO adversarial
-        // proof can survive `new()` and then panic mid-stream needs the Mode-5
-        // Scala/mainnet ADProof corpus, which is tracked as a separate deferred
-        // item — so this is current best-evidence, not a closed invariant. If
-        // such a vector is found, those tests fail first and an op-level guard
-        // (mapping the panic to a session-scoped error) belongs here then.
+        // No `catch_unwind` is needed HERE: both upstream panic classes are
+        // already contained below this call. Construction panics (proof-graph
+        // rebuild in `new()`) are guarded at construction (see
+        // `VerifierConstructionPanic`). Operation-time panics — a structurally-
+        // valid-but-wrong proof drives the crate to `panic!` mid-stream
+        // (`authenticated_tree_ops.rs` 413/431/635; see `ergo-sigma`'s
+        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`) — are
+        // caught inside `AvlVerifier` itself (`ergo-sigma`'s `avl::guarded`),
+        // which poisons the verifier and surfaces `Err(())`. So every op call
+        // here observes only `Ok`/`Err`; a caught op-time panic arrives as the
+        // `Err(())` arms below and is mapped to a session-scoped
+        // `VerifierOpFailed` (fail closed, matching Scala). A still-open item is
+        // a Scala/mainnet differential corpus proving the Rust fail-closed set
+        // exactly matches Scala's — tracked separately; it would NOT change the
+        // guarding here, only confirm parity.
         let mut resolved: Vec<([u8; 32], Vec<u8>)> =
             Vec::with_capacity(to_lookup.len() + to_remove.len());
         for key in to_lookup {

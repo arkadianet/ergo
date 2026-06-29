@@ -11,6 +11,47 @@ use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
 use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
 use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
 use ergo_avltree_rust::operation::{KeyValue, Operation};
+use std::cell::Cell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+thread_local! {
+    /// Armed while an AVL verifier operation runs inside its panic guard. The
+    /// node's global panic hook reads this (via [`in_expected_avl_panic`]) to
+    /// recognise an EXPECTED, already-contained AVL verifier panic — a
+    /// malformed attacker-supplied proof — and suppress the alarming
+    /// "node panicked" error log, so a flood of crafted transactions cannot
+    /// amplify into a log-flood DoS. The rejection itself stays observable on
+    /// the validation path.
+    static IN_AVL_GUARD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True when the current thread is inside a guarded AVL verifier operation.
+/// The node's global panic hook calls this to suppress the log for an expected,
+/// contained AVL verifier panic (see [`AvlVerifier::guarded`]).
+pub fn in_expected_avl_panic() -> bool {
+    IN_AVL_GUARD.with(|f| f.get())
+}
+
+/// RAII: arm `IN_AVL_GUARD` for the duration of a guarded op and restore the
+/// previous value on drop (drop runs after `catch_unwind` returns, since the
+/// guard's own frame does not unwind).
+struct AvlGuard {
+    prev: bool,
+}
+
+impl AvlGuard {
+    fn arm() -> Self {
+        AvlGuard {
+            prev: IN_AVL_GUARD.with(|f| f.replace(true)),
+        }
+    }
+}
+
+impl Drop for AvlGuard {
+    fn drop(&mut self) {
+        IN_AVL_GUARD.with(|f| f.set(self.prev));
+    }
+}
 
 /// Opaque handle to a BatchAVLVerifier from `ergo_avltree_rust`.
 ///
@@ -20,7 +61,20 @@ use ergo_avltree_rust::operation::{KeyValue, Operation};
 /// Wraps the verifier so the evaluator does not need direct imports from
 /// the underlying crate. All proof verification operations go through
 /// this type's methods.
-pub struct AvlVerifier(BatchAVLVerifier);
+///
+/// The inner verifier is an `Option` so it can be POISONED. `ergo_avltree_rust`
+/// `panic!`s (rather than returning `Err`) on a structurally-valid-but-wrong
+/// proof — e.g. a lookup proof supplied where a remove proof belongs — at
+/// several op-time sites (`authenticated_tree_ops.rs` 413/431/635/...). The
+/// Scala reference throws the same error but catches it in an enclosing `Try`,
+/// so the operation fails and the transaction is invalid while the node
+/// survives. [`AvlVerifier::guarded`] restores that fail-closed parity: a caught
+/// panic drops the inner verifier (`None`), and every later op — including
+/// [`AvlVerifier::digest`] — then fails, exactly as Scala's `topNode = None`
+/// does after a failed op. Reading a digest from a half-mutated verifier would
+/// be an accept-invalid divergence (a fork), strictly worse than the crash, so
+/// poisoning is load-bearing, not cosmetic.
+pub struct AvlVerifier(Option<BatchAVLVerifier>);
 
 // `clippy::result_unit_err`: the underlying `ergo_avltree_rust` crate
 // returns opaque errors from `perform_one_operation`; collapsing to
@@ -53,42 +107,85 @@ impl AvlVerifier {
             None,
             None,
         )
-        .map(AvlVerifier)
+        .map(|v| AvlVerifier(Some(v)))
         .map_err(|e| format!("{e}"))
     }
 
-    /// Single-key lookup. Returns the value bytes if found.
-    pub fn lookup(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
-        match self
-            .0
-            .perform_one_operation(&Operation::Lookup(bytes::Bytes::from(key.to_vec())))
-        {
-            Ok(Some(v)) => Ok(Some(v.to_vec())),
-            Ok(None) => Ok(None),
+    /// Run `f` against the wrapped verifier, isolating any panic from the
+    /// upstream `ergo_avltree_rust` crate into the fail-closed `Err(())` path.
+    ///
+    /// The crate `panic!`s on a structurally-valid-but-wrong proof at op time
+    /// (see the type doc). This restores Scala's `Try`-boundary semantics: a
+    /// caught panic POISONS the verifier (the inner value was moved into the
+    /// unwinding closure and dropped, so `self.0` stays `None`) and surfaces
+    /// `Err(())`. A verifier already poisoned by an earlier caught panic stays
+    /// failed. A clean (non-panicking) `Err` from the crate is returned
+    /// unchanged and does NOT poison — existing, oracle-verified behaviour is
+    /// untouched; only the previously-undefined panic case changes.
+    ///
+    /// Relies on `panic = "unwind"` (enforced by a compile guard in `lib.rs`):
+    /// `catch_unwind` cannot catch an aborting panic.
+    fn guarded<R>(
+        &mut self,
+        f: impl FnOnce(&mut BatchAVLVerifier) -> Result<R, ()>,
+    ) -> Result<R, ()> {
+        // Already poisoned by an earlier caught panic → stay failed.
+        let mut bv = match self.0.take() {
+            Some(bv) => bv,
+            None => return Err(()),
+        };
+        // `AssertUnwindSafe` is justified: `bv` is owned (not shared, no locks),
+        // and on panic it is dropped during unwinding — no broken invariant is
+        // ever observed, because the verifier is never reused after a panic.
+        let _guard = AvlGuard::arm();
+        match catch_unwind(AssertUnwindSafe(move || {
+            let r = f(&mut bv);
+            (bv, r)
+        })) {
+            // Op completed (Ok, or a clean crate Err) → keep the verifier.
+            Ok((bv, r)) => {
+                self.0 = Some(bv);
+                r
+            }
+            // Panicked: `bv` was moved into the closure and dropped while
+            // unwinding; `self.0` stays `None` (poisoned) and we fail closed.
             Err(_) => Err(()),
         }
     }
 
+    /// Single-key lookup. Returns the value bytes if found.
+    pub fn lookup(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
+        self.guarded(|bv| {
+            match bv.perform_one_operation(&Operation::Lookup(bytes::Bytes::from(key.to_vec()))) {
+                Ok(Some(v)) => Ok(Some(v.to_vec())),
+                Ok(None) => Ok(None),
+                Err(_) => Err(()),
+            }
+        })
+    }
+
     /// Update an existing key with a new value. Returns Ok(true) on success.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.0
-            .perform_one_operation(&Operation::Update(KeyValue {
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::Update(KeyValue {
                 key: bytes::Bytes::from(key.to_vec()),
                 value: bytes::Bytes::from(value.to_vec()),
             }))
             .map(|_| ())
             .map_err(|_| ())
+        })
     }
 
     /// Insert a new key-value pair. Returns Ok(()) on success.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.0
-            .perform_one_operation(&Operation::Insert(KeyValue {
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::Insert(KeyValue {
                 key: bytes::Bytes::from(key.to_vec()),
                 value: bytes::Bytes::from(value.to_vec()),
             }))
             .map(|_| ())
             .map_err(|_| ())
+        })
     }
 
     /// Insert a new entry OR overwrite an existing one for the same
@@ -96,21 +193,23 @@ impl AvlVerifier {
     /// (Scala `SAvlTreeMethods.insertOrUpdateMethod` at
     /// `methods.scala:1671-1686`). Returns Ok(()) on success.
     pub fn insert_or_update(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        self.0
-            .perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
                 key: bytes::Bytes::from(key.to_vec()),
                 value: bytes::Bytes::from(value.to_vec()),
             }))
             .map(|_| ())
             .map_err(|_| ())
+        })
     }
 
     /// Remove a key from the tree. Returns Ok(()) on success.
     pub fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
-        self.0
-            .perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
-            .map(|_| ())
-            .map_err(|_| ())
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
+                .map(|_| ())
+                .map_err(|_| ())
+        })
     }
 
     /// Remove a key AND report whether the key was present in the
@@ -128,10 +227,11 @@ impl AvlVerifier {
     ///   for the access path, malformed envelope partway through,
     ///   etc.). Opaque from this side; treat as session-scoped.
     pub fn remove_with_presence(&mut self, key: &[u8]) -> Result<bool, ()> {
-        self.0
-            .perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
-            .map(|opt| opt.is_some())
-            .map_err(|_| ())
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
+                .map(|opt| opt.is_some())
+                .map_err(|_| ())
+        })
     }
 
     /// Remove a key AND return the old value the proof witnessed — the
@@ -143,16 +243,23 @@ impl AvlVerifier {
     /// `proofs.verify` returns these), so this variant keeps the value
     /// that `remove_with_presence` discards.
     pub fn remove_returning_value(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
-        self.0
-            .perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
-            .map(|opt| opt.map(|v| v.to_vec()))
-            .map_err(|_| ())
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
+                .map(|opt| opt.map(|v| v.to_vec()))
+                .map_err(|_| ())
+        })
     }
 
     /// Extract the updated tree digest after mutations.
     /// Returns the 33-byte digest (32 hash bytes + 1 height byte).
+    ///
+    /// Returns `None` if the verifier was poisoned by a caught op-time panic
+    /// (Scala parity: a failed op yields `topNode = None`, so no digest leaks).
     pub fn digest(&self) -> Option<Vec<u8>> {
-        self.0.digest().map(|d| d.to_vec())
+        self.0
+            .as_ref()
+            .and_then(|bv| bv.digest())
+            .map(|d| d.to_vec())
     }
 }
 
@@ -255,21 +362,85 @@ mod tests {
     // against the upstream return type.
 
     #[test]
+    fn remove_structurally_valid_wrong_proof_fails_closed_not_panic() {
+        // CONSENSUS-DoS REGRESSION. A structurally-valid LOOKUP proof supplied
+        // where a REMOVE proof belongs (in a permissionless contract the spender
+        // controls the proof bytes). The proof CONSTRUCTS fine, then the Remove
+        // walks into a LabelOnly node the lookup proof never materialised, and
+        // the upstream crate `panic!`s at OPERATION time
+        // (`authenticated_tree_ops.rs:635 "Not internal node"` for this shape —
+        // a sibling of the 413/431 "this proof is wrong" sites). Scala throws the
+        // same error but catches it in an enclosing `Try`, so the op fails and
+        // the tx is invalid while the node survives. The `guarded` panic boundary
+        // must reproduce that fail-closed outcome:
+        //   1. `remove()` returns `Err` — no panic escapes to crash the node; and
+        //   2. the verifier is POISONED — `digest()` reads `None`, not a
+        //      half-mutated tree (which would be accept-invalid, a fork — strictly
+        //      worse than the DoS) — and every later op stays failed.
+        let keys: [[u8; 32]; 2] = [[1u8; 32], [12u8; 32]];
+
+        // Parent digest of the {keys[0], keys[1]} tree.
+        let mut prover = new_prover();
+        for k in &keys {
+            prover
+                .perform_one_operation(&ProverOp::Insert(pk(*k, vec![0xAB])))
+                .expect("seed insert");
+        }
+        let _ = prover.generate_proof();
+        let parent = prover_digest(&mut prover);
+
+        // A genuine LOOKUP proof for keys[0] against that same tree — valid
+        // bytes, wrong operation. Rebuild an identical prover so the lookup
+        // batch is emitted on its own.
+        let mut lp = new_prover();
+        for k in &keys {
+            lp.perform_one_operation(&ProverOp::Insert(pk(*k, vec![0xAB])))
+                .expect("seed insert");
+        }
+        let _ = lp.generate_proof();
+        lp.perform_one_operation(&ProverOp::Lookup(bytes::Bytes::from(keys[0].to_vec())))
+            .expect("prover lookup");
+        let lookup_proof = lp.generate_proof().to_vec();
+
+        let mut verifier =
+            AvlVerifier::new(&parent, &lookup_proof, 32, None).expect("verifier construction");
+
+        // (1) Fail closed, do not panic.
+        assert_eq!(
+            verifier.remove(&keys[0]),
+            Err(()),
+            "a structurally-valid wrong-op remove proof must fail closed, not panic",
+        );
+        // (2) Poisoned: no half-mutated digest may leak (Scala: failed op → None).
+        assert_eq!(
+            verifier.digest(),
+            None,
+            "a panic-poisoned verifier must report no digest (accept-invalid guard)",
+        );
+        // And it stays failed for every subsequent operation.
+        assert_eq!(
+            verifier.remove(&keys[1]),
+            Err(()),
+            "a poisoned verifier must stay failed",
+        );
+    }
+
+    #[test]
     fn corrupted_proof_never_panics_during_operations() {
-        // Investigation pin for the digest-mode AVL op path. The upstream
-        // `BatchAVLVerifier` rebuilds the entire proof graph in `new()` — the
-        // panic site the `digest_apply` construction guard already wraps in
-        // `catch_unwind`. The per-op `perform_one_operation` then walks that
-        // in-memory graph and returns `Err` on a bad access path (see
-        // `remove_with_presence_uncovered_key_returns_err`).
+        // Pins the CONSTRUCTION-time failure boundary for crude proof
+        // corruptions: the upstream `BatchAVLVerifier` rebuilds the entire proof
+        // graph in `new()`, so byte-level corruptions almost always fail (or
+        // panic) AT CONSTRUCTION; a verifier that does construct then returns
+        // `Ok`/`Err` from these ops, not an operation-time panic.
         //
-        // This pins the panic boundary empirically: across many corruptions of
-        // a valid proof, a malformed proof either fails (or panics) AT
-        // CONSTRUCTION, or yields a verifier whose subsequent operations return
-        // `Ok`/`Err` — never an operation-time panic. If this ever fails, the
-        // op path in `digest_apply` needs its own `catch_unwind`; while it
-        // holds, the construction guard is the sufficient boundary and wrapping
-        // the ops too would be dead defensive code.
+        // This is NOT the whole story: a *structurally-valid-but-wrong* proof
+        // (e.g. a lookup proof used for a remove) constructs cleanly and DOES
+        // panic at operation time — see
+        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`. That
+        // op-time panic is now contained by `AvlVerifier::guarded`, so the
+        // wrapper — not just `digest_apply`'s construction guard — is the panic
+        // boundary. The `op_panicked` check below therefore stays green because
+        // the guard converts any op-time panic into `Err`.
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let mut prover = new_prover();
@@ -348,10 +519,11 @@ mod tests {
         // which returns on the first `Err` and never operates past a failure.
         // Keys the proof does not witness (uncovered, zero/ff, a pseudo-random
         // sweep) across lookup/remove/remove_with_presence/insert must all
-        // return `Ok`/`Err`, never panic. This is the realistic Mode-5 threat (a
-        // proof that constructs, then an op falls off its witnessed access path)
-        // and is the load-bearing evidence that the `digest_apply` op loop needs
-        // no `catch_unwind`.
+        // return `Ok`/`Err`, never panic. This pins the benign case (an op that
+        // merely falls off its witnessed access path returns `Err` on its own).
+        // It does NOT cover the structurally-valid-but-wrong proof, which panics
+        // at op time and is contained by `AvlVerifier::guarded` — see
+        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`.
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let mut prover = new_prover();
