@@ -231,18 +231,18 @@ impl DigestProofVerifier {
         // toward this block's `header.state_root`, which the
         // caller cross-checks via `finalize_digest`.
         //
-        // Two failure modes, both session-scoped: the upstream
-        // crate panics on certain malformed envelopes (stack
-        // underflow during graph rebuild) and otherwise returns
-        // a typed Err. "Definitive bad proof" and "stale local
-        // parent root" are observationally identical at this
-        // layer, so both route to session-scoped variants; the
-        // orchestrator only promotes to persistent invalidity
-        // after independently re-deriving the parent root. The
-        // panic catch is sound because the panic is deterministic
-        // on the proof bytes and does not mutate shared state;
-        // the verifier under construction is a fresh stack-local
-        // value.
+        // `AvlVerifier::new` now self-guards construction panics
+        // and returns a typed Err, so in practice failures arrive
+        // as `VerifierConstructionRejected`. The outer panic catch
+        // here is belt-and-suspenders for any unexpected panic
+        // escaping `new()`; both variants are session-scoped and
+        // observationally identical ("definitive bad proof" vs
+        // "stale local parent root"), so the orchestrator only
+        // promotes to persistent invalidity after independently
+        // re-deriving the parent root. Catching the panic is sound:
+        // it is deterministic on the proof bytes, mutates no shared
+        // state, and the verifier under construction is a fresh
+        // stack-local value.
         let proof_owned = proof_bytes.to_vec();
         let parent_owned = parent_state_root.to_vec();
         let construct = || AvlVerifier::new(&parent_owned, &proof_owned, BOX_ID_KEY_LENGTH, None);

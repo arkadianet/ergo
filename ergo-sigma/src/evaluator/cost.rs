@@ -705,9 +705,9 @@ pub(crate) fn make_avl_verifier(
 /// (`avl_tree_height`), exactly as the success path — NOT zero. (Verified
 /// against the JVM-blessed contains-on-bad-proof vector cost.)
 ///
-/// The `catch_unwind` is confined to this evaluator-only helper; the shared
-/// [`crate::avl::AvlVerifier`] is left untouched so the digest-mode
-/// validator (which has its own construction guard) is unaffected.
+/// [`crate::avl::AvlVerifier::new`] now self-guards construction panics (returns
+/// `Err`), so this `catch_unwind` is belt-and-suspenders — it also collapses an
+/// `Err` to `None` via `.and_then(|r| r.ok())`, the fail-closed cost path.
 pub(crate) fn try_make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
     proof: &[u8],

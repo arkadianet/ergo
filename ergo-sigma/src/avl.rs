@@ -74,6 +74,11 @@ impl Drop for AvlGuard {
 /// does after a failed op. Reading a digest from a half-mutated verifier would
 /// be an accept-invalid divergence (a fork), strictly worse than the crash, so
 /// poisoning is load-bearing, not cosmetic.
+///
+/// Construction ([`AvlVerifier::new`]) is guarded the same way — the crate can
+/// also panic while parsing a malformed proof — so `new` catches it and returns
+/// `Err` instead of panicking. `AvlVerifier` is thus a single fail-closed
+/// boundary at BOTH construction and operation time.
 pub struct AvlVerifier(Option<BatchAVLVerifier>);
 
 // `clippy::result_unit_err`: the underlying `ergo_avltree_rust` crate
@@ -96,19 +101,37 @@ impl AvlVerifier {
     ) -> Result<Self, String> {
         let digest = bytes::Bytes::from(digest.to_vec());
         let proof = bytes::Bytes::from(proof.to_vec());
-        BatchAVLVerifier::new(
-            &digest,
-            &proof,
-            AVLTree::new(
-                |d| Node::LabelOnly(NodeHeader::new(Some(*d), None)),
-                key_length,
-                value_length_opt,
-            ),
-            None,
-            None,
-        )
-        .map(|v| AvlVerifier(Some(v)))
-        .map_err(|e| format!("{e}"))
+        // The upstream crate can `panic!` while parsing a malformed proof into
+        // its in-memory tree (e.g. a truncated proof → a slice-index panic in
+        // `batch_avl_verifier.rs`). Contain it HERE so construction — like the
+        // ops below — is a self-guarded fail-closed boundary: a caught panic
+        // becomes a normal `Err`, mirroring Scala's `reconstructedTree` `Try`
+        // (which yields `topNode = None`). Every consumer is then protected at
+        // both construction and op time without having to wrap `new()` itself
+        // (callers that still do are harmless belt-and-suspenders). Arming
+        // `AvlGuard` lets the node's panic hook recognise this as an expected,
+        // contained AVL panic and suppress the log-flood. Sound for the same
+        // reason as the op guard: the panic is deterministic on the proof bytes,
+        // mutates no shared state, and the half-built verifier (owned,
+        // stack-local) is dropped on unwind.
+        let _guard = AvlGuard::arm();
+        match catch_unwind(AssertUnwindSafe(|| {
+            BatchAVLVerifier::new(
+                &digest,
+                &proof,
+                AVLTree::new(
+                    |d| Node::LabelOnly(NodeHeader::new(Some(*d), None)),
+                    key_length,
+                    value_length_opt,
+                ),
+                None,
+                None,
+            )
+        })) {
+            Ok(Ok(v)) => Ok(AvlVerifier(Some(v))),
+            Ok(Err(e)) => Err(format!("{e}")),
+            Err(_) => Err("AVL verifier construction panicked on a malformed proof".to_string()),
+        }
     }
 
     /// Run `f` against the wrapped verifier, isolating any panic from the
