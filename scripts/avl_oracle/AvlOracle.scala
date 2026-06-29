@@ -31,6 +31,15 @@ object AvlOracle {
     case None    => Array[Byte](0xAB.toByte, 0xCD.toByte)
   }
 
+  // Distinct payload for UPDATE vectors: the leaf value must actually change vs
+  // the `valueFor`-seeded insert, otherwise the update is a no-op and the
+  // expected digest equals the start digest (it would not exercise a real
+  // digest change). Same length as `valueFor` so fixed-length trees stay valid.
+  def updateValueFor(vl: Option[Int]): Array[Byte] = vl match {
+    case Some(n) => Array.fill(n)(0x5A.toByte)
+    case None    => Array[Byte](0x12.toByte, 0x34.toByte)
+  }
+
   def opJson(op: Operation): String = {
     val (kind, k, v) = op match {
       case Lookup(key)    => ("lookup", key: Array[Byte], None)
@@ -103,8 +112,8 @@ object AvlOracle {
       val present = keys(n / 2)
       out += gen(s"valid_insert_n$n", keys, Insert(ADKey @@ fresh, ADValue @@ valueFor(None)),
         Insert(ADKey @@ fresh, ADValue @@ valueFor(None)), None)
-      out += gen(s"valid_update_n$n", keys, Update(ADKey @@ present, ADValue @@ valueFor(None)),
-        Update(ADKey @@ present, ADValue @@ valueFor(None)), None)
+      out += gen(s"valid_update_n$n", keys, Update(ADKey @@ present, ADValue @@ updateValueFor(None)),
+        Update(ADKey @@ present, ADValue @@ updateValueFor(None)), None)
     }
 
     // Fixed value-length variant (valueLengthOpt = Some(4)).

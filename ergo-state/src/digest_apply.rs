@@ -386,10 +386,7 @@ impl DigestProofVerifier {
         // which poisons the verifier and surfaces `Err(())`. So every op call
         // here observes only `Ok`/`Err`; a caught op-time panic arrives as the
         // `Err(())` arms below and is mapped to a session-scoped
-        // `VerifierOpFailed` (fail closed, matching Scala). A still-open item is
-        // a Scala/mainnet differential corpus proving the Rust fail-closed set
-        // exactly matches Scala's — tracked separately; it would NOT change the
-        // guarding here, only confirm parity.
+        // `VerifierOpFailed` (fail closed, matching Scala).
         let mut resolved: Vec<([u8; 32], Vec<u8>)> =
             Vec::with_capacity(to_lookup.len() + to_remove.len());
         for key in to_lookup {
