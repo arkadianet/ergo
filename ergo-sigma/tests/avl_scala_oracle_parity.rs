@@ -36,8 +36,13 @@ impl SilenceHook {
 
 impl Drop for SilenceHook {
     fn drop(&mut self) {
-        if let Some(prev) = self.0.take() {
-            std::panic::set_hook(prev);
+        // NEVER call set_hook while unwinding: it panics on a panicking thread
+        // (double-panic -> process abort). If we are already failing, leaving the
+        // hook silenced is harmless — the run is ending.
+        if !std::thread::panicking() {
+            if let Some(prev) = self.0.take() {
+                std::panic::set_hook(prev);
+            }
         }
     }
 }
@@ -118,41 +123,59 @@ fn run_vector(v: &Vector) -> (bool, Option<Vec<u8>>) {
 
 #[test]
 fn avl_verifier_matches_scala_oracle_on_all_vectors() {
-    let _silence = SilenceHook::install();
     let vectors: Vec<Vector> = serde_json::from_str(VECTORS_JSON).expect("parse oracle vectors");
     assert!(!vectors.is_empty(), "no oracle vectors loaded");
 
+    // The wrong-op / malformed vectors deliberately trigger panics the wrapper
+    // catches, so silence the hook for the comparison loop — but COLLECT
+    // mismatches and assert AFTER restoring the hook, so a real failure reports
+    // its vector cleanly instead of being swallowed by the silent hook or
+    // aborting the process via a set_hook-during-unwind double panic.
+    let mut mismatches: Vec<String> = Vec::new();
     let mut accepts = 0usize;
     let mut rejects = 0usize;
-
-    for v in &vectors {
-        let (rust_ok, rust_digest) = run_vector(v);
-
-        // Accept/reject parity — the consensus-relevant verdict.
-        assert_eq!(
-            rust_ok, v.expect.success,
-            "vector {}: Rust op success={rust_ok} but Scala success={}",
-            v.name, v.expect.success,
-        );
-
-        if v.expect.success {
-            accepts += 1;
-            // Digest parity on accept — the reject-valid / accept-invalid guard.
-            let expected = v
+    {
+        let _silence = SilenceHook::install();
+        for v in &vectors {
+            let (rust_ok, rust_digest) = run_vector(v);
+            let expected_digest = v
                 .expect
                 .digest_hex
                 .as_ref()
                 .map(|h| hex::decode(h).expect("expected digest hex"));
-            assert_eq!(
-                rust_digest, expected,
-                "vector {}: Rust digest diverged from the Scala oracle on an accepted op",
-                v.name,
-            );
-        } else {
-            rejects += 1;
-        }
-    }
 
+            if rust_ok != v.expect.success {
+                mismatches.push(format!(
+                    "{}: op success rust={rust_ok} scala={}",
+                    v.name, v.expect.success
+                ));
+            } else if rust_digest != expected_digest {
+                // Digest parity on BOTH accept and reject: Scala pins `digest`
+                // None on every failure, and the AVL remove path decides the
+                // result from the final digest — so a Rust failure that still
+                // exposes Some(digest) would be a real divergence.
+                mismatches.push(format!(
+                    "{}: digest rust={:?} scala={:?}",
+                    v.name,
+                    rust_digest.as_ref().map(hex::encode),
+                    expected_digest.as_ref().map(hex::encode),
+                ));
+            }
+            if v.expect.success {
+                accepts += 1;
+            } else {
+                rejects += 1;
+            }
+        }
+    } // hook restored here, before any assertion
+
+    assert!(
+        mismatches.is_empty(),
+        "Scala oracle parity: {} of {} vectors diverged:\n{}",
+        mismatches.len(),
+        vectors.len(),
+        mismatches.join("\n"),
+    );
     // Non-vacuity: the corpus must exercise BOTH outcomes, including the
     // wrong-op/malformed proofs that drive the Rust crate's op-time panic class.
     assert!(

@@ -69,8 +69,13 @@ impl SilenceHook {
 
 impl Drop for SilenceHook {
     fn drop(&mut self) {
-        if let Some(prev) = self.0.take() {
-            std::panic::set_hook(prev);
+        // NEVER call set_hook while unwinding: it panics on a panicking thread
+        // (double-panic -> process abort). If we are already failing, leaving the
+        // hook silenced is harmless — the run is ending.
+        if !std::thread::panicking() {
+            if let Some(prev) = self.0.take() {
+                std::panic::set_hook(prev);
+            }
         }
     }
 }
@@ -199,56 +204,73 @@ fn make_case(keys: &[[u8; 32]], proof_op: &Op) -> (Vec<u8>, Vec<u8>) {
 
 #[test]
 fn guarded_verifier_is_faithful_and_fails_closed_vs_raw_crate() {
-    let _silence = SilenceHook::install();
-    let mut rng = SplitMix64(0xA5A5_1234_DEAD_BEEF);
-
     const ITERS: usize = 4000;
+    let mut failures: Vec<String> = Vec::new();
     let mut raw_panics = 0usize;
     let mut compared = 0usize;
 
-    for i in 0..ITERS {
-        let n = 1 + rng.below(8);
-        let keys: Vec<[u8; 32]> = (0..n).map(|_| rand_key(&mut rng)).collect();
-        let proof_op = Op::pick(&mut rng, &keys);
-        let verify_op = Op::pick(&mut rng, &keys);
+    // Run the (panic-noisy) comparison loop under a silenced hook, COLLECTING
+    // failures, then restore the hook and assert — so a real divergence reports
+    // cleanly rather than being swallowed by the silent hook or aborting the
+    // process via a set_hook-during-unwind double panic.
+    {
+        let _silence = SilenceHook::install();
+        let mut rng = SplitMix64(0xA5A5_1234_DEAD_BEEF);
 
-        let (start, proof) = make_case(&keys, &proof_op);
+        for i in 0..ITERS {
+            let n = 1 + rng.below(8);
+            let keys: Vec<[u8; 32]> = (0..n).map(|_| rand_key(&mut rng)).collect();
+            let proof_op = Op::pick(&mut rng, &keys);
+            let verify_op = Op::pick(&mut rng, &keys);
 
-        let raw = run_raw(&start, &proof, &verify_op);
-        let wrapped = run_wrapped(&start, &proof, &verify_op);
+            let (start, proof) = make_case(&keys, &proof_op);
 
-        // (1) A panic must NEVER escape the wrapper.
-        let (w_ok, w_digest) = match wrapped {
-            Some(v) => v,
-            None => panic!(
-                "iter {i}: a panic ESCAPED AvlVerifier — the guard has a gap. \
-                 seed=0xA5A51234DEADBEEF n={n}"
-            ),
-        };
+            let raw = run_raw(&start, &proof, &verify_op);
+            let wrapped = run_wrapped(&start, &proof, &verify_op);
 
-        match raw {
-            // (2) Raw panicked → wrapper must fail closed: Err + no digest.
-            None => {
-                raw_panics += 1;
-                assert!(
-                    !w_ok && w_digest.is_none(),
-                    "iter {i}: raw crate panicked but wrapper did not fail closed \
-                     (ok={w_ok}, digest={:?}) — poisoning is broken",
-                    w_digest.as_ref().map(hex::encode),
-                );
-            }
-            // (3) Raw completed → wrapper must be byte-identical (faithful).
-            Some((r_ok, r_digest)) => {
-                compared += 1;
-                assert_eq!(
-                    (w_ok, &w_digest),
-                    (r_ok, &r_digest),
-                    "iter {i}: wrapper diverged from the raw crate on a non-panicking input",
-                );
+            // (1) A panic must NEVER escape the wrapper.
+            let (w_ok, w_digest) = match wrapped {
+                Some(v) => v,
+                None => {
+                    failures.push(format!(
+                        "iter {i}: a panic ESCAPED AvlVerifier — guard gap (n={n})"
+                    ));
+                    continue;
+                }
+            };
+
+            match raw {
+                // (2) Raw panicked → wrapper must fail closed: Err + no digest.
+                None => {
+                    raw_panics += 1;
+                    if w_ok || w_digest.is_some() {
+                        failures.push(format!(
+                            "iter {i}: raw panicked but wrapper not fail-closed (ok={w_ok}, digest={:?})",
+                            w_digest.as_ref().map(hex::encode),
+                        ));
+                    }
+                }
+                // (3) Raw completed → wrapper must be byte-identical (faithful).
+                Some((r_ok, r_digest)) => {
+                    compared += 1;
+                    if (w_ok, &w_digest) != (r_ok, &r_digest) {
+                        failures.push(format!(
+                            "iter {i}: wrapper diverged from raw (wrapper ok={w_ok} digest={:?}; raw ok={r_ok} digest={:?})",
+                            w_digest.as_ref().map(hex::encode),
+                            r_digest.as_ref().map(hex::encode),
+                        ));
+                    }
+                }
             }
         }
-    }
+    } // hook restored here, before any assertion
 
+    assert!(
+        failures.is_empty(),
+        "{} differential failures:\n{}",
+        failures.len(),
+        failures.join("\n"),
+    );
     // Non-vacuity: the fuzz MUST have exercised the panic→fail-closed path,
     // otherwise it proves nothing about the guard.
     assert!(
