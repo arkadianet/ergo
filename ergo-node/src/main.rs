@@ -30,6 +30,16 @@ async fn main() {
     // (and JSON) sink with a wall-clock timestamp, not only on raw stderr.
     // Installed right after the subscriber so the hook's events are captured.
     std::panic::set_hook(Box::new(|info| {
+        // An expected, already-contained AVL verifier panic: a malformed
+        // attacker-supplied proof, caught in ergo-sigma's `avl.rs` and surfaced
+        // as a fail-closed tx-invalid error. Suppress the alarming "node
+        // panicked" log so a flood of crafted transactions cannot amplify into
+        // a log-flood DoS; the rejection stays observable on the validation
+        // path. (Do NOT mutate the global hook per-operation — that would be
+        // racy under Rayon block validation.)
+        if ergo_sigma::avl::in_expected_avl_panic() {
+            return;
+        }
         let location = info
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))

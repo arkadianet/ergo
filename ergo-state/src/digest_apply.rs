@@ -231,18 +231,18 @@ impl DigestProofVerifier {
         // toward this block's `header.state_root`, which the
         // caller cross-checks via `finalize_digest`.
         //
-        // Two failure modes, both session-scoped: the upstream
-        // crate panics on certain malformed envelopes (stack
-        // underflow during graph rebuild) and otherwise returns
-        // a typed Err. "Definitive bad proof" and "stale local
-        // parent root" are observationally identical at this
-        // layer, so both route to session-scoped variants; the
-        // orchestrator only promotes to persistent invalidity
-        // after independently re-deriving the parent root. The
-        // panic catch is sound because the panic is deterministic
-        // on the proof bytes and does not mutate shared state;
-        // the verifier under construction is a fresh stack-local
-        // value.
+        // `AvlVerifier::new` now self-guards construction panics
+        // and returns a typed Err, so in practice failures arrive
+        // as `VerifierConstructionRejected`. The outer panic catch
+        // here is belt-and-suspenders for any unexpected panic
+        // escaping `new()`; both variants are session-scoped and
+        // observationally identical ("definitive bad proof" vs
+        // "stale local parent root"), so the orchestrator only
+        // promotes to persistent invalidity after independently
+        // re-deriving the parent root. Catching the panic is sound:
+        // it is deterministic on the proof bytes, mutates no shared
+        // state, and the verifier under construction is a fresh
+        // stack-local value.
         let proof_owned = proof_bytes.to_vec();
         let parent_owned = parent_state_root.to_vec();
         let construct = || AvlVerifier::new(&parent_owned, &proof_owned, BOX_ID_KEY_LENGTH, None);
@@ -375,20 +375,18 @@ impl DigestProofVerifier {
         // follow. `to_lookup` carries the data-input box ids in that exact
         // order, duplicates included.
         //
-        // No `catch_unwind` around these ops. The upstream crate's known panic
-        // site is proof-graph rebuild in `new()`, guarded at construction (see
-        // `VerifierConstructionPanic`). No operation-time panic has been
-        // demonstrated on a constructed verifier: `ergo-sigma`'s
-        // `constructed_verifier_adversarial_ops_return_err_not_panic` (valid
-        // proof; first ops AND ops after partial proof-stream consumption, on
-        // uncovered keys across the whole op surface) and
-        // `remove_with_presence_uncovered_key_returns_err` exercise the op path
-        // and observe only `Ok`/`Err`. Exhaustively proving that NO adversarial
-        // proof can survive `new()` and then panic mid-stream needs the Mode-5
-        // Scala/mainnet ADProof corpus, which is tracked as a separate deferred
-        // item — so this is current best-evidence, not a closed invariant. If
-        // such a vector is found, those tests fail first and an op-level guard
-        // (mapping the panic to a session-scoped error) belongs here then.
+        // No `catch_unwind` is needed HERE: both upstream panic classes are
+        // already contained below this call. Construction panics (proof-graph
+        // rebuild in `new()`) are guarded at construction (see
+        // `VerifierConstructionPanic`). Operation-time panics — a structurally-
+        // valid-but-wrong proof drives the crate to `panic!` mid-stream
+        // (`authenticated_tree_ops.rs` 413/431/635; see `ergo-sigma`'s
+        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`) — are
+        // caught inside `AvlVerifier` itself (`ergo-sigma`'s `avl::guarded`),
+        // which poisons the verifier and surfaces `Err(())`. So every op call
+        // here observes only `Ok`/`Err`; a caught op-time panic arrives as the
+        // `Err(())` arms below and is mapped to a session-scoped
+        // `VerifierOpFailed` (fail closed, matching Scala).
         let mut resolved: Vec<([u8; 32], Vec<u8>)> =
             Vec::with_capacity(to_lookup.len() + to_remove.len());
         for key in to_lookup {

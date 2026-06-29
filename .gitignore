@@ -74,3 +74,5 @@ docs/research/
 /.codex/
 /audit/
 /extract-tools/
+.bsp/
+.scala-build/
