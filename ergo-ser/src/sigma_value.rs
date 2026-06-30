@@ -2044,7 +2044,10 @@ mod tests {
         let mut trusted = VlqReader::new(&box_bytes).trusted();
         let val = read_value(&mut trusted, &SigmaType::SBox)
             .expect("trusted reader must accept a stored high-version nested opaque tree");
-        assert!(trusted.is_empty(), "box-field boundary must land exactly at end");
+        assert!(
+            trusted.is_empty(),
+            "box-field boundary must land exactly at end"
+        );
         assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
     }
 

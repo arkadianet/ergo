@@ -2963,7 +2963,8 @@ mod tests {
 
         // Trusted reader: the body sub-reader inherits trust, so it round-trips.
         let mut trusted = VlqReader::new(&bytes).trusted();
-        read_ergo_tree(&mut trusted)
-            .expect("trusted must accept a stored size-delimited body with a nested high-version tree");
+        read_ergo_tree(&mut trusted).expect(
+            "trusted must accept a stored size-delimited body with a nested high-version tree",
+        );
     }
 }

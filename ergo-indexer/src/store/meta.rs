@@ -108,7 +108,10 @@ pub(crate) fn write_secondary_repair_skipped(
     skipped: u64,
 ) -> Result<(), IndexerError> {
     let mut table = write_txn.open_table(INDEXER_META)?;
-    table.insert(KEY_SECONDARY_REPAIR_SKIPPED, skipped.to_be_bytes().as_slice())?;
+    table.insert(
+        KEY_SECONDARY_REPAIR_SKIPPED,
+        skipped.to_be_bytes().as_slice(),
+    )?;
     Ok(())
 }
 

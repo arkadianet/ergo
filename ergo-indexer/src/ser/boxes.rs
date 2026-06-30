@@ -225,7 +225,10 @@ mod tests {
         // Header byte 0xcd → version (low 3 bits) = 5, size bit (0x08) set.
         let tree_hdr = b.box_data.candidate.ergo_tree_bytes()[0];
         assert_eq!(tree_hdr & 0x07, 5, "tree header version must be 5");
-        assert!(tree_hdr & 0x08 != 0, "tree must be size-delimited (has_size)");
+        assert!(
+            tree_hdr & 0x08 != 0,
+            "tree must be size-delimited (has_size)"
+        );
         assert!(b.is_spent());
 
         // And the STRICT consensus box reader STILL rejects the same box — the

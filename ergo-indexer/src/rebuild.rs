@@ -584,9 +584,14 @@ mod tests {
     }
 
     fn valid_box_row(tree: &ErgoTree, gi: i64) -> Vec<u8> {
-        let candidate =
-            ErgoBoxCandidate::new(1_000_000, tree.clone(), 1, vec![], AdditionalRegisters::empty())
-                .unwrap();
+        let candidate = ErgoBoxCandidate::new(
+            1_000_000,
+            tree.clone(),
+            1,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
         let b = IndexedErgoBox {
             inclusion_height: 1,
             spending_tx_id: None,
@@ -636,12 +641,18 @@ mod tests {
                 nb.insert(2u64.to_be_bytes().as_slice(), id2.as_bytes().as_slice())
                     .unwrap();
                 let mut bt = wt.open_table(INDEXED_BOX).unwrap();
-                bt.insert(id0.as_bytes().as_slice(), valid_box_row(&tree, 0).as_slice())
-                    .unwrap();
+                bt.insert(
+                    id0.as_bytes().as_slice(),
+                    valid_box_row(&tree, 0).as_slice(),
+                )
+                .unwrap();
                 bt.insert(id1.as_bytes().as_slice(), [0xFFu8, 0xFF, 0xFF].as_slice())
                     .unwrap();
-                bt.insert(id2.as_bytes().as_slice(), valid_box_row(&tree, 2).as_slice())
-                    .unwrap();
+                bt.insert(
+                    id2.as_bytes().as_slice(),
+                    valid_box_row(&tree, 2).as_slice(),
+                )
+                .unwrap();
             }
             let mut meta = crate::store::IndexerMeta::empty();
             meta.global_box_index = 3;
@@ -692,10 +703,16 @@ mod tests {
                 nb.insert(1u64.to_be_bytes().as_slice(), id1.as_bytes().as_slice())
                     .unwrap();
                 let mut bt = wt.open_table(INDEXED_BOX).unwrap();
-                bt.insert(id0.as_bytes().as_slice(), valid_box_row(&tree, 0).as_slice())
-                    .unwrap();
-                bt.insert(id1.as_bytes().as_slice(), valid_box_row(&tree, 1).as_slice())
-                    .unwrap();
+                bt.insert(
+                    id0.as_bytes().as_slice(),
+                    valid_box_row(&tree, 0).as_slice(),
+                )
+                .unwrap();
+                bt.insert(
+                    id1.as_bytes().as_slice(),
+                    valid_box_row(&tree, 1).as_slice(),
+                )
+                .unwrap();
             }
             let mut meta = crate::store::IndexerMeta::empty();
             meta.global_box_index = 2;
