@@ -382,6 +382,7 @@ async function retrieveMaturedRewards() {
     dryRun: false,
     destination: p.destination,
     boxIds: p.boxIds,
+    fee: p.fee,
   });
   if (!res.ok) {
     window.alert(res.data?.detail || res.reason || `retrieve failed (${res.status})`);

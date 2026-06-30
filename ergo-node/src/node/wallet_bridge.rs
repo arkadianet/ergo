@@ -3301,6 +3301,30 @@ async fn retrieve_rewards_impl(
             }
         };
 
+    // PINNED request whose boxes are already being spent by a PENDING pool tx:
+    // surface it as a CONFLICT carrying the pending txid BEFORE any rebuild work.
+    // Rebuilding after a tip advance restamps a new `creation_height` → a
+    // different tx id → submit would reject it as a double-spend rather than
+    // dedupe; and we cannot treat the pooled tx as an idempotent SUCCESS (it may
+    // be a conflicting/manual spend, not our sweep, and we cannot verify it pays
+    // the previewed destination/amounts). Run this BEFORE `sweep_breakdown` /
+    // `build_unsigned_tx` / structural validation so a tip or local-limit change
+    // between preview and retry can't fail one of those first and rob the caller
+    // of this stable response. Runs for a pinned DRY-RUN too, so a preview can't
+    // approve boxes an immediate execute would reject.
+    if box_ids_override.is_some() {
+        if let Some(pending) = reward_boxes.iter().find_map(|b| {
+            mempool.pool_spending_tx(&ergo_primitives::digest::Digest32::from_bytes(b.box_id))
+        }) {
+            return Err(WalletAdminError::BadRequest(format!(
+                "the requested reward boxes are already being spent by pending transaction {}; \
+                 if that is your earlier sweep, wait for it to confirm — otherwise the inputs are \
+                 conflicted",
+                hex::encode(pending.as_bytes())
+            )));
+        }
+    }
+
     // 2. Breakdown via the SHARED obligation (cannot drift from the build below).
     //    Fee floor = max(protocol min, configured relay floor); a sweep below it
     //    is rejected by submit before validation, so default to it and reject
@@ -3348,12 +3372,24 @@ async fn retrieve_rewards_impl(
     }
 
     // 3. Destination string for the echo (default = persisted change address).
+    //    A freshly initialized wallet only backfills its change address on first
+    //    unlock, so an omitted destination on a locked-wallet DRY-RUN can reach
+    //    here with no address. That's a caller precondition (supply a destination
+    //    or unlock once), not a server fault — return 400, not a 500. `build_unsigned_tx`
+    //    below resolves the SAME change address, so this also pre-empts its own
+    //    `Internal("no change address set")` for the omitted-destination path.
     let destination = match destination_override {
         Some(a) => a.to_string(),
         None => state
             .read()
             .change_address()
-            .ok_or_else(|| WalletAdminError::Internal("no change address set".into()))?
+            .ok_or_else(|| {
+                WalletAdminError::BadRequest(
+                    "destination omitted but the wallet has no change address yet; \
+                     unlock once or supply a tracked destination"
+                        .into(),
+                )
+            })?
             .to_string(),
     };
 
@@ -3392,29 +3428,6 @@ async fn retrieve_rewards_impl(
     let box_count = reward_boxes.len() as u32;
     let box_ids = reward_box_ids;
     let other_tokens_vec: Vec<([u8; 32], u64)> = other_tokens.into_iter().collect();
-
-    // PINNED request whose boxes are already being spent by a PENDING pool tx:
-    // do NOT rebuild/submit. Rebuilding after a tip advance restamps a new
-    // `creation_height` → a different tx id → submit would reject it as a
-    // double-spend rather than dedupe. But we also cannot treat the pooled tx as
-    // an idempotent SUCCESS: it may be a conflicting/manual spend of the same
-    // boxes, not our sweep, and we cannot verify it pays the previewed
-    // destination/amounts. So surface it as a CONFLICT carrying the pending txid
-    // — the caller can await it (if it is their earlier sweep) or react to the
-    // conflict — instead of a misleading success. Runs for a pinned DRY-RUN too,
-    // so a preview can't approve boxes an immediate execute would reject.
-    if box_ids_override.is_some() {
-        if let Some(pending) = reward_boxes.iter().find_map(|b| {
-            mempool.pool_spending_tx(&ergo_primitives::digest::Digest32::from_bytes(b.box_id))
-        }) {
-            return Err(WalletAdminError::BadRequest(format!(
-                "the requested reward boxes are already being spent by pending transaction {}; \
-                 if that is your earlier sweep, wait for it to confirm — otherwise the inputs are \
-                 conflicted",
-                hex::encode(pending.as_bytes())
-            )));
-        }
-    }
 
     if dry_run {
         return Ok(RetrieveRewardsOutcome {

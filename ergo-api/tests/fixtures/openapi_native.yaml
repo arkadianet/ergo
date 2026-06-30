@@ -807,7 +807,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NativeWalletError'
         '409':
-          description: Wallet locked (execute)
+          description: Wallet locked (execute) / wallet uninitialized
           content:
             application/json:
               schema:

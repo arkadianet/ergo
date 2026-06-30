@@ -702,7 +702,7 @@ pub(crate) async fn send_transaction(
         (status = 200, description = "Preview (dryRun) or submitted sweep", body = dto::RetrieveRewardsResultDto),
         (status = 400, description = "Malformed body / no matured rewards / too many token types", body = error::NativeWalletError),
         (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 409, description = "Wallet locked (execute)", body = error::NativeWalletError),
+        (status = 409, description = "Wallet locked (execute) / wallet uninitialized", body = error::NativeWalletError),
         (status = 422, description = "insufficient_funds / change_address_untracked", body = error::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
