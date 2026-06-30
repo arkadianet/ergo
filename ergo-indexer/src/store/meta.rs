@@ -30,6 +30,77 @@ pub(crate) const KEY_INDEXED_HEADER_ID: &str = "indexed_header_id";
 pub(crate) const KEY_GLOBAL_TX_INDEX: &str = "global_tx_index";
 pub(crate) const KEY_GLOBAL_BOX_INDEX: &str = "global_box_index";
 
+/// Sticky "the derived template/token segments are degraded; rebuild them"
+/// marker. Set (atomically, in the block-apply / rollback write txn) the first
+/// time a secondary sign-flip is skipped on a topology drift; checked by the
+/// indexer task before it transitions to `CaughtUp`, which runs the chain-free
+/// secondary-index rebuild and clears the marker on success. Deliberately NOT a
+/// field of [`IndexerMeta`] / `UndoEntry`: `write_meta` only rewrites its four
+/// known keys and rollback only restores the `UndoEntry` fields, so this extra
+/// key survives a reorg meta-restore — it is sticky until a rebuild clears it.
+pub(crate) const KEY_SECONDARY_REPAIR_PENDING: &str = "secondary_repair_pending";
+/// Chunk checkpoint for an in-progress rebuild: the next global box index to
+/// process. Lets a crash mid-rebuild resume instead of restarting. Absent /
+/// 0 = start from the beginning.
+pub(crate) const KEY_SECONDARY_REPAIR_NEXT_GI: &str = "secondary_repair_next_gi";
+
+/// Mark the derived (template/token) secondary index as degraded so the task
+/// rebuilds it before serving. Idempotent. Written in the SAME write txn as the
+/// block apply/rollback that skipped the flip, so the marker is durable iff the
+/// degraded block committed.
+pub(crate) fn set_secondary_repair_pending(
+    write_txn: &WriteTransaction,
+) -> Result<(), IndexerError> {
+    let mut table = write_txn.open_table(INDEXER_META)?;
+    table.insert(KEY_SECONDARY_REPAIR_PENDING, [1u8].as_slice())?;
+    Ok(())
+}
+
+/// Whether a secondary-index rebuild is pending (marker present and truthy).
+pub(crate) fn read_secondary_repair_pending(
+    read_txn: &redb::ReadTransaction,
+) -> Result<bool, IndexerError> {
+    let table = read_txn.open_table(INDEXER_META)?;
+    Ok(table
+        .get(KEY_SECONDARY_REPAIR_PENDING)?
+        .map(|g| g.value().first().copied().unwrap_or(0) != 0)
+        .unwrap_or(false))
+}
+
+/// Persist the rebuild chunk checkpoint (next global box index to process).
+pub(crate) fn write_secondary_repair_next_gi(
+    write_txn: &WriteTransaction,
+    next_gi: u64,
+) -> Result<(), IndexerError> {
+    let mut table = write_txn.open_table(INDEXER_META)?;
+    table.insert(
+        KEY_SECONDARY_REPAIR_NEXT_GI,
+        next_gi.to_be_bytes().as_slice(),
+    )?;
+    Ok(())
+}
+
+/// Read the rebuild chunk checkpoint as an Option: `None` when the key is
+/// absent (no rebuild started yet → Phase 0 wipe must run first), `Some(gi)`
+/// when a rebuild is in progress (resume Phase 1 from `gi`, skip the wipe). The
+/// `None`-vs-`Some(0)` distinction is what makes a crashed rebuild resume
+/// correctly instead of re-wiping the partial progress.
+pub(crate) fn read_secondary_repair_next_gi_opt(
+    read_txn: &redb::ReadTransaction,
+) -> Result<Option<u64>, IndexerError> {
+    let table = read_txn.open_table(INDEXER_META)?;
+    read_u64(&table, KEY_SECONDARY_REPAIR_NEXT_GI)
+}
+
+/// Clear both rebuild marker keys — called only inside the FINAL successful
+/// rebuild commit, so the index is fully repaired before the pending flag drops.
+pub(crate) fn clear_secondary_repair(write_txn: &WriteTransaction) -> Result<(), IndexerError> {
+    let mut table = write_txn.open_table(INDEXER_META)?;
+    table.remove(KEY_SECONDARY_REPAIR_PENDING)?;
+    table.remove(KEY_SECONDARY_REPAIR_NEXT_GI)?;
+    Ok(())
+}
+
 /// In-memory mirror of the meta-key set. Read on boot, mutated per
 /// block during apply/rollback, then written back inside the same
 /// `WriteTransaction` that wrote the per-type rows.
@@ -176,4 +247,75 @@ where
     let mut buf = [0u8; 8];
     buf.copy_from_slice(bytes);
     Ok(Some(u64::from_be_bytes(buf)))
+}
+
+#[cfg(test)]
+mod repair_marker_tests {
+    use super::*;
+    use crate::store::tables::INDEXER_META;
+
+    fn temp_db() -> (redb::Database, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = redb::Database::create(tmp.path().join("m.redb")).unwrap();
+        // Create INDEXER_META so the read paths can open it.
+        let w = db.begin_write().unwrap();
+        {
+            w.open_table(INDEXER_META).unwrap();
+        }
+        w.commit().unwrap();
+        (db, tmp)
+    }
+
+    #[test]
+    fn repair_marker_set_read_clear_and_is_sticky_across_write_meta() {
+        let (db, _t) = temp_db();
+
+        // Initially clear.
+        {
+            let r = db.begin_read().unwrap();
+            assert!(!read_secondary_repair_pending(&r).unwrap());
+            assert_eq!(read_secondary_repair_next_gi_opt(&r).unwrap(), None);
+        }
+
+        // Set pending + a checkpoint.
+        {
+            let w = db.begin_write().unwrap();
+            set_secondary_repair_pending(&w).unwrap();
+            write_secondary_repair_next_gi(&w, 12_345).unwrap();
+            w.commit().unwrap();
+        }
+        {
+            let r = db.begin_read().unwrap();
+            assert!(read_secondary_repair_pending(&r).unwrap());
+            assert_eq!(read_secondary_repair_next_gi_opt(&r).unwrap(), Some(12_345));
+        }
+
+        // CRITICAL: a normal block-meta write must NOT clear the sticky marker
+        // (this is what makes it survive a reorg's meta-restore).
+        {
+            let w = db.begin_write().unwrap();
+            write_meta(&w, &IndexerMeta::empty()).unwrap();
+            w.commit().unwrap();
+        }
+        {
+            let r = db.begin_read().unwrap();
+            assert!(
+                read_secondary_repair_pending(&r).unwrap(),
+                "write_meta must not clear the sticky repair marker"
+            );
+            assert_eq!(read_secondary_repair_next_gi_opt(&r).unwrap(), Some(12_345));
+        }
+
+        // Clear (only the rebuild does this on success).
+        {
+            let w = db.begin_write().unwrap();
+            clear_secondary_repair(&w).unwrap();
+            w.commit().unwrap();
+        }
+        {
+            let r = db.begin_read().unwrap();
+            assert!(!read_secondary_repair_pending(&r).unwrap());
+            assert_eq!(read_secondary_repair_next_gi_opt(&r).unwrap(), None);
+        }
+    }
 }

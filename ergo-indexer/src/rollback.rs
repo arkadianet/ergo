@@ -154,6 +154,9 @@ fn rollback_one_block_inner(
     block_height: i32,
 ) -> Result<IndexerMeta, IndexerError> {
     let write_txn = store.begin_write()?;
+    // Mirror apply: set if any secondary unflip is skipped on a drift, flushed
+    // to the sticky repair marker before commit.
+    let mut secondary_skipped = false;
 
     // Read + remove the undo entry up front. If it's missing the chain
     // already rejects the reorg as too deep, so failing loudly here
@@ -517,12 +520,14 @@ fn rollback_one_block_inner(
                             &mut staged_spills,
                             &segments_table,
                         );
-                        tolerate_secondary_drift(
+                        if tolerate_secondary_drift(
                             "template",
                             &template.template_hash,
                             spent_global_index,
                             unflip,
-                        )?;
+                        )? {
+                            secondary_skipped = true;
+                        }
                     }
 
                     // Token box-segment sign-flip rollback (mirror of
@@ -544,12 +549,14 @@ fn rollback_one_block_inner(
                                 &mut staged_spills,
                                 &segments_table,
                             );
-                            tolerate_secondary_drift(
+                            if tolerate_secondary_drift(
                                 "token",
                                 &parent_id,
                                 spent_global_index,
                                 unflip,
-                            )?;
+                            )? {
+                                secondary_skipped = true;
+                            }
                         }
                     }
 
@@ -648,6 +655,9 @@ fn rollback_one_block_inner(
         global_box_index: undo_entry.prev_global_box_index,
     };
     meta_io::write_meta(&write_txn, &next)?;
+    if secondary_skipped {
+        meta_io::set_secondary_repair_pending(&write_txn)?;
+    }
 
     write_txn.commit()?;
 

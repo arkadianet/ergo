@@ -129,6 +129,28 @@ impl<C: IndexerChainSource> IndexerTask<C> {
 
         let tip = self.chain.committed_tip();
 
+        // Self-repair gate — MUST run before the reorg + forward-apply paths.
+        // If a tolerated drift flagged the derived template/token index degraded
+        // (sticky marker), run/resume the chain-free rebuild to completion now,
+        // with status held at `Syncing` (the gated read API only serves at
+        // `CaughtUp`, so a half-rebuilt index is never exposed). Placement is
+        // load-bearing: the rebuild checkpoints by global box index, so applying
+        // a new block (extending `global_box_index`) or rolling back BEFORE the
+        // rebuild finishes would double-append those entries or operate on
+        // half-wiped segments. The marker is sticky until the rebuild clears it,
+        // so an interrupted rebuild resumes here on the next poll — always ahead
+        // of any apply/rollback. No overhead on a healthy node (one bool read).
+        match store.secondary_repair_pending() {
+            Ok(true) => {
+                self.handle.set_status(IndexerStatus::Syncing);
+                if let Err(e) = crate::rebuild::rebuild_secondary_indexes(&store) {
+                    return IndexerPoll::Halted(e);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => return IndexerPoll::Halted(e),
+        }
+
         if let Some(prev_id) = meta.indexed_header_id {
             let our_h = match u32::try_from(meta.indexed_height) {
                 Ok(h) => h,
