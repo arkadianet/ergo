@@ -142,6 +142,17 @@ pub trait WalletAdmin: Send + Sync {
         requests: Vec<sending::PaymentRequestDto>,
     ) -> Result<String, WalletAdminError>;
 
+    /// Sweep all matured miner-reward boxes into one P2PK output, EIP-27-correct
+    /// (burns the re-emission token, routes its ERG to pay-to-reemission, carries
+    /// other tokens through). `dryRun` returns the breakdown without submitting.
+    /// Default impl errors `Uninitialized`; the live wallet bridge overrides it.
+    async fn retrieve_rewards(
+        &self,
+        _req: native::dto::RetrieveRewardsRequest,
+    ) -> Result<native::dto::RetrieveRewardsResultDto, WalletAdminError> {
+        Err(WalletAdminError::Uninitialized)
+    }
+
     /// Build + sign (no submit). Returns the signed-tx response (hex bytes).
     async fn transaction_generate(
         &self,

@@ -328,6 +328,69 @@ async function refreshBalances() {
   } else {
     body.append(el('div', { class: 'muted', text: 'no tokens' }));
   }
+  body.append(
+    el(
+      'div',
+      { style: 'margin-top:12px' },
+      el('button', {
+        class: 'btn btn--sm',
+        type: 'button',
+        text: 'Retrieve matured rewards',
+        title: 'Sweep matured mining-reward boxes into your address, paying EIP-27 re-emission',
+        onclick: retrieveMaturedRewards,
+      }),
+    ),
+  );
+}
+
+// Sweep matured miner-reward boxes into the wallet address (EIP-27-correct:
+// burns the re-emission token, pays pay-to-reemission). Previews (dry-run),
+// confirms the breakdown, then executes.
+async function retrieveMaturedRewards() {
+  const preview = await api.wallet.retrieveRewards({ dryRun: true });
+  if (!preview.ok) {
+    // Native endpoint: the actionable message is `detail` (e.g. "no matured
+    // rewards", "fee below the minimum relay fee"); `reason` is the generic code.
+    window.alert(preview.data?.detail || preview.reason || `preview failed (${preview.status})`);
+    return;
+  }
+  const p = preview.data;
+  // Amounts arrive as decimal nanoErg strings — format with the BigInt-based
+  // `erg()` so large totals are not rounded by JS `Number`.
+  const tokenLine =
+    p.otherTokens && p.otherTokens.length
+      ? `\n+ ${p.otherTokens.length} other token type(s) carried through`
+      : '';
+  const remainingLine =
+    p.remaining > 0 ? `\n  (${p.remaining} more box(es) — run again after this)` : '';
+  const ok = window.confirm(
+    `Retrieve ${p.boxCount} matured reward box(es):\n` +
+      `\n  gross matured:  ${erg(p.grossErg)} ERG` +
+      `\n  re-emission:    ${erg(p.reemissionPaid)} ERG (paid to re-emission)` +
+      `\n  fee:            ${erg(p.fee)} ERG` +
+      `\n  net to you:     ${erg(p.netToDestination)} ERG` +
+      `\n  destination:    ${p.destination}` +
+      tokenLine +
+      remainingLine +
+      `\n\nSubmit this sweep?`,
+  );
+  if (!ok) return;
+  // Pin the executed sweep to EXACTLY the inputs + destination the user just
+  // confirmed, so a change-address update or a newly-matured reward between
+  // preview and confirm can't submit a different sweep than was shown.
+  const res = await api.wallet.retrieveRewards({
+    dryRun: false,
+    destination: p.destination,
+    boxIds: p.boxIds,
+    fee: p.fee,
+  });
+  if (!res.ok) {
+    window.alert(res.data?.detail || res.reason || `retrieve failed (${res.status})`);
+    return;
+  }
+  const more = res.data.remaining > 0 ? ` (${res.data.remaining} more — run again)` : '';
+  window.alert(`Submitted sweep: ${res.data.txId}${more}`);
+  refreshBalances();
 }
 
 async function refreshAddresses() {

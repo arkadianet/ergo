@@ -126,6 +126,64 @@ pub(crate) async fn payment_send(
     let _ = reply.send(result);
 }
 
+pub(crate) async fn retrieve_rewards(
+    ctx: &WriterContext<'_>,
+    req: ergo_api::wallet::native::dto::RetrieveRewardsRequest,
+    reply: oneshot::Sender<
+        Result<ergo_api::wallet::native::dto::RetrieveRewardsResultDto, WalletAdminError>,
+    >,
+) {
+    // Fee arrives as a decimal nanoErg string (native amount convention) — parse
+    // it before building so an out-of-range/garbage fee is a clean 400, not a 500.
+    let fee = match req.fee.as_deref().map(str::parse::<u64>).transpose() {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = reply.send(Err(WalletAdminError::BadRequest(
+                "fee must be a nanoErg decimal string".into(),
+            )));
+            return;
+        }
+    };
+    let result = super::retrieve_rewards_impl(
+        req.destination.as_deref(),
+        fee,
+        ctx.cfg.min_relay_fee_nano_erg,
+        ctx.cfg.max_tx_size_bytes,
+        req.box_ids.as_deref(),
+        req.dry_run,
+        ctx.storage,
+        ctx.state,
+        ctx.db,
+        ctx.chain.as_ref(),
+        ctx.submit_handle.as_ref(),
+        ctx.mempool.as_ref(),
+        ctx.cfg.network,
+    )
+    .await
+    .map(
+        |o| ergo_api::wallet::native::dto::RetrieveRewardsResultDto {
+            box_count: o.box_count,
+            box_ids: o.box_ids,
+            remaining: o.remaining,
+            gross_erg: o.gross_erg.to_string(),
+            reemission_paid: o.reemission_paid.to_string(),
+            fee: o.fee.to_string(),
+            net_to_destination: o.net_to_destination.to_string(),
+            other_tokens: o
+                .other_tokens
+                .into_iter()
+                .map(|(id, amt)| ergo_api::wallet::native::dto::SweptTokenDto {
+                    token_id: hex::encode(id),
+                    amount: amt.to_string(),
+                })
+                .collect(),
+            destination: o.destination,
+            tx_id: o.tx_id,
+        },
+    );
+    let _ = reply.send(result);
+}
+
 pub(crate) async fn transaction_generate(
     ctx: &WriterContext<'_>,
     request: TransactionGenerateRequest,

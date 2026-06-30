@@ -111,6 +111,9 @@ export const api = {
     deriveNextKey: () => walletReq('/wallet/deriveNextKey'),
     updateChangeAddress: (address) => walletPost('/wallet/updateChangeAddress', { address }),
     send: (requests) => walletPost('/wallet/payment/send', requests),
+    // Native endpoint: sweep matured miner-reward boxes into one P2PK output,
+    // EIP-27-correct (burns the re-emission token, pays pay-to-reemission).
+    retrieveRewards: (body) => walletPost('/api/v1/wallet/rewards/retrieve', body),
   },
 };
 

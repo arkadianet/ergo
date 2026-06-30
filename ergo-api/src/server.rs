@@ -1392,6 +1392,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         crate::wallet::native::build_transaction,
         crate::wallet::native::sign_transaction,
         crate::wallet::native::send_transaction,
+        crate::wallet::native::retrieve_rewards,
     ),
     components(schemas(
         ApiInfo,
@@ -1475,6 +1476,9 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         crate::wallet::native::dto::SignTxResponse,
         crate::wallet::native::dto::SendTxRequest,
         crate::wallet::native::dto::SendTxResponse,
+        crate::wallet::native::dto::RetrieveRewardsRequest,
+        crate::wallet::native::dto::RetrieveRewardsResultDto,
+        crate::wallet::native::dto::SweptTokenDto,
         crate::wallet::native::error::NativeWalletError,
     )),
     tags(
