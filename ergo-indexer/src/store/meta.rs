@@ -43,6 +43,12 @@ pub(crate) const KEY_SECONDARY_REPAIR_PENDING: &str = "secondary_repair_pending"
 /// process. Lets a crash mid-rebuild resume instead of restarting. Absent /
 /// 0 = start from the beginning.
 pub(crate) const KEY_SECONDARY_REPAIR_NEXT_GI: &str = "secondary_repair_next_gi";
+/// Running count of boxes the rebuild had to SKIP because their primary
+/// `INDEXED_BOX` row could not be decoded even by the trusted/lenient reader
+/// (genuine row corruption). Persisted with each chunk checkpoint so it survives
+/// a crash + resume, and KEPT after a completed-with-skips rebuild as the durable
+/// "the repaired index is knowingly incomplete" signal. Absent = 0.
+pub(crate) const KEY_SECONDARY_REPAIR_SKIPPED: &str = "secondary_repair_skipped";
 
 /// Mark the derived (template/token) secondary index as degraded so the task
 /// rebuilds it before serving. Idempotent. Written in the SAME write txn as the
@@ -92,8 +98,41 @@ pub(crate) fn read_secondary_repair_next_gi_opt(
     read_u64(&table, KEY_SECONDARY_REPAIR_NEXT_GI)
 }
 
+/// Persist the running skipped-box count (undecodable primary rows the rebuild
+/// stepped over). Written with each chunk checkpoint and at Phase-0 reset.
+pub(crate) fn write_secondary_repair_skipped(
+    write_txn: &WriteTransaction,
+    skipped: u64,
+) -> Result<(), IndexerError> {
+    let mut table = write_txn.open_table(INDEXER_META)?;
+    table.insert(KEY_SECONDARY_REPAIR_SKIPPED, skipped.to_be_bytes().as_slice())?;
+    Ok(())
+}
+
+/// Read the durable skipped-box count: `0` when the key is absent (no rebuild has
+/// skipped anything) or explicitly zero. A non-zero value persists after a
+/// completed rebuild as the "knowingly incomplete" signal.
+pub(crate) fn read_secondary_repair_skipped(
+    read_txn: &redb::ReadTransaction,
+) -> Result<u64, IndexerError> {
+    let table = read_txn.open_table(INDEXER_META)?;
+    Ok(read_u64(&table, KEY_SECONDARY_REPAIR_SKIPPED)?.unwrap_or(0))
+}
+
+/// Remove the skipped-box record — called on a fully-clean (zero-skip) rebuild
+/// completion so the key does not linger.
+pub(crate) fn clear_secondary_repair_skipped(
+    write_txn: &WriteTransaction,
+) -> Result<(), IndexerError> {
+    let mut table = write_txn.open_table(INDEXER_META)?;
+    table.remove(KEY_SECONDARY_REPAIR_SKIPPED)?;
+    Ok(())
+}
+
 /// Clear both rebuild marker keys — called only inside the FINAL successful
 /// rebuild commit, so the index is fully repaired before the pending flag drops.
+/// The skipped-box record (if any) is managed separately so a completed-with-skips
+/// rebuild can retain it.
 pub(crate) fn clear_secondary_repair(write_txn: &WriteTransaction) -> Result<(), IndexerError> {
     let mut table = write_txn.open_table(INDEXER_META)?;
     table.remove(KEY_SECONDARY_REPAIR_PENDING)?;

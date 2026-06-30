@@ -29,11 +29,12 @@
 //! Consensus is untouched: this writes only `indexer.redb` secondary tables.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ergo_primitives::digest::Digest32;
 use ergo_primitives::writer::VlqWriter;
 use redb::ReadableTable;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::IndexerError;
 use crate::segment::Segment;
@@ -72,6 +73,21 @@ const WIPE_PARENT_CHUNK: usize = 20_000;
 /// invocation crash-safe too (a crash mid-rebuild leaves the marker set, so the
 /// next poll resumes the rebuild rather than exposing a wiped/half-rebuilt index).
 pub fn rebuild_secondary_indexes(store: &IndexerStore) -> Result<(), IndexerError> {
+    rebuild_secondary_indexes_until(store, &AtomicBool::new(false))
+}
+
+/// As [`rebuild_secondary_indexes`], but checks `cancel` between Phase-1 chunks
+/// (and between Phase-0 wipe batches) so a node SHUTDOWN drains promptly instead
+/// of blocking for the entire multi-hour rebuild. On cancel it returns early
+/// WITHOUT clearing the repair marker — the per-chunk checkpoint persists, so the
+/// rebuild resumes from where it stopped on the next start. Returns `Ok(())` for
+/// both a completed rebuild and an early cancel; the caller distinguishes the two
+/// by re-checking the same `cancel` flag (the marker also stays pending on
+/// cancel, so the next poll re-enters the rebuild before any apply/rollback).
+pub fn rebuild_secondary_indexes_until(
+    store: &IndexerStore,
+    cancel: &AtomicBool,
+) -> Result<(), IndexerError> {
     ensure_repair_marker_armed(store)?;
 
     let total = store.read_meta()?.global_box_index; // exclusive upper bound on gi
@@ -81,11 +97,20 @@ pub fn rebuild_secondary_indexes(store: &IndexerStore) -> Result<(), IndexerErro
     let mut next_gi = match store.secondary_repair_next_gi()? {
         None => {
             info!("secondary-index rebuild: phase 0 (wipe) starting");
-            wipe_template_segments(store)?;
-            wipe_token_segments(store)?;
-            // Mark the wipe done + Phase 1 start. Sentinel commit.
+            wipe_template_segments(store, cancel)?;
+            wipe_token_segments(store, cancel)?;
+            // A cancel during the (idempotent) wipe leaves the sentinel unwritten,
+            // so a resume re-enters Phase 0 and finishes the wipe.
+            if cancel.load(Ordering::Acquire) {
+                info!("secondary-index rebuild: phase 0 interrupted (resumes on restart)");
+                return Ok(());
+            }
+            // Mark the wipe done + Phase 1 start. Sentinel commit. Reset the skip
+            // count to 0 so a fresh rebuild does not inherit a prior aborted run's
+            // tally.
             let write_txn = store.begin_write()?;
             meta_io::write_secondary_repair_next_gi(&write_txn, 0)?;
+            meta_io::write_secondary_repair_skipped(&write_txn, 0)?;
             write_txn.commit()?;
             info!("secondary-index rebuild: phase 0 complete");
             0
@@ -101,24 +126,51 @@ pub fn rebuild_secondary_indexes(store: &IndexerStore) -> Result<(), IndexerErro
         start = next_gi,
         "secondary-index rebuild: phase 1 (re-derive segments) starting"
     );
+    // Resume-safe running total of undecodable boxes skipped by the fallback
+    // (persisted with each checkpoint, so it accumulates correctly across a
+    // crash + resume rather than resetting to the post-restart portion only).
+    let mut skipped = store.secondary_repair_skipped()?;
     while next_gi < total {
+        // Drain promptly on shutdown — the last committed checkpoint resumes us.
+        if cancel.load(Ordering::Acquire) {
+            info!(
+                done = next_gi,
+                total, "secondary-index rebuild: phase 1 interrupted (resumes on restart)"
+            );
+            return Ok(());
+        }
         let chunk_end = next_gi.saturating_add(REBUILD_BOX_CHUNK).min(total);
-        rebuild_box_chunk(store, next_gi, chunk_end)?;
+        skipped = rebuild_box_chunk(store, next_gi, chunk_end, skipped)?;
         next_gi = chunk_end;
         info!(
             done = next_gi,
-            total, "secondary-index rebuild: phase 1 progress"
+            total, skipped, "secondary-index rebuild: phase 1 progress"
         );
     }
 
-    // Fully rebuilt: drop the marker + checkpoint in one final commit.
+    // Done. Drop the pending marker + checkpoint in one final commit. When boxes
+    // were skipped, KEEP the durable skipped-count record so a knowingly-incomplete
+    // index is never silently presented as fully repaired; otherwise clear it too.
     let write_txn = store.begin_write()?;
     meta_io::clear_secondary_repair(&write_txn)?;
+    if skipped == 0 {
+        meta_io::clear_secondary_repair_skipped(&write_txn)?;
+    }
     write_txn.commit()?;
-    info!(
-        total,
-        "secondary-index rebuild: complete (index fully repaired)"
-    );
+    if skipped == 0 {
+        info!(
+            total,
+            "secondary-index rebuild: complete (index fully repaired)"
+        );
+    } else {
+        warn!(
+            total,
+            skipped,
+            "secondary-index rebuild: complete with undecodable box(es) skipped — their \
+             template/token entries are omitted (box ids in earlier logs); address-index \
+             entries are retained"
+        );
+    }
     Ok(())
 }
 
@@ -140,9 +192,14 @@ fn ensure_repair_marker_armed(store: &IndexerStore) -> Result<(), IndexerError> 
 
 /// Phase 0a — delete every `INDEXED_TEMPLATE` row and its box-segment spills.
 /// Templates carry no metadata (row = `template_hash || segment`), so they are
-/// re-created from scratch in Phase 1. Idempotent + chunked.
-fn wipe_template_segments(store: &IndexerStore) -> Result<(), IndexerError> {
+/// re-created from scratch in Phase 1. Idempotent + chunked. Checks `cancel`
+/// between batches so a shutdown drains promptly; the wipe is idempotent, so a
+/// resume re-runs it to completion.
+fn wipe_template_segments(store: &IndexerStore, cancel: &AtomicBool) -> Result<(), IndexerError> {
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let write_txn = store.begin_write()?;
         let mut wrote = 0usize;
         {
@@ -195,10 +252,14 @@ fn wipe_template_segments(store: &IndexerStore) -> Result<(), IndexerError> {
 
 /// Phase 0b — reset every `INDEXED_TOKEN`'s box-segment to empty (PRESERVING the
 /// token metadata: `creating_box_id`, emission, name, description, decimals) and
-/// delete its box-segment spills. Idempotent + chunked.
-fn wipe_token_segments(store: &IndexerStore) -> Result<(), IndexerError> {
+/// delete its box-segment spills. Idempotent + chunked. Checks `cancel` between
+/// batches so a shutdown drains promptly; the wipe is idempotent on resume.
+fn wipe_token_segments(store: &IndexerStore, cancel: &AtomicBool) -> Result<(), IndexerError> {
     let mut start_after: Option<Vec<u8>> = None;
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let write_txn = store.begin_write()?;
         let mut processed = 0usize;
         let mut last_key: Option<Vec<u8>> = None;
@@ -270,7 +331,13 @@ fn wipe_token_segments(store: &IndexerStore) -> Result<(), IndexerError> {
 /// index in `[start_gi, end_gi)`, in one write transaction, then checkpoint.
 /// Reuses the apply append/flip/flush path so segments are identical to a fresh
 /// linear index.
-fn rebuild_box_chunk(store: &IndexerStore, start_gi: u64, end_gi: u64) -> Result<(), IndexerError> {
+fn rebuild_box_chunk(
+    store: &IndexerStore,
+    start_gi: u64,
+    end_gi: u64,
+    skipped_so_far: u64,
+) -> Result<u64, IndexerError> {
+    let mut skipped = skipped_so_far;
     let write_txn = store.begin_write()?;
     {
         let num_box_table = write_txn.open_table(NUMERIC_BOX)?;
@@ -293,7 +360,24 @@ fn rebuild_box_chunk(store: &IndexerStore, start_gi: u64, end_gi: u64) -> Result
                     detail: format!("rebuild: NUMERIC_BOX has no box_id for global_index {gi}"),
                 });
             };
-            let rec = read_box(&box_table, &box_id)?;
+            let rec = match read_box(&box_table, &box_id, gi) {
+                Ok(rec) => rec,
+                Err(IndexerError::DbDecode { .. }) => {
+                    // Degrade-not-halt FALLBACK: a stored row that even the
+                    // trusted/lenient reader cannot decode is genuine primary-row
+                    // corruption (not a tolerable secondary drift). Skip THIS one
+                    // box so the rebuild still completes — its template/token
+                    // segment entries are omitted (the box keeps its address-index
+                    // entry). read_box already logged the offending gi+box_id; the
+                    // running skip count is persisted with the checkpoint below so
+                    // completion does NOT falsely claim a full repair.
+                    skipped += 1;
+                    continue;
+                }
+                // A missing NUMERIC_BOX/INDEXED_BOX row is structural primary
+                // corruption we must NOT paper over — still fatal.
+                Err(e) => return Err(e),
+            };
             let gi_i64 = gi as i64;
             let spent = rec.is_spent();
             let tree_bytes = rec.box_data.candidate.ergo_tree_bytes();
@@ -339,10 +423,13 @@ fn rebuild_box_chunk(store: &IndexerStore, start_gi: u64, end_gi: u64) -> Result
         flush_tokens(&mut token_table, &mut writer, &touched_tokens, &no_removals)?;
         flush_staged_spills(&mut segments_table, &mut writer, &staged, &deleted)?;
     }
-    // Checkpoint atomically with this chunk's writes.
+    // Checkpoint atomically with this chunk's writes — the `next_gi` cursor AND
+    // the running skipped-box total, so a crash + resume neither re-processes a
+    // committed chunk nor loses the skip count.
     meta_io::write_secondary_repair_next_gi(&write_txn, end_gi)?;
+    meta_io::write_secondary_repair_skipped(&write_txn, skipped)?;
     write_txn.commit()?;
-    Ok(())
+    Ok(skipped)
 }
 
 // ---- small read helpers over a write-txn-opened table ----
@@ -361,6 +448,7 @@ fn read_box_id(
 fn read_box(
     box_table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     box_id: &Digest32,
+    gi: u64,
 ) -> Result<IndexedErgoBox, IndexerError> {
     let Some(g) = box_table.get(box_id.as_bytes().as_slice())? else {
         return Err(IndexerError::SegmentTopologyError {
@@ -370,9 +458,21 @@ fn read_box(
             ),
         });
     };
-    deserialize_indexed_box(g.value()).map_err(|e| IndexerError::DbDecode {
-        context: "rebuild_read_box",
-        source: e,
+    deserialize_indexed_box(g.value()).map_err(|e| {
+        // The deserializer is lenient about already-validated stored boxes
+        // (high-version opaque trees included), so a failure here is genuine
+        // primary-row corruption — name the offending box so it is actionable
+        // without re-running a 50M-box scan to find it.
+        tracing::error!(
+            gi,
+            box_id = %hex::encode(box_id.as_bytes()),
+            error = %e,
+            "secondary-index rebuild: INDEXED_BOX row failed to decode",
+        );
+        IndexerError::DbDecode {
+            context: "rebuild_read_box",
+            source: e,
+        }
     })
 }
 
@@ -459,5 +559,165 @@ mod tests {
         ensure_repair_marker_armed(&store).unwrap();
         assert!(store.secondary_repair_pending().unwrap());
         assert_eq!(store.secondary_repair_next_gi().unwrap(), Some(1_000));
+    }
+
+    use ergo_indexer_types::IndexedErgoBox;
+    use ergo_primitives::digest::ModifierId;
+    use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
+    use ergo_ser::ergo_tree::{template_hash_from_bytes, write_ergo_tree, ErgoTree};
+    use ergo_ser::opcode::{Body, Expr};
+    use ergo_ser::register::AdditionalRegisters;
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
+
+    fn parseable_tree() -> ErgoTree {
+        ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            constants: vec![],
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            } as Body,
+        }
+    }
+
+    fn valid_box_row(tree: &ErgoTree, gi: i64) -> Vec<u8> {
+        let candidate =
+            ErgoBoxCandidate::new(1_000_000, tree.clone(), 1, vec![], AdditionalRegisters::empty())
+                .unwrap();
+        let b = IndexedErgoBox {
+            inclusion_height: 1,
+            spending_tx_id: None,
+            spending_height: None,
+            spending_proof: None,
+            box_data: ErgoBox {
+                candidate,
+                transaction_id: ModifierId::from_bytes([0x11; 32]),
+                index: 0,
+            },
+            global_index: gi,
+        };
+        crate::ser::boxes::serialize_indexed_box(&b).unwrap()
+    }
+
+    /// Degrade-not-halt FALLBACK: a primary `INDEXED_BOX` row that no reader can
+    /// decode (genuine corruption — NOT a tolerable high-version opaque tree, which
+    /// the trusted reader handles) must be SKIPPED. The rebuild completes, the
+    /// surviving boxes are re-derived, and the skip is recorded durably so the
+    /// index is never silently presented as a full repair.
+    #[test]
+    fn rebuild_skips_undecodable_box_and_records_the_skip() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+        let tree = parseable_tree();
+        let tree_bytes = {
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &tree).unwrap();
+            w.result()
+        };
+        let template = Digest32::from_bytes(template_hash_from_bytes(&tree_bytes).unwrap());
+
+        let id0 = Digest32::from_bytes([0xA0; 32]);
+        let id1 = Digest32::from_bytes([0xA1; 32]);
+        let id2 = Digest32::from_bytes([0xA2; 32]);
+
+        // Populate the PRIMARY tables directly: gi 0 and 2 are valid boxes sharing
+        // a template; gi 1 is an undecodable garbage row. global_box_index = 3.
+        {
+            let wt = store.begin_write().unwrap();
+            {
+                let mut nb = wt.open_table(NUMERIC_BOX).unwrap();
+                nb.insert(0u64.to_be_bytes().as_slice(), id0.as_bytes().as_slice())
+                    .unwrap();
+                nb.insert(1u64.to_be_bytes().as_slice(), id1.as_bytes().as_slice())
+                    .unwrap();
+                nb.insert(2u64.to_be_bytes().as_slice(), id2.as_bytes().as_slice())
+                    .unwrap();
+                let mut bt = wt.open_table(INDEXED_BOX).unwrap();
+                bt.insert(id0.as_bytes().as_slice(), valid_box_row(&tree, 0).as_slice())
+                    .unwrap();
+                bt.insert(id1.as_bytes().as_slice(), [0xFFu8, 0xFF, 0xFF].as_slice())
+                    .unwrap();
+                bt.insert(id2.as_bytes().as_slice(), valid_box_row(&tree, 2).as_slice())
+                    .unwrap();
+            }
+            let mut meta = crate::store::IndexerMeta::empty();
+            meta.global_box_index = 3;
+            meta_io::write_meta(&wt, &meta).unwrap();
+            meta_io::set_secondary_repair_pending(&wt).unwrap();
+            wt.commit().unwrap();
+        }
+
+        rebuild_secondary_indexes(&store).unwrap();
+
+        // The corrupt gi=1 row was skipped; 0 and 2 were re-derived into the
+        // template segment.
+        assert_eq!(
+            store.read_template_box_entries(&template).unwrap().unwrap(),
+            vec![0, 2],
+            "valid boxes rebuilt, undecodable one omitted"
+        );
+        // The skip is recorded durably and the pending marker is cleared.
+        assert_eq!(store.secondary_repair_skipped().unwrap(), 1);
+        assert!(!store.secondary_repair_pending().unwrap());
+        assert_eq!(store.secondary_repair_next_gi().unwrap(), None);
+    }
+
+    /// The rebuild drains promptly on shutdown: with the cancel flag set it
+    /// returns early WITHOUT clearing the marker (so the half-rebuilt index is
+    /// never exposed and is not extended by forward-apply), and a later
+    /// uncancelled run resumes and completes it.
+    #[test]
+    fn rebuild_until_honors_cancel_and_resumes() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+        let tree = parseable_tree();
+        let tree_bytes = {
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &tree).unwrap();
+            w.result()
+        };
+        let template = Digest32::from_bytes(template_hash_from_bytes(&tree_bytes).unwrap());
+
+        let id0 = Digest32::from_bytes([0xB0; 32]);
+        let id1 = Digest32::from_bytes([0xB1; 32]);
+        {
+            let wt = store.begin_write().unwrap();
+            {
+                let mut nb = wt.open_table(NUMERIC_BOX).unwrap();
+                nb.insert(0u64.to_be_bytes().as_slice(), id0.as_bytes().as_slice())
+                    .unwrap();
+                nb.insert(1u64.to_be_bytes().as_slice(), id1.as_bytes().as_slice())
+                    .unwrap();
+                let mut bt = wt.open_table(INDEXED_BOX).unwrap();
+                bt.insert(id0.as_bytes().as_slice(), valid_box_row(&tree, 0).as_slice())
+                    .unwrap();
+                bt.insert(id1.as_bytes().as_slice(), valid_box_row(&tree, 1).as_slice())
+                    .unwrap();
+            }
+            let mut meta = crate::store::IndexerMeta::empty();
+            meta.global_box_index = 2;
+            meta_io::write_meta(&wt, &meta).unwrap();
+            meta_io::set_secondary_repair_pending(&wt).unwrap();
+            wt.commit().unwrap();
+        }
+
+        // Cancel already set → the rebuild returns early; the marker STAYS pending.
+        let cancel = AtomicBool::new(true);
+        rebuild_secondary_indexes_until(&store, &cancel).unwrap();
+        assert!(
+            store.secondary_repair_pending().unwrap(),
+            "cancel must leave the repair marker pending for a resume"
+        );
+
+        // An uncancelled resume completes it.
+        rebuild_secondary_indexes(&store).unwrap();
+        assert!(!store.secondary_repair_pending().unwrap());
+        assert_eq!(
+            store.read_template_box_entries(&template).unwrap().unwrap(),
+            vec![0, 1]
+        );
     }
 }
