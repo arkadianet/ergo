@@ -99,6 +99,12 @@ pub struct IndexerTask<C: IndexerChainSource> {
     handle: IndexerHandle,
     chain: Arc<C>,
     scratch: BlockApplyScratch,
+    /// Shutdown flag, shared with [`IndexerTask::run`]'s driver loop. Threaded
+    /// into the secondary-index rebuild so a multi-hour rebuild drains promptly
+    /// on shutdown instead of ignoring SIGTERM until it finishes. Defaults to a
+    /// never-set flag (e.g. for `step`-only tests); `run` overwrites it with the
+    /// real cancel handle before the first poll.
+    cancel: Arc<AtomicBool>,
 }
 
 impl<C: IndexerChainSource> IndexerTask<C> {
@@ -107,6 +113,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             handle,
             chain,
             scratch: BlockApplyScratch::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -128,6 +135,39 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         };
 
         let tip = self.chain.committed_tip();
+
+        // Self-repair gate — MUST run before the reorg + forward-apply paths.
+        // If a tolerated drift flagged the derived template/token index degraded
+        // (sticky marker), run/resume the chain-free rebuild to completion now,
+        // with status held at `Syncing` (the gated read API only serves at
+        // `CaughtUp`, so a half-rebuilt index is never exposed). Placement is
+        // load-bearing: the rebuild checkpoints by global box index, so applying
+        // a new block (extending `global_box_index`) or rolling back BEFORE the
+        // rebuild finishes would double-append those entries or operate on
+        // half-wiped segments. The marker is sticky until the rebuild clears it,
+        // so an interrupted rebuild resumes here on the next poll — always ahead
+        // of any apply/rollback. No overhead on a healthy node (one bool read).
+        match store.secondary_repair_pending() {
+            Ok(true) => {
+                self.handle.set_status(IndexerStatus::Syncing);
+                if let Err(e) =
+                    crate::rebuild::rebuild_secondary_indexes_until(&store, &self.cancel)
+                {
+                    return IndexerPoll::Halted(e);
+                }
+                // The rebuild returns early on shutdown WITHOUT finishing (marker
+                // still pending, index half-rebuilt). Do NOT fall through to the
+                // reorg / forward-apply paths — that would extend or roll back the
+                // box index under a half-rebuilt secondary index. The driver loop
+                // sees the cancel flag next and exits; the rebuild resumes on the
+                // next start (its per-chunk checkpoint persists).
+                if self.cancel.load(Ordering::Acquire) {
+                    return IndexerPoll::Idle;
+                }
+            }
+            Ok(false) => {}
+            Err(e) => return IndexerPoll::Halted(e),
+        }
 
         if let Some(prev_id) = meta.indexed_header_id {
             let our_h = match u32::try_from(meta.indexed_height) {
@@ -245,6 +285,9 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     ///   `SectionMissing` after [`MAX_SECTION_RETRIES`].
     /// - `Halted`: set status, exit.
     pub async fn run(mut self, cancel: Arc<AtomicBool>, poll_idle: Duration) {
+        // Share the driver's cancel flag with `step` so an in-progress
+        // secondary-index rebuild can drain promptly on shutdown.
+        self.cancel = cancel.clone();
         let mut section_retry_count: u32 = 0;
         loop {
             if cancel.load(Ordering::Acquire) {

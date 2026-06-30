@@ -36,6 +36,7 @@ use crate::error::IndexerError;
 use crate::scratch::BlockApplyScratch;
 use crate::segment_buffer::{
     append_box_entry, append_tx_entry, flip_box_segment_entry, flush_staged_spills,
+    tolerate_secondary_drift,
 };
 use crate::segment_id::{token_unique_id, tree_hash_from_bytes};
 use crate::ser::boxes::{deserialize_indexed_box, write_indexed_box};
@@ -148,6 +149,10 @@ pub fn apply_block_with_scratch(
     let no_token_removals: HashSet<TokenId> = HashSet::new();
 
     let mut write_txn = store.begin_write()?;
+    // Set when any secondary (template/token) sign-flip is skipped on a drift
+    // this block; flushed to the sticky repair marker before commit so the task
+    // rebuilds the degraded segments before next serving (atomic with apply).
+    let mut secondary_skipped = false;
     // `indexer.redb` holds derived state — every row is reproducible by
     // replaying blocks from `state.redb`, which itself commits durably.
     // `Eventual` keeps the per-block redb txn atomic (meta + per-row writes
@@ -282,13 +287,25 @@ pub fn apply_block_with_scratch(
                             &mut scratch.touched_templates,
                             template_hash,
                         )?;
-                        flip_box_segment_entry(
+                        // Secondary index: a topology-drift gap degrades this
+                        // template's box queries but must not halt the indexer
+                        // (see `tolerate_secondary_drift`). All other errors
+                        // still propagate.
+                        let flip = flip_box_segment_entry(
                             &template.template_hash,
                             &mut template.segment,
                             spent_global_index,
                             &mut scratch.staged_spills,
                             &segments_table,
-                        )?;
+                        );
+                        if tolerate_secondary_drift(
+                            "template",
+                            &template.template_hash,
+                            spent_global_index,
+                            flip,
+                        )? {
+                            secondary_skipped = true;
+                        }
                     }
 
                     // Token box-segment sign-flip on spend: for each
@@ -305,13 +322,22 @@ pub fn apply_block_with_scratch(
                             token.token_id,
                         )? {
                             let parent_id = token_unique_id(&record.token_id);
-                            flip_box_segment_entry(
+                            // Secondary index — degrade-not-halt on drift.
+                            let flip = flip_box_segment_entry(
                                 &parent_id,
                                 &mut record.segment,
                                 spent_global_index,
                                 &mut scratch.staged_spills,
                                 &segments_table,
-                            )?;
+                            );
+                            if tolerate_secondary_drift(
+                                "token",
+                                &parent_id,
+                                spent_global_index,
+                                flip,
+                            )? {
+                                secondary_skipped = true;
+                            }
                         }
                     }
 
@@ -572,6 +598,12 @@ pub fn apply_block_with_scratch(
     next.indexed_header_id = Some(block.header_id);
 
     meta_io::write_meta(&write_txn, &next)?;
+    // A skipped secondary flip means the template/token index is now degraded;
+    // persist the sticky repair marker in the SAME txn so it is durable iff this
+    // block commits (and survives reorg meta-restore — see meta.rs).
+    if secondary_skipped {
+        meta_io::set_secondary_repair_pending(&write_txn)?;
+    }
     undo_io::write_undo(&write_txn, block_height_u64, &undo)?;
     undo_io::prune_below_window(&write_txn, block_height_u64)?;
 

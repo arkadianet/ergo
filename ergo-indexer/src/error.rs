@@ -265,6 +265,16 @@ pub enum IndexerError {
     /// variant level is the right granularity.
     #[error("indexer segment topology violated: {detail}")]
     SegmentTopologyError { detail: String },
+    /// A box sign-flip found NO entry of either sign for the target
+    /// `global_index` in a parent's segment (neither in the head nor any
+    /// spill) — the entry was never appended (or was lost). Kept DISTINCT
+    /// from [`Self::SegmentTopologyError`] (double-flip / missing-spill /
+    /// pop mismatch) precisely so the DERIVED template & token indexes can
+    /// tolerate this one reindex-reproducible gap (see
+    /// `segment_buffer::tolerate_secondary_drift`) while the PRIMARY address
+    /// index — and every other segment-structure error — still halts.
+    #[error("indexer segment entry missing: {detail}")]
+    SegmentEntryMissing { detail: String },
     /// `unspent_by_creation_height` index is missing a row for a box
     /// that `INDEXED_BOX` says exists — desync between two indexer
     /// tables.
@@ -336,7 +346,7 @@ impl IndexerError {
     ///
     /// The typed structural variants (HeightMismatch, HeaderMismatch,
     /// NothingToRollback, BoxMissing, TxMissing, AddressBalanceMissing,
-    /// SegmentTopologyError, StorageRentDesync, SpillMissingFromParent,
+    /// SegmentTopologyError, SegmentEntryMissing, StorageRentDesync, SpillMissingFromParent,
     /// UndoEntryMalformed, BootStoreMissing, HeightOverflowsU32, FsIo,
     /// SchemaTableMissing, DbCommit, DbDecode struct shape, DbRowLength,
     /// Serialize, LengthExceedsI32, HashDerivation) all halt as
@@ -367,6 +377,7 @@ impl IndexerError {
             | Self::TxMissing { .. }
             | Self::AddressBalanceMissing { .. }
             | Self::SegmentTopologyError { .. }
+            | Self::SegmentEntryMissing { .. }
             | Self::StorageRentDesync { .. }
             | Self::SpillMissingFromParent { .. }
             | Self::UndoEntryMalformed { .. } => IndexerHaltReason::DbCorruption,

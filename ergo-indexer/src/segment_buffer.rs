@@ -35,10 +35,12 @@
 //! persist all changes in a single redb pass at the end of the block.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::VlqReader;
 use redb::{ReadableTable, Table};
+use tracing::warn;
 
 use crate::address::IndexedAddress;
 use crate::error::IndexerError;
@@ -53,6 +55,73 @@ pub(crate) type StagedSpills = HashMap<Digest32, Segment>;
 /// Set of spill segment ids that must be deleted from `SEGMENTS` at the
 /// end of a rollback (merge-back removes one spill per underflowed pop).
 pub(crate) type DeletedSpills = HashSet<Digest32>;
+
+/// CUMULATIVE process-lifetime count of secondary-index (template / token)
+/// sign-flips SKIPPED because of a topology-drift gap — a `+gi` entry missing
+/// from a derived secondary segment (see [`tolerate_secondary_drift`]). Exposed
+/// via [`secondary_index_drift_skips`] as a diagnostic / metric only. It is NOT a
+/// live "index degraded" bit: it resets on restart and is NOT cleared by a
+/// successful in-process self-repair rebuild, so a non-zero value can outlive the
+/// degradation it counted. The LIVE degraded / completed-with-skips state lives in
+/// the durable `INDEXER_META` markers instead — `IndexerStore::secondary_repair_pending`
+/// (rebuild owed / in progress) and `IndexerStore::secondary_repair_skipped`
+/// (undecodable boxes a completed rebuild had to omit).
+static SECONDARY_DRIFT_SKIPS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of secondary-index sign-flips skipped (template / token topology
+/// drift) since process start. Cumulative diagnostic counter — NOT a live health
+/// bit (a successful self-repair does not reset it). Use the durable repair
+/// marker / skipped-box count for live index state. Consensus is unaffected
+/// either way.
+pub fn secondary_index_drift_skips() -> u64 {
+    SECONDARY_DRIFT_SKIPS.load(Ordering::Relaxed)
+}
+
+/// Tolerate a topology-drift gap on a DERIVED secondary index
+/// (`IndexedTemplate` / `IndexedToken`): a single missing `+gi` entry in a
+/// reindex-reproducible secondary segment must NOT halt the whole indexer.
+/// The indexer is non-consensus data fully rebuildable by reindex, and a stray
+/// gap in a *shared* secondary index (e.g. an ancient box first spent at its
+/// storage-rent eligibility height, whose template entry predates current
+/// indexing code) should degrade that one lookup, not freeze `/blockchain/*`
+/// for everyone. This mirrors the reference node's `ExtraIndexer`, which logs
+/// and continues when `Segment.findAndModBox` misses.
+///
+/// ONLY [`IndexerError::SegmentEntryMissing`] — the specific "no entry of
+/// either sign present" gap — is swallowed. Every other error still propagates
+/// and halts, INCLUDING the sibling [`IndexerError::SegmentTopologyError`]
+/// (double-flip, missing spill row, pop mismatch) and DB decode / row-length /
+/// redb errors — so genuine structural corruption is never masked. The PRIMARY
+/// address index deliberately does NOT use this wrapper: a missing entry there
+/// is a real balance-index inconsistency and stays fatal.
+///
+/// Returns `Ok(true)` when the flip was skipped (index now degraded),
+/// `Ok(false)` when it succeeded. On a skip it bumps the degraded counter and
+/// logs a loud WARN naming the index kind, parent id and global index.
+pub(crate) fn tolerate_secondary_drift(
+    index_kind: &'static str,
+    parent_id: &Digest32,
+    global_index: i64,
+    flip_result: Result<(), IndexerError>,
+) -> Result<bool, IndexerError> {
+    match flip_result {
+        Ok(()) => Ok(false),
+        Err(IndexerError::SegmentEntryMissing { detail }) => {
+            SECONDARY_DRIFT_SKIPS.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                index = index_kind,
+                parent = %hex::encode(parent_id.as_bytes()),
+                global_index,
+                detail,
+                "secondary-index sign-flip skipped (topology drift) — secondary \
+                 index DEGRADED; this template/token's box queries may be \
+                 incomplete until a reindex (consensus is unaffected)"
+            );
+            Ok(true)
+        }
+        Err(other) => Err(other),
+    }
+}
 
 /// Append `+global_index` to a parent's box-segment head and spill
 /// the oldest 512 entries if the head crosses `SEGMENT_THRESHOLD`. May
@@ -233,23 +302,34 @@ fn flip_helper(
         FlipDirection::Apply => "positive",
         FlipDirection::Rollback => "negative",
     };
-    let detail = if saw_opposite_sign {
-        format!(
-            "segment_buffer: cannot flip global_index {target} in parent {}: entry exists but every copy is already {} (double-flip)",
-            hex::encode(parent_id.as_bytes()),
-            match direction {
-                FlipDirection::Apply => "negative",
-                FlipDirection::Rollback => "positive",
-            },
-        )
+    if saw_opposite_sign {
+        // The entry exists but every copy is already in the requested sign:
+        // an Apply/Rollback ran for this target without its inverse between
+        // them. A genuine internal inconsistency — stays fatal on EVERY index
+        // (not tolerated by `tolerate_secondary_drift`).
+        Err(IndexerError::SegmentTopologyError {
+            detail: format!(
+                "segment_buffer: cannot flip global_index {target} in parent {}: entry exists but every copy is already {} (double-flip)",
+                hex::encode(parent_id.as_bytes()),
+                match direction {
+                    FlipDirection::Apply => "negative",
+                    FlipDirection::Rollback => "positive",
+                },
+            ),
+        })
     } else {
-        format!(
-            "segment_buffer: cannot flip global_index {target} in parent {}: no {} entry found and no entry of either sign present (topology drift)",
-            hex::encode(parent_id.as_bytes()),
-            direction_label,
-        )
-    };
-    Err(IndexerError::SegmentTopologyError { detail })
+        // No entry of either sign anywhere — the entry was never appended (or
+        // was lost) in this parent's segment. A DISTINCT variant so the DERIVED
+        // template/token indexes can tolerate this one reindex-reproducible gap
+        // (`tolerate_secondary_drift`); the PRIMARY address index still halts.
+        Err(IndexerError::SegmentEntryMissing {
+            detail: format!(
+                "segment_buffer: cannot flip global_index {target} in parent {}: no {} entry found and no entry of either sign present (topology drift)",
+                hex::encode(parent_id.as_bytes()),
+                direction_label,
+            ),
+        })
+    }
 }
 
 fn entry_sign_matches(entry: i64, direction: FlipDirection) -> bool {
@@ -450,6 +530,64 @@ mod tests {
 
     fn fresh_addr(seed: u8) -> IndexedAddress {
         IndexedAddress::empty(Digest32::from_bytes([seed; 32]))
+    }
+
+    // ----- secondary-index degrade-not-halt (topology-drift tolerance) -----
+
+    #[test]
+    fn tolerate_secondary_drift_swallows_topology_but_propagates_other_errors() {
+        let parent = Digest32::from_bytes([0x84; 32]);
+
+        // A successful flip is not a skip.
+        assert!(
+            !tolerate_secondary_drift("template", &parent, 1, Ok(())).unwrap(),
+            "Ok flip must report not-skipped",
+        );
+
+        // The no-entry drift (`SegmentEntryMissing`) is swallowed (skipped,
+        // index degraded) and bumps the process-wide degraded counter
+        // (monotonic — assert a lower bound so the global static stays race-safe
+        // under parallel tests).
+        let before = secondary_index_drift_skips();
+        let drift = Err(IndexerError::SegmentEntryMissing {
+            detail: "segment_buffer: cannot flip global_index 17620319 ... topology drift".into(),
+        });
+        assert!(
+            tolerate_secondary_drift("token", &parent, 17_620_319, drift).unwrap(),
+            "a no-entry drift flip must be reported as skipped, not propagated",
+        );
+        assert!(
+            secondary_index_drift_skips() > before,
+            "a skipped flip must increment the degraded counter",
+        );
+
+        // The SIBLING SegmentTopologyError (double-flip / missing-spill /
+        // pop-mismatch) is genuine structural corruption — it must STILL
+        // propagate (halt), even though it is "topology"-flavoured. This is the
+        // narrowing guard: only the missing-entry variant is tolerated.
+        let double_flip: Result<(), IndexerError> = Err(IndexerError::SegmentTopologyError {
+            detail: "segment_buffer: ... already negative (double-flip)".into(),
+        });
+        assert!(
+            matches!(
+                tolerate_secondary_drift("template", &parent, 3, double_flip),
+                Err(IndexerError::SegmentTopologyError { .. })
+            ),
+            "double-flip / missing-spill SegmentTopologyError must stay fatal",
+        );
+
+        // Every other error also still propagates — genuine corruption (DB
+        // decode, missing balance, etc.) is never masked by the tolerance.
+        let other: Result<(), IndexerError> = Err(IndexerError::AddressBalanceMissing {
+            tree_hash: "deadbeef".into(),
+        });
+        assert!(
+            matches!(
+                tolerate_secondary_drift("template", &parent, 2, other),
+                Err(IndexerError::AddressBalanceMissing { .. })
+            ),
+            "non-drift errors must stay fatal (propagate)",
+        );
     }
 
     // ----- happy path -----
@@ -856,11 +994,11 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            IndexerError::SegmentTopologyError { detail } => assert!(
+            IndexerError::SegmentEntryMissing { detail } => assert!(
                 detail.contains("topology drift") && detail.contains("no positive entry found"),
                 "got: {detail}"
             ),
-            other => panic!("expected SegmentTopologyError, got {other:?}"),
+            other => panic!("expected SegmentEntryMissing, got {other:?}"),
         }
     }
 

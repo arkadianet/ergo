@@ -8,6 +8,7 @@
 //! astronomically-low probability.
 
 use redb::ReadTransaction;
+use redb::Table;
 #[cfg(test)]
 use redb::WriteTransaction;
 
@@ -36,6 +37,18 @@ pub(crate) fn write_spill(
     let bytes = w.result();
     let mut table = write_txn.open_table(SEGMENTS)?;
     table.insert(segment_id.as_bytes().as_slice(), bytes.as_slice())?;
+    Ok(())
+}
+
+/// Remove a spill segment row from an already-open `SEGMENTS` table. Used by
+/// the secondary-index rebuild's Phase 0 wipe to drop a template/token parent's
+/// old box-segment spills (the shared address/tx spills are left untouched).
+/// Removing an absent row is a no-op, which keeps the wipe idempotent.
+pub(crate) fn remove_spill(
+    table: &mut Table<&[u8], &[u8]>,
+    segment_id: &Digest32,
+) -> Result<(), IndexerError> {
+    table.remove(segment_id.as_bytes().as_slice())?;
     Ok(())
 }
 

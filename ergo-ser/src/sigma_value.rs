@@ -638,8 +638,15 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
         let (sub_tree, _) = crate::ergo_tree::read_ergo_tree_tracking_wrap(r)?;
         // A future-version inner tree is HARD-rejected (Scala's
         // `VersionContext.withVersions` throws a `SerializerException` the enclosing
-        // tree does not catch). `read_ergo_tree` wrapped it leniently; reject here.
-        crate::ergo_tree::check_tree_version_supported(&sub_tree)?;
+        // tree does not catch). `read_ergo_tree` wrapped it leniently; reject here —
+        // UNLESS the reader is decoding a TRUSTED, already-validated stored box
+        // (`VlqReader::trusted`), where a legacy high-version opaque NESTED tree
+        // must round-trip exactly like the top-level case (the indexer re-reading
+        // its own `INDEXED_BOX` rows). The structural parse above already advanced
+        // the reader, so only the acceptance check is skipped.
+        if !r.is_trusted() {
+            crate::ergo_tree::check_tree_version_supported(&sub_tree)?;
+        }
     } else {
         // SIZELESS nested box script (an `SBox` constant's inner ErgoTree). This
         // mirrors Scala `deserializeErgoTree` for `sizeOpt = None`, where the
@@ -663,7 +670,7 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
         // Size-delimited nested trees are kept opaque above — Scala wraps an
         // inner failure as `UnparsedErgoTree`, rejected only on spend, which the
         // evaluator's spend-path gate handles.
-        if version != 0 {
+        if version != 0 && !r.is_trusted() {
             return Err(ReadError::InvalidData(format!(
                 "nested box script: ErgoTree version {version} requires the size bit (CheckHeaderSizeBit, rule 1012)"
             )));
@@ -2009,6 +2016,39 @@ mod tests {
         assert!(r.is_empty(), "box-field boundary must land exactly at end");
         assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
         roundtrip_value(&SigmaType::SBox, &val);
+    }
+
+    /// A nested `SBox` constant whose inner ErgoTree is a HIGH-VERSION
+    /// size-delimited (opaque) tree (header `0xcd` = version 5, has_size) is
+    /// HARD-rejected by the strict consensus reader (`check_tree_version_supported`
+    /// inside `skip_ergo_tree`), but a TRUSTED reader accepts it. This is the
+    /// nested mirror of the top-level legacy-box case: a stored box can carry such
+    /// a tree nested in a register / `SBox` constant / context-extension, and the
+    /// indexer (re-reading its OWN already-validated data with a trusted reader)
+    /// must round-trip it instead of halting the rebuild. The trusted flag rides
+    /// on the reader, so it reaches this nested gate without any param threading.
+    #[test]
+    fn sbox_constant_high_version_opaque_tree_strict_rejects_trusted_accepts() {
+        // Real nested-tree bytes shape from mainnet box gi 5918565: header 0xcd
+        // (version 5, has_size), declared size 7, 7 opaque body bytes.
+        let tree = hex::decode("cd07021a8e6f59fd4a").unwrap();
+        let box_bytes = sbox_constant_bytes(&tree);
+
+        // Strict (untrusted) consensus reader rejects the future-version tree.
+        let mut strict = VlqReader::new(&box_bytes);
+        read_value(&mut strict, &SigmaType::SBox)
+            .expect_err("strict reader must reject a version-5 nested box-constant tree");
+
+        // Trusted reader (already-validated stored data) accepts it, landing the
+        // box-field boundary exactly.
+        let mut trusted = VlqReader::new(&box_bytes).trusted();
+        let val = read_value(&mut trusted, &SigmaType::SBox)
+            .expect("trusted reader must accept a stored high-version nested opaque tree");
+        assert!(
+            trusted.is_empty(),
+            "box-field boundary must land exactly at end"
+        );
+        assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
     }
 
     /// A nested `SBox`-constant whose inner script is a sizeless Boolean-root tree

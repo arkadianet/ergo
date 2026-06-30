@@ -41,8 +41,8 @@ use crate::address::IndexedAddress;
 use crate::apply::{candidate_token_deltas, flush_addresses, load_address_into_map, IndexerBlock};
 use crate::error::{BoxMissingContext, IndexerError};
 use crate::segment_buffer::{
-    flush_staged_spills, pop_box_entry, pop_tx_entry, unflip_box_segment_entry, DeletedSpills,
-    StagedSpills,
+    flush_staged_spills, pop_box_entry, pop_tx_entry, tolerate_secondary_drift,
+    unflip_box_segment_entry, DeletedSpills, StagedSpills,
 };
 use crate::segment_id::{token_unique_id, tree_hash_from_bytes};
 use crate::ser::boxes::{deserialize_indexed_box, serialize_indexed_box};
@@ -154,6 +154,9 @@ fn rollback_one_block_inner(
     block_height: i32,
 ) -> Result<IndexerMeta, IndexerError> {
     let write_txn = store.begin_write()?;
+    // Mirror apply: set if any secondary unflip is skipped on a drift, flushed
+    // to the sticky repair marker before commit.
+    let mut secondary_skipped = false;
 
     // Read + remove the undo entry up front. If it's missing the chain
     // already rejects the reorg as too deep, so failing loudly here
@@ -506,13 +509,25 @@ fn rollback_one_block_inner(
                             &mut touched_templates,
                             template_hash,
                         )?;
-                        unflip_box_segment_entry(
+                        // Secondary index — mirror the apply-side
+                        // degrade-not-halt: if the apply skipped this
+                        // template's flip on a drift gap, the rollback unflip
+                        // would otherwise halt here; tolerate it the same way.
+                        let unflip = unflip_box_segment_entry(
                             &template.template_hash,
                             &mut template.segment,
                             spent_global_index,
                             &mut staged_spills,
                             &segments_table,
-                        )?;
+                        );
+                        if tolerate_secondary_drift(
+                            "template",
+                            &template.template_hash,
+                            spent_global_index,
+                            unflip,
+                        )? {
+                            secondary_skipped = true;
+                        }
                     }
 
                     // Token box-segment sign-flip rollback (mirror of
@@ -526,13 +541,22 @@ fn rollback_one_block_inner(
                             token.token_id,
                         )? {
                             let parent_id = token_unique_id(&record.token_id);
-                            unflip_box_segment_entry(
+                            // Secondary index — degrade-not-halt on drift.
+                            let unflip = unflip_box_segment_entry(
                                 &parent_id,
                                 &mut record.segment,
                                 spent_global_index,
                                 &mut staged_spills,
                                 &segments_table,
-                            )?;
+                            );
+                            if tolerate_secondary_drift(
+                                "token",
+                                &parent_id,
+                                spent_global_index,
+                                unflip,
+                            )? {
+                                secondary_skipped = true;
+                            }
                         }
                     }
 
@@ -631,6 +655,9 @@ fn rollback_one_block_inner(
         global_box_index: undo_entry.prev_global_box_index,
     };
     meta_io::write_meta(&write_txn, &next)?;
+    if secondary_skipped {
+        meta_io::set_secondary_repair_pending(&write_txn)?;
+    }
 
     write_txn.commit()?;
 

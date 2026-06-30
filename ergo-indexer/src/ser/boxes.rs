@@ -46,6 +46,15 @@ pub fn read_indexed_box(r: &mut VlqReader) -> Result<IndexedErgoBox, ReadError> 
     })?;
     let spending_height = read_opt(r, |r| r.get_i32())?;
     let spending_proof = read_opt(r, read_spending_proof)?;
+    // Box read. When `r` is a TRUSTED reader (set by `deserialize_indexed_box`,
+    // the only entrypoint for stored rows) the box-script acceptance gates are
+    // skipped for the top-level tree AND any tree nested in a register / `SBox`
+    // constant / spending-proof extension — because `INDEXED_BOX` rows are boxes
+    // the node already validated and stored, and a legacy row can carry a
+    // high-version opaque tree the consensus gates hard-reject. Re-validating
+    // consensus while reading our own stored data makes the row (and every
+    // segment that references it, and the rebuild that scans it) unreadable. The
+    // structural parse is unchanged; only the acceptance checks are gated.
     let box_data = read_ergo_box(r)?;
     let global_index = r.get_i64()?;
     Ok(IndexedErgoBox {
@@ -65,7 +74,13 @@ pub fn serialize_indexed_box(b: &IndexedErgoBox) -> Result<Vec<u8>, ReadError> {
 }
 
 pub fn deserialize_indexed_box(bytes: &[u8]) -> Result<IndexedErgoBox, ReadError> {
-    let mut r = VlqReader::new(bytes);
+    // TRUSTED reader: `INDEXED_BOX` rows are the node's OWN already-validated
+    // stored boxes, never untrusted external bytes (every write originates from a
+    // typed, consensus-validated block transaction). The trusted flag rides on
+    // the reader, so the box-script acceptance gates are skipped for the
+    // top-level tree and every nested tree reached through this same reader. This
+    // is the single entrypoint that decodes stored box rows.
+    let mut r = VlqReader::new(bytes).trusted();
     let b = read_indexed_box(&mut r)?;
     if !r.is_empty() {
         return Err(ReadError::InvalidData(format!(
@@ -182,5 +197,45 @@ mod tests {
         let mut r = VlqReader::new(&bytes);
         let err = read_indexed_box(&mut r).expect_err("must reject");
         assert!(matches!(err, ReadError::InvalidData(_)));
+    }
+
+    #[test]
+    fn reads_legacy_high_version_opaque_tree_box_leniently() {
+        // A REAL mainnet `INDEXED_BOX` row (global index 5918565) whose box
+        // carries a size-delimited ErgoTree with header version 5 — stored by a
+        // legacy node before the consensus version-cap gates existed. The strict
+        // consensus box reader hard-rejects `version > MAX_SUPPORTED_TREE_VERSION`
+        // even for an opaque (size-delimited) tree, but the indexer must read its
+        // own already-validated stored data leniently. Regression: the
+        // secondary-index rebuild halted mid-scan ("ErgoTree version 5 exceeds the
+        // maximum supported version 3") when it re-read this box through the
+        // strict reader.
+        let row = hex::decode(
+            "a8ce42017483c3811372923234938d227ee5796c13d631965f2ab9d82a0cde19\
+             34d9c59f01b4f7c2010100017f0300c0843dcd07021a8e6f59fd4a92a7210000\
+             3a8555a63904527a70b4f1896d4c265dff86152db5837820398c5531db143ac2\
+             00cabdd205",
+        )
+        .unwrap();
+
+        // The indexer's lenient deserializer reads it fine.
+        let b = deserialize_indexed_box(&row)
+            .expect("indexer must read a stored high-version opaque-tree box");
+        assert_eq!(b.global_index, 5918565);
+        // Header byte 0xcd → version (low 3 bits) = 5, size bit (0x08) set.
+        let tree_hdr = b.box_data.candidate.ergo_tree_bytes()[0];
+        assert_eq!(tree_hdr & 0x07, 5, "tree header version must be 5");
+        assert!(
+            tree_hdr & 0x08 != 0,
+            "tree must be size-delimited (has_size)"
+        );
+        assert!(b.is_spent());
+
+        // And the STRICT consensus box reader STILL rejects the same box — the
+        // lenient path is additive and never weakens consensus parsing.
+        let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&b.box_data).unwrap();
+        let mut r = VlqReader::new(&box_bytes);
+        ergo_ser::ergo_box::read_ergo_box(&mut r)
+            .expect_err("strict consensus reader must still reject the version-5 tree");
     }
 }

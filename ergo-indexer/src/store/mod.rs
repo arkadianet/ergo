@@ -169,6 +169,29 @@ impl IndexerStore {
         meta::read_meta(&read_txn)
     }
 
+    /// Whether the derived template/token segments are flagged as degraded and
+    /// need a chain-free rebuild (set when a secondary flip was skipped).
+    pub fn secondary_repair_pending(&self) -> Result<bool, IndexerError> {
+        let read_txn = self.db.begin_read()?;
+        meta::read_secondary_repair_pending(&read_txn)
+    }
+
+    /// Rebuild checkpoint: `None` = not started (Phase 0 wipe due), `Some(gi)` =
+    /// resume Phase 1 from `gi`.
+    pub fn secondary_repair_next_gi(&self) -> Result<Option<u64>, IndexerError> {
+        let read_txn = self.db.begin_read()?;
+        meta::read_secondary_repair_next_gi_opt(&read_txn)
+    }
+
+    /// Count of boxes the last/current rebuild skipped because their primary row
+    /// could not be decoded (genuine corruption). `0` normally; a non-zero value
+    /// that persists after `secondary_repair_pending()` is false means the
+    /// repaired template/token index is knowingly incomplete for that many boxes.
+    pub fn secondary_repair_skipped(&self) -> Result<u64, IndexerError> {
+        let read_txn = self.db.begin_read()?;
+        meta::read_secondary_repair_skipped(&read_txn)
+    }
+
     /// Look up the undo entry recorded for `height`. `None` means "no
     /// entry" — caller must classify that as `IndexerError::UndoMissing`
     /// when in rollback context.

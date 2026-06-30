@@ -41,6 +41,20 @@ pub struct VlqReader<'a> {
     /// by `isV3OrLaterErgoTreeVersion`. Set by the ErgoTree body parser around the
     /// body (and segregated constants); `None` defaults to the v6/activated set.
     ergo_tree_version: Option<u8>,
+    /// Trusted (already-validated) source: when `true`, the box-script ACCEPTANCE
+    /// gates (ErgoTree version cap / size-bit / method-resolution / sigma-root) are
+    /// skipped — for the TOP-LEVEL box tree and for any tree NESTED in a register,
+    /// `SBox` constant, or context-extension constant reached through this reader.
+    /// `false` (the default) is strict consensus parsing of untrusted bytes.
+    ///
+    /// Set ONLY when re-reading the node's OWN already-validated stored data (the
+    /// derived indexer's `INDEXED_BOX` rows, via `deserialize_indexed_box`): a
+    /// legacy row can carry a high-version size-delimited (opaque) tree that the
+    /// consensus reader hard-rejects, and re-validating consensus while reading
+    /// stored data makes the row — and the rebuild that scans it — unreadable.
+    /// The structural parse is unchanged; only the acceptance checks are gated.
+    /// NEVER set this on a reader fed untrusted block/transaction bytes.
+    trusted: bool,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -106,7 +120,30 @@ impl<'a> VlqReader<'a> {
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
             ergo_tree_version: None,
+            trusted: false,
         }
+    }
+
+    /// Mark this reader as decoding a TRUSTED, already-validated source (see the
+    /// [`trusted`](Self::trusted) field). The flag rides on the reader, so it
+    /// applies to every nested parse driven by this same reader. Returns `self`
+    /// for use at construction (`VlqReader::new(bytes).trusted()`).
+    #[must_use]
+    pub fn trusted(mut self) -> Self {
+        self.trusted = true;
+        self
+    }
+
+    /// Set the trusted flag on an already-constructed reader. Used to PROPAGATE
+    /// trust into a mid-parse sub-reader (e.g. the size-delimited ErgoTree body
+    /// view), so the whole nested parse of a trusted stored box stays lenient.
+    pub fn set_trusted(&mut self, trusted: bool) {
+        self.trusted = trusted;
+    }
+
+    /// Whether this reader is decoding a trusted, already-validated source.
+    pub fn is_trusted(&self) -> bool {
+        self.trusted
     }
 
     pub fn position(&self) -> usize {
