@@ -16,8 +16,32 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-01
+
+A self-repair release for the derived secondary index, a native wallet
+retrieve-rewards sweep, and consensus-parity fixes since v0.4.0. As always for
+this node: re-verify its verdicts against the Scala reference node before relying
+on it for funds.
+
 ### Fixed
 
+- **Indexer: degrade-not-halt + chain-free self-repair of the derived secondary
+  index (#147).** Every indexer-enabled node halted deterministically at a fixed
+  mainnet height reporting `db-corruption` — not real corruption: an ancient box
+  whose `+gi` creation entry was missing from the shared template segment tripped
+  a strict consistency check on its first spend (at its storage-rent eligibility
+  height), so the same shared code stopped every indexer node at the same height.
+  The indexer now tolerates that specific drift instead of halting (the address
+  index stays strict; structural errors stay fatal), sets a sticky repair marker,
+  and runs a chain-free rebuild that re-derives the template/token segments from
+  the intact primary tables — byte-identical to a fresh linear index — so a node
+  recovers automatically on a binary update + restart, with no reindex. Also adds
+  lenient `trusted` reads of the node's OWN already-validated stored boxes (legacy
+  high-version size-delimited trees, top-level and nested) so reads and the
+  rebuild no longer re-reject them; a skip-not-halt fallback with a durable
+  skipped-box count for genuinely-undecodable rows; and an interruptible rebuild
+  that drains promptly on shutdown and resumes from its checkpoint. Consensus,
+  validation, and chain state are untouched (derived `indexer.redb` only).
 - **Consensus: reject a box script whose deserialized root is not `SigmaProp`
   (`CheckDeserializedScriptIsSigmaProp`, validation rule 1001).** The lenient
   `read_ergo_tree` codec accepted a sizeless ErgoTree whose root statically types
@@ -35,6 +59,11 @@ infrastructure.
 
 ### Added
 
+- **API: native `/api/v1/wallet/rewards/retrieve` to sweep matured mining rewards
+  into a single P2PK output (#146).** EIP-27-correct (burns the re-emission token
+  and pays the re-emission contract where required) so the consolidation can never
+  produce a consensus-invalid reward transaction; input-pinned, capped, and
+  conflict / relay-floor hardened, with an operator UI button.
 - **Test: a `reduce` eval/cost differential surface in `ergo-difftest`.** Extends
   the JVM-oracle fuzzer to deserialize an ErgoTree, reduce its root to the
   on-chain sigma proposition + raw JIT cost under a minimal dummy context, and
