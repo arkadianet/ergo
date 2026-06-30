@@ -36,6 +36,7 @@ use crate::error::IndexerError;
 use crate::scratch::BlockApplyScratch;
 use crate::segment_buffer::{
     append_box_entry, append_tx_entry, flip_box_segment_entry, flush_staged_spills,
+    tolerate_secondary_drift,
 };
 use crate::segment_id::{token_unique_id, tree_hash_from_bytes};
 use crate::ser::boxes::{deserialize_indexed_box, write_indexed_box};
@@ -282,12 +283,22 @@ pub fn apply_block_with_scratch(
                             &mut scratch.touched_templates,
                             template_hash,
                         )?;
-                        flip_box_segment_entry(
+                        // Secondary index: a topology-drift gap degrades this
+                        // template's box queries but must not halt the indexer
+                        // (see `tolerate_secondary_drift`). All other errors
+                        // still propagate.
+                        let flip = flip_box_segment_entry(
                             &template.template_hash,
                             &mut template.segment,
                             spent_global_index,
                             &mut scratch.staged_spills,
                             &segments_table,
+                        );
+                        tolerate_secondary_drift(
+                            "template",
+                            &template.template_hash,
+                            spent_global_index,
+                            flip,
                         )?;
                     }
 
@@ -305,12 +316,19 @@ pub fn apply_block_with_scratch(
                             token.token_id,
                         )? {
                             let parent_id = token_unique_id(&record.token_id);
-                            flip_box_segment_entry(
+                            // Secondary index — degrade-not-halt on drift.
+                            let flip = flip_box_segment_entry(
                                 &parent_id,
                                 &mut record.segment,
                                 spent_global_index,
                                 &mut scratch.staged_spills,
                                 &segments_table,
+                            );
+                            tolerate_secondary_drift(
+                                "token",
+                                &parent_id,
+                                spent_global_index,
+                                flip,
                             )?;
                         }
                     }

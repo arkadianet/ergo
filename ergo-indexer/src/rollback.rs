@@ -41,8 +41,8 @@ use crate::address::IndexedAddress;
 use crate::apply::{candidate_token_deltas, flush_addresses, load_address_into_map, IndexerBlock};
 use crate::error::{BoxMissingContext, IndexerError};
 use crate::segment_buffer::{
-    flush_staged_spills, pop_box_entry, pop_tx_entry, unflip_box_segment_entry, DeletedSpills,
-    StagedSpills,
+    flush_staged_spills, pop_box_entry, pop_tx_entry, tolerate_secondary_drift,
+    unflip_box_segment_entry, DeletedSpills, StagedSpills,
 };
 use crate::segment_id::{token_unique_id, tree_hash_from_bytes};
 use crate::ser::boxes::{deserialize_indexed_box, serialize_indexed_box};
@@ -506,12 +506,22 @@ fn rollback_one_block_inner(
                             &mut touched_templates,
                             template_hash,
                         )?;
-                        unflip_box_segment_entry(
+                        // Secondary index — mirror the apply-side
+                        // degrade-not-halt: if the apply skipped this
+                        // template's flip on a drift gap, the rollback unflip
+                        // would otherwise halt here; tolerate it the same way.
+                        let unflip = unflip_box_segment_entry(
                             &template.template_hash,
                             &mut template.segment,
                             spent_global_index,
                             &mut staged_spills,
                             &segments_table,
+                        );
+                        tolerate_secondary_drift(
+                            "template",
+                            &template.template_hash,
+                            spent_global_index,
+                            unflip,
                         )?;
                     }
 
@@ -526,12 +536,19 @@ fn rollback_one_block_inner(
                             token.token_id,
                         )? {
                             let parent_id = token_unique_id(&record.token_id);
-                            unflip_box_segment_entry(
+                            // Secondary index — degrade-not-halt on drift.
+                            let unflip = unflip_box_segment_entry(
                                 &parent_id,
                                 &mut record.segment,
                                 spent_global_index,
                                 &mut staged_spills,
                                 &segments_table,
+                            );
+                            tolerate_secondary_drift(
+                                "token",
+                                &parent_id,
+                                spent_global_index,
+                                unflip,
                             )?;
                         }
                     }

@@ -11,7 +11,7 @@
 //! - `HashDerivation { context, source: WriteError }` for id/hash passes
 //! - typed domain variants (`HeightMismatch`, `HeaderMismatch`,
 //!   `BoxMissing`, `TxMissing`, `AddressBalanceMissing`,
-//!   `SegmentTopologyError`, `StorageRentDesync`,
+//!   `SegmentTopologyError`, `SegmentEntryMissing`, `StorageRentDesync`,
 //!   `SpillMissingFromParent`, `UndoEntryMalformed`,
 //!   `NothingToRollback`)
 //! - typed boot/schema variants (`SchemaTableMissing`,
@@ -285,6 +285,9 @@ fn halt_reason_domain_divergence_routes_to_db_corruption() {
         },
         IndexerError::SegmentTopologyError {
             detail: "topology".into(),
+        },
+        IndexerError::SegmentEntryMissing {
+            detail: "no entry of either sign present (topology drift)".into(),
         },
         IndexerError::StorageRentDesync {
             creation_height: 1,

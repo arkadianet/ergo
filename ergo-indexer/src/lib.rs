@@ -48,6 +48,7 @@ pub use error::IndexerError;
 pub use handle::IndexerHandle;
 pub use rollback::rollback_one_block;
 pub use scratch::BlockApplyScratch;
+pub use segment_buffer::secondary_index_drift_skips;
 pub use store::{
     IndexerMeta, IndexerStore, OpenOutcome, UndoEntry, INDEXER_SCHEMA_VERSION, ROLLBACK_WINDOW,
 };
