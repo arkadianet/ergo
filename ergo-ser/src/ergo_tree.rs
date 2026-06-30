@@ -992,6 +992,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             let body_view = r.data_slice(body_start, body_start + r.remaining());
             let mut inner = VlqReader::new(body_view);
             inner.set_position_limit(Some(body_budget));
+            // Propagate trust into the body sub-reader so a high-version tree
+            // nested in this size-delimited tree's body / segregated constants
+            // (an `SBox` constant reached via `skip_ergo_tree`) stays lenient when
+            // the outer reader is decoding a trusted stored box. No effect on the
+            // (default, untrusted) consensus path.
+            inner.set_trusted(r.is_trusted());
             // Gate embeddable type codes (e.g. SUnsignedBigInt, v6-only) against
             // this tree's header version, like Scala's version-scoped
             // `getEmbeddableType`. Covers segregated constants + the body.
@@ -2905,5 +2911,59 @@ mod tests {
                 "{hex_str} must re-serialize byte-identical"
             );
         }
+    }
+
+    /// Residual surfaced in review: a stored box whose TOP-LEVEL tree is
+    /// size-delimited (so it parses through a fresh body sub-reader) but whose
+    /// BODY carries an inline `SBox` constant with a FUTURE-version nested tree.
+    /// The body sub-reader must inherit `trusted` from the outer reader, else the
+    /// nested `skip_ergo_tree` gate hard-rejects even the indexer's own
+    /// already-validated stored data. A trusted read must round-trip; the strict
+    /// consensus read must still reject.
+    #[test]
+    fn size_delimited_body_nested_high_version_sbox_trusted_vs_strict() {
+        // Inner box whose proposition is a v5 (future-version) size-delimited tree
+        // (header 0xcd = version 5, has_size; size 7; 7 opaque body bytes).
+        let inner_v5_tree = hex::decode("cd07021a8e6f59fd4a").unwrap();
+        let inner_box = {
+            let mut w = VlqWriter::new();
+            w.put_u64(1_000_000); // value
+            w.put_bytes(&inner_v5_tree); // proposition
+            w.put_u32(100); // creation height
+            w.put_u8(0); // token count
+            w.put_u8(0); // register count
+            w.put_bytes(&[0u8; 32]); // tx id
+            w.put_u16(0); // output index
+            w.result()
+        };
+        // Top-level size-delimited tree whose body is an inline SBox constant
+        // carrying that inner box.
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            constants: vec![],
+            body: Expr::Const {
+                tpe: crate::sigma_type::SigmaType::SBox,
+                val: crate::sigma_value::SigmaValue::OpaqueBoxBytes(inner_box),
+            },
+        };
+        let bytes = {
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &tree).unwrap();
+            w.result()
+        };
+
+        // Strict (untrusted) consensus reader: the nested v5 tree inside the
+        // size-delimited body hard-rejects.
+        let mut strict = VlqReader::new(&bytes);
+        read_ergo_tree(&mut strict).expect_err(
+            "strict must reject a nested high-version tree inside a size-delimited body",
+        );
+
+        // Trusted reader: the body sub-reader inherits trust, so it round-trips.
+        let mut trusted = VlqReader::new(&bytes).trusted();
+        read_ergo_tree(&mut trusted)
+            .expect("trusted must accept a stored size-delimited body with a nested high-version tree");
     }
 }
