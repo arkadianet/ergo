@@ -770,6 +770,56 @@ paths:
                 $ref: '#/components/schemas/NativeWalletError'
       security:
       - ApiKeyAuth: []
+  /api/v1/wallet/rewards/retrieve:
+    post:
+      tags:
+      - wallet
+      summary: |-
+        `POST /api/v1/wallet/rewards/retrieve` — sweep all matured miner-reward boxes
+        into one P2PK output (the wallet change address, or `destination`), in one
+        EIP-27-correct tx: the re-emission token is burned and its ERG routed to
+        pay-to-reemission, other tokens are carried through. `dryRun` returns the
+        breakdown without signing/submitting. `Cache-Control: no-store`.
+      operationId: retrieve_rewards
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetrieveRewardsRequest'
+        required: true
+      responses:
+        '200':
+          description: Preview (dryRun) or submitted sweep
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrieveRewardsResultDto'
+        '400':
+          description: Malformed body / no matured rewards / too many token types
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '403':
+          description: Missing/invalid api key (route-layer gate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: Wallet locked (execute)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: insufficient_funds / change_address_untracked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
   /api/v1/wallet/status:
     get:
       tags:
@@ -3116,6 +3166,108 @@ components:
           type: string
           description: Wallet password.
       additionalProperties: false
+    RetrieveRewardsRequest:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/rewards/retrieve` request. Sweeps all matured
+        (Confirmed) miner-reward boxes into one P2PK output, burning the re-emission
+        token and routing its ERG to pay-to-reemission.
+      properties:
+        boxIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: |-
+            Exact reward box ids (hex) to sweep — PIN the input set returned by a
+            preview so execute spends the same boxes the user confirmed. When omitted,
+            the server selects the oldest matured reward boxes (up to the per-sweep
+            cap). Every id MUST still be a matured, unspent miner-reward box or the
+            request is rejected.
+        destination:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Destination for the swept ERG + non-re-emission tokens. MUST be a tracked
+            wallet address (the sweep routes funds there as change). `null`/omitted →
+            the wallet's current change address.
+        dryRun:
+          type: boolean
+          description: |-
+            `true` → build + report the breakdown WITHOUT signing/submitting (preview).
+            `false` → execute: sign, self-verify (incl. EIP-27), and submit. Unknown
+            keys are rejected (`deny_unknown_fields`) so a misspelled `dryRun` cannot
+            silently execute a sweep the caller intended only to preview.
+        fee:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Miner fee in nanoErg (decimal string). `null`/omitted → the wallet default
+            minimum fee.
+      additionalProperties: false
+    RetrieveRewardsResultDto:
+      type: object
+      description: |-
+        `POST /api/v1/wallet/rewards/retrieve` response (preview or executed). All
+        nanoErg fields are decimal strings.
+      required:
+      - boxCount
+      - boxIds
+      - remaining
+      - grossErg
+      - reemissionPaid
+      - fee
+      - netToDestination
+      - otherTokens
+      - destination
+      properties:
+        boxCount:
+          type: integer
+          format: int32
+          description: Matured reward boxes swept.
+          minimum: 0
+        boxIds:
+          type: array
+          items:
+            type: string
+          description: |-
+            The exact reward box ids (hex) this sweep spends. Pass these back as
+            `boxIds` on the execute call to pin the input set the preview showed.
+        destination:
+          type: string
+          description: Destination address the sweep pays to.
+        fee:
+          type: string
+          description: Miner fee.
+        grossErg:
+          type: string
+          description: Gross matured ERG across those boxes.
+        netToDestination:
+          type: string
+          description: Net ERG delivered to the destination (`gross − fee − reemission`).
+        otherTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SweptTokenDto'
+          description: Non-re-emission tokens carried to the destination output.
+        reemissionPaid:
+          type: string
+          description: nanoErg routed to the pay-to-reemission contract (= re-emission tokens burned).
+        remaining:
+          type: integer
+          format: int32
+          description: |-
+            Matured reward boxes NOT included this round (over the per-sweep cap). Run
+            the sweep again to retrieve them. `0` when everything matured was swept.
+          minimum: 0
+        txId:
+          type:
+          - string
+          - 'null'
+          description: Submitted transaction id, or `null` on a dry-run (preview).
     ScopeDto:
       oneOf:
       - type: object
@@ -3258,6 +3410,19 @@ components:
         txId:
           type: string
           description: 32-byte transaction id, hex.
+    SweptTokenDto:
+      type: object
+      description: A non-re-emission token carried through a sweep to the destination output.
+      required:
+      - tokenId
+      - amount
+      properties:
+        amount:
+          type: string
+          description: Token amount (decimal string).
+        tokenId:
+          type: string
+          description: 32-byte token id, hex.
     SyncStateLabel:
       type: string
       enum:

@@ -1220,6 +1220,8 @@ async fn run_inner_with_backend(
                     // the wallet's re-emission reserve + burn-aware builder cannot
                     // drift from consensus (None off EIP-27 nets, e.g. testnet).
                     reemission: build_reemission_rules(&config.chain_spec),
+                    min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
+                    max_tx_size_bytes: config.mempool_config.max_tx_size_bytes,
                 };
                 let submit_handle: std::sync::Arc<dyn super::wallet_bridge::TxSubmitter> =
                     std::sync::Arc::new(super::wallet_bridge::NodeSubmitAdapter::new(

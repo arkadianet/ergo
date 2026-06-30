@@ -171,6 +171,8 @@ fn spawn_writer(
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
@@ -350,6 +352,8 @@ async fn admin_init_status_roundtrip() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
 
@@ -412,6 +416,8 @@ async fn get_private_key_gated_by_expose_flag_false() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
@@ -496,6 +502,8 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
@@ -590,6 +598,8 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: Some(ergo_validation::ReemissionRuleInputs {
             activation_height: ACTIVATION,
             reemission_token_id: REEMISSION_TOKEN,
@@ -708,6 +718,8 @@ async fn native_select_boxes_burn_aware_dry_run() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None, // build/select read chain.reemission_rules(), not cfg
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
@@ -874,6 +886,8 @@ async fn native_reads_status_boxes_and_lookup() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
@@ -972,6 +986,8 @@ async fn native_status_shows_change_address_while_locked() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
@@ -1032,6 +1048,8 @@ async fn init_twice_returns_wallet_exists() {
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
+        min_relay_fee_nano_erg: 1_000_000,
+        max_tx_size_bytes: 98_304,
         reemission: None,
     };
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);

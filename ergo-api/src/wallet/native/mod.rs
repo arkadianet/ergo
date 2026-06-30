@@ -690,6 +690,31 @@ pub(crate) async fn send_transaction(
     Ok(no_store(resp))
 }
 
+/// `POST /api/v1/wallet/rewards/retrieve` — sweep all matured miner-reward boxes
+/// into one P2PK output (the wallet change address, or `destination`), in one
+/// EIP-27-correct tx: the re-emission token is burned and its ERG routed to
+/// pay-to-reemission, other tokens are carried through. `dryRun` returns the
+/// breakdown without signing/submitting. `Cache-Control: no-store`.
+#[utoipa::path(
+    post, path = "/api/v1/wallet/rewards/retrieve", tag = "wallet",
+    request_body = dto::RetrieveRewardsRequest,
+    responses(
+        (status = 200, description = "Preview (dryRun) or submitted sweep", body = dto::RetrieveRewardsResultDto),
+        (status = 400, description = "Malformed body / no matured rewards / too many token types", body = error::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 409, description = "Wallet locked (execute)", body = error::NativeWalletError),
+        (status = 422, description = "insufficient_funds / change_address_untracked", body = error::NativeWalletError),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn retrieve_rewards(
+    State(admin): State<Arc<dyn WalletAdmin>>,
+    StrictJson(req): StrictJson<dto::RetrieveRewardsRequest>,
+) -> Result<NoStoreJson<dto::RetrieveRewardsResultDto>, NativeErr> {
+    let resp = admin.retrieve_rewards(req).await.map_err(error::map_err)?;
+    Ok(no_store(resp))
+}
+
 /// Build the native `/api/v1/wallet/*` router. Mirrors
 /// [`crate::wallet::router_with_security`]: the whole subtree is api-key gated
 /// via `route_layer` (never `layer` — see that fn's note on the `/emission/at`
@@ -719,6 +744,7 @@ pub fn router_with_security(
         .route("/api/v1/wallet/transactions/build", post(build_transaction))
         .route("/api/v1/wallet/transactions/sign", post(sign_transaction))
         .route("/api/v1/wallet/transactions/send", post(send_transaction))
+        .route("/api/v1/wallet/rewards/retrieve", post(retrieve_rewards))
         .route("/api/v1/wallet/transactions/:tx_id", get(transaction_by_id))
         // --- lifecycle (POST) ---
         .route("/api/v1/wallet/init", post(init))
