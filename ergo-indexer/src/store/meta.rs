@@ -40,8 +40,11 @@ pub(crate) const KEY_GLOBAL_BOX_INDEX: &str = "global_box_index";
 /// key survives a reorg meta-restore — it is sticky until a rebuild clears it.
 pub(crate) const KEY_SECONDARY_REPAIR_PENDING: &str = "secondary_repair_pending";
 /// Chunk checkpoint for an in-progress rebuild: the next global box index to
-/// process. Lets a crash mid-rebuild resume instead of restarting. Absent /
-/// 0 = start from the beginning.
+/// process. Lets a crash mid-rebuild resume instead of restarting. ABSENT and a
+/// stored `0` are DISTINCT states (the `None` vs `Some(0)` the rebuild branches
+/// on): absent means Phase 0 (the wipe) has not committed yet, so the wipe must
+/// run first; a stored `0` means the wipe committed and Phase 1 resumes from the
+/// first global index. See [`read_secondary_repair_next_gi_opt`].
 pub(crate) const KEY_SECONDARY_REPAIR_NEXT_GI: &str = "secondary_repair_next_gi";
 /// Running count of boxes the rebuild had to SKIP because their primary
 /// `INDEXED_BOX` row could not be decoded even by the trusted/lenient reader

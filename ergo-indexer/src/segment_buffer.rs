@@ -56,19 +56,23 @@ pub(crate) type StagedSpills = HashMap<Digest32, Segment>;
 /// end of a rollback (merge-back removes one spill per underflowed pop).
 pub(crate) type DeletedSpills = HashSet<Digest32>;
 
-/// Process-lifetime count of secondary-index (template / token) sign-flips
-/// SKIPPED because of a topology-drift gap — a `+gi` entry missing from a
-/// derived secondary segment (see [`tolerate_secondary_drift`]). Exposed via
-/// [`secondary_index_drift_skips`] so the node can surface a "secondary index
-/// degraded" signal. It resets on restart, which is correct: the offending
-/// block re-applies deterministically and re-accrues the count, so the value
-/// always reflects the live degradation of the running index.
+/// CUMULATIVE process-lifetime count of secondary-index (template / token)
+/// sign-flips SKIPPED because of a topology-drift gap — a `+gi` entry missing
+/// from a derived secondary segment (see [`tolerate_secondary_drift`]). Exposed
+/// via [`secondary_index_drift_skips`] as a diagnostic / metric only. It is NOT a
+/// live "index degraded" bit: it resets on restart and is NOT cleared by a
+/// successful in-process self-repair rebuild, so a non-zero value can outlive the
+/// degradation it counted. The LIVE degraded / completed-with-skips state lives in
+/// the durable `INDEXER_META` markers instead — `IndexerStore::secondary_repair_pending`
+/// (rebuild owed / in progress) and `IndexerStore::secondary_repair_skipped`
+/// (undecodable boxes a completed rebuild had to omit).
 static SECONDARY_DRIFT_SKIPS: AtomicU64 = AtomicU64::new(0);
 
 /// Number of secondary-index sign-flips skipped (template / token topology
-/// drift) since process start. Non-zero means `/blockchain/*` template- and
-/// token-box queries may be missing some boxes until the index is rebuilt
-/// (a reindex repairs it; consensus is unaffected).
+/// drift) since process start. Cumulative diagnostic counter — NOT a live health
+/// bit (a successful self-repair does not reset it). Use the durable repair
+/// marker / skipped-box count for live index state. Consensus is unaffected
+/// either way.
 pub fn secondary_index_drift_skips() -> u64 {
     SECONDARY_DRIFT_SKIPS.load(Ordering::Relaxed)
 }
