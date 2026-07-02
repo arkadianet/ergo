@@ -209,12 +209,15 @@ export function barChart({ h = 150, color = 'var(--purple)', yFmt = noop, label 
     grid(ui.svg, h, [0.02, 0.5, 0.98]);
     const bw = W / bins.length;
     bins.forEach((b, i) => {
-      const bh = (b.value / max) * (h * 0.96);
+      // Clamp FIRST, then derive y from the clamped height — deriving y
+      // from the raw height while clamping the height would push a tiny
+      // bar's bottom edge past the baseline (CodeRabbit, PR #151).
+      const bh = Math.max((b.value / max) * (h * 0.96), b.value > 0 ? 2 : 0);
       const r = svgEl('rect', {
         x: i * bw + bw * 0.12,
         y: h - bh,
         width: bw * 0.76,
-        height: Math.max(bh, b.value > 0 ? 2 : 0),
+        height: bh,
         rx: 2,
       });
       r.style.fill = color;
