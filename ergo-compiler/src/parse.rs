@@ -1096,17 +1096,23 @@ fn arg_list(c: &mut Cursor) -> Result<ArgList, ParseError> {
         if c.peek().kind != TokenKind::Comma {
             break;
         }
-        if c.comma_then_newline() {
-            c.bump(); // trailing comma; the Newline stays for the closer
-            break;
-        }
+        // `Arg.rep(1, ",")` is separator-first: a comma is a SEPARATOR whenever
+        // another `Arg` follows (newlines are transparent), so try `, ~ Arg` before
+        // the `TrailingComma` fallback — mirroring `type_list`/`expr_list`. This is
+        // what lets a multi-line head like `(x: Int,\n y: Int)` bind both args
+        // instead of stopping at the newline.
         let mark = c.save();
-        c.bump(); // separator comma
+        c.bump(); // try the separator comma
         if starts_fun_arg(c.peek()) {
             args.push(fun_arg(c)?);
             continue;
         }
-        c.restore(mark); // no arg follows and not a valid trailing comma
+        // `sep ~ Arg` failed → rewind the comma; a legal trailing comma is one
+        // directly followed by a `Newline` before the closer (Literals.scala:63).
+        c.restore(mark);
+        if c.comma_then_newline() {
+            c.bump(); // trailing comma; the Newline stays for the closer
+        }
         break;
     }
     Ok(args)
@@ -1272,16 +1278,17 @@ fn tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
             if c.peek().kind != TokenKind::Comma {
                 break;
             }
-            if c.comma_then_newline() {
-                c.bump(); // TrailingComma; the Newline stays for the closer
-                break;
-            }
+            // Separator-first: `Pattern.rep(_, ",")` takes `, ~ Pattern` greedily
+            // (newlines transparent) before the `TrailingComma` fallback.
             let mark = c.save();
-            c.bump(); // separator comma — another Pattern must follow
+            c.bump(); // try the separator comma — another Pattern must follow
             if starts_pattern(c.peek()) {
                 continue;
             }
-            c.restore(mark); // let `)` report the failure at the comma
+            c.restore(mark); // `sep ~ Pattern` failed → rewind the comma
+            if c.comma_then_newline() {
+                c.bump(); // TrailingComma; the Newline stays for the closer
+            }
             break;
         }
     } else if c.peek().kind == TokenKind::Comma && c.comma_then_newline() {
@@ -1417,18 +1424,20 @@ fn fun_type_args(c: &mut Cursor) -> Result<(), ParseError> {
         if c.peek().kind != TokenKind::Comma {
             break;
         }
-        if c.comma_then_newline() {
-            c.bump(); // TrailingComma; the Newline stays for the closer
-            break;
-        }
+        // Separator-first: `(Annot.rep ~ TypeArg).rep(1, ",")` takes `, ~ item`
+        // greedily (newlines transparent) before the `TrailingComma` fallback, so a
+        // multi-line `[T,\n U]` binds both type args.
         let mark = c.save();
-        c.bump(); // separator comma — another `(Annot.rep ~ TypeArg)` must follow
+        c.bump(); // try the separator comma — another `(Annot.rep ~ TypeArg)` must follow
         if c.at_kw(Kw::At) || is_id(c.peek()) {
             continue;
         }
-        // No item follows and it is not a valid trailing comma: rewind so `]`
-        // reports the failure at the comma (fastparse rewinds a failed `sep ~ item`).
+        // `sep ~ item` failed → rewind the comma; a legal trailing comma is one
+        // directly followed by a `Newline`, else `]` reports the failure at the comma.
         c.restore(mark);
+        if c.comma_then_newline() {
+            c.bump(); // TrailingComma; the Newline stays for the closer
+        }
         break;
     }
     c.expect(&TokenKind::RBracket, "]")?;
@@ -1467,16 +1476,17 @@ fn type_arg_list(c: &mut Cursor) -> Result<(), ParseError> {
         if c.peek().kind != TokenKind::Comma {
             break;
         }
-        if c.comma_then_newline() {
-            c.bump(); // TrailingComma
-            break;
-        }
+        // Separator-first: `TypeArgVariant.rep(1, ",")` takes `, ~ item` greedily
+        // (newlines transparent) before the `TrailingComma` fallback.
         let mark = c.save();
-        c.bump(); // separator comma — another TypeArgVariant must follow
+        c.bump(); // try the separator comma — another TypeArgVariant must follow
         if c.at_kw(Kw::At) || c.at_op("+") || c.at_op("-") || is_id(c.peek()) {
             continue;
         }
-        c.restore(mark);
+        c.restore(mark); // `sep ~ item` failed → rewind the comma
+        if c.comma_then_newline() {
+            c.bump(); // TrailingComma
+        }
         break;
     }
     c.expect(&TokenKind::RBracket, "]")?;
@@ -1872,16 +1882,57 @@ fn prefix_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
     }
 }
 
+/// The ASCII members of `Basic.isOpChar` (Basic.scala:41-45). A raw-byte twin of
+/// `is_op_char` used where a lookahead must run on the ORIGINAL source before any
+/// whitespace/comment skipping — see `prefix_op`'s `!OpChar` guard.
+fn is_op_char_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#'
+            | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'/'
+            | b':'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'?'
+            | b'@'
+            | b'\\'
+            | b'^'
+            | b'|'
+            | b'~'
+    )
+}
+
 /// `ExprPrefix` (Exprs.scala:78): `WL ~ CharPred("-+!~") ~~ !OpChar ~ WS`. Consume
 /// and return a one-char prefix operator. Maximal munch already groups every
 /// op-char run into a single `OpId`, so the `!OpChar` guard is satisfied exactly
 /// when the `OpId`'s text is a single one of `- + ! ~` (a longer run like `--` or
 /// `!=` is one multi-char `OpId` and is NOT a prefix).
+///
+/// The `~~ !OpChar` runs on the RAW source BEFORE whitespace/comment skipping, so
+/// the byte immediately after the op token also disqualifies the prefix. The op-run
+/// munch stops before a `//`/`/*` comment (Identifiers.scala:22-24), so a lone
+/// prefix-op token can only be followed by a non-op-char OR by `/` (a comment
+/// start); the latter is an op-char, so `-/*c*/1` / `!//c\nx` are NOT prefixes —
+/// the op falls through to `SimpleExpr` as an operator ident (oracle-verified).
 fn prefix_op(c: &mut Cursor) -> Option<String> {
     let t = c.peek();
     if t.kind == TokenKind::OpId {
         let s = t.text(c.src);
         if matches!(s, "-" | "+" | "!" | "~") {
+            if c.src
+                .as_bytes()
+                .get(t.end as usize)
+                .copied()
+                .is_some_and(is_op_char_byte)
+            {
+                return None; // raw next char is an op-char → `!OpChar` fails
+            }
             let s = s.to_string();
             c.bump();
             return Some(s);

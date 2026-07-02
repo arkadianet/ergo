@@ -814,14 +814,44 @@ impl<'a> Lexer<'a> {
             _ => {}
         }
 
-        // Symbol form: PlainId | Keywords. An id-start begins an identifier /
-        // keyword run; an op-char begins an `Operator`.
+        // Symbol form: `PlainId | Keywords` (Literals.scala:94, Identifiers.scala:32-59).
+        // An id-start begins an identifier / alphabetic-keyword run (`UppercaseId |
+        // VarId | AlphabetKeywords`); an op-char begins an `Operator` / symbolic-
+        // keyword run (`: = => # @`); and `;` — the one symbolic keyword that is not
+        // itself an op-char (Identifiers.scala:55-56) — is accepted on its own.
         match self.peek_char() {
             Some(c) if is_id_start(c) => {
                 self.pos += c.len_utf8();
                 self.consume_id_rest();
             }
-            Some(c) if is_op_char(c) => self.consume_op_run(),
+            Some(';') => {
+                // SymbolicKeywords `";" ~ !OpChar` (Identifiers.scala:55-56): valid
+                // only when not followed by an op-char, else the `~/` cut hard-fails.
+                if self
+                    .peek_byte_at(1)
+                    .map(|b| b as char)
+                    .is_some_and(is_op_char)
+                {
+                    return Err(ParseError::Lexical {
+                        pos: after_quote as u32,
+                        msg: "expected char or symbol after `'`".into(),
+                    });
+                }
+                self.pos += 1;
+            }
+            Some(c) if is_op_char(c) => {
+                let op_start = self.pos;
+                self.consume_op_run();
+                if self.pos == op_start {
+                    // `Operator = … .rep(1)` requires >=1 op char (Identifiers.scala:22-24);
+                    // the munch stopped before a `//`/`/*` comment, so `'` is directly
+                    // followed by a comment and no Symbol matches — a hard failure.
+                    return Err(ParseError::Lexical {
+                        pos: after_quote as u32,
+                        msg: "expected char or symbol after `'`".into(),
+                    });
+                }
+            }
             _ => {
                 // `'` followed by neither a closing-`'` char form nor a symbol:
                 // the reference's cut turns this into a hard failure.
@@ -1112,6 +1142,48 @@ mod tests {
         assert_eq!(kinds("'a'")[0], TokenKind::CharSym("'a'".into()));
         assert_eq!(kinds("'foo")[0], TokenKind::CharSym("'foo".into()));
         assert_eq!(kinds("'if")[0], TokenKind::CharSym("'if".into())); // Symbol = PlainId | Keywords
+    }
+    #[test]
+    fn charsym_symbolic_keyword_forms_keep_quote() {
+        // Symbol = PlainId | Keywords, and Keywords includes the symbolic keywords
+        // `: ; => = # @` (Identifiers.scala:55-57). `;` is the one that is not an
+        // op-char, so it needs its own acceptance path.
+        // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each
+        assert_eq!(kinds("';")[0], TokenKind::CharSym("';".into()));
+        assert_eq!(kinds("'=>")[0], TokenKind::CharSym("'=>".into()));
+        assert_eq!(kinds("':")[0], TokenKind::CharSym("':".into()));
+        assert_eq!(kinds("'=")[0], TokenKind::CharSym("'=".into()));
+        assert_eq!(kinds("'#")[0], TokenKind::CharSym("'#".into()));
+        assert_eq!(kinds("'@")[0], TokenKind::CharSym("'@".into()));
+    }
+    #[test]
+    fn charsym_semicolon_before_opchar_errors() {
+        // `;` is a symbolic keyword only with `!OpChar` after (Identifiers.scala:56);
+        // `';:` has `:` (an op-char) after the `;`, so no Symbol matches and the
+        // `~/` cut hard-fails at the `;`.
+        // oracle: ParserOracle sigma-state 6.0.2 — REJECT 1:2
+        let e = lex_err("';:");
+        assert!(matches!(e, ParseError::Lexical { .. }));
+        assert_eq!(e.pos(), 1); // the `;`, one past the opening quote
+    }
+    #[test]
+    fn charsym_quote_before_comment_errors() {
+        // `Operator = … .rep(1)` needs >=1 op char (Identifiers.scala:22-24); the
+        // op-run munch stops before a `//`/`/*` comment, so `'` directly followed by
+        // a comment consumes zero chars and no Symbol matches — a hard failure (never
+        // an empty `CharSym("'")`).
+        // oracle: ParserOracle sigma-state 6.0.2 — REJECT 1:2
+        for src in ["'/**/x", "'/**/'", "'//c\nx"] {
+            let e = lex_err(src);
+            assert!(matches!(e, ParseError::Lexical { .. }), "{src}");
+            assert_eq!(e.pos(), 1, "{src}");
+        }
+    }
+    #[test]
+    fn charsym_slash_operator_symbol_keeps_quote() {
+        // A lone `/` that is NOT a comment start is a valid one-char Operator symbol.
+        // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT (`'/x` = `'/`.x postfix)
+        assert_eq!(kinds("'/x")[0], TokenKind::CharSym("'/".into()));
     }
     #[test]
     fn charsym_escape_form_keeps_quotes() {

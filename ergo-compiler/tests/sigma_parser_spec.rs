@@ -58,6 +58,13 @@ fn reject(src: &str) {
     assert!(parse(src, 3).is_err(), "expected parse error for {src:?}");
 }
 
+/// `accept(src)` — parse succeeds (accept-parity only; used where the exact AST
+/// is not the point) and every node position is within bounds.
+fn accept(src: &str) {
+    let parsed = parse(src, 3).unwrap_or_else(|e| panic!("expected accept for {src:?}: {e:?}"));
+    walk_positions(&parsed, src);
+}
+
 // ----- node constructors (position-free; pos filled with 0) -----
 
 fn int(v: i32) -> Expr {
@@ -2208,4 +2215,108 @@ fn quirk_entry_trailing_newline_ok_but_semicolon_errors() {
     // newline is skipped but a trailing `;` is a hard error.
     check("1\n", int(1));
     reject("1;");
+}
+
+// -----------------------------------------------------------------------------
+// Codex round-2 parity fixes (separator-first arg lists, faithful parse-time
+// types, raw prefix guard). Every case oracle-pinned against ParserOracle.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn separator_first_multiline_arg_lists_accept() {
+    // Finding 1: `Arg.rep(1, ",") ~ TrailingComma` / `TypeArg.rep(1, ",")` are
+    // separator-first — a `,\n item` is a separator, not a trailing comma. A
+    // multi-line block-lambda head, FunArgs list, extractor pattern, and FunTypeArgs
+    // all bind every element.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each
+    accept("{ (x: Int,\n y: Int) => x }");
+    accept("{ (x: Int,\n y: Int,\n z: Int) => x }");
+    accept("{ def f(\n x: Int,\n y: Int\n) = x; 1 }");
+    accept("{ def f(a: Int,\n b: Int)(c: Int) = a; 1 }");
+    accept("{ def f[T,\n U](x: Int) = x; 1 }");
+    accept("{ def f[A,\n B,\n C](x: Int) = x; 1 }");
+    accept("{ val Some(a,\n b) = t; a }");
+}
+
+#[test]
+fn separator_first_trailing_comma_newline_accepts() {
+    // Finding 1: a trailing comma directly before a Newline IS legal
+    // (`TrailingComma = ("," WS Newline)?`, Literals.scala:63).
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each
+    accept("{ (x: Int,\n) => x }");
+    accept("{ def f[T,\n](x: Int) = x; 1 }");
+    accept("{ val Some(a,\n) = t; a }");
+}
+
+#[test]
+fn separator_first_no_newline_trailing_comma_rejects() {
+    // Finding 1 regression: a trailing comma NOT followed by a Newline is rejected
+    // wherever Scala rejects. Reject-parity holds; the exact position is a
+    // pre-existing furthest-failure vs recursive-descent difference (the block-lambda
+    // head backtracks and re-parses `(x: Int,)` as a parenthesized expr) unaffected
+    // by this fix, so only the verdict is asserted.
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT each
+    reject("{ (x: Int,) => x }");
+    reject("{ def f[T,](x: Int) = x; 1 }");
+    reject("{ val Some(a,) = t; a }");
+}
+
+#[test]
+fn parse_time_numeric_guard_rejects_non_numeric_operands() {
+    // Finding 2: mkUnaryOp/mkBinaryOp read `arg.tpe` (SigmaParser.scala:44/55/61/
+    // 85/91). A Relation/LogicalNot is SBoolean, a Tuple is STuple, a Lambda is
+    // SFunc, an If is trueBranch.tpe — none are numeric-or-NoType, so `-`/`~`/`&`/`|`
+    // on them is a parse-time error (not a blanket accept).
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT at the pinned position
+    fail_at("-(1 == 2)", 1, 3); // Relation -> SBoolean, pinned to the left operand
+    fail_at("~(1 < 2)", 1, 3);
+    fail_at("!x & 3", 1, 2); // `!x` is LogicalNot -> SBoolean
+    fail_at("{true} & 1", 1, 2); // Block result SBoolean
+    fail_at("{true} & {false}", 1, 2);
+    fail_at("~(1, 2)", 1, 2); // Tuple -> STuple
+    fail_at("(1==2) & (3==4)", 1, 2);
+    fail_at("-{ (x: Int) => x }", 1, 4); // Lambda -> SFunc
+    fail_at("-true", 1, 2);
+    fail_at("-\"hi\"", 1, 2);
+    fail_at("true | false", 1, 1);
+    fail_at("true | x", 1, 1);
+    fail_at("-(if (x) (1==1) else (2==2))", 1, 3); // If -> trueBranch.tpe = SBoolean
+}
+
+#[test]
+fn parse_time_numeric_guard_accepts_numeric_or_notype_operands() {
+    // Finding 2 regression: NoType operands (Ident/Select/Apply) and numeric-typed
+    // operands (Block of an Ident, ArithOp, If with numeric branch) still pass.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each
+    accept("-OUTPUTS.size"); // Select on a NoType object -> NoType
+    accept("x | y"); // Idents -> NoType
+    accept("-{ val x = 1; x }"); // Block result is an Ident -> NoType
+    accept("-(1 - 2)"); // ArithOp -> left.tpe = SInt
+    accept("-(if (x) 1 else 2)"); // If trueBranch numeric -> SInt
+    accept("ZKProof { proveDlog(g) }"); // standalone; the SFunc Ident is the callee
+}
+
+#[test]
+fn prefix_op_honours_raw_next_char_comment_is_op_char() {
+    // Finding 3: ExprPrefix's `~~ !OpChar` runs on the RAW source before comment/WS
+    // skipping. A `-`/`+`/`!`/`~` immediately followed by `/` (a comment start, which
+    // is an op-char) is NOT a prefix — the op falls through to SimpleExpr as an
+    // operator ident, leaving the operand as trailing input.
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT at the pinned position
+    fail_at("-/*c*/1", 1, 7);
+    fail_at("+/*c*/1", 1, 7);
+    fail_at("~/*c*/1", 1, 7);
+    fail_at("!//c\nx", 2, 1);
+}
+
+#[test]
+fn prefix_op_still_folds_across_whitespace_and_adjacency() {
+    // Finding 3 regression: a `-` folds a numeric constant whether adjacent (`-5`)
+    // or separated by whitespace (`- 5`); a block-comment before a NON-op operand
+    // (`-/*c*/x`) still prefixes; a line comment that ends the input is harmless.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each
+    check("-5", int(-5));
+    check("- 5", int(-5));
+    accept("-/*c*/x"); // Negation(Ident) — the operand is not an op-char
+    accept("!//c");
 }
