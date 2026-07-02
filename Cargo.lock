@@ -646,6 +646,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ergo-compiler"
+version = "0.5.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ergo-crypto"
 version = "0.5.1"
 dependencies = [

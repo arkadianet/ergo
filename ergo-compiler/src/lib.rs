@@ -10,3 +10,6 @@
 //! NOT a consensus surface: a compiler bug yields a wrong tree/address, never
 //! a fork — but a wrong address strands funds, so correctness is held to the
 //! oracle-parity bar anyway.
+
+pub mod error;
+pub mod span;
