@@ -13,6 +13,12 @@
 
 pub mod ast;
 pub mod error;
+mod parse;
 pub mod span;
 pub mod stype;
 pub mod token;
+
+pub use ast::{ArithKind, BitKind, Expr, RelKind, ValDef};
+pub use error::ParseError;
+pub use parse::{parse, parse_type};
+pub use stype::SType;
