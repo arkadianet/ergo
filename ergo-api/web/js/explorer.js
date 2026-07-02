@@ -94,14 +94,29 @@ function spentPill(spentTxId) {
   return p;
 }
 
+// Token amounts arrive as bare JSON numbers (u64 on the wire) — anything past
+// 2^53 already lost precision at JSON.parse. Flag it instead of silently
+// rounding. (Emitting u64 as strings server-side, as difficulty already is,
+// is the real fix — tracked as a follow-up since it changes the API contract.)
+function amt(v) {
+  if (v == null) return '—';
+  return Number.isSafeInteger(v) ? num(v) : `≈${num(v)}`;
+}
+
 function go(path) {
   location.hash = path ? `explorer/${path}` : 'explorer';
 }
 
 // ---- indexer availability (drives banners + search degradation) ----
 
+// True once the FIRST indexedHeight read has completed (success or failure):
+// distinguishes "not yet fetched" from "fetch failed / no indexer" so a cold
+// load can't flash the alarming unavailable-banner on a healthy node.
+let idxLoaded = false;
+
 async function refreshIndexerStatus() {
   idx = await api.indexedHeight();
+  idxLoaded = true;
 }
 
 function indexerReady() {
@@ -134,11 +149,13 @@ function gatedMiss() {
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 // Base58 (Bitcoin alphabet) — the char class EXCLUDES '/' and '.', which is
-// what actually closes the path-traversal hole; the length bound is only a
-// sanity cap. P2S/script addresses encode an arbitrary ErgoTree and run much
-// longer than a 51-char P2PK, so the upper bound is generous (a 120-char cap
-// silently broke cross-links to real mining-pool payout scripts).
-const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{20,1000}$/;
+// what actually closes the path-traversal hole; the length bounds are only a
+// sanity cap and err WIDE on both ends. Real mainnet extremes: the trueProp
+// burn address `4MQyML64GnzMxZgm` is 16 chars (a 20-char floor made it
+// unsearchable and its cross-links dead), and P2S scripts encode arbitrary
+// ErgoTrees far beyond a 51-char P2PK. encodeURIComponent keeps any length
+// safe in a fetch path, so tight caps buy no security — only lost coverage.
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{9,4096}$/;
 
 // Search epoch: a slow earlier probe must not call go() / overwrite status
 // after a newer search was issued OR after the user navigated away. Each
@@ -174,19 +191,23 @@ async function runSearch(q) {
   // syncing-indexer nodes still resolve.
   if (HEX64.test(query)) {
     const id = query.toLowerCase();
-    const [blk, tx, box, token] = await Promise.all([
+    const [blk, tx, pooled, box, token] = await Promise.all([
       getJson(`/blocks/${id}/header`),
       getJson(`/api/v1/transactions/${id}/detail`),
+      // Mempool-only probe: the slim detail route above mounts only when an
+      // indexer is plumbed, so this keeps mempool txs searchable on
+      // indexer-less nodes too.
+      getJson(`/transactions/unconfirmed/byTransactionId/${id}`),
       indexerReady() ? getJson(`/blockchain/box/byId/${id}`) : null,
       indexerReady() ? getJson(`/blockchain/token/byId/${id}`) : null,
     ]);
     if (stale()) return;
     setStatus('');
     if (blk) return go(`block/${id}`);
-    if (tx) return go(`tx/${id}`);
+    if (tx || pooled) return go(`tx/${id}`);
     if (box) return go(`box/${id}`);
     if (token) return go(`token/${id}`);
-    setStatus(indexerReady() ? 'no block, transaction, box, or token with that id' : 'not found (extra-index still syncing — searched blocks + mempool only)');
+    setStatus(indexerReady() ? 'no block, transaction, box, or token with that id' : `not found — searched blocks + mempool only (${gatedMiss()})`);
     return;
   }
 
@@ -199,7 +220,7 @@ async function runSearch(q) {
       setStatus('');
       go(`address/${query}`);
     } else {
-      setStatus(indexerReady() ? 'not a valid address for this network' : 'address lookups need the extra-index (still syncing)');
+      setStatus(indexerReady() ? 'not a valid address for this network' : `address lookups unavailable — ${gatedMiss()}`);
     }
     return;
   }
@@ -243,6 +264,51 @@ async function notFoundGated(what, mySeq, readyMsg) {
   notFound(what, indexerReady() ? readyMsg || null : gatedMiss());
 }
 
+// ---- shared pager ----
+
+// prev/next pager row. `total` null = bare-array mode (end detected by a short
+// page). `onMove(newOffset)` re-fetches. Buttons carry data-pg so callers can
+// restore keyboard focus across rebuilds (the pager is replaced per page).
+function pagerEl(offset, total, got, onMove) {
+  const w = el('div', 'ex-pager');
+  const prev = el('button', 'btn btn--ghost btn--sm', '← prev');
+  prev.type = 'button';
+  prev.dataset.pg = 'prev';
+  prev.disabled = offset === 0;
+  prev.onclick = () => onMove(Math.max(0, offset - PAGE));
+  const label = el(
+    'span',
+    'muted',
+    got === 0
+      ? total != null
+        ? `0 of ${num(total)}`
+        : 'no results'
+      : total != null
+        ? `${num(offset + 1)}–${num(offset + got)} of ${num(total)}`
+        : `${num(offset + 1)}–${num(offset + got)}`,
+  );
+  const next = el('button', 'btn btn--ghost btn--sm', 'next →');
+  next.type = 'button';
+  next.dataset.pg = 'next';
+  // got === 0 also disables next: an empty page IS the end — prevents paging
+  // past a final page that was exactly full into a "21–20" ghost page.
+  next.disabled = got === 0 || (total != null ? offset + PAGE >= total : got < PAGE);
+  next.onclick = () => onMove(offset + PAGE);
+  w.append(prev, label, next);
+  return w;
+}
+
+// Restore keyboard focus onto the rebuilt pager: the button the user pressed
+// was destroyed with the old page (focus fell to <body>, stranding keyboard
+// users). Falls back to the sibling when the pressed button became disabled.
+function refocusPager(host, pg) {
+  if (!pg) return;
+  const want = host.querySelector(`[data-pg="${pg}"]`);
+  const alt = host.querySelector(`[data-pg="${pg === 'prev' ? 'next' : 'prev'}"]`);
+  const target = want && !want.disabled ? want : alt && !alt.disabled ? alt : null;
+  if (target) target.focus();
+}
+
 // Home view: a persisted table + banner slot so the 4s onSlow refresh can
 // update rows in place WITHOUT rebuilding the table (which would reset the
 // user's chosen column sort).
@@ -253,11 +319,19 @@ let homeBannerSlot = null;
 function refreshHomeBanner() {
   if (!homeBannerSlot) return;
   homeBannerSlot.replaceChildren();
+  // First status read still in flight → suppress; the mount().then re-route
+  // paints the real state moments later without a scary transient.
+  if (!idxLoaded && !idx) return;
   if (!indexerReady()) homeBannerSlot.append(indexerBanner());
 }
 
 // Home: recent blocks + (when relevant) the indexer-status banner.
 async function renderHome(mySeq) {
+  // Entity → home: blank the outgoing view immediately so its controls can't
+  // absorb clicks while recent-blocks loads (zombie-interaction guard). Skip
+  // when the home table is already painted to avoid flashing "loading…" over
+  // it on banner-driven re-routes.
+  if (!homeHost?.isConnected) loading();
   const recent = await api.recentBlocks(32);
   if (mySeq !== seq) return;
   body.replaceChildren();
@@ -292,11 +366,25 @@ async function renderHome(mySeq) {
 // syncs. Height search canonicalizes to a header id before landing here.
 async function renderBlock(id, mySeq) {
   loading();
-  const blk = await getJson(`/blocks/${id}`);
+  let blk = await getJson(`/blocks/${id}`);
   if (mySeq !== seq) return;
-  if (!blk?.header) return notFound('block');
+  let headerOnly = false;
+  if (!blk?.header) {
+    // Header-first sync: the header chain runs ahead of block bodies, so
+    // /blocks/:id 404s while /blocks/at/:h (and header search) already
+    // resolve this id. Fall back to the header route and say so honestly
+    // instead of a misleading "block not found".
+    const hdr = await getJson(`/blocks/${id}/header`);
+    if (mySeq !== seq) return;
+    if (!hdr) return notFound('block');
+    blk = { header: hdr, size: null, blockTransactions: null };
+    headerOnly = true;
+  }
   const h = blk.header;
   body.replaceChildren();
+  if (headerOnly) {
+    body.append(banner('info', 'header only — the block body has not been downloaded yet (node still syncing)'));
+  }
 
   const { panel: p, body: pb, head } = panel(`Block ${num(h.height)}`);
   // prev / next chain navigation: parent is direct; next resolves via the
@@ -330,6 +418,8 @@ async function renderBlock(id, mySeq) {
   kvRow(grid, 'state root', h.stateRoot ? hashNode(h.stateRoot) : '—');
   pb.append(grid);
   body.append(p);
+
+  if (headerOnly) return; // no body yet — the banner above explains why
 
   const txs = blk.blockTransactions?.transactions || [];
   const { panel: tp, body: tpb } = panel(`Transactions · ${txs.length}`);
@@ -368,7 +458,7 @@ function ioLine(b) {
     for (const t of tokens) {
       const tid = t.tokenId || t.token_id;
       const line = el('div', 'muted');
-      line.append('+ ', el('span', null, num(t.amount)), ' ', link(`token/${tid}`, truncMiddle(tid, 6, 6)));
+      line.append('+ ', el('span', null, amt(t.amount)), ' ', link(`token/${tid}`, truncMiddle(tid, 6, 6)));
       tk.append(line);
     }
     row.append(tk);
@@ -410,7 +500,9 @@ async function renderTx(id, mySeq) {
   if (rich) {
     kvRow(grid, 'block', hashNode(rich.blockId, `block/${rich.blockId}`));
     kvRow(grid, 'height', num(rich.inclusionHeight));
-    kvRow(grid, 'confirmations', num(rich.numConfirmations));
+    // numConfirmations = fullHeight − inclusionHeight, so the tip block reads
+    // 0 — annotate it so "0" can't be misread as unconfirmed.
+    kvRow(grid, 'confirmations', rich.numConfirmations === 0 ? '0 · in latest block' : num(rich.numConfirmations));
     kvRow(grid, 'time', tsNode(rich.timestamp));
     kvRow(grid, 'size', bytes(rich.size));
     kvRow(grid, 'index in block', String(rich.index));
@@ -423,18 +515,30 @@ async function renderTx(id, mySeq) {
     kvRow(grid, 'status', el('span', 'pill pill--warn', 'unconfirmed'));
   } else {
     // Index is BEHIND (rich 503'd) and pool ruled out mempool: slim is our only
-    // source. Best-effort "confirmed", flagged as detail-limited until the index
-    // catches up and the rich route can serve the full record.
+    // source. Best-effort "confirmed", flagged as detail-limited — naming the
+    // real degradation (syncing vs halted vs unavailable), not assuming syncing.
     const s = el('span');
-    s.append(el('span', 'pill pill--ok', 'confirmed'), el('span', 'muted', ' · extra-index syncing — limited detail'));
+    s.append(el('span', 'pill pill--ok', 'confirmed'), el('span', 'muted', ` · ${gatedMiss()} — limited detail`));
     kvRow(grid, 'status', s);
   }
   pb.append(grid);
   body.append(p);
 
-  // IO source: prefer rich (resolved), then slim (resolves input values/addrs),
-  // then the raw pool tx (bare boxIds). ioLine tolerates all three shapes.
-  const io = rich || slim || pool;
+  // IO source: rich is complete. For an unconfirmed tx MERGE the two partial
+  // sources instead of picking one: slim resolves input/output address+value+
+  // tokens but its outputs carry box_id null (the server builds them from
+  // candidates), while the pool tx authoritatively carries every output boxId
+  // plus the dataInputs slim lacks. Zip by index — both are the tx's ordered
+  // IO lists.
+  let io = rich;
+  if (!io && slim && pool) {
+    io = {
+      inputs: (slim.inputs || []).map((inp, i) => ({ ...inp, box_id: inp.box_id ?? pool.inputs?.[i]?.boxId })),
+      outputs: (slim.outputs || []).map((out, i) => ({ ...out, box_id: out.box_id ?? pool.outputs?.[i]?.boxId })),
+      dataInputs: pool.dataInputs || [],
+    };
+  }
+  if (!io) io = slim || pool;
   const inputs = io.inputs || [];
   const outputs = io.outputs || [];
   const grid2 = el('div', 'ex-iogrid');
@@ -484,7 +588,7 @@ async function renderBox(id, mySeq) {
     const { panel: ap, body: ab } = panel(`Tokens · ${b.assets.length}`);
     for (const a of b.assets) {
       const row = el('div', 'ex-io');
-      row.append(hashNode(a.tokenId, `token/${a.tokenId}`), el('span', 'ex-io__val', num(a.amount)));
+      row.append(hashNode(a.tokenId, `token/${a.tokenId}`), el('span', 'ex-io__val', amt(a.amount)));
       ab.append(row);
     }
     body.append(ap);
@@ -531,7 +635,7 @@ async function renderAddress(addr, mySeq) {
     const { panel: tp, body: tb } = panel('Token balances');
     for (const t of tokens) {
       const row = el('div', 'ex-io');
-      row.append(hashNode(t.tokenId, `token/${t.tokenId}`), el('span', 'ex-io__val', num(t.amount)));
+      row.append(hashNode(t.tokenId, `token/${t.tokenId}`), el('span', 'ex-io__val', amt(t.amount)));
       tb.append(row);
     }
     body.append(tp);
@@ -539,10 +643,13 @@ async function renderAddress(addr, mySeq) {
 
   // Tabs: transactions (has {items,total}) / unspent boxes (bare array).
   const tabs = el('div', 'tabs');
+  tabs.setAttribute('role', 'tablist');
   const txTab = el('button', 'tab', 'Transactions');
   const boxTab = el('button', 'tab', 'Unspent boxes');
   txTab.type = 'button';
   boxTab.type = 'button';
+  txTab.setAttribute('role', 'tab');
+  boxTab.setAttribute('role', 'tab');
   tabs.append(txTab, boxTab);
   body.append(tabs);
   const tabHost = el('div');
@@ -564,10 +671,18 @@ async function renderAddress(addr, mySeq) {
   txTab.onclick = () => select('txs');
   boxTab.onclick = () => select('boxes');
 
+  const move = (o) => {
+    offset = o;
+    page();
+  };
+
   async function page() {
     const myRoute = seq;
     const myPage = ++pageEpoch;
     const stale = () => myRoute !== seq || myPage !== pageEpoch;
+    // Which pager button (if any) held focus — restored after the rebuild so
+    // keyboard users aren't dumped to <body> on every page.
+    const focusPg = document.activeElement?.dataset?.pg || null;
     tabHost.replaceChildren(el('div', 'muted', 'loading…'));
     if (mode === 'txs') {
       const r = await getJson(`/blockchain/transaction/byAddress/${encodeURIComponent(addr)}?offset=${offset}&limit=${PAGE}`);
@@ -586,7 +701,8 @@ async function renderAddress(addr, mySeq) {
         ],
         { rowKey: (t) => t.id, initialSort: { key: 'height', dir: -1 } },
       ).update(items);
-      tabHost.append(pager(r?.total ?? null, items.length));
+      tabHost.append(pagerEl(offset, r?.total ?? null, items.length, move));
+      refocusPager(tabHost, focusPg);
     } else {
       const items = await getJson(
         `/blockchain/box/unspent/byAddress/${encodeURIComponent(addr)}?offset=${offset}&limit=${PAGE}&sortDirection=desc`,
@@ -606,33 +722,9 @@ async function renderAddress(addr, mySeq) {
         ],
         { rowKey: (b) => b.boxId, initialSort: { key: 'height', dir: -1 } },
       ).update(rows);
-      tabHost.append(pager(null, rows.length));
+      tabHost.append(pagerEl(offset, null, rows.length, move));
+      refocusPager(tabHost, focusPg);
     }
-  }
-
-  function pager(total, got) {
-    const w = el('div', 'ex-pager');
-    const prev = el('button', 'btn btn--ghost btn--sm', '← prev');
-    prev.type = 'button';
-    prev.disabled = offset === 0;
-    prev.onclick = () => {
-      offset = Math.max(0, offset - PAGE);
-      page();
-    };
-    const label = el(
-      'span',
-      'muted',
-      total != null ? `${num(offset + 1)}–${num(offset + got)} of ${num(total)}` : `${num(offset + 1)}–${num(offset + got)}`,
-    );
-    const next = el('button', 'btn btn--ghost btn--sm', 'next →');
-    next.type = 'button';
-    next.disabled = total != null ? offset + PAGE >= total : got < PAGE;
-    next.onclick = () => {
-      offset += PAGE;
-      page();
-    };
-    w.append(prev, label, next);
-    return w;
   }
 
   select('txs');
@@ -651,35 +743,54 @@ async function renderToken(id, mySeq) {
   kvRow(grid, 'name', t.name || '—');
   kvRow(grid, 'description', t.description || '—');
   kvRow(grid, 'decimals', String(t.decimals ?? 0));
-  kvRow(grid, 'emission', num(t.emissionAmount));
+  kvRow(grid, 'emission', amt(t.emissionAmount));
   kvRow(grid, 'minted in box', hashNode(t.boxId, `box/${t.boxId}`));
   pb.append(grid);
   body.append(p);
 
-  const r = await getJson(`/blockchain/box/byTokenId/${id}?offset=0&limit=${PAGE}`);
-  if (mySeq !== seq) return;
-  const items = r?.items || [];
-  const { panel: bp, body: bb } = panel(`Boxes holding it${r?.total != null ? ` · ${num(r.total)}` : ''}`);
-  const host = el('div');
-  bb.append(host);
-  makeTable(
-    host,
-    [
-      { key: 'id', label: 'Box ID', render: (b) => hashNode(b.boxId, `box/${b.boxId}`), sort: (b) => b.boxId },
-      {
-        key: 'amount',
-        label: 'Amount',
-        width: 120,
-        align: 'right',
-        render: (b) => num((b.assets || []).find((a) => a.tokenId === id)?.amount),
-        sort: (b) => Number((b.assets || []).find((a) => a.tokenId === id)?.amount ?? 0),
-      },
-      { key: 'state', label: 'State', width: 90, render: (b) => spentPill(b.spentTransactionId), sort: (b) => (b.spentTransactionId ? 1 : 0) },
-      { key: 'height', label: 'Created', width: 90, align: 'right', render: (b) => num(b.inclusionHeight), sort: (b) => b.inclusionHeight },
-    ],
-    { rowKey: (b) => b.boxId, initialSort: { key: 'height', dir: -1 } },
-  ).update(items);
-  body.append(bp);
+  // Holding boxes: paged ({items,total} envelope) with the shared pager —
+  // previously only the first 20 rendered while the title advertised a total
+  // the user could never reach.
+  const boxSection = el('div');
+  body.append(boxSection);
+  let offset = 0;
+  let pageEpoch = 0;
+  async function pageBoxes() {
+    const myPage = ++pageEpoch;
+    const focusPg = document.activeElement?.dataset?.pg || null;
+    const r = await getJson(`/blockchain/box/byTokenId/${id}?offset=${offset}&limit=${PAGE}`);
+    if (mySeq !== seq || myPage !== pageEpoch) return;
+    const items = r?.items || [];
+    const { panel: bp, body: bb } = panel(`Boxes holding it${r?.total != null ? ` · ${num(r.total)}` : ''}`);
+    const host = el('div');
+    bb.append(host);
+    makeTable(
+      host,
+      [
+        { key: 'id', label: 'Box ID', render: (b) => hashNode(b.boxId, `box/${b.boxId}`), sort: (b) => b.boxId },
+        {
+          key: 'amount',
+          label: 'Amount',
+          width: 120,
+          align: 'right',
+          render: (b) => amt((b.assets || []).find((a) => a.tokenId === id)?.amount),
+          sort: (b) => Number((b.assets || []).find((a) => a.tokenId === id)?.amount ?? 0),
+        },
+        { key: 'state', label: 'State', width: 90, render: (b) => spentPill(b.spentTransactionId), sort: (b) => (b.spentTransactionId ? 1 : 0) },
+        { key: 'height', label: 'Created', width: 90, align: 'right', render: (b) => num(b.inclusionHeight), sort: (b) => b.inclusionHeight },
+      ],
+      { rowKey: (b) => b.boxId, initialSort: { key: 'height', dir: -1 } },
+    ).update(items);
+    bb.append(
+      pagerEl(offset, r?.total ?? null, items.length, (o) => {
+        offset = o;
+        pageBoxes();
+      }),
+    );
+    boxSection.replaceChildren(bp);
+    refocusPager(boxSection, focusPg);
+  }
+  await pageBoxes();
 }
 
 // ---- routing ----
@@ -722,7 +833,7 @@ export function mount(el2) {
              placeholder="height · block / tx / box / token id · address    ( / to focus )" aria-label="search the chain" />
       <button class="btn btn--primary" type="submit">Search</button>
     </form>
-    <div class="ex-status micro-label" data-status></div>
+    <div class="ex-status micro-label" data-status role="status" aria-live="polite"></div>
     <div class="ex-body" data-body></div>`;
   body = root.querySelector('[data-body]');
   statusEl = root.querySelector('[data-status]');
@@ -734,8 +845,10 @@ export function mount(el2) {
   };
   refreshIndexerStatus().then(() => {
     // First paint may have rendered the home view before the status arrived —
-    // re-render so the syncing banner appears/disappears correctly.
-    if (!tail) route();
+    // refresh the banner slot IN PLACE. (A full route() here would bump seq
+    // and silently cancel a search submitted during the round-trip; and if
+    // home hasn't painted yet, renderHome refreshes the banner itself.)
+    if (!tail) refreshHomeBanner();
   });
 }
 
@@ -758,18 +871,24 @@ export function onHide() {
 }
 
 export async function onSlow() {
+  // Snapshot the route seq: `tail` alone can't tell THIS home paint from a
+  // replacement one (an entity detour and back returns tail to '' but bumps
+  // seq twice) — without this, a slow tick could stale-paint old rows over a
+  // fresh home render.
+  const mySeq = seq;
   await refreshIndexerStatus();
   // Entity views are immutable snapshots — not auto-refreshed (a reload is one
   // hash click away). Only the home list ticks.
-  if (tail) return;
+  if (tail || mySeq !== seq) return;
   const recent = await api.recentBlocks(32);
-  if (tail) return; // navigated into an entity view while the fetch was in flight
+  if (tail || mySeq !== seq) return;
   if (homeTable && homeHost?.isConnected) {
     // In-place refresh: keeps the user's chosen column sort (a full renderHome
     // would rebuild the table and snap it back to the default).
     refreshHomeBanner();
     homeTable.update(Array.isArray(recent) ? recent : []);
-  } else {
-    await renderHome(seq);
   }
+  // No fallback render: if the table isn't mounted here, a route()-driven
+  // renderHome is in flight for this same seq — rendering again would race it
+  // (two same-seq paints, last responder wins). The next tick refreshes.
 }

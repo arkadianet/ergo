@@ -115,6 +115,11 @@ function boot() {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (document.querySelector('dialog[open]')) return;
+    // Never initiate navigation away from a busy section: on the wallet
+    // mnemonic gate, '/' would raise the leave-confirm where Enter (the
+    // default OK) discards the recovery phrase — a two-keystroke slip.
+    const r = renderers[current];
+    if (r && r.isBusy && r.isBusy()) return;
     e.preventDefault();
     if (current !== 'explorer') location.hash = 'explorer';
     // Focus after the router has painted the section (hashchange is async).

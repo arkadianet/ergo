@@ -845,6 +845,11 @@
   gap: var(--space-5);
   font-size: var(--fs-small);
 }
+/* Non-linked hashes (block id, miner pk, state root) must not wear link blue —
+   identical colour to .ex-link falsely advertises a click affordance. */
+.ex-body .v--hash {
+  color: var(--tx2);
+}
 .ex-iogrid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -892,7 +897,6 @@
   .quad,
   .ov-charts,
   .drawer-grid,
-  .ex-iogrid,
   .w-wrap {
     grid-template-columns: 1fr;
     grid-template-areas:
@@ -902,6 +906,11 @@
       'addresses'
       'send'
       'keys';
+  }
+  /* Own rule: sharing the group above would hand this two-child grid the
+     wallet's six named rows — four empty rows of dead row-gap whitespace. */
+  .ex-iogrid {
+    grid-template-columns: 1fr;
   }
   .w-wrap:has(> [data-scan-banner][hidden]) {
     grid-template-areas:
