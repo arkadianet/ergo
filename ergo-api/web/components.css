@@ -5,6 +5,7 @@
   font-size: var(--fs-micro);
   color: var(--tx3);
   text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .btn {
@@ -39,13 +40,17 @@
   outline-offset: 2px;
 }
 .btn--primary {
-  background: var(--accent);
+  background: linear-gradient(180deg, var(--accent-grad-hi), var(--accent-grad-lo));
   border-color: var(--accent);
-  color: #111820;
+  color: var(--accent-fg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 1px 2px rgba(0, 0, 0, 0.3);
 }
 .btn--primary:hover {
-  background: color-mix(in srgb, var(--accent) 86%, white);
-  border-color: color-mix(in srgb, var(--accent) 86%, white);
+  /* Theme-agnostic lift: brightening the gradient in-place keeps each theme's
+     contrast pairing (see --accent-fg) instead of hardcoding a lighter mix. */
+  filter: brightness(1.07);
 }
 .btn--danger {
   background: color-mix(in srgb, var(--red) 10%, transparent);
@@ -86,6 +91,10 @@
   color: var(--tx2);
   padding: var(--space-3) var(--space-5);
   cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
 }
 .tab:hover {
   color: var(--tx);
@@ -133,7 +142,7 @@
   background: var(--s1);
   border: 1px solid var(--bd2);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
+  box-shadow: var(--edge), var(--shadow);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -160,6 +169,7 @@
   font-size: var(--fs-micro);
   font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--tx2);
 }
 .panel__right {
@@ -235,13 +245,16 @@
   color: var(--tx);
   border: 1px solid var(--bd);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
+  box-shadow:
+    var(--edge),
+    0 24px 64px rgba(0, 0, 0, 0.45);
   padding: 0;
   max-width: 460px;
   width: min(92vw, 460px);
 }
 .dialog::backdrop {
   background: var(--scrim);
+  backdrop-filter: blur(3px);
 }
 .dialog__body {
   padding: var(--space-7);
@@ -296,7 +309,7 @@ code {
   background: var(--s1);
   border: 1px solid var(--bd2);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
+  box-shadow: var(--edge), var(--shadow);
   font-size: var(--fs-body);
 }
 .dtable__head {
@@ -317,8 +330,10 @@ code {
   font-size: var(--fs-micro);
   font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
   min-width: 0;
   padding: var(--space-2) 0;
+  transition: color var(--dur) var(--ease);
 }
 .dtable__th:hover {
   color: var(--tx2);
@@ -335,6 +350,7 @@ code {
   padding: var(--space-4) var(--space-5);
   border-bottom: 1px solid var(--divider);
   cursor: pointer;
+  transition: background var(--dur) var(--ease);
 }
 .dtable__row:hover {
   background: color-mix(in srgb, var(--s2) 82%, var(--blue) 5%);
@@ -468,7 +484,7 @@ code {
   background: var(--s1);
   border: 1px solid var(--bd2);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
+  box-shadow: var(--edge), var(--shadow);
   font-size: var(--fs-body);
 }
 .table th {
@@ -477,6 +493,7 @@ code {
   font-size: var(--fs-micro);
   font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--tx3);
   background: var(--s2);
   padding: var(--space-4) var(--space-5);

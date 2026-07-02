@@ -34,3 +34,8 @@ pub const JS_APP: &str = include_str!("../web/js/app.js");
 /// the dashboard and the strict-CSP wallet render the same typography
 /// with no external font CDN. License: `ergo-api/web/fonts/LICENSE-OFL.txt`.
 pub const JETBRAINS_MONO_WOFF2: &[u8] = include_bytes!("../web/fonts/jetbrains-mono.woff2");
+
+/// Self-hosted Inter (variable, SIL OFL 1.1) — the UI-chrome face; JetBrains
+/// Mono stays for data (hashes, heights, amounts). Same no-CDN rationale.
+/// License: `ergo-api/web/fonts/OFL-Inter.txt`.
+pub const INTER_VARIABLE_WOFF2: &[u8] = include_bytes!("../web/fonts/inter-variable.woff2");

@@ -7,6 +7,16 @@
   font-style: normal;
 }
 
+/* UI-chrome face (labels, nav, headings, copy). Data — hashes, heights,
+   amounts — stays on JetBrains Mono. Both self-hosted: no CDN, CSP 'self'. */
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/inter-variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+  font-style: normal;
+}
+
 :root,
 .theme-dark {
   --bg: #0b0c0e;
@@ -28,7 +38,17 @@
   --yellow: #e1bd59;
   --cyan: #55d1c4;
   --accent: var(--orange);
-  --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+  /* Primary-button text + gradient stops. Dark ink on the bright dark-theme
+     accent clears 4.5:1; each theme picks its own compliant pairing. */
+  --accent-fg: #111820;
+  --accent-grad-hi: color-mix(in srgb, var(--accent) 90%, white);
+  --accent-grad-lo: var(--accent);
+  /* Layered elevation: tight contact shadow + soft ambient. --edge is the
+     1px top-light that makes a dark surface read as a raised plate. */
+  --shadow:
+    0 1px 2px rgba(0, 0, 0, 0.32),
+    0 12px 32px rgba(0, 0, 0, 0.26);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .theme-light {
@@ -51,7 +71,15 @@
   --yellow: #936800;
   --cyan: #087f78;
   --accent: var(--orange);
-  --shadow: 0 14px 34px rgba(20, 32, 43, 0.12);
+  /* Light-theme accent (#b85b00) is too dark for dark ink at 13px (~3.9:1):
+     white text + a top-anchored darker gradient keeps every stop ≥ 4.5:1. */
+  --accent-fg: #ffffff;
+  --accent-grad-hi: var(--accent);
+  --accent-grad-lo: color-mix(in srgb, var(--accent) 88%, black);
+  --shadow:
+    0 1px 2px rgba(20, 32, 43, 0.08),
+    0 10px 28px rgba(20, 32, 43, 0.1);
+  --edge: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .theme-hc {
@@ -74,7 +102,13 @@
   --yellow: #e3b341;
   --cyan: #64e8d9;
   --accent: var(--orange);
-  --shadow: none;
+  --accent-fg: #111820;
+  --accent-grad-hi: var(--accent);
+  --accent-grad-lo: var(--accent);
+  /* Zero-length shadows (not `none`) so multi-part box-shadow lists that
+     compose var(--edge), var(--shadow) stay valid in this theme. */
+  --shadow: 0 0 rgba(0, 0, 0, 0);
+  --edge: inset 0 0 rgba(0, 0, 0, 0);
 }
 
 :root {
@@ -88,18 +122,21 @@
   --space-8: 32px;
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-lg: 10px;
   --fs-micro: 10px;
   --fs-small: 12px;
   --fs-body: 13px;
   --fs-value: 20px;
-  --fs-lg: 26px;
+  --fs-lg: 24px;
   --sidebar-w: 232px;
-  --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --sans: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
   --dur: 0.14s;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --divider: var(--bd2);
   --scrim: rgba(0, 0, 0, 0.62);
+  /* Focus ring — one hue everywhere so keyboard position is unmistakable. */
+  --ring: color-mix(in srgb, var(--accent) 75%, transparent);
 }
 
 html {
@@ -113,6 +150,7 @@ body {
   color: var(--tx);
   font-family: var(--sans);
   font-feature-settings: 'tnum' 1;
+  font-optical-sizing: auto;
   line-height: 1.35;
   -webkit-font-smoothing: antialiased;
 }
@@ -128,10 +166,48 @@ textarea {
   box-sizing: border-box;
 }
 
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Thin, surface-matched scrollbars — stock chrome scrollbars read as an
+   unfinished corner on a dark shell. Scoped to the shell's actual scroll
+   containers rather than `*` so the rule can't surprise arbitrary elements. */
+:is(html, .main, .side, .panel__body, .dtable, textarea, pre) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--s4) transparent;
+}
+:is(html, .main, .side, .panel__body, .dtable, textarea, pre)::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+:is(html, .main, .side, .panel__body, .dtable, textarea, pre)::-webkit-scrollbar-thumb {
+  background: var(--s4);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+:is(html, .main, .side, .panel__body, .dtable, textarea, pre)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .density-compact {
   --space-5: 8px;
   --space-6: 10px;
   --space-7: 14px;
   --fs-body: 12px;
   --fs-value: 17px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur: 0s;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -3,9 +3,11 @@
 //! The SPA at `/` hosts the wallet section, which renders mnemonics
 //! (init/restore), so the SPA document and its static assets carry a strict
 //! CSP plus `Cache-Control: no-store` (a bfcache mitigation) and
-//! `Referrer-Policy: no-referrer`. These headers must cover `/`, the CSS/JS
-//! assets and the self-hosted font, and must NOT leak onto the CDN-backed
-//! `/swagger*` pages (whose `default-src 'self'` would block Swagger-UI).
+//! `Referrer-Policy: no-referrer`. These headers must cover `/` and the
+//! CSS/JS assets, and must NOT leak onto the CDN-backed `/swagger*` pages
+//! (whose `default-src 'self'` would block Swagger-UI). The self-hosted
+//! fonts get CSP + Referrer-Policy but KEEP their immutable cache — they are
+//! inert public binaries (see `assert_font_headers`).
 
 use std::sync::Arc;
 
@@ -152,9 +154,37 @@ async fn explorer_js_module_carries_spa_security_headers() {
     assert_spa_security_headers("/js/explorer.js").await;
 }
 
+/// Fonts are inert public binaries: they carry the CSP + Referrer-Policy like
+/// every SPA asset, but keep the handler's immutable cache — no-store on a
+/// 352 KB font would force a refetch on every reload for zero secrecy gain.
+async fn assert_font_headers(path: &str) {
+    let resp = app().oneshot(get(path)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{path} should serve 200");
+    assert_eq!(
+        header_str(&resp, header::CONTENT_SECURITY_POLICY).as_deref(),
+        Some(EXPECTED_CSP),
+        "{path} CSP mismatch"
+    );
+    assert_eq!(
+        header_str(&resp, header::CACHE_CONTROL).as_deref(),
+        Some("public, max-age=31536000, immutable"),
+        "{path} must keep the immutable font cache"
+    );
+    assert_eq!(
+        header_str(&resp, header::REFERRER_POLICY).as_deref(),
+        Some("no-referrer"),
+        "{path} Referrer-Policy mismatch"
+    );
+}
+
 #[tokio::test]
-async fn web_font_carries_spa_security_headers() {
-    assert_spa_security_headers("/fonts/jetbrains-mono.woff2").await;
+async fn web_font_carries_csp_and_immutable_cache() {
+    assert_font_headers("/fonts/jetbrains-mono.woff2").await;
+}
+
+#[tokio::test]
+async fn inter_font_carries_csp_and_immutable_cache() {
+    assert_font_headers("/fonts/inter-variable.woff2").await;
 }
 
 // ----- scope isolation -----
