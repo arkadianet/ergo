@@ -1,0 +1,11 @@
+[package]
+name        = "ergo-compiler"
+description = "ErgoScript → ErgoTree compiler. M1: lexer + parser producing an untyped AST, production-faithful to the Scala reference parser (sigmastate.lang.SigmaParser, sigma-state 6.0.2). Later milestones add binding, typing, lowering and byte-identical ErgoTree emission."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+thiserror = { workspace = true }
