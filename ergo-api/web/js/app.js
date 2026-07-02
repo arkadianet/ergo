@@ -38,7 +38,12 @@ let slowInFlight = null;
 function setConn(ok) {
   const dot = document.getElementById('conn-dot');
   const state = document.getElementById('conn-state');
-  if (dot) dot.style.color = ok ? 'var(--green)' : 'var(--red)';
+  if (dot) {
+    dot.style.color = ok ? 'var(--green)' : 'var(--red)';
+    // The CSS heartbeat only runs while live — a pulsing "Unreachable" dot
+    // would read as activity where there is none.
+    dot.classList.toggle('is-live', ok);
+  }
   if (state) state.textContent = ok ? 'Live' : 'Unreachable';
 }
 

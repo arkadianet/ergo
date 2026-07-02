@@ -89,10 +89,10 @@ use crate::types::{
     RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
-    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, JETBRAINS_MONO_WOFF2, JS_API_CLIENT, JS_APP,
-    JS_AUTH, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW, JS_PEERS, JS_ROUTER,
-    JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML,
-    SWAGGER_HTML, TOKENS_CSS,
+    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
+    JS_API_CLIENT, JS_APP, JS_AUTH, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW,
+    JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET,
+    NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::NetworkPrefix;
@@ -550,6 +550,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/components.css", get(components_css))
         .route("/dashboard.css", get(dashboard_css))
         .route("/fonts/jetbrains-mono.woff2", get(jetbrains_mono_woff2))
+        .route("/fonts/inter-variable.woff2", get(inter_variable_woff2))
         .route("/js/app.js", get(|| async { js(JS_APP) }))
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
         .route("/js/auth.js", get(|| async { js(JS_AUTH) }))
@@ -1215,20 +1216,27 @@ async fn wallet_ui_redirect() -> Redirect {
 /// Strict response headers for the mnemonic-bearing SPA surfaces (applied by
 /// `spa_security_headers`). `Cache-Control: no-store` is a bfcache mitigation,
 /// not a hard guarantee — some browsers retain bfcache snapshots regardless.
-/// The web font is self-hosted (see `web.rs`), so `default-src 'self'` does not
-/// block it.
-fn apply_strict_static_headers(headers: &mut HeaderMap) {
+/// The web fonts are self-hosted (see `web.rs`), so `default-src 'self'` does
+/// not block them.
+///
+/// `cache_sensitive` gates the no-store trio: HTML/JS/CSS can carry secrets or
+/// secret-adjacent logic, but the fonts are inert public binaries — for those
+/// the handler's `immutable` caching must survive (352 KB of Inter refetched on
+/// every reload is pure waste), while CSP/Referrer-Policy still apply.
+fn apply_strict_static_headers(headers: &mut HeaderMap, cache_sensitive: bool) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
         ),
     );
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, no-cache, must-revalidate"),
-    );
-    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    if cache_sensitive {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+        );
+        headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    }
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
@@ -1241,17 +1249,21 @@ fn apply_strict_static_headers(headers: &mut HeaderMap) {
 /// `/swagger*` pages (which load Swagger-UI from a CDN), `/api/*` and `/metrics`
 /// are unaffected.
 async fn spa_security_headers(req: Request, next: Next) -> Response {
-    let is_spa = {
+    let (is_spa, is_font) = {
         let p = req.uri().path();
-        p == "/"
-            || p == "/index.html"
-            || p.starts_with("/js/")
-            || p.starts_with("/fonts/")
-            || p.ends_with(".css")
+        let is_font = p.starts_with("/fonts/");
+        (
+            p == "/"
+                || p == "/index.html"
+                || p.starts_with("/js/")
+                || is_font
+                || p.ends_with(".css"),
+            is_font,
+        )
     };
     let mut resp = next.run(req).await;
     if is_spa {
-        apply_strict_static_headers(resp.headers_mut());
+        apply_strict_static_headers(resp.headers_mut(), !is_font);
     }
     resp
 }
@@ -1296,6 +1308,17 @@ async fn jetbrains_mono_woff2() -> Response {
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         JETBRAINS_MONO_WOFF2,
+    )
+        .into_response()
+}
+
+async fn inter_variable_woff2() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        INTER_VARIABLE_WOFF2,
     )
         .into_response()
 }
