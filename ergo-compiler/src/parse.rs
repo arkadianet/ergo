@@ -1094,11 +1094,11 @@ enum BindPat {
 }
 
 /// `BindPattern = SimplePattern` (Exprs.scala:309-312): `TupleEx | Extractor |
-/// VarId` (Exprs.scala:234-240). Only a lone `VarId`/`StableId`-Ident (no dot, no
-/// extractor args) yields `Name`; everything else (a tuple pattern, a dotted path,
-/// or an extractor with args) yields `Other`. Consumed in full so the following
-/// `(`:` Type).? ~ `=` Expr` still parses (matching the reference's parse-then-map
-/// order).
+/// VarId` (Exprs.scala:234-240). The pattern reduces to the bare `StableId` result:
+/// a single-segment id (with or without extractor args) yields `Name`; a dotted path
+/// (→ `Select`, non-`Ident`) or a leading tuple pattern yields `Other`. Consumed in
+/// full so the following `(`:` Type).? ~ `=` Expr` still parses (matching the
+/// reference's parse-then-map order).
 fn bind_pattern(c: &mut Cursor) -> Result<BindPat, ParseError> {
     if c.peek().kind == TokenKind::LParen {
         consume_tuple_ex(c)?; // TupleEx `( Pattern,* )`
@@ -1125,16 +1125,57 @@ fn bind_pattern(c: &mut Cursor) -> Result<BindPat, ParseError> {
         c.bump();
         other = true;
     }
-    // Extractor args: `TupleEx.?` — an extractor with args is not a single name.
+    // Extractor args: `Extractor = StableId ~ TupleEx.?` (Exprs.scala:236). Scala
+    // DROPS the TupleEx — the pattern reduces to the bare StableId — so a
+    // single-segment id binds a val of that NAME (`val Some(x) = 1` → Val("Some", 1),
+    // a token-dropping quirk, but the reference behavior). The arg list is still
+    // parsed and discarded (with the real pattern grammar, so a malformed inner
+    // pattern hard-rejects at the `(` cut); it does NOT make this a non-name pattern.
     if c.peek().kind == TokenKind::LParen {
-        consume_tuple_ex(c)?;
-        other = true;
+        tuple_ex(c)?;
     }
     Ok(if other {
         BindPat::Other
     } else {
         BindPat::Name(name)
     })
+}
+
+/// `TupleEx = "(" ~/ Pattern.rep(0, ",") ~ TrailingComma ~ ")"` (Exprs.scala:235).
+/// Parsed and DISCARDED (the Extractor drops it, :236). The `(` is a cut, so a
+/// malformed inner pattern is a hard reject — the contents are parsed with the real
+/// `SimplePattern` machinery (`bind_pattern`), not a balanced-paren scan.
+fn tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
+    c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
+    if starts_pattern(c.peek()) {
+        loop {
+            bind_pattern(c)?; // one Pattern — discarded
+            if c.peek().kind != TokenKind::Comma {
+                break;
+            }
+            if c.comma_then_newline() {
+                c.bump(); // TrailingComma; the Newline stays for the closer
+                break;
+            }
+            let mark = c.save();
+            c.bump(); // separator comma — another Pattern must follow
+            if starts_pattern(c.peek()) {
+                continue;
+            }
+            c.restore(mark); // let `)` report the failure at the comma
+            break;
+        }
+    } else if c.peek().kind == TokenKind::Comma && c.comma_then_newline() {
+        c.bump(); // rep(0) matched nothing; TrailingComma still absorbs `,\n`
+    }
+    c.expect(&TokenKind::RParen, ")")?;
+    Ok(())
+}
+
+/// A token that can begin a `SimplePattern` (Exprs.scala:234-240): a `(` (TupleEx)
+/// or an `Id` (Extractor `StableId` / `VarId`).
+fn starts_pattern(t: &Token) -> bool {
+    t.kind == TokenKind::LParen || is_id(t)
 }
 
 /// Consume a balanced `( … )` region (a `TupleEx` pattern group, Exprs.scala:235).
@@ -1216,11 +1257,12 @@ fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
 }
 
 /// `FunSig = FunTypeArgs.? ~~ FunArgs.rep` (Types.scala:136-145). The optional
-/// `FunTypeArgs` (`[ … ]`) is parsed and DISCARDED; the returned value is the list
-/// of `FunArgs` argument lists (each `OneNLMax ~ "(" ~/ Args.? ~ ")"`).
+/// `FunTypeArgs` (`[ … ]`) is parsed and DISCARDED via the real `TypeArg` grammar;
+/// the returned value is the list of `FunArgs` argument lists (each `OneNLMax ~ "("
+/// ~/ Args.? ~ ")"`).
 fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
     if c.peek().kind == TokenKind::LBracket {
-        discard_bracketed(c)?; // FunTypeArgs — parsed and discarded
+        fun_type_args(c)?; // FunTypeArgs — parsed and discarded
     }
     let mut lists = Vec::new();
     loop {
@@ -1241,28 +1283,97 @@ fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
     Ok(lists)
 }
 
-/// Consume a balanced `[ … ]` region. Used for `FunTypeArgs` (Types.scala:143),
-/// whose full `TypeArg` grammar (variance, bounds, context bounds) is parsed and
-/// discarded by the reference — a token-level balanced scan is faithful for that
-/// discard and robust to nesting.
-fn discard_bracketed(c: &mut Cursor) -> Result<(), ParseError> {
-    let open = c.expect(&TokenKind::LBracket, "[")?;
-    let mut depth = 1usize;
-    while depth > 0 {
-        let t = c.bump();
-        match t.kind {
-            TokenKind::LBracket => depth += 1,
-            TokenKind::RBracket => depth -= 1,
-            TokenKind::Eof => {
-                return Err(ParseError::Syntax {
-                    pos: open.start,
-                    expected: "`]`".to_string(),
-                })
-            }
-            _ => {}
+/// `FunTypeArgs = "[" ~/ (Annot.rep ~ TypeArg).rep(1, ",") ~ TrailingComma ~ "]"`
+/// (Types.scala:143). The `[` is a cut and the bracketed content is parsed with the
+/// real `TypeArg` grammar, then DISCARDED. Because `.rep(1, ",")` requires at least
+/// one item, malformed content the reference rejects — `[]`, `[123]`, or a trailing
+/// comma not directly followed by a newline (`[T,]`) — is a hard reject here too.
+fn fun_type_args(c: &mut Cursor) -> Result<(), ParseError> {
+    c.expect(&TokenKind::LBracket, "[")?; // "[" ~/ — committed
+    loop {
+        while c.at_kw(Kw::At) {
+            annot(c)?; // Annot.rep — discarded
         }
+        type_arg(c)?; // one TypeArg — discarded
+        if c.peek().kind != TokenKind::Comma {
+            break;
+        }
+        if c.comma_then_newline() {
+            c.bump(); // TrailingComma; the Newline stays for the closer
+            break;
+        }
+        let mark = c.save();
+        c.bump(); // separator comma — another `(Annot.rep ~ TypeArg)` must follow
+        if c.at_kw(Kw::At) || is_id(c.peek()) {
+            continue;
+        }
+        // No item follows and it is not a valid trailing comma: rewind so `]`
+        // reports the failure at the comma (fastparse rewinds a failed `sep ~ item`).
+        c.restore(mark);
+        break;
+    }
+    c.expect(&TokenKind::RBracket, "]")?;
+    Ok(())
+}
+
+/// `TypeArg = (Id | `_`) ~ TypeArgList.? ~ TypeBounds ~ CtxBounds` where `CtxBounds =
+/// (`:` ~/ Type).rep` (Types.scala:153-156). Parsed and DISCARDED. `_` lexes as an
+/// `Ident`, so it is covered by `is_id`; a non-id head (e.g. `123`) is a reject.
+fn type_arg(c: &mut Cursor) -> Result<(), ParseError> {
+    if !is_id(c.peek()) {
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "type parameter".to_string(),
+        });
+    }
+    c.bump(); // (Id | `_`)
+    if c.peek().kind == TokenKind::LBracket {
+        type_arg_list(c)?; // TypeArgList.?
+    }
+    type_bounds(c)?; // TypeBounds
+    while c.at_kw(Kw::Colon) {
+        c.bump(); // CtxBounds: `:` ~/ — committed
+        type_(c)?;
     }
     Ok(())
+}
+
+/// `TypeArgList = "[" ~/ TypeArgVariant.rep(1, ",") ~ TrailingComma ~ "]"`
+/// (Types.scala:163-165); `TypeArgVariant = Annot.rep ~ (`+` | `-`).? ~ TypeArg`
+/// (:161). Parsed and DISCARDED — the variance markers `+`/`-` are `OpId` tokens.
+fn type_arg_list(c: &mut Cursor) -> Result<(), ParseError> {
+    c.expect(&TokenKind::LBracket, "[")?; // "[" ~/ — committed
+    loop {
+        type_arg_variant(c)?;
+        if c.peek().kind != TokenKind::Comma {
+            break;
+        }
+        if c.comma_then_newline() {
+            c.bump(); // TrailingComma
+            break;
+        }
+        let mark = c.save();
+        c.bump(); // separator comma — another TypeArgVariant must follow
+        if c.at_kw(Kw::At) || c.at_op("+") || c.at_op("-") || is_id(c.peek()) {
+            continue;
+        }
+        c.restore(mark);
+        break;
+    }
+    c.expect(&TokenKind::RBracket, "]")?;
+    Ok(())
+}
+
+/// `TypeArgVariant = Annot.rep ~ (`+` | `-`).? ~ TypeArg` (Types.scala:161). Parsed
+/// and DISCARDED.
+fn type_arg_variant(c: &mut Cursor) -> Result<(), ParseError> {
+    while c.at_kw(Kw::At) {
+        annot(c)?; // Annot.rep — discarded
+    }
+    if c.at_op("+") || c.at_op("-") {
+        c.bump(); // variance marker
+    }
+    type_arg(c)
 }
 
 /// `DottyExtMethodSubj = "(" ~/ Id ~ `:` ~/ Type ~ ")"` (Types.scala:150), the
@@ -1318,8 +1429,11 @@ fn postfix_lambda(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
         None => Ok(e),
         Some(body) => match e {
             Expr::Tuple { items, .. } => lambda_from_tuple(items, body, pos),
-            other => Err(ParseError::Semantic {
-                pos: other.pos(),
+            // Exprs.scala:65,69: the error pins to the `PostfixLambda` production
+            // start (`Index ~ PostfixExpr`) — i.e. `pos`, captured before any prefix
+            // ops — not the parsed expression's own position.
+            _ => Err(ParseError::Semantic {
+                pos,
                 msg: "Invalid declaration of lambda".to_string(),
             }),
         },
@@ -1333,6 +1447,10 @@ fn postfix_lambda(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
 fn lambda_rhs(c: &mut Cursor, ctx: Ctx) -> Result<Option<Expr>, ParseError> {
     if ctx.semi_inference() {
         let pos = c.peek().start; // LambdaRhs `Index`, before the BlockChunk
+                                  // `BlockChunk = BlockLambda.rep ~ BlockStat.rep`; the `case (_, b)` map at
+                                  // Exprs.scala:59-60 SILENTLY DISCARDS the leading `BlockLambda.rep`, so the
+                                  // body is only the BlockStat list — e.g. `(x,y) => (a) => c` has body `c`.
+        while try_block_lambda(c)?.is_some() {} // drop leading BlockLambda heads
         let stats = block_body(c)?; // BlockChunk's BlockStat.rep(sep = Semis)
         Ok(Some(block_from_stats(stats, pos)?))
     } else if starts_expr(c.peek()) {
@@ -3080,5 +3198,89 @@ mod expr_tests {
         // trailing Newlines but not a trailing `;`.
         assert_eq!(strip_pos(&p("1\n")), int(1));
         assert!(crate::parse("1;", 3).is_err());
+    }
+
+    // ----- FunTypeArgs grammar (Finding A, Types.scala:143,153-165) -----
+
+    #[test]
+    fn def_typeargs_empty_brackets_errors() {
+        // FunTypeArgs = "[" ~/ (Annot.rep ~ TypeArg).rep(1, ",") … (Types.scala:143):
+        // the `.rep(1)` requires one TypeArg, so `[]` is rejected after the `[` cut.
+        // (The `def` non-cut backtrack then re-parses `def` as an Ident, but the
+        // block's trailing `f[](x: Int) = x` still fails — reject overall.)
+        assert!(crate::parse("{ def f[](x: Int) = x; 1 }", 3).is_err());
+    }
+
+    #[test]
+    fn def_typeargs_numeric_errors() {
+        // TypeArg head = (Id | `_`) (Types.scala:155): a numeric literal is not an
+        // Id, so `[123]` is rejected after the `[` cut.
+        assert!(crate::parse("def f[123](x: Int) = x", 3).is_err());
+    }
+
+    #[test]
+    fn def_typeargs_wellformed_discarded() {
+        // `[T, U <: Int]` parses via the real TypeArg grammar (TypeBounds `<: Int`)
+        // and is DISCARDED — only the value args survive on the Lambda.
+        assert_eq!(
+            strip_pos(&p("{ def f[T, U <: Int](x: Int): Int = x; 1 }")),
+            block(
+                vec![val(
+                    "f",
+                    SType::SInt,
+                    lambda_r(vec![("x", SType::SInt)], SType::SInt, ident0("x"))
+                )],
+                int(1)
+            )
+        );
+    }
+
+    // ----- Extractor-arg silent drop (Finding B, Exprs.scala:236) -----
+
+    #[test]
+    fn val_extractor_args_binds_name_silently_dropping() {
+        // Extractor = StableId ~ TupleEx.? (Exprs.scala:236): the TupleEx is dropped,
+        // so a single-segment id binds a val of that NAME (`Some`) — a token-dropping
+        // quirk, but the reference behavior.
+        assert_eq!(
+            strip_pos(&p("{ val Some(x) = 1; 2 }")),
+            block(vec![val("Some", SType::NoType, int(1))], int(2))
+        );
+    }
+
+    #[test]
+    fn val_dotted_extractor_still_errors() {
+        // A DOTTED StableId (`a.b`) folds to a Select — a non-Ident pattern → "Only
+        // single name patterns supported" (SigmaParser.scala:31-32). Unchanged.
+        assert!(crate::parse("{ val a.b(x) = 1; 2 }", 3).is_err());
+    }
+
+    #[test]
+    fn val_extractor_bad_inner_pattern_errors() {
+        // TupleEx = "(" ~/ Pattern.rep(0, ",") ~ … (Exprs.scala:235): the args are
+        // parsed with the real pattern grammar, not a balanced scan. `123` starts no
+        // Pattern, so rep(0) matches nothing and the `)` closer fails at `123` after
+        // the `(` cut — a hard reject (matching Scala). NB the dispatch suggested
+        // `%%%`, but `%%%` is a valid symbolic StableId (Operator, Identifiers.scala:22)
+        // that Scala's Extractor accepts, so rejecting it would DIVERGE; `123` is a
+        // genuinely un-parseable inner pattern in both.
+        assert!(crate::parse("{ val Some(123) = 1; 2 }", 3).is_err());
+    }
+
+    // ----- LambdaRhs leading BlockLambda drop (Finding C, Exprs.scala:59-60) -----
+
+    #[test]
+    fn lambda_rhs_leading_blocklambda_head_silently_dropped() {
+        // LambdaRhs BlockChunk = BlockLambda.rep ~ BlockStat.rep; the `case (_, b)`
+        // map (Exprs.scala:59-60) DISCARDS the leading `(a) =>` head, so the body is
+        // just `c` — wrapped via block() like every semi-inference LambdaRhs
+        // (→ Block([], c), matching `(a,b) => e`).
+        assert_eq!(
+            strip_pos(&p("(x, y) => (a) => c")),
+            lambda(
+                vec![("x", SType::NoType), ("y", SType::NoType)],
+                block(vec![], ident0("c"))
+            )
+        );
     }
 }
