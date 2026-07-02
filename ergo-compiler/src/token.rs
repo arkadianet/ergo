@@ -2,15 +2,15 @@
 //!
 //! There is no separate lexer in the Scala reference — it is a scannerless
 //! fastparse grammar (recon-lexical.md §0). This module reconstructs the token
-//! stream that grammar observes, so the Task 6+ parser can drive semicolon
+//! stream that grammar observes, so the parser can drive semicolon
 //! inference off explicit `Newline` tokens. Every rule cites the mirrored Scala
 //! source under `sigmastate-interpreter/parsers/shared/.../parsers`.
 //!
-//! Task 4 scope: whitespace/comment/newline machinery, identifiers, keywords,
-//! numbers, and punctuation. Task 5 completes the lexer with string (`"`) and
-//! char/symbol (`'`) literals — the four string forms of Literals.scala:149-156
-//! with their raw-capture `strip` semantics, escape validation (never
-//! decoding), triple-quote quirks, and the id-prefix/interpolation forms.
+//! The complete lexer covers: whitespace/comment/newline machinery, identifiers,
+//! keywords, numbers, punctuation, string (`"`) and char/symbol (`'`) literals.
+//! String literals support the four forms of Literals.scala:149-156 with
+//! raw-capture `strip` semantics, escape validation (never decoding),
+//! triple-quote quirks, and id-prefix/interpolation forms.
 
 use crate::error::ParseError;
 use crate::span::Pos;
@@ -53,9 +53,9 @@ pub enum TokenKind {
     /// Value validated at lex time (Literals.scala:106-116).
     IntLit(i32),
     LongLit(i64),
-    /// Task 5.
+    /// String literal: raw-captured value with quotes stripped per Literals.scala:119-124.
     Str(String),
-    /// Task 5 (`'c'` / `'sym` raw forms).
+    /// Char or symbol literal (`'c'` / `'sym` forms): raw text including the leading quote.
     CharSym(String),
     Kw(Kw),
     LParen,
@@ -123,7 +123,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 // deviation: full Sm/So op-char classes are deferred (Rust std has no Unicode
 // general-category predicate); the single `⇒` (U+21D2, Core.scala:23) is
 // special-cased and the ASCII set is exact. No real contract uses another
-// Unicode operator, and the Task 11 corpus oracle catches any counterexample.
+// Unicode operator, and the corpus oracle catches any counterexample.
 fn is_op_char(c: char) -> bool {
     matches!(
         c,
@@ -163,7 +163,7 @@ fn is_id_start(c: char) -> bool {
 // deviation: id-rest letters use `char::is_alphabetic` (≈ Lu/Ll/Lt/Lm/Lo) and
 // digits use `char::is_numeric` (wider than Nd) rather than exact JVM
 // `Character.getType` masks. Number *literals* use ASCII-only `is_ascii_digit`
-// (Basic.scala:12, exact). Corpus-checked in Task 11.
+// (Basic.scala:12, exact). Corpus-checked.
 fn is_id_char(c: char) -> bool {
     c == '$' || c.is_alphabetic() || c.is_numeric()
 }
@@ -246,7 +246,10 @@ impl<'a> Lexer<'a> {
                     ));
                     last_was_comment = false;
                 }
-                Some(b'\r') => self.pos += 1, // lone \r: skipped, no token
+                Some(b'\r') => {
+                    self.pos += 1; // lone \r: skipped, no token
+                    last_was_comment = false; // not a comment; breaks comment-adjacency (Literals.scala:57-60)
+                }
                 Some(b'/') if self.peek_byte_at(1) == Some(b'/') => {
                     self.consume_line_comment();
                     last_was_comment = true;
@@ -1050,8 +1053,30 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn newline_after_comment_and_bare_cr_not_after_comment() {
+        // Literals.scala:57-60 OneNLMax comment-absorption: a Newline has
+        // after_comment=true only when it is immediately preceded (in whitespace)
+        // by a comment. A lone \r between the comment and the \n is NOT a comment
+        // and must break comment-adjacency → after_comment=false.
+        //
+        // "a /*c*/ \r \nb": skip_gap sees space, then /*c*/ (last_was_comment=true),
+        // then space, then lone \r (resets last_was_comment=false), then space,
+        // then \n → Newline { after_comment: false }.
+        let toks = tokenize("a /*c*/ \r \nb").unwrap();
+        let nl = toks
+            .iter()
+            .find(|t| matches!(t.kind, TokenKind::Newline { .. }))
+            .unwrap();
+        assert_eq!(
+            nl.kind,
+            TokenKind::Newline {
+                after_comment: false
+            }
+        );
+    }
 
-    // ----- happy path (strings / char-symbol, Task 5) -----
+    // ----- happy path (strings and char/symbol literals) -----
     #[test]
     fn string_plain_and_triple_strip_quotes() {
         assert_eq!(kinds(r#""hello""#)[0], TokenKind::Str("hello".into()));

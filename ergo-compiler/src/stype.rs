@@ -1,14 +1,15 @@
 //! Parser-domain SType: types as the parser sees them.
 //!
 //! This module defines the SType enum, deliberately distinct from ergo-ser's
-//! SigmaType. The parser needs NoType and STypeApply variants that crate lacks.
+//! SigmaType. The parser needs `NoType` and `STypeApply` variants that
+//! ergo-ser's SigmaType lacks.
 //! Cites: Types.scala:30-49 (predef table), SType.scala:105-122 + :338 (gate).
 
 /// Parser-domain type representation.
 ///
-/// Includes compound shapes (SColl/SOption/STuple/SFunc/STypeVar/STypeApply) and
-/// NoType (eliminated by the typer). Never includes NoType/STypeApply in the
-/// predef-available set.
+/// Includes primitive types, compound shapes (SColl/SOption/STuple/SFunc),
+/// compiler-internal types (STypeVar/STypeApply), and NoType (eliminated by
+/// the typer). See [`is_predef_available`] for version-gating.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SType {
     /// Eliminated by the typer (SType.scala:278-281).
@@ -93,8 +94,9 @@ pub fn predef_type(name: &str) -> Option<SType> {
 /// Mirrors SType.scala:105-122 availability gate:
 /// - All 17 v5 primitive types are available at every version (0+).
 /// - SUnsignedBigInt is available only at tree_version >= 3.
-/// - Compound shapes (SColl, SOption, STuple, SFunc) and NoType are never
-///   "predef available" (checked by SPrimType.unapply in Scala).
+/// - Compound shapes (SColl, SOption, STuple, SFunc), STypeVar, STypeApply,
+///   and NoType are never "predef available" (checked by SPrimType.unapply in
+///   Scala — they are not in the predefined-type table).
 pub fn is_predef_available(t: &SType, tree_version: u8) -> bool {
     match t {
         // v5 core: available at all versions.

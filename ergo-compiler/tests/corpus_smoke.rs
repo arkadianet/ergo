@@ -27,6 +27,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+// ----- helpers -----
+
 /// `<crate>/../test-vectors/ergoscript/corpus`.
 fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

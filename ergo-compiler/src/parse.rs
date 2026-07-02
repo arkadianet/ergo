@@ -29,10 +29,10 @@ use crate::token::{tokenize, Kw, Token, TokenKind};
 /// Parse an ErgoScript expression (Scala `SigmaParser.apply`,
 /// SigmaParser.scala:114-117: `StatCtx.Expr ~ End`).
 ///
-/// Task 7 pipeline: `simple_expr` + `expr_suffix` + `apply_suffix` in `StatCtx`,
-/// then `~ End`. This covers the postfix (atom/select/apply/type-apply) layer;
-/// Task 8 replaces `expr` with the full `PostfixExpr`/infix/lambda grammar and
-/// this entry point is unchanged.
+/// The accepted grammar is `Exprs.scala:46-74`: `If | Fun | PostfixLambda` in
+/// statement context (`StatCtx`), then `~ End` (SigmaParser.scala:114-117).
+/// This covers the full expression grammar — infix, prefix/postfix, lambdas,
+/// blocks, `if`/`else`, `val`/`def`, and all atom forms.
 pub fn parse(source: &str, tree_version: u8) -> Result<Expr, ParseError> {
     let toks = tokenize(source)?;
     let mut c = Cursor::new(source, toks, tree_version);
@@ -219,6 +219,11 @@ impl<'a> Cursor<'a> {
     /// transparently skipped by `peek`, so the only observable effect of the
     /// single-`Semi` option is a lone `;` (a second `;` is left for the caller —
     /// this is what makes `if(c) t;;else e` a hard error, Exprs.scala:48).
+    ///
+    /// Deviation: `if (c) t\n;else e` — Scala's `Semi.?` (Basic.scala:35) consumes
+    /// the newline-run as the single Semi, and the residual `;` blocks `else`
+    /// (reject). Our transparent-newline skip consumes the `;` directly (accept).
+    /// Accept-divergence on this pathological separator mix only.
     fn take_one_semi(&mut self) {
         let j = self.skip_nl(self.i);
         if j < self.toks.len() && self.toks[j].kind == TokenKind::Semi {
@@ -744,7 +749,7 @@ fn starts_full_expr(t: &Token) -> bool {
 ///
 /// `null` maps to `StringConst("null")` (Literals.scala:88) — but ONLY here, in
 /// literal-atom position; `ExprLiteral` precedes `StableId` in `SimpleExpr`, so a
-/// bare `null` is a literal, while a `null` used as a binder name (Task 9) stays an
+/// bare `null` is a literal, while a `null` used as a binder name in a block stays an
 /// ordinary Ident. `Str` carries the already-stripped value; `CharSym` carries the
 /// raw `'…'` form (strip only removes leading `"`, Literals.scala:119-124) — both
 /// become `StringConst`. Positions are the token start.
@@ -1109,6 +1114,18 @@ fn expect_assign(c: &mut Cursor) -> Result<(), ParseError> {
         // `"="` matched the leading `=`; `!OpChar` fails one byte later.
         return Err(ParseError::Syntax {
             pos: t.start + 1,
+            expected: "`=`".to_string(),
+        });
+    }
+    // ASCII `=>` FatArrow (Core.scala:25): O("=") matches the leading `=`, then
+    // `!OpChar` fails at the following `>` — one byte past t.start, same as the
+    // OpId `==` arm. The Unicode alias `⇒` (U+21D2, three UTF-8 bytes starting
+    // 0xE2) does NOT start with `=`, so keep t.start for that form.
+    if t.kind == TokenKind::Kw(Kw::FatArrow) {
+        let src_byte = c.src.as_bytes().get(t.start as usize).copied();
+        let pos_offset = if src_byte == Some(b'=') { 1 } else { 0 };
+        return Err(ParseError::Syntax {
+            pos: t.start + pos_offset,
             expected: "`=`".to_string(),
         });
     }
@@ -2187,7 +2204,7 @@ mod tests {
     #[test]
     fn parse_type_compound_and_path_types_rejected() {
         // fail("Coll[Int with Sortable](1)",1,6) / fail("Coll[Int.A](1)",1,10) are
-        // expression-level (Task 10); here assert the type-level classification:
+        // expression-level; here assert the type-level classification:
         assert!(parse_type("Int with Sortable", 3).is_err()); // Types.scala:97-103
         assert!(parse_type("Int.A", 3).is_err()); // Types.scala:108-115
     }
@@ -2759,7 +2776,7 @@ mod expr_tests {
         );
     }
 
-    // ----- infix / prefix / postfix layers (Task 8) -----
+    // ----- infix / prefix / postfix layers -----
 
     #[test]
     fn infix_left_assoc_chain() {
@@ -3007,7 +3024,7 @@ mod expr_tests {
         assert_eq!(parse_type("Int @foo()", 3).unwrap(), SType::SInt);
     }
 
-    // ----- Task 9: blocks, val/def, lambdas, if (ported, cited) -----
+    // ----- blocks, val/def, lambdas, if -----
 
     #[test]
     fn block_val_and_newline_separators() {
@@ -3180,7 +3197,7 @@ mod expr_tests {
         assert_eq!(strip_pos(&p("{}")), block(vec![], unit()));
     }
 
-    // ----- Task 9 error paths -----
+    // ----- blocks and lambdas — error paths -----
 
     #[test]
     fn block_and_lambda_rejections_at_scala_positions() {
@@ -3197,7 +3214,7 @@ mod expr_tests {
         assert!(crate::parse("{ val a = 1; (x: Int) => x }", 3).is_err());
     }
 
-    // ----- Task 9 Scala-cited edge cases (spec-derived) -----
+    // ----- blocks and lambdas — Scala-cited edge cases -----
 
     #[test]
     fn block_result_may_be_a_val() {
@@ -3389,7 +3406,7 @@ mod expr_tests {
         );
     }
 
-    // ----- corpus-parity regressions (Task 11: real-contract corpus) -----
+    // ----- corpus-parity regressions -----
 
     #[test]
     fn if_expr_is_a_valid_paren_and_arg_item() {
@@ -3424,6 +3441,17 @@ mod expr_tests {
         // matches and the `!OpChar` lookahead fails one char later — ChainCash
         // `layer2-old/reserve.es` (`val redemptionInputOk == …`) rejects at the 2nd `=`.
         let src = "{ val x == y }";
+        let e = crate::parse(src, 3).expect_err("must reject");
+        assert_eq!(e.line_col(src), (1, 10));
+    }
+
+    #[test]
+    fn val_def_fatarrow_reports_scala_position() {
+        // expect_assign: O("=") = `"=" ~ !OpChar` (Core.scala:25). ASCII `=>`
+        // FatArrow: `=` matches at t.start, `!OpChar` fails at t.start+1 (the `>`).
+        // `{ val x => 1; 2 }`: `=>` is at byte 8 (0-indexed), so error is at byte 9
+        // → line 1, col 10 (1-based).
+        let src = "{ val x => 1; 2 }";
         let e = crate::parse(src, 3).expect_err("must reject");
         assert_eq!(e.line_col(src), (1, 10));
     }

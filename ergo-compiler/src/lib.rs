@@ -29,9 +29,9 @@
 //! ## Known M1 deviations from the Scala reference
 //!
 //! All deviations are bounded to either pathological/malformed input that no
-//! real contract contains or to deliberate M1 scoping decisions. The Task 11
-//! corpus (67 accepted / 12 rejected real contracts) serves as the regression
-//! oracle for each.
+//! real contract contains or to deliberate M1 scoping decisions. The corpus
+//! (67 accepted / 12 rejected real contracts) serves as the regression oracle
+//! for each.
 //!
 //! - **D6 — `${…}` interpolation block rejected** (`token.rs`): the reference's
 //!   `${ Block }` string-interpolation form is rejected with a lexical error rather
@@ -64,7 +64,7 @@
 //!   (`-`/`+`/`!`/`~` prefixes are handled correctly via the expression grammar).
 //!
 //! - **D4 — integer overflow parity** (`token.rs`): positive magnitudes above
-//!   `i32::MAX` / `i63::MAX` are rejected at lex time (`ParseError::Lexical`),
+//!   `i32::MAX` / `i64::MAX` are rejected at lex time (`ParseError::Lexical`),
 //!   matching the Scala reference which rejects them via
 //!   `NumberFormatException`/`MatchError`. Both sides REJECT; the error class
 //!   differs. The practical consequence is that `-2147483648` is rejected (as in
@@ -89,6 +89,13 @@
 //!   and the empty-last-line fallback col is clamped to `0` instead of `-1`
 //!   (matches the `u32` return type). Neither affects error positions for any
 //!   real contract.
+//!
+//! - **`take_one_semi` else-separator edge** (`parse.rs`): the input
+//!   `if (c) t\n;else e` — Scala's `Semi.?` (Basic.scala:35, Literals.scala:50)
+//!   consumes the newline-run as the single Semi and the residual `;` blocks
+//!   `else` (reject). Our transparent-newline `take_one_semi` skips the newlines
+//!   and consumes the `;` directly (accept). Accept-divergence on a pathological
+//!   newline+semicolon separator mix that no real contract produces.
 
 pub mod ast;
 pub mod error;
