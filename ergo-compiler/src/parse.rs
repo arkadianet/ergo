@@ -29,18 +29,23 @@ use crate::token::{tokenize, Kw, Token, TokenKind};
 /// Parse an ErgoScript expression (Scala `SigmaParser.apply`,
 /// SigmaParser.scala:114-117: `StatCtx.Expr ~ End`).
 ///
-/// The expression grammar lands in Task 7; this task ships only the type grammar
-/// and the shared public entry points. We still tokenize so that lexical errors
-/// (unterminated comment, numeric overflow) surface at the correct offset instead
-/// of being masked by the stub.
+/// Task 7 pipeline: `simple_expr` + `expr_suffix` + `apply_suffix` in `StatCtx`,
+/// then `~ End`. This covers the postfix (atom/select/apply/type-apply) layer;
+/// Task 8 replaces `expr` with the full `PostfixExpr`/infix/lambda grammar and
+/// this entry point is unchanged.
 pub fn parse(source: &str, tree_version: u8) -> Result<Expr, ParseError> {
-    let _ = tree_version;
     let toks = tokenize(source)?;
-    let pos = toks.first().map(|t| t.start).unwrap_or(0);
-    Err(ParseError::Syntax {
-        pos,
-        expected: "expression grammar lands in Task 7".to_string(),
-    })
+    let mut c = Cursor::new(source, toks, tree_version);
+    let e = expr(&mut c, Ctx::Stat)?;
+    // `~ End`: trailing whitespace/newlines/comments are skipped by `peek`.
+    let tail = c.peek();
+    if tail.kind != TokenKind::Eof {
+        return Err(ParseError::Syntax {
+            pos: tail.start,
+            expected: "end of input".to_string(),
+        });
+    }
+    Ok(e)
 }
 
 /// Parse an ErgoScript type (Scala `SigmaParser.parseType`,
@@ -108,8 +113,9 @@ impl<'a> Cursor<'a> {
         &self.toks[self.skip_nl(self.i)]
     }
 
-    /// Second non-`Newline` token (one token of lookahead past `peek`).
-    #[allow(dead_code)] // consumed by Tasks 7-9 (expression lookahead); pinned by tests below.
+    /// Second non-`Newline` token (one token of lookahead past `peek`). Used by
+    /// `stable_id` to realise `PostDotCheck` — inspecting the token after a `.`
+    /// without committing to consuming the dot.
     fn peek2(&self) -> &Token {
         let j1 = self.skip_nl(self.i);
         let j2 = self.skip_nl(j1 + 1);
@@ -169,39 +175,10 @@ impl<'a> Cursor<'a> {
         self.i >= self.toks.len() || !Self::is_nl(&self.toks[self.i])
     }
 
-    /// `Semi` (Literals.scala:50, Basic.scala:35): one `;` *or* a run of one or
-    /// more `Newline`s. Returns true if a separator was consumed.
-    #[allow(dead_code)] // consumed by Tasks 7-9 (block/statement grammar); pinned by tests below.
-    fn take_one_semi(&mut self) -> bool {
-        if self.i < self.toks.len() {
-            match self.toks[self.i].kind {
-                TokenKind::Semi => {
-                    self.i += 1;
-                    return true;
-                }
-                TokenKind::Newline { .. } => {
-                    while self.i < self.toks.len()
-                        && matches!(self.toks[self.i].kind, TokenKind::Newline { .. })
-                    {
-                        self.i += 1;
-                    }
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
-    /// `Semis` (Literals.scala:51): `Semi+`. Returns true if any consumed.
-    #[allow(dead_code)] // consumed by Tasks 7-9 (block/statement grammar); pinned by tests below.
-    fn skip_semis(&mut self) -> bool {
-        let mut any = false;
-        while self.take_one_semi() {
-            any = true;
-        }
-        any
-    }
+    // The `Semi`/`Semis` primitives (Literals.scala:50-51) belong to the block /
+    // statement grammar (Exprs.scala:280-302), which lands in Task 9; they are
+    // (re)introduced there rather than kept unused here (the repo forbids
+    // `#[allow(dead_code)]`).
 
     /// `OneNLMax` (Literals.scala:57-60), over `Newline` tokens: optionally
     /// consume ONE `Newline` (either flavor), then consume a run of
@@ -407,20 +384,66 @@ fn annot_type(c: &mut Cursor) -> Result<SType, ParseError> {
     Ok(t)
 }
 
-/// `Annot` (Types.scala:159): `` `@` ~/ SimpleType ~ ("(" … ")").rep ``.
-/// The annotation body is discarded. Annotation arguments are an expression list
-/// (`Exprs`) that lands with the expression grammar; until then a `(` after the
-/// annotation type is a syntax error. Task 7 replaces this with the real `Exprs`
-/// call. No ported test exercises annotation arguments before Task 7.
+/// `Annot` (Types.scala:159): `` `@` ~/ SimpleType ~ ("(" ~/ (Exprs ~ (`:` ~/
+/// `_*`).?).? ~ TrailingComma ~ ")").rep ``. The annotation type and every argument
+/// group are parsed and DISCARDED; argument expressions parse in `ExprCtx`
+/// (`Exprs`, Types.scala:168).
 fn annot(c: &mut Cursor) -> Result<(), ParseError> {
     c.bump(); // `@` ~/ — committed
     simple_type(c)?; // discarded
-    if c.peek().kind == TokenKind::LParen {
-        return Err(ParseError::Syntax {
-            pos: c.peek().start,
-            expected: "annotation arguments land in Task 7".to_string(),
-        });
+    while c.peek().kind == TokenKind::LParen {
+        annot_arg_group(c)?;
     }
+    Ok(())
+}
+
+/// One `"(" ~/ (Exprs ~ (`:` ~/ `_*`).?).? ~ TrailingComma ~ ")"` argument group of
+/// an annotation (Types.scala:159). Everything parsed here is discarded.
+fn annot_arg_group(c: &mut Cursor) -> Result<(), ParseError> {
+    c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
+    if starts_expr(c.peek()) {
+        // Exprs = TypeExpr.rep(1, ",") (Types.scala:168); no trailing comma here —
+        // the trailing comma belongs to the `TrailingComma` below.
+        loop {
+            expr(c, Ctx::Expr)?; // discarded
+            if c.peek().kind != TokenKind::Comma {
+                break;
+            }
+            if c.comma_then_newline() {
+                break; // leave the trailing comma for `TrailingComma`
+            }
+            let mark = c.save();
+            c.bump(); // separator comma
+            if starts_expr(c.peek()) {
+                continue;
+            }
+            c.restore(mark);
+            break;
+        }
+        // (`:` ~/ `_*`).? — varargs ascription (Core.scala:47: `` `_*` = `_` ~ `*` ``).
+        if c.at_kw(Kw::Colon) {
+            c.bump(); // `:` ~/ — committed
+            if !(c.peek().kind == TokenKind::Ident && c.peek().text(c.src) == "_") {
+                return Err(ParseError::Syntax {
+                    pos: c.peek().start,
+                    expected: "`_*`".to_string(),
+                });
+            }
+            c.bump(); // `_`
+            if !c.at_op("*") {
+                return Err(ParseError::Syntax {
+                    pos: c.peek().start,
+                    expected: "`*`".to_string(),
+                });
+            }
+            c.bump(); // `*`
+        }
+    }
+    // TrailingComma = ("," WS Newline)? (Literals.scala:63).
+    if c.peek().kind == TokenKind::Comma && c.comma_then_newline() {
+        c.bump();
+    }
+    c.expect(&TokenKind::RParen, ")")?;
     Ok(())
 }
 
@@ -592,6 +615,396 @@ fn type_bounds(c: &mut Cursor) -> Result<(), ParseError> {
         type_(c)?;
     }
     Ok(())
+}
+
+// =============================================================================
+// Expression grammar: atoms (SimpleExpr) and the postfix suffix machinery
+// (ExprSuffix / applySuffix). Exprs.scala:46-132, 191-211, 315-320; Core.scala:62-69.
+// =============================================================================
+
+/// Expression parsing context (Exprs.scala:27-31). Semicolon inference is on in
+/// statement positions and off inside nested expressions; it gates the
+/// `NoSemis`/`OneSemiMax` combinators (Exprs.scala:42-43).
+///
+/// `FreeCtx` (the `val x = …`/`def f = …` RHS) joins in Task 9, where it is first
+/// *constructed* — adding a never-constructed variant now would trip `dead_code`
+/// (the repo forbids `#[allow]`).
+#[derive(Clone, Copy, PartialEq)]
+enum Ctx {
+    /// `StatCtx` — top level / inside a `{}` block (semiInference = true).
+    Stat,
+    /// `ExprCtx` — nested in another expression: parens, arg-lists, annotation
+    /// arguments (semiInference = false).
+    Expr,
+}
+
+impl Ctx {
+    /// `semiInference` (Exprs.scala:40): true for `StatCtx` (and, from Task 9,
+    /// `FreeCtx`).
+    fn semi_inference(self) -> bool {
+        matches!(self, Ctx::Stat)
+    }
+}
+
+/// One postfix `ExprSuffix` marker (Exprs.scala:79-83), folded by `apply_suffix`.
+///
+/// The markers carry no positions: every node `apply_suffix` builds takes
+/// `pos = f.pos()` (Scala pins `builder.currentSrcCtx = f.sourceContext` for the
+/// whole fold, Exprs.scala:192), so a marker's own captured index is discarded.
+enum Suffix {
+    /// `.id` → `mkSelect(acc, name)` (Exprs.scala:80).
+    Select { name: String },
+    /// `[T,…]` → `mkApplyTypes(acc, args)` (Exprs.scala:81).
+    TypeApply { args: Vec<SType> },
+    /// `(…)` → `mkApply` (Exprs.scala:315-319). `None` = `()` (unit carrier);
+    /// `Some(xs)` = the tuple carrier `apply_suffix` unwraps into the arg list.
+    Args { tuple: Option<Vec<Expr>> },
+    /// `{ … }` → a block argument, e.g. `f { … }` (Exprs.scala:320); handled with
+    /// the ZKProof special case in `apply_suffix`.
+    BlockArg { block: Expr },
+}
+
+/// A token that can begin a `SimpleExpr` (Exprs.scala:120-132): a `BlockExpr` `{`,
+/// an `ExprLiteral`, a `StableId` head (`Id`), the `_` atom, or a `Parened` `(`.
+fn starts_expr(t: &Token) -> bool {
+    matches!(
+        t.kind,
+        TokenKind::LParen
+            | TokenKind::LBrace
+            | TokenKind::IntLit(_)
+            | TokenKind::LongLit(_)
+            | TokenKind::Str(_)
+            | TokenKind::CharSym(_)
+            | TokenKind::Kw(Kw::True)
+            | TokenKind::Kw(Kw::False)
+    ) || is_id(t)
+}
+
+/// `ExprLiteral` → constant node (Literals.scala:70-124). Returns `None` when the
+/// token is not a literal, so the caller falls through to `StableId`.
+///
+/// `null` maps to `StringConst("null")` (Literals.scala:88) — but ONLY here, in
+/// literal-atom position; `ExprLiteral` precedes `StableId` in `SimpleExpr`, so a
+/// bare `null` is a literal, while a `null` used as a binder name (Task 9) stays an
+/// ordinary Ident. `Str` carries the already-stripped value; `CharSym` carries the
+/// raw `'…'` form (strip only removes leading `"`, Literals.scala:119-124) — both
+/// become `StringConst`. Positions are the token start.
+fn try_literal(t: &Token, src: &str) -> Option<Expr> {
+    let pos = t.start;
+    match &t.kind {
+        TokenKind::IntLit(v) => Some(Expr::IntConst { value: *v, pos }),
+        TokenKind::LongLit(v) => Some(Expr::LongConst { value: *v, pos }),
+        TokenKind::Kw(Kw::True) => Some(Expr::BoolConst { value: true, pos }),
+        TokenKind::Kw(Kw::False) => Some(Expr::BoolConst { value: false, pos }),
+        TokenKind::Str(s) => Some(Expr::StringConst {
+            value: s.clone(),
+            pos,
+        }),
+        TokenKind::CharSym(s) => Some(Expr::StringConst {
+            value: s.clone(),
+            pos,
+        }),
+        TokenKind::Ident if t.text(src) == "null" => Some(Expr::StringConst {
+            value: "null".to_string(),
+            pos,
+        }),
+        _ => None,
+    }
+}
+
+/// The Task-7 expression parser: a reduced `PostfixExpr` = `SimpleExpr ~~
+/// ExprSuffix` (Exprs.scala:106), without the prefix / infix / postfix layers.
+///
+/// Task 8 replaces this body with the full `Expr` (`If | Fun | PostfixLambda`)
+/// grammar; `parse`, `Parened` and `ArgList` all route their sub-expressions
+/// through here, so that swap lifts every caller at once.
+fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+    let f = simple_expr(c, ctx)?;
+    let suffixes = expr_suffix(c, ctx)?;
+    apply_suffix(c, f, suffixes)
+}
+
+/// `SimpleExpr` (Exprs.scala:120-132), ordered `BlockExpr | ExprLiteral | StableId
+/// | `_` | Parened`. The `_` atom is subsumed by `StableId` (which yields
+/// `Ident("_")`), exactly as in the reference where `StableId` precedes it.
+///
+/// `ctx` does not influence the atom head (`Parened` hardcodes `ExprCtx`), but is
+/// carried for signature parity with the Task-8 layer.
+fn simple_expr(c: &mut Cursor, _ctx: Ctx) -> Result<Expr, ParseError> {
+    let t = c.peek();
+    if t.kind == TokenKind::LBrace {
+        return block_expr(c); // BlockExpr
+    }
+    if let Some(e) = try_literal(t, c.src) {
+        c.bump(); // ExprLiteral wins over StableId (`null`/`true` are literals)
+        return Ok(e);
+    }
+    if is_id(t) {
+        return stable_id(c); // StableId (also the lone `_` atom)
+    }
+    if t.kind == TokenKind::LParen {
+        return parened(c);
+    }
+    Err(ParseError::Syntax {
+        pos: t.start,
+        expected: "expression".to_string(),
+    })
+}
+
+/// `BlockExpr` (Exprs.scala:242): `"{" Block "}"`. The `Block` grammar
+/// (Exprs.scala:280-302) lands in Task 9; here `block()` is a stub that rejects any
+/// brace-expression so it is never silently mis-parsed.
+fn block_expr(c: &mut Cursor) -> Result<Expr, ParseError> {
+    Err(ParseError::Syntax {
+        pos: c.peek().start,
+        expected: "block (Task 9)".to_string(),
+    })
+}
+
+/// `StableId` (Core.scala:62-69): `Id ("." PostDotCheck ~/ (`this` | Id))*`, folded
+/// `Ident(first)` then `Select(acc, seg)` with each `Select`'s pos = the segment's
+/// index (Core.scala:65).
+///
+/// `PostDotCheck` (Core.scala:61) inspects the token after the `.` *without*
+/// committing to the dot: a banned token (`super`/`this`/`type`, `_`, or `{`)
+/// backtracks the dot and ends the `StableId`. The cut sits AFTER `PostDotCheck`
+/// (`"." ~ PostDotCheck ~/ …`), so once it passes a missing Id is a hard error.
+fn stable_id(c: &mut Cursor) -> Result<Expr, ParseError> {
+    let head = c.bump(); // caller guaranteed `is_id`
+    let mut acc = Expr::Ident {
+        name: head.text(c.src).to_string(),
+        tpe: SType::NoType,
+        pos: head.start,
+    };
+    loop {
+        if c.peek().kind != TokenKind::Dot {
+            break;
+        }
+        // PostDotCheck (lookahead): a banned token after the dot ends the StableId
+        // with the dot left unconsumed.
+        if post_dot_banned(c.peek2(), c.src) {
+            break;
+        }
+        c.bump(); // "." ~ PostDotCheck ~/ — committed
+        if !is_id(c.peek()) {
+            return Err(ParseError::Syntax {
+                pos: c.peek().start,
+                expected: "identifier after `.`".to_string(),
+            });
+        }
+        let seg = c.bump();
+        acc = Expr::Select {
+            obj: Box::new(acc),
+            field: seg.text(c.src).to_string(),
+            pos: seg.start,
+        };
+    }
+    Ok(acc)
+}
+
+/// `PostDotCheck` ban set (Core.scala:61): `!(`super` | `this` | "{" | `_` |
+/// `type`)`. `super`/`this`/`type`/`_` are `Key.W` words (Ident tokens), `{` is a
+/// brace.
+fn post_dot_banned(t: &Token, src: &str) -> bool {
+    if t.kind == TokenKind::LBrace {
+        return true;
+    }
+    t.kind == TokenKind::Ident && matches!(t.text(src), "super" | "this" | "type" | "_")
+}
+
+/// `Parened` (Exprs.scala:119,126-130): `Index ~ "(" ~/ TypeExpr.rep(0,",") ~
+/// TrailingComma ~ ")"`. Items parse in `ExprCtx` (Exprs.scala:33). 0 → `UnitConst`;
+/// 1 → the item itself (pure grouping, no node); ≥2 → `Tuple`. The `Index` (before
+/// `"("`) is the position of `UnitConst`/`Tuple`.
+fn parened(c: &mut Cursor) -> Result<Expr, ParseError> {
+    let open = c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
+    let pos = open.start;
+    let mut items = expr_list(c)?;
+    c.expect(&TokenKind::RParen, ")")?;
+    Ok(match items.len() {
+        0 => Expr::UnitConst { pos },
+        1 => items.pop().unwrap(),
+        _ => Expr::Tuple { items, pos },
+    })
+}
+
+/// `TypeExpr.rep(0, ",") ~ TrailingComma` — the comma-separated expression list
+/// shared by `Parened` and `ParenArgList`, stopping before the closer. Items parse
+/// in `ExprCtx` (Exprs.scala:33). A separator comma must be followed by another
+/// item; a trailing comma is legal only when directly followed by a `Newline`
+/// (Literals.scala:63).
+fn expr_list(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
+    let mut items = Vec::new();
+    if starts_expr(c.peek()) {
+        loop {
+            items.push(expr(c, Ctx::Expr)?);
+            if c.peek().kind != TokenKind::Comma {
+                break;
+            }
+            if c.comma_then_newline() {
+                c.bump(); // trailing comma; the Newline stays for the closer's skip
+                break;
+            }
+            let mark = c.save();
+            c.bump(); // separator comma
+            if starts_expr(c.peek()) {
+                continue;
+            }
+            // No item follows and it is not a valid trailing comma: rewind so the
+            // closer's `expect` reports the failure at the comma.
+            c.restore(mark);
+            break;
+        }
+    } else if c.peek().kind == TokenKind::Comma && c.comma_then_newline() {
+        // rep(0) matched nothing, but TrailingComma still absorbs a lone `,\n`.
+        c.bump();
+    }
+    Ok(items)
+}
+
+/// `ExprSuffix` (Exprs.scala:79-83): `(WL "." Id | WL TypeArgs | NoSemis ArgList)*`,
+/// collected as `Suffix` markers for `apply_suffix`.
+///
+/// - `.` has a CUT: a non-Id after a consumed `.` is a hard error. Any Id follows,
+///   INCLUDING `_`/`this`/`type` — `PostDotCheck` does NOT apply here (the
+///   `StableId` already ended).
+/// - `[T,…]` reuses `TypeArgs`; `X[]` is legal (empty).
+/// - `NoSemis ~ ArgList`: in semi-inference contexts an arg-list may not start on a
+///   new line; `ArgList = ParenArgList | OneNLMax ~ BlockExpr`.
+fn expr_suffix(c: &mut Cursor, ctx: Ctx) -> Result<Vec<Suffix>, ParseError> {
+    let mut out = Vec::new();
+    loop {
+        // Alt 1: WL ~ "." ~/ Id
+        if c.peek().kind == TokenKind::Dot {
+            c.bump(); // "." ~/ — committed
+            if !is_id(c.peek()) {
+                return Err(ParseError::Syntax {
+                    pos: c.peek().start,
+                    expected: "identifier after `.`".to_string(),
+                });
+            }
+            let seg = c.bump();
+            out.push(Suffix::Select {
+                name: seg.text(c.src).to_string(),
+            });
+            continue;
+        }
+        // Alt 2: WL ~ TypeArgs
+        if c.peek().kind == TokenKind::LBracket {
+            out.push(Suffix::TypeApply {
+                args: type_args(c)?,
+            });
+            continue;
+        }
+        // Alt 3: NoSemis ~ ArgList. NoSemis (semi-inference): the arg-list may not
+        // start on a new line.
+        if ctx.semi_inference() && !c.no_newline_before_next() {
+            break;
+        }
+        // ArgList = ParenArgList | OneNLMax ~ BlockExpr.
+        if c.peek().kind == TokenKind::LParen {
+            out.push(paren_arg_list(c)?);
+            continue;
+        }
+        let mark = c.save();
+        if c.one_nl_max() && c.peek().kind == TokenKind::LBrace {
+            let block = block_expr(c)?;
+            out.push(Suffix::BlockArg { block });
+            continue;
+        }
+        c.restore(mark);
+        break;
+    }
+    Ok(out)
+}
+
+/// `ParenArgList` (Exprs.scala:315-319): `"(" ~/ Index ~ Exprs.? ~ TrailingComma ~
+/// ")"`. `()` → `Suffix::Args { tuple: None }` (unit carrier); a non-empty list →
+/// `Suffix::Args { tuple: Some(xs) }` (tuple carrier, unwrapped by `apply_suffix`).
+fn paren_arg_list(c: &mut Cursor) -> Result<Suffix, ParseError> {
+    c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
+    let items = expr_list(c)?;
+    c.expect(&TokenKind::RParen, ")")?;
+    Ok(Suffix::Args {
+        tuple: if items.is_empty() { None } else { Some(items) },
+    })
+}
+
+/// `applySuffix` (Exprs.scala:191-211): `foldLeft` the markers onto `f`. Every node
+/// built here takes `pos = f.pos()` (Scala pins `builder.currentSrcCtx =
+/// f.sourceContext` for the whole fold, :192).
+///
+/// The `Cursor` is unused (positions come from `f` and the markers) but is kept in
+/// the signature for parity with the Task-8 caller layer.
+fn apply_suffix(_c: &Cursor, f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, ParseError> {
+    let f_pos = f.pos();
+    let mut acc = f;
+    for suf in suffixes {
+        acc = match suf {
+            Suffix::Select { name } => Expr::Select {
+                obj: Box::new(acc),
+                field: name,
+                pos: f_pos,
+            },
+            Suffix::Args { tuple: None } => Expr::Apply {
+                func: Box::new(acc),
+                args: Vec::new(),
+                pos: f_pos,
+            },
+            Suffix::Args { tuple: Some(xs) } => Expr::Apply {
+                func: Box::new(acc),
+                args: xs,
+                pos: f_pos,
+            },
+            Suffix::TypeApply { args } => Expr::ApplyTypes {
+                input: Box::new(acc),
+                type_args: args,
+                pos: f_pos,
+            },
+            Suffix::BlockArg { block } => {
+                // ZKProof special case (Exprs.scala:199-204): the block's bindings
+                // are DISCARDED — only its result is applied — and the callee Ident
+                // carries `ZKProofFunc.declaration.tpe`. Verified against
+                // SigmaPredef.scala:125-126: `Lambda(Array("block" -> SSigmaProp),
+                // SBoolean, None).tpe = SFunc(dom = [SSigmaProp], range = SBoolean)`.
+                if matches!(&acc, Expr::Ident { name, .. } if name == "ZKProof") {
+                    match block {
+                        Expr::Block { result, .. } => {
+                            let callee = Expr::Ident {
+                                name: "ZKProof".to_string(),
+                                tpe: SType::SFunc {
+                                    dom: vec![SType::SSigmaProp],
+                                    range: Box::new(SType::SBoolean),
+                                },
+                                pos: f_pos,
+                            };
+                            Expr::Apply {
+                                func: Box::new(callee),
+                                args: vec![*result],
+                                pos: f_pos,
+                            }
+                        }
+                        // Unreachable while `block()` is stubbed (Task 7): the
+                        // block-arg form only yields a `Block`. Kept for the Task 9
+                        // non-block error path (Exprs.scala:203). Tested in Task 9.
+                        nonblock => {
+                            return Err(ParseError::Semantic {
+                                pos: nonblock.pos(),
+                                msg: "expected block parameter for ZKProof".to_string(),
+                            })
+                        }
+                    }
+                } else {
+                    Expr::Apply {
+                        func: Box::new(acc),
+                        args: vec![block],
+                        pos: f_pos,
+                    }
+                }
+            }
+        };
+    }
+    Ok(acc)
 }
 
 #[cfg(test)]
@@ -814,22 +1227,357 @@ mod tests {
         assert!(!c2.one_nl_max());
         assert_eq!(c2.save(), before);
     }
+}
+
+#[cfg(test)]
+mod expr_tests {
+    use super::*;
+    use crate::ast::ValDef;
+
+    // ----- helpers -----
+
+    // Expected ASTs are taken from SigmaParserTest.scala (cited per test); the
+    // Scala suite is the oracle, so these values are NOT self-derived.
+    fn p(src: &str) -> Expr {
+        crate::parse(src, 3).unwrap()
+    }
+    fn int(v: i32) -> Expr {
+        Expr::IntConst { value: v, pos: 0 }
+    }
+    fn long(v: i64) -> Expr {
+        Expr::LongConst { value: v, pos: 0 }
+    }
+    fn boolean(v: bool) -> Expr {
+        Expr::BoolConst { value: v, pos: 0 }
+    }
+    fn string(s: &str) -> Expr {
+        Expr::StringConst {
+            value: s.into(),
+            pos: 0,
+        }
+    }
+    fn unit() -> Expr {
+        Expr::UnitConst { pos: 0 }
+    }
+    fn ident0(n: &str) -> Expr {
+        Expr::Ident {
+            name: n.into(),
+            tpe: SType::NoType,
+            pos: 0,
+        }
+    }
+    fn tuple(items: Vec<Expr>) -> Expr {
+        Expr::Tuple { items, pos: 0 }
+    }
+    fn select(obj: Expr, f: &str) -> Expr {
+        Expr::Select {
+            obj: Box::new(obj),
+            field: f.into(),
+            pos: 0,
+        }
+    }
+    fn apply(f: Expr, args: Vec<Expr>) -> Expr {
+        Expr::Apply {
+            func: Box::new(f),
+            args,
+            pos: 0,
+        }
+    }
+    fn apply_types(input: Expr, type_args: Vec<SType>) -> Expr {
+        Expr::ApplyTypes {
+            input: Box::new(input),
+            type_args,
+            pos: 0,
+        }
+    }
+
+    /// Recursively set every `pos` (and `ValDef` pos) to 0 for shape-only
+    /// comparison against the position-free helper constructors above.
+    fn strip_pos(e: &Expr) -> Expr {
+        match e {
+            Expr::IntConst { value, .. } => Expr::IntConst {
+                value: *value,
+                pos: 0,
+            },
+            Expr::LongConst { value, .. } => Expr::LongConst {
+                value: *value,
+                pos: 0,
+            },
+            Expr::BoolConst { value, .. } => Expr::BoolConst {
+                value: *value,
+                pos: 0,
+            },
+            Expr::StringConst { value, .. } => Expr::StringConst {
+                value: value.clone(),
+                pos: 0,
+            },
+            Expr::UnitConst { .. } => Expr::UnitConst { pos: 0 },
+            Expr::Ident { name, tpe, .. } => Expr::Ident {
+                name: name.clone(),
+                tpe: tpe.clone(),
+                pos: 0,
+            },
+            Expr::Select { obj, field, .. } => Expr::Select {
+                obj: Box::new(strip_pos(obj)),
+                field: field.clone(),
+                pos: 0,
+            },
+            Expr::Apply { func, args, .. } => Expr::Apply {
+                func: Box::new(strip_pos(func)),
+                args: args.iter().map(strip_pos).collect(),
+                pos: 0,
+            },
+            Expr::ApplyTypes {
+                input, type_args, ..
+            } => Expr::ApplyTypes {
+                input: Box::new(strip_pos(input)),
+                type_args: type_args.clone(),
+                pos: 0,
+            },
+            Expr::MethodCallLike {
+                obj, name, args, ..
+            } => Expr::MethodCallLike {
+                obj: Box::new(strip_pos(obj)),
+                name: name.clone(),
+                args: args.iter().map(strip_pos).collect(),
+                pos: 0,
+            },
+            Expr::Lambda {
+                args,
+                given_res_type,
+                body,
+                ..
+            } => Expr::Lambda {
+                args: args.clone(),
+                given_res_type: given_res_type.clone(),
+                body: Box::new(strip_pos(body)),
+                pos: 0,
+            },
+            Expr::Val(v) => Expr::Val(Box::new(strip_val(v))),
+            Expr::Block {
+                bindings, result, ..
+            } => Expr::Block {
+                bindings: bindings.iter().map(strip_val).collect(),
+                result: Box::new(strip_pos(result)),
+                pos: 0,
+            },
+            Expr::Tuple { items, .. } => Expr::Tuple {
+                items: items.iter().map(strip_pos).collect(),
+                pos: 0,
+            },
+            Expr::If {
+                condition,
+                true_branch,
+                false_branch,
+                ..
+            } => Expr::If {
+                condition: Box::new(strip_pos(condition)),
+                true_branch: Box::new(strip_pos(true_branch)),
+                false_branch: Box::new(strip_pos(false_branch)),
+                pos: 0,
+            },
+            Expr::LogicalNot { input, .. } => Expr::LogicalNot {
+                input: Box::new(strip_pos(input)),
+                pos: 0,
+            },
+            Expr::Negation { input, .. } => Expr::Negation {
+                input: Box::new(strip_pos(input)),
+                pos: 0,
+            },
+            Expr::BitInversion { input, .. } => Expr::BitInversion {
+                input: Box::new(strip_pos(input)),
+                pos: 0,
+            },
+            Expr::Relation {
+                kind, left, right, ..
+            } => Expr::Relation {
+                kind: *kind,
+                left: Box::new(strip_pos(left)),
+                right: Box::new(strip_pos(right)),
+                pos: 0,
+            },
+            Expr::ArithOp {
+                kind, left, right, ..
+            } => Expr::ArithOp {
+                kind: *kind,
+                left: Box::new(strip_pos(left)),
+                right: Box::new(strip_pos(right)),
+                pos: 0,
+            },
+            Expr::BitOp {
+                kind, left, right, ..
+            } => Expr::BitOp {
+                kind: *kind,
+                left: Box::new(strip_pos(left)),
+                right: Box::new(strip_pos(right)),
+                pos: 0,
+            },
+        }
+    }
+
+    fn strip_val(v: &ValDef) -> ValDef {
+        ValDef {
+            name: v.name.clone(),
+            given_type: v.given_type.clone(),
+            body: strip_pos(&v.body),
+            pos: 0,
+        }
+    }
+
+    // ----- happy path -----
 
     #[test]
-    fn cursor_semi_run_and_semis() {
-        // ";" is one Semi.
-        let mut c1 = cur("a ; b");
-        c1.bump(); // `a`
-        assert!(c1.take_one_semi()); // the `;`
-        assert_eq!(c1.peek().text("a ; b"), "b");
-        // A run of newlines is a single Semi; `;\n;` is three Semis absorbed by skip_semis.
-        let mut c2 = cur("a\n\n;b");
-        c2.bump(); // `a`
-        assert!(c2.skip_semis());
-        assert_eq!(c2.peek().text("a\n\n;b"), "b");
-        // No separator present.
-        let mut c3 = cur("a b");
-        c3.bump();
-        assert!(!c3.take_one_semi());
+    fn atom_literals_map_to_constants() {
+        // SigmaParserTest.scala:74-106, :612
+        assert_eq!(strip_pos(&p("10")), int(10));
+        assert_eq!(strip_pos(&p("10L")), long(10));
+        assert_eq!(strip_pos(&p("true")), boolean(true));
+        assert_eq!(strip_pos(&p("\"hello\"")), string("hello"));
+        assert_eq!(strip_pos(&p("null")), string("null")); // Literals.scala:88
+        assert_eq!(strip_pos(&p("()")), unit()); // grouping :145
+        assert_eq!(strip_pos(&p("(1)")), int(1)); // :146 grouping, not tuple
+    }
+
+    #[test]
+    fn tuple_and_tuple_access() {
+        // SigmaParserTest.scala:148-162
+        assert_eq!(strip_pos(&p("(1, 2)")), tuple(vec![int(1), int(2)]));
+        assert_eq!(
+            strip_pos(&p("(1, 2L)._1")),
+            select(tuple(vec![int(1), long(2)]), "_1")
+        );
+        assert_eq!(
+            strip_pos(&p("(1, 2L)(0)")),
+            apply(tuple(vec![int(1), long(2)]), vec![int(0)])
+        );
+    }
+
+    #[test]
+    fn stableid_dotted_chain_folds_selects() {
+        // Core.scala:62-69: `a.b.c` is one StableId -> nested Select.
+        assert_eq!(
+            strip_pos(&p("a.b.c")),
+            select(select(ident0("a"), "b"), "c")
+        );
+    }
+
+    #[test]
+    fn call_select_typeapply_chains() {
+        // SigmaParserTest.scala:348,560-573,604,324
+        assert_eq!(
+            strip_pos(&p("X[Int]")),
+            apply_types(ident0("X"), vec![SType::SInt])
+        );
+        assert_eq!(
+            strip_pos(&p("SELF.R1[Int]")),
+            apply_types(select(ident0("SELF"), "R1"), vec![SType::SInt])
+        );
+        assert_eq!(
+            strip_pos(&p("SELF.getReg[Int](1)")),
+            apply(
+                apply_types(select(ident0("SELF"), "getReg"), vec![SType::SInt]),
+                vec![int(1)]
+            )
+        );
+        assert_eq!(
+            strip_pos(&p("Coll[Int]()")),
+            apply(apply_types(ident0("Coll"), vec![SType::SInt]), vec![])
+        );
+        assert_eq!(
+            strip_pos(&p("getVar[Coll[Byte]](10).get")),
+            select(
+                apply(
+                    apply_types(ident0("getVar"), vec![SType::SColl(Box::new(SType::SByte))]),
+                    vec![int(10)]
+                ),
+                "get"
+            )
+        );
+        assert_eq!(strip_pos(&p("1.toByte")), select(int(1), "toByte")); // :604
+        assert_eq!(
+            strip_pos(&p("Coll(1, 2)")),
+            apply(ident0("Coll"), vec![int(1), int(2)]) // :324 — no collection literal
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn paren_errors_match_scala_positions() {
+        // SigmaParserTest fail() table: the ")"/end-of-input positions.
+        let e = crate::parse("(10", 3).unwrap_err();
+        assert_eq!(e.line_col("(10"), (1, 4));
+        let e = crate::parse("10)", 3).unwrap_err();
+        assert_eq!(e.line_col("10)"), (1, 3));
+    }
+
+    #[test]
+    fn block_expr_atom_is_stubbed() {
+        // BlockExpr dispatch reaches the Task-9 `block()` stub (Exprs.scala:242).
+        assert!(crate::parse("{}", 3).is_err());
+    }
+
+    // ----- Scala-cited edge cases (spec-derived) -----
+
+    #[test]
+    fn suffix_select_accepts_postdot_banned_words() {
+        // ExprSuffix `.` accepts ANY Id incl. `type`/`_` — PostDotCheck (which bans
+        // them in StableId) does NOT apply once the StableId has ended
+        // (Exprs.scala:80; Core.scala:61). So `a.type` and `a._` are field selects.
+        assert_eq!(strip_pos(&p("a.type")), select(ident0("a"), "type"));
+        assert_eq!(strip_pos(&p("a._")), select(ident0("a"), "_"));
+    }
+
+    #[test]
+    fn stableid_keyword_as_field_selects() {
+        // `val`/`def` are Idents lexically (recon-lexical.md §2.3), so `a.val`
+        // selects a field named "val" via StableId (Core.scala:62-69).
+        assert_eq!(strip_pos(&p("a.val")), select(ident0("a"), "val"));
+    }
+
+    #[test]
+    fn empty_type_args_apply() {
+        // TypeArgs `rep(0)` (Types.scala:117): `X[]` is a legal empty type-app.
+        assert_eq!(strip_pos(&p("X[]")), apply_types(ident0("X"), vec![]));
+    }
+
+    #[test]
+    fn arglist_trailing_comma_before_newline() {
+        // TrailingComma (Literals.scala:63): a trailing comma is legal only before a
+        // Newline. `f(1,\n)` -> Apply(f, [1]).
+        assert_eq!(strip_pos(&p("f(1,\n)")), apply(ident0("f"), vec![int(1)]));
+        // Without the newline it is a parse error (the closer expects a `)`).
+        assert!(crate::parse("f(1,)", 3).is_err());
+    }
+
+    #[test]
+    fn arglist_newline_gated_by_context() {
+        // NoSemis (Exprs.scala:82): in StatCtx an arg-list may not start on a new
+        // line, so `f\n(x)` leaves `(x)` dangling -> End error.
+        assert!(crate::parse("f\n(x)", 3).is_err());
+        // In ExprCtx (inside parens) NoSemis = Pass, so `f\n(x)` IS an application.
+        assert_eq!(
+            strip_pos(&p("(f\n(x))")),
+            apply(ident0("f"), vec![ident0("x")])
+        );
+    }
+
+    #[test]
+    fn char_and_symbol_literals_are_strings() {
+        // Literals.scala:94-101,119: `'c'`/`'sym` retain the leading `'` and become
+        // StringConst (CharSym raw form; strip only removes leading `"`).
+        assert_eq!(strip_pos(&p("'a'")), string("'a'"));
+        assert_eq!(strip_pos(&p("'sym")), string("'sym"));
+    }
+
+    #[test]
+    fn annotation_arguments_parse_and_discard() {
+        // Step 5 (Types.scala:159,168): an annotation's `(Exprs)` argument group is
+        // parsed via the expression parser and DISCARDED; the annotated type is
+        // unchanged.
+        assert_eq!(parse_type("Int @foo(1, 2)", 3).unwrap(), SType::SInt);
+        // Zero-arg and empty-arg-group forms also discard cleanly.
+        assert_eq!(parse_type("Int @foo", 3).unwrap(), SType::SInt);
+        assert_eq!(parse_type("Int @foo()", 3).unwrap(), SType::SInt);
     }
 }
