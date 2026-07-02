@@ -403,10 +403,14 @@ impl<'a> Lexer<'a> {
         // carries `!Keywords`, Identifiers.scala:32,37) — a reserved word cannot,
         // so a keyword before `"` stays a separate keyword token.
         //
-        // deviation: an operator identifier (`+"x"`) can also be an `Id` prefix
-        // in the reference, but that collides with prefix-operator lexing at the
-        // grammar level (not here) and no contract does it, so op-runs are left
-        // as their own token before the string.
+        // deviation: operator-identifier string prefixes are NOT merged. For `-`/`+`/`!`/`~`
+        // Scala's ExprPrefix (Exprs.scala:78) consumes the char before the String production
+        // sees it, and at infix position InfixSuffix's Id (Exprs.scala:93) takes it — both
+        // equivalent to our [OpId, Str] tokens. But for other op-ids at ATOM position
+        // (e.g. `*"foo"`), Scala's String production (Literals.scala:152, Id ~ '"') matches
+        // the operator as a PlainId prefix and yields one SString("*\"foo\"") where we lex
+        // [OpId, Str] and the parser will reject — a real accept/reject divergence on
+        // pathological input no real contract contains. Tracked as a known M1 deviation.
         if kind == TokenKind::Ident && self.peek_byte() == Some(b'"') {
             return self.lex_string(start, true);
         }
@@ -787,7 +791,12 @@ impl<'a> Lexer<'a> {
                         self.tok(TokenKind::CharSym(self.src[start..self.pos].into()), start)
                     );
                 }
-                self.pos = after_quote; // valid escape but no closing quote → Symbol
+                // Literals.scala:91 — cut after '\\': a valid escape without closing
+                // quote is a hard failure; no fallback to Symbol.
+                return Err(ParseError::Lexical {
+                    pos: self.pos as u32,
+                    msg: "expected closing ' after character escape".into(),
+                });
             }
             Some(c) if is_printable_char(c) => {
                 self.pos += c.len_utf8();
@@ -1153,6 +1162,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn opid_string_prefix_not_merged_known_deviation() {
+        // Known M1 deviation (see comment at the id-prefix merge site): for
+        // op-ids at ATOM position Scala's String production (Literals.scala:152,
+        // Id ~ '"') matches the operator as a PlainId prefix and yields one
+        // op-prefixed SString, whereas we lex [OpId, Str] and the parser will
+        // reject. No real contract does this — documented, not fixed.
+        assert_eq!(
+            kinds(r#"*"foo""#),
+            vec![
+                TokenKind::OpId,
+                TokenKind::Str("foo".into()),
+                TokenKind::Eof
+            ]
+        );
+    }
+
     // ----- error paths -----
     #[test]
     fn string_four_quotes_unterminated_errors() {
@@ -1170,6 +1196,12 @@ mod tests {
     fn charsym_invalid_escape_errors() {
         // The Escape cut fires inside Char too: '\x' is a hard failure.
         assert!(matches!(lex_err("'\\x'"), ParseError::Lexical { .. }));
+    }
+    #[test]
+    fn charsym_escape_without_closing_quote_errors() {
+        // Literals.scala:91 — cut after '\\': a valid escape (\n) not followed by
+        // a closing quote must be a hard Lexical failure, never a Symbol fallback.
+        assert!(matches!(lex_err("'\\n x"), ParseError::Lexical { .. }));
     }
     #[test]
     fn triple_string_backslash_position_is_the_backslash() {
