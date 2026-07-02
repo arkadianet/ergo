@@ -20,7 +20,7 @@
 //!   choices likewise dispatch on the leading token, so no alternative is ever
 //!   tried after a cut.
 
-use crate::ast::Expr;
+use crate::ast::{ArithKind, BitKind, Expr, RelKind};
 use crate::error::ParseError;
 use crate::span::Pos;
 use crate::stype::{is_predef_available, predef_type, SType};
@@ -712,16 +712,14 @@ fn try_literal(t: &Token, src: &str) -> Option<Expr> {
     }
 }
 
-/// The Task-7 expression parser: a reduced `PostfixExpr` = `SimpleExpr ~~
-/// ExprSuffix` (Exprs.scala:106), without the prefix / infix / postfix layers.
+/// The expression entry point. Through Task 8 this is exactly `PostfixExpr`
+/// (Exprs.scala:106-117) — the prefix / suffix / infix / trailing-postfix layer.
 ///
-/// Task 8 replaces this body with the full `Expr` (`If | Fun | PostfixLambda`)
-/// grammar; `parse`, `Parened` and `ArgList` all route their sub-expressions
-/// through here, so that swap lifts every caller at once.
+/// Task 9 wraps this with `Expr ::= If | Fun | PostfixLambda` (Exprs.scala:46-75);
+/// `parse`, `Parened` and `ArgList` all route their sub-expressions through here,
+/// so that swap lifts every caller at once.
 fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
-    let f = simple_expr(c, ctx)?;
-    let suffixes = expr_suffix(c, ctx)?;
-    apply_suffix(c, f, suffixes)
+    postfix_expr(c, ctx)
 }
 
 /// `SimpleExpr` (Exprs.scala:120-132), ordered `BlockExpr | ExprLiteral | StableId
@@ -933,10 +931,7 @@ fn paren_arg_list(c: &mut Cursor) -> Result<Suffix, ParseError> {
 /// `applySuffix` (Exprs.scala:191-211): `foldLeft` the markers onto `f`. Every node
 /// built here takes `pos = f.pos()` (Scala pins `builder.currentSrcCtx =
 /// f.sourceContext` for the whole fold, :192).
-///
-/// The `Cursor` is unused (positions come from `f` and the markers) but is kept in
-/// the signature for parity with the Task-8 caller layer.
-fn apply_suffix(_c: &Cursor, f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, ParseError> {
+fn apply_suffix(f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, ParseError> {
     let f_pos = f.pos();
     let mut acc = f;
     for suf in suffixes {
@@ -1005,6 +1000,315 @@ fn apply_suffix(_c: &Cursor, f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, Par
         };
     }
     Ok(acc)
+}
+
+// =============================================================================
+// Prefix / infix / postfix layers: operator precedence.
+// Exprs.scala:78,85-117,141-189; SigmaParser.scala:40-101.
+// =============================================================================
+
+/// `PrefixExpr` (Exprs.scala:85-88): `ExprPrefix? ~ SimpleExpr`. The optional
+/// prefix wraps the ATOM via `mk_unary_op` — the suffixes of `PostfixExpr` then
+/// wrap around THAT result (so `-f(x)` is `Apply(Negation(f), [x])`, while
+/// `-OUTPUTS.size` is `Negation(Select(..))` because `StableId` already consumed
+/// the dotted chain inside `SimpleExpr`).
+fn prefix_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+    let op = prefix_op(c);
+    let e = simple_expr(c, ctx)?;
+    match op {
+        Some(op) => mk_unary_op(&op, e),
+        None => Ok(e),
+    }
+}
+
+/// `ExprPrefix` (Exprs.scala:78): `WL ~ CharPred("-+!~") ~~ !OpChar ~ WS`. Consume
+/// and return a one-char prefix operator. Maximal munch already groups every
+/// op-char run into a single `OpId`, so the `!OpChar` guard is satisfied exactly
+/// when the `OpId`'s text is a single one of `- + ! ~` (a longer run like `--` or
+/// `!=` is one multi-char `OpId` and is NOT a prefix).
+fn prefix_op(c: &mut Cursor) -> Option<String> {
+    let t = c.peek();
+    if t.kind == TokenKind::OpId {
+        let s = t.text(c.src);
+        if matches!(s, "-" | "+" | "!" | "~") {
+            let s = s.to_string();
+            c.bump();
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// `PostfixExpr` (Exprs.scala:106-117): `PrefixExpr ~~ ExprSuffix ~~ PostfixSuffix`
+/// where `PostfixSuffix = InfixSuffix.repX ~~ PostFix.?` (Exprs.scala:92-104).
+///
+/// `lhs = applySuffix(prefix, suffix)`, then `obj = mkInfixTree(lhs, infixOps)`
+/// resolves precedence, then an optional trailing `PostFix` lone `Id` becomes
+/// `MethodCallLike(obj, name, [])` with `pos = obj.pos()`.
+fn postfix_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+    let prefix = prefix_expr(c, ctx)?;
+    let suffixes = expr_suffix(c, ctx)?;
+    let lhs = apply_suffix(prefix, suffixes)?;
+
+    // PostfixSuffix = InfixSuffix.repX ~~ PostFix.?
+    let mut infix_ops: Vec<(String, Expr)> = Vec::new();
+    let mut postfix_name: Option<String> = None;
+    loop {
+        let mark = c.save();
+        // Head shared by InfixSuffix and PostFix: `NoSemis ~~ WL ~~ Id.!`. NoSemis
+        // (semi-inference) forbids the op from starting on a new line; either way a
+        // newline before the op ends the postfix chain in a Stat/Free context.
+        if ctx.semi_inference() && !c.no_newline_before_next() {
+            break;
+        }
+        if !is_id(c.peek()) {
+            break;
+        }
+        let op_tok = c.bump();
+        let op = op_tok.text(c.src).to_string();
+
+        // InfixSuffix continuation: `OneSemiMax ~ PrefixExpr ~~ ExprSuffix`.
+        // OneSemiMax = OneNLMax in semi-inference contexts (else Pass): at most one
+        // newline may follow the op. The rhs must actually start a `PrefixExpr`
+        // (leading-token dispatch) for the InfixSuffix to commit; otherwise this Id
+        // is a trailing `PostFix` — the "WL is non-cutting" backtrack of
+        // Exprs.scala:90-91.
+        let semi_ok = !ctx.semi_inference() || c.one_nl_max();
+        if semi_ok && starts_expr(c.peek()) {
+            let rprefix = prefix_expr(c, ctx)?;
+            let rsuffixes = expr_suffix(c, ctx)?;
+            let rhs = apply_suffix(rprefix, rsuffixes)?;
+            infix_ops.push((op, rhs));
+            continue;
+        }
+
+        // PostFix: `NoSemis ~~ WL ~~ Id.! ~ Newline.?`. Rewind the InfixSuffix
+        // attempt (the op and any OneNLMax newline) and re-consume the Id here,
+        // then optionally one trailing Newline.
+        c.restore(mark);
+        let id_tok = c.bump();
+        postfix_name = Some(id_tok.text(c.src).to_string());
+        if c.i < c.toks.len() && Cursor::is_nl(&c.toks[c.i]) {
+            c.i += 1; // Newline.?
+        }
+        break; // PostFix.? — at most one, and it is terminal
+    }
+
+    let obj = mk_infix_tree(lhs, infix_ops)?;
+    match postfix_name {
+        // mkMethodCallLike pinned to `obj.sourceContext` (Exprs.scala:113).
+        Some(name) => {
+            let pos = obj.pos();
+            Ok(Expr::MethodCallLike {
+                obj: Box::new(obj),
+                name,
+                args: Vec::new(),
+                pos,
+            })
+        }
+        None => Ok(obj),
+    }
+}
+
+/// `precedenceOf` (Exprs.scala:144-162): precedence by the operator's FIRST char;
+/// letters, backtick ids and unmapped symbols are 0 (lowest).
+///
+/// The `>`-quirk is deliberate: `priorityList` lists `'>'` twice — with `<` at 5
+/// (Exprs.scala:150) and with `:` at 6 (:151) — and `.toMap` keeps the later
+/// entry, so `>` has precedence **6**, one higher than `<`. Hence `a < b > c`
+/// parses as `a < (b > c)`.
+fn precedence_of(op: &str) -> u8 {
+    match op.chars().next() {
+        Some('|') => 1,
+        Some('^') => 2,
+        Some('&') => 3,
+        Some('=') | Some('!') => 4,
+        Some('<') => 5,
+        Some(':') | Some('>') => 6,
+        Some('+') | Some('-') => 7,
+        Some('*') | Some('/') | Some('%') => 8,
+        _ => 0,
+    }
+}
+
+/// `mkInfixTree` (Exprs.scala:167-189): the shunting-yard fold that resolves
+/// precedence. Reduces while the stacked op's precedence `>=` the incoming op's,
+/// i.e. left-associative at equal precedence. There is NO right-associativity for
+/// trailing-`:` operators in expressions (that rule is type-grammar only).
+fn mk_infix_tree(lhs: Expr, rest: Vec<(String, Expr)>) -> Result<Expr, ParseError> {
+    let mut wait: Vec<(Expr, String)> = Vec::new();
+    let mut x = lhs;
+    let mut rest = rest.into_iter().peekable();
+    loop {
+        match (wait.last().is_some(), rest.peek().is_some()) {
+            (true, true) => {
+                let p_stacked = precedence_of(&wait.last().unwrap().1);
+                let p_incoming = precedence_of(&rest.peek().unwrap().0);
+                if p_stacked >= p_incoming {
+                    let (l, op1) = wait.pop().unwrap();
+                    x = mk_binary_op(l, &op1, x)?; // reduce; rest unchanged
+                } else {
+                    let (op2, r) = rest.next().unwrap();
+                    wait.push((x, op2)); // shift
+                    x = r;
+                }
+            }
+            (false, false) => return Ok(x),
+            (false, true) => {
+                let (op, r) = rest.next().unwrap();
+                wait.push((x, op));
+                x = r;
+            }
+            (true, false) => {
+                let (l, op) = wait.pop().unwrap();
+                x = mk_binary_op(l, &op, x)?;
+            }
+        }
+    }
+}
+
+/// `mkUnaryOp` (SigmaParser.scala:40-69). Every node and error is pinned to the
+/// ARG's position (`currentSrcCtx.withValue(arg.sourceContext)`, :41).
+fn mk_unary_op(op: &str, arg: Expr) -> Result<Expr, ParseError> {
+    let pos = arg.pos();
+    // "-" on a numeric constant: parser-level constant fold (:43-48). Magnitudes
+    // are validated positive at lex (no `-2147483648`), so negation never
+    // overflows (D4).
+    if op == "-" && arg.is_numeric_constant() {
+        return match arg {
+            Expr::IntConst { value, .. } => Ok(Expr::IntConst { value: -value, pos }),
+            Expr::LongConst { value, .. } => Ok(Expr::LongConst { value: -value, pos }),
+            // Unreachable: `is_numeric_constant` ⟺ Int/Long. Mirrors the ":49"
+            // "cannot prefix" guard for a hypothetical other numeric constant.
+            other => Err(ParseError::Semantic {
+                pos,
+                msg: format!("cannot prefix {other:?} with op {op}"),
+            }),
+        };
+    }
+    match op {
+        "!" => Ok(Expr::LogicalNot {
+            input: Box::new(arg),
+            pos,
+        }), // :52 — no guard
+        "-" => {
+            if arg.is_num_type_or_no_type() {
+                Ok(Expr::Negation {
+                    input: Box::new(arg),
+                    pos,
+                }) // :54-56
+            } else {
+                Err(ParseError::Semantic {
+                    pos,
+                    msg: format!("Numeric argument expected for '{op}' operation"),
+                }) // :58
+            }
+        }
+        "~" => {
+            if arg.is_num_type_or_no_type() {
+                Ok(Expr::BitInversion {
+                    input: Box::new(arg),
+                    pos,
+                }) // :60-62
+            } else {
+                Err(ParseError::Semantic {
+                    pos,
+                    msg: format!("Numeric argument expected for '{op}' operation"),
+                }) // :64
+            }
+        }
+        // "+" and anything else (grammatically accepted but not a real prefix).
+        _ => Err(ParseError::Semantic {
+            pos,
+            msg: format!("Unknown prefix operation {op}"),
+        }), // :66-67
+    }
+}
+
+/// The `parseAsMethods` set (SigmaParser.scala:71): infix ops deferred to the
+/// typer as `MethodCallLike`.
+fn is_parse_as_method(op: &str) -> bool {
+    matches!(
+        op,
+        "*" | "++" | "||" | "&&" | "+" | "^" | "<<" | ">>" | ">>>"
+    )
+}
+
+/// `mkBinaryOp` (SigmaParser.scala:71-101). Every node and error is pinned to the
+/// LEFT operand's position (`currentSrcCtx.withValue(l.sourceContext)`, :74). The
+/// match order is exactly the Scala `opName match`: `|`/`&` (with a both-operands
+/// numeric-or-NoType guard) are checked BEFORE `parseAsMethods`, so `true | false`
+/// errors at parse time while `x | y` passes via `NoType`.
+fn mk_binary_op(l: Expr, op: &str, r: Expr) -> Result<Expr, ParseError> {
+    let pos = l.pos();
+    let rel = |kind: RelKind, l: Expr, r: Expr| Expr::Relation {
+        kind,
+        left: Box::new(l),
+        right: Box::new(r),
+        pos,
+    };
+    let arith = |kind: ArithKind, l: Expr, r: Expr| Expr::ArithOp {
+        kind,
+        left: Box::new(l),
+        right: Box::new(r),
+        pos,
+    };
+    Ok(match op {
+        "==" => rel(RelKind::Eq, l, r),       // :76
+        "!=" => rel(RelKind::Neq, l, r),      // :77
+        ">=" => rel(RelKind::Ge, l, r),       // :78
+        ">" => rel(RelKind::Gt, l, r),        // :79
+        "<=" => rel(RelKind::Le, l, r),       // :80
+        "<" => rel(RelKind::Lt, l, r),        // :81
+        "-" => arith(ArithKind::Minus, l, r), // :82
+        "|" => {
+            // :84-88 — guard both operands BEFORE the parseAsMethods fall-through.
+            if l.is_num_type_or_no_type() && r.is_num_type_or_no_type() {
+                Expr::BitOp {
+                    kind: BitKind::Or,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                    pos,
+                }
+            } else {
+                return Err(ParseError::Semantic {
+                    pos,
+                    msg: format!("Numeric arguments expected for '{op}' operation"),
+                });
+            }
+        }
+        "&" => {
+            // :90-94
+            if l.is_num_type_or_no_type() && r.is_num_type_or_no_type() {
+                Expr::BitOp {
+                    kind: BitKind::And,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                    pos,
+                }
+            } else {
+                return Err(ParseError::Semantic {
+                    pos,
+                    msg: format!("Numeric arguments expected for '{op}' operation"),
+                });
+            }
+        }
+        _ if is_parse_as_method(op) => Expr::MethodCallLike {
+            obj: Box::new(l),
+            name: op.to_string(),
+            args: vec![r],
+            pos,
+        }, // :96
+        "/" => arith(ArithKind::Divide, l, r), // :97
+        "%" => arith(ArithKind::Modulo, l, r), // :98
+        // alphanumeric ids, `::`, `**`, backtick ids … (:99)
+        _ => {
+            return Err(ParseError::Semantic {
+                pos,
+                msg: format!("Unknown binary operation {op}"),
+            })
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1232,7 +1536,7 @@ mod tests {
 #[cfg(test)]
 mod expr_tests {
     use super::*;
-    use crate::ast::ValDef;
+    use crate::ast::{ArithKind, BitKind, RelKind, ValDef};
 
     // ----- helpers -----
 
@@ -1287,6 +1591,104 @@ mod expr_tests {
         Expr::ApplyTypes {
             input: Box::new(input),
             type_args,
+            pos: 0,
+        }
+    }
+    fn minus(l: Expr, r: Expr) -> Expr {
+        Expr::ArithOp {
+            kind: ArithKind::Minus,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn divide(l: Expr, r: Expr) -> Expr {
+        Expr::ArithOp {
+            kind: ArithKind::Divide,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn modulo(l: Expr, r: Expr) -> Expr {
+        Expr::ArithOp {
+            kind: ArithKind::Modulo,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn eq_(l: Expr, r: Expr) -> Expr {
+        Expr::Relation {
+            kind: RelKind::Eq,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn gt(l: Expr, r: Expr) -> Expr {
+        Expr::Relation {
+            kind: RelKind::Gt,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn lt(l: Expr, r: Expr) -> Expr {
+        Expr::Relation {
+            kind: RelKind::Lt,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn bit_and(l: Expr, r: Expr) -> Expr {
+        Expr::BitOp {
+            kind: BitKind::And,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn bit_or(l: Expr, r: Expr) -> Expr {
+        Expr::BitOp {
+            kind: BitKind::Or,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn negation(input: Expr) -> Expr {
+        Expr::Negation {
+            input: Box::new(input),
+            pos: 0,
+        }
+    }
+    fn bit_inversion(input: Expr) -> Expr {
+        Expr::BitInversion {
+            input: Box::new(input),
+            pos: 0,
+        }
+    }
+    fn logical_not(input: Expr) -> Expr {
+        Expr::LogicalNot {
+            input: Box::new(input),
+            pos: 0,
+        }
+    }
+    fn mcl(obj: Expr, name: &str, arg: Expr) -> Expr {
+        Expr::MethodCallLike {
+            obj: Box::new(obj),
+            name: name.into(),
+            args: vec![arg],
+            pos: 0,
+        }
+    }
+    fn mcl0args(obj: Expr, name: &str) -> Expr {
+        Expr::MethodCallLike {
+            obj: Box::new(obj),
+            name: name.into(),
+            args: vec![],
             pos: 0,
         }
     }
@@ -1500,7 +1902,99 @@ mod expr_tests {
         );
     }
 
+    // ----- infix / prefix / postfix layers (Task 8) -----
+
+    #[test]
+    fn infix_left_assoc_chain() {
+        // SigmaParserTest.scala:74-121, 775-820
+        assert_eq!(
+            strip_pos(&p("1-2-3-4-5")),
+            minus(minus(minus(minus(int(1), int(2)), int(3)), int(4)), int(5))
+        ); // :86
+        assert_eq!(strip_pos(&p("10L-11L")), minus(long(10), long(11))); // :83
+        assert_eq!(strip_pos(&p("(-10-11)")), minus(int(-10), int(11))); // :84 unary fold
+        assert_eq!(strip_pos(&p("1 / 2")), divide(int(1), int(2))); // :88
+        assert_eq!(strip_pos(&p("5 % 2")), modulo(int(5), int(2))); // :89
+    }
+
+    #[test]
+    fn infix_precedence_and_methodcalllike() {
+        assert_eq!(strip_pos(&p("1==1")), eq_(int(1), int(1))); // :92
+        assert_eq!(
+            strip_pos(&p("true && true")),
+            mcl(boolean(true), "&&", boolean(true))
+        ); // :95
+        assert_eq!(
+            strip_pos(&p("false || false || false")),
+            mcl(
+                mcl(boolean(false), "||", boolean(false)),
+                "||",
+                boolean(false)
+            )
+        );
+        assert_eq!(
+            strip_pos(&p("1 == 0 || 3 == 2")),
+            mcl(eq_(int(1), int(0)), "||", eq_(int(3), int(2)))
+        ); // :110
+        assert_eq!(
+            strip_pos(&p("3 - 2 > 2 - 1")),
+            gt(minus(int(3), int(2)), minus(int(2), int(1)))
+        ); // :112
+        assert_eq!(
+            strip_pos(&p("arr1 ++ arr2")),
+            mcl(ident0("arr1"), "++", ident0("arr2"))
+        ); // :102
+        assert_eq!(strip_pos(&p("1 ^ 2")), mcl(int(1), "^", int(2))); // :810
+        assert_eq!(strip_pos(&p("128 >> 2")), mcl(int(128), ">>", int(2))); // :816
+    }
+
+    #[test]
+    fn gt_gets_precedence_six_not_five() {
+        // spec-derived: Exprs.scala:150-151 duplicate '>' — later toMap entry wins,
+        // so `>` (6) binds TIGHTER than `<` (5): a < b > c == a < (b > c)
+        assert_eq!(
+            strip_pos(&p("a < b > c")),
+            lt(ident0("a"), gt(ident0("b"), ident0("c")))
+        );
+    }
+
+    #[test]
+    fn unary_ops_bind_atom_then_suffixes_wrap() {
+        // :775-786 + recon-gap item 2
+        assert_eq!(
+            strip_pos(&p("-OUTPUTS.size")),
+            negation(select(ident0("OUTPUTS"), "size"))
+        );
+        assert_eq!(
+            strip_pos(&p("~OUTPUTS.size")),
+            bit_inversion(select(ident0("OUTPUTS"), "size"))
+        );
+        assert_eq!(strip_pos(&p("!true")), logical_not(boolean(true)));
+        assert_eq!(
+            strip_pos(&p("-f(x)")),
+            apply(negation(ident0("f")), vec![ident0("x")])
+        ); // spec-derived
+        assert_eq!(strip_pos(&p("-1.toByte")), select(int(-1), "toByte")); // spec-derived
+        assert_eq!(strip_pos(&p("1 & 2")), bit_and(int(1), int(2))); // :806
+        assert_eq!(strip_pos(&p("1 | 2")), bit_or(int(1), int(2))); // :808
+    }
+
+    #[test]
+    fn postfix_lone_id_is_methodcalllike() {
+        // spec-derived: Exprs.scala:99-116 (zero SigmaParserTest coverage — gap item 15)
+        assert_eq!(strip_pos(&p("x id")), mcl0args(ident0("x"), "id"));
+    }
+
     // ----- error paths -----
+
+    #[test]
+    fn unknown_ops_error_at_scala_positions() {
+        let e = crate::parse("+1", 3).unwrap_err();
+        assert_eq!(e.line_col("+1"), (1, 2)); // fail(:921)
+        let e = crate::parse("1**1", 3).unwrap_err();
+        assert_eq!(e.line_col("1**1"), (1, 1)); // fail(:923)
+        assert!(crate::parse("true | false", 3).is_err()); // bit-op numeric guard (SP:84-88)
+    }
 
     #[test]
     fn paren_errors_match_scala_positions() {
@@ -1518,6 +2012,68 @@ mod expr_tests {
     }
 
     // ----- Scala-cited edge cases (spec-derived) -----
+
+    #[test]
+    fn precedence_of_matches_scala_table() {
+        // Exprs.scala:144-162 priorityList/priorityMap/precedenceOf. First char
+        // only; letters/backtick/unmapped -> 0; the `>`-quirk lands `>` at 6.
+        assert_eq!(precedence_of("|"), 1);
+        assert_eq!(precedence_of("||"), 1);
+        assert_eq!(precedence_of("^"), 2);
+        assert_eq!(precedence_of("&"), 3);
+        assert_eq!(precedence_of("&&"), 3);
+        assert_eq!(precedence_of("=="), 4);
+        assert_eq!(precedence_of("!="), 4);
+        assert_eq!(precedence_of("<"), 5);
+        assert_eq!(precedence_of("<="), 5);
+        assert_eq!(precedence_of("<<"), 5);
+        assert_eq!(precedence_of(">"), 6); // quirk: '>' is 6, not grouped with '<'
+        assert_eq!(precedence_of(">="), 6);
+        assert_eq!(precedence_of(">>>"), 6);
+        assert_eq!(precedence_of(":"), 6);
+        assert_eq!(precedence_of("+"), 7);
+        assert_eq!(precedence_of("-"), 7);
+        assert_eq!(precedence_of("++"), 7);
+        assert_eq!(precedence_of("*"), 8);
+        assert_eq!(precedence_of("/"), 8);
+        assert_eq!(precedence_of("%"), 8);
+        assert_eq!(precedence_of("`foo`"), 0); // backtick first char -> 0
+        assert_eq!(precedence_of("foo"), 0); // letters -> 0
+    }
+
+    #[test]
+    fn backtick_infix_op_is_rejected() {
+        // Exprs.scala:92 `Id.!` captures a backtick op's raw text (precedence 0);
+        // mkBinaryOp then rejects it as an "Unknown binary operation" (SP:99).
+        assert!(crate::parse("a `foo` b", 3).is_err());
+    }
+
+    #[test]
+    fn equal_precedence_is_left_associative() {
+        // Exprs.scala:170 reduces when precedenceOf(op1) >= precedenceOf(op2): `+`
+        // and `-` are both precedence 7, so `a - b + c` == `(a - b) + c`. `+` is a
+        // parseAsMethod (SP:96) -> MethodCallLike; `-` -> ArithOp(Minus) (SP:82).
+        assert_eq!(
+            strip_pos(&p("a - b + c")),
+            mcl(minus(ident0("a"), ident0("b")), "+", ident0("c"))
+        );
+    }
+
+    #[test]
+    fn postfix_lone_id_consumes_trailing_newline() {
+        // PostFix `~ Newline.?` (Exprs.scala:100): a single trailing newline after
+        // the postfix ident is consumed; the result is MethodCallLike(x, id, []).
+        assert_eq!(strip_pos(&p("x id\n")), mcl0args(ident0("x"), "id"));
+    }
+
+    #[test]
+    fn infix_op_newline_gated_by_context() {
+        // NoSemis (Exprs.scala:93,100): in StatCtx an infix op may not begin on a
+        // new line, so `a\n- b` parses only `a` and leaves `- b` -> End error.
+        assert!(crate::parse("a\n- b", 3).is_err());
+        // In ExprCtx (inside parens) NoSemis = Pass, so `a\n- b` IS `a - b`.
+        assert_eq!(strip_pos(&p("(a\n- b)")), minus(ident0("a"), ident0("b")));
+    }
 
     #[test]
     fn suffix_select_accepts_postdot_banned_words() {
