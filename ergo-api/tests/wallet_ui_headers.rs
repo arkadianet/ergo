@@ -154,6 +154,11 @@ async fn explorer_js_module_carries_spa_security_headers() {
     assert_spa_security_headers("/js/explorer.js").await;
 }
 
+#[tokio::test]
+async fn chart_js_module_carries_spa_security_headers() {
+    assert_spa_security_headers("/js/chart.js").await;
+}
+
 /// Fonts are inert public binaries: they carry the CSP + Referrer-Policy like
 /// every SPA asset, but keep the handler's immutable cache — no-store on a
 /// 352 KB font would force a refetch on every reload for zero secrecy gain.

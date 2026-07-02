@@ -52,7 +52,8 @@ pub use rollback::rollback_one_block;
 pub use scratch::BlockApplyScratch;
 pub use segment_buffer::secondary_index_drift_skips;
 pub use store::{
-    IndexerMeta, IndexerStore, OpenOutcome, UndoEntry, INDEXER_SCHEMA_VERSION, ROLLBACK_WINDOW,
+    IndexerMeta, IndexerStore, OpenOutcome, StoreHealthSnapshot, UndoEntry, INDEXER_SCHEMA_VERSION,
+    ROLLBACK_WINDOW,
 };
 pub use task::{
     ChainTip, IndexerChainSource, IndexerFullBlock, IndexerPoll, IndexerTask, MAX_SECTION_RETRIES,
@@ -60,6 +61,7 @@ pub use task::{
 
 pub use ergo_indexer_types::{
     BalanceDto, BoxId, HeaderId, IndexedBlockDto, IndexedBoxDto, IndexedErgoBox,
-    IndexedErgoTransaction, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerQuery,
-    IndexerStatus, Page, SortDir, StorageRentEligibleDto, TemplateHash, TokenId, TreeHash, TxId,
+    IndexedErgoTransaction, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerHealthDto,
+    IndexerQuery, IndexerStatus, Page, SortDir, StorageRentEligibleDto, TemplateHash, TokenId,
+    TreeHash, TxId,
 };

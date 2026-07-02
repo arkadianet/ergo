@@ -22,6 +22,7 @@ pub const JS_ROUTER: &str = include_str!("../web/js/router.js");
 pub const JS_SETTINGS: &str = include_str!("../web/js/settings.js");
 pub const JS_TABLE: &str = include_str!("../web/js/table.js");
 pub const JS_SPARKLINE: &str = include_str!("../web/js/sparkline.js");
+pub const JS_CHART: &str = include_str!("../web/js/chart.js");
 pub const JS_OVERVIEW: &str = include_str!("../web/js/overview.js");
 pub const JS_EXPLORER: &str = include_str!("../web/js/explorer.js");
 pub const JS_PEERS: &str = include_str!("../web/js/peers.js");

@@ -60,6 +60,17 @@ pub struct IndexerStore {
     path: PathBuf,
 }
 
+/// Mutually-consistent health read (see [`IndexerStore::health_snapshot`]):
+/// the meta block and all three durable repair markers, captured under one
+/// redb read transaction.
+#[derive(Debug, Clone)]
+pub struct StoreHealthSnapshot {
+    pub meta: IndexerMeta,
+    pub repair_pending: bool,
+    pub repair_next_gi: Option<u64>,
+    pub repair_skipped: u64,
+}
+
 impl IndexerStore {
     /// Open the indexer DB at `path`, applying the wipe/resume
     /// table:
@@ -190,6 +201,21 @@ impl IndexerStore {
     pub fn secondary_repair_skipped(&self) -> Result<u64, IndexerError> {
         let read_txn = self.db.begin_read()?;
         meta::read_secondary_repair_skipped(&read_txn)
+    }
+
+    /// One-read-txn snapshot of everything the operator health surface needs:
+    /// the meta block plus all three repair markers. Exists so the polled
+    /// `/api/v1/indexer/status` endpoint costs a single redb read txn per
+    /// poll instead of four — and so the markers are mutually consistent
+    /// (a commit can't land between the reads).
+    pub fn health_snapshot(&self) -> Result<StoreHealthSnapshot, IndexerError> {
+        let read_txn = self.db.begin_read()?;
+        Ok(StoreHealthSnapshot {
+            meta: meta::read_meta(&read_txn)?,
+            repair_pending: meta::read_secondary_repair_pending(&read_txn)?,
+            repair_next_gi: meta::read_secondary_repair_next_gi_opt(&read_txn)?,
+            repair_skipped: meta::read_secondary_repair_skipped(&read_txn)?,
+        })
     }
 
     /// Look up the undo entry recorded for `height`. `None` means "no

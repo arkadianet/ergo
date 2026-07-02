@@ -32,6 +32,19 @@ pub trait IndexerQuery: Send + Sync + 'static {
     fn indexed_height(&self) -> u64;
     fn status(&self) -> IndexerStatus;
 
+    /// Live health snapshot for the operator surface (`/api/v1/indexer/status`):
+    /// the durable self-repair markers plus running totals. Deliberately
+    /// separate from `status()` — a `CaughtUp` index can still be degraded
+    /// (repair pending / completed-with-skips), and the operator UI must be
+    /// able to say so.
+    ///
+    /// Default impl returns the healthy-empty snapshot so fixture / stub
+    /// implementations stay terse; production `IndexerHandle` overrides with
+    /// the real meta reads.
+    fn health(&self) -> IndexerHealthDto {
+        IndexerHealthDto::default()
+    }
+
     /// Convenience wrapper for non-router callers (metrics, logs,
     /// tests). The normative API gate primitive is `status()` — the
     /// axum middleware needs the full enum to select between the
@@ -157,6 +170,31 @@ pub trait IndexerQuery: Send + Sync + 'static {
 // Address / token / block DTOs that aren't fully wired yet remain
 // placeholders — they fill in alongside their respective segment apply
 // paths.
+
+/// Live indexer-health snapshot (see [`IndexerQuery::health`]).
+///
+/// Field semantics mirror the durable `INDEXER_META` repair markers:
+/// - `repair_pending` — the derived template/token segments are degraded and a
+///   chain-free rebuild is owed or in progress.
+/// - `repair_next_gi` — rebuild phase-1 cursor (boxes re-derived so far);
+///   `None` when no rebuild is running (or phase 0 hasn't finished). Progress
+///   percentage = `repair_next_gi / global_boxes`.
+/// - `repair_skipped` — undecodable boxes a rebuild had to omit. A non-zero
+///   value with `repair_pending == false` means the index completed its repair
+///   knowingly incomplete (the honest marker) — surface it, never hide it.
+/// - `drift_skips` — CUMULATIVE process-lifetime count of live secondary
+///   sign-flips skipped on topology drift. Diagnostic only: resets on restart
+///   and is NOT cleared by a successful rebuild.
+/// - `global_boxes` / `global_txs` — running totals from the meta counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexerHealthDto {
+    pub repair_pending: bool,
+    pub repair_next_gi: Option<u64>,
+    pub repair_skipped: u64,
+    pub drift_skips: u64,
+    pub global_boxes: u64,
+    pub global_txs: u64,
+}
 
 /// Confirmed indexed-box record.
 pub type IndexedBoxDto = IndexedErgoBox;

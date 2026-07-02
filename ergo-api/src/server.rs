@@ -90,8 +90,8 @@ use crate::types::{
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
-    JS_API_CLIENT, JS_APP, JS_AUTH, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL, JS_OVERVIEW,
-    JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET,
+    JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
+    JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET,
     NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
 };
 use ergo_indexer_types::IndexerQuery;
@@ -560,6 +560,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/settings.js", get(|| async { js(JS_SETTINGS) }))
         .route("/js/table.js", get(|| async { js(JS_TABLE) }))
         .route("/js/sparkline.js", get(|| async { js(JS_SPARKLINE) }))
+        .route("/js/chart.js", get(|| async { js(JS_CHART) }))
         .route("/js/overview.js", get(|| async { js(JS_OVERVIEW) }))
         .route("/js/explorer.js", get(|| async { js(JS_EXPLORER) }))
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
@@ -650,6 +651,13 @@ pub fn router_with_mempool_and_wallet_and_security(
         };
         let always_open: Router<BlockchainState> = Router::new()
             .route("/blockchain/indexedHeight", get(indexed_height_handler))
+            // Operator health surface: indexedHeight + the self-repair
+            // markers + totals. Ungated for the same reason indexedHeight
+            // is — it must answer while syncing / repairing / halted.
+            .route(
+                "/api/v1/indexer/status",
+                get(crate::blockchain::indexer_status_handler),
+            )
             // Resolved tx detail for the UI drawer. Ungated so the
             // unconfirmed (pool) path works while the indexer is syncing.
             .route("/api/v1/transactions/:tx_id/detail", get(tx_detail_handler));
@@ -1380,6 +1388,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         info_handler,
         difficulty_history_handler,
         votes_history_handler,
+        crate::blockchain::indexer_status_handler,
         identity_handler,
         host_handler,
         status_handler,
@@ -1450,6 +1459,9 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiFullBlockRef,
         ApiDifficultyPoint,
         ApiDifficultySeries,
+        crate::types::ApiIndexerStatus,
+        crate::types::ApiIndexerRepair,
+        crate::types::ApiIndexerTotals,
         ApiWeightFunction,
         ApiTxSource,
         SyncStateLabel,
