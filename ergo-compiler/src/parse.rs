@@ -175,10 +175,32 @@ impl<'a> Cursor<'a> {
         self.i >= self.toks.len() || !Self::is_nl(&self.toks[self.i])
     }
 
-    // The `Semi`/`Semis` primitives (Literals.scala:50-51) belong to the block /
-    // statement grammar (Exprs.scala:280-302), which lands in Task 9; they are
-    // (re)introduced there rather than kept unused here (the repo forbids
-    // `#[allow(dead_code)]`).
+    /// `Semis.?` (Literals.scala:50-51): consume a maximal run of `Semi` and
+    /// `Newline` tokens (`Semis = ( ';' | Newline+ )+`). Returns whether any were
+    /// consumed. Used for the block-body separator, the leading/trailing `Semis`
+    /// of `BaseBlock`, and the `{`/`}` semicolon absorption (Core.scala:49-50).
+    fn skip_semis(&mut self) -> bool {
+        let start = self.i;
+        while self.i < self.toks.len() {
+            if Self::is_nl(&self.toks[self.i]) || self.toks[self.i].kind == TokenKind::Semi {
+                self.i += 1;
+            } else {
+                break;
+            }
+        }
+        self.i != start
+    }
+
+    /// `Semi.?` (Literals.scala:50): consume AT MOST one leading `;`. Newlines are
+    /// transparently skipped by `peek`, so the only observable effect of the
+    /// single-`Semi` option is a lone `;` (a second `;` is left for the caller —
+    /// this is what makes `if(c) t;;else e` a hard error, Exprs.scala:48).
+    fn take_one_semi(&mut self) {
+        let j = self.skip_nl(self.i);
+        if j < self.toks.len() && self.toks[j].kind == TokenKind::Semi {
+            self.i = j + 1;
+        }
+    }
 
     /// `OneNLMax` (Literals.scala:57-60), over `Newline` tokens: optionally
     /// consume ONE `Newline` (either flavor), then consume a run of
@@ -625,24 +647,23 @@ fn type_bounds(c: &mut Cursor) -> Result<(), ParseError> {
 /// Expression parsing context (Exprs.scala:27-31). Semicolon inference is on in
 /// statement positions and off inside nested expressions; it gates the
 /// `NoSemis`/`OneSemiMax` combinators (Exprs.scala:42-43).
-///
-/// `FreeCtx` (the `val x = …`/`def f = …` RHS) joins in Task 9, where it is first
-/// *constructed* — adding a never-constructed variant now would trip `dead_code`
-/// (the repo forbids `#[allow]`).
 #[derive(Clone, Copy, PartialEq)]
 enum Ctx {
     /// `StatCtx` — top level / inside a `{}` block (semiInference = true).
     Stat,
     /// `ExprCtx` — nested in another expression: parens, arg-lists, annotation
-    /// arguments (semiInference = false).
+    /// arguments, the `if` condition (semiInference = false).
     Expr,
+    /// `FreeCtx` — the RHS of `val x = …` / `def f = …` (semiInference = true,
+    /// Exprs.scala:31). Behaves like `Stat` for semicolon inference but is a
+    /// distinct context, mirroring the reference.
+    Free,
 }
 
 impl Ctx {
-    /// `semiInference` (Exprs.scala:40): true for `StatCtx` (and, from Task 9,
-    /// `FreeCtx`).
+    /// `semiInference` (Exprs.scala:40): true for `StatCtx` and `FreeCtx`.
     fn semi_inference(self) -> bool {
-        matches!(self, Ctx::Stat)
+        matches!(self, Ctx::Stat | Ctx::Free)
     }
 }
 
@@ -712,14 +733,53 @@ fn try_literal(t: &Token, src: &str) -> Option<Expr> {
     }
 }
 
-/// The expression entry point. Through Task 8 this is exactly `PostfixExpr`
-/// (Exprs.scala:106-117) — the prefix / suffix / infix / trailing-postfix layer.
-///
-/// Task 9 wraps this with `Expr ::= If | Fun | PostfixLambda` (Exprs.scala:46-75);
-/// `parse`, `Parened` and `ArgList` all route their sub-expressions through here,
-/// so that swap lifts every caller at once.
+/// `Expr` (Exprs.scala:46-75): `If | Fun | PostfixLambda`. Ordered choice by
+/// leading token: a reserved `if`, the word `def`, else the postfix/lambda layer.
+/// `parse`, `Parened` and `ArgList` all route their sub-expressions through here.
 fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
-    postfix_expr(c, ctx)
+    // If — `if` is a reserved keyword; once seen we commit (Exprs.scala:47-52).
+    if c.at_kw(Kw::If) {
+        return if_expr(c, ctx);
+    }
+    // Fun — `def` FunDef with NO cut after `def` (Exprs.scala:55): a FunDef failure
+    // backtracks and lets `def` parse as an ordinary identifier via PostfixLambda.
+    if c.at_word("def") {
+        let mark = c.save();
+        c.bump(); // `def`
+        match fun_def(c) {
+            Ok(v) => return Ok(v),
+            Err(_) => c.restore(mark),
+        }
+    }
+    postfix_lambda(c, ctx)
+}
+
+/// `If` (Exprs.scala:47-52): `Index ~ `if` ~/ "(" ~ ExprCtx.Expr ~ ")" ~ Expr ~
+/// Else` where `Else = Semi.? ~ `else` ~/ Expr`. The `if` keyword commits (a
+/// missing `else` is a hard error); the condition parses in `ExprCtx`, both
+/// branches in the enclosing `ctx`. Node pos = the `if` token.
+fn if_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+    let pos = c.peek().start; // Index (at `if`)
+    c.bump(); // `if` ~/ — committed
+    c.expect(&TokenKind::LParen, "(")?;
+    let condition = expr(c, Ctx::Expr)?; // ExprCtx.Expr
+    c.expect(&TokenKind::RParen, ")")?;
+    let true_branch = expr(c, ctx)?;
+    c.take_one_semi(); // Semi.? before `else`
+    if !c.at_kw(Kw::Else) {
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "`else`".to_string(),
+        });
+    }
+    c.bump(); // `else` ~/ — committed
+    let false_branch = expr(c, ctx)?;
+    Ok(Expr::If {
+        condition: Box::new(condition),
+        true_branch: Box::new(true_branch),
+        false_branch: Box::new(false_branch),
+        pos,
+    })
 }
 
 /// `SimpleExpr` (Exprs.scala:120-132), ordered `BlockExpr | ExprLiteral | StableId
@@ -749,13 +809,561 @@ fn simple_expr(c: &mut Cursor, _ctx: Ctx) -> Result<Expr, ParseError> {
     })
 }
 
-/// `BlockExpr` (Exprs.scala:242): `"{" Block "}"`. The `Block` grammar
-/// (Exprs.scala:280-302) lands in Task 9; here `block()` is a stub that rejects any
-/// brace-expression so it is never silently mis-parsed.
+/// `BlockExpr` (Exprs.scala:242): `"{" ~/ ( Block ~ "}" )` where `Block =
+/// BaseBlock("}")` (Exprs.scala:302). The `{`/`}` semicolon absorption of
+/// Core.scala:49-50 is realised by `BaseBlock`'s own leading `Semis.?` and
+/// `BlockEnd`'s trailing `Semis.?`.
 fn block_expr(c: &mut Cursor) -> Result<Expr, ParseError> {
-    Err(ParseError::Syntax {
-        pos: c.peek().start,
-        expected: "block (Task 9)".to_string(),
+    c.expect(&TokenKind::LBrace, "{")?; // "{" ~/ — committed
+    let e = base_block(c)?;
+    c.expect(&TokenKind::RBrace, "}")?;
+    Ok(e)
+}
+
+// =============================================================================
+// Block machinery, val/def definitions, and the PostfixLambda suffix.
+// Exprs.scala:57-77, 214-320; SigmaParser.scala:26-35; Types.scala:25-27, 136-150.
+// =============================================================================
+
+/// One argument list: `(name, type)` pairs with `NoType` for unascribed params.
+/// Shared by `BlockLambdaHead`, `FunArgs`, and the lambda constructor.
+type ArgList = Vec<(String, SType)>;
+
+/// `BaseBlock("}")` (Exprs.scala:280-302): `Index ~ Semis.? ~ BlockLambda.? ~ Body
+/// ~/ BlockEnd`. The caller (`block_expr`) has consumed `{` and will consume `}`.
+///
+/// Shape-for-shape port of the result map (Exprs.scala:283-299):
+/// - leading `BlockLambda` + exactly one stat → `Lambda(args, NoType, stat)`
+/// - leading `BlockLambda` + any other body → `Lambda(args, NoType, block(stats))`
+/// - no leading `BlockLambda` → `block(stats)`
+///
+/// A `BlockLambda` in a non-first chunk is a `scala.MatchError` in the reference
+/// (the flatMap only matches `case (Seq(), exprs)`, :288-296); a second
+/// consecutive block-lambda at the block head is the only reachable form of that
+/// (the greedy `BlockStat.rep` grabs any `(a,b) => e` after a `Semis` as an
+/// expression lambda), and it is rejected here as a Semantic error (D5).
+fn base_block(c: &mut Cursor) -> Result<Expr, ParseError> {
+    let pos = c.peek().start; // Index (before Semis.?)
+    c.skip_semis(); // Semis.?
+    let lead = try_block_lambda(c)?.map(|(_, args)| args); // BlockLambda.?
+                                                           // Body's first BlockChunk runs `BlockLambda.rep`; a match here (a second
+                                                           // consecutive head) makes that chunk's lambda-list non-empty → MatchError.
+    if let Some((lam_pos, _)) = try_block_lambda(c)? {
+        return Err(ParseError::Semantic {
+            pos: lam_pos,
+            msg: "block lambda is only allowed at the start of a block".to_string(),
+        });
+    }
+    let stats = block_body(c)?;
+    match lead {
+        Some(args) => {
+            // Single-stat single-chunk → the stat is the body directly (:284-285);
+            // otherwise the stats are wrapped in a block (:286-292).
+            let body = if stats.len() == 1 {
+                stats.into_iter().next().unwrap()
+            } else {
+                block_from_stats(stats, pos)?
+            };
+            Ok(Expr::Lambda {
+                args,
+                given_res_type: SType::NoType,
+                body: Box::new(body),
+                pos,
+            })
+        }
+        None => block_from_stats(stats, pos),
+    }
+}
+
+/// `Body = BlockChunk.repX(sep = Semis)` flattened to a statement list
+/// (Exprs.scala:282). `BlockChunk = BlockLambda.rep ~ BlockStat.rep(sep = Semis)`;
+/// the greedy `BlockStat.rep` means all statements land in one flat list here.
+/// Stops at the `}` / end (`BlockEnd = Semis.? ~ &("}")`, :281).
+fn block_body(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
+    let mut stats = Vec::new();
+    if !starts_block_stat(c.peek()) {
+        return Ok(stats); // empty body (e.g. `{}`)
+    }
+    loop {
+        stats.push(block_stat(c)?);
+        // BlockStat.rep separator = Semis; BlockEnd absorbs the trailing run.
+        if !c.skip_semis() {
+            break; // no separator → statement list ends
+        }
+        if !starts_block_stat(c.peek()) {
+            break; // trailing Semis before `}` / end
+        }
+    }
+    Ok(stats)
+}
+
+/// `BlockStat = Prelude ~ BlockDef | StatCtx.Expr` (Exprs.scala:258). `Prelude =
+/// Annot.rep ~ `lazy`.?` (:257) is parsed and IGNORED; `BlockDef = Dcl` (SP:35) is
+/// the `val` form. A non-`val` after the prelude backtracks (the prelude is
+/// discarded) and the statement parses as a `StatCtx.Expr` (which also covers the
+/// `def` form via `Fun`).
+fn block_stat(c: &mut Cursor) -> Result<Expr, ParseError> {
+    let mark = c.save();
+    prelude(c)?; // Annot.rep ~ `lazy`.?
+    if c.at_word("val") {
+        return val_def(c); // Dcl = `val` ~/ ValVarDef
+    }
+    c.restore(mark); // BlockDef failed → discard the prelude
+    expr(c, Ctx::Stat) // StatCtx.Expr
+}
+
+/// `Prelude = Annot.rep ~ `lazy`.?` (Exprs.scala:257). Parsed and discarded.
+fn prelude(c: &mut Cursor) -> Result<(), ParseError> {
+    while c.at_kw(Kw::At) {
+        annot(c)?;
+    }
+    if c.at_word("lazy") {
+        c.bump();
+    }
+    Ok(())
+}
+
+/// A token that can begin a `BlockStat`: a `StatCtx.Expr` head, an `if`, or a
+/// leading `@` (an annotated `val`). `val`/`def`/`lazy` are ordinary `Ident`s and
+/// are already covered by `starts_expr`.
+fn starts_block_stat(t: &Token) -> bool {
+    starts_expr(t) || matches!(t.kind, TokenKind::Kw(Kw::If) | TokenKind::Kw(Kw::At))
+}
+
+/// `block(stats)` / `extractBlockStats` (Exprs.scala:262-278): empty → `Block([],
+/// UnitConstant)`; otherwise every stat but the last must be a `Val` (unwrapped
+/// into a binding), the last is the result (which MAY itself be a `Val`). A
+/// non-`Val` in non-tail position is a Semantic error at that stat's own position.
+/// The block/unit node carries the block's `pos`.
+fn block_from_stats(stats: Vec<Expr>, pos: Pos) -> Result<Expr, ParseError> {
+    if stats.is_empty() {
+        return Ok(Expr::Block {
+            bindings: Vec::new(),
+            result: Box::new(Expr::UnitConst { pos }),
+            pos,
+        });
+    }
+    let n = stats.len();
+    let mut bindings = Vec::with_capacity(n - 1);
+    let mut result = None;
+    for (i, s) in stats.into_iter().enumerate() {
+        if i == n - 1 {
+            result = Some(s); // last stat = result (may itself be a Val)
+        } else {
+            match s {
+                Expr::Val(vd) => bindings.push(*vd),
+                other => {
+                    return Err(ParseError::Semantic {
+                        pos: other.pos(),
+                        msg: "Block should contain a list of Val bindings and one expression"
+                            .to_string(),
+                    })
+                }
+            }
+        }
+    }
+    Ok(Expr::Block {
+        bindings,
+        result: Box::new(result.unwrap()),
+        pos,
+    })
+}
+
+/// `BlockLambda = BlockLambdaHead ~ `=>`` (Exprs.scala:244-254). Returns the arg
+/// list (and its start position) when a full `( Arg,* ) =>` head is present, else
+/// `None` with the cursor restored — the head is NOT cut, so it fully backtracks
+/// (this is what lets `(x + 1)` fall through to `Parened`). A `:`-ascription
+/// failure inside an `Arg` IS cut (`(`:` ~/ Type).?`, :245) and propagates.
+fn try_block_lambda(c: &mut Cursor) -> Result<Option<(Pos, ArgList)>, ParseError> {
+    let mark = c.save();
+    let pos = c.peek().start;
+    if !c.one_nl_max() || c.peek().kind != TokenKind::LParen {
+        c.restore(mark);
+        return Ok(None);
+    }
+    c.bump(); // "("
+    let args = if starts_fun_arg(c.peek()) {
+        arg_list(c)? // Arg.rep(1, ",") ~ TrailingComma
+    } else {
+        Vec::new() // `()` — no args
+    };
+    if c.peek().kind != TokenKind::RParen {
+        c.restore(mark);
+        return Ok(None);
+    }
+    c.bump(); // ")"
+    if !c.at_kw(Kw::FatArrow) {
+        c.restore(mark); // a paren group with no `=>` is not a lambda head
+        return Ok(None);
+    }
+    c.bump(); // `=>`
+    Ok(Some((pos, args)))
+}
+
+/// A token that can begin a `FunArg`/`Arg`: an `Id` or a leading annotation `@`
+/// (Exprs.scala:245, Types.scala:137).
+fn starts_fun_arg(t: &Token) -> bool {
+    is_id(t) || t.kind == TokenKind::Kw(Kw::At)
+}
+
+/// `Arg.rep(1, ",") ~ TrailingComma` (Exprs.scala:249, Types.scala:141) — the
+/// comma-separated argument list shared by `BlockLambdaHead` and `FunArgs`. Each
+/// `Arg = Annot.rep ~ Id.! ~ (`:` ~/ Type).?`, untyped args default to `NoType`.
+fn arg_list(c: &mut Cursor) -> Result<ArgList, ParseError> {
+    let mut args = vec![fun_arg(c)?];
+    loop {
+        if c.peek().kind != TokenKind::Comma {
+            break;
+        }
+        if c.comma_then_newline() {
+            c.bump(); // trailing comma; the Newline stays for the closer
+            break;
+        }
+        let mark = c.save();
+        c.bump(); // separator comma
+        if starts_fun_arg(c.peek()) {
+            args.push(fun_arg(c)?);
+            continue;
+        }
+        c.restore(mark); // no arg follows and not a valid trailing comma
+        break;
+    }
+    Ok(args)
+}
+
+/// One `Arg`/`FunArg` = `Annot.rep ~ Id.! ~ (`:` ~/ Type).?` (Exprs.scala:245-248,
+/// Types.scala:137-140). Annotations are discarded; an absent type is `NoType`.
+fn fun_arg(c: &mut Cursor) -> Result<(String, SType), ParseError> {
+    while c.at_kw(Kw::At) {
+        annot(c)?;
+    }
+    if !is_id(c.peek()) {
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "argument name".to_string(),
+        });
+    }
+    let name = c.bump();
+    let name = name.text(c.src).to_string();
+    let tpe = if c.at_kw(Kw::Colon) {
+        c.bump(); // `:` ~/ — committed
+        type_(c)?
+    } else {
+        SType::NoType
+    };
+    Ok((name, tpe))
+}
+
+/// `Dcl = `val` ~/ ValVarDef` (Types.scala:25-27) with `ValVarDef = Index ~
+/// BindPattern ~ (`:` ~/ Type).? ~ (`=` ~/ FreeCtx.Expr)` (SP:26-33). The pattern
+/// must reduce to a single `Ident` → `Val(name, T|NoType, body)` at the pattern's
+/// start; any other pattern → Semantic "Only single name patterns supported" at
+/// that same position. The `val` keyword is a cut, so a malformed `ValVarDef` is a
+/// hard error.
+fn val_def(c: &mut Cursor) -> Result<Expr, ParseError> {
+    c.bump(); // `val` ~/ — committed
+    let pos = c.peek().start; // Index (at the BindPattern)
+    let pat = bind_pattern(c)?;
+    let given_type = if c.at_kw(Kw::Colon) {
+        c.bump(); // `:` ~/ — committed
+        type_(c)?
+    } else {
+        SType::NoType
+    };
+    c.expect(&TokenKind::Kw(Kw::Assign), "=")?; // `=` ~/ — committed
+    let body = expr(c, Ctx::Free)?; // FreeCtx.Expr
+    match pat {
+        BindPat::Name(name) => Ok(Expr::Val(Box::new(crate::ast::ValDef {
+            name,
+            given_type,
+            body,
+            pos,
+        }))),
+        BindPat::Other => Err(ParseError::Semantic {
+            pos,
+            msg: "Only single name patterns supported".to_string(),
+        }),
+    }
+}
+
+/// A parsed `BindPattern`: either a single-name binding or any other (tuple /
+/// extractor / dotted) pattern, which the `val` binder rejects.
+enum BindPat {
+    Name(String),
+    Other,
+}
+
+/// `BindPattern = SimplePattern` (Exprs.scala:309-312): `TupleEx | Extractor |
+/// VarId` (Exprs.scala:234-240). Only a lone `VarId`/`StableId`-Ident (no dot, no
+/// extractor args) yields `Name`; everything else (a tuple pattern, a dotted path,
+/// or an extractor with args) yields `Other`. Consumed in full so the following
+/// `(`:` Type).? ~ `=` Expr` still parses (matching the reference's parse-then-map
+/// order).
+fn bind_pattern(c: &mut Cursor) -> Result<BindPat, ParseError> {
+    if c.peek().kind == TokenKind::LParen {
+        consume_tuple_ex(c)?; // TupleEx `( Pattern,* )`
+        return Ok(BindPat::Other);
+    }
+    if !is_id(c.peek()) {
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "pattern".to_string(),
+        });
+    }
+    let head = c.bump();
+    let name = head.text(c.src).to_string();
+    let mut other = false;
+    // StableId tail: `('.' Id)*` — a dotted path is not a single name.
+    while c.peek().kind == TokenKind::Dot {
+        c.bump();
+        if !is_id(c.peek()) {
+            return Err(ParseError::Syntax {
+                pos: c.peek().start,
+                expected: "identifier after `.`".to_string(),
+            });
+        }
+        c.bump();
+        other = true;
+    }
+    // Extractor args: `TupleEx.?` — an extractor with args is not a single name.
+    if c.peek().kind == TokenKind::LParen {
+        consume_tuple_ex(c)?;
+        other = true;
+    }
+    Ok(if other {
+        BindPat::Other
+    } else {
+        BindPat::Name(name)
+    })
+}
+
+/// Consume a balanced `( … )` region (a `TupleEx` pattern group, Exprs.scala:235).
+/// The contents are pattern syntax that the `val` binder discards, so a
+/// token-level balanced-paren scan is faithful; an unterminated group is an error.
+fn consume_tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
+    let open = c.expect(&TokenKind::LParen, "(")?;
+    let mut depth = 1usize;
+    while depth > 0 {
+        let t = c.bump();
+        match t.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => depth -= 1,
+            TokenKind::Eof => {
+                return Err(ParseError::Syntax {
+                    pos: open.start,
+                    expected: "`)`".to_string(),
+                })
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// `Fun = `def` ~ FunDef` body (Exprs.scala:214-232). The caller has consumed
+/// `def`. Produces `Val(name, resType|NoType, Lambda(args, resType|NoType, body))`
+/// at the production start. No dotty subject: `args` = the FIRST arg list only —
+/// extra lists are silently dropped (`args.headOption`, :220). With a dotty subject
+/// and ≤1 lists: `args = [subj] ++ first`; with >1 lists: Semantic error (:229-231).
+fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
+    let pos = c.peek().start; // Index (at DottyExtMethodSubj? / Id)
+    let dotty = try_dotty_subj(c)?;
+    if !is_id(c.peek()) {
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "function name".to_string(),
+        });
+    }
+    let name = c.bump();
+    let name = name.text(c.src).to_string();
+    let arg_lists = fun_sig(c)?;
+    let res_type = if c.at_kw(Kw::Colon) {
+        c.bump(); // `:` ~/ — committed
+        Some(type_(c)?)
+    } else {
+        None
+    };
+    c.expect(&TokenKind::Kw(Kw::Assign), "=")?; // `=` ~/ — committed
+    let body = expr(c, Ctx::Free)?; // FreeCtx.Expr
+    let res = res_type.unwrap_or(SType::NoType);
+
+    let args = match dotty {
+        None => arg_lists.into_iter().next().unwrap_or_default(),
+        Some(subj) => {
+            if arg_lists.len() > 1 {
+                return Err(ParseError::Semantic {
+                    pos,
+                    msg: "Function can only have single argument list".to_string(),
+                });
+            }
+            let mut combined = vec![subj];
+            combined.extend(arg_lists.into_iter().next().unwrap_or_default());
+            combined
+        }
+    };
+    let lambda = Expr::Lambda {
+        args,
+        given_res_type: res.clone(),
+        body: Box::new(body),
+        pos,
+    };
+    Ok(Expr::Val(Box::new(crate::ast::ValDef {
+        name,
+        given_type: res,
+        body: lambda,
+        pos,
+    })))
+}
+
+/// `FunSig = FunTypeArgs.? ~~ FunArgs.rep` (Types.scala:136-145). The optional
+/// `FunTypeArgs` (`[ … ]`) is parsed and DISCARDED; the returned value is the list
+/// of `FunArgs` argument lists (each `OneNLMax ~ "(" ~/ Args.? ~ ")"`).
+fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
+    if c.peek().kind == TokenKind::LBracket {
+        discard_bracketed(c)?; // FunTypeArgs — parsed and discarded
+    }
+    let mut lists = Vec::new();
+    loop {
+        let mark = c.save();
+        if !c.one_nl_max() || c.peek().kind != TokenKind::LParen {
+            c.restore(mark);
+            break; // FunArgs.rep ends
+        }
+        c.bump(); // "(" ~/ — committed
+        let args = if starts_fun_arg(c.peek()) {
+            arg_list(c)?
+        } else {
+            Vec::new()
+        };
+        c.expect(&TokenKind::RParen, ")")?;
+        lists.push(args);
+    }
+    Ok(lists)
+}
+
+/// Consume a balanced `[ … ]` region. Used for `FunTypeArgs` (Types.scala:143),
+/// whose full `TypeArg` grammar (variance, bounds, context bounds) is parsed and
+/// discarded by the reference — a token-level balanced scan is faithful for that
+/// discard and robust to nesting.
+fn discard_bracketed(c: &mut Cursor) -> Result<(), ParseError> {
+    let open = c.expect(&TokenKind::LBracket, "[")?;
+    let mut depth = 1usize;
+    while depth > 0 {
+        let t = c.bump();
+        match t.kind {
+            TokenKind::LBracket => depth += 1,
+            TokenKind::RBracket => depth -= 1,
+            TokenKind::Eof => {
+                return Err(ParseError::Syntax {
+                    pos: open.start,
+                    expected: "`]`".to_string(),
+                })
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// `DottyExtMethodSubj = "(" ~/ Id ~ `:` ~/ Type ~ ")"` (Types.scala:150), the
+/// (rarely used) extension-method subject. Returns `None` with the cursor restored
+/// when the leading `(` does not open a `( Id : Type )` group.
+fn try_dotty_subj(c: &mut Cursor) -> Result<Option<(String, SType)>, ParseError> {
+    if c.peek().kind != TokenKind::LParen {
+        return Ok(None);
+    }
+    let mark = c.save();
+    c.bump(); // "("
+    if !is_id(c.peek()) {
+        c.restore(mark);
+        return Ok(None);
+    }
+    let id = c.bump();
+    let id = id.text(c.src).to_string();
+    if !c.at_kw(Kw::Colon) {
+        c.restore(mark);
+        return Ok(None);
+    }
+    c.bump(); // `:`
+    let ty = type_(c)?;
+    if c.peek().kind != TokenKind::RParen {
+        c.restore(mark);
+        return Ok(None);
+    }
+    c.bump(); // ")"
+    Ok(Some((id, ty)))
+}
+
+/// `PostfixLambda` (Exprs.scala:65-70) + `SuperPostfixSuffix` (:77):
+/// `PostfixExpr ~ (`=>` ~ LambdaRhs.? | (`=` ~/ Expr).?).?`. The optional suffix
+/// always succeeds (the `=`-variant is itself optional), so it yields
+/// `Option<body>`: `None` = no body (the `PostfixExpr` is returned unchanged, both
+/// the `Some(None)` and no-suffix cases of :66-67); `Some(body)` = a lambda body,
+/// which requires a `Tuple`-of-`Ident` lhs (`lambda()`, :136-139) — any other lhs
+/// is the "Invalid declaration of lambda" error (:69), pinned to the `PostfixExpr`
+/// start.
+fn postfix_lambda(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+    let pos = c.peek().start; // Index
+    let e = postfix_expr(c, ctx)?;
+    let body: Option<Expr> = if c.at_kw(Kw::FatArrow) {
+        c.bump(); // `=>`
+        lambda_rhs(c, ctx)?
+    } else if c.at_kw(Kw::Assign) {
+        c.bump(); // `=` ~/ — SuperPostfixSuffix
+        Some(expr(c, ctx)?)
+    } else {
+        None
+    };
+    match body {
+        None => Ok(e),
+        Some(body) => match e {
+            Expr::Tuple { items, .. } => lambda_from_tuple(items, body, pos),
+            other => Err(ParseError::Semantic {
+                pos: other.pos(),
+                msg: "Invalid declaration of lambda".to_string(),
+            }),
+        },
+    }
+}
+
+/// `LambdaRhs` (Exprs.scala:57-63): in a semi-inference context a `BlockChunk`
+/// wrapped via `block()` (which always succeeds — an empty chunk yields `Block([],
+/// Unit)`); otherwise an optional `Expr`. Returns the lambda body, or `None` when
+/// (only possible in the `Expr` branch) no expression follows the `=>`.
+fn lambda_rhs(c: &mut Cursor, ctx: Ctx) -> Result<Option<Expr>, ParseError> {
+    if ctx.semi_inference() {
+        let pos = c.peek().start; // LambdaRhs `Index`, before the BlockChunk
+        let stats = block_body(c)?; // BlockChunk's BlockStat.rep(sep = Semis)
+        Ok(Some(block_from_stats(stats, pos)?))
+    } else if starts_expr(c.peek()) {
+        Ok(Some(expr(c, ctx)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// `lambda(args, body)` (Exprs.scala:136-139): the tuple's items become the lambda
+/// parameters, each `Ident(n, t) → (n, t)`. A non-`Ident` item is Scala's
+/// `MatchError` in the `.map`; here it is a Semantic error. Result type is
+/// `NoType`.
+fn lambda_from_tuple(items: Vec<Expr>, body: Expr, pos: Pos) -> Result<Expr, ParseError> {
+    let mut args = Vec::with_capacity(items.len());
+    for it in items {
+        match it {
+            Expr::Ident { name, tpe, .. } => args.push((name, tpe)),
+            other => {
+                return Err(ParseError::Semantic {
+                    pos: other.pos(),
+                    msg: "lambda parameters must be identifiers".to_string(),
+                })
+            }
+        }
+    }
+    Ok(Expr::Lambda {
+        args,
+        given_res_type: SType::NoType,
+        body: Box::new(body),
+        pos,
     })
 }
 
@@ -979,9 +1587,9 @@ fn apply_suffix(f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, ParseError> {
                                 pos: f_pos,
                             }
                         }
-                        // Unreachable while `block()` is stubbed (Task 7): the
-                        // block-arg form only yields a `Block`. Kept for the Task 9
-                        // non-block error path (Exprs.scala:203). Tested in Task 9.
+                        // A block-arg whose `{ … }` is a leading-lambda block
+                        // yields a `Lambda`, not a `Block` — the reference's
+                        // non-block ZKProof error path (Exprs.scala:202-203).
                         nonblock => {
                             return Err(ParseError::Semantic {
                                 pos: nonblock.pos(),
@@ -1692,6 +2300,51 @@ mod expr_tests {
             pos: 0,
         }
     }
+    fn ge(l: Expr, r: Expr) -> Expr {
+        Expr::Relation {
+            kind: RelKind::Ge,
+            left: Box::new(l),
+            right: Box::new(r),
+            pos: 0,
+        }
+    }
+    fn val(name: &str, given_type: SType, body: Expr) -> ValDef {
+        ValDef {
+            name: name.into(),
+            given_type,
+            body,
+            pos: 0,
+        }
+    }
+    fn val_expr(name: &str, given_type: SType, body: Expr) -> Expr {
+        Expr::Val(Box::new(val(name, given_type, body)))
+    }
+    fn block(bindings: Vec<ValDef>, result: Expr) -> Expr {
+        Expr::Block {
+            bindings,
+            result: Box::new(result),
+            pos: 0,
+        }
+    }
+    fn if_(condition: Expr, true_branch: Expr, false_branch: Expr) -> Expr {
+        Expr::If {
+            condition: Box::new(condition),
+            true_branch: Box::new(true_branch),
+            false_branch: Box::new(false_branch),
+            pos: 0,
+        }
+    }
+    fn lambda(args: Vec<(&str, SType)>, body: Expr) -> Expr {
+        lambda_r(args, SType::NoType, body)
+    }
+    fn lambda_r(args: Vec<(&str, SType)>, given_res_type: SType, body: Expr) -> Expr {
+        Expr::Lambda {
+            args: args.into_iter().map(|(n, t)| (n.to_string(), t)).collect(),
+            given_res_type,
+            body: Box::new(body),
+            pos: 0,
+        }
+    }
 
     /// Recursively set every `pos` (and `ValDef` pos) to 0 for shape-only
     /// comparison against the position-free helper constructors above.
@@ -2005,12 +2658,6 @@ mod expr_tests {
         assert_eq!(e.line_col("10)"), (1, 3));
     }
 
-    #[test]
-    fn block_expr_atom_is_stubbed() {
-        // BlockExpr dispatch reaches the Task-9 `block()` stub (Exprs.scala:242).
-        assert!(crate::parse("{}", 3).is_err());
-    }
-
     // ----- Scala-cited edge cases (spec-derived) -----
 
     #[test]
@@ -2135,5 +2782,303 @@ mod expr_tests {
         // Zero-arg and empty-arg-group forms also discard cleanly.
         assert_eq!(parse_type("Int @foo", 3).unwrap(), SType::SInt);
         assert_eq!(parse_type("Int @foo()", 3).unwrap(), SType::SInt);
+    }
+
+    // ----- Task 9: blocks, val/def, lambdas, if (ported, cited) -----
+
+    #[test]
+    fn block_val_and_newline_separators() {
+        // SigmaParserTest.scala:169-189
+        assert_eq!(
+            strip_pos(&p("{val X = 10; 3 > 2}")),
+            block(vec![val("X", SType::NoType, int(10))], gt(int(3), int(2)))
+        );
+        assert_eq!(
+            strip_pos(&p("{val X = 10\n3 > 2}")),
+            block(vec![val("X", SType::NoType, int(10))], gt(int(3), int(2)))
+        );
+        assert_eq!(
+            strip_pos(&p("{val X: Byte = 10; 3 > 2}")),
+            block(vec![val("X", SType::SByte, int(10))], gt(int(3), int(2)))
+        );
+        assert_eq!(
+            strip_pos(&p("{val X: (Int, Boolean) = (10, true); 3 > 2}")),
+            block(
+                vec![val(
+                    "X",
+                    SType::STuple(vec![SType::SInt, SType::SBoolean]),
+                    tuple(vec![int(10), boolean(true)])
+                )],
+                gt(int(3), int(2))
+            )
+        );
+    }
+
+    #[test]
+    fn block_comments_do_not_separate() {
+        // SigmaParserTest.scala:219-228
+        let src = "{\n// line comment\nval X = 12\n/* comment // nested line comment\n*/\n3 - // end line comment\n  2\n}";
+        assert_eq!(
+            strip_pos(&p(src)),
+            block(
+                vec![val("X", SType::NoType, int(12))],
+                minus(int(3), int(2))
+            )
+        );
+    }
+
+    #[test]
+    fn if_else_and_chain() {
+        // SigmaParserTest.scala:232-233
+        assert_eq!(
+            strip_pos(&p("if(true) 1 else 2")),
+            if_(boolean(true), int(1), int(2))
+        );
+        assert_eq!(
+            strip_pos(&p("if(true) 1 else if(X==Y) 2 else 3")),
+            if_(
+                boolean(true),
+                int(1),
+                if_(eq_(ident0("X"), ident0("Y")), int(2), int(3))
+            )
+        );
+    }
+
+    #[test]
+    fn lambdas_block_forms() {
+        // SigmaParserTest.scala:356-393
+        assert_eq!(
+            strip_pos(&p("{ (x) => x - 1 }")),
+            lambda(vec![("x", SType::NoType)], minus(ident0("x"), int(1)))
+        );
+        assert_eq!(
+            strip_pos(&p("{ (x: Int) => x - 1 }")),
+            lambda(vec![("x", SType::SInt)], minus(ident0("x"), int(1)))
+        );
+        assert_eq!(
+            strip_pos(&p("{ (x: Int) => { x - 1 } }")),
+            lambda(
+                vec![("x", SType::SInt)],
+                block(vec![], minus(ident0("x"), int(1)))
+            )
+        );
+        assert_eq!(
+            strip_pos(&p("{ (x: Int) =>  val y = x - 1; y }")),
+            lambda(
+                vec![("x", SType::SInt)],
+                block(
+                    vec![val("y", SType::NoType, minus(ident0("x"), int(1)))],
+                    ident0("y")
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn lambda_argument_sugar_three_forms_equal() {
+        // SigmaParserTest.scala:403-413
+        let expected = apply(
+            select(ident0("arr"), "exists"),
+            vec![lambda(vec![("a", SType::SInt)], ge(ident0("a"), int(1)))],
+        );
+        assert_eq!(
+            strip_pos(&p("arr.exists ({ (a: Int) => a >= 1 })")),
+            expected
+        );
+        assert_eq!(strip_pos(&p("arr.exists { (a: Int) => a >= 1 }")), expected);
+    }
+
+    #[test]
+    fn def_is_val_holding_lambda() {
+        // SigmaParserTest.scala:453-459, 511-512
+        assert_eq!(
+            strip_pos(&p("{ def f(x: Int): Int = x - 1 }")),
+            block(
+                vec![],
+                val_expr(
+                    "f",
+                    SType::SInt,
+                    lambda_r(
+                        vec![("x", SType::SInt)],
+                        SType::SInt,
+                        minus(ident0("x"), int(1))
+                    )
+                )
+            )
+        );
+        assert_eq!(
+            strip_pos(&p("{ def f(x: Int) = x - 1 }")),
+            block(
+                vec![],
+                val_expr(
+                    "f",
+                    SType::NoType,
+                    lambda_r(
+                        vec![("x", SType::SInt)],
+                        SType::NoType,
+                        minus(ident0("x"), int(1))
+                    )
+                )
+            )
+        );
+        assert_eq!(
+            strip_pos(&p("{ def f: Int = 1 }")),
+            block(
+                vec![],
+                val_expr("f", SType::SInt, lambda_r(vec![], SType::SInt, int(1)))
+            )
+        );
+    }
+
+    #[test]
+    fn zkproof_requires_block() {
+        // SigmaParserTest.scala:652, fail :660
+        assert_eq!(
+            strip_pos(&p("ZKProof { proveDlog(g) }")),
+            apply(
+                Expr::Ident {
+                    name: "ZKProof".into(),
+                    tpe: SType::SFunc {
+                        dom: vec![SType::SSigmaProp],
+                        range: Box::new(SType::SBoolean)
+                    },
+                    pos: 0
+                },
+                vec![apply(ident0("proveDlog"), vec![ident0("g")])]
+            )
+        );
+        let e = crate::parse("ZKProof 1 > 1", 3).unwrap_err();
+        assert_eq!(e.line_col("ZKProof 1 > 1"), (1, 9));
+    }
+
+    #[test]
+    fn empty_block_is_unit() {
+        // spec-derived: Exprs.scala:271-272
+        assert_eq!(strip_pos(&p("{}")), block(vec![], unit()));
+    }
+
+    // ----- Task 9 error paths -----
+
+    #[test]
+    fn block_and_lambda_rejections_at_scala_positions() {
+        let e = crate::parse("{ val X", 3).unwrap_err();
+        assert_eq!(e.line_col("{ val X"), (1, 8)); // fail :588
+        let e = crate::parse("{val (a,b) = (1,2)}", 3).unwrap_err();
+        assert_eq!(e.line_col("{val (a,b) = (1,2)}"), (1, 6)); // fail :921
+        let e = crate::parse("{1 ; 1 == 1}", 3).unwrap_err();
+        assert_eq!(e.line_col("{1 ; 1 == 1}"), (1, 2)); // fail :949
+        assert!(crate::parse("arr.exists { a => a >= 1 }", 3).is_err()); // :600
+        let e = crate::parse("arr.exists ( (a: Int) => a >= 1 )", 3).unwrap_err();
+        assert_eq!(e.line_col("arr.exists ( (a: Int) => a >= 1 )"), (1, 16)); // :597
+                                                                              // D5: block-lambda in non-first chunk is a reject (Scala: MatchError crash).
+        assert!(crate::parse("{ val a = 1; (x: Int) => x }", 3).is_err());
+    }
+
+    // ----- Task 9 Scala-cited edge cases (spec-derived) -----
+
+    #[test]
+    fn block_result_may_be_a_val() {
+        // extractBlockStats (Exprs.scala:262-273): the LAST stat may itself be a Val.
+        assert_eq!(
+            strip_pos(&p("{ val x = 1 }")),
+            block(vec![], val_expr("x", SType::NoType, int(1)))
+        );
+    }
+
+    #[test]
+    fn block_mixed_separators_and_multi_val() {
+        // Semis = (';' | Newline+)+ (Literals.scala:50-51): `;` and newline mix.
+        assert_eq!(
+            strip_pos(&p("{ val a = 1\n val b = 2; a }")),
+            block(
+                vec![
+                    val("a", SType::NoType, int(1)),
+                    val("b", SType::NoType, int(2))
+                ],
+                ident0("a")
+            )
+        );
+    }
+
+    #[test]
+    fn block_lazy_and_annotation_prelude_ignored() {
+        // Prelude = Annot.rep ~ `lazy`.? (Exprs.scala:257) — parsed and ignored.
+        assert_eq!(
+            strip_pos(&p("{ lazy val x = 1; x }")),
+            block(vec![val("x", SType::NoType, int(1))], ident0("x"))
+        );
+        assert_eq!(
+            strip_pos(&p("{ @foo val x = 1; x }")),
+            block(vec![val("x", SType::NoType, int(1))], ident0("x"))
+        );
+    }
+
+    #[test]
+    fn nested_block_as_statement() {
+        // BlockExpr nests: a `{ … }` is an ordinary statement/result.
+        assert_eq!(
+            strip_pos(&p("{ val x = 1; { x } }")),
+            block(
+                vec![val("x", SType::NoType, int(1))],
+                block(vec![], ident0("x"))
+            )
+        );
+    }
+
+    #[test]
+    fn def_backtracks_to_ident_when_not_a_fundef() {
+        // Fun = `def` ~ FunDef with NO cut (Exprs.scala:55): `def` alone backtracks
+        // to an ordinary identifier via PostfixLambda.
+        assert_eq!(strip_pos(&p("def")), ident0("def"));
+    }
+
+    #[test]
+    fn def_extra_arg_lists_are_dropped() {
+        // FunDef quirk (Exprs.scala:220 args.headOption): with no dotty subject the
+        // extra `(b: Int)` list is silently dropped, keeping only `a`.
+        assert_eq!(
+            strip_pos(&p("def f(a: Int)(b: Int) = a")),
+            val_expr(
+                "f",
+                SType::NoType,
+                lambda_r(vec![("a", SType::SInt)], SType::NoType, ident0("a"))
+            )
+        );
+    }
+
+    #[test]
+    fn expr_tuple_lambda_arrow_and_eq_forms() {
+        // PostfixLambda (Exprs.scala:65-70): `(a,b) => e` wraps the body via a
+        // semi-inference LambdaRhs → block([e]) = Block([], e) (mkBlock never
+        // unwraps, SigmaBuilder.scala:522-523).
+        assert_eq!(
+            strip_pos(&p("(a, b) => a")),
+            lambda(
+                vec![("a", SType::NoType), ("b", SType::NoType)],
+                block(vec![], ident0("a"))
+            )
+        );
+        // SuperPostfixSuffix `= Expr` (Exprs.scala:77) uses a raw `Expr` body.
+        assert_eq!(
+            strip_pos(&p("(a, b) = a")),
+            lambda(
+                vec![("a", SType::NoType), ("b", SType::NoType)],
+                ident0("a")
+            )
+        );
+    }
+
+    #[test]
+    fn non_tuple_lhs_lambda_is_rejected() {
+        // lhs not a Tuple + a body present → "Invalid declaration of lambda" (:69).
+        assert!(crate::parse("x => e", 3).is_err());
+    }
+
+    #[test]
+    fn entry_trailing_newline_ok_but_semicolon_errors() {
+        // spec-derived (SigmaParser.scala:114-117): `StatCtx.Expr ~ End` skips
+        // trailing Newlines but not a trailing `;`.
+        assert_eq!(strip_pos(&p("1\n")), int(1));
+        assert!(crate::parse("1;", 3).is_err());
     }
 }
