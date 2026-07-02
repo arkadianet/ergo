@@ -7,9 +7,10 @@
 //! source under `sigmastate-interpreter/parsers/shared/.../parsers`.
 //!
 //! Task 4 scope: whitespace/comment/newline machinery, identifiers, keywords,
-//! numbers, and punctuation. String (`"`) and char/symbol (`'`) literals are
-//! Task 5 — their `TokenKind` variants exist but a `"`/`'` in the input returns
-//! a placeholder `ParseError::Lexical` here (clearly marked "Task 5").
+//! numbers, and punctuation. Task 5 completes the lexer with string (`"`) and
+//! char/symbol (`'`) literals — the four string forms of Literals.scala:149-156
+//! with their raw-capture `strip` semantics, escape validation (never
+//! decoding), triple-quote quirks, and the id-prefix/interpolation forms.
 
 use crate::error::ParseError;
 use crate::span::Pos;
@@ -351,22 +352,14 @@ impl<'a> Lexer<'a> {
                 TokenKind::Dot
             }
             '`' => return self.lex_backtick(start),
-            '"' => {
-                // Task 5 scope: string literals are lexed in Task 5.
-                return Err(ParseError::Lexical {
-                    pos: start as u32,
-                    msg: "strings lexed in Task 5".into(),
-                });
-            }
-            '\'' => {
-                // Task 5 scope: char/symbol quote forms are lexed in Task 5.
-                return Err(ParseError::Lexical {
-                    pos: start as u32,
-                    msg: "char/symbol literals lexed in Task 5".into(),
-                });
-            }
+            // Plain string forms 3-4 (Literals.scala:153-154): no id prefix, so
+            // interpolation is disabled (`NoInterp`) and the plain single form
+            // requires valid escapes (`SingleChars(false)`, allowSlash=false).
+            '"' => return self.lex_string(start, false),
+            // Char/Symbol quote forms (Literals.scala:96-101,119).
+            '\'' => return self.lex_char_sym(start),
             _ if c.is_ascii_digit() => return self.lex_number(start),
-            _ if is_id_start(c) => return Ok(self.lex_ident(start)),
+            _ if is_id_start(c) => return self.lex_ident(start),
             _ if is_op_char(c) => return Ok(self.lex_op_run(start)),
             _ => {
                 return Err(ParseError::Lexical {
@@ -382,7 +375,7 @@ impl<'a> Lexer<'a> {
     /// then reserved-word classification. Maximal munch enforces the keyword
     /// boundary rule: a text equal to a reserved word only reaches the keyword
     /// arm when no id-continuation char followed (Basic.scala:74-75).
-    fn lex_ident(&mut self, start: usize) -> Token {
+    fn lex_ident(&mut self, start: usize) -> Result<Token, ParseError> {
         let c = self.peek_char().expect("id start");
         self.pos += c.len_utf8();
         self.consume_id_rest();
@@ -403,7 +396,21 @@ impl<'a> Lexer<'a> {
             // NOT reserved (recon-lexical.md §2.3) — they lex as Ident.
             _ => TokenKind::Ident,
         };
-        self.tok(kind, start)
+        // Id-prefixed string forms 1-2 (Literals.scala:151-152): `Id ~ TQ/"\""`
+        // merges an identifier DIRECTLY adjacent to an opening quote with the
+        // string into one raw-captured `Str` token, enabling interpolation.
+        // Only a `PlainId` can prefix (`Id = BacktickId | PlainId`, and PlainId
+        // carries `!Keywords`, Identifiers.scala:32,37) — a reserved word cannot,
+        // so a keyword before `"` stays a separate keyword token.
+        //
+        // deviation: an operator identifier (`+"x"`) can also be an `Id` prefix
+        // in the reference, but that collides with prefix-operator lexing at the
+        // grammar level (not here) and no contract does it, so op-runs are left
+        // as their own token before the string.
+        if kind == TokenKind::Ident && self.peek_byte() == Some(b'"') {
+            return self.lex_string(start, true);
+        }
+        Ok(self.tok(kind, start))
     }
 
     /// `IdRest(allowDollar=true)` (Identifiers.scala:39-47):
@@ -455,16 +462,7 @@ impl<'a> Lexer<'a> {
     /// keyword (`: => ⇒ = # @`, Identifiers.scala:55-57 + Core.scala:23) is that
     /// keyword; every other run (`:: == <= ++ -` …) is an `OpId`.
     fn lex_op_run(&mut self, start: usize) -> Token {
-        loop {
-            match self.peek_char() {
-                Some('/') => match self.peek_byte_at(1) {
-                    Some(b'/') | Some(b'*') => break, // stop before comment
-                    _ => self.pos += 1,               // single '/' is an op-char
-                },
-                Some(c) if is_op_char(c) => self.pos += c.len_utf8(),
-                _ => break,
-            }
-        }
+        self.consume_op_run();
         let run = &self.src[start..self.pos];
         let kind = match run {
             ":" => TokenKind::Kw(Kw::Colon),
@@ -475,6 +473,22 @@ impl<'a> Lexer<'a> {
             _ => TokenKind::OpId,
         };
         self.tok(kind, start)
+    }
+
+    /// Consume a maximal op-char run (`Operator`, Identifiers.scala:22-24),
+    /// stopping before a `//`/`/*` comment start. Advances the cursor without
+    /// classifying — shared by `lex_op_run` and the `'`-symbol form.
+    fn consume_op_run(&mut self) {
+        loop {
+            match self.peek_char() {
+                Some('/') => match self.peek_byte_at(1) {
+                    Some(b'/') | Some(b'*') => break, // stop before comment
+                    _ => self.pos += 1,               // single '/' is an op-char
+                },
+                Some(c) if is_op_char(c) => self.pos += c.len_utf8(),
+                _ => break,
+            }
+        }
     }
 
     /// `` `raw` `` (Identifiers.scala:36): backtick, 1+ non-backtick chars
@@ -500,6 +514,11 @@ impl<'a> Lexer<'a> {
                         });
                     }
                     self.pos += 1; // closing `
+                                   // A backtick id is also an `Id` (Identifiers.scala:37), so a
+                                   // directly-adjacent quote makes it a string prefix (form 1-2).
+                    if self.peek_byte() == Some(b'"') {
+                        return self.lex_string(start, true);
+                    }
                     return Ok(self.tok(TokenKind::BacktickId, start));
                 }
                 Some(c) => self.pos += c.len_utf8(),
@@ -549,6 +568,284 @@ impl<'a> Lexer<'a> {
         };
         Ok(self.tok(kind, start))
     }
+
+    /// String literal (Literals.scala:149-156). `start` is the token start
+    /// (the id prefix's start when `prefixed`, else the opening quote); the
+    /// cursor sits on the opening `"`. The reference tries a triple-quoted form
+    /// first (`TQ ~/ ...`, TQ = `"""`), falling back to single-quoted — so three
+    /// leading quotes select the triple form and the `~/` cut then commits.
+    ///
+    /// The token's value is the RAW captured text (prefix, quotes, escapes, all
+    /// verbatim) with only the `strip` loop of Literals.scala:119-124 applied:
+    /// escapes are validated but NEVER decoded, and an id prefix (which does not
+    /// start with `"`) strips nothing — `s"foo"` keeps its 7 chars.
+    fn lex_string(&mut self, start: usize, prefixed: bool) -> Result<Token, ParseError> {
+        let triple = self.peek_byte() == Some(b'"')
+            && self.peek_byte_at(1) == Some(b'"')
+            && self.peek_byte_at(2) == Some(b'"');
+        if triple {
+            self.lex_triple_string(start, prefixed)
+        } else {
+            self.lex_single_string(start, prefixed)
+        }
+    }
+
+    /// Finish a string once the closing delimiter has been consumed: build the
+    /// `Str` token from the raw span with `strip` (Literals.scala:119-124).
+    fn finish_string(&self, start: usize) -> Token {
+        let raw = &self.src[start..self.pos];
+        self.tok(TokenKind::Str(strip_quotes(raw)), start)
+    }
+
+    /// Single-quoted form (Literals.scala:144-154). Content =
+    /// `(StringChars | Interp | LiteralSlash | Escape | NonStringEnd).rep`, then
+    /// a closing `"`. A raw `\n` cannot be matched by any content class, so it
+    /// (and EOF) is where the closing-quote match fails — the reference's
+    /// failure index, which we mirror. `prefixed` = interpolation active and
+    /// `allowSlash=true` (a backslash is then a LITERAL char, `LiteralSlash`
+    /// winning over `Escape`); plain strings use `SingleChars(false)`, so every
+    /// `\` must begin a valid `Escape`.
+    fn lex_single_string(&mut self, start: usize, prefixed: bool) -> Result<Token, ParseError> {
+        self.pos += 1; // opening "
+        loop {
+            match self.peek_byte() {
+                // `~ "\""` fails at EOF: unterminated (index at EOF, matching
+                // fail("\"str", 1, 5)).
+                None => {
+                    return Err(ParseError::Lexical {
+                        pos: self.pos as u32,
+                        msg: "unterminated string literal".into(),
+                    });
+                }
+                Some(b'"') => {
+                    self.pos += 1; // closing "
+                    return Ok(self.finish_string(start));
+                }
+                // Raw newline: no content class admits it (StringChars/NonStringEnd
+                // both exclude `\n`), so the closing-quote match fails here.
+                Some(b'\n') => {
+                    return Err(ParseError::Lexical {
+                        pos: self.pos as u32,
+                        msg: "newline in single-quoted string".into(),
+                    });
+                }
+                Some(b'\\') => {
+                    if prefixed {
+                        self.pos += 1; // LiteralSlash: a bare backslash is content
+                    } else {
+                        self.consume_escape()?; // must be a valid Escape (cut)
+                    }
+                }
+                Some(b'$') if prefixed => self.consume_interp_dollar()?,
+                // StringChars / NonStringEnd: any other char (incl. `$` in plain
+                // strings, a lone `\r`, and non-ASCII) is verbatim content.
+                Some(_) => {
+                    let c = self.peek_char().expect("boundary");
+                    self.pos += c.len_utf8();
+                }
+            }
+        }
+    }
+
+    /// Triple-quoted form (Literals.scala:142,151,153). After the opening `"""`,
+    /// content = `(StringChars | Interp | NonTripleQuoteChar).rep` then
+    /// `TripleTail = "\"\"\"" ~ "\"".rep`. `NonTripleQuoteChar` admits raw
+    /// newlines and 1-2 quotes not followed by a third, but NOT a backslash
+    /// (`CharIn("\\$\n")` = {`$`,`\n`} under fastparse class semantics), so a
+    /// `\` is an unconsumable parse failure AT the backslash. The closing `"""`
+    /// greedily eats every trailing quote (`TripleTail`).
+    fn lex_triple_string(&mut self, start: usize, prefixed: bool) -> Result<Token, ParseError> {
+        self.pos += 3; // opening """
+        loop {
+            match self.peek_byte() {
+                None => {
+                    return Err(ParseError::Lexical {
+                        pos: self.pos as u32,
+                        msg: "unterminated triple-quoted string".into(),
+                    });
+                }
+                Some(b'"') => {
+                    let two_more = self.peek_byte_at(1) == Some(b'"');
+                    let three = two_more && self.peek_byte_at(2) == Some(b'"');
+                    if three {
+                        // TripleTail: closing """ plus every extra trailing quote.
+                        while self.peek_byte() == Some(b'"') {
+                            self.pos += 1;
+                        }
+                        return Ok(self.finish_string(start));
+                    } else if two_more {
+                        self.pos += 2; // `""` content (next char is not a quote)
+                    } else {
+                        self.pos += 1; // `"` content
+                    }
+                }
+                // A backslash matches no content class: hard failure AT the `\`.
+                Some(b'\\') => {
+                    return Err(ParseError::Lexical {
+                        pos: self.pos as u32,
+                        msg: "backslash in triple-quoted string".into(),
+                    });
+                }
+                Some(b'$') if prefixed => self.consume_interp_dollar()?,
+                // NonTripleQuoteChar / StringChars: raw `\n`, `$` (plain), `\r`,
+                // and any other char are verbatim content.
+                Some(_) => {
+                    let c = self.peek_char().expect("boundary");
+                    self.pos += c.len_utf8();
+                }
+            }
+        }
+    }
+
+    /// Handle a `$` inside an id-prefixed string where interpolation is active
+    /// (Literals.scala:127-130). `$$` and `$`+plain-id are consumed; a bare `$`
+    /// that starts no interpolation is still swallowed as content by
+    /// `NonStringEnd`/`NonTripleQuoteChar`, so — the raw capture being identical
+    /// either way — we consume just the `$` and let the rest fall through as
+    /// content. Only `${` is special.
+    fn consume_interp_dollar(&mut self) -> Result<(), ParseError> {
+        // deviation (D6): the reference's `${ Block }` interpolation is not
+        // supported in M1 — reject it rather than parse an embedded expression.
+        if self.peek_byte_at(1) == Some(b'{') {
+            return Err(ParseError::Lexical {
+                pos: self.pos as u32,
+                msg: "string interpolation block not supported".into(),
+            });
+        }
+        self.pos += 1; // `$`
+        Ok(())
+    }
+
+    /// Consume one `Escape` (Literals.scala:90-91) at the cursor (`\`), without
+    /// decoding it. The `~/` cut makes an invalid escape a hard failure. Under
+    /// fastparse `CharIn` class semantics the single-char set is exactly
+    /// `{b t n f r ' " ]}` — note `\]` is (accidentally) legal and `\\` is NOT.
+    /// `OctalEscape` is 1-3 DECIMAL digits; `UnicodeEscape` is `u` + exactly 4
+    /// hex digits (Basic.scala:20).
+    fn consume_escape(&mut self) -> Result<(), ParseError> {
+        self.pos += 1; // `\`
+        match self.peek_char() {
+            None => Err(ParseError::Lexical {
+                pos: self.pos as u32,
+                msg: "unterminated escape sequence".into(),
+            }),
+            // Single-char escapes {b t n f r ' " ]} (Literals.scala:91): note `\]`
+            // is legal and `\\` is NOT — a backslash is not in the set.
+            Some('b' | 't' | 'n' | 'f' | 'r' | '\'' | '"' | ']') => {
+                self.pos += 1;
+                Ok(())
+            }
+            Some(c) if c.is_ascii_digit() => {
+                self.pos += 1; // first octal digit
+                for _ in 0..2 {
+                    if self.peek_byte().is_some_and(|b| b.is_ascii_digit()) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            Some('u') => {
+                self.pos += 1; // `u`
+                for _ in 0..4 {
+                    if self.peek_byte().is_some_and(|b| b.is_ascii_hexdigit()) {
+                        self.pos += 1;
+                    } else {
+                        return Err(ParseError::Lexical {
+                            pos: self.pos as u32,
+                            msg: "invalid unicode escape".into(),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            Some(_) => Err(ParseError::Lexical {
+                pos: self.pos as u32,
+                msg: "invalid escape sequence".into(),
+            }),
+        }
+    }
+
+    /// Char/Symbol quote forms (Literals.scala:94-101,119): `'` cut, then either
+    /// `Char = (Escape | PrintableChar) ~ "'"` (raw text keeps BOTH quotes,
+    /// `'a'`) or `Symbol = PlainId | Keywords` (leading quote only, `'foo`).
+    /// `Char` is tried first; a printable/escape not followed by `'` backtracks
+    /// to `Symbol`. Both are captured raw and become `SString` — `strip` removes
+    /// no `'`. A `'` matched by neither is the `~/` cut's hard failure.
+    fn lex_char_sym(&mut self, start: usize) -> Result<Token, ParseError> {
+        self.pos += 1; // opening '
+        let after_quote = self.pos;
+
+        // Char form: one escape/printable char then a closing `'`.
+        match self.peek_char() {
+            Some('\\') => {
+                self.consume_escape()?; // invalid escape is a hard failure (cut)
+                if self.peek_byte() == Some(b'\'') {
+                    self.pos += 1;
+                    return Ok(
+                        self.tok(TokenKind::CharSym(self.src[start..self.pos].into()), start)
+                    );
+                }
+                self.pos = after_quote; // valid escape but no closing quote → Symbol
+            }
+            Some(c) if is_printable_char(c) => {
+                self.pos += c.len_utf8();
+                if self.peek_byte() == Some(b'\'') {
+                    self.pos += 1;
+                    return Ok(
+                        self.tok(TokenKind::CharSym(self.src[start..self.pos].into()), start)
+                    );
+                }
+                self.pos = after_quote; // printable but no closing quote → Symbol
+            }
+            _ => {}
+        }
+
+        // Symbol form: PlainId | Keywords. An id-start begins an identifier /
+        // keyword run; an op-char begins an `Operator`.
+        match self.peek_char() {
+            Some(c) if is_id_start(c) => {
+                self.pos += c.len_utf8();
+                self.consume_id_rest();
+            }
+            Some(c) if is_op_char(c) => self.consume_op_run(),
+            _ => {
+                // `'` followed by neither a closing-`'` char form nor a symbol:
+                // the reference's cut turns this into a hard failure.
+                return Err(ParseError::Lexical {
+                    pos: after_quote as u32,
+                    msg: "expected char or symbol after `'`".into(),
+                });
+            }
+        }
+        Ok(self.tok(TokenKind::CharSym(self.src[start..self.pos].into()), start))
+    }
+}
+
+/// `strip` (Literals.scala:119-124): while the text starts with `"`, drop one
+/// leading `"` and (if present) one trailing `"`, recursively. An id-prefixed
+/// capture does not start with `"` and is returned unchanged; a plain `"x"`
+/// yields `x`, a triple `"""x"""` also `x`. Ported verbatim, including the
+/// `stripSuffix`-is-conditional detail (the recursion guards only on the
+/// prefix).
+fn strip_quotes(s: &str) -> String {
+    let mut cur = s;
+    while let Some(rest) = cur.strip_prefix('"') {
+        cur = rest.strip_suffix('"').unwrap_or(rest);
+    }
+    cur.to_string()
+}
+
+/// fastparse `isPrintableChar` (CharPredicates, referenced Literals.scala:98).
+//
+// deviation: the exact predicate also excludes the SPECIALS block and code
+// points whose Unicode block is null; we approximate it with "not an ISO
+// control character" (Rust `char` can never be an unpaired surrogate). This is
+// only used to split the `'`-char form from the `'`-symbol form for a single
+// char; the printable chars any contract uses (`'a'` etc.) classify identically.
+fn is_printable_char(c: char) -> bool {
+    !c.is_control()
 }
 
 #[cfg(test)]
@@ -745,7 +1042,165 @@ mod tests {
         );
     }
 
+    // ----- happy path (strings / char-symbol, Task 5) -----
+    #[test]
+    fn string_plain_and_triple_strip_quotes() {
+        assert_eq!(kinds(r#""hello""#)[0], TokenKind::Str("hello".into()));
+        assert_eq!(kinds(r#""""hello""""#)[0], TokenKind::Str("hello".into())); // """hello"""
+        assert_eq!(
+            kinds("\"\"\"hel\nlo\"\"\"")[0],
+            TokenKind::Str("hel\nlo".into())
+        ); // raw \n ok
+    }
+    #[test]
+    fn string_escapes_validated_not_decoded() {
+        // Literals.scala:119-124 raw capture: value keeps backslash-n as two chars
+        assert_eq!(kinds(r#""a\nb""#)[0], TokenKind::Str(r"a\nb".into()));
+        assert_eq!(kinds(r#""q\]w""#)[0], TokenKind::Str(r"q\]w".into())); // \] legal (quirk)
+        assert_eq!(kinds(r#""uA""#)[0], TokenKind::Str(r"uA".into()));
+        assert_eq!(kinds(r#""o\7w""#)[0], TokenKind::Str(r"o\7w".into())); // octal, decimal digits
+    }
+    #[test]
+    fn string_id_prefixed_keeps_prefix_and_quotes() {
+        // strip() strips nothing when the raw text starts with the id prefix
+        assert_eq!(kinds(r#"s"foo""#)[0], TokenKind::Str(r#"s"foo""#.into()));
+        assert_eq!(
+            kinds(r#"s"a $x b""#)[0],
+            TokenKind::Str(r#"s"a $x b""#.into())
+        );
+        assert_eq!(
+            kinds(r#"s"100%$$""#)[0],
+            TokenKind::Str(r#"s"100%$$""#.into())
+        );
+    }
+    #[test]
+    fn charsym_quirk_forms_keep_quote() {
+        assert_eq!(kinds("'a'")[0], TokenKind::CharSym("'a'".into()));
+        assert_eq!(kinds("'foo")[0], TokenKind::CharSym("'foo".into()));
+        assert_eq!(kinds("'if")[0], TokenKind::CharSym("'if".into())); // Symbol = PlainId | Keywords
+    }
+    #[test]
+    fn charsym_escape_form_keeps_quotes() {
+        // Char = (Escape | PrintableChar) ~ "'" (Literals.scala:96-101): a valid
+        // escape then a closing `'` — captured raw incl. both quotes, undecoded.
+        assert_eq!(kinds("'\\n'")[0], TokenKind::CharSym("'\\n'".into())); // 'BACKSLASH n'
+    }
+    #[test]
+    fn string_empty_and_empty_triple_are_empty() {
+        // "" is single form with empty content → strip → ""; """""" (6 quotes) is
+        // an empty triple: TQ, no content, TripleTail = TQ then greedy quotes.
+        assert_eq!(kinds("\"\"")[0], TokenKind::Str("".into()));
+        assert_eq!(kinds("\"\"\"\"\"\"")[0], TokenKind::Str("".into())); // 6 quotes
+    }
+    #[test]
+    fn string_triple_tail_greedy_strip_leaves_quote() {
+        // Literals.scala:143 TripleTail eats all trailing quotes, then strip
+        // (119-124) is symmetric on the raw capture: 3 leading vs 4 trailing
+        // quotes → 3 pairs removed, one trailing quote survives in the value.
+        assert_eq!(kinds("\"\"\"a\"\"\"\"")[0], TokenKind::Str("a\"".into())); // """a""""
+    }
+    #[test]
+    fn triple_string_embedded_quotes_are_content() {
+        // NonTripleQuoteChar (Literals.scala:141) admits 1-2 quotes not followed
+        // by a third.
+        assert_eq!(kinds("\"\"\"a\"b\"\"\"")[0], TokenKind::Str("a\"b".into())); // """a"b"""
+        assert_eq!(
+            kinds("\"\"\"a\"\"b\"\"\"")[0],
+            TokenKind::Str("a\"\"b".into())
+        ); // """a""b"""
+    }
+    #[test]
+    fn string_unicode_and_octal_escapes_validate_not_decode() {
+        // Basic.scala:20 UnicodeEscape = u + 4 hex; Literals.scala:90 OctalEscape
+        // = 1-3 decimal digits (greedy, max 3). Value keeps the raw bytes.
+        assert_eq!(kinds(r#""ÿ""#)[0], TokenKind::Str(r"ÿ".into()));
+        assert_eq!(kinds(r#""\1234""#)[0], TokenKind::Str(r"\1234".into())); // octal \123 then '4'
+    }
+    #[test]
+    fn plain_string_dollar_brace_is_content() {
+        // Plain strings use NoInterp (Interp = Fail, Literals.scala:128,153-154),
+        // so `$` and `{` are ordinary content — no D6 rejection.
+        assert_eq!(kinds(r#""${x}""#)[0], TokenKind::Str("${x}".into()));
+    }
+    #[test]
+    fn prefixed_single_backslash_is_literal_content() {
+        // Id-prefixed single = SingleChars(true): LiteralSlash wins over Escape
+        // (Literals.scala:145,147), so a backslash is a literal content char and
+        // is NOT escape-validated. Prefix means strip removes nothing.
+        assert_eq!(kinds(r#"s"a\nb""#)[0], TokenKind::Str(r#"s"a\nb""#.into()));
+    }
+    #[test]
+    fn prefixed_triple_and_bare_dollar_strip_nothing() {
+        // Id-prefixed triple (form 1); bare `$` before the closing quote is
+        // content (no interp match), raw-captured with the prefix intact.
+        assert_eq!(
+            kinds("s\"\"\"a\"\"\"")[0],
+            TokenKind::Str("s\"\"\"a\"\"\"".into())
+        ); // s"""a"""
+        assert_eq!(kinds(r#"s"a$""#)[0], TokenKind::Str(r#"s"a$""#.into()));
+    }
+    #[test]
+    fn keyword_prefix_does_not_merge_with_string() {
+        // Id = BacktickId | PlainId, PlainId has !Keywords (Identifiers.scala:32),
+        // so a reserved word does NOT prefix a string.
+        assert_eq!(
+            kinds(r#"if"x""#),
+            vec![
+                TokenKind::Kw(Kw::If),
+                TokenKind::Str("x".into()),
+                TokenKind::Eof
+            ]
+        );
+    }
+
     // ----- error paths -----
+    #[test]
+    fn string_four_quotes_unterminated_errors() {
+        // """" selects the triple form (TQ cut), consumes the 4th quote as
+        // content, then TripleTail cannot find its closing """ → hard failure.
+        assert!(matches!(lex_err("\"\"\"\""), ParseError::Lexical { .. })); // 4 quotes
+    }
+    #[test]
+    fn string_invalid_unicode_escape_errors() {
+        // UnicodeEscape needs exactly 4 hex digits; the Escape cut makes a short
+        // one a hard failure.
+        assert!(matches!(lex_err(r#""\uAB""#), ParseError::Lexical { .. }));
+    }
+    #[test]
+    fn charsym_invalid_escape_errors() {
+        // The Escape cut fires inside Char too: '\x' is a hard failure.
+        assert!(matches!(lex_err("'\\x'"), ParseError::Lexical { .. }));
+    }
+    #[test]
+    fn triple_string_backslash_position_is_the_backslash() {
+        // Independent of the pinned SigmaParserTest vector: the failure index is
+        // exactly the backslash byte.
+        let e = lex_err("\"\"\"ab\\c\"\"\"");
+        assert_eq!(e.pos(), 5); // """ab\c""" — backslash at byte 5
+    }
+    #[test]
+    fn string_unterminated_errors_at_eof() {
+        let e = lex_err("\"str");
+        assert_eq!(e.pos(), 4); // fail("\"str", 1, 5) — SigmaParserTest
+    }
+    #[test]
+    fn string_backslash_backslash_is_invalid_escape() {
+        // recon-lexical.md §4: \\ is NOT in the escape set (fastparse CharIn quirk)
+        assert!(matches!(lex_err(r#""a\\b""#), ParseError::Lexical { .. }));
+    }
+    #[test]
+    fn triple_string_backslash_errors_at_backslash() {
+        // SigmaParserTest.scala:612-622: """h\el\nlo""" -> Parse Error Position 1:5
+        let e = lex_err("\"\"\"h\\el\nlo\"\"\"");
+        assert_eq!(e.pos(), 4);
+    }
+    #[test]
+    fn interp_block_rejected_m1() {
+        assert!(matches!(
+            lex_err(r#"s"a ${x} b""#),
+            ParseError::Lexical { .. }
+        )); // D6
+    }
     #[test]
     fn int_overflow_min_value_magnitude_errors() {
         // D4 / recon-gap.md item 8: Scala rejects -2147483648 because the positive
