@@ -215,6 +215,23 @@ impl<'a> Cursor<'a> {
         self.i != start
     }
 
+    /// `Semis.?` (as `skip_semis`), additionally reporting whether a LITERAL `;`
+    /// (`Semi`) — not merely a `Newline` — was among the consumed run.
+    ///
+    /// `BaseBlock`'s leading `Semis.?` uses this to decide whether an otherwise
+    /// empty block was rescued by an explicit `;`. In SigmaParser the implicit
+    /// `ScalaWhitespace` swallows newlines and comments *before* that `Semis.?`
+    /// ever runs, so an empty block matches the `Semis` only when a bare `;` is
+    /// present: `{;}` parses as `Block([], ())` while `{}` / `{\n}` / `{/*c*/}`
+    /// are rejected (oracle-verified against SigmaParser 6.0.2).
+    fn skip_semis_lit(&mut self) -> bool {
+        let start = self.i;
+        self.skip_semis();
+        self.toks[start..self.i]
+            .iter()
+            .any(|t| t.kind == TokenKind::Semi)
+    }
+
     /// `Semi.?` (Literals.scala:50): consume AT MOST one leading `;`. Newlines are
     /// transparently skipped by `peek`, so the only observable effect of the
     /// single-`Semi` option is a lone `;` (a second `;` is left for the caller —
@@ -880,6 +897,13 @@ type ArgList = Vec<(String, SType)>;
 /// - leading `BlockLambda` + any other body → `Lambda(args, NoType, block(stats))`
 /// - no leading `BlockLambda` → `block(stats)`
 ///
+/// A plain empty block (no leading lambda, zero stats) is REJECTED unless a
+/// literal `;` was consumed between the braces. `extractBlockStats`' empty arm
+/// (Exprs.scala:271-272) is reachable only via an explicit `;` — bare `{}` fails
+/// in fastparse before reaching it, because the implicit whitespace consumes any
+/// newlines/comments before `BaseBlock`'s leading `Semis.?` can match
+/// (oracle-verified). The failure is reported one past the closing `}`.
+///
 /// A `BlockLambda` in a non-first chunk is a `scala.MatchError` in the reference
 /// (the flatMap only matches `case (Seq(), exprs)`, :288-296); a second
 /// consecutive block-lambda at the block head is the only reachable form of that
@@ -887,7 +911,7 @@ type ArgList = Vec<(String, SType)>;
 /// expression lambda), and it is rejected here as a Semantic error (D5).
 fn base_block(c: &mut Cursor) -> Result<Expr, ParseError> {
     let pos = c.peek().start; // Index (before Semis.?)
-    c.skip_semis(); // Semis.?
+    let saw_semi = c.skip_semis_lit(); // Semis.? — was a literal `;` among the run?
     let lead = try_block_lambda(c)?.map(|(_, args)| args); // BlockLambda.?
                                                            // Body's first BlockChunk runs `BlockLambda.rep`; a match here (a second
                                                            // consecutive head) makes that chunk's lambda-list non-empty → MatchError.
@@ -914,7 +938,21 @@ fn base_block(c: &mut Cursor) -> Result<Expr, ParseError> {
                 pos,
             })
         }
-        None => block_from_stats(stats, pos),
+        None => {
+            // A plain empty block is rejected unless a literal `;` rescued it: the
+            // reference's `Semis.?` matches only a bare `;`, never the implicit
+            // whitespace it has already consumed. Report one past the `}` (peekable
+            // here — `block_body` stopped before the closer), which reproduces the
+            // oracle positions for `{}` / `{ }` / `{\n}` / `{/*c*/}` and the nested
+            // forms (`f({})`, `({})`, `ZKProof {}`).
+            if stats.is_empty() && !saw_semi {
+                return Err(ParseError::Syntax {
+                    pos: c.peek().end,
+                    expected: "block statement".to_string(),
+                });
+            }
+            block_from_stats(stats, pos)
+        }
     }
 }
 
@@ -3192,9 +3230,26 @@ mod expr_tests {
     }
 
     #[test]
-    fn empty_block_is_unit() {
-        // spec-derived: Exprs.scala:271-272
-        assert_eq!(strip_pos(&p("{}")), block(vec![], unit()));
+    fn empty_block_rejects_without_semi() {
+        // extractBlockStats' empty arm (Exprs.scala:271-272) is reachable only via
+        // an explicit ';' — bare {} fails in fastparse before reaching it
+        // (oracle-verified). Reject position = one past the closing `}`.
+        let e = crate::parse("{}", 3).unwrap_err();
+        assert_eq!(e.line_col("{}"), (1, 3)); // oracle: ParserOracle sigma-state 6.0.2
+        let e = crate::parse("{ }", 3).unwrap_err();
+        assert_eq!(e.line_col("{ }"), (1, 4)); // oracle: ParserOracle sigma-state 6.0.2
+        let e = crate::parse("{\n}", 3).unwrap_err();
+        assert_eq!(e.line_col("{\n}"), (2, 2)); // oracle: ParserOracle sigma-state 6.0.2
+        let e = crate::parse("{/*c*/}", 3).unwrap_err();
+        assert_eq!(e.line_col("{/*c*/}"), (1, 8)); // oracle: ParserOracle sigma-state 6.0.2
+    }
+
+    #[test]
+    fn empty_block_with_semi_is_unit() {
+        // A literal ';' rescues the empty block into Block([], ()) — the only path
+        // that reaches extractBlockStats' empty arm (Exprs.scala:271-272).
+        assert_eq!(strip_pos(&p("{;}")), block(vec![], unit())); // oracle: ParserOracle sigma-state 6.0.2
+        assert_eq!(strip_pos(&p("{ ; }")), block(vec![], unit())); // oracle: ParserOracle sigma-state 6.0.2
     }
 
     // ----- blocks and lambdas — error paths -----

@@ -2164,9 +2164,29 @@ fn quirk_if_without_else_is_hard_error() {
 }
 
 #[test]
-fn quirk_empty_block_is_unit() {
-    // spec-derived: Exprs.scala:271-272 — an empty block `{}` has a Unit result.
-    check("{}", block(vec![], unit()));
+fn quirk_empty_block_rejects_without_semi() {
+    // extractBlockStats' empty arm (Exprs.scala:271-272) is reachable only via an
+    // explicit ';' — bare {} fails in fastparse before reaching it (oracle-verified).
+    // Reject position = one past the empty block's closing `}`.
+    fail_at("{}", 1, 3); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("{ }", 1, 4); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("{\n}", 2, 2); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("{//c\n}", 2, 2); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("{/*c*/}", 1, 8); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("f({})", 1, 5); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("({})", 1, 4); // oracle: ParserOracle sigma-state 6.0.2
+    fail_at("ZKProof {}", 1, 11); // oracle: ParserOracle sigma-state 6.0.2
+                                  // oracle REJECT 1:5; ours rejects at the inner block (1,4) — furthest-failure
+                                  // vs recursive-descent position difference, reject-parity holds.
+    reject("{{}}"); // oracle: ParserOracle sigma-state 6.0.2
+}
+
+#[test]
+fn quirk_empty_block_with_semi_accepts() {
+    // A literal ';' rescues the empty block into Block([], ()) — the only path that
+    // reaches extractBlockStats' empty arm (Exprs.scala:271-272).
+    check("{;}", block(vec![], unit())); // oracle: ParserOracle sigma-state 6.0.2
+    check("{;;}", block(vec![], unit())); // oracle: ParserOracle sigma-state 6.0.2
 }
 
 #[test]

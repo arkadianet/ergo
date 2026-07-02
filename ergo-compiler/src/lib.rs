@@ -96,6 +96,12 @@
 //!   `else` (reject). Our transparent-newline `take_one_semi` skips the newlines
 //!   and consumes the `;` directly (accept). Accept-divergence on a pathological
 //!   newline+semicolon separator mix that no real contract produces.
+//!
+//! - **Nested empty-block reject position** (`parse.rs`): both sides REJECT a bare
+//!   empty block, but on the doubly-nested `{{}}` the reference's furthest-failure
+//!   reports `1:5` (past the outer `}`) while our recursive descent fails at the
+//!   inner empty block (`1:4`, one past the inner `}`). Position-only, reject-parity
+//!   holds; bounded to nested bare empty blocks no real contract produces.
 
 pub mod ast;
 pub mod error;
