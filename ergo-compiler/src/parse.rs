@@ -431,11 +431,11 @@ fn annot_arg_group(c: &mut Cursor) -> Result<(), ParseError> {
             if c.peek().kind != TokenKind::Comma {
                 break;
             }
-            if c.comma_then_newline() {
-                break; // leave the trailing comma for `TrailingComma`
-            }
+            // Separator comma when another Expr follows; otherwise rewind and leave
+            // the comma for the `TrailingComma` check below (Types.scala:168,
+            // Literals.scala:63).
             let mark = c.save();
-            c.bump(); // separator comma
+            c.bump(); // try the separator comma
             if starts_expr(c.peek()) {
                 continue;
             }
@@ -560,19 +560,21 @@ fn type_list(c: &mut Cursor) -> Result<Vec<SType>, ParseError> {
             if c.peek().kind != TokenKind::Comma {
                 break;
             }
-            if c.comma_then_newline() {
-                c.bump(); // trailing comma; the Newline stays for the closer's skip
-                break;
-            }
+            // A comma is a SEPARATOR whenever another type follows (newlines are
+            // transparent); only a comma with no following type is a trailing comma.
+            // Matches fastparse `Type.rep(_, ",") ~ TrailingComma` — try `, ~ Type`
+            // first so a multi-line tuple/type-arg list parses every element.
             let mark = c.save();
-            c.bump(); // separator comma
+            c.bump(); // try the separator comma
             if starts_type(c.peek()) {
                 continue;
             }
-            // No type follows and it was not a valid trailing comma: rewind so the
-            // closer's `expect` reports the failure at the comma (fastparse rewinds
-            // the whole `sep ~ item` when the item fails without a cut).
+            // `sep ~ Type` failed → rewind the comma; a legal trailing comma is one
+            // directly followed by a `Newline` before the closer (Literals.scala:63).
             c.restore(mark);
+            if c.comma_then_newline() {
+                c.bump(); // trailing comma; the Newline stays for the closer's skip
+            }
             break;
         }
     } else if c.peek().kind == TokenKind::Comma && c.comma_then_newline() {
@@ -1565,18 +1567,24 @@ fn expr_list(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
             if c.peek().kind != TokenKind::Comma {
                 break;
             }
-            if c.comma_then_newline() {
-                c.bump(); // trailing comma; the Newline stays for the closer's skip
-                break;
-            }
+            // `Exprs = Expr.rep(1, ",")`: a comma is a SEPARATOR whenever another
+            // Expr follows (newlines are transparent in ExprCtx), so try `, ~ Expr`
+            // before considering a trailing comma. This is what makes a multi-line
+            // arg list like `f(\n a,\n b\n)` parse as `[a, b]` (SigmaParserTest
+            // "outerJoin", :848), not `[a]`.
             let mark = c.save();
-            c.bump(); // separator comma
+            c.bump(); // try the separator comma
             if starts_expr(c.peek()) {
                 continue;
             }
-            // No item follows and it is not a valid trailing comma: rewind so the
-            // closer's `expect` reports the failure at the comma.
+            // `sep ~ Expr` failed → fastparse rewinds the comma; then
+            // `TrailingComma = ("," WS Newline)?` absorbs a legal `,\n` before the
+            // closer, otherwise the comma is left for the closer's `expect`
+            // (Literals.scala:63).
             c.restore(mark);
+            if c.comma_then_newline() {
+                c.bump(); // trailing comma; the Newline stays for the closer's skip
+            }
             break;
         }
     } else if c.peek().kind == TokenKind::Comma && c.comma_then_newline() {
@@ -2170,6 +2178,22 @@ mod tests {
         );
         // Without the newline it is a parse error (the closer expects a type).
         assert!(parse_type("(Int,)", 3).is_err());
+    }
+
+    #[test]
+    fn type_list_multiline_separator_commas_are_not_trailing() {
+        // Regression (shares the root cause of SigmaParserTest.scala:848): a comma
+        // is a separator when another type follows across a newline, so a multi-line
+        // tuple/type-arg list keeps every element instead of reducing at the first
+        // `,\n`.
+        assert_eq!(
+            parse_type("(Int,\nLong)", 3).unwrap(),
+            SType::STuple(vec![SType::SInt, SType::SLong])
+        );
+        assert_eq!(
+            parse_type("Coll[(Int,\nLong)]", 3).unwrap(),
+            SType::SColl(Box::new(SType::STuple(vec![SType::SInt, SType::SLong])))
+        );
     }
 
     #[test]
@@ -2869,6 +2893,25 @@ mod expr_tests {
         assert_eq!(strip_pos(&p("f(1,\n)")), apply(ident0("f"), vec![int(1)]));
         // Without the newline it is a parse error (the closer expects a `)`).
         assert!(crate::parse("f(1,)", 3).is_err());
+    }
+
+    #[test]
+    fn arglist_multiline_separator_commas_are_not_trailing() {
+        // Regression (SigmaParserTest.scala:848 "outerJoin"): `Exprs = Expr.rep(1,
+        // ",")` treats a comma as a SEPARATOR whenever another Expr follows across a
+        // newline (ExprCtx whitespace absorbs newlines), so `f(a,\nb)` is [a, b] —
+        // NOT the trailing-comma reduction [a]. The bug was checking
+        // comma_then_newline() before trying `, ~ Expr`.
+        assert_eq!(
+            strip_pos(&p("f(1,\n2)")),
+            apply(ident0("f"), vec![int(1), int(2)])
+        );
+        assert_eq!(
+            strip_pos(&p("f(\n1,\n2,\n3\n)")),
+            apply(ident0("f"), vec![int(1), int(2), int(3)])
+        );
+        // A genuine trailing comma before the closer still reduces (unchanged).
+        assert_eq!(strip_pos(&p("f(1,\n)")), apply(ident0("f"), vec![int(1)]));
     }
 
     #[test]
