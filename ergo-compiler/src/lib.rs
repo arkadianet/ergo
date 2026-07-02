@@ -11,6 +11,7 @@
 //! a fork — but a wrong address strands funds, so correctness is held to the
 //! oracle-parity bar anyway.
 
+pub mod ast;
 pub mod error;
 pub mod span;
 pub mod stype;
