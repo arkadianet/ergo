@@ -36,7 +36,10 @@ use crate::token::{tokenize, Kw, Token, TokenKind};
 pub fn parse(source: &str, tree_version: u8) -> Result<Expr, ParseError> {
     let toks = tokenize(source)?;
     let mut c = Cursor::new(source, toks, tree_version);
-    let e = expr(&mut c, Ctx::Stat)?;
+    let e = match expr(&mut c, Ctx::Stat) {
+        Ok(e) => e,
+        Err(err) => return Err(clamp_zero_progress(err, &c)),
+    };
     // `~ End`: trailing whitespace/newlines/comments are skipped by `peek`.
     let tail = c.peek();
     if tail.kind != TokenKind::Eof {
@@ -46,6 +49,27 @@ pub fn parse(source: &str, tree_version: u8) -> Result<Expr, ParseError> {
         });
     }
     Ok(e)
+}
+
+/// fastparse `Parsed.Failure.index` quirk for the top-level `Expr ~ End`
+/// (SigmaParser.scala:114-117). When `Expr` matches NOTHING — the offending token
+/// is the first meaningful token, preceded only by whitespace/comments — the
+/// failure index is the start of input (`0` → `1:1`), NOT the token's own offset.
+/// Once `Expr` consumes >=1 token the real furthest position is kept. Detected by
+/// the cursor never having advanced (`save() == 0`). Empirically: `@x` / `  @x` /
+/// `/* c */ @x` → `1:1`; `1 @x` → `1:3` (reported by the tail `End` check above,
+/// not here, so it is unaffected). Realises the fastparse behavior that a leading
+/// block/line comment before an unparsable first token still points at `1:1`
+/// (the `@contract`/`@test` LSP template files).
+fn clamp_zero_progress(err: ParseError, c: &Cursor) -> ParseError {
+    if c.save() != 0 {
+        return err; // >=1 token consumed: keep the real furthest position
+    }
+    match err {
+        ParseError::Syntax { expected, .. } => ParseError::Syntax { pos: 0, expected },
+        ParseError::Lexical { msg, .. } => ParseError::Lexical { pos: 0, msg },
+        ParseError::Semantic { msg, .. } => ParseError::Semantic { pos: 0, msg },
+    }
 }
 
 /// Parse an ErgoScript type (Scala `SigmaParser.parseType`,
@@ -423,7 +447,7 @@ fn annot(c: &mut Cursor) -> Result<(), ParseError> {
 /// an annotation (Types.scala:159). Everything parsed here is discarded.
 fn annot_arg_group(c: &mut Cursor) -> Result<(), ParseError> {
     c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
-    if starts_expr(c.peek()) {
+    if starts_full_expr(c.peek()) {
         // Exprs = TypeExpr.rep(1, ",") (Types.scala:168); no trailing comma here —
         // the trailing comma belongs to the `TrailingComma` below.
         loop {
@@ -436,7 +460,7 @@ fn annot_arg_group(c: &mut Cursor) -> Result<(), ParseError> {
             // Literals.scala:63).
             let mark = c.save();
             c.bump(); // try the separator comma
-            if starts_expr(c.peek()) {
+            if starts_full_expr(c.peek()) {
                 continue;
             }
             c.restore(mark);
@@ -701,6 +725,18 @@ fn starts_expr(t: &Token) -> bool {
             | TokenKind::Kw(Kw::True)
             | TokenKind::Kw(Kw::False)
     ) || is_id(t)
+}
+
+/// A token that can begin a full `Expr` (Exprs.scala:46: `If | Fun | PostfixLambda`),
+/// as opposed to `starts_expr` which covers only the `SimpleExpr` atom head. The one
+/// extra head is the reserved `if` — `Fun`'s `def` is an `Ident`/word and
+/// `PostfixLambda`'s prefix operators (`-`/`!`/`~`) are `OpId`s, both already
+/// `is_id`. Used at the guards that parse a full `Expr` item (Parened / `Exprs`
+/// arg-lists, annotation arguments, the `=>`-rhs `Expr.?`), where `if` is legal
+/// (`Coll(if (c) a else b)`, `f && (if (c) a else b)` — Dexy `swap`, Rosen
+/// `Collateral`/`RwtRepo`).
+fn starts_full_expr(t: &Token) -> bool {
+    starts_expr(t) || t.kind == TokenKind::Kw(Kw::If)
 }
 
 /// `ExprLiteral` → constant node (Literals.scala:70-124). Returns `None` when the
@@ -1056,6 +1092,32 @@ fn fun_arg(c: &mut Cursor) -> Result<(String, SType), ParseError> {
     Ok((name, tpe))
 }
 
+/// `` `=` `` (Core.scala:25 = `O("=")` = `"=" ~ !OpChar`): the `val`/`def` binding
+/// assignment. A lone `=` is `Kw::Assign`. When the next token is an op-identifier
+/// that STARTS with `=` (e.g. `==`), fastparse matches the single `=` char, then
+/// the `!OpChar` negative lookahead fails at the FOLLOWING op-char — so the error
+/// index is one byte past the `=`, not at it (ChainCash `reserve.es`:
+/// `val redemptionInputOk == …` rejects at the second `=`). The token lexer folds
+/// `==` into one `OpId`, so this granularity is restored here.
+fn expect_assign(c: &mut Cursor) -> Result<(), ParseError> {
+    let t = c.peek();
+    if t.kind == TokenKind::Kw(Kw::Assign) {
+        c.bump(); // `=` ~/ — committed
+        return Ok(());
+    }
+    if t.kind == TokenKind::OpId && t.text(c.src).starts_with('=') {
+        // `"="` matched the leading `=`; `!OpChar` fails one byte later.
+        return Err(ParseError::Syntax {
+            pos: t.start + 1,
+            expected: "`=`".to_string(),
+        });
+    }
+    Err(ParseError::Syntax {
+        pos: t.start,
+        expected: "`=`".to_string(),
+    })
+}
+
 /// `Dcl = `val` ~/ ValVarDef` (Types.scala:25-27) with `ValVarDef = Index ~
 /// BindPattern ~ (`:` ~/ Type).? ~ (`=` ~/ FreeCtx.Expr)` (SP:26-33). The pattern
 /// must reduce to a single `Ident` → `Val(name, T|NoType, body)` at the pattern's
@@ -1072,7 +1134,7 @@ fn val_def(c: &mut Cursor) -> Result<Expr, ParseError> {
     } else {
         SType::NoType
     };
-    c.expect(&TokenKind::Kw(Kw::Assign), "=")?; // `=` ~/ — committed
+    expect_assign(c)?; // `=` ~/ — committed
     let body = expr(c, Ctx::Free)?; // FreeCtx.Expr
     match pat {
         BindPat::Name(name) => Ok(Expr::Val(Box::new(crate::ast::ValDef {
@@ -1226,7 +1288,7 @@ fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
     } else {
         None
     };
-    c.expect(&TokenKind::Kw(Kw::Assign), "=")?; // `=` ~/ — committed
+    expect_assign(c)?; // `=` ~/ — committed
     let body = expr(c, Ctx::Free)?; // FreeCtx.Expr
     let res = res_type.unwrap_or(SType::NoType);
 
@@ -1455,7 +1517,7 @@ fn lambda_rhs(c: &mut Cursor, ctx: Ctx) -> Result<Option<Expr>, ParseError> {
         while try_block_lambda(c)?.is_some() {} // drop leading BlockLambda heads
         let stats = block_body(c)?; // BlockChunk's BlockStat.rep(sep = Semis)
         Ok(Some(block_from_stats(stats, pos)?))
-    } else if starts_expr(c.peek()) {
+    } else if starts_full_expr(c.peek()) {
         Ok(Some(expr(c, ctx)?))
     } else {
         Ok(None)
@@ -1561,7 +1623,7 @@ fn parened(c: &mut Cursor) -> Result<Expr, ParseError> {
 /// (Literals.scala:63).
 fn expr_list(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
     let mut items = Vec::new();
-    if starts_expr(c.peek()) {
+    if starts_full_expr(c.peek()) {
         loop {
             items.push(expr(c, Ctx::Expr)?);
             if c.peek().kind != TokenKind::Comma {
@@ -1574,7 +1636,7 @@ fn expr_list(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
             // "outerJoin", :848), not `[a]`.
             let mark = c.save();
             c.bump(); // try the separator comma
-            if starts_expr(c.peek()) {
+            if starts_full_expr(c.peek()) {
                 continue;
             }
             // `sep ~ Expr` failed → fastparse rewinds the comma; then
@@ -3325,5 +3387,44 @@ mod expr_tests {
                 block(vec![], ident0("c"))
             )
         );
+    }
+
+    // ----- corpus-parity regressions (Task 11: real-contract corpus) -----
+
+    #[test]
+    fn if_expr_is_a_valid_paren_and_arg_item() {
+        // Exprs.scala:46 `Expr = If | Fun | PostfixLambda`: `if` is a full-Expr head,
+        // so it is a legal Parened item / call argument. The narrower `starts_expr`
+        // guard (SimpleExpr only) wrongly rejected these — Dexy `lp/pool/swap.es`
+        // (`&& ( if … )`) and Rosen `Collateral.es`/`RwtRepo.es` (`Coll( …, if … )`).
+        assert!(crate::parse("Coll(if (x > 1) 1 else 2)", 3).is_ok());
+        assert!(crate::parse("Coll(if (x > 1) {c} else {d})", 3).is_ok());
+        assert!(crate::parse("a == 0 && ( if (x > 0) 1 else 2 )", 3).is_ok());
+        assert!(crate::parse("allOf(Coll(a == b, if (x > 1) {c} else {d}))", 3).is_ok());
+    }
+
+    #[test]
+    fn top_level_zero_progress_failure_reports_one_one() {
+        // fastparse `Expr ~ End`: an unparsable FIRST token preceded only by
+        // whitespace/comments fails at index 0 (`1:1`), not the token's offset — the
+        // `@contract`/`@test` LSP template files. Once a token is consumed the real
+        // furthest position stands.
+        for src in ["@x", "   @x", "/* c */ @x", "/*\n c\n*/\n@x"] {
+            let e = crate::parse(src, 3).expect_err("must reject");
+            assert_eq!(e.line_col(src), (1, 1), "src={src:?}");
+        }
+        // A consumed token keeps the real position (reported by the tail `End` check).
+        let e = crate::parse("1 @x", 3).expect_err("must reject");
+        assert_eq!(e.line_col("1 @x"), (1, 3));
+    }
+
+    #[test]
+    fn val_binding_double_eq_rejects_after_the_first_eq() {
+        // `` `=` `` = O("=") = `"=" ~ !OpChar` (Core.scala:25): on `==` the `=`
+        // matches and the `!OpChar` lookahead fails one char later — ChainCash
+        // `layer2-old/reserve.es` (`val redemptionInputOk == …`) rejects at the 2nd `=`.
+        let src = "{ val x == y }";
+        let e = crate::parse(src, 3).expect_err("must reject");
+        assert_eq!(e.line_col(src), (1, 10));
     }
 }

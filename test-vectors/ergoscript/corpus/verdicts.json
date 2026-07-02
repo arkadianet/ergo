@@ -1,0 +1,263 @@
+{
+  "chaincash-basis/basis-tracker-basis.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/layer2-old/note.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/layer2-old/redemption.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/layer2-old/redproducer.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/layer2-old/reserve.es": {
+    "col": 30,
+    "line": 36,
+    "verdict": "reject"
+  },
+  "chaincash-basis/chaincash/offchain/basis-token.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/offchain/basis.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/onchain/note.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/onchain/receipt.es": {
+    "verdict": "accept"
+  },
+  "chaincash-basis/chaincash/onchain/reserve.es": {
+    "verdict": "accept"
+  },
+  "crystalpool/buy-token-for-erg.es": {
+    "verdict": "accept"
+  },
+  "crystalpool/deposit.es": {
+    "verdict": "accept"
+  },
+  "crystalpool/sell-token-for-erg.es": {
+    "verdict": "accept"
+  },
+  "crystalpool/swap-tokens-denom.es": {
+    "verdict": "accept"
+  },
+  "crystalpool/swap-tokens.es": {
+    "verdict": "accept"
+  },
+  "curve-trees/CurveTreeVerifier-v6.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/arbmint.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/bank.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/buyback-patched.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/buyback.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/freemint.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/intervention.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/payout.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/update/ballot.es": {
+    "verdict": "accept"
+  },
+  "dexy/bank/update/update.es": {
+    "verdict": "accept"
+  },
+  "dexy/gort-dev/emission.es": {
+    "verdict": "accept"
+  },
+  "dexy/hodlcoin/hodlcoin.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/pool/extract.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/pool/main.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/pool/mint.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/pool/redeem.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/pool/swap.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/proxy/Deposit.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/proxy/Redeem.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/proxy/SwapBuyV1.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/proxy/SwapBuyV2.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/proxy/SwapSell.es": {
+    "verdict": "accept"
+  },
+  "dexy/lp/proxy/SwapSellV1.es": {
+    "verdict": "accept"
+  },
+  "dexy/tracking.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodlerg_bank.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodlerg_fee.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodlerg_proxy.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodltoken_bank.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodltoken_fee.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodltoken_proxy.es": {
+    "col": 5,
+    "line": 200,
+    "verdict": "reject"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodlcoin_bank.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodlcoin_fee.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodlcoin_feeTest.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodlcoin_feeTest_mainnet.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodlcoin_proxy.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodltoken_bank.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodltoken_fee.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodltoken_feeTest_mainnet.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodltoken_feeTest_testnet.es": {
+    "verdict": "accept"
+  },
+  "hodlcoin/phoenix/phoenix_v1_hodltoken_proxy.es": {
+    "verdict": "accept"
+  },
+  "lsp/examples/completion_demo.es": {
+    "col": 3,
+    "line": 18,
+    "verdict": "reject"
+  },
+  "lsp/examples/eip5-multi-sig.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/examples/eip5-payment-channel.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/examples/eip5-simple-contract.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/examples/hover_demo.es": {
+    "col": 3,
+    "line": 54,
+    "verdict": "reject"
+  },
+  "lsp/src/main.es": {
+    "verdict": "accept"
+  },
+  "lsp/src/simple.es": {
+    "verdict": "accept"
+  },
+  "lsp/src/template_test.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/test_contract.es": {
+    "verdict": "accept"
+  },
+  "lsp/test_simple.es": {
+    "verdict": "accept"
+  },
+  "lsp/tests/main.test.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/tests/simple.test.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/tests/template.test.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "lsp/zed-extension-test.es": {
+    "col": 1,
+    "line": 1,
+    "verdict": "reject"
+  },
+  "rosen-bridge/Collateral.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/Commitment.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/Emission.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/EventTrigger.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/Fraud.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/GuardSign.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/Lock.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/Permit.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/RepoConfig.es": {
+    "verdict": "accept"
+  },
+  "rosen-bridge/RwtRepo.es": {
+    "verdict": "accept"
+  }
+}

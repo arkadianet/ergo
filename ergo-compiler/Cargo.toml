@@ -9,3 +9,6 @@ publish    = false
 
 [dependencies]
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
