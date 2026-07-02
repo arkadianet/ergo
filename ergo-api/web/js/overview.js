@@ -3,6 +3,7 @@
 // cheap status/info; the quadrant + sysbar rebuild on the 4 s slow tick.
 import { api } from './api-client.js';
 import { sparkline } from './sparkline.js';
+import { lineChart, barChart } from './chart.js';
 import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
 
@@ -217,10 +218,11 @@ export function onFast({ status, info }) {
 
 // ---- data + quadrant (4 s) ----
 export async function onSlow() {
-  const [tip, sync, indexer, mempool, peers, recent, host] = await Promise.all([
+  const [tip, sync, indexer, indexerHealth, mempool, peers, recent, host] = await Promise.all([
     api.tip(),
     api.sync(),
     api.indexedHeight(),
+    api.indexerStatus(),
     api.mempoolSummary(),
     api.peers(),
     api.recentBlocks(10),
@@ -256,8 +258,10 @@ export async function onSlow() {
     };
   }
 
-  state._slow = { sync, indexer, mempool, recent, host };
+  state._slow = { sync, indexer, indexerHealth, mempool, recent, host };
   renderBody();
+  // Charts view: refresh the server-history series when the tip advanced.
+  if (viewMode === 'charts') refreshChartData();
   // refresh KPI subs that depend on slow data
   if (state.status) onFast({ status: state.status, info: state.info });
 }
@@ -360,6 +364,27 @@ function renderBody() {
       pipeRow('blocks', num(blkH), hdrH > 0 ? blkH / hdrH : 0, 'var(--green)'),
       pipeRow('indexer', idx ? num(idx.indexedHeight) : 'off', idx && hdrH > 0 ? idx.indexedHeight / hdrH : 0, 'var(--blue)'),
     );
+    // Extra-index health (self-repair markers from /api/v1/indexer/status).
+    // Silent when healthy: rows appear only when there is something an
+    // operator needs to see — a rebuild running, an honestly-incomplete
+    // repair, or a halt.
+    const ih = slow.indexerHealth;
+    if (ih?.status === 'halted') {
+      body.append(kv('index halted', ih.haltReason || 'unknown', 'var(--red)'));
+    }
+    if (ih?.repair?.pending) {
+      const denom = ih.totals?.boxes ?? 0;
+      const cur = ih.repair.nextGi;
+      if (cur != null && denom > 0) {
+        body.append(pipeRow('index repair', `${num(cur)} / ${num(denom)}`, cur / denom, 'var(--yellow)'));
+      } else {
+        body.append(kv('index repair', 'queued — wipe phase', 'var(--yellow)'));
+      }
+    } else if (ih?.repair?.skipped > 0) {
+      // The honest marker: the rebuild completed but had to omit
+      // undecodable boxes from the template/token indexes.
+      body.append(kv('index repair', `done · ${num(ih.repair.skipped)} box(es) skipped`, 'var(--yellow)'));
+    }
     const foot = document.createElement('div');
     foot.className = 'ov-foot';
     foot.textContent = sync
@@ -483,33 +508,130 @@ function renderBody() {
   host.append(sb);
 }
 
-function renderCharts(host) {
-  const series = [
-    ['Block height', hist.height, 'var(--green)'],
-    ['Block time (s)', hist.blockTimes, 'var(--orange)'],
-    ['Mempool depth', hist.mempool, 'var(--blue)'],
-    ['Difficulty', hist.difficulty, 'var(--purple)'],
-  ];
-  const wrap = document.createElement('div');
-  wrap.className = 'ov-charts';
-  for (const [label, buf, color] of series) {
-    const card = document.createElement('section');
-    card.className = 'panel';
-    const head = document.createElement('div');
-    head.className = 'panel__head';
-    const t = document.createElement('span');
-    t.className = 'micro-label';
-    t.textContent = label;
-    const last = document.createElement('span');
-    last.className = 'ov-foot';
-    last.textContent = buf.length ? num(Math.round(buf[buf.length - 1])) : '—';
-    head.append(t, last);
-    const body = document.createElement('div');
-    body.className = 'panel__body ov-chart';
-    if (buf.length > 1) body.append(sparkline(buf, { color, h: 60 }));
-    else body.textContent = 'warming up…';
-    card.append(head, body);
-    wrap.append(card);
+// ---- charts view: real server-history charts (built once, updated in place
+// so hover state and DOM survive the 4 s renderBody rebuild) ----
+
+const charts = {
+  wrap: null,
+  diff: null,
+  hr: null,
+  intervals: null,
+  fees: null,
+  lastFetchHeight: 0,
+  inFlight: false,
+};
+
+function chartCard(title, chart) {
+  const card = document.createElement('section');
+  card.className = 'panel';
+  const head = document.createElement('div');
+  head.className = 'panel__head';
+  const t = document.createElement('span');
+  t.className = 'panel__title';
+  t.textContent = title;
+  head.append(t);
+  const body = document.createElement('div');
+  body.className = 'panel__body';
+  body.append(chart.el);
+  card.append(head, body);
+  return card;
+}
+
+function buildCharts() {
+  charts.diff = lineChart({
+    color: 'var(--purple)',
+    xFmt: (h) => num(h),
+    yFmt: fmtDiff,
+    label: 'network difficulty',
+  });
+  charts.hr = lineChart({
+    color: 'var(--orange)',
+    xFmt: (h) => num(h),
+    yFmt: fmtHr,
+    label: 'estimated hashrate',
+  });
+  charts.intervals = barChart({
+    color: 'var(--green)',
+    yFmt: (v) => `${num(v)} blocks`,
+    label: 'block-interval distribution',
+  });
+  charts.fees = barChart({
+    color: 'var(--blue)',
+    yFmt: (v) => `${num(v)} tx`,
+    label: 'mempool wait-time histogram',
+  });
+  charts.wrap = document.createElement('div');
+  charts.wrap.className = 'ov-charts';
+  charts.wrap.append(
+    chartCard('Difficulty · last 720 blocks', charts.diff),
+    chartCard('Est. hashrate · last 720 blocks', charts.hr),
+    chartCard('Block intervals · last 720 blocks', charts.intervals),
+    chartCard('Mempool age histogram · waiting tx', charts.fees),
+  );
+}
+
+// Bucket consecutive-block timestamp deltas into a readable histogram.
+const INTERVAL_BINS = [
+  ['<30s', 0, 30],
+  ['30–60s', 30, 60],
+  ['1–2m', 60, 120],
+  ['2–3m', 120, 180],
+  ['3–5m', 180, 300],
+  ['5–10m', 300, 600],
+  ['>10m', 600, Infinity],
+];
+
+async function refreshChartData() {
+  const tipH = state.status?.best_full_block_height ?? 0;
+  // Difficulty/intervals only change on a new block — skip refetch otherwise.
+  const needSeries = tipH > 0 && tipH !== charts.lastFetchHeight;
+  if (charts.inFlight) return;
+  charts.inFlight = true;
+  try {
+    const [series, histo] = await Promise.all([
+      needSeries ? api.difficultyHistory(720) : null,
+      api.poolHistogram(12, 3_600_000),
+    ]);
+    if (series?.points?.length) {
+      charts.lastFetchHeight = tipH;
+      const pts = series.points;
+      // difficulty is a STRING on the wire because it can exceed 2^53 —
+      // Number() here is a DELIBERATE approximate parse: charts are visual,
+      // a sub-ppm rounding above 2^53 is invisible at pixel scale. Exact
+      // rendering (the explorer block view) keeps the string verbatim.
+      charts.diff.update(pts.map((p) => ({ x: p.height, y: Number(p.difficulty) })));
+      // Estimated hashrate = difficulty / target interval — same derivation
+      // as the KPI band (deriveHr), applied per point.
+      const tgtS = Math.max(1, (state.info?.target_block_interval_ms ?? 120000) / 1000);
+      charts.hr.update(pts.map((p) => ({ x: p.height, y: Number(p.difficulty) / tgtS })));
+      const bins = INTERVAL_BINS.map(([label]) => ({ label, value: 0 }));
+      for (let i = 1; i < pts.length; i++) {
+        const dt = (pts[i].timestamp_unix_ms - pts[i - 1].timestamp_unix_ms) / 1000;
+        if (!(dt >= 0)) continue;
+        const bi = INTERVAL_BINS.findIndex(([, lo, hi]) => dt >= lo && dt < hi);
+        if (bi >= 0) bins[bi].value += 1;
+      }
+      charts.intervals.update(bins);
+    }
+    if (Array.isArray(histo)) {
+      // bins+1 wait-time buckets of {nTxns, totalFee}, oldest-waiting last.
+      const stepMin = 3_600_000 / 12 / 60_000;
+      charts.fees.update(
+        histo.map((b, i) => ({
+          label: i < 12 ? `${Math.round(i * stepMin)}–${Math.round((i + 1) * stepMin)}m` : `>${Math.round(12 * stepMin)}m`,
+          value: b.nTxns ?? 0,
+        })),
+      );
+    }
+  } finally {
+    charts.inFlight = false;
   }
-  host.append(wrap);
+}
+
+function renderCharts(host) {
+  if (!charts.wrap) {
+    buildCharts();
+    refreshChartData();
+  }
+  host.append(charts.wrap);
 }

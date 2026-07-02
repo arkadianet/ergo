@@ -12,8 +12,8 @@ pub mod types;
 
 pub use protocol_genesis::{is_protocol_genesis_box, PROTOCOL_GENESIS_BOX_IDS_MAINNET};
 pub use query::{
-    BalanceDto, IndexedBlockDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerQuery, Page,
-    SortDir, StorageRentEligibleDto,
+    BalanceDto, IndexedBlockDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerHealthDto,
+    IndexerQuery, Page, SortDir, StorageRentEligibleDto,
 };
 pub use status::{IndexerHaltReason, IndexerStatus};
 pub use types::{IndexedErgoBox, IndexedErgoTransaction};

@@ -95,6 +95,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiIdentity'
+  /api/v1/indexer/status:
+    get:
+      tags:
+      - node
+      summary: |-
+        `GET /api/v1/indexer/status`. Always 200; never gated (like
+        `indexedHeight`, this must keep answering while the index is syncing,
+        repairing, or halted — that is exactly when the operator needs it).
+        `/blockchain/indexedHeight` stays pinned to its Scala-parity shape;
+        the self-repair markers and totals live here instead.
+      description: |-
+        Mounted only when an indexer handle is plumbed — on indexer-less wiring
+        the route 404s, which the UI reads as "extra-index disabled".
+      operationId: indexer_status_handler
+      responses:
+        '200':
+          description: 'Extra-index health: sync status, self-repair markers (rebuild pending / progress cursor / honestly-skipped boxes), and running totals. Conditional: mounted only when the node is wired with an extra-index; 404 means the index is disabled.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiIndexerStatus'
   /api/v1/info:
     get:
       tags:
@@ -1642,6 +1663,93 @@ components:
           type: boolean
         verify_transactions:
           type: boolean
+    ApiIndexerRepair:
+      type: object
+      description: |-
+        Self-repair sub-state of the extra-index for `GET /api/v1/indexer/status`.
+        Mirrors the durable `INDEXER_META` repair markers: `pending` = a
+        chain-free rebuild of the derived template/token segments is owed or in
+        progress; `nextGi` = the rebuild's phase-1 cursor (boxes re-derived so
+        far — progress % = nextGi / totals.boxes); `skipped` = undecodable boxes a
+        completed rebuild had to omit (the honest marker: non-zero with
+        `pending=false` means knowingly incomplete); `driftSkips` = cumulative
+        process-lifetime live-apply skips (diagnostic; resets on restart).
+      required:
+      - pending
+      - skipped
+      - driftSkips
+      properties:
+        driftSkips:
+          type: integer
+          format: int64
+          minimum: 0
+        nextGi:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        pending:
+          type: boolean
+        skipped:
+          type: integer
+          format: int64
+          minimum: 0
+    ApiIndexerStatus:
+      type: object
+      description: |-
+        Operator-grade extra-index health for `GET /api/v1/indexer/status`.
+        Superset of `/blockchain/indexedHeight` (which stays pinned to its
+        Scala-parity shape): adds the self-repair markers and totals so the UI
+        can say "caught up but degraded" honestly. `status` carries the same
+        camelCase label set as indexedHeight (`syncing` / `caughtUp` /
+        `halted`); `haltReason` is the kebab-case reason when halted.
+      required:
+      - status
+      - indexedHeight
+      - fullHeight
+      - repair
+      - totals
+      properties:
+        fullHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        haltReason:
+          type:
+          - string
+          - 'null'
+        indexedHeight:
+          type: integer
+          format: int64
+          minimum: 0
+        repair:
+          $ref: '#/components/schemas/ApiIndexerRepair'
+        status:
+          type: string
+        totals:
+          $ref: '#/components/schemas/ApiIndexerTotals'
+    ApiIndexerTotals:
+      type: object
+      description: |-
+        Running index totals for `GET /api/v1/indexer/status`.
+
+        `boxes`/`txs` (and `repair.nextGi`) are `u64` JSON numbers. Mainnet is
+        at ~10^7–10^8 today; a JS consumer only loses precision past 2^53
+        (~9·10^15), which at ~50M boxes/year is comfortably >10^8 years away —
+        documented so the contract's limit is explicit rather than discovered.
+      required:
+      - boxes
+      - txs
+      properties:
+        boxes:
+          type: integer
+          format: int64
+          minimum: 0
+        txs:
+          type: integer
+          format: int64
+          minimum: 0
     ApiInfo:
       type: object
       description: Static node identity. Cheap to compute; doesn't change after boot.

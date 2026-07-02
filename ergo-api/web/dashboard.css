@@ -436,6 +436,61 @@
   color: var(--tx3);
 }
 
+/* Real charts (chart.js): readout row + plot (y-labels overlay) + x-labels. */
+.chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.chart__readout {
+  min-height: 18px;
+  font-family: var(--mono);
+  font-size: var(--fs-small);
+  color: var(--tx2);
+  text-align: right;
+}
+.chart__plot {
+  position: relative;
+  min-width: 0;
+}
+.chart__plot svg {
+  touch-action: none;
+}
+.chart__ylabels {
+  position: absolute;
+  inset: 2px auto 2px 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0 0 0 var(--space-2);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  color: var(--tx3);
+  pointer-events: none;
+  z-index: 1;
+}
+/* Scrim behind each y-label so it stays legible over the area fill. */
+.chart__ylabels span {
+  background: color-mix(in srgb, var(--s1) 72%, transparent);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.chart__xlabels {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  color: var(--tx3);
+}
+.chart__xlabels span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Shared page composition */
 .comp {
   display: grid;

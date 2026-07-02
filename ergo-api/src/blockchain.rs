@@ -177,6 +177,61 @@ pub async fn indexed_height_handler(State(state): State<BlockchainState>) -> Res
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/indexer/status — operator health surface
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/indexer/status`. Always 200; never gated (like
+/// `indexedHeight`, this must keep answering while the index is syncing,
+/// repairing, or halted — that is exactly when the operator needs it).
+/// `/blockchain/indexedHeight` stays pinned to its Scala-parity shape;
+/// the self-repair markers and totals live here instead.
+///
+/// Mounted only when an indexer handle is plumbed — on indexer-less wiring
+/// the route 404s, which the UI reads as "extra-index disabled".
+#[utoipa::path(
+    get,
+    path = "/api/v1/indexer/status",
+    tag = "node",
+    responses(
+        (status = 200,
+         description = "Extra-index health: sync status, self-repair markers \
+(rebuild pending / progress cursor / honestly-skipped boxes), and running totals. \
+Conditional: mounted only when the node is wired with an extra-index; 404 means \
+the index is disabled.",
+         body = crate::types::ApiIndexerStatus, content_type = "application/json"),
+    ),
+)]
+pub async fn indexer_status_handler(State(state): State<BlockchainState>) -> Response {
+    let status = state.indexer.status();
+    let halt_reason = match &status {
+        IndexerStatus::Halted(reason) => Some(reason.as_kebab_case().to_string()),
+        _ => None,
+    };
+    let health = state.indexer.health();
+    let body = crate::types::ApiIndexerStatus {
+        status: match &status {
+            IndexerStatus::Syncing => "syncing".to_string(),
+            IndexerStatus::CaughtUp => "caughtUp".to_string(),
+            IndexerStatus::Halted(_) => "halted".to_string(),
+        },
+        halt_reason,
+        indexed_height: state.indexer.indexed_height(),
+        full_height: state.read.status().best_full_block_height,
+        repair: crate::types::ApiIndexerRepair {
+            pending: health.repair_pending,
+            next_gi: health.repair_next_gi,
+            skipped: health.repair_skipped,
+            drift_skips: health.drift_skips,
+        },
+        totals: crate::types::ApiIndexerTotals {
+            boxes: health.global_boxes,
+            txs: health.global_txs,
+        },
+    };
+    Json(body).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Status gate middleware
 // ---------------------------------------------------------------------------
 

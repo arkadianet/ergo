@@ -88,8 +88,14 @@ export const api = {
   identity: () => getJson('/api/v1/identity'),
   host: () => getJson('/api/v1/host'),
   indexedHeight: () => getJson('/blockchain/indexedHeight'),
+  // Operator health superset of indexedHeight (self-repair markers + totals).
+  // 404s on indexer-less wiring — the UI reads null as "extra-index disabled".
+  indexerStatus: () => getJson('/api/v1/indexer/status'),
   recentBlocks: (n = 10) => getJson(`/api/v1/blocks/recent?n=${n}`),
   difficultyHistory: (b = 60) => getJson(`/api/v1/difficulty/history?blocks=${b}`),
+  // Mempool wait-time histogram: bins+1 buckets of {nTxns, totalFee}.
+  poolHistogram: (bins = 10, maxtimeMs = 3_600_000) =>
+    getJson(`/transactions/poolHistogram?bins=${bins}&maxtime=${maxtimeMs}`),
   peers: () => getJson('/api/v1/peers'),
   mempoolSummary: () => getJson('/api/v1/mempool/summary'),
   mempoolTransactions: () => getJson('/api/v1/mempool/transactions'),

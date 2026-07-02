@@ -7,8 +7,8 @@ use crate::segment::SEGMENT_THRESHOLD;
 use crate::store::IndexerStore;
 use crate::{BoxId, TemplateHash, TokenId, TreeHash, TxId};
 use ergo_indexer_types::{
-    BalanceDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerQuery,
-    IndexerStatus, Page, SortDir, StorageRentEligibleDto,
+    BalanceDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerHealthDto,
+    IndexerQuery, IndexerStatus, Page, SortDir, StorageRentEligibleDto,
 };
 
 /// Public read-side handle wired into `ergo-api`. Holds the in-memory
@@ -181,6 +181,40 @@ impl IndexerQuery for IndexerHandle {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn health(&self) -> IndexerHealthDto {
+        // One redb read txn per call (see `IndexerStore::health_snapshot`) —
+        // acceptable at dashboard-poll cadence, unlike `indexed_height`,
+        // whose cached mirror exists because the status-gate middleware
+        // reads it on EVERY gated request. Best-effort: a failed snapshot
+        // degrades to the healthy default rather than erroring the surface
+        // — which must keep answering exactly when the store is unwell.
+        let drift_skips = crate::segment_buffer::secondary_index_drift_skips();
+        let Some(store) = self.inner.store.as_ref() else {
+            // Boot-halted handle: no store, only the process counter.
+            return IndexerHealthDto {
+                drift_skips,
+                ..IndexerHealthDto::default()
+            };
+        };
+        match store.health_snapshot() {
+            Ok(s) => IndexerHealthDto {
+                repair_pending: s.repair_pending,
+                repair_next_gi: s.repair_next_gi,
+                repair_skipped: s.repair_skipped,
+                drift_skips,
+                global_boxes: s.meta.global_box_index,
+                global_txs: s.meta.global_tx_index,
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "indexer health snapshot failed");
+                IndexerHealthDto {
+                    drift_skips,
+                    ..IndexerHealthDto::default()
+                }
+            }
+        }
     }
 
     fn box_by_id(&self, box_id: &BoxId) -> Option<IndexedBoxDto> {
