@@ -76,15 +76,17 @@ export function makeTable(container, columns, opts = {}) {
         r.setAttribute('role', 'button');
         r.setAttribute('aria-expanded', String(expanded === rk));
         const toggle = (e) => {
-          if (e.target.closest('.copy')) return;
+          // Copy buttons and links inside a cell act on their own — a click
+          // there must not also toggle the row drawer.
+          if (e.target.closest('.copy, a')) return;
           expanded = expanded === rk ? null : rk;
           draw();
         };
         r.onclick = toggle;
         r.onkeydown = (e) => {
-          // Let a focused copy button handle its own Enter/Space (don't
-          // preventDefault its native activation before it fires).
-          if (e.target.closest('.copy')) return;
+          // Let a focused copy button / link handle its own Enter/Space
+          // (don't preventDefault its native activation before it fires).
+          if (e.target.closest('.copy, a')) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             toggle(e);

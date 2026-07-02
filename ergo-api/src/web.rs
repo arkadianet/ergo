@@ -23,6 +23,7 @@ pub const JS_SETTINGS: &str = include_str!("../web/js/settings.js");
 pub const JS_TABLE: &str = include_str!("../web/js/table.js");
 pub const JS_SPARKLINE: &str = include_str!("../web/js/sparkline.js");
 pub const JS_OVERVIEW: &str = include_str!("../web/js/overview.js");
+pub const JS_EXPLORER: &str = include_str!("../web/js/explorer.js");
 pub const JS_PEERS: &str = include_str!("../web/js/peers.js");
 pub const JS_MEMPOOL: &str = include_str!("../web/js/mempool.js");
 pub const JS_VOTING: &str = include_str!("../web/js/voting.js");

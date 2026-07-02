@@ -21,8 +21,14 @@ function span(text, color) {
 
 function txidNode(t) {
   const w = document.createElement('span');
-  w.style.color = 'var(--blue)';
-  w.append(document.createTextNode(t.tx_id), ' ', copyBtn(t.tx_id));
+  // Links into the explorer's tx view — the ungated detail route resolves
+  // unconfirmed txs too, so the link works for pool entries. Row expansion
+  // still works: the drawer toggle only fires outside `.copy`/anchor targets.
+  const a = document.createElement('a');
+  a.className = 'ex-link';
+  a.href = `#explorer/tx/${t.tx_id}`;
+  a.textContent = t.tx_id;
+  w.append(a, ' ', copyBtn(t.tx_id));
   return w;
 }
 
