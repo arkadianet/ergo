@@ -148,6 +148,11 @@ async fn wallet_js_module_carries_spa_security_headers() {
 }
 
 #[tokio::test]
+async fn explorer_js_module_carries_spa_security_headers() {
+    assert_spa_security_headers("/js/explorer.js").await;
+}
+
+#[tokio::test]
 async fn web_font_carries_spa_security_headers() {
     assert_spa_security_headers("/fonts/jetbrains-mono.woff2").await;
 }

@@ -12,18 +12,22 @@
 //   isBusy()    — section holds in-flight user input; it patches read-only
 //                 cells instead of rebuilding (the section enforces this).
 //   canLeave()  — return false to veto navigation (wallet mnemonic gate).
+//   onRoute(t)  — the hash sub-path after `#section/` changed (deep links,
+//                 e.g. `#explorer/tx/<id>`); also fired on section entry with
+//                 the current tail. Sections without sub-routes never see it.
 import { startRouter } from './router.js';
 import { initSettings, applyPrefs } from './settings.js';
 import { initAuth } from './auth.js';
 import { api } from './api-client.js';
 import * as overview from './overview.js';
+import * as explorer from './explorer.js';
 import * as peers from './peers.js';
 import * as mempool from './mempool.js';
 import * as voting from './voting.js';
 import * as wallet from './wallet.js';
 
-const SECTIONS = ['overview', 'peers', 'mempool', 'voting', 'wallet'];
-const renderers = { overview, peers, mempool, voting, wallet };
+const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'voting', 'wallet'];
+const renderers = { overview, explorer, peers, mempool, voting, wallet };
 const mounted = new Set();
 let current = null;
 // Holds the section name whose onSlow() is in flight, so a 4 s tick can't
@@ -67,17 +71,22 @@ async function slow() {
   }
 }
 
-function show(s) {
-  if (current === s) return;
+function show(s, tail) {
+  const r = renderers[s];
+  if (current === s) {
+    // Same section, new sub-path (deep-link navigation within the section).
+    if (r && r.onRoute) r.onRoute(tail || '');
+    return;
+  }
   const prev = current && renderers[current];
   if (prev && prev.onHide) prev.onHide();
   current = s;
-  const r = renderers[s];
   if (!mounted.has(s)) {
     r.mount(document.getElementById(`section-${s}`));
     mounted.add(s);
   }
   if (r.onShow) r.onShow();
+  if (r.onRoute) r.onRoute(tail || '');
   slow(); // immediate first paint for the entered section
 }
 
@@ -98,6 +107,24 @@ function boot() {
   );
   applyPrefs();
   startRouter(SECTIONS, show, beforeLeave);
+  // "/" from anywhere jumps to the explorer omnibox (GitHub-style). Ignored
+  // while typing in a field or while a dialog is open, so it never swallows a
+  // literal slash the user is entering.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (document.querySelector('dialog[open]')) return;
+    // Never initiate navigation away from a busy section: on the wallet
+    // mnemonic gate, '/' would raise the leave-confirm where Enter (the
+    // default OK) discards the recovery phrase — a two-keystroke slip.
+    const r = renderers[current];
+    if (r && r.isBusy && r.isBusy()) return;
+    e.preventDefault();
+    if (current !== 'explorer') location.hash = 'explorer';
+    // Focus after the router has painted the section (hashchange is async).
+    setTimeout(() => explorer.focusSearch(), 0);
+  });
   fast();
   setInterval(fast, 1000);
   setInterval(slow, 4000);

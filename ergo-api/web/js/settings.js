@@ -3,8 +3,12 @@
 // importers keep working during the migration.
 export { getApiKey, setApiKey } from './auth.js';
 
-const PREFS = 'ergo.prefs'; // localStorage — theme/density/explorer
-const defaults = { theme: 'dark', density: 'normal', explorer: '' };
+const PREFS = 'ergo.prefs'; // localStorage — theme/density
+// The old `explorer` external-URL pref (and its never-wired explorerTxUrl
+// helper) was removed when the in-app Explorer section landed — a dead field
+// named identically to a real section was pure confusion. A stale `explorer`
+// key in stored prefs is harmless: defaults-merge just ignores it.
+const defaults = { theme: 'dark', density: 'normal' };
 
 export function prefs() {
   try {
@@ -18,10 +22,6 @@ export function setPref(k, v) {
   p[k] = v;
   localStorage.setItem(PREFS, JSON.stringify(p));
   applyPrefs();
-}
-export function explorerTxUrl(id) {
-  const e = prefs().explorer.trim();
-  return e ? e.replace(/\/$/, '') + '/transactions/' + id : null;
 }
 export function applyPrefs() {
   const p = prefs();
@@ -38,8 +38,6 @@ export function initSettings(dialog, openBtn) {
   dialog.innerHTML = `
     <form method="dialog" class="dialog__body">
       <h3 class="micro-label">Settings</h3>
-      <label>Explorer URL (optional)
-        <input id="set-exp" placeholder="https://explorer.ergoplatform.com"></label>
       <label>Theme
         <select id="set-theme">${opts(['dark', 'light', 'hc'])}</select></label>
       <label>Density
@@ -49,13 +47,11 @@ export function initSettings(dialog, openBtn) {
         <button class="btn" value="cancel" type="submit">Close</button>
       </div>
     </form>`;
-  dialog.querySelector('#set-exp').value = p.explorer;
   dialog.querySelector('#set-theme').value = p.theme;
   dialog.querySelector('#set-den').value = p.density;
   openBtn.addEventListener('click', () => dialog.showModal());
   dialog.addEventListener('close', () => {
     if (dialog.returnValue !== 'save') return;
-    setPref('explorer', dialog.querySelector('#set-exp').value.trim());
     setPref('theme', dialog.querySelector('#set-theme').value);
     setPref('density', dialog.querySelector('#set-den').value);
   });

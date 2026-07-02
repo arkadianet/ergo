@@ -442,7 +442,12 @@ function renderBody() {
         const row = document.createElement('div');
         row.className = 'ov-recent__r';
         const h = document.createElement('span');
-        h.textContent = num(b.height);
+        // Height links into the explorer's block view (deep-linkable).
+        const a = document.createElement('a');
+        a.className = 'ex-link';
+        a.href = `#explorer/block/${b.header_id}`;
+        a.textContent = num(b.height);
+        h.append(a);
         const m = document.createElement('span');
         m.textContent = `${b.txs} tx · ${bytes(b.size_bytes)} · ${dur(Math.floor((Date.now() - b.ts_unix_ms) / 1000))}`;
         row.append(h, m);
