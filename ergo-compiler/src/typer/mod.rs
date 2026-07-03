@@ -20,6 +20,7 @@ use crate::stype::SType;
 
 pub mod assign;
 pub mod methods;
+pub mod predef_ir;
 pub mod unify;
 
 // Re-export the primary public surface for typer consumers.
@@ -28,6 +29,7 @@ pub use methods::{
     container_exists, get_method, global_method, has_method, owner_name_for_type, specialize_for,
     SMethodDesc,
 };
+pub use predef_ir::{predef_ir_builder, predefined_env};
 pub use unify::{
     apply_subst, apply_subst_func, apply_upcast, arith_op, comparison_op, const_downcast,
     const_upcast, equality_op, is_numeric, is_prim_type, msg_type, msg_type_of, numeric_index,

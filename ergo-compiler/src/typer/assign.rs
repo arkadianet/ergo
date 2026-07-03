@@ -6,19 +6,22 @@
 //! Spec: `dev-docs/m2-recon/m2-typer.md` §1.1-1.25, §5, §6 (with the E1
 //! correction from the M2 plan — see below).
 //!
-//! # Scope (M2 Task 5 — structural arms + bimap/bimap2/unmap harness)
+//! # Scope (M2 Tasks 5-6 — structural arms + Apply arms + predef lowering)
 //!
 //! Implemented here (source order matters, first-match): §1.1 Block (E1-lenient),
 //! §1.2 Tuple, §1.3 ConcreteCollection, §1.4 Ident, §1.5 Select (resolver),
-//! §1.6 Lambda, §1.13 If, §1.14 AND/OR, §1.15 relations, §1.16 ArithOp,
-//! §1.17 BitOp, §1.18 Xor/MultiplyGroup, §1.19 Exponentiate, §1.20 ByIndex,
-//! §1.21 SizeOf, §1.22 SigmaProp ops, §1.23 unary, §1.24 passthroughs,
-//! §1.25 fallthrough.  The §6 `bimap`/`bimap2`/`unmap` harness is ported exactly.
+//! §1.6 Lambda, §1.7 Apply(ApplyTypes(Select…)) explicit type args, §1.8
+//! Apply(Select…) method call, §1.9 Apply(Ident) SGlobal method, §1.10 generic
+//! Apply (predef funcs / collection & tuple index), §1.12 ApplyTypes, §1.13 If,
+//! §1.14 AND/OR, §1.15 relations, §1.16 ArithOp, §1.17 BitOp, §1.18
+//! Xor/MultiplyGroup, §1.19 Exponentiate, §1.20 ByIndex, §1.21 SizeOf, §1.22
+//! SigmaProp ops, §1.23 unary, §1.24 passthroughs, §1.25 fallthrough.  The §6
+//! `bimap`/`bimap2`/`unmap` harness and the predef irBuilder lowering table
+//! (`predef_ir.rs`) + method-lowering catalog (`lower_method`) are ported here.
 //!
-//! Deferred to Tasks 6/7 (returned as [`TyperError::NotYetImplemented`], a
-//! grep-able marker — never `todo!`/`unimplemented!`): §1.7-1.10 the Apply arms,
-//! §1.11 MethodCallLike receiver dispatch, §1.12 ApplyTypes, the predef irBuilder
-//! table, and the SGlobal no-arg-property lowering (`groupGenerator`→GroupGenerator).
+//! Deferred to Task 7 (returned as [`TyperError::NotYetImplemented`], a grep-able
+//! marker — never `todo!`/`unimplemented!`): §1.11 MethodCallLike receiver
+//! dispatch (the `* ++ || && + ^ << >> >>>` operators).
 //!
 //! # E1 (CRITICAL) — lenient v6.0.2 Block rule
 //!
@@ -38,13 +41,17 @@
 use crate::span::Pos;
 use crate::stype::SType;
 use crate::typed::{
-    node_tpe, product_prefix, MethodRef, TypedExpr, ARITH_DIVISION, ARITH_MAX, ARITH_MIN,
-    ARITH_MINUS, ARITH_MODULO, ARITH_MULTIPLY, ARITH_PLUS, BIT_AND, BIT_OR, BIT_XOR,
+    node_tpe, product_prefix, ConstPayload, MethodRef, TypedExpr, ARITH_DIVISION, ARITH_MAX,
+    ARITH_MIN, ARITH_MINUS, ARITH_MODULO, ARITH_MULTIPLY, ARITH_PLUS, BIT_AND, BIT_OR, BIT_XOR,
 };
-use crate::typer::methods::{container_exists, get_method, global_method, owner_name_for_type};
+use crate::typer::methods::{
+    container_exists, get_method, global_method, owner_name_for_type, SMethodDesc,
+};
+use crate::typer::predef_ir::predef_ir_builder;
 use crate::typer::unify::{
-    apply_subst_func, arith_op, comparison_op, equality_op, is_numeric, msg_type_of, unify_types,
-    BuildError,
+    apply_subst, apply_subst_func, arith_op, comparison_op, const_downcast, const_upcast,
+    equality_op, is_numeric, msg_type_of, unify_type_lists, unify_types, upcast_to, BuildError,
+    TypeSubst,
 };
 use crate::typer::{coll_elem, is_collection_like, TypeEnv, TyperCtx};
 
@@ -225,14 +232,12 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             ..
         } => assign_lambda(env, tpe_params, args, given_res_type, body, ctx),
 
-        // §1.7-1.10 Apply arms — Task 6.
-        Apply { .. } => Err(TyperError::NotYetImplemented {
-            arm: "Apply (§1.7-1.10, Task 6)",
-        }),
-        // §1.12 ApplyTypes — Task 6.
-        ApplyTypes { .. } => Err(TyperError::NotYetImplemented {
-            arm: "ApplyTypes (§1.12, Task 6)",
-        }),
+        // §1.7-1.10 Apply arms — SigmaTyper.scala:137-300.
+        Apply { func, args, .. } => assign_apply(env, *func, args, ctx),
+        // §1.12 ApplyTypes standalone — SigmaTyper.scala:423-438.
+        ApplyTypes {
+            input, type_args, ..
+        } => assign_apply_types(env, *input, type_args, ctx),
         // §1.11 MethodCallLike receiver dispatch — Task 7.
         MethodCallLike { .. } => Err(TyperError::NotYetImplemented {
             arm: "MethodCallLike (§1.11, Task 7)",
@@ -445,7 +450,13 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             tt(),
         ),
 
-        // §1.24 terminal passthroughs (already typed) — SigmaTyper.scala:524-538
+        // §1.24 terminal passthroughs (already typed) — SigmaTyper.scala:524-538.
+        // These match nodes that arrive already-typed and are returned unchanged.
+        // `GroupGenerator` is now *produced* by §1.9/§1.4 (processGlobalMethod) but
+        // never appears in binder output, so this passthrough is idempotency-only.
+        // `Downcast` likewise: no arm or binder rule constructs it in M2 (numeric
+        // casts stay `Select`), so its passthrough is inert but kept for structural
+        // completeness (matches the Scala `case v: <Node> => v` arms).
         node @ (Height { .. }
         | Self_ { .. }
         | Inputs { .. }
@@ -581,14 +592,12 @@ fn assign_ident(name: &str, env: &TypeEnv, ctx: &TyperCtx) -> Result<TypedExpr, 
     }
     // None -> SGlobalMethods.method(n): a no-arg global property (tDom.length==1,
     // e.g. `groupGenerator` without parens) -> processGlobalMethod
-    // (SigmaTyper.scala:79-82).  The only such method is groupGenerator, whose
-    // custom irBuilder lowers to the dedicated GroupGenerator node — that lowering
-    // (§8.1/§1.9) is Task 6.
+    // (SigmaTyper.scala:79-82).  groupGenerator lowers to the dedicated
+    // GroupGenerator node via processGlobalMethod (§8.1); other no-arg SGlobal
+    // properties fall back to a MethodCall(Global, …).
     if let Some(method) = global_method(name, ctx.tree_version) {
         if method.stype.dom.len() == 1 {
-            return Err(TyperError::NotYetImplemented {
-                arm: "SGlobal no-arg property lowering (groupGenerator, §8.1/§1.9, Task 6)",
-            });
+            return process_global_method(&method, vec![]);
         }
     }
     // else -> error (SigmaTyper.scala:84)
@@ -646,29 +655,13 @@ fn assign_select(
 
     // Node choice (SigmaTyper.scala:108-119).
     if method.has_ir_builder && !t_res_is_func {
-        // Parameter-less property with a lowering builder.
-        //
-        // Task-5 simplification: MethodCallIrBuilder -> MethodCall (the golden
-        // seed shows box/context/avltree/header properties survive as MethodCall,
-        // e.g. `%AvlTree.digest [] {}`).  The narrow set of custom-lowering
-        // properties (SOption.get/isDefined -> OptionGet/OptionIsDefined, etc.),
-        // reachable only via receivers that need the Task-6/7 Apply arms, is
-        // refined there.  Cast methods (toByte..) and SCollection.size have
-        // has_ir_builder=false and take the Select branch below (correct — they
-        // stay Select until GraphBuilding).
-        let owner = owner_name_for_type(&t_obj).ok_or_else(|| {
-            TyperError::typer(format!("No MethodCall owner name for type {t_obj:?}"))
-        })?;
-        Ok(TypedExpr::MethodCall {
-            obj: Box::new(new_obj),
-            method: MethodRef {
-                owner: owner.to_string(),
-                name: field,
-            },
-            args: vec![],
-            type_subst: vec![],
-            tpe: t_res,
-        })
+        // Parameter-less property with a lowering builder.  Custom irBuilders
+        // lower to dedicated nodes (SOption.get -> OptionGet, isDefined ->
+        // OptionIsDefined); every other property survives as MethodCall (the golden
+        // seed shows box/context/avltree/header properties as `%Owner.name [] {}`).
+        // Cast methods (toByte..) and SCollection.size have has_ir_builder=false
+        // and take the Select branch below (they stay Select until GraphBuilding).
+        Ok(lower_method(&t_obj, &field, new_obj, vec![], t_res))
     } else {
         // Select survives: numeric cast methods (no irBuilder) and method-with-args
         // carriers (tRes.isFunc), consumed by an enclosing Apply (Task 6).
@@ -865,6 +858,808 @@ fn assign_byindex(
         default,
         tpe: elem,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §1.7-1.10 Apply arms + §1.12 ApplyTypes (SigmaTyper.scala:137-300, 423-438)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Route an `Apply(func, args)` to the correct arm (source order is load-bearing):
+/// §1.7 `Apply(ApplyTypes(Select…, [T]), …)`, §1.8 `Apply(Select…, …)`,
+/// §1.9 `Apply(Ident, …)` when the ident names a SGlobal method, else §1.10.
+fn assign_apply(
+    env: &TypeEnv,
+    func: TypedExpr,
+    args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    // §1.7 — Apply(ApplyTypes(Select(obj, n, _), Seq(rangeTpe)), args).
+    if let TypedExpr::ApplyTypes {
+        input, type_args, ..
+    } = &func
+    {
+        if type_args.len() == 1 {
+            if let TypedExpr::Select { obj, field, .. } = input.as_ref() {
+                return assign_apply_explicit_method(
+                    env,
+                    obj.as_ref().clone(),
+                    field.clone(),
+                    type_args[0].clone(),
+                    args,
+                    ctx,
+                );
+            }
+        }
+    }
+    // §1.8 — Apply(Select(obj, nOriginal, resType), args).
+    if let TypedExpr::Select {
+        obj,
+        field,
+        res_type,
+        ..
+    } = &func
+    {
+        return assign_apply_select(
+            env,
+            obj.as_ref().clone(),
+            field.clone(),
+            res_type.clone(),
+            args,
+            ctx,
+        );
+    }
+    // §1.9 — Apply(Ident, args) if SGlobalMethods.hasMethod(ident.name).
+    if let TypedExpr::Ident { name, .. } = &func {
+        if let Some(method) = global_method(name, ctx.tree_version) {
+            let new_args = type_all(env, args, ctx)?;
+            return process_global_method(&method, new_args);
+        }
+    }
+    // §1.10 — generic application.
+    assign_apply_generic(env, func, args, ctx)
+}
+
+/// §1.7 `Apply(ApplyTypes(Select(obj, n, _), Seq(rangeTpe)), args)` —
+/// SigmaTyper.scala:137-179 (`obj.m[T](args)` explicit type args on a method).
+fn assign_apply_explicit_method(
+    env: &TypeEnv,
+    obj: TypedExpr,
+    field: String,
+    range_tpe: SType,
+    args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    // getVarFromInput arg-narrow hack (SigmaTyper.scala:139-147): both args are
+    // numeric constants -> (Short, Byte).
+    let n_args = if field == "getVarFromInput"
+        && args.len() == 2
+        && numeric_const_value(&args[0]).is_some()
+        && numeric_const_value(&args[1]).is_some()
+    {
+        vec![
+            short_const(numeric_const_value(&args[0]).unwrap() as i16),
+            byte_const(numeric_const_value(&args[1]).unwrap() as i8),
+        ]
+    } else {
+        args
+    };
+
+    let new_obj = assign_type(env, obj, ctx)?;
+    let t_obj = node_tpe(&new_obj).clone();
+    let new_args = type_all(env, n_args, ctx)?;
+    if !container_exists(&t_obj) {
+        return Err(TyperError::typer(format!(
+            "Cannot get field '{field}' in the object of non-product type {t_obj:?}"
+        )));
+    }
+    let method = get_method(&t_obj, &field, ctx.tree_version).ok_or_else(|| {
+        TyperError::method_not_found(format!(
+            "Cannot find method '{field}' in the object of Product type {t_obj:?}"
+        ))
+    })?;
+    // subst = Map(genFunTpe.tpeParams.head.ident -> rangeTpe) (SigmaTyper.scala:156).
+    let tparam = method.stype.tpe_params.first().ok_or_else(|| {
+        TyperError::typer(format!("Method '{field}' has no type parameter for [T]"))
+    })?;
+    let subst: TypeSubst = std::iter::once((tparam.clone(), range_tpe.clone())).collect();
+    let concr = apply_subst_func(&method.stype, &subst);
+    let expected_args = concr.dom_tail();
+    let actual_types: Vec<SType> = new_args.iter().map(|a| node_tpe(a).clone()).collect();
+    if expected_args.len() != actual_types.len()
+        || !expected_args
+            .iter()
+            .zip(&actual_types)
+            .all(|(ea, na)| *ea == SType::SAny || ea == na)
+    {
+        return Err(TyperError::typer(format!(
+            "For method {field} expected args: {expected_args:?}; actual: {actual_types:?}"
+        )));
+    }
+    if method.has_ir_builder {
+        // Every §1.7-reachable method (some/none/getReg/deserializeTo/
+        // fromBigEndianBytes/getVarFromInput) uses a MethodCallIrBuilder that lifts
+        // to a MethodCall carrying the {T->rangeTpe} substitution (seed §4).
+        let owner = owner_name_for_type(&t_obj).ok_or_else(|| {
+            TyperError::typer(format!("No MethodCall owner name for type {t_obj:?}"))
+        })?;
+        Ok(TypedExpr::MethodCall {
+            obj: Box::new(new_obj),
+            method: MethodRef {
+                owner: owner.to_string(),
+                name: field,
+            },
+            args: new_args,
+            type_subst: vec![(tparam.clone(), range_tpe)],
+            tpe: concr.range,
+        })
+    } else {
+        // mkApply(mkSelect(newObj, n, Some(concrFunTpe)), newArgs).
+        let concr_ty = spec_to_stype(&concr);
+        let sel = TypedExpr::Select {
+            obj: Box::new(new_obj),
+            field,
+            res_type: Some(concr_ty.clone()),
+            tpe: concr_ty,
+        };
+        Ok(TypedExpr::Apply {
+            func: Box::new(sel),
+            args: new_args,
+            tpe: concr.range,
+        })
+    }
+}
+
+/// §1.8 `Apply(Select(obj, nOriginal, resType), args)` — SigmaTyper.scala:181-223
+/// (`obj.m(args)`).
+fn assign_apply_select(
+    env: &TypeEnv,
+    obj: TypedExpr,
+    n_original: String,
+    res_type: Option<SType>,
+    args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    let new_args = type_all(env, args, ctx)?;
+    // exp -> expUnsigned hack (SigmaTyper.scala:188-193).
+    let n = if n_original == "exp"
+        && new_args
+            .first()
+            .is_some_and(|a| matches!(node_tpe(a), SType::SUnsignedBigInt))
+    {
+        "expUnsigned".to_string()
+    } else {
+        n_original
+    };
+    // newSel = assignType(Select(obj, n, resType)) — re-runs §1.5.
+    let sel = TypedExpr::Select {
+        obj: Box::new(obj.clone()),
+        field: n.clone(),
+        res_type,
+        tpe: SType::NoType,
+    };
+    let new_sel = assign_type(env, sel, ctx)?;
+    match node_tpe(&new_sel).clone() {
+        SType::SFunc {
+            dom: arg_types,
+            range: _,
+        } => {
+            let new_obj = assign_type(env, obj, ctx)?;
+            let new_arg_types: Vec<SType> = new_args.iter().map(|a| node_tpe(a).clone()).collect();
+            match unify_type_lists(&arg_types, &new_arg_types) {
+                Some(subst) => {
+                    let concr = apply_subst(node_tpe(&new_sel), &subst);
+                    let (concr_dom, concr_range) = func_parts(&concr);
+                    let t_obj = node_tpe(&new_obj).clone();
+                    match get_method(&t_obj, &n, ctx.tree_version) {
+                        Some(method) if method.has_ir_builder => {
+                            // expectedArgs = concrFunTpe.tDom (receiver already dropped).
+                            if concr_dom.len() != new_arg_types.len()
+                                || !concr_dom
+                                    .iter()
+                                    .zip(&new_arg_types)
+                                    .all(|(ea, na)| *ea == SType::SAny || ea == na)
+                            {
+                                return Err(TyperError::typer(format!(
+                                    "For method {n} expected args: {concr_dom:?}; actual: {new_arg_types:?}"
+                                )));
+                            }
+                            Ok(lower_method(&t_obj, &n, new_obj, new_args, concr_range.clone()))
+                        }
+                        _ => {
+                            // mkApply(mkSelect(newObj, n, Some(concrFunTpe)), newArgs).
+                            let sel2 = TypedExpr::Select {
+                                obj: Box::new(new_obj),
+                                field: n,
+                                res_type: Some(concr.clone()),
+                                tpe: concr,
+                            };
+                            Ok(TypedExpr::Apply {
+                                func: Box::new(sel2),
+                                args: new_args,
+                                tpe: concr_range.clone(),
+                            })
+                        }
+                    }
+                }
+                None => Err(TyperError::typer(format!(
+                    "Invalid argument type of application: expected {arg_types:?}; actual: {new_arg_types:?}"
+                ))),
+            }
+        }
+        // else -> mkApply(newSel, newArgs) (newSel is not a function type).
+        other => {
+            let tpe = apply_result_tpe(&other);
+            Ok(TypedExpr::Apply {
+                func: Box::new(new_sel),
+                args: new_args,
+                tpe,
+            })
+        }
+    }
+}
+
+/// §1.10 `Apply(f, args)` — SigmaTyper.scala:231-300 (generic application:
+/// predefined funcs, collection indexing, tuple indexing).
+fn assign_apply_generic(
+    env: &TypeEnv,
+    f: TypedExpr,
+    args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    let new_f = assign_type(env, f, ctx)?;
+    match node_tpe(&new_f).clone() {
+        // Predefined function application (SigmaTyper.scala:233-259).
+        SType::SFunc { dom, range } => {
+            if args.len() != dom.len() {
+                return Err(TyperError::typer(
+                    "Invalid argument type of application: invalid number of arguments".to_string(),
+                ));
+            }
+            let typed_args = type_all(env, args, ctx)?;
+            let adapted = adapt_apply_args(&new_f, typed_args)?;
+            let actual: Vec<SType> = adapted.iter().map(|a| node_tpe(a).clone()).collect();
+            if unify_type_lists(&dom, &actual).is_none() {
+                return Err(TyperError::typer(format!(
+                    "Invalid argument type of application: expected {dom:?}; actual after typing: {actual:?}"
+                )));
+            }
+            // PredefinedFuncApply post-wrapper (SigmaTyper.scala:297-299).
+            if let TypedExpr::Ident { name, .. } = &new_f {
+                if let Some(res) = predef_ir_builder(name, &new_f, &adapted) {
+                    return res;
+                }
+            }
+            Ok(TypedExpr::Apply {
+                func: Box::new(new_f),
+                args: adapted,
+                tpe: *range,
+            })
+        }
+        // Collection indexing `coll(i)` (SigmaTyper.scala:261-277).
+        SType::SColl(elem) => assign_collection_index(env, new_f, args, *elem, ctx),
+        // Tuple indexing `tup(i)` (SigmaTyper.scala:278-294).
+        SType::STuple(items) => assign_tuple_index(env, new_f, args, items, ctx),
+        other => Err(TyperError::typer(format!(
+            "Invalid array application: array type is expected but was {other:?}"
+        ))),
+    }
+}
+
+/// Collection application `coll(i)` (SigmaTyper.scala:261-277).
+fn assign_collection_index(
+    env: &TypeEnv,
+    new_f: TypedExpr,
+    mut args: Vec<TypedExpr>,
+    elem: SType,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    if args.len() != 1 {
+        return Err(TyperError::typer(
+            "Invalid argument of array application: expected integer value".to_string(),
+        ));
+    }
+    let index = args.pop().unwrap();
+    // Seq(c @ Constant(index, _: SNumericType)) -> IntConstant(SInt.upcast(index)).
+    if let Some((payload, ctype)) = numeric_constant_parts(&index) {
+        let folded = const_upcast(&payload, &ctype, &SType::SInt, ctx.tree_version)
+            .map_err(build_to_typer)?;
+        return Ok(TypedExpr::ByIndex {
+            input: Box::new(new_f),
+            index: Box::new(TypedExpr::Constant {
+                value: folded,
+                tpe: SType::SInt,
+            }),
+            default: None,
+            tpe: elem,
+        });
+    }
+    // Seq(index) -> typedIndex.upcastTo(SInt) if numeric, else error.
+    let typed_index = assign_type(env, index, ctx)?;
+    if !is_numeric(node_tpe(&typed_index)) {
+        return Err(TyperError::typer(format!(
+            "Invalid argument type of array application: expected numeric type; actual: {:?}",
+            node_tpe(&typed_index)
+        )));
+    }
+    let idx = upcast_to(typed_index, &SType::SInt).map_err(build_to_typer)?;
+    Ok(TypedExpr::ByIndex {
+        input: Box::new(new_f),
+        index: Box::new(idx),
+        default: None,
+        tpe: elem,
+    })
+}
+
+/// Tuple application `tup(i)` (SigmaTyper.scala:278-294).
+fn assign_tuple_index(
+    env: &TypeEnv,
+    new_f: TypedExpr,
+    mut args: Vec<TypedExpr>,
+    items: Vec<SType>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    if args.len() != 1 {
+        return Err(TyperError::typer(
+            "Invalid argument of tuple application: expected integer value".to_string(),
+        ));
+    }
+    let index = args.pop().unwrap();
+    // Seq(Constant(index, _: SNumericType)) -> SelectField(tup, SByte.downcast(index)+1).
+    if let Some((payload, ctype)) = numeric_constant_parts(&index) {
+        let narrowed = const_downcast(&payload, &ctype, &SType::SByte, ctx.tree_version)
+            .map_err(build_to_typer)?;
+        let byte_idx = match narrowed {
+            ConstPayload::Byte(v) => v,
+            _ => unreachable!("const_downcast to SByte yields a Byte payload"),
+        };
+        let field_index = byte_idx as i16 + 1; // 1-based
+        if field_index < 1 || field_index as usize > items.len() {
+            return Err(TyperError::typer(format!(
+                "Invalid tuple field index {field_index} for tuple of arity {}",
+                items.len()
+            )));
+        }
+        let tpe = items[(field_index as usize) - 1].clone();
+        return Ok(TypedExpr::SelectField {
+            input: Box::new(new_f),
+            field_index: field_index as i8,
+            tpe,
+        });
+    }
+    // Seq(index) non-const -> mkByIndex(new_f.asCollection[SAny], upcastTo(SInt), None).
+    let typed_index = assign_type(env, index, ctx)?;
+    if !is_numeric(node_tpe(&typed_index)) {
+        return Err(TyperError::typer(format!(
+            "Invalid argument type of tuple application: expected numeric type; actual: {:?}",
+            node_tpe(&typed_index)
+        )));
+    }
+    let idx = upcast_to(typed_index, &SType::SInt).map_err(build_to_typer)?;
+    Ok(TypedExpr::ByIndex {
+        input: Box::new(new_f),
+        index: Box::new(idx),
+        default: None,
+        tpe: SType::SAny,
+    })
+}
+
+/// §1.12 `ApplyTypes(input, targs)` — SigmaTyper.scala:423-438 (standalone `f[T]`).
+fn assign_apply_types(
+    env: &TypeEnv,
+    input: TypedExpr,
+    type_args: Vec<SType>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    let new_input = assign_type(env, input, ctx)?;
+    match node_tpe(&new_input).clone() {
+        SType::SFunc { dom, range } => {
+            // tpeParams recovered as the free type vars of the SFunc, in
+            // first-appearance order (our SType::SFunc has no tpeParams slot).
+            let tpe_params = free_type_vars(&dom, &range);
+            if tpe_params.len() != type_args.len() {
+                return Err(TyperError::typer(format!(
+                    "Wrong number of type arguments: expected {tpe_params:?} but provided {type_args:?}. \
+                     Note that partial application of type parameters is not supported."
+                )));
+            }
+            let subst: TypeSubst = tpe_params.into_iter().zip(type_args).collect();
+            let concr = apply_subst(node_tpe(&new_input), &subst);
+            match new_input {
+                TypedExpr::Select { obj, field, .. } => {
+                    // mkSelect(obj, n, Some(concrFunTpe.tRange)).
+                    let (_, concr_range) = func_parts(&concr);
+                    let r = concr_range.clone();
+                    Ok(TypedExpr::Select {
+                        obj,
+                        field,
+                        res_type: Some(r.clone()),
+                        tpe: r,
+                    })
+                }
+                TypedExpr::Ident { name, .. } => {
+                    // mkIdent(name, concrFunTpe).
+                    Ok(TypedExpr::Ident { name, tpe: concr })
+                }
+                other => Err(TyperError::typer(format!(
+                    "Invalid application of type arguments: unexpected input {}",
+                    product_prefix(&other)
+                ))),
+            }
+        }
+        _ => Err(TyperError::typer(
+            "Invalid application of type arguments: function doesn't have type parameters"
+                .to_string(),
+        )),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// processGlobalMethod (§8.1) + the method-lowering catalog
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `processGlobalMethod(srcCtx, method, args)` — SigmaTyper.scala:38-48.
+/// groupGenerator -> GroupGenerator, xor -> Xor (their custom irBuilders), all
+/// other SGlobal methods fall back to MethodCall(Global, …).
+fn process_global_method(
+    method: &SMethodDesc,
+    args: Vec<TypedExpr>,
+) -> Result<TypedExpr, TyperError> {
+    match method.name {
+        "groupGenerator" if args.is_empty() => Ok(TypedExpr::GroupGenerator {
+            tpe: SType::SGroupElement,
+        }),
+        "xor" if args.len() == 2 => {
+            let mut it = args.into_iter();
+            let left = it.next().unwrap();
+            let right = it.next().unwrap();
+            Ok(TypedExpr::Xor {
+                left: Box::new(left),
+                right: Box::new(right),
+                tpe: SType::SColl(Box::new(SType::SByte)),
+            })
+        }
+        _ => Ok(TypedExpr::MethodCall {
+            obj: Box::new(TypedExpr::Global {
+                tpe: SType::SGlobal,
+            }),
+            method: MethodRef {
+                owner: "SigmaDslBuilder".to_string(),
+                name: method.name.to_string(),
+            },
+            args,
+            type_subst: vec![],
+            tpe: method.stype.range.clone(),
+        }),
+    }
+}
+
+/// The shared method/property irBuilder lowering catalog.
+///
+/// Maps custom-irBuilder methods to their dedicated typed nodes; everything else
+/// (MethodCallIrBuilder) falls back to `MethodCall(obj, %Owner.name, args, {})`.
+/// Keyed on `(receiver type, method name)` — receiver-specific because e.g.
+/// `SCollection.map` lowers to `MapCollection` while `SOption.map` survives as a
+/// MethodCall (seed line 21 vs 107).  `ret` is the method's specialized return
+/// type.  Used by §1.5 (properties, `args = []`) and §1.8 (methods with args).
+fn lower_method(
+    recv: &SType,
+    name: &str,
+    obj: TypedExpr,
+    args: Vec<TypedExpr>,
+    ret: SType,
+) -> TypedExpr {
+    let b = Box::new;
+    let mut it = args.clone().into_iter();
+    match (recv, name) {
+        // ── SOption custom irBuilders ─────────────────────────────────────────
+        (SType::SOption(_), "get") => TypedExpr::OptionGet {
+            input: b(obj),
+            tpe: ret,
+        },
+        (SType::SOption(_), "isDefined") => TypedExpr::OptionIsDefined {
+            input: b(obj),
+            tpe: ret,
+        },
+        (SType::SOption(_), "getOrElse") => TypedExpr::OptionGetOrElse {
+            input: b(obj),
+            default: b(it.next().expect("getOrElse arg")),
+            tpe: ret,
+        },
+        // ── SCollection custom irBuilders ─────────────────────────────────────
+        (SType::SColl(_), "map") => TypedExpr::MapCollection {
+            input: b(obj),
+            mapper: b(it.next().expect("map arg")),
+            tpe: ret,
+        },
+        (SType::SColl(_), "filter") => TypedExpr::Filter {
+            input: b(obj),
+            condition: b(it.next().expect("filter arg")),
+            tpe: ret,
+        },
+        (SType::SColl(_), "exists") => TypedExpr::Exists {
+            input: b(obj),
+            condition: b(it.next().expect("exists arg")),
+            tpe: ret,
+        },
+        (SType::SColl(_), "forall") => TypedExpr::ForAll {
+            input: b(obj),
+            condition: b(it.next().expect("forall arg")),
+            tpe: ret,
+        },
+        (SType::SColl(_), "fold") => {
+            let zero = it.next().expect("fold zero");
+            let fold_op = it.next().expect("fold op");
+            TypedExpr::Fold {
+                input: b(obj),
+                zero: b(zero),
+                fold_op: b(fold_op),
+                tpe: ret,
+            }
+        }
+        (SType::SColl(_), "slice") => {
+            let from = it.next().expect("slice from");
+            let until = it.next().expect("slice until");
+            TypedExpr::Slice {
+                input: b(obj),
+                from: b(from),
+                until: b(until),
+                tpe: ret,
+            }
+        }
+        (SType::SColl(_), "append") => TypedExpr::Append {
+            input: b(obj),
+            col2: b(it.next().expect("append arg")),
+            tpe: ret,
+        },
+        (SType::SColl(_), "getOrElse") => {
+            let index = it.next().expect("getOrElse index");
+            let default = it.next().expect("getOrElse default");
+            TypedExpr::ByIndex {
+                input: b(obj),
+                index: b(index),
+                default: Some(b(default)),
+                tpe: ret,
+            }
+        }
+        // ── SGroupElement custom irBuilders ──────────────────────────────────
+        (SType::SGroupElement, "exp") => TypedExpr::Exponentiate {
+            left: b(obj),
+            right: b(it.next().expect("exp arg")),
+            tpe: ret,
+        },
+        (SType::SGroupElement, "multiply") => TypedExpr::MultiplyGroup {
+            left: b(obj),
+            right: b(it.next().expect("multiply arg")),
+            tpe: ret,
+        },
+        // ── everything else: MethodCall(obj, %Owner.name, args, {}) ──────────
+        _ => {
+            let owner = owner_name_for_type(recv).unwrap_or("?");
+            TypedExpr::MethodCall {
+                obj: b(obj),
+                method: MethodRef {
+                    owner: owner.to_string(),
+                    name: name.to_string(),
+                },
+                args,
+                type_subst: vec![],
+                tpe: ret,
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// arg adaptation (§8.3 adaptSigmaPropToBoolean + getVar-family narrowing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// §1.10 arg adaptation (SigmaTyper.scala:241-252): allOf/anyOf coerce SigmaProp
+/// elements to Boolean; getVar/executeFromVar/getVarFromInput narrow constant ids.
+fn adapt_apply_args(
+    new_f: &TypedExpr,
+    typed_args: Vec<TypedExpr>,
+) -> Result<Vec<TypedExpr>, TyperError> {
+    let name = match new_f {
+        TypedExpr::Ident { name, .. } => name.as_str(),
+        _ => return Ok(typed_args),
+    };
+    match name {
+        "allOf" | "anyOf" => {
+            // adaptSigmaPropToBoolean(typedArgs, argTypes) with argTypes = [Coll[Bool]].
+            adapt_sigma_prop_to_boolean(typed_args, &[SType::SColl(Box::new(SType::SBoolean))])
+        }
+        "getVar" | "executeFromVar"
+            if typed_args.len() == 1 && numeric_const_value(&typed_args[0]).is_some() =>
+        {
+            let id = numeric_const_value(&typed_args[0]).unwrap();
+            Ok(vec![byte_const(id as i8)])
+        }
+        "getVarFromInput"
+            if typed_args.len() == 2
+                && numeric_const_value(&typed_args[0]).is_some()
+                && numeric_const_value(&typed_args[1]).is_some() =>
+        {
+            let input_id = numeric_const_value(&typed_args[0]).unwrap();
+            let var_id = numeric_const_value(&typed_args[1]).unwrap();
+            Ok(vec![short_const(input_id as i16), byte_const(var_id as i8)])
+        }
+        _ => Ok(typed_args),
+    }
+}
+
+/// `adaptSigmaPropToBoolean(items, expectedTypes)` — SigmaTyper.scala:558-567.
+fn adapt_sigma_prop_to_boolean(
+    items: Vec<TypedExpr>,
+    expected: &[SType],
+) -> Result<Vec<TypedExpr>, TyperError> {
+    let bool_array = SType::SColl(Box::new(SType::SBoolean));
+    let mut out = Vec::with_capacity(items.len());
+    for (i, it) in items.into_iter().enumerate() {
+        let exp = expected.get(i);
+        match (it, exp) {
+            // (cc: ConcreteCollection, SBooleanArray) -> recurse + finalize.
+            (
+                TypedExpr::ConcreteCollection {
+                    items: inner_items, ..
+                },
+                Some(e),
+            ) if *e == bool_array => {
+                let filled = vec![SType::SBoolean; inner_items.len()];
+                let adapted = adapt_sigma_prop_to_boolean(inner_items, &filled)?;
+                out.push(finalize_collection(adapted)?);
+            }
+            // (it, SBoolean) where it.tpe == SSigmaProp -> SigmaPropIsProven(it).
+            (it, Some(e)) if *e == SType::SBoolean && *node_tpe(&it) == SType::SSigmaProp => {
+                out.push(TypedExpr::SigmaPropIsProven {
+                    input: Box::new(it),
+                    tpe: SType::SBoolean,
+                });
+            }
+            (it, _) => out.push(it),
+        }
+    }
+    Ok(out)
+}
+
+/// `assignConcreteCollection(cc, items)` over ALREADY-TYPED items (no re-typing) —
+/// SigmaTyper.scala:545-556.  Computes the element type via msgTypeOf.
+fn finalize_collection(items: Vec<TypedExpr>) -> Result<TypedExpr, TyperError> {
+    let mut types: Vec<SType> = Vec::new();
+    for it in &items {
+        let t = node_tpe(it).clone();
+        if !types.contains(&t) {
+            types.push(t);
+        }
+    }
+    let t_item = if items.is_empty() {
+        return Err(TyperError::typer(
+            "Undefined type of empty collection".to_string(),
+        ));
+    } else {
+        msg_type_of(&types).ok_or_else(|| {
+            TyperError::typer(format!(
+                "All element of array should have the same type but found {types:?}"
+            ))
+        })?
+    };
+    Ok(TypedExpr::ConcreteCollection {
+        tpe: SType::SColl(Box::new(t_item.clone())),
+        items,
+        elem_type: t_item,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// small helpers for the Apply arms
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Numeric value of a numeric `Constant` (Byte/Short/Int/Long), else `None`.
+fn numeric_const_value(e: &TypedExpr) -> Option<i64> {
+    numeric_constant_parts(e).map(|(payload, _)| match payload {
+        ConstPayload::Byte(v) => v as i64,
+        ConstPayload::Short(v) => v as i64,
+        ConstPayload::Int(v) => v as i64,
+        ConstPayload::Long(v) => v,
+        _ => unreachable!("numeric_constant_parts only yields numeric payloads"),
+    })
+}
+
+/// `(payload, type)` of a numeric `Constant` (Byte/Short/Int/Long/BigInt), else
+/// `None`.  Mirrors the `Constant(index, _: SNumericType)` match arms.
+fn numeric_constant_parts(e: &TypedExpr) -> Option<(ConstPayload, SType)> {
+    match e {
+        TypedExpr::Constant { value, tpe } => match value {
+            ConstPayload::Byte(_)
+            | ConstPayload::Short(_)
+            | ConstPayload::Int(_)
+            | ConstPayload::Long(_)
+            | ConstPayload::BigInt(_) => Some((value.clone(), tpe.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn byte_const(v: i8) -> TypedExpr {
+    TypedExpr::Constant {
+        value: ConstPayload::Byte(v),
+        tpe: SType::SByte,
+    }
+}
+
+fn short_const(v: i16) -> TypedExpr {
+    TypedExpr::Constant {
+        value: ConstPayload::Short(v),
+        tpe: SType::SShort,
+    }
+}
+
+/// Destructure an `SType::SFunc` into `(dom, range)`; empty/NoType for non-funcs.
+fn func_parts(t: &SType) -> (Vec<SType>, SType) {
+    match t {
+        SType::SFunc { dom, range } => (dom.clone(), (**range).clone()),
+        _ => (vec![], SType::NoType),
+    }
+}
+
+/// Convert an `SFuncSpec` to the `SType::SFunc` shape (tpeParams dropped — our
+/// `SType::SFunc` has no slot; the free type vars still live in dom/range).
+fn spec_to_stype(spec: &crate::typer::unify::SFuncSpec) -> SType {
+    SType::SFunc {
+        dom: spec.dom.clone(),
+        range: Box::new(spec.range.clone()),
+    }
+}
+
+/// `mkApply` result type: the callee's `SFunc` range, else `NoType` (the global
+/// post-condition then rejects — matching Scala's `Apply.tpe`).
+fn apply_result_tpe(func_tpe: &SType) -> SType {
+    match func_tpe {
+        SType::SFunc { range, .. } => (**range).clone(),
+        _ => SType::NoType,
+    }
+}
+
+/// Free type variables of an `SFunc(dom, range)` in first-appearance order.
+/// Recovers the `tpeParams` that `SType::SFunc` cannot carry, for §1.12.
+fn free_type_vars(dom: &[SType], range: &SType) -> Vec<String> {
+    let mut acc = Vec::new();
+    for d in dom {
+        collect_type_vars(d, &mut acc);
+    }
+    collect_type_vars(range, &mut acc);
+    acc
+}
+
+fn collect_type_vars(t: &SType, acc: &mut Vec<String>) {
+    match t {
+        SType::STypeVar(n) if !acc.contains(n) => acc.push(n.clone()),
+        SType::STypeVar(_) => {}
+        SType::SColl(e) | SType::SOption(e) => collect_type_vars(e, acc),
+        SType::STuple(items) => {
+            for i in items {
+                collect_type_vars(i, acc);
+            }
+        }
+        SType::SFunc { dom, range } => {
+            for d in dom {
+                collect_type_vars(d, acc);
+            }
+            collect_type_vars(range, acc);
+        }
+        SType::STypeApply { args, .. } => {
+            for a in args {
+                collect_type_vars(a, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Map a builder-layer error to a typer exception (the `mkByIndex`/`upcastTo`
+/// paths are outside `bimap`, so their throws surface as generic rejections).
+fn build_to_typer(be: BuildError) -> TyperError {
+    TyperError::typer(format!("{be:?}"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1105,10 +1900,12 @@ fn type_all(
 mod tests {
     use super::*;
     use crate::binder::bind;
-    use crate::env::ScriptEnv;
+    use crate::env::{EnvValue, ScriptEnv};
     use crate::parse::parse;
     use crate::typed::ConstPayload;
     use crate::typed_print::print_typed;
+    use crate::typer::predef_ir::predefined_env;
+    use ergo_primitives::group_element::GroupElement;
     use ergo_ser::address::NetworkPrefix;
 
     // ----- helpers -----
@@ -1117,27 +1914,64 @@ mod tests {
         TyperCtx::new(3)
     }
 
+    /// The base typer env: predefined func names (`predefinedEnv`) plus any test
+    /// overlay entries (mirrors `predefFuncs ++ typeEnv`, SigmaTyper.scala:33-36).
     fn tenv(entries: &[(&str, SType)]) -> TypeEnv {
-        entries
-            .iter()
-            .map(|(n, t)| ((*n).to_string(), t.clone()))
-            .collect()
+        let mut env = predefined_env(3);
+        for (n, t) in entries {
+            env.insert((*n).to_string(), t.clone());
+        }
+        env
     }
 
-    /// parse -> bind (empty ScriptEnv, testnet) -> assign_type(tenv) -> Result.
-    fn type_env_res(src: &str, env: &TypeEnv) -> Result<TypedExpr, TyperError> {
+    /// The oracle `tce` demo binder env: a,b:Coll[Byte]; col1,col2:Coll[Long];
+    /// g1,g2:GroupElement; n1:BigInt; bb1,bb2:Byte (TyperOracle.scala:112-126).
+    fn demo_script_env() -> ScriptEnv {
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x02;
+        let x = hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .expect("valid hex");
+        bytes[1..].copy_from_slice(&x);
+        let ge = GroupElement::from_bytes(bytes);
+        let mut env = ScriptEnv::new();
+        env.insert("a", EnvValue::ByteArray(vec![1, 2]));
+        env.insert("b", EnvValue::ByteArray(vec![3, 4]));
+        env.insert("col1", EnvValue::LongArray(vec![1, 2]));
+        env.insert("col2", EnvValue::LongArray(vec![3, 4]));
+        env.insert("g1", EnvValue::GroupElement(ge));
+        env.insert("g2", EnvValue::GroupElement(ge));
+        env.insert("n1", EnvValue::BigInt("5".to_string()));
+        env.insert("bb1", EnvValue::Byte(1));
+        env.insert("bb2", EnvValue::Byte(2));
+        env
+    }
+
+    /// parse -> bind (`script_env`, testnet) -> assign_type(`env` + predef) -> Result.
+    fn type_res(src: &str, script_env: &ScriptEnv, env: &TypeEnv) -> Result<TypedExpr, TyperError> {
         let ast = parse(src, 3).expect("parse must succeed");
-        let bound = bind(&ScriptEnv::new(), &ast, NetworkPrefix::Testnet, 3).expect("bind ok");
+        let bound = bind(script_env, &ast, NetworkPrefix::Testnet, 3).expect("bind ok");
         assign_type(env, bound, &ctx())
     }
 
-    /// Empty typer env, print the typed tree.
+    /// `tc`: empty binder env, predefined typer env.
+    fn type_env_res(src: &str, env: &TypeEnv) -> Result<TypedExpr, TyperError> {
+        type_res(src, &ScriptEnv::new(), env)
+    }
+
+    /// `tc` (empty env) — print the typed tree.
     fn type_tc(src: &str) -> String {
-        print_typed(&type_env_res(src, &TypeEnv::new()).expect("typecheck must succeed"))
+        print_typed(&type_env_res(src, &tenv(&[])).expect("typecheck must succeed"))
+    }
+
+    /// `tce` (demo env) — print the typed tree.
+    fn type_tce(src: &str) -> String {
+        print_typed(
+            &type_res(src, &demo_script_env(), &tenv(&[])).expect("typecheck (tce) must succeed"),
+        )
     }
 
     fn type_err(src: &str) -> TyperError {
-        type_env_res(src, &TypeEnv::new()).expect_err("typecheck must fail")
+        type_env_res(src, &tenv(&[])).expect_err("typecheck must fail")
     }
 
     /// Look up the committed OK-line for `source` in the golden seed (compile-time
@@ -1550,9 +2384,10 @@ mod tests {
         assert_eq!(err.class_tag(), "TyperException");
     }
 
-    // ----- oracle parity — out-of-scope handoff markers (Tasks 6/7) -----
+    // ----- oracle parity — Task-7 handoff marker (MethodCallLike only) -----
 
-    /// §1.11: a MethodCallLike (`+`, `*`, `++`, `&&`, …) is Task 7.
+    /// §1.11: a MethodCallLike (`+`, `*`, `++`, `&&`, …) is Task 7.  This is the
+    /// ONLY remaining NotYetImplemented arm after Task 6.
     #[test]
     fn method_call_like_input_is_not_yet_implemented() {
         // `1 + 2` binds to MethodCallLike("+").
@@ -1564,17 +2399,20 @@ mod tests {
         assert_eq!(err.class_tag(), "NotYetImplemented");
     }
 
-    /// §1.7-1.10: an Apply is Task 6.
+    /// §1.10: an Apply whose callee is unbound (not env/predef) errors at the
+    /// callee Ident, NOT NotYetImplemented (SigmaTyper.scala:232 → §1.4).
     #[test]
-    fn apply_input_is_not_yet_implemented() {
-        // `f(1)` with f unbound binds to Apply(Ident(f), [1]).
+    fn apply_unbound_callee_errors_typer_exception() {
+        // `f(1)` with f unbound binds to Apply(Ident(f), [1]); new_f resolution
+        // fails in §1.4.
         let err = type_err("f(1)");
-        assert!(matches!(err, TyperError::NotYetImplemented { .. }));
+        assert_eq!(err.class_tag(), "TyperException");
     }
 
-    /// §1.12: an ApplyTypes is Task 6.
+    /// §1.12: partial type-argument application is rejected (SigmaTyper.scala:427-429).
     #[test]
-    fn apply_types_input_is_not_yet_implemented() {
+    fn apply_types_partial_application_errors() {
+        // f: SFunc with NO type params; providing [Long] is a partial application.
         let node = TypedExpr::ApplyTypes {
             input: Box::new(TypedExpr::Ident {
                 name: "f".to_string(),
@@ -1584,24 +2422,321 @@ mod tests {
                 },
             }),
             type_args: vec![SType::SLong],
-            tpe: SType::SFunc {
+            tpe: SType::NoType,
+        };
+        let env = tenv(&[(
+            "f",
+            SType::SFunc {
                 dom: vec![],
                 range: Box::new(SType::SLong),
             },
-        };
-        let err = assign_type(&TypeEnv::new(), node, &ctx()).expect_err("fail");
-        assert!(matches!(err, TyperError::NotYetImplemented { .. }));
+        )]);
+        let err = assign_type(&env, node, &ctx()).expect_err("fail");
+        assert_eq!(err.class_tag(), "TyperException");
     }
 
-    /// §1.4/§8.1: a bare `groupGenerator` (no-arg SGlobal property) needs the
-    /// Task-6 GroupGenerator lowering.
+    /// §1.4/§8.1: a bare `groupGenerator` (no-arg SGlobal property) lowers to the
+    /// dedicated GroupGenerator node (E3).  Oracle: `(GroupGenerator:GroupElement)`.
     #[test]
-    fn bare_group_generator_is_not_yet_implemented() {
-        let err = type_err("groupGenerator");
-        assert!(
-            matches!(err, TyperError::NotYetImplemented { .. }),
-            "{err:?}"
+    fn bare_group_generator_lowers_to_group_generator_node() {
+        let typed = type_env_res("groupGenerator", &tenv(&[])).expect("types");
+        assert!(matches!(typed, TypedExpr::GroupGenerator { .. }));
+        assert_eq!(print_typed(&typed), "(GroupGenerator:GroupElement)");
+    }
+
+    // ----- oracle parity — Task-6 accept byte-parity sweep (file-driven) -----
+
+    /// Sources that remain Task-7 (MethodCallLike operators) or carry a documented
+    /// M2 rendering deviation (PK), excluded from the byte-parity sweep.
+    const SWEEP_SKIP: &[&str] = &[
+        // §1.11 MethodCallLike (`* ++ || && + ^ << >> >>>`) — Task 7.
+        "1L + 1",
+        "1.toByte + 2.toByte",
+        "true && (1 == 1)",
+        "HEIGHT>5 && HEIGHT<9",
+        "a ++ b",
+        "\"ab\" + \"cd\"",
+        // PK renders ProveDlog with an M2 hex placeholder (deviation; see typed.rs).
+        "PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")",
+        // Records embedding a demo-env GroupElement CONSTANT (g1/g2): env.rs `lift`
+        // renders the 33-byte key as an M2 hex placeholder, not the oracle's
+        // decompressed `Ecp (x,y,1)` form (documented deviation, M3).  Their
+        // LOWERING is verified structurally instead (see the per-arm tests below).
+        "proveDlog(g1)",
+        "atLeast(1, Coll(proveDlog(g1)))",
+        "allOf(Coll(proveDlog(g1)))",
+        "g1.exp(n1)",
+        "g1.negate",
+        "g1.multiply(g2)",
+        "proveDHTuple(g1, g2, g1, g2)",
+    ];
+
+    /// Every in-scope ACCEPT record in the golden seed (tc + tce) types end-to-end
+    /// (parse -> bind -> assignType -> print) to the byte-exact oracle string.
+    /// This sweeps ALL previously-NYI-blocked records that Task 6 now enables
+    /// (§1/§4/§7/§9/§12 predef lowerings, method calls, indexing) plus the Task-5
+    /// structural records — the whole accept surface minus the Task-7 SKIP set.
+    #[test]
+    fn seed_accept_records_byte_match_oracle_v3() {
+        let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
+        let mut checked = 0usize;
+        for line in seed.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+            let (verb, src, expected) = (parts[0], parts[1], parts[2]);
+            let Some(sexpr) = expected.strip_prefix("OK ") else {
+                continue; // REJECT/ERR records handled elsewhere
+            };
+            if SWEEP_SKIP.contains(&src) {
+                continue;
+            }
+            let got = match verb {
+                "tc" => type_tc(src),
+                "tce" => type_tce(src),
+                _ => continue,
+            };
+            assert_eq!(got, sexpr, "byte-parity mismatch for {verb} {src:?}");
+            checked += 1;
+        }
+        // Guard: the sweep must actually exercise a substantial set.
+        assert!(checked >= 45, "swept only {checked} accept records");
+    }
+
+    /// §6 v2-gate rejects: the same explicit-type-arg SGlobal method calls that
+    /// accept at v3 (§4) reject with `MethodNotFound` at tree_version 2 (the method
+    /// container has no v6 methods).  Verifies the §1.7 getMethod-None path.
+    #[test]
+    fn v2_gated_global_methods_reject_method_not_found() {
+        fn type_v2(src: &str, script_env: &ScriptEnv) -> TyperError {
+            let ast = parse(src, 2).expect("parse");
+            let bound = bind(script_env, &ast, NetworkPrefix::Testnet, 2).expect("bind");
+            assign_type(&predefined_env(2), bound, &TyperCtx::new(2)).expect_err("v2 rejects")
+        }
+        let demo = demo_script_env();
+        for (src, se) in [
+            ("Global.fromBigEndianBytes[Long](a)", &demo),
+            ("Global.deserializeTo[Long](a)", &demo),
+        ] {
+            assert_eq!(type_v2(src, se).class_tag(), "MethodNotFound", "{src}");
+        }
+        assert_eq!(
+            type_v2("Global.none[Int]()", &ScriptEnv::new()).class_tag(),
+            "MethodNotFound"
         );
+    }
+
+    // ----- per-arm units — Apply arms (v6.0.2 SigmaTyper.scala cites inline) -----
+
+    /// §1.7: `SELF.getReg[Long](4)` -> MethodCall with the {T->Long} subst
+    /// (SigmaTyper.scala:137-179).
+    #[test]
+    fn apply_explicit_type_arg_method_is_method_call() {
+        let typed = type_env_res("SELF.getReg[Long](4)", &tenv(&[])).expect("types");
+        assert_eq!(
+            print_typed(&typed),
+            "(MethodCall:Option[Long] (Self:Box) %Box.getReg [(ConstantNode:Int @4)] {#T->#Long})"
+        );
+    }
+
+    /// §1.8 exp-overload: `g.exp(ubi)` renames to expUnsigned when the arg is
+    /// UnsignedBigInt (SigmaTyper.scala:188-193) -> MethodCall on expUnsigned.
+    #[test]
+    fn apply_select_exp_overload_renames_to_exp_unsigned() {
+        // A UnsignedBigInt-typed receiver arg via a seeded env (u: UnsignedBigInt).
+        let env = tenv(&[("g", SType::SGroupElement), ("u", SType::SUnsignedBigInt)]);
+        let typed = type_env_res("g.exp(u)", &env).expect("types");
+        // expUnsigned has no dedicated lowering -> survives as MethodCall.
+        match &typed {
+            TypedExpr::MethodCall { method, .. } => {
+                assert_eq!(method.name, "expUnsigned");
+                assert_eq!(method.owner, "GroupElement");
+            }
+            other => panic!("expected MethodCall expUnsigned, got {other:?}"),
+        }
+    }
+
+    /// §1.8: a method-with-args MethodCall survivor via Apply(Select) — `col1.zip`.
+    #[test]
+    fn apply_select_method_survives_as_method_call() {
+        let typed = type_tce("col1.zip(col2)");
+        assert_eq!(typed, seed_expected("col1.zip(col2)"));
+        assert!(typed.contains("%SCollection.zip"));
+    }
+
+    /// §1.9: `xor(a, b)` lowers to the dedicated Xor node (E3), NOT a MethodCall.
+    #[test]
+    fn apply_ident_xor_lowers_to_xor_node() {
+        let typed = type_res("xor(a, b)", &demo_script_env(), &tenv(&[])).expect("types");
+        assert!(matches!(typed, TypedExpr::Xor { .. }));
+    }
+
+    /// §1.10: collection const index folds to IntConstant; non-const upcasts to Int.
+    #[test]
+    fn apply_collection_index_const_and_non_const() {
+        // const 0 -> ByIndex with IntConstant(0), no Upcast.
+        assert_eq!(
+            type_tc("Coll(1, 2, 3)(0)"),
+            seed_expected("Coll(1, 2, 3)(0)")
+        );
+        // non-const Byte index i -> Upcast:Int.
+        let src = "{ val i = 1.toByte; Coll(1, 2, 3)(i) }";
+        assert_eq!(type_tc(src), seed_expected(src));
+    }
+
+    /// §1.10: tuple const index -> 1-based SelectField (SigmaTyper.scala:281-283).
+    #[test]
+    fn apply_tuple_index_const_is_select_field_one_based() {
+        assert_eq!(type_tc("(1, 2L)(1)"), seed_expected("(1, 2L)(1)"));
+        assert_eq!(
+            type_tc("(1, 2L, HEIGHT)(2)"),
+            seed_expected("(1, 2L, HEIGHT)(2)")
+        );
+    }
+
+    /// §1.12: standalone `getVar[Int]` -> `Ident:(Byte) => Option[Int] 'getVar'`.
+    #[test]
+    fn apply_types_standalone_ident_substitutes_range() {
+        assert_eq!(type_tc("getVar[Int]"), seed_expected("getVar[Int]"));
+    }
+
+    /// §8.3 adaptSigmaPropToBoolean (nested): `allOf(Coll(proveDlog(g1)))` wraps the
+    /// SigmaProp element in SigmaPropIsProven then re-finalizes the Coll[Boolean]
+    /// (SigmaTyper.scala:558-567).  Structural check (the embedded GroupElement
+    /// constant renders with an M2 hex placeholder — see SWEEP_SKIP).
+    #[test]
+    fn adapt_sigma_prop_to_boolean_nested_wraps_is_proven() {
+        let typed =
+            type_res("allOf(Coll(proveDlog(g1)))", &demo_script_env(), &tenv(&[])).expect("types");
+        // allOf -> AND over a Coll[Boolean] whose sole item is SigmaPropIsProven(...).
+        match &typed {
+            TypedExpr::AND { input, .. } => match input.as_ref() {
+                TypedExpr::ConcreteCollection {
+                    items, elem_type, ..
+                } => {
+                    assert_eq!(*elem_type, SType::SBoolean);
+                    assert!(matches!(items[0], TypedExpr::SigmaPropIsProven { .. }));
+                }
+                other => panic!("expected ConcreteCollection, got {other:?}"),
+            },
+            other => panic!("expected AND, got {other:?}"),
+        }
+    }
+
+    /// §1.10 predef + §1.8 method GroupElement lowerings (structural — the GE
+    /// constant rendering is an M2 deviation, so bytes are not compared): proveDlog
+    /// -> CreateProveDlog, atLeast -> AtLeast, proveDHTuple -> CreateProveDHTuple,
+    /// g1.exp -> Exponentiate, g1.multiply -> MultiplyGroup, g1.negate -> MethodCall.
+    #[test]
+    fn group_element_lowerings_produce_dedicated_nodes() {
+        let se = demo_script_env();
+        let env = tenv(&[]);
+        let t = |src: &str| type_res(src, &se, &env).expect("types");
+        assert!(matches!(
+            t("proveDlog(g1)"),
+            TypedExpr::CreateProveDlog { .. }
+        ));
+        assert!(matches!(
+            t("proveDHTuple(g1, g2, g1, g2)"),
+            TypedExpr::CreateProveDHTuple { .. }
+        ));
+        assert!(matches!(
+            t("atLeast(1, Coll(proveDlog(g1)))"),
+            TypedExpr::AtLeast { .. }
+        ));
+        assert!(matches!(t("g1.exp(n1)"), TypedExpr::Exponentiate { .. }));
+        assert!(matches!(
+            t("g1.multiply(g2)"),
+            TypedExpr::MultiplyGroup { .. }
+        ));
+        // negate is a MethodCallIrBuilder property -> MethodCall survivor.
+        match t("g1.negate") {
+            TypedExpr::MethodCall { method, .. } => {
+                assert_eq!(method.owner, "GroupElement");
+                assert_eq!(method.name, "negate");
+            }
+            other => panic!("expected MethodCall, got {other:?}"),
+        }
+    }
+
+    // ----- carry-forwards from the Task-5 review -----
+
+    /// BitOp `1 | 2L`: `|` is a direct BitOp node (NOT MethodCallLike), no upcast —
+    /// the Long operand stays Long (SigmaBuilder.scala:630-637).  Task-5 arm,
+    /// oracle-pinned in seed §12.
+    #[test]
+    fn bit_or_mixed_width_no_upcast() {
+        assert_eq!(type_tc("1 | 2L"), seed_expected("1 | 2L"));
+    }
+
+    /// §1.18 Xor arm (direct node): bimap over (SByteArray, SByteArray).
+    #[test]
+    fn xor_arm_over_byte_arrays_types() {
+        let ba = |v: Vec<i8>| TypedExpr::Constant {
+            value: ConstPayload::ByteColl(v),
+            tpe: SType::SColl(Box::new(SType::SByte)),
+        };
+        let node = TypedExpr::Xor {
+            left: Box::new(ba(vec![1, 2])),
+            right: Box::new(ba(vec![3, 4])),
+            tpe: SType::NoType,
+        };
+        let typed = assign_type(&tenv(&[]), node, &ctx()).expect("types");
+        assert!(matches!(typed, TypedExpr::Xor { .. }));
+        assert_eq!(node_tpe(&typed), &SType::SColl(Box::new(SType::SByte)));
+    }
+
+    /// §1.18 MultiplyGroup arm (direct node): bimap over (GroupElement, GroupElement).
+    #[test]
+    fn multiply_group_arm_types() {
+        let ge = || TypedExpr::Constant {
+            value: ConstPayload::GroupElement("(x,y,1)".to_string()),
+            tpe: SType::SGroupElement,
+        };
+        let node = TypedExpr::MultiplyGroup {
+            left: Box::new(ge()),
+            right: Box::new(ge()),
+            tpe: SType::NoType,
+        };
+        let typed = assign_type(&tenv(&[]), node, &ctx()).expect("types");
+        assert_eq!(node_tpe(&typed), &SType::SGroupElement);
+    }
+
+    /// §1.23 BitInversion arm: `~x` over a numeric operand keeps the operand type.
+    #[test]
+    fn bit_inversion_arm_keeps_numeric_type() {
+        let node = TypedExpr::BitInversion {
+            input: Box::new(int_const(1)),
+            tpe: SType::NoType,
+        };
+        let typed = assign_type(&tenv(&[]), node, &ctx()).expect("types");
+        assert!(matches!(typed, TypedExpr::BitInversion { .. }));
+        assert_eq!(node_tpe(&typed), &SType::SInt);
+    }
+
+    /// §1.23 Negation on a non-numeric operand (`-true`) rejects with
+    /// InvalidUnaryOperationParameters (unmap guard, SigmaTyper.scala:521).
+    #[test]
+    fn negation_on_boolean_errors_invalid_unary() {
+        let node = TypedExpr::Negation {
+            input: Box::new(bool_const(true)),
+            tpe: SType::NoType,
+        };
+        let err = assign_type(&tenv(&[]), node, &ctx()).expect_err("fail");
+        assert_eq!(err.class_tag(), "InvalidUnaryOperationParameters");
+    }
+
+    /// §1.1: a block val whose name is already in the OUTER (env-provided) scope is
+    /// a duplicate-definition error (SigmaTyper.scala:58).
+    #[test]
+    fn block_val_collides_with_env_provided_name_errors() {
+        let env = tenv(&[("x", SType::SInt)]);
+        let err = type_env_res("{ val x = 5; x }", &env).expect_err("dup name");
+        assert_eq!(err.class_tag(), "TyperException");
     }
 
     // ----- round-trips -----

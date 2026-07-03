@@ -511,10 +511,12 @@ fn collect_ctx_predef(e: &TypedExpr) -> Vec<String> {
         // N2: tpe == node.tpe → always stripped.
         DeserializeContext { id, .. } => vec![format!("@{}", id)],
 
-        // DeserializeRegister productIterator: [reg: Byte, tpe: V, default].
-        // N2: tpe == node.tpe → stripped.
+        // DeserializeRegister productIterator: [reg: RegisterId, tpe: V, default].
+        // N2: tpe == node.tpe → stripped.  `reg` is a register index (0..=9); the
+        // Scala `RegisterId.toString` renders it `R{n}` (oracle: `@R4`), so the
+        // productIterator element prints `@R4`, not `@4`.
         DeserializeRegister { reg, default, .. } => {
-            vec![format!("@{}", reg), render_opt_node(default)]
+            vec![format!("@R{}", reg), render_opt_node(default)]
         }
 
         // ── Predef irBuilder outputs ──────────────────────────────────────────
