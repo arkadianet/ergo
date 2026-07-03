@@ -317,4 +317,13 @@ pub(crate) struct NodeState {
     /// pure observability — never feeds sync / consensus / scoring.
     /// Read at snapshot build time to populate `ApiRecentBlock.delivered_by`.
     pub(super) first_deliverer_ring: super::first_deliverer::FirstDelivererRing,
+    /// Operator event feed (bounded ring) + the previous-tick observations
+    /// its differ compares against. Fed once per snapshot emit; pure
+    /// observability — never feeds sync / consensus / scoring.
+    pub(super) event_feed: super::event_feed::EventFeedRing,
+    pub(super) event_feed_prev: super::event_feed::FeedPrev,
+    /// Seq-keyed cache of the projected `ApiNodeEvents` Arc: rebuilt only
+    /// when the ring's latest seq advances, so a quiet tick re-publishes
+    /// the same allocation (mirrors the recent-blocks per-tip cache).
+    pub(super) event_feed_projection: Option<(u64, std::sync::Arc<ergo_api::types::ApiNodeEvents>)>,
 }

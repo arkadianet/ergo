@@ -881,6 +881,40 @@ pub struct ApiDifficultySeries {
     pub points: Vec<ApiDifficultyPoint>,
 }
 
+/// One operator event for `GET /api/v1/events` — flat shape with optional
+/// per-kind fields so the feed renders without a type registry. `kind` is
+/// one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
+/// `indexerStatus`.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiNodeEvent {
+    /// Monotonic sequence number (gaps = ring eviction).
+    pub seq: u64,
+    pub unix_ms: u64,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Event-feed page for `GET /api/v1/events`: the retained tail (bounded by
+/// the node-side ring) plus the newest sequence number for `?since=` polls.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiNodeEvents {
+    pub latest_seq: u64,
+    pub events: Vec<ApiNodeEvent>,
+}
+
 /// Self-repair sub-state of the extra-index for `GET /api/v1/indexer/status`.
 /// Mirrors the durable `INDEXER_META` repair markers: `pending` = a
 /// chain-free rebuild of the derived template/token segments is owed or in

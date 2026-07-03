@@ -48,6 +48,13 @@ pub trait NodeReadState: Send + Sync {
     fn identity(&self) -> ApiIdentity {
         ApiIdentity::default()
     }
+    /// Operator event feed (`GET /api/v1/events`) — the retained tail of the
+    /// node-side bounded ring, projected into the snapshot each tick.
+    /// Default impl returns the empty feed so the many test fixtures don't
+    /// break; production `SnapshotReadState` overrides.
+    fn events(&self) -> crate::types::ApiNodeEvents {
+        crate::types::ApiNodeEvents::default()
+    }
     /// Host-process metrics — memory, DB sizes, disk space. Default impl
     /// returns all `None`s so test fixtures don't have to be updated; the
     /// production `SnapshotReadState` overrides with sysinfo + filesystem

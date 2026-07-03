@@ -218,7 +218,7 @@ export function onFast({ status, info }) {
 
 // ---- data + quadrant (4 s) ----
 export async function onSlow() {
-  const [tip, sync, indexer, indexerHealth, mempool, peers, recent, host] = await Promise.all([
+  const [tip, sync, indexer, indexerHealth, mempool, peers, recent, host, events] = await Promise.all([
     api.tip(),
     api.sync(),
     api.indexedHeight(),
@@ -227,6 +227,7 @@ export async function onSlow() {
     api.peers(),
     api.recentBlocks(10),
     api.host(),
+    api.events(),
   ]);
   if (tip) state.tip = tip;
 
@@ -258,7 +259,7 @@ export async function onSlow() {
     };
   }
 
-  state._slow = { sync, indexer, indexerHealth, mempool, recent, host };
+  state._slow = { sync, indexer, indexerHealth, mempool, recent, host, events };
   renderBody();
   // Charts view: refresh the server-history series when the tip advanced.
   if (viewMode === 'charts') refreshChartData();
@@ -484,6 +485,59 @@ function renderBody() {
   }
 
   host.append(grid);
+
+  // Events feed: full-width tail of the node's bounded event ring, newest
+  // first. Silent kinds map to colored pills; block heights deep-link into
+  // the explorer.
+  {
+    const feed = slow.events;
+    if (feed && Array.isArray(feed.events) && feed.events.length) {
+      const { panel: p, body } = panel('Events');
+      const list = document.createElement('div');
+      list.className = 'ov-events';
+      for (const e of feed.events.slice(-10).reverse()) {
+        const row = document.createElement('div');
+        row.className = 'ov-events__r';
+        const pill = document.createElement('span');
+        pill.className = 'pill';
+        const text = document.createElement('span');
+        text.className = 'ov-events__t';
+        if (e.kind === 'blockApplied') {
+          pill.classList.add('pill--ok');
+          pill.textContent = 'block';
+          const a = document.createElement('a');
+          a.className = 'ex-link';
+          a.href = `#explorer/block/${e.headerId}`;
+          a.textContent = num(e.height);
+          text.append(a, ` · ${num(e.txs)} tx · ${bytes(e.sizeBytes)}`);
+        } else if (e.kind === 'reorg') {
+          pill.classList.add('pill--err');
+          pill.textContent = 'reorg';
+          text.textContent = `tip replaced at ${num(e.height)}`;
+        } else if (e.kind === 'peerConnected') {
+          pill.textContent = 'peer +';
+          text.textContent = e.addr || '';
+        } else if (e.kind === 'peerDisconnected') {
+          pill.classList.add('pill--warn');
+          pill.textContent = 'peer −';
+          text.textContent = e.addr || '';
+        } else if (e.kind === 'indexerStatus') {
+          pill.classList.add('pill--warn');
+          pill.textContent = 'index';
+          text.textContent = e.detail || '';
+        } else {
+          pill.textContent = e.kind;
+        }
+        const when = document.createElement('span');
+        when.className = 'ov-events__w';
+        when.textContent = e.unixMs ? `${dur(Math.max(0, Math.floor((Date.now() - e.unixMs) / 1000)))} ago` : '';
+        row.append(pill, text, when);
+        list.append(row);
+      }
+      body.append(list);
+      host.append(p);
+    }
+  }
 
   // sysbar
   const sb = document.createElement('div');

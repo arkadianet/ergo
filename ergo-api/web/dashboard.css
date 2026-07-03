@@ -429,6 +429,41 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-5);
 }
+
+/* Events feed: pill · text · relative-time rows. */
+.ov-events {
+  display: flex;
+  flex-direction: column;
+}
+.ov-events__r {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--divider);
+  font-size: var(--fs-small);
+}
+.ov-events__r:last-child {
+  border-bottom: 0;
+}
+.ov-events__r .pill {
+  flex: 0 0 76px;
+  justify-content: center;
+}
+.ov-events__t {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+.ov-events__w {
+  flex: none;
+  color: var(--tx3);
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+}
 .ov-chart {
   display: flex;
   align-items: center;
