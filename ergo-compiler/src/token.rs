@@ -174,8 +174,17 @@ fn is_op_char(c: char) -> bool {
 /// A character that may START a plain identifier: `Lower | Upper`
 /// (Basic.scala:52-54) = `isLower || '$' || '_'` or `isUpper`. Rust's
 /// `is_lowercase`/`is_uppercase` mirror Java's `isLowerCase`/`isUpperCase`
-/// (both exclude titlecase Lt and case-less Lo), so a case-less letter cannot
-/// start a plain id — matching the reference.
+/// (both include `Other_Uppercase`/`Other_Lowercase` chars), so a case-less
+/// letter cannot start a plain id — matching the reference.
+///
+/// Exception: U+24B6–24E9 (circled Latin capital/small letters, So) carry
+/// `Other_Uppercase`/`Other_Lowercase` so both Rust and JVM return `true` for
+/// their case predicates. However, Scala's grammar treats So chars as op-chars
+/// (not id-starts); our ASCII-only op-char set cannot form a token for them
+/// either, so excluding them from id-start produces a lex error — reject-side
+/// divergence from Scala (which ACCEPTs `xⒶ` as a postfix call) but verdict
+/// parity on mixed forms like `xⒶ+1` (both REJECT). Documented in the Sm/So
+/// ledger entry in lib.rs.
 ///
 /// fastparse scans the JVM `String` as UTF-16 `Char`s, so a supplementary
 /// code point (> U+FFFF) reaches the id-start check as two surrogate halves,
@@ -183,7 +192,13 @@ fn is_op_char(c: char) -> bool {
 /// can never start an identifier. Hence the BMP gate (mirrors `is_id_char`).
 /// oracle: `𝐀` (U+1D400, `Lu`) REJECT 1:1; `{ val x = 𝐀 }` REJECT 1:11.
 fn is_id_start(c: char) -> bool {
-    if (c as u32) > 0xFFFF {
+    let cp = c as u32;
+    if cp > 0xFFFF {
+        return false;
+    }
+    // Circled Latin letters: Other_Uppercase/Other_Lowercase so case predicates fire,
+    // but Scala treats them as So op-chars. Exclude to match grammar-level behavior.
+    if matches!(cp, 0x24B6..=0x24E9) {
         return false;
     }
     c.is_lowercase() || c.is_uppercase() || c == '$' || c == '_'
@@ -220,9 +235,10 @@ fn is_jvm_digit(c: char) -> bool {
 
 /// JVM `Character.isLetter` — general category `Lu|Ll|Lt|Lm|Lo`. Rust
 /// `char::is_alphabetic` is the wider Unicode `Alphabetic` property (it also
-/// admits `Nl` and the `Other_Alphabetic` combining marks), narrowed here by
+/// admits `Nl`, `So`, and `Other_Alphabetic` combining marks), narrowed here by
 /// subtracting the `ALPHA_NOT_LETTER` table. oracle: `xְ` (U+05B0 `Mn`) REJECT,
-/// `xＡ` (U+FF21 `Lu`) ACCEPT.
+/// `xＡ` (U+FF21 `Lu`) ACCEPT, `xⒶ` (U+24B6 `So`) id STOPS at `x` → lex error
+/// (Scala: So op-char forms separate token; our ASCII-only op-chars → REJECT).
 fn is_jvm_letter(c: char) -> bool {
     c.is_alphabetic() && !in_ranges(c, ALPHA_NOT_LETTER)
 }
@@ -295,8 +311,14 @@ const ND: &[(u16, u16)] = &[
     (0xFF10, 0xFF19),
 ];
 
-/// BMP code points that Rust `char::is_alphabetic` accepts but JVM `Character.isLetter` rejects (categories `Mn`/`Mc`/`Nl`).
-/// 897 code points in 162 ranges (Unicode 16.0.0, via UCD `unicodedata`).
+/// BMP code points that Rust `char::is_alphabetic` accepts but JVM `Character.isLetter` rejects (categories `Mn`/`Mc`/`Nl`/`So`).
+/// 949 code points in 163 ranges (Unicode 16.0.0, via UCD `unicodedata`).
+/// The `So` entry covers the 52 circled Latin letters U+24B6–24E9 (CIRCLED LATIN CAPITAL/SMALL
+/// LETTER A–Z) — they carry `Other_Alphabetic` so Rust `is_alphabetic` returns `true`, but
+/// `Character.isLetter` returns `false` (category `So`, not `L*`). Scala's lexer therefore ends
+/// the identifier before them and parses them as So operator characters; our ASCII-only op-char
+/// set cannot produce an operator token for them, so the whole input REJECTS (reject-side
+/// divergence from Scala; documented in lib.rs Sm/So ledger entry).
 const ALPHA_NOT_LETTER: &[(u16, u16)] = &[
     (0x0345, 0x0345),
     (0x0363, 0x036F),
@@ -429,6 +451,9 @@ const ALPHA_NOT_LETTER: &[(u16, u16)] = &[
     (0x1DD3, 0x1DF4),
     (0x2160, 0x2182),
     (0x2185, 0x2188),
+    // U+24B6–24E9: CIRCLED LATIN CAPITAL/SMALL LETTER A–Z (So, Other_Alphabetic).
+    // Rust is_alphabetic=true; JVM Character.isLetter=false (So ≠ L*).
+    (0x24B6, 0x24E9),
     (0x2DE0, 0x2DFF),
     (0x3007, 0x3007),
     (0x3021, 0x3029),
@@ -1360,6 +1385,56 @@ mod tests {
         assert!(
             matches!(tokenize("x\u{1D400}"), Err(ParseError::Lexical { .. })),
             "x𝐀 (supplementary) should lex-error after BMP-gate on is_id_start"
+        );
+    }
+    #[test]
+    fn id_tail_circled_letter_so_excluded_from_letter_class() {
+        // Round-11 fix: U+24B6–24E9 (CIRCLED LATIN CAPITAL/SMALL LETTER A–Z, category
+        // So) are Rust `is_alphabetic` but NOT JVM `Character.isLetter`. They must not
+        // extend an identifier; the ALPHA_NOT_LETTER table now covers them.
+        //
+        // `xⒶ+1`: Scala REJECT 1:4 (id ends at x; Ⓐ is a So op-char; `Ⓐ+` is an
+        // operator; `1` is the operand — parses but no well-typed result → REJECT at
+        // semantic level). Our lexer: id ends at `x`; Ⓐ is not an ASCII op-char →
+        // lex error. Verdict parity: both REJECT.
+        // oracle: `xⒶ+1` REJECT 1:4 (Scala), lex error (ours).
+        assert!(
+            matches!(tokenize("x\u{24B6}+1"), Err(ParseError::Lexical { .. })),
+            "xⒶ+1 must lex-error (circled letter ends id, not an ASCII op-char)"
+        );
+        // Regressions: normal id-tail chars still accepted.
+        for src in ["x2", "x_y", "truex"] {
+            assert!(tokenize(src).is_ok(), "{src} regression: must still parse");
+        }
+        // `xⒶ` and `xⒶy`: oracle ACCEPT (sic) — Scala parses Ⓐ/Ⓐy as So op-char
+        // identifiers (postfix / infix on `x`). Our ASCII-only op-char set cannot
+        // form an operator token for So chars → lex error → REJECT. Reject-side
+        // divergence; no real contract uses circled letters as operators.
+        // oracle: `xⒶ` ACCEPT (sic), `xⒶy` ACCEPT (sic) — So op-char deviation.
+        assert!(
+            matches!(tokenize("x\u{24B6}"), Err(ParseError::Lexical { .. })),
+            "xⒶ: oracle ACCEPT (sic) — So op-char deviation; our lex-error is expected"
+        );
+        assert!(
+            matches!(tokenize("x\u{24B6}y"), Err(ParseError::Lexical { .. })),
+            "xⒶy: oracle ACCEPT (sic) — So op-char deviation; our lex-error is expected"
+        );
+        // Spot-check both ends of the range: Ⓩ (U+24CF) and ⓩ (U+24E9).
+        assert!(
+            matches!(tokenize("x\u{24CF}"), Err(ParseError::Lexical { .. })),
+            "xⒹ (U+24CF) must lex-error"
+        );
+        assert!(
+            matches!(tokenize("x\u{24E9}"), Err(ParseError::Lexical { .. })),
+            "xⓩ (U+24E9) must lex-error"
+        );
+        // Ⓐx (So as id-start): not a JVM letter → is_id_start returns false → lex error.
+        // oracle: Scala Ⓐ is an op-char id-start, so `Ⓐx` is an infix application of
+        // the Ⓐ operator on implicit lhs and `x` rhs — rejects without lhs context.
+        // Both sides REJECT; same deviation class.
+        assert!(
+            matches!(tokenize("\u{24B6}x"), Err(ParseError::Lexical { .. })),
+            "Ⓐx (So as id-start) must lex-error"
         );
     }
     #[test]

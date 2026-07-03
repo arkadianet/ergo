@@ -44,11 +44,16 @@
 //!   used in real contracts — `⇒` (U+21D2, `Core.scala:23`) — is included. `⇒` is
 //!   an op-char but NOT a reserved symbolic keyword: it lexes as an `OpId` and is
 //!   the arrow only in keyword position (`Cursor::at_sym_kw`). Any OTHER Unicode
-//!   op-char is mis-tokenized; a knock-on is that a So/Sm code point used as an
-//!   identifier tail (e.g. `xⒶ`, U+24B6) — which the JVM lexes as a separate
-//!   op-token, still ACCEPT — is folded into one identifier here (same ACCEPT), and
-//!   a So/Sm code point in a `'c'` char literal REJECTS one column early. The corpus
-//!   oracle catches any accept/reject counterexample.
+//!   op-char is mis-tokenized; a knock-on is that a So/Sm code point in a `'c'`
+//!   char literal REJECTS one column early. **So chars that are also
+//!   `Other_Alphabetic` (the 52 circled Latin letters U+24B6–24E9)** are now
+//!   correctly excluded from `ALPHA_NOT_LETTER` so the identifier ENDS before
+//!   them. Since our op-char set is ASCII-only, the circled letter is then an
+//!   unrecognised character → lex error → REJECT. Scala ends the identifier the
+//!   same way but can form an So operator token, so `xⒶ` and `xⒶy` are ACCEPT in
+//!   Scala and REJECT here (reject-side divergence; no legitimate contract uses
+//!   circled letters as operators). `xⒶ+1` REJECTs on both sides (verdict parity).
+//!   The corpus oracle catches any remaining accept/reject counterexample.
 //!
 //! - **id-start/tail Unicode classes** (`token.rs`): both `is_id_start` and
 //!   identifier-interior chars (`is_id_char`) are BMP-gated — supplementary code
@@ -58,12 +63,12 @@
 //!   `Character.isLetter` (`Lu|Ll|Lt|Lm|Lo`) and `Character.isDigit` (`Nd`) masks
 //!   (`Identifiers.scala:41-43`), reconstructed by narrowing Rust's wider
 //!   `char::is_alphabetic`/`is_numeric` with the `ALPHA_NOT_LETTER`/`ND` UCD range
-//!   tables. Exact except that 60 BMP code points Rust marks `is_alphabetic` but
-//!   the JVM does not treat as letters — 52 `So` (e.g. circled letters U+24B6) plus
-//!   8 `Cn` version-skew points — are still accepted as id-tail chars; the `So`
-//!   cases are JVM op-chars that form a separate token, so the whole-input
-//!   ACCEPT/REJECT verdict is unchanged. Numeric literals use ASCII-only
-//!   `is_ascii_digit` (exact).
+//!   tables. Exact except that 8 `Cn` version-skew BMP code points Rust marks
+//!   `is_alphabetic` but the JVM does not treat as letters — these are still
+//!   accepted as id-tail chars (unassigned, no real contract uses them). The 52
+//!   `So` circled letters (U+24B6–24E9) that were previously in this residual are
+//!   now correctly excluded by `ALPHA_NOT_LETTER` (round 11 fix). Numeric literals
+//!   use ASCII-only `is_ascii_digit` (exact).
 //!
 //! - **`is_printable_char` — supplementary scalars BMP-gated, SPECIALS excluded,
 //!   null-block deferred** (`token.rs`): the `'c'`-form char literal vs `'sym`
