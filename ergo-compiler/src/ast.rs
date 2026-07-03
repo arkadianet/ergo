@@ -179,34 +179,42 @@ fn or_no_type(given: &SType, fallback: impl FnOnce() -> SType) -> SType {
 /// constructor), so a FOUND method yields an `SFunc` (never numeric, never
 /// `NoType` — it fails the mkUnaryOp/mkBinaryOp numeric guard); a MISSING method,
 /// or a non-`SProduct` receiver, yields `NoType` (which passes the guard). The
-/// returned `SFunc`'s RANGE is the method's real result type — it is read by
+/// returned `SFunc`'s RANGE is the method's real result type read raw from
+/// `m.stype` (Scala does NOT substitute the receiver's element type — the range
+/// keeps the generic `STypeVar`s of the descriptor). It is consumed by
 /// `Apply.parse_tpe` (values.scala:1218-1222), e.g. `-(5.toBytes(0))` REJECTs
-/// because `Apply(Select(5,toBytes),[0]).tpe = SColl[SByte]`. The DOM is never
+/// because `Apply(Select(5,toBytes),[0]).tpe = SColl[SByte]`, and
+/// `-(5.toBytes().apply(0))` REJECTs because `Coll.apply`'s range is the generic
+/// `tIV = STypeVar("IV")` (methods.scala:940-941), non-numeric. The DOM is never
 /// inspected by any `parse_tpe` consumer, so the receiver stands in for it.
 ///
-/// Parse-time-reachable `SProduct` receivers (every other object — a NoType
-/// identifier, `SFunc`, `SColl`, `SOption`, … — hits the `_ => NoType` arm):
-/// - `STuple` (a tuple literal / paren≥2) — `getTupleMethod` (methods.scala:1248-
-///   1257): the inherited Coll `size`/`apply` (methods.scala:1240-1246) or an `_i`
-///   component with `1 <= i <= len`.
-/// - a numeric constant/expr (`SInt`/`SLong`; the other numerics share the same
-///   table but are not parse-time-reachable) — `SNumericTypeMethods`
-///   (methods.scala:461-478).
+/// This is the COMPLETE closure of `SProduct` method tables reachable from the
+/// parse-time-typed roots `parse_tpe` can produce. The reachable-receiver set is
+/// finite and closed under method-range types (every range is a numeric, `SColl`,
+/// `SOption`, `STuple`, `SBoolean`, or an `STypeVar` — the last is not `SProduct`,
+/// SType.scala:287, so it terminates at `NoType`):
+/// - `STuple` (tuple literal / paren≥2) — [`tuple_method_range`]
+///   (methods.scala:1248-1257).
+/// - numerics `SByte`/`SShort`/`SInt`/`SLong` (casts / arith / `x.toByte()` …) —
+///   [`numeric_shared_range`] (`SNumericTypeMethods`, methods.scala:288-478).
+/// - `SBigInt` (`x.toBigInt()`) — shared numeric table plus the v6-only
+///   `SBigIntMethods` extras (`toUnsigned`/`toUnsignedMod`, methods.scala:546-565).
+/// - `SUnsignedBigInt` (`x.toBigInt().toUnsigned()` at v6) — shared numeric table
+///   plus the `SUnsignedBigIntMethods` extras (methods.scala:576-623); the type
+///   has NO method container at v5 (methodsV6-only, methods.scala:169) → all
+///   fields `NoType` there.
+/// - `SColl[_]` (`x.toBytes()`/`x.toBits()`, or a `SColl`-returning method) —
+///   [`collection_method_range`] (`SCollectionMethods`, methods.scala:821-1216).
+/// - `SOption[_]` (`coll.get(i)` at v6, methods.scala:1183-1189) —
+///   [`option_method_range`] (`SOptionMethods`, methods.scala:750-799).
 /// - `SBoolean`/`SString` are `SProduct` but define NO methods
-///   (`SBooleanMethods`/`SStringMethods` `getMethods = super = Nil`) → `NoType`.
-/// - `SUnit`/`SAny` are NOT `SProduct` (SType.scala:626/639) → the `_ => NoType` arm.
+///   (`SBooleanMethods`/`SStringMethods` `getMethods = super = Nil`, methods.scala:
+///   511/628) → `NoType`, same as the `_` arm below.
+/// - `SUnit`/`SAny`/`SFunc`/`STypeVar` are NOT `SProduct` (SType.scala:626/639/660/
+///   287) → the `_ => NoType` arm. `SGroupElement`/`SBox`/`SAvlTree`/… are `SProduct`
+///   but NOT parse-time reachable (only ever `NoType` `Ident`s), so no table is ported.
 fn product_method_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType {
-    let range = match obj_tpe {
-        SType::STuple(items) => tuple_method_range(items, field),
-        SType::SByte
-        | SType::SShort
-        | SType::SInt
-        | SType::SLong
-        | SType::SBigInt
-        | SType::SUnsignedBigInt => numeric_method_range(field, obj_tpe, tree_version),
-        _ => None,
-    };
-    match range {
+    match method_range(obj_tpe, field, tree_version) {
         Some(res) => SType::SFunc {
             dom: vec![obj_tpe.clone()],
             range: Box::new(res),
@@ -215,11 +223,36 @@ fn product_method_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType {
     }
 }
 
+/// The result type (`SFunc` range) of `MethodsContainer.getMethod(receiver, field)`
+/// at `tree_version`, or `None` when the method is absent (a missing method, an
+/// empty-table `SProduct`, or a non-`SProduct` receiver — all `NoType`).
+fn method_range(receiver: &SType, field: &str, tree_version: u8) -> Option<SType> {
+    match receiver {
+        SType::STuple(items) => tuple_method_range(items, field),
+        SType::SColl(_) => collection_method_range(field, tree_version),
+        SType::SOption(_) => option_method_range(field),
+        SType::SByte | SType::SShort | SType::SInt | SType::SLong => {
+            numeric_shared_range(field, receiver, tree_version)
+        }
+        // SBigInt: shared numeric methods + v6-only SBigIntMethods extras.
+        SType::SBigInt => numeric_shared_range(field, receiver, tree_version)
+            .or_else(|| bigint_extra_range(field, tree_version)),
+        // SUnsignedBigInt only has a method container at v6 (methodsV6-only,
+        // methods.scala:169); at v5 the container lookup misses → NoType.
+        SType::SUnsignedBigInt if tree_version >= 3 => {
+            numeric_shared_range(field, receiver, tree_version)
+                .or_else(|| unsigned_bigint_extra_range(field))
+        }
+        _ => None,
+    }
+}
+
 /// `STupleMethods.getTupleMethod` result type (methods.scala:1248-1257) for a tuple
 /// receiver, or `None` when `field` is not a tuple method.
 fn tuple_method_range(items: &[SType], field: &str) -> Option<SType> {
     // colMethods inherited from Coll (methods.scala:1240-1246): `size` (id 1) →
-    // `SInt`, `apply` (id 10) → `SAny` (elemType after the `tIV -> SAny` subst).
+    // `SInt`, `apply` (id 10) → `SAny` (elemType after the `tIV -> SAny` subst
+    // that is applied ONLY for tuples, methods.scala:1241).
     match field {
         "size" => return Some(SType::SInt),
         "apply" => return Some(SType::SAny),
@@ -238,10 +271,11 @@ fn tuple_method_range(items: &[SType], field: &str) -> Option<SType> {
     }
 }
 
-/// `SNumericTypeMethods` result type (methods.scala:288-478) for a numeric receiver
-/// `recv`; the `tNum` type variable is substituted by `recv` (methods.scala:235).
-/// `None` when `field` is not a numeric method at `tree_version`.
-fn numeric_method_range(field: &str, recv: &SType, tree_version: u8) -> Option<SType> {
+/// `SNumericTypeMethods` result type (methods.scala:288-478) shared by every numeric
+/// receiver `recv`; the `tNum` type variable is substituted by `recv`
+/// (methods.scala:235). `None` when `field` is not a shared numeric method at
+/// `tree_version`.
+fn numeric_shared_range(field: &str, recv: &SType, tree_version: u8) -> Option<SType> {
     // v5 set (methods.scala:288-336, 461-469): present at every version.
     match field {
         "toByte" => return Some(SType::SByte),
@@ -254,7 +288,7 @@ fn numeric_method_range(field: &str, recv: &SType, tree_version: u8) -> Option<S
         _ => {}
     }
     // v6-only additions (`isV3OrLaterErgoTreeVersion` == `tree_version >= 3`;
-    // methods.scala:356-458, 471-478): each returns the receiver numeric type.
+    // methods.scala:355-459, 471-478): each returns the receiver numeric type.
     if tree_version >= 3
         && matches!(
             field,
@@ -269,6 +303,103 @@ fn numeric_method_range(field: &str, recv: &SType, tree_version: u8) -> Option<S
         Some(recv.clone())
     } else {
         None
+    }
+}
+
+/// v6-only `SBigIntMethods` extras (methods.scala:546-565), added on top of the
+/// shared numeric table for a `SBigInt` receiver at `tree_version >= 3`.
+fn bigint_extra_range(field: &str, tree_version: u8) -> Option<SType> {
+    if tree_version < 3 {
+        return None;
+    }
+    match field {
+        // toUnsigned: SFunc(SBigInt, SUnsignedBigInt) (methods.scala:546).
+        "toUnsigned" => Some(SType::SUnsignedBigInt),
+        // toUnsignedMod: SFunc([SBigInt, SUnsignedBigInt], SUnsignedBigInt) (:553).
+        "toUnsignedMod" => Some(SType::SUnsignedBigInt),
+        _ => None,
+    }
+}
+
+/// `SUnsignedBigIntMethods` extras (methods.scala:576-623), added on top of the
+/// shared numeric table for a `SUnsignedBigInt` receiver. The container exists only
+/// at v6 (gated by the caller in [`method_range`]); the extras themselves carry no
+/// further version gate (methods.scala:613-623).
+fn unsigned_bigint_extra_range(field: &str) -> Option<SType> {
+    match field {
+        // All five modular ops return the receiver `SUnsignedBigInt`
+        // (methods.scala:576-605).
+        "modInverse" | "plusMod" | "subtractMod" | "multiplyMod" | "mod" => {
+            Some(SType::SUnsignedBigInt)
+        }
+        // toSigned: SFunc([SUnsignedBigInt], SBigInt) (methods.scala:609).
+        "toSigned" => Some(SType::SBigInt),
+        _ => None,
+    }
+}
+
+/// `SCollectionMethods` result type (methods.scala:821-1216) for a `SColl[_]`
+/// receiver. Ranges are read RAW from the descriptor — the generic element vars
+/// `tIV = STypeVar("IV")` / `tOV = STypeVar("OV")` (SType.scala:88-89) are NOT
+/// substituted with the receiver's element type (Scala uses `m.stype`
+/// unchanged, values.scala:1174). `None` when `field` is not a Coll method at
+/// `tree_version`. The lookup is element-agnostic (keyed by the `SCollection`
+/// type code), matching `MethodsContainer.getMethod`.
+fn collection_method_range(field: &str, tree_version: u8) -> Option<SType> {
+    let tiv = || SType::STypeVar("IV".to_string());
+    let tov = || SType::STypeVar("OV".to_string());
+    let coll = |t: SType| SType::SColl(Box::new(t));
+    // v5 set (methods.scala:1191-1209): present at every version.
+    let v5 = match field {
+        "size" => Some(SType::SInt),                            // :821
+        "getOrElse" => Some(tiv()),                             // :824
+        "map" => Some(coll(tov())),                             // :846 tOVColl
+        "exists" => Some(SType::SBoolean),                      // :869
+        "fold" => Some(tov()),                                  // :880
+        "forall" => Some(SType::SBoolean),                      // :891
+        "slice" => Some(coll(tiv())),                           // :903 ThisType
+        "filter" => Some(coll(tiv())),                          // :919 ThisType
+        "append" => Some(coll(tiv())),                          // :931 ThisType
+        "apply" => Some(tiv()),                                 // :940
+        "indices" => Some(coll(SType::SInt)),                   // :954
+        "flatMap" => Some(coll(tov())),                         // :982 tOVColl
+        "patch" => Some(coll(tiv())),                           // :1013 ThisType
+        "updated" => Some(coll(tiv())),                         // :1033 ThisType
+        "updateMany" => Some(coll(tiv())),                      // :1053 ThisType
+        "indexOf" => Some(SType::SInt),                         // :1070
+        "zip" => Some(coll(SType::STuple(vec![tiv(), tov()]))), // :1105
+        _ => None,
+    };
+    if v5.is_some() {
+        return v5;
+    }
+    // v6-only additions (methods.scala:1211-1216; `isV3OrLaterErgoTreeVersion`).
+    if tree_version >= 3 {
+        match field {
+            "reverse" => Some(coll(tiv())),                 // :1126 ThisType
+            "startsWith" => Some(SType::SBoolean),          // :1145
+            "endsWith" => Some(SType::SBoolean),            // :1165
+            "get" => Some(SType::SOption(Box::new(tiv()))), // :1183
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// `SOptionMethods` result type (methods.scala:750-799) for a `SOption[_]` receiver.
+/// The table is version-independent (`getMethods` has no gate, methods.scala:792);
+/// `SOption` is only parse-time-reachable at v6 via `Coll.get`, but the lookup
+/// itself is unconditional, mirroring the reference. Ranges keep the generic vars
+/// `tT = STypeVar("T")` / `tR = STypeVar("R")` (SType.scala:81-82), unsubstituted.
+fn option_method_range(field: &str) -> Option<SType> {
+    match field {
+        "isDefined" => Some(SType::SBoolean),                  // :750
+        "get" => Some(SType::STypeVar("T".to_string())),       // :758 tT
+        "getOrElse" => Some(SType::STypeVar("T".to_string())), // :765 tT
+        "map" => Some(SType::SOption(Box::new(SType::STypeVar("R".to_string())))), // :775 SOption(tR)
+        "filter" => Some(SType::SOption(Box::new(SType::STypeVar("T".to_string())))), // :784 ThisType
+        _ => None,
     }
 }
 
@@ -315,13 +446,17 @@ impl Expr {
     ///   ZKProof callee, which carries `SFunc`).
     /// - `Select` — `resType.getOrElse(obj.tpe match { SProduct => method-lookup;
     ///   _ => NoType })` (values.scala:1171-1178), delegated to
-    ///   [`product_method_tpe`]. `resType` is `None` at parse time; a
-    ///   NoType/identifier-rooted object stays `NoType` (so `-OUTPUTS.size`
-    ///   accepts), but a parse-time-typed *product* object — a tuple literal
-    ///   `(a,b)._i`, a numeric constant `.toByte` — resolves through the reference
-    ///   method tables, and a FOUND method makes the Select an `SFunc`
-    ///   (non-numeric). This is why `-((1,2)._1)` / `((1,true)._2) | 1` /
-    ///   `-(5.toByte)` REJECT (oracle-verified) while we used to accept.
+    ///   [`product_method_tpe`], which ports the COMPLETE closure of reachable
+    ///   method tables (tuple / numeric / `SColl` / `SOption` / v6 BigInt).
+    ///   `resType` is `None` at parse time; a NoType/identifier-rooted object stays
+    ///   `NoType` (so `-OUTPUTS.size` accepts), but a parse-time-typed *product*
+    ///   object — a tuple literal `(a,b)._i`, a numeric constant `.toByte`, a
+    ///   `SColl` `5.toBytes().size`, an `SOption` `…get(0).isDefined`, a v6
+    ///   `5.toBigInt().toUnsigned` — resolves through the reference method tables,
+    ///   and a FOUND method makes the Select an `SFunc` (non-numeric). This is why
+    ///   `-((1,2)._1)` / `((1,true)._2) | 1` / `-(5.toByte)` /
+    ///   `-(5.toBytes().size)` / `-(5.toBigInt().toUnsigned)` REJECT
+    ///   (oracle-verified) while we used to accept.
     /// - `Apply` — `func.tpe match { SFunc => range; SColl => elem; _ => NoType }`
     ///   (values.scala:1218-1222).
     /// - `ApplyTypes` — `input.tpe` (values.scala:1262-1267; `applySubst` on an
@@ -939,6 +1074,182 @@ mod tests {
         assert_eq!(str_obj.parse_tpe(3), SType::NoType);
         let unit_obj = select(Expr::UnitConst { pos: 0 }, "foo");
         assert_eq!(unit_obj.parse_tpe(3), SType::NoType);
+    }
+
+    // ----- method-table closure (SColl / SOption / v6 BigInt) -----
+
+    /// `Apply(f, args)` — parses `f`'s callee-tpe per values.scala:1218-1222.
+    fn call(f: Expr, args: Vec<Expr>) -> Expr {
+        Expr::Apply {
+            func: Box::new(f),
+            args,
+            pos: 0,
+        }
+    }
+
+    /// `5.toBytes()` — an `SColl[SByte]`-typed receiver (Apply of the numeric
+    /// `toBytes` cast, whose SFunc range is read by Apply).
+    fn coll_recv() -> Expr {
+        call(select(int(5), "toBytes"), vec![])
+    }
+
+    /// `5.toBigInt()` — an `SBigInt`-typed receiver.
+    fn bigint_recv() -> Expr {
+        call(select(int(5), "toBigInt"), vec![])
+    }
+
+    /// `5.toBigInt().toUnsigned()` — an `SUnsignedBigInt`-typed receiver (v6).
+    fn ubigint_recv() -> Expr {
+        call(select(bigint_recv(), "toUnsigned"), vec![])
+    }
+
+    #[test]
+    fn parse_tpe_coll_receiver_has_scollection_type() {
+        // Sanity: `5.toBytes()` derives to SColl[SByte] (numeric toBytes range).
+        assert_eq!(
+            coll_recv().parse_tpe(3),
+            SType::SColl(Box::new(SType::SByte))
+        );
+    }
+
+    #[test]
+    fn parse_tpe_select_coll_method_is_sfunc() {
+        // SColl is SProduct with SCollectionMethods → found method → SFunc →
+        // non-numeric → guard FAILS. oracle: `-(5.toBytes().size)`,
+        // `5.toBytes().apply | 1`, `-(5.toBytes().indexOf)`, `-(5.toBytes().map)`
+        // all REJECT.
+        for field in ["size", "apply", "indexOf", "map", "slice", "getOrElse"] {
+            let s = select(coll_recv(), field);
+            assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }), "{field}");
+            assert!(!s.is_num_type_or_no_type(3), "{field}");
+        }
+    }
+
+    #[test]
+    fn parse_tpe_select_coll_v6_method_is_version_gated() {
+        // reverse/startsWith/endsWith/get are v6-only (tree_version>=3). oracle:
+        // `-(5.toBytes().reverse)` / `-(5.toBytes().get)` REJECT at v6.
+        for field in ["reverse", "startsWith", "endsWith", "get"] {
+            let s = select(coll_recv(), field);
+            assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }), "{field} v6");
+            // At v5 the method does not exist → NoType → guard passes.
+            assert_eq!(s.parse_tpe(0), SType::NoType, "{field} v5");
+        }
+    }
+
+    #[test]
+    fn parse_tpe_select_coll_unknown_field_is_no_type() {
+        // A missing Coll method → getMethod None → NoType → guard passes. oracle:
+        // `-(5.toBytes().nosuchmethod)` ACCEPT.
+        let s = select(coll_recv(), "nosuchmethod");
+        assert_eq!(s.parse_tpe(3), SType::NoType);
+        assert!(s.is_num_type_or_no_type(3));
+    }
+
+    #[test]
+    fn parse_tpe_coll_method_ranges_drive_apply_verdict() {
+        // The SFunc range read by Apply (values.scala:1218-1222):
+        //  size    → SInt      numeric  → guard passes. oracle:
+        //                      `-(5.toBytes().size(0))` ACCEPT.
+        let size_call = call(select(coll_recv(), "size"), vec![int(0)]);
+        assert_eq!(size_call.parse_tpe(3), SType::SInt);
+        assert!(size_call.is_num_type_or_no_type(3));
+        //  exists  → SBoolean  non-numeric → guard fails. oracle:
+        //                      `-(5.toBytes().exists(0))` REJECT.
+        let exists_call = call(select(coll_recv(), "exists"), vec![int(0)]);
+        assert_eq!(exists_call.parse_tpe(3), SType::SBoolean);
+        assert!(!exists_call.is_num_type_or_no_type(3));
+        //  apply   → generic tIV (NOT the SByte element) → non-numeric → fails.
+        //                      oracle: `-(5.toBytes().apply(0))` REJECT.
+        let apply_call = call(select(coll_recv(), "apply"), vec![int(0)]);
+        assert_eq!(apply_call.parse_tpe(3), SType::STypeVar("IV".to_string()));
+        assert!(!apply_call.is_num_type_or_no_type(3));
+    }
+
+    #[test]
+    fn parse_tpe_coll_index_apply_stays_scalar() {
+        // Regression: `5.toBytes()(0)` is Apply-ON-SColl (not `.apply`), so it
+        // reads the ELEMENT type SByte (numeric) → guard passes. oracle:
+        // `-(5.toBytes()(0))` ACCEPT.
+        let indexed = call(coll_recv(), vec![int(0)]);
+        assert_eq!(indexed.parse_tpe(3), SType::SByte);
+        assert!(indexed.is_num_type_or_no_type(3));
+    }
+
+    #[test]
+    fn parse_tpe_select_option_method_is_sfunc() {
+        // `5.toBytes().get(0)` is SOption[tIV] (v6 Coll.get range). SOption is
+        // SProduct with SOptionMethods → found method → SFunc. oracle:
+        // `-(5.toBytes().get(0).isDefined)` / `.getOrElse` REJECT.
+        let opt = call(select(coll_recv(), "get"), vec![int(0)]);
+        assert_eq!(
+            opt.parse_tpe(3),
+            SType::SOption(Box::new(SType::STypeVar("IV".to_string())))
+        );
+        for field in ["isDefined", "get", "getOrElse", "map", "filter"] {
+            let s = select(opt.clone(), field);
+            assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }), "{field}");
+        }
+        // Unknown SOption field → NoType. oracle:
+        // `-(5.toBytes().get(0).nosuch)` ACCEPT.
+        let unknown = select(opt, "nosuch");
+        assert_eq!(unknown.parse_tpe(3), SType::NoType);
+    }
+
+    #[test]
+    fn parse_tpe_select_bigint_v6_extra_is_version_gated() {
+        // SBigInt v6 extras toUnsigned/toUnsignedMod (SBigIntMethods). oracle:
+        // `-(5.toBigInt().toUnsigned)` / `-(5.toBigInt().toUnsignedMod)` REJECT.
+        for field in ["toUnsigned", "toUnsignedMod"] {
+            let s = select(bigint_recv(), field);
+            assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }), "{field} v6");
+            // Absent at v5 → NoType (source-derived; oracle runs v6 only).
+            assert_eq!(s.parse_tpe(0), SType::NoType, "{field} v5");
+        }
+        // Shared numeric methods also resolve on SBigInt. oracle:
+        // `5.toBigInt().toBytes | 1` REJECT.
+        let s = select(bigint_recv(), "toBytes");
+        assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }));
+        // toUnsigned's range is SUnsignedBigInt (numeric) → an Apply of it passes.
+        // oracle: `-(5.toBigInt().toUnsigned())` ACCEPT.
+        assert_eq!(ubigint_recv().parse_tpe(3), SType::SUnsignedBigInt);
+    }
+
+    #[test]
+    fn parse_tpe_select_unsigned_bigint_method_is_sfunc() {
+        // SUnsignedBigInt (reachable via toUnsigned()) → SUnsignedBigIntMethods.
+        // oracle: `-(5.toBigInt().toUnsigned().modInverse)` /
+        // `-(5.toBigInt().toUnsigned().toSigned)` / `.toBytes` REJECT.
+        for field in [
+            "modInverse",
+            "plusMod",
+            "subtractMod",
+            "multiplyMod",
+            "mod",
+            "toSigned",
+            "toBytes",
+        ] {
+            let s = select(ubigint_recv(), field);
+            assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }), "{field}");
+        }
+        // toSigned's range is SBigInt (numeric) → Apply passes. oracle:
+        // `-(5.toBigInt().toUnsigned().toSigned())` ACCEPT.
+        let to_signed = call(select(ubigint_recv(), "toSigned"), vec![]);
+        assert_eq!(to_signed.parse_tpe(3), SType::SBigInt);
+        assert!(to_signed.is_num_type_or_no_type(3));
+        // Unknown field → NoType.
+        let unknown = select(ubigint_recv(), "nosuch");
+        assert_eq!(unknown.parse_tpe(3), SType::NoType);
+    }
+
+    #[test]
+    fn parse_tpe_unsigned_bigint_receiver_has_no_methods_at_v5() {
+        // Source-derived: SUnsignedBigInt has NO method container at v5
+        // (methodsV6-only) → any field is NoType. (Not parse-reachable at v5,
+        // but the table must mirror the container gate.)
+        let recv = SType::SUnsignedBigInt;
+        assert_eq!(product_method_tpe(&recv, "modInverse", 0), SType::NoType);
+        assert_eq!(product_method_tpe(&recv, "toBytes", 0), SType::NoType);
     }
 
     #[test]
