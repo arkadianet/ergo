@@ -10,6 +10,10 @@
 // Verbs (hex is Base16 of the UTF-8 source):
 //   tc  <hex>     typecheck with an EMPTY script env
 //   tce <hex>     typecheck with the DEMO env (free vars a,b,col1,col2,g1,g2,n1,bb1,bb2)
+//   tcs <hex>     typecheck with the SigmaTyperTest env (LangTests.scala:52-69):
+//                 x,y:Int; c1,c2:Boolean; height1,height2:Long; b1,b2:Byte;
+//                 arr1,arr2:Coll[Byte]; col1,col2:Coll[Long]; g1,g2:GroupElement;
+//                 p1,p2:SigmaProp; n1,n2:BigInt
 //
 // ── batch mode (from worktree root) ────────────────────────────────────────────
 //   python3 scripts/jvm_typer_oracle/gen_inputs.py | \
@@ -125,6 +129,41 @@ object TyperOracle {
     )
   }
 
+  // ----- SigmaTyperTest env for the `tcs` verb -----
+  // Mirrors LangTests.scala:52-69 exactly (the `env` used across SigmaTyperTest),
+  // restricted to the entries any SigmaTyperTest property references.  Values are
+  // written as the SValue constants that `Platform.liftToConstant` produces from the
+  // LangTests raw values (CAnyValue(10) → IntConstant(10), etc.), so the bound tree is
+  // byte-identical to the reference test.  `big`/`bigIntArr1` are omitted (never
+  // referenced by any typer property).
+  private val sigmaTyperEnv: ScriptEnv = {
+    val dlog = sigma.crypto.CryptoConstants.dlogGroup
+    val ecp1 = dlog.generator
+    val ecp2 = dlog.multiplyGroupElements(ecp1, ecp1)
+    val ge1  = sigma.data.CSigmaDslBuilder.GroupElement(ecp1)
+    val ge2  = sigma.data.CSigmaDslBuilder.GroupElement(ecp2)
+    Map[String, Any](
+      "x"       -> IntConstant(10),
+      "y"       -> IntConstant(11),
+      "c1"      -> TrueLeaf,
+      "c2"      -> FalseLeaf,
+      "height1" -> LongConstant(100L),
+      "height2" -> LongConstant(200L),
+      "b1"      -> ByteConstant(1.toByte),
+      "b2"      -> ByteConstant(2.toByte),
+      "arr1"    -> ByteArrayConstant(Array[Byte](1, 2)),
+      "arr2"    -> ByteArrayConstant(Array[Byte](10, 20)),
+      "col1"    -> ConcreteCollection.fromItems(LongConstant(1), LongConstant(2)),
+      "col2"    -> ConcreteCollection.fromItems(LongConstant(10), LongConstant(20)),
+      "g1"      -> GroupElementConstant(ge1),
+      "g2"      -> GroupElementConstant(ge2),
+      "p1"      -> SigmaPropConstant(sigma.data.ProveDlog(ecp1)),
+      "p2"      -> SigmaPropConstant(sigma.data.ProveDlog(ecp2)),
+      "n1"      -> BigIntConstant(BigInt(10).bigInteger),
+      "n2"      -> BigIntConstant(BigInt(20).bigInteger)
+    )
+  }
+
   // ===== canonical s-expression printer over the typed Value[SType] tree =====
 
   private def typeTerm(t: SType): String = t.toTermString
@@ -217,6 +256,7 @@ object TyperOracle {
         val out = t.split("\\s+", 2) match {
           case Array("tc",  hex) => handle(Map.empty, hex)
           case Array("tce", hex) => handle(demoEnv, hex)
+          case Array("tcs", hex) => handle(sigmaTyperEnv, hex)
           case _                 => "ERR bad-line"
         }
         println(out)

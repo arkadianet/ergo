@@ -245,3 +245,29 @@ tce	col1 ++ a	REJECT 1:9 TyperException	# ++ Coll[Long] vs Coll[Byte] exact-type
 tc	(1, 2) ++ Coll(3)	REJECT 1:1 TyperException	# ++ on tuple receiver → else-arm (§1.11:419-420)
 tc	HEIGHT ^ true	REJECT 1:10 InvalidBinaryOperationParameters	# numeric ^ non-numeric rhs (§1.11 SNumeric:357-358)
 tc	sigmaProp(true) ^ sigmaProp(false)	REJECT 0:0 NotImplementedError	# SigmaProp ^ SigmaProp (§1.11:379)
+#
+# ── § 15: Task-8 SigmaTyperTest shape captures (public typecheck API port) ───────
+# All captured ORACLE_TREE_VERSION=3 (v6) via scripts/jvm_typer_oracle. Verb `tcs`
+# uses the SigmaTyperTest env (LangTests.scala:52-69) added to the oracle for this
+# task; `tc` = empty env. These pin the full-tree SHAPE assertions of
+# SigmaTyperTest.scala (`typecheck(env, x, expected)`): env substitution (x→10,
+# arr1→<1 2>), the Upcast placement in `x + height1`, INPUTS.size Select survival,
+# xor/Append lowering, and the numeric `.toBytes` MethodCall survivors (owner name =
+# the concrete numeric type: %Byte.toBytes etc.). The integration test
+# (tests/sigma_typer_spec.rs) is file-driven over these records, so each is byte-swept.
+tcs	x	OK (ConstantNode:Int @10)
+tcs	x + y	OK (ArithOp:Int (ConstantNode:Int @10) (ConstantNode:Int @11) @-102)
+tcs	x + height1	OK (ArithOp:Long (Upcast:Long (ConstantNode:Int @10)) (ConstantNode:Long @100) @-102)
+tcs	c1 && c2	OK (BinAnd:Boolean (ConstantNode:Boolean @true) (ConstantNode:Boolean @false))
+tcs	arr1	OK (ConstantNode:Coll[Byte] <@1 @2>)
+tc	HEIGHT	OK (Height:Int)
+tc	INPUTS	OK (Inputs:Coll[Box])
+tc	INPUTS.size > 1	OK (GT:Boolean (Select:Int (Inputs:Coll[Box]) 'size') (ConstantNode:Int @1))
+tcs	xor(arr1, arr2)	OK (Xor:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@10 @20>))
+tcs	arr1 ++ arr2	OK (Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@10 @20>))
+tc	1.toByte.toBytes	OK (MethodCall:Coll[Byte] (Select:Byte (ConstantNode:Int @1) 'toByte') %Byte.toBytes [] {})
+tc	1.toShort.toBytes	OK (MethodCall:Coll[Byte] (Select:Short (ConstantNode:Int @1) 'toShort') %Short.toBytes [] {})
+tc	1.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Int @1) %Int.toBytes [] {})
+tc	1.toLong.toBytes	OK (MethodCall:Coll[Byte] (Select:Long (ConstantNode:Int @1) 'toLong') %Long.toBytes [] {})
+tc	1.toBigInt.toBytes	OK (MethodCall:Coll[Byte] (Select:BigInt (ConstantNode:Int @1) 'toBigInt') %BigInt.toBytes [] {})
+tc	serialize((1, 2L))	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Tuple:(Int,Long) [(ConstantNode:Int @1) (ConstantNode:Long @2)])] {})

@@ -155,6 +155,24 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
         vec![coll_byte(), coll(SType::SInt), coll(t())],
         coll_byte(),
     );
+    // outerJoin[K, L, R, O] (SigmaPredef.scala:108-123).  No irBuilder
+    // (`PredefFuncInfo(undefined)`) → survives as `Apply` at type time, so the env
+    // entry alone is a complete port.  Type params are recovered in first-appearance
+    // order (K, L, R, O), matching `outerJoin[K, L, R, O](...)`.
+    {
+        let tup = |a: SType, b: SType| SType::STuple(vec![a, b]);
+        put(
+            "outerJoin",
+            vec![
+                coll(tup(tv("K"), tv("L"))),
+                coll(tup(tv("K"), tv("R"))),
+                func(vec![tv("K"), tv("L")], tv("O")),
+                func(vec![tv("K"), tv("R")], tv("O")),
+                func(vec![tv("K"), tv("L"), tv("R")], tv("O")),
+            ],
+            coll(tup(tv("K"), tv("O"))),
+        );
+    }
 
     // Global-method predef aliases (also SGlobal methods; the bare-Ident form is
     // reached here, the `Global.<m>` form via the §1.7/§1.8 Select arms).

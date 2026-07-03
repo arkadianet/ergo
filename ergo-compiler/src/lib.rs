@@ -238,6 +238,7 @@ mod parse;
 pub mod span;
 pub mod stype;
 pub mod token;
+pub mod typecheck;
 pub mod typed;
 pub mod typed_print;
 pub mod typer;
@@ -248,3 +249,14 @@ pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;
 pub use parse::{parse, parse_type};
 pub use stype::SType;
+pub use typecheck::{typecheck, typecheck_with_network, CompileError};
+pub use typed::{node_tpe, ConstPayload, TypedExpr};
+pub use typed_print::print_typed;
+pub use typer::TyperError;
+
+// Re-exported so `PK("addr")` compiles can select the address network without a
+// direct `ergo-ser` dependency in downstream crates.
+pub use ergo_ser::address::NetworkPrefix;
+// Re-exported so callers can build `EnvValue::GroupElement` without a direct
+// `ergo-primitives` dependency (the type is part of the `ScriptEnv` surface).
+pub use ergo_primitives::group_element::GroupElement;
