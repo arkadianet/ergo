@@ -430,6 +430,42 @@
   gap: var(--space-5);
 }
 
+/* Wallet pre-auth explainer. */
+.w-preauth {
+  max-width: 640px;
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  color: var(--tx2);
+}
+.w-preauth p {
+  margin: 0 0 var(--space-5);
+}
+.w-preauth p:last-child {
+  margin: 0;
+}
+.w-preauth ul {
+  margin: 0 0 var(--space-5);
+  padding-left: var(--space-7);
+}
+.w-preauth li {
+  margin-bottom: var(--space-3);
+}
+.w-preauth b {
+  color: var(--tx);
+}
+
+/* Mining + Events row: mining sidecar (1/3) beside the feed (2/3); a lone
+   child (mining-off node, or empty feed) takes the full width. */
+.ov-duo {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+.ov-duo--solo {
+  grid-template-columns: 1fr;
+}
+
 /* Events feed: pill · text · relative-time rows. */
 .ov-events {
   display: flex;
@@ -1034,7 +1070,8 @@
   }
   /* Own rule: sharing the group above would hand this two-child grid the
      wallet's six named rows — four empty rows of dead row-gap whitespace. */
-  .ex-iogrid {
+  .ex-iogrid,
+  .ov-duo {
     grid-template-columns: 1fr;
   }
   .w-wrap:has(> [data-scan-banner][hidden]) {

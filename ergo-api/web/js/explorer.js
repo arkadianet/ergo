@@ -69,10 +69,25 @@ function kvRow(grid, label, valueNode) {
 function panel(title) {
   const p = el('section', 'panel ex-panel');
   const head = el('div', 'panel__head');
-  head.append(el('span', 'panel__title', title));
+  // Real heading (not a span): gives screen-reader users jump targets and
+  // focusView() an announcement anchor after cross-link navigation.
+  head.append(el('h2', 'panel__title', title));
   const bodyEl = el('div', 'panel__body');
   p.append(head, bodyEl);
   return { panel: p, body: bodyEl, head };
+}
+
+// After a view swap, the element the user activated was destroyed with the
+// old view, dropping focus to <body> with no announcement. Move it onto the
+// fresh view's first heading — but never steal an active control (the
+// omnibox after '/', a pager button mid-interaction, etc.).
+function focusView() {
+  if (document.activeElement !== document.body) return;
+  const t = body.querySelector('.panel__title, .banner');
+  if (t) {
+    t.tabIndex = -1;
+    t.focus({ preventScroll: true });
+  }
 }
 
 function banner(kind, text) {
@@ -251,6 +266,7 @@ function notFound(what, extra) {
   const back = link('', '← back to explorer');
   back.href = '#explorer';
   body.append(back);
+  focusView();
 }
 
 // A gated (box / token / rich-tx / address) lookup came back empty. The cached
@@ -801,20 +817,29 @@ function route() {
   const slash = tail.indexOf('/');
   const kind = slash < 0 ? tail : tail.slice(0, slash);
   const arg = slash < 0 ? '' : tail.slice(slash + 1);
-  if (!kind) return renderHome(my);
+  // `focused` moves screen-reader/keyboard context onto the fresh view's
+  // heading once the render lands (no-op if a newer route superseded it or
+  // if the user is mid-interaction with a live control). Defined before the
+  // home early-return so home navigation ('← back to explorer', sidebar)
+  // gets the same announcement as the entity views.
+  const focused = (p) =>
+    p.then(() => {
+      if (my === seq) focusView();
+    });
+  if (!kind) return focused(renderHome(my));
   // SECURITY: validate the entity id against a strict shape BEFORE it can reach
   // a fetch URL. hex64 / base58 contain no '/' or '.', so this closes the
   // path-traversal hole where a crafted hash (e.g. `#explorer/block/../wallet/
   // lock`) would otherwise normalize to an api-key'd, state-changing wallet GET.
-  if (kind === 'block' && HEX64.test(arg)) return renderBlock(arg.toLowerCase(), my);
-  if (kind === 'tx' && HEX64.test(arg)) return renderTx(arg.toLowerCase(), my);
-  if (kind === 'box' && HEX64.test(arg)) return renderBox(arg.toLowerCase(), my);
-  if (kind === 'token' && HEX64.test(arg)) return renderToken(arg.toLowerCase(), my);
-  if (kind === 'address' && BASE58.test(arg)) return renderAddress(arg, my);
+  if (kind === 'block' && HEX64.test(arg)) return focused(renderBlock(arg.toLowerCase(), my));
+  if (kind === 'tx' && HEX64.test(arg)) return focused(renderTx(arg.toLowerCase(), my));
+  if (kind === 'box' && HEX64.test(arg)) return focused(renderBox(arg.toLowerCase(), my));
+  if (kind === 'token' && HEX64.test(arg)) return focused(renderToken(arg.toLowerCase(), my));
+  if (kind === 'address' && BASE58.test(arg)) return focused(renderAddress(arg, my));
   // Anything else (unknown kind, malformed id, path-traversal attempt) → home
   // with an honest note; never fetch an unvalidated segment.
   setStatus('invalid or unsupported explorer link');
-  return renderHome(my);
+  return focused(renderHome(my));
 }
 
 // ---- lifecycle ----

@@ -218,18 +218,44 @@ export function onFast({ status, info }) {
 
 // ---- data + quadrant (4 s) ----
 export async function onSlow() {
-  const [tip, sync, indexer, indexerHealth, mempool, peers, recent, host, events] = await Promise.all([
-    api.tip(),
-    api.sync(),
-    api.indexedHeight(),
-    api.indexerStatus(),
-    api.mempoolSummary(),
-    api.peers(),
-    api.recentBlocks(10),
-    api.host(),
-    api.events(),
-  ]);
+  // Identity is normally fetched once on mount — but a transient failure
+  // there would otherwise suppress identity-gated panels (mining) until a
+  // remount. Retry on the slow tick while it's still missing.
+  if (!state.identity) fetchIdentity();
+  // Mining reads only when identity says mining is on (identity may still
+  // be in flight the first tick — the calls start next tick).
+  const miningOn = !!state.identity?.mining;
+  const [tip, sync, indexer, indexerHealth, mempool, peers, recent, host, events, candidate, rewardAddr] =
+    await Promise.all([
+      api.tip(),
+      api.sync(),
+      api.indexedHeight(),
+      api.indexerStatus(),
+      api.mempoolSummary(),
+      api.peers(),
+      api.recentBlocks(10),
+      api.host(),
+      api.events(),
+      miningOn ? api.miningCandidate() : null,
+      // Reward address is static config — fetch once, then reuse.
+      miningOn && !state.miningReward ? api.miningRewardAddress() : null,
+    ]);
   if (tip) state.tip = tip;
+  if (rewardAddr?.rewardAddress) state.miningReward = rewardAddr.rewardAddress;
+  if (candidate) {
+    // Track template turnover so the panel can show "refreshed Xs ago" —
+    // template_seq bumps whenever the node rebuilds work for the miner.
+    if (state.miningSeq !== candidate.template_seq) {
+      state.miningSeq = candidate.template_seq;
+      state.miningSeqAt = Date.now();
+    }
+    state.miningCandidate = candidate;
+  } else if (miningOn) {
+    // 503 window (no candidate / not synced / generation race): clear the
+    // stale work rather than keep presenting old heights as current — the
+    // panel renders its "no work available" state instead.
+    state.miningCandidate = null;
+  }
 
   // history buffers
   if (state.status) {
@@ -344,6 +370,11 @@ function renderBody() {
   if (!root) return;
   const host = root.querySelector('.ov-body');
   if (!host) return;
+  // Keyboard-safe rebuild: replacing the subtree while focus is inside it
+  // dumps the user's focus to <body> on every 4s tick (the body now holds
+  // links — recent blocks, mining reward, event heights). Defer the rebuild
+  // to the next tick instead; one stale tick loses to keyboard usability.
+  if (host.contains(document.activeElement)) return;
   host.replaceChildren();
   if (viewMode === 'charts') {
     renderCharts(host);
@@ -486,9 +517,53 @@ function renderBody() {
 
   host.append(grid);
 
-  // Events feed: full-width tail of the node's bounded event ring, newest
-  // first. Silent kinds map to colored pills; block heights deep-link into
-  // the explorer.
+  // Mining + Events row: Mining renders only on mining-enabled nodes (the
+  // /mining routes 404 elsewhere); Events takes the full width when alone.
+  const duo = document.createElement('div');
+  duo.className = 'ov-duo';
+  if (state.identity?.mining) {
+    const { panel: p, body } = panel('Mining');
+    const c = state.miningCandidate;
+    // Middle-ellipsize long ids; short/odd strings render verbatim rather
+    // than as duplicated slices.
+    const midTrunc = (s, head, tail) => (s && s.length > head + tail + 1 ? `${s.slice(0, head)}…${s.slice(-tail)}` : s || '—');
+    if (c) {
+      body.append(kv('work height', num(c.h), 'var(--tx2)'));
+      if (state.miningSeqAt) {
+        body.append(
+          kv(
+            `template #${num(c.template_seq)}`,
+            `refreshed ${dur(Math.max(0, Math.floor((Date.now() - state.miningSeqAt) / 1000)))} ago`,
+            'var(--tx2)',
+          ),
+        );
+      }
+      if (c.pk) body.append(kv('miner pk', midTrunc(c.pk, 10, 8), 'var(--tx3)'));
+    } else {
+      // Candidate 503s while the node has no work to hand out (syncing /
+      // candidate generation race) — say so instead of showing stale work.
+      body.append(kv('work', 'no candidate available (node syncing?)', 'var(--yellow)'));
+    }
+    if (state.miningReward) {
+      const r = document.createElement('div');
+      r.className = 'ov-kv';
+      const l = document.createElement('span');
+      l.textContent = 'reward address';
+      const a = document.createElement('a');
+      a.className = 'ex-link';
+      a.href = `#explorer/address/${state.miningReward}`;
+      a.textContent = midTrunc(state.miningReward, 10, 6);
+      const v = document.createElement('span');
+      v.append(a);
+      r.append(l, v);
+      body.append(r);
+    }
+    duo.append(p);
+  }
+
+  // Events feed: tail of the node's bounded event ring, newest first.
+  // Silent kinds map to colored pills; block heights deep-link into the
+  // explorer.
   {
     const feed = slow.events;
     if (feed && Array.isArray(feed.events) && feed.events.length) {
@@ -535,8 +610,12 @@ function renderBody() {
         list.append(row);
       }
       body.append(list);
-      host.append(p);
+      duo.append(p);
     }
+  }
+  if (duo.childElementCount) {
+    duo.classList.toggle('ov-duo--solo', duo.childElementCount === 1);
+    host.append(duo);
   }
 
   // sysbar

@@ -74,6 +74,20 @@ export function mount(el_) {
       </div>
     </div>
     <div class="ov-prompt banner banner--info" data-wallet-prompt hidden></div>
+    <section class="panel" data-wallet-preauth hidden>
+      <div class="panel__head"><div class="panel__title">Node wallet</div></div>
+      <div class="panel__body w-preauth">
+        <p>The embedded wallet lives entirely on this node — keys never leave the machine.
+        Authorizing with the operator <code>api_key</code> unlocks:</p>
+        <ul>
+          <li><b>Balances &amp; addresses</b> — confirmed / unconfirmed ERG and tokens, derived receive addresses</li>
+          <li><b>Send payments</b> — build, sign, and broadcast transactions with local key material</li>
+          <li><b>Mining rewards</b> — sweep matured miner rewards to a P2PK address (EIP-27-correct)</li>
+          <li><b>Recovery &amp; rescan</b> — initialize / restore from a mnemonic, rescan the chain for wallet history</li>
+        </ul>
+        <p class="muted">The key is held in this browser session only and sent solely to this node.</p>
+      </div>
+    </section>
     <div class="w-wrap" data-wallet-app hidden>
       <div class="banner banner--warn" data-scan-banner hidden></div>
       <section class="panel" data-onboard-panel hidden>
@@ -157,6 +171,7 @@ function renderAuthGate(s) {
   if (!root) return;
   const blocked = s === 'none' || s === 'invalid';
   q('[data-wallet-prompt]').hidden = !blocked;
+  q('[data-wallet-preauth]').hidden = !blocked;
   q('[data-wallet-app]').hidden = blocked;
   if (blocked) {
     scrubSecrets();
