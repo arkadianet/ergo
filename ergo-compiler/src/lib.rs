@@ -191,15 +191,23 @@
 //! matches, error class differs. Bounded to out-of-range literal ids which no
 //! real contract uses.
 //!
-//! ### D-T2 — fromBase58 / fromBase64 / deserialize accept-invalid on malformed input
+//! ### D-T2 — fromBase58/fromBase64 validation (verdict parity); deserialize deferred
 //!
-//! These three predefined functions are deferred in M2 (no vendored decoder /
-//! no M3 `ValueSerializer`): `predef_ir_builder` returns `None` and the `Apply`
-//! node survives unlowered. This means a malformed argument (bad Base58 encoding,
-//! bad Base64 padding, undeserializable bytes) is **accepted** where Scala would
-//! reject at compile time. Only input-validity is affected; the result type and
-//! node shape are otherwise correct. No real contract passes malformed literals to
-//! these functions. M3 completes them with real decoders + byte validation.
+//! **`fromBase58` and `fromBase64`**: literal validation is now implemented in
+//! `predef_ir_builder` (Fix round 1, 2026-07-04).  An invalid character causes a
+//! `TyperError` — REJECT verdict matches Scala (which throws `AssertionError` for
+//! Base58 via Scorex `Predef.ensuring("Wrong char in Base58 string")`, and
+//! `IllegalArgumentException` for Base64 via `java.util.Base64.getDecoder().decode`).
+//! The error *class* differs (oracle: JVM-runtime exception; Rust: `TyperError`) —
+//! both are non-reproducible oracle classes, so class parity is not asserted.
+//! A valid (or empty) literal still returns `None` so the `Apply` survives unlowered;
+//! M3 decodes to `ByteArrayConstant`.
+//!
+//! **`deserialize`**: remains fully deferred — `predef_ir_builder` returns `None`
+//! unconditionally.  Scala constant-folds `deserialize(lit)` at type-check time
+//! and throws on undeserializable bytes; we accept the `Apply` unlowered
+//! (accept-invalid deviation, bounded to malformed literals no real contract uses).
+//! M3 completes with `ValueSerializer` integration.
 //!
 //! ### D-T3 — unsignedBigInt deferred shape (non-negative literals)
 //!

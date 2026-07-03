@@ -283,3 +283,26 @@ tc	"x".foo	REJECT 1:1 MethodNotFound
 #   widening.  Oracle confirms: Upcast wraps the ByIndex RESULT (not inside ByIndex).
 #   Shape: (ArithOp:BigInt (Upcast:BigInt (ByIndex:Long ...)) (ConstantNode:BigInt ...) @-102)
 tce	col1(0) + n1	OK (ArithOp:BigInt (Upcast:BigInt (ByIndex:Long (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) None)) (ConstantNode:BigInt (CBigInt @5)) @-102)
+#
+# ── § 17: Fix-round-1 fromBase58/fromBase64 validation probes ────────────────
+# All captured ORACLE_TREE_VERSION=3 (v6); tc = empty env.
+# fromBase58 oracle: Scorex `Base58.decode(s).get` — `Predef.ensuring` throws
+#   `AssertionError("Wrong char in Base58 string")` on invalid char. `.get` on
+#   `Failure` rethrows. Class = AssertionError (non-reproducible; D-T2 in lib.rs).
+# fromBase64 oracle: `java.util.Base64.getDecoder().decode(s)` throws
+#   `IllegalArgumentException` on invalid char. Class = IllegalArgumentException
+#   (non-reproducible; D-T2 in lib.rs).
+# Both REJECT records: verdict checked (both sides reject); class NOT asserted
+#   (non-reproducible oracle classes per `is_reproducible_class`).
+#
+# Reject probes (class non-reproducible; verdict-only assertion):
+tc	fromBase58("$reserveContractHash")	REJECT 0:0 AssertionError
+tc	fromBase64("$bankNFT")	REJECT 0:0 IllegalArgumentException
+tc	fromBase64("abc!")	REJECT 0:0 IllegalArgumentException
+tc	fromBase64("RWT_REPO_NFT")	REJECT 0:0 IllegalArgumentException
+#
+# Accept probes (shape deferred — Apply survives in M2; M3 decodes to ByteArrayConstant):
+#   fromBase58("") → Oracle: OK (ConstantNode:Coll[Byte] <>)  [Scorex empty = BigInt(0) = emptyByteArray]
+#   fromBase64("") → Oracle: OK (ConstantNode:Coll[Byte] <>)  [Java decoder: empty input = empty output]
+#   fromBase64("YWJj") → Oracle: OK (ConstantNode:Coll[Byte] <@97 @98 @99>)  [= "abc"]
+# These are SWEEP_SKIP — verdict ACCEPT, s-expr shape deferred (Apply survives in M2).

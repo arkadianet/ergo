@@ -356,6 +356,8 @@ fn gap_check_edge_vectors() {
     // ByIndex/BigInt upcast-placement (oracle §16):
     // col1(0) → ByIndex:Long; adding n1:BigInt → numeric upcast via bimap.
     // The Upcast wraps the ByIndex RESULT (confirmed oracle: Upcast:BigInt(...ByIndex...)).
+    // Refutes the cannonQ-harvest claim flagged CRITICAL in m2-gap.md check (d) —
+    // oracle wraps the RESULT.
     let seed_expected = {
         let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
         seed.lines()
@@ -559,21 +561,33 @@ fn rust_typecheck_verdict(src: &str) -> Result<(), CompileError> {
     typecheck_with_network(&env, src, 3, NetworkPrefix::Testnet).map(|_| ())
 }
 
+// =============================================================================
+// Named allowlist for residual accept-invalid deviations.
+// =============================================================================
+//
+// Each entry is (corpus-relative file path, deviation id from lib.rs).
+// The test ASSERTS the divergence direction — oracle=reject AND rust=accept —
+// so fixing a deviation here will cause a loud failure (rather than silently
+// passing with wrong parity).
+//
+// Expected: empty after Fix round 1 (fromBase58/64 validation closes the 20
+// real divergences; `deserialize` is not used in any corpus contract).
+const KNOWN_ACCEPT_INVALID: &[(&str, &str)] = &[];
+
 /// Every vendored corpus contract: `typecheck(empty env, v3)` verdict must
 /// match the committed JVM-oracle verdict.
 ///
-/// Verdict check: strict (accept vs reject).
-/// Class check: only for compiler-level exceptions reproducible by our impl.
-/// Java-runtime classes (`IllegalArgumentException`, `AssertionError`) are
-/// excluded from class checking — the REJECT verdict is sufficient signal.
+/// Verdict check: strict for all entries — oracle=reject MUST mean rust=reject.
+/// Class check: only for compiler-level exceptions reproducible by our impl
+/// (`is_reproducible_class`); Java-runtime classes (`IllegalArgumentException`,
+/// `AssertionError`) are not asserted on class but ARE asserted on verdict.
 ///
 /// A mismatch on verdict is a real bug (accept-invalid or reject-valid).
 /// A mismatch on class for a reproducible exception class is also a real bug.
 ///
-/// Implementation note: all 79 corpus contracts reference free variables not in
-/// the empty env, so most REJECT with `TyperException` (unbound ident) or
-/// `ParserException` (parse-rejected contracts).  The 19 contracts that ACCEPT
-/// with empty env are structurally self-contained (no free variable references).
+/// Residual accept-invalid deviations must be listed in `KNOWN_ACCEPT_INVALID`
+/// with the lib.rs deviation id; each entry asserts the divergence direction so
+/// that closing it later causes a loud test failure.
 #[test]
 fn corpus_typed_verdict_parity() {
     let files = corpus_files();
@@ -590,27 +604,8 @@ fn corpus_typed_verdict_parity() {
     let mut divergences: Vec<String> = Vec::new();
     for (rel, src) in &files {
         let expected = &oracle[rel];
-
-        // Non-reproducible oracle reject (AssertionError / IllegalArgumentException /
-        // base Exception): the JVM throws a runtime exception that is NOT a
-        // spec-defined compiler rejection.  Our type-checker correctly accepts or
-        // rejects based on the language spec alone, so skip both verdict and class
-        // checks for these entries.  Documented deviations:
-        //   - AssertionError: Scala constant-folds `fromBase58(lit)` at type-check
-        //     time and asserts on invalid base58 (e.g. `"$template"` placeholders).
-        //   - IllegalArgumentException: JVM-internal constraint violations that Scala
-        //     expresses outside the defined TyperException taxonomy.
         let oracle_class = expected.class.as_deref();
-        if expected.verdict == "reject"
-            && oracle_class
-                .map(|c| !is_reproducible_class(c))
-                .unwrap_or(false)
-        {
-            continue;
-        }
-
         let result = rust_typecheck_verdict(src);
-
         let oracle_accepts = expected.verdict == "accept";
         let rust_accepts = result.is_ok();
 
@@ -619,12 +614,32 @@ fn corpus_typed_verdict_parity() {
                 Ok(()) => "ACCEPT".to_string(),
                 Err(e) => format!("REJECT {}", e.class()),
             };
+
+            // Check if this is a known documented deviation.
+            if let Some(&(_file, dev_id)) = KNOWN_ACCEPT_INVALID
+                .iter()
+                .find(|(f, _)| *f == rel.as_str())
+            {
+                // Assert the known direction: oracle=reject, rust=accept.
+                // Closing this deviation later must fail loudly.
+                assert!(
+                    !oracle_accepts && rust_accepts,
+                    "KNOWN_ACCEPT_INVALID entry {rel} ({dev_id}) no longer diverges \
+                     in the expected direction — remove it from the allowlist. \
+                     oracle={} rust={rust_info}",
+                    expected.verdict
+                );
+                continue;
+            }
+
             divergences.push(format!(
                 "{rel}: verdict mismatch — oracle={} rust={rust_info}",
                 expected.verdict
             ));
         } else if !rust_accepts {
             // Both reject: check class for reproducible exceptions.
+            // Non-reproducible classes (AssertionError, IllegalArgumentException) are
+            // NOT class-checked but their REJECT verdict is enforced above.
             if let Some(cls) = oracle_class {
                 if is_reproducible_class(cls) {
                     let rust_class = result.unwrap_err().class();

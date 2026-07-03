@@ -2011,10 +2011,10 @@ fn spec_to_stype(spec: &crate::typer::unify::SFuncSpec) -> SType {
     }
 }
 
-/// `mkApply` result type — mirrors `SType.tRange` (sigma-state SType.scala).
+/// `mkApply` result type — mirrors `Apply.tpe` (values.scala:1218-1222).
 ///
 /// - `SFunc { range, .. }` → range (the standard call-result type).
-/// - `SColl(elem)` → elem: SCollection.tRange = tpeItems (SType.scala:205).
+/// - `SColl(elem)` → elem: `SCollectionType.elemType` (SType.scala:750).
 ///   This handles the §1.8 `other` branch for a select that resolves to a
 ///   collection type; `Apply:(elem)` is the result shape the oracle produces.
 /// - All other types → `NoType`; the global post-condition rejects.

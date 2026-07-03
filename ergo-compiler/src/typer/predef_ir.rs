@@ -30,13 +30,25 @@
 //! `InvalidArguments`), but for a valid non-negative literal it returns `None`
 //! so the `Apply` survives unlowered.  M3 constructs the `UBI` constant payload.
 //!
-//! `fromBase58`, `fromBase64`, and `deserialize` return `None` unconditionally —
-//! **ACCEPT-INVALID deviation**: Scala rejects malformed inputs at compile time
-//! (e.g. bad Base58 encoding, bad Base64 padding, undeserializable bytes) while we
-//! accept them as unlowered `Apply` nodes.  This is a bounded M2 gap: real contracts
-//! do not pass runtime-malformed literals to these functions.  See lib.rs
-//! § "Known M2 deviations" for the full ledger.  M3 completes them with real
-//! decoders + byte validation.
+//! `fromBase58` validates that every character is in the Bitcoin / Scorex Base58
+//! alphabet (`123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`).  An
+//! invalid character causes Scorex `Base58.decode(s).get` to throw `AssertionError`
+//! ("Wrong char in Base58 string") via `Predef.ensuring`; we map this to a
+//! `TyperError` (D-T2: verdict parity; error class differs, as documented in
+//! lib.rs).  A valid (or empty) input still returns `None` so the `Apply` survives
+//! unlowered.  M3 completes decoding.
+//!
+//! `fromBase64` validates that every character is in the Java standard Base64
+//! alphabet (`A-Za-z0-9+/=`).  An invalid character causes
+//! `java.util.Base64.getDecoder().decode(s)` to throw `IllegalArgumentException`;
+//! we map to `TyperError` (D-T2: verdict parity; error class differs, as
+//! documented in lib.rs).  Valid / empty input returns `None` (Apply survives;
+//! M3 decodes to `ByteArrayConstant`).
+//!
+//! `deserialize` remains fully deferred — `None` unconditionally.  Scala
+//! constant-folds `deserialize(lit)` at type-check time and throws on invalid
+//! bytes (accept-invalid deviation; no real contract calls `deserialize(bad)`).
+//! See lib.rs § "Known M2 deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
 //! typer).
@@ -437,8 +449,30 @@ pub fn predef_ir_builder(
                 None
             }
         }
-        // fromBase58/fromBase64/deserialize: accept-invalid in M2 (see module docs).
-        "fromBase58" | "fromBase64" | "deserialize" => None,
+        // fromBase58: reject if any char is outside the Bitcoin/Scorex Base58
+        // alphabet (Scorex `Base58.decode(s).get` → AssertionError on bad char via
+        // `Predef.ensuring`; we emit TyperError — D-T2, verdict parity).
+        // Valid / empty → None (Apply survives; M3 decodes to ByteArrayConstant).
+        "fromBase58" => {
+            let s = string_const(args.first()?)?;
+            s.chars()
+                .find(|&c| !is_base58_char(c))
+                .map(|bad| Err(typer_err(format!("Wrong char in Base58 string: '{bad}'"))))
+        }
+        // fromBase64: reject if any char is outside the Java standard Base64
+        // alphabet (`java.util.Base64.getDecoder().decode(s)` → IllegalArgumentException;
+        // we emit TyperError — D-T2, verdict parity).
+        // Valid / empty → None (Apply survives; M3 decodes to ByteArrayConstant).
+        "fromBase64" => {
+            let s = string_const(args.first()?)?;
+            if let Err(msg) = validate_base64(s) {
+                Some(Err(typer_err(msg)))
+            } else {
+                None
+            }
+        }
+        // deserialize: fully deferred (accept-invalid deviation; see module docs).
+        "deserialize" => None,
         // allZK/anyZK/outerJoin/serialize(binder-handled)/PK(binder-handled):
         // no typer-time irBuilder → fall through.
         _ => None,
@@ -595,6 +629,53 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+/// Returns `true` iff `c` is in the Scorex / Bitcoin Base58 alphabet:
+/// `123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`.
+/// Excluded: `0`, `O`, `I`, `l` (visually ambiguous characters).
+/// (SigmaPredef.scala:235 / scorex-util Base58$.Alphabet)
+fn is_base58_char(c: char) -> bool {
+    matches!(c,
+        '1'..='9'
+        | 'A'..='H' | 'J'..='N' | 'P'..='Z'   // skip 'I' and 'O'
+        | 'a'..='k' | 'm'..='z'                // skip 'l'
+    )
+}
+
+/// Validates a string against the Java standard Base64 alphabet
+/// (`java.util.Base64.getDecoder()` — `A-Za-z0-9+/` plus `=` padding).
+///
+/// Returns `Ok(())` if the string is a structurally valid base64 input
+/// (all chars in alphabet; at most 2 trailing `=` signs; no interior `=`;
+/// length % 4 ≠ 1).  Returns `Err(msg)` otherwise, mirroring the
+/// `IllegalArgumentException` that the Java decoder throws.
+///
+/// (SigmaPredef.scala:249 / `java.util.Base64.getDecoder().decode(s)`)
+fn validate_base64(s: &str) -> Result<(), String> {
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '+' | '/' | '=' => {}
+            _ => return Err(format!("Illegal base64 character 0x{:02x}", c as u32)),
+        }
+    }
+    // Validate padding: `=` only at the end, at most 2, no interior `=`.
+    let trimmed = s.trim_end_matches('=');
+    let pad_count = s.len() - trimmed.len();
+    if pad_count > 2 {
+        return Err("Too many padding chars in base64 string".to_string());
+    }
+    if trimmed.contains('=') {
+        return Err("Interior '=' in base64 string".to_string());
+    }
+    // A single trailing character after all complete 4-char groups is undecodable.
+    if s.len() % 4 == 1 {
+        return Err(format!(
+            "Invalid base64 string length: {} (remainder 1 is undecodable)",
+            s.len()
+        ));
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -785,13 +866,73 @@ mod tests {
 
     // ----- error paths / fall-through -----
 
-    /// Deferred decoders fall through (None) so the Apply survives.
+    /// Valid fromBase58/fromBase64 inputs fall through (None) so the Apply survives.
+    /// Deferred: M3 will decode and produce ByteArrayConstant.
     #[test]
-    fn deferred_decoders_fall_through() {
+    fn valid_decoders_fall_through() {
+        // Valid base58 char 'x' → None (deferred)
         let f = ident("fromBase58", vec![SType::SString], coll_byte());
         assert!(predef_ir_builder("fromBase58", &f, &[str_const("x")]).is_none());
-        let f2 = ident("deserialize", vec![SType::SString], SType::SInt);
-        assert!(predef_ir_builder("deserialize", &f2, &[str_const("x")]).is_none());
+        // Valid base58 empty string → None (deferred; oracle §17 probe: ACCEPT)
+        assert!(predef_ir_builder("fromBase58", &f, &[str_const("")]).is_none());
+        // Valid base64 string → None (deferred; oracle §17 probe: ACCEPT)
+        let f2 = ident("fromBase64", vec![SType::SString], coll_byte());
+        assert!(predef_ir_builder("fromBase64", &f2, &[str_const("YWJj")]).is_none());
+        // Valid base64 empty string → None (deferred; oracle §17 probe: ACCEPT)
+        assert!(predef_ir_builder("fromBase64", &f2, &[str_const("")]).is_none());
+        // deserialize: always deferred (accept-invalid deviation, see module docs)
+        let f3 = ident("deserialize", vec![SType::SString], SType::SInt);
+        assert!(predef_ir_builder("deserialize", &f3, &[str_const("x")]).is_none());
+    }
+
+    // ----- fromBase58 / fromBase64 validation (oracle §17) -----
+
+    /// `fromBase58("$reserveContractHash")` → Err (Scorex: AssertionError "Wrong char
+    /// in Base58 string"; oracle §17 class = AssertionError, non-reproducible per D-T2).
+    #[test]
+    fn from_base58_dollar_char_rejects() {
+        let f = ident("fromBase58", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase58", &f, &[str_const("$reserveContractHash")])
+            .expect("isDefinedAt true for invalid Base58 char");
+        assert!(res.is_err(), "invalid Base58 char must error");
+    }
+
+    /// `fromBase58("0")` → Err (Scorex: '0' not in Base58 alphabet, same path).
+    #[test]
+    fn from_base58_zero_digit_rejects() {
+        let f = ident("fromBase58", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase58", &f, &[str_const("0")])
+            .expect("isDefinedAt true for '0'");
+        assert!(res.is_err(), "'0' not in Base58 alphabet");
+    }
+
+    /// `fromBase64("$bankNFT")` → Err (Java: IllegalArgumentException; oracle §17
+    /// class = IllegalArgumentException, non-reproducible per D-T2).
+    #[test]
+    fn from_base64_dollar_char_rejects() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("$bankNFT")])
+            .expect("isDefinedAt true for invalid Base64 char");
+        assert!(res.is_err(), "invalid Base64 char must error");
+    }
+
+    /// `fromBase64("abc!")` → Err ('!' not in standard Base64 alphabet; oracle §17).
+    #[test]
+    fn from_base64_bang_char_rejects() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("abc!")])
+            .expect("isDefinedAt true for '!'");
+        assert!(res.is_err(), "'!' not in Base64 alphabet");
+    }
+
+    /// `fromBase64("RWT_REPO_NFT")` → Err ('_' not in STANDARD base64; oracle §17).
+    /// URL-safe base64 uses '_', but `java.util.Base64.getDecoder()` is STANDARD.
+    #[test]
+    fn from_base64_underscore_rejects() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("RWT_REPO_NFT")])
+            .expect("isDefinedAt true for '_'");
+        assert!(res.is_err(), "'_' not in standard Base64 alphabet");
     }
 
     /// An unknown name has no irBuilder → None.
