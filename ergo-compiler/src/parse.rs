@@ -317,10 +317,23 @@ impl<'a> Cursor<'a> {
     /// comment-preceded newlines (`Newline { after_comment: true }`), and succeed
     /// iff the next token is not a `Newline`. Pure lookahead: the cursor is
     /// restored on failure.
+    ///
+    /// `bc_before` on the landing token poisons the call ONLY when a `Newline` was
+    /// consumed. Mechanism: `ConsumeComments = (WSChars.? ~ Comment ~ WSChars.? ~
+    /// Newline).rep` (Literals.scala:58) cuts on a block comment that is not
+    /// followed by a `Newline`; the cut is only reachable AFTER `Newline.?` consumed
+    /// a newline. When zero newlines are consumed, the same block comment is plain
+    /// implicit whitespace in the gap (not inside `ConsumeComments`) and is harmless
+    /// — `OneNLMax` succeeds with zero newlines. oracle: `a +\n/*c*/b` REJECT (nl
+    /// consumed → bc_before poisons); `a + /*c*/\nb` ACCEPT (nl consumed, bc_before
+    /// not set); `{ val x = 1\n/*c*/(x,y)=>x }` REJECT (block body's `Semis` already
+    /// consumed the `\n`, so zero newlines consumed by `one_nl_max` at the `(` — but
+    /// `(` must still be detected as a later-chunk block-lambda head and rejected).
     fn one_nl_max(&mut self) -> bool {
         let save = self.i;
         // Basic.Newline.?
-        if self.i < self.toks.len() && Self::is_nl(&self.toks[self.i]) {
+        let consumed_nl = self.i < self.toks.len() && Self::is_nl(&self.toks[self.i]);
+        if consumed_nl {
             self.i += 1;
         }
         // ConsumeComments: (WSChars.? ~ Comment ~ WSChars.? ~ Newline).rep
@@ -339,13 +352,11 @@ impl<'a> Cursor<'a> {
             self.i = save;
             return false;
         }
-        // ConsumeComments' `~/`-cut: a block comment in the post-newline region
-        // that is not newline-terminated (a `MultilineComment` matched but the
-        // required trailing `Basic.Newline` is absent, Literals.scala:58,83) makes
-        // the `.rep` fail hard. `OneNLMax` is `NoCut` so the caller backtracks, but
-        // the continuation is refused. The lexer stamps this as `bc_before` on the
-        // token `OneNLMax` lands on. oracle: `a +\n/*c*/b` REJECT.
-        if self.i < self.toks.len() && self.toks[self.i].bc_before {
+        // ConsumeComments' `~/`-cut: poisons only when a newline was consumed (the
+        // cut is inside ConsumeComments, which is only reached after Newline.? fires).
+        // oracle: `a +\n/*c*/b` REJECT; `{ val x=1\n/*c*/(x,y)=>x }` REJECT (zero
+        // newlines here — bc_before ignored, head detected, later-chunk reject fires).
+        if consumed_nl && self.i < self.toks.len() && self.toks[self.i].bc_before {
             self.i = save;
             return false;
         }
@@ -3619,6 +3630,34 @@ mod expr_tests {
         assert_eq!(e.line_col("arr.exists ( (a: Int) => a >= 1 )"), (1, 16)); // :597
                                                                               // D5: block-lambda in non-first chunk is a reject (Scala: MatchError crash).
         assert!(crate::parse("{ val a = 1; (x: Int) => x }", 3).is_err());
+    }
+
+    #[test]
+    fn one_nl_max_bc_before_only_poisons_when_newline_consumed() {
+        // Round-12 fix: bc_before poisons one_nl_max ONLY when it consumed a Newline.
+        //
+        // (a) later-chunk block-lambda head via newline+comment gap → REJECT
+        //     oracle: ParserOracle sigma-state 6.0.2 → REJECT 0:0
+        //     The block body's Semis already consumed the `\n`, so one_nl_max at `(`
+        //     sees zero newlines — bc_before is ignored — the head IS detected and
+        //     reject_chunk_lambda_head fires.
+        assert!(crate::parse("{ val x = 1\n/*c*/(x,y)=>x }", 3).is_err());
+        // (b) semicolon-separated (same chunk) lambda with trailing comment → ACCEPT
+        //     oracle: ParserOracle sigma-state 6.0.2 → ACCEPT
+        //     `;` is in the same chunk; no newline crosses one_nl_max; bc_before is
+        //     false on `(` (comment precedes no newline in that gap).
+        assert!(crate::parse("{ val x = 1; /*c*/(x,y)=>x }", 3).is_ok());
+        // (c) infix op across newline+comment without trailing newline → REJECT
+        //     oracle: ParserOracle sigma-state 6.0.2 → REJECT 2:6
+        //     one_nl_max consumes the `\n`, then sees bc_before on `b` → poison.
+        assert!(crate::parse("a +\n/*c*/b", 3).is_err());
+        // (d) infix op across comment+newline (comment terminates with newline) → ACCEPT
+        //     oracle: ParserOracle sigma-state 6.0.2 → ACCEPT
+        //     bc_before is not set (the block comment IS followed by a newline).
+        assert!(crate::parse("a + /*c*/\nb", 3).is_ok());
+        // (e) type-level infix across newline+comment → REJECT (shared one_nl_max)
+        //     oracle: ParserOracle sigma-state 6.0.2 → REJECT 2:6
+        assert!(crate::parse("Int +\n/*c*/Long", 3).is_err());
     }
 
     // ----- blocks and lambdas — Scala-cited edge cases -----
