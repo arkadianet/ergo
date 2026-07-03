@@ -262,7 +262,6 @@ const EXPECTED_TX_FILES: &[&str] = &[
     "transactions_1_10.json",
     "transactions_1_200.json",
     "transactions_1_1000.json",
-    "transactions_1_10000.json",
     "transactions_205000_205200.json",
     "transactions_417785_417800.json",
     "transactions_500000_501000.json",
@@ -277,7 +276,6 @@ const EXPECTED_TX_FILES: &[&str] = &[
     "transactions_1300000_1301000.json",
     "transactions_1500000_1501000.json",
     "transactions_1750000_1751000.json",
-    "transactions_1761000_1762000.json",
 ];
 
 #[test]

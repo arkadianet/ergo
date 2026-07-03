@@ -75,8 +75,10 @@ pub fn minimize<P: FnMut(&[u8]) -> bool>(input: &[u8], mut predicate: P) -> Vec<
         }
 
         // ── Phase 2: truncation ───────────────────────────────────────────────
-        // Try prefixes from `len-1` down to `0`; accept the first that satisfies.
-        for new_len in (0..current.len()).rev() {
+        // Ascend from the shortest prefix and accept the first that satisfies, so
+        // truncation removes as much as possible (a descending scan would keep the
+        // longest satisfying prefix — the least reduction).
+        for new_len in 0..current.len() {
             if predicate(&current[..new_len]) {
                 current.truncate(new_len);
                 break;

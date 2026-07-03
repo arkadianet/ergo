@@ -234,11 +234,17 @@ impl UtxoView for UtxoAllHistory {
 #[ignore = "slow; needs re-extractable modern corpus (retired from git — see test-vectors/mainnet/FIXTURES.md); run with --ignored after extracting via test-vectors/scripts or the replay driver"]
 fn mempool_admits_mainnet_corpus_1761k() {
     // The 1761k modern bulk range is retired from git (deep coverage moved to
-    // `ergo-difftest --bin replay`). Skip cleanly if it hasn't been re-extracted.
+    // `ergo-difftest --bin replay`). Skip cleanly if ANY of the three fixtures
+    // this test reads (txs / headers / input boxes) hasn't been re-extracted, so
+    // a partial extraction can't panic on a later `.expect`.
     let tx_path = "../test-vectors/mainnet/transactions_1761000_1762000.json";
-    if !std::path::Path::new(tx_path).exists() {
-        eprintln!("skip: {tx_path} retired from git; re-extract to run this diagnostic");
-        return;
+    let headers_path = "../test-vectors/mainnet/headers_1761000_1762000.json";
+    let boxes_path = "../test-vectors/mainnet/input_boxes_1761000_1762000.json";
+    for p in [tx_path, headers_path, boxes_path] {
+        if !std::path::Path::new(p).exists() {
+            eprintln!("skip: {p} retired from git; re-extract to run this diagnostic");
+            return;
+        }
     }
     let tx_data = std::fs::read_to_string(tx_path).expect("transactions_1761000_1762000.json");
     let vectors: Vec<TxVector> = serde_json::from_str(&tx_data).unwrap();

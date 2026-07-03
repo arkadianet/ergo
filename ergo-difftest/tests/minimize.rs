@@ -300,8 +300,8 @@ fn auto_file_pending_appends_to_queue_artifact_does_not() {
     );
 }
 
-/// Idempotency: filing the same record twice writes to the same path (overwrite
-/// is fine; no duplicate QUEUE.md entries are required, but the file must be valid).
+/// Idempotency: filing the same Pending record twice writes the same path AND
+/// does not duplicate its QUEUE.md line.
 #[test]
 fn auto_file_is_idempotent_same_path() {
     let dir = tempfile::tempdir().expect("tmpdir");
@@ -313,4 +313,12 @@ fn auto_file_is_idempotent_same_path() {
 
     assert_eq!(p1, p2, "second filing must produce the same path as first");
     assert!(p2.exists());
+
+    // The Pending record must appear exactly once in QUEUE.md after two files.
+    let queue = std::fs::read_to_string(reg.join("QUEUE.md")).expect("QUEUE.md");
+    assert_eq!(
+        queue.matches("[PENDING]").count(),
+        1,
+        "re-filing the same record must not duplicate its QUEUE.md line"
+    );
 }

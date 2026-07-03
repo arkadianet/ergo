@@ -137,8 +137,12 @@ jobs:
   difftest:
     name: difftest (structured hermetic campaign + coverage gate)
     runs-on: ubuntu-latest
+    # Fail fast if the structured campaign hangs rather than burning the runner.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@master
         with:

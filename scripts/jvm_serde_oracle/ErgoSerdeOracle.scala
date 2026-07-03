@@ -286,6 +286,12 @@ object ErgoSerdeOracle {
                   "ERR frame-truncated:" + e.getMessage
                 case scala.util.Failure(e: IllegalArgumentException) =>
                   "ERR frame-invalid:" + e.getMessage
+                // The reflective CAvlTreeVerifier constructor wraps a real
+                // failure in InvocationTargetException; surface the cause so the
+                // REJECT class is the actual verifier error, not the wrapper.
+                case scala.util.Failure(e: java.lang.reflect.InvocationTargetException) =>
+                  val cause = if (e.getCause != null) e.getCause else e
+                  "REJECT " + cause.getClass.getSimpleName
                 // Verification failures → REJECT with the exception class name
                 // so the triage log shows which Scala exception fired.
                 case scala.util.Failure(e) => "REJECT " + e.getClass.getSimpleName

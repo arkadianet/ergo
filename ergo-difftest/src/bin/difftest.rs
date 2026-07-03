@@ -294,7 +294,7 @@ fn run_check_canonical(input: &[u8], expected_hex: &str) -> ExitCode {
         eprintln!("[CANONICAL-GATE] write_ergo_tree failed: {e:?}");
         return ExitCode::FAILURE;
     }
-    let actual_hex: String = w.result().iter().map(|b| format!("{b:02x}")).collect();
+    let actual_hex = ergo_difftest::to_hex(&w.result());
 
     if actual_hex == expected_hex {
         println!("[CANONICAL-GATE] PASS: re-encoded = {actual_hex}");

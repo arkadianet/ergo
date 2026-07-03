@@ -37,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -64,6 +66,8 @@ jobs:
     # Independent of fuzz-structured — a separate signal, runs in parallel.
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -102,6 +106,8 @@ jobs:
     # runner or a workflow_dispatch from an operator with node access).
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -141,6 +147,8 @@ jobs:
         target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@master
         with:
