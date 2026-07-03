@@ -57,7 +57,7 @@ paths:
     get:
       tags:
       - node
-      description: 'Operator event feed, oldest-first: block applies, reorgs, peer connects/disconnects, extra-index status transitions. Backed by a bounded node-side ring (512 events) projected into the lock-free snapshot each tick, so this read never touches live node state. `seq` is monotonic; a gap between polls means the ring evicted entries in between. Reorg detection is approximate: derived from the committed recent-block tail (a replaced block within the last 32 heights), so a reorg deeper than that tail surfaces as plain `blockApplied` events only.'
+      description: 'Operator event feed, oldest-first: block applies, reorgs, peer connects/disconnects, extra-index status transitions. Backed by a bounded node-side ring (512 events) whose FULL retained tail is projected into the lock-free snapshot, so this read never touches live node state and a cold poll returns up to 512 events. `seq` is monotonic; a gap between polls means the ring evicted entries in between — eviction is the ONLY gap source. Reorg detection is approximate: derived from the committed recent-block tail (a replaced block within the last 32 heights), so a reorg deeper than that tail surfaces as plain `blockApplied` events only.'
       operationId: events_handler
       parameters:
       - name: since

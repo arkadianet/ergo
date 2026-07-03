@@ -919,8 +919,15 @@ fn build_events_projection(
     ring: &crate::node::event_feed::EventFeedRing,
 ) -> std::sync::Arc<ergo_api::types::ApiNodeEvents> {
     use crate::node::event_feed::FeedEventKind as K;
+    // Project the FULL retained tail (ring CAP, 512), not a shorter window:
+    // the seq contract promises that a gap between polls means ring
+    // EVICTION and nothing else. A narrower projection would open a silent
+    // second gap source for any client whose `since` cursor is older than
+    // the window but younger than eviction (CodeRabbit, PR #152). ~512
+    // small events clone only when the seq advances (see the cache at the
+    // call site), so the cost stays negligible.
     let events = ring
-        .latest(100)
+        .latest(crate::node::event_feed::EventFeedRing::CAP)
         .into_iter()
         .map(|e| {
             let mut ev = ergo_api::types::ApiNodeEvent {
