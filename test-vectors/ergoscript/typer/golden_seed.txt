@@ -395,9 +395,14 @@ tc	1L.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Long @1) %SNumericType.toB
 # ── § 22: M2 adversarial wave M2 — bare-serialize arg is the reference BOUND tree ──
 # A bare `serialize(v)` binds to `MethodCall(Global, serialize, [v])` with an un-typed
 # arg (Rule-10); §1.24 passes it through un-typed, mirroring the reference, which then
-# RENDERS the bound arg.  The reference s-expression printer THROWS (RuntimeException →
-# REJECT, non-reproducible class → verdict graded) on any node whose bound `tpe` is
-# NoType; every node the binder types renders clean and ACCEPTS with the bound shape.
+# RENDERS the bound arg.  Verdict parity is real across all three reference stages:
+# the reference `typecheck` ACCEPTS (its `case MethodCall => v` does not recurse into
+# args, leaving a NoType descendant), but the full `compiler.compile` REJECTS at
+# graph-building (GraphBuildingException/StagingException), and the oracle surfaces the
+# same reject early because its s-expr printer THROWS (RuntimeException → REJECT,
+# non-reproducible class → verdict graded) on any node whose bound `tpe` is NoType.
+# We reject one stage earlier still, at the typer's NoType arg scan — all agree on
+# verdict.  Every node the binder types renders clean and ACCEPTS with the bound shape.
 # A property/method `Select` carries the DECLARED method signature (`declared_select_tpe`),
 # NOT the resolved value type — `SELF.value → (Box) => Long`, `xs.size → (Coll[IV]) => Int`
 # (receiver kept, IV un-substituted, res_type=None) — distinct from the typed Select
