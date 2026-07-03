@@ -387,6 +387,38 @@ code {
   font-family: var(--mono);
   font-size: var(--fs-small);
 }
+.dtable__toggle {
+  flex: 0 0 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--tx3);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    color var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+.dtable__toggle:hover {
+  color: var(--tx);
+  background: var(--s3);
+}
+.dtable__toggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.dtable__toggle[aria-expanded='true'] {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+.dtable__togglespace {
+  flex: 0 0 26px;
+}
+
 .dtable__drawer {
   background: color-mix(in srgb, var(--s2) 72%, black);
   box-shadow: inset 3px 0 0 var(--accent);

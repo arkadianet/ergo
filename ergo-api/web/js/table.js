@@ -4,7 +4,10 @@
 //
 // columns: [{ key, label, width?, align?, render?(row)->Node|string, sort?(row)->any }]
 // opts: { rowKey(row)->string, renderDetail?(row)->Node, initialSort?:{key,dir} }
+let tableSeq = 0; // per-instance drawer-id namespace (see aria-controls below)
+
 export function makeTable(container, columns, opts = {}) {
+  const tableId = ++tableSeq;
   let rows = [];
   let sort = opts.initialSort || { key: columns[0].key, dir: -1 };
   let expanded = null;
@@ -42,6 +45,13 @@ export function makeTable(container, columns, opts = {}) {
       };
       h.append(s);
     }
+    if (opts.renderDetail) {
+      // Spacer aligning the header with the rows' expand-toggle column.
+      const sp = document.createElement('span');
+      sp.className = 'dtable__togglespace';
+      sp.setAttribute('aria-hidden', 'true');
+      h.append(sp);
+    }
     return h;
   }
 
@@ -72,31 +82,49 @@ export function makeTable(container, columns, opts = {}) {
       if (expanded === rk) r.classList.add('dtable__row--open');
       for (const c of columns) r.append(cell(c, row));
       if (opts.renderDetail) {
-        r.tabIndex = 0;
-        r.setAttribute('role', 'button');
-        r.setAttribute('aria-expanded', String(expanded === rk));
-        const toggle = (e) => {
-          // Copy buttons and links inside a cell act on their own — a click
-          // there must not also toggle the row drawer.
-          if (e.target.closest('.copy, a')) return;
+        // A dedicated, natively-focusable toggle carries the disclosure
+        // semantics. The old shape (role=button + tabindex on the whole
+        // row) nested links/copy-buttons inside a button role — invalid
+        // ARIA that screen readers flatten inconsistently. The row keeps a
+        // pointer-only whitespace-click affordance (no role, no tabindex),
+        // so mouse ergonomics are unchanged while AT sees one clean button.
+        const isOpen = expanded === rk;
+        // Only one drawer is open per table, so the id needs no row
+        // component at all — an instance counter is collision-proof where a
+        // truncated row key was not.
+        const drawerId = `dtable-drawer-${tableId}`;
+        const tg = document.createElement('button');
+        tg.type = 'button';
+        tg.className = 'dtable__toggle';
+        tg.textContent = '▸';
+        tg.title = isOpen ? 'collapse details' : 'expand details';
+        tg.setAttribute('aria-label', 'row details');
+        tg.setAttribute('aria-expanded', String(isOpen));
+        if (isOpen) tg.setAttribute('aria-controls', drawerId);
+        const toggle = () => {
           expanded = expanded === rk ? null : rk;
           draw();
+          // Re-focus the same row's toggle after the redraw so keyboard
+          // users aren't dumped to <body> by the rebuild.
+          const again = table.querySelector(`[data-tg="${CSS.escape(String(rk))}"]`);
+          if (again) again.focus({ preventScroll: true });
         };
-        r.onclick = toggle;
-        r.onkeydown = (e) => {
-          // Let a focused copy button / link handle its own Enter/Space
-          // (don't preventDefault its native activation before it fires).
-          if (e.target.closest('.copy, a')) return;
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggle(e);
-          }
+        tg.dataset.tg = String(rk);
+        tg.onclick = toggle;
+        r.append(tg);
+        r.onclick = (e) => {
+          // Pointer convenience: whitespace clicks toggle too. Interactive
+          // descendants (links, copy, the toggle itself) act on their own.
+          if (e.target.closest('.copy, a, button')) return;
+          toggle();
         };
+        if (isOpen) r._drawerId = drawerId;
       }
       table.append(r);
       if (opts.renderDetail && expanded === rk) {
         const d = document.createElement('div');
         d.className = 'dtable__drawer';
+        d.id = r._drawerId;
         d.append(opts.renderDetail(row));
         table.append(d);
       }

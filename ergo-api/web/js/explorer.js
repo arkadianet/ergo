@@ -118,6 +118,95 @@ function amt(v) {
   return Number.isSafeInteger(v) ? num(v) : `≈${num(v)}`;
 }
 
+// ---- EIP-4 token metadata (name + decimals) ----
+//
+// Asset lists on the wire carry only {tokenId, amount}; without the mint
+// box's EIP-4 registers a 2-decimal token renders "100" for 1.00. Cache
+// metadata per token id (session-lifetime — mint metadata is immutable) and
+// decimal-adjust amounts wherever assets render. Lookups need the
+// extra-index; on a syncing/absent index amounts stay raw.
+const tokenMeta = new Map(); // tokenId → {name, decimals}
+
+// Unicode bidi/zero-width formatting controls: stripped from DISPLAY names so
+// a hostile mint can't reorder or invisibly pad the label. The raw name stays
+// reachable on the token detail view.
+const BIDI_CONTROLS = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
+
+// EIP-4 decimals is attacker-controlled mint data decoded from a register —
+// a huge value would turn 10**d / padStart(d+1) into a RangeError or a giant
+// allocation at render time. u64 amounts have ≤ 20 digits, so clamp to
+// [0, 19]; anything outside renders raw.
+function saneDecimals(d) {
+  return Number.isInteger(d) && d > 0 && d <= 19 ? d : 0;
+}
+
+// Read-only POST (the batch token route). Deliberately NOT api-client's
+// postJson: that helper is for gated writes — it attaches the api_key and
+// reports 2xx as key-valid, which an ungated read would false-confirm.
+async function postReadJson(path, bodyVal) {
+  try {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(bodyVal),
+    });
+    return r.ok ? await r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTokenMeta(ids) {
+  if (!indexerReady()) return;
+  const misses = [...new Set(ids)].filter((id) => id && !tokenMeta.has(id));
+  if (!misses.length) return;
+  // One batched lookup (POST /blockchain/tokens) instead of a per-token
+  // fan-out — a 100-asset tx costs one request. Only SUCCESSFUL lookups are
+  // cached, so a transient failure retries on the next view instead of
+  // pinning raw amounts for the whole session.
+  const got = await postReadJson('/blockchain/tokens', misses);
+  if (!Array.isArray(got)) return;
+  for (const t of got) {
+    if (t?.id) {
+      tokenMeta.set(t.id, {
+        name: (t.name || '').replace(BIDI_CONTROLS, ''),
+        decimals: saneDecimals(t.decimals),
+      });
+    }
+  }
+}
+
+// Integer-exact decimal shift (string math via BigInt) for safe integers;
+// unsafe magnitudes fall back to an approximate float shift, marked ≈.
+function decimalize(amount, d) {
+  if (amount == null) return '—';
+  if (!Number.isSafeInteger(amount)) return `≈${num(amount / 10 ** d)}`;
+  const neg = amount < 0;
+  const s = BigInt(Math.abs(amount))
+    .toString()
+    .padStart(d + 1, '0');
+  const whole = num(Number(s.slice(0, s.length - d)));
+  const frac = s.slice(s.length - d).replace(/0+$/, '');
+  return `${neg ? '-' : ''}${whole}${frac ? `.${frac}` : ''}`;
+}
+
+// Cache-driven amount display: decimal-adjusted when the token's EIP-4
+// decimals are known and non-zero, raw otherwise.
+function tokenAmt(tid, amount) {
+  const m = tokenMeta.get(tid);
+  return m && m.decimals > 0 ? decimalize(amount, m.decimals) : amt(amount);
+}
+
+// Link label for a token: its (attacker-controlled, textContent-only) EIP-4
+// name when known, else the truncated id. The full id always rides the
+// title attribute so a name that MIMICS an id can't hide the real one.
+function tokenLink(tid) {
+  const m = tokenMeta.get(tid);
+  const a = link(`token/${tid}`, m?.name?.trim() ? m.name.trim().slice(0, 32) : truncMiddle(tid, 6, 6));
+  a.title = tid;
+  return a;
+}
+
 function go(path) {
   location.hash = path ? `explorer/${path}` : 'explorer';
 }
@@ -474,7 +563,7 @@ function ioLine(b) {
     for (const t of tokens) {
       const tid = t.tokenId || t.token_id;
       const line = el('div', 'muted');
-      line.append('+ ', el('span', null, amt(t.amount)), ' ', link(`token/${tid}`, truncMiddle(tid, 6, 6)));
+      line.append('+ ', el('span', null, tokenAmt(tid, t.amount)), ' ', tokenLink(tid));
       tk.append(line);
     }
     row.append(tk);
@@ -555,6 +644,13 @@ async function renderTx(id, mySeq) {
     };
   }
   if (!io) io = slim || pool;
+  // Warm the EIP-4 cache for every asset in view, then render (ioLine reads
+  // the cache synchronously). Bail if the route moved on during the fetch.
+  const ioTokenIds = [...(io.inputs || []), ...(io.outputs || [])].flatMap((b) =>
+    (b.assets || b.tokens || []).map((t) => t.tokenId || t.token_id),
+  );
+  await fetchTokenMeta(ioTokenIds);
+  if (mySeq !== seq) return;
   const inputs = io.inputs || [];
   const outputs = io.outputs || [];
   const grid2 = el('div', 'ex-iogrid');
@@ -583,6 +679,8 @@ async function renderBox(id, mySeq) {
   const b = await getJson(`/blockchain/box/byId/${id}`);
   if (mySeq !== seq) return;
   if (!b) return notFoundGated('box', mySeq);
+  await fetchTokenMeta((b.assets || []).map((a) => a.tokenId));
+  if (mySeq !== seq) return;
   body.replaceChildren();
 
   const { panel: p, body: pb, head } = panel('Box');
@@ -604,7 +702,9 @@ async function renderBox(id, mySeq) {
     const { panel: ap, body: ab } = panel(`Tokens · ${b.assets.length}`);
     for (const a of b.assets) {
       const row = el('div', 'ex-io');
-      row.append(hashNode(a.tokenId, `token/${a.tokenId}`), el('span', 'ex-io__val', amt(a.amount)));
+      const label = el('span', 'ex-hash');
+      label.append(tokenLink(a.tokenId), copyBtn(a.tokenId));
+      row.append(label, el('span', 'ex-io__val', tokenAmt(a.tokenId, a.amount)));
       ab.append(row);
     }
     body.append(ap);
@@ -632,6 +732,8 @@ async function renderAddress(addr, mySeq) {
   const bal = await getJson(`/blockchain/balanceForAddress/${encodeURIComponent(addr)}`);
   if (mySeq !== seq) return;
   if (!bal) return notFoundGated('address', mySeq, 'invalid for this network');
+  await fetchTokenMeta((bal.confirmed?.tokens || []).map((t) => t.tokenId));
+  if (mySeq !== seq) return;
   body.replaceChildren();
 
   const { panel: p, body: pb } = panel('Address');
@@ -651,7 +753,9 @@ async function renderAddress(addr, mySeq) {
     const { panel: tp, body: tb } = panel('Token balances');
     for (const t of tokens) {
       const row = el('div', 'ex-io');
-      row.append(hashNode(t.tokenId, `token/${t.tokenId}`), el('span', 'ex-io__val', amt(t.amount)));
+      const label = el('span', 'ex-hash');
+      label.append(tokenLink(t.tokenId), copyBtn(t.tokenId));
+      row.append(label, el('span', 'ex-io__val', tokenAmt(t.tokenId, t.amount)));
       tb.append(row);
     }
     body.append(tp);
@@ -759,7 +863,9 @@ async function renderToken(id, mySeq) {
   kvRow(grid, 'name', t.name || '—');
   kvRow(grid, 'description', t.description || '—');
   kvRow(grid, 'decimals', String(t.decimals ?? 0));
-  kvRow(grid, 'emission', amt(t.emissionAmount));
+  // t.decimals is hostile mint data — clamp before any decimal math.
+  const tokenD = saneDecimals(t.decimals);
+  kvRow(grid, 'emission', tokenD > 0 ? decimalize(t.emissionAmount, tokenD) : amt(t.emissionAmount));
   kvRow(grid, 'minted in box', hashNode(t.boxId, `box/${t.boxId}`));
   pb.append(grid);
   body.append(p);
@@ -789,7 +895,10 @@ async function renderToken(id, mySeq) {
           label: 'Amount',
           width: 120,
           align: 'right',
-          render: (b) => amt((b.assets || []).find((a) => a.tokenId === id)?.amount),
+          render: (b) => {
+            const raw = (b.assets || []).find((a) => a.tokenId === id)?.amount;
+            return tokenD > 0 ? decimalize(raw, tokenD) : amt(raw);
+          },
           sort: (b) => Number((b.assets || []).find((a) => a.tokenId === id)?.amount ?? 0),
         },
         { key: 'state', label: 'State', width: 90, render: (b) => spentPill(b.spentTransactionId), sort: (b) => (b.spentTransactionId ? 1 : 0) },
