@@ -817,18 +817,20 @@ function route() {
   const slash = tail.indexOf('/');
   const kind = slash < 0 ? tail : tail.slice(0, slash);
   const arg = slash < 0 ? '' : tail.slice(slash + 1);
-  if (!kind) return renderHome(my);
-  // SECURITY: validate the entity id against a strict shape BEFORE it can reach
-  // a fetch URL. hex64 / base58 contain no '/' or '.', so this closes the
-  // path-traversal hole where a crafted hash (e.g. `#explorer/block/../wallet/
-  // lock`) would otherwise normalize to an api-key'd, state-changing wallet GET.
   // `focused` moves screen-reader/keyboard context onto the fresh view's
   // heading once the render lands (no-op if a newer route superseded it or
-  // if the user is mid-interaction with a live control).
+  // if the user is mid-interaction with a live control). Defined before the
+  // home early-return so home navigation ('← back to explorer', sidebar)
+  // gets the same announcement as the entity views.
   const focused = (p) =>
     p.then(() => {
       if (my === seq) focusView();
     });
+  if (!kind) return focused(renderHome(my));
+  // SECURITY: validate the entity id against a strict shape BEFORE it can reach
+  // a fetch URL. hex64 / base58 contain no '/' or '.', so this closes the
+  // path-traversal hole where a crafted hash (e.g. `#explorer/block/../wallet/
+  // lock`) would otherwise normalize to an api-key'd, state-changing wallet GET.
   if (kind === 'block' && HEX64.test(arg)) return focused(renderBlock(arg.toLowerCase(), my));
   if (kind === 'tx' && HEX64.test(arg)) return focused(renderTx(arg.toLowerCase(), my));
   if (kind === 'box' && HEX64.test(arg)) return focused(renderBox(arg.toLowerCase(), my));
@@ -837,7 +839,7 @@ function route() {
   // Anything else (unknown kind, malformed id, path-traversal attempt) → home
   // with an honest note; never fetch an unvalidated segment.
   setStatus('invalid or unsupported explorer link');
-  return renderHome(my);
+  return focused(renderHome(my));
 }
 
 // ---- lifecycle ----

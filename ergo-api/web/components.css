@@ -173,8 +173,16 @@
   letter-spacing: 0.08em;
   color: var(--tx2);
 }
+/* Programmatic focus target (focusView): pointer-driven route swaps stay
+   visually clean, but keyboard-driven navigation keeps a visible cue so
+   sighted keyboard users can see where focus landed. */
 .panel__title:focus {
-  outline: none; /* programmatic focus target (focusView) — not a control */
+  outline: none;
+}
+.panel__title:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+  border-radius: 2px;
 }
 .panel__right {
   font-family: var(--mono);
