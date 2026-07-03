@@ -178,6 +178,8 @@ mod parse;
 pub mod span;
 pub mod stype;
 pub mod token;
+pub mod typed;
+pub mod typed_print;
 
 pub use ast::{ArithKind, BitKind, Expr, RelKind, ValDef};
 pub use error::ParseError;
