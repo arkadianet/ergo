@@ -511,7 +511,7 @@ fn validate_header_after_pow_eip37_undersized_window_returns_difficulty_missing(
 
     // Real mainnet headers: parent at 1_761_792 (= 13_764 * 128, a
     // post-EIP-37 recalculation boundary) and child at 1_761_793.
-    let headers = load_sorted("../test-vectors/mainnet/headers_1761000_1762000.json");
+    let headers = load_sorted("../test-vectors/mainnet/headers_1761792_1761795_eip37_curated.json");
     let parent = headers
         .iter()
         .find(|(h, _)| h.height == 1_761_792)

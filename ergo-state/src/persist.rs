@@ -228,6 +228,7 @@ pub(crate) struct PersistJob {
     /// unchecked-test harness runs without populating HEADER_META.
     /// Production never touches this — header_proc has already written
     /// HEADER_META before apply_block is called.
+    #[cfg_attr(not(feature = "test-helpers"), allow(dead_code))]
     pub parent_header_id: [u8; 32],
     /// Voted protocol parameters parsed from this block's extension.
     /// `Some` iff `height % 1024 == 0 && height > 0` (i.e. this block

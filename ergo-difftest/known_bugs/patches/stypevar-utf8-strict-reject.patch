@@ -1,0 +1,15 @@
+diff --git a/ergo-ser/src/sigma_type.rs b/ergo-ser/src/sigma_type.rs
+index 03331b1..9d9b66e 100644
+--- a/ergo-ser/src/sigma_type.rs
++++ b/ergo-ser/src/sigma_type.rs
+@@ -432,7 +432,9 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
+             // for byte. See [`crate::jvm_utf8`].
+             let name_len = r.get_u8()? as usize;
+             let name_bytes = r.get_bytes(name_len)?;
+-            Ok(SigmaType::STypeVar(crate::jvm_utf8::decode(name_bytes)))
++            let name = String::from_utf8(name_bytes.to_vec())
++                .map_err(|e| ReadError::InvalidData(format!("STypeVar name is not valid UTF-8: {e}")))?;
++            Ok(SigmaType::STypeVar(name))
+         }
+         SHEADER_CODE => Ok(SigmaType::SHeader),
+         SPREHEADER_CODE => Ok(SigmaType::SPreHeader),

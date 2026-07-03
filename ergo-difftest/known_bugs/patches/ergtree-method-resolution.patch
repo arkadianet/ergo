@@ -1,0 +1,13 @@
+diff --git a/ergo-ser/src/ergo_tree.rs b/ergo-ser/src/ergo_tree.rs
+index e9a1426..f5b3f0d 100644
+--- a/ergo-ser/src/ergo_tree.rs
++++ b/ergo-ser/src/ergo_tree.rs
+@@ -182,7 +182,7 @@ pub fn check_tree_version_supported(tree: &ErgoTree) -> Result<(), ReadError> {
+ /// creating transaction's parse, matching Scala's eager box-deserialize reject.
+ pub fn check_resolvable_methods(tree: &ErgoTree) -> Result<(), ReadError> {
+     if !tree.has_size && tree.version < 3 {
+-        if let Some((type_id, method_id)) = crate::opcode::find_unresolved_v5_method(&tree.body) {
++        if let Some((type_id, method_id)) = crate::opcode::find_v3_only_method(&tree.body) {
+             return Err(ReadError::InvalidData(format!(
+                 "method ({type_id}, {method_id}) does not resolve in the v5 registry for tree version {} (method-resolution ValidationException at deserialize)",
+                 tree.version

@@ -1,0 +1,470 @@
+# Known-bug manifest for the re-injection gate.
+# Schema defined in ergo-difftest/docs/interface-contracts.md §5.1.
+#
+# wire_reachable = true  → trigger_hex is present; patch + gate fully exercisable.
+# wire_reachable = false → SD bug; trigger_hex = ""; replay-driver path (future).
+#
+# Detection channels (§5.2):
+#   canonical     → difftest --repro <trigger_hex> --surface <s> --check-canonical <expected_canonical>
+#   accept-reject → difftest --oracle --repro <trigger_hex> --surface <s>
+#   cost          → difftest --oracle --repro <trigger_hex> --surface reduce
+#   panic         → difftest --repro <trigger_hex> --surface <s>  (looks for [BUG] PANIC)
+
+# ---------------------------------------------------------------------------
+# 1. relation2-0x85-noncanonical  [PATCH VERIFIED, DEMONSTRATED]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "relation2-0x85-noncanonical"
+surface        = "ergo_tree"
+class          = "canonical"
+wire_reachable = true
+fix_file       = "ergo-ser/src/opcode/write.rs"
+reinject       = "In write_payload Payload::Two arm, remove the relation2_bool_pair branch and always call write_expr(w, a) then write_expr(w, b)"
+budget_iters   = 50000
+trigger_hex    = "00938503"
+# 00 = v0 no-size no-cseg header; 93 = Eq opcode; 85 = bool-pair marker; 03 = both true (bits 0+1)
+expected_canonical = "00938503"
+# Bugged write produces: 009301010101 (expanded: type=SBoolean=0x01 value=true=0x01, twice)
+note = "HERMETIC: difftest --repro 00938503 --surface ergo_tree --check-canonical 00938503"
+
+# ---------------------------------------------------------------------------
+# 2. fundef-ntpeargs-signed-byte  [PATCH VERIFIED, DEMONSTRATED]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "fundef-ntpeargs-signed-byte"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/opcode/parse.rs"
+reinject       = "In parse_expr ArgPattern::FunDef arm, replace the n_tpe_args_byte > 0x7f guard with: let n_tpe_args = r.get_u8()? as usize;"
+budget_iters   = 50000
+trigger_hex    = "00D801D70180670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141670141A308D3"
+# v0 ErgoTree; BlockValue([FunDef(id=1, nTpeArgs=0x80=128, 128×STypeVar("A"), rhs=Height)], Const(SSigmaProp, TrueProp))
+# Bugged Rust: accepts (reads 128 STypeVars successfully); JVM: NegativeArraySizeException
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro <trigger_hex> --surface ergo_tree"
+
+# ---------------------------------------------------------------------------
+# 3. header-size-bit-rule1012
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "header-size-bit-rule1012"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs;ergo-ser/src/ergo_box.rs;ergo-difftest/src/oracle.rs"
+reinject       = "In oracle.rs::deserialize_box_script, remove the check_header_size_bit(&tree)? call"
+budget_iters   = 50000
+trigger_hex    = "02D3"
+# 02 = header (version=1, no-size bit set to 0, no-cseg); D3 = TrueProp constant
+# Bugged: accepts (lenient read_ergo_tree + no gate); JVM: CheckHeaderSizeBit SerializerException
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro 02D3 --surface ergo_tree. Re-inject in oracle.rs not ergo_box.rs for this surface."
+
+# ---------------------------------------------------------------------------
+# 4. stypevar-utf8-strict-reject
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "stypevar-utf8-strict-reject"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/jvm_utf8.rs;ergo-ser/src/sigma_type.rs;ergo-ser/src/sigma_value.rs"
+reinject       = "In sigma_type.rs STypeVar name decoding, replace jvm_utf8::decode(bytes) with String::from_utf8(bytes.to_vec()) and return Err on failure"
+budget_iters   = 50000
+# Sizeless form of stypevar_utf8_parity.rs "ff" test vector: header=0x10 (v0,cseg,no-size) + body bytes (const-table+expression)
+# from_utf8 strict: REJECTS on 0xFF STypeVar name; jvm_utf8::decode: ACCEPTS (JVM lossy decode)
+trigger_hex    = "1001040ad801d701016701ffd901026701ff72027300"
+expected_canonical = ""
+note = "ORACLE: reject-valid class. Bugged Rust rejects 0xFF STypeVar name; JVM accepts (lossy decode). Derived from stypevar_utf8_parity.rs 'ff' vector stripped to sizeless v0 form."
+
+# ---------------------------------------------------------------------------
+# 5. group-element-off-curve
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "group-element-off-curve"
+surface        = "reduce"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-primitives/src/reader.rs;ergo-ser/src/sigma_value.rs;ergo-validation/src/tx/ge.rs;ergo-difftest/src/oracle.rs"
+reinject       = "In oracle.rs::deserialize_box_script, change the check_group_elements argument from true to false in the reduce path, removing the GE curve check"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger_hex is a P2PK tree with an off-curve point: 0008cd<33-byte off-curve SEC1 point>. Off-curve points have valid SEC1 prefix (02 or 03) but the x coordinate is not on the secp256k1 curve. Complex to hand-craft; use oracle structured mode. The re-inject is in oracle.rs (change check_group_elements=true→false in reduce_verdict's deserialize_box_script call)."
+
+# ---------------------------------------------------------------------------
+# 6. deserialize-subst-cost  [COVERAGE GAP — see note]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "deserialize-subst-cost"
+surface        = "reduce"
+class          = "cost"
+wire_reachable = false
+fix_file       = "ergo-sigma/src/reduce.rs"
+reinject       = "reduce.rs:211 self_box.script_bytes.len() -> serialized_ergo_tree_len(ergo_tree)"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "COVERAGE GAP on the `reduce` oracle surface. The deserialize-substitution INIT cost (ergoTree.bytes.length * CostPerTreeByte) lives in reduce.rs `verify_spending` (the Scala `Interpreter.reductionWithDeserialize` twin). The `reduce` oracle surface calls `ergo_sigma::evaluator::reduce_expr_with_cost` DIRECTLY (see oracle.rs::reduce_verdict) and the JVM oracle calls `CErgoTreeEvaluator.eval` with initCost=0 (ErgoSerdeOracle.scala::reduce) — BOTH bypass reductionWithDeserialize, so re-injecting reduce.rs:211 produces NO delta here. The sigma_expr generator DOES emit the deserialize-node vocabulary (Feature::EvalDeserializeNode, a DeserializeRegister/Context on a dead If branch) for coverage, but this cost bug needs the reduce surface (both sides) to route through the full verify path — a lead-engineer oracle-contract change, not done here. Reachable via the REPLAY driver instead."
+
+# ---------------------------------------------------------------------------
+# 7. coll-equality-cost  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "coll-equality-cost"
+surface        = "reduce"
+class          = "cost"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/cost.rs"
+reinject       = "In prim_coll_eq, delete the `break;` on first-mismatch so k_eff spans the FULL length (pre-#15: no cost short-circuit). Patch: known_bugs/patches/coll-equality-cost.patch"
+budget_iters   = 50000
+# sigma_expr::trigger_coll_eq_early(): sigmaProp(Coll[Byte](0..200) == same but byte0 flipped).
+# Clean: node + JVM both P:d2|43 (short-circuit charges the 1-element compared prefix).
+# Bugged: node P:d2|45 (full 200 → 2 cost chunks vs 1), JVM P:d2|43 -> Canonical cost divergence.
+trigger_hex    = "00d1930ec801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c70ec801ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7"
+expected_canonical = ""
+note = "ORACLE reduce cost. difftest --oracle --repro <trigger_hex> --surface reduce: clean AGREE (P:d2|43==43), patched Canonical (rust P:d2|45 vs jvm P:d2|43)."
+
+# ---------------------------------------------------------------------------
+# 8. tokens-equality-cost  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "tokens-equality-cost"
+surface        = "reduce"
+class          = "cost"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/cost.rs"
+reinject       = "In eq_coll_elems, delete the `break;` on first-unequal-element so every token's equalDataValues cost is charged (pre-#16 token/non-prim-coll cost). Patch: known_bugs/patches/tokens-equality-cost.patch"
+budget_iters   = 50000
+# sigma_expr::trigger_token_eq_early(): sigmaProp(tokens == same but FIRST token id flipped),
+# 5-token Coll[(Coll[Byte],Long)]. Clean: node + JVM both P:d2|60 (short-circuit at token 0).
+# Bugged: node P:d2|168 (all 5 tokens' inner costs + full EQ_Coll), JVM P:d2|60 -> Canonical.
+trigger_hex    = "00d1930c4d0e05201111111111111111111111111111111111111111111111111111111111111111d00f201212121212121212121212121212121212121212121212121212121212121212d20f201313131313131313131313131313131313131313131313131313131313131313d40f201414141414141414141414141414141414141414141414141414141414141414d60f201515151515151515151515151515151515151515151515151515151515151515d80f0c4d0e0520ee11111111111111111111111111111111111111111111111111111111111111d00f201212121212121212121212121212121212121212121212121212121212121212d20f201313131313131313131313131313131313131313131313131313131313131313d40f201414141414141414141414141414141414141414141414141414141414141414d60f201515151515151515151515151515151515151515151515151515151515151515d80f"
+expected_canonical = ""
+note = "ORACLE reduce cost. difftest --oracle --repro <trigger_hex> --surface reduce: clean AGREE (P:d2|60==60), patched Canonical (rust P:d2|168 vs jvm P:d2|60)."
+
+# ---------------------------------------------------------------------------
+# 8b. atleast-maxchildren-cap  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "atleast-maxchildren-cap"
+surface        = "reduce"
+class          = "reduce"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/opcodes/sigma.rs"
+reinject       = "Set AT_LEAST_MAX_CHILDREN to usize::MAX so the >255-children cap never fires (catalog #13, the DoS/accept-invalid arm). Patch: known_bugs/patches/atleast-maxchildren-cap.patch"
+budget_iters   = 50000
+# sigma_expr::trigger_at_least_over_cap(): atLeast(1, [256 x sigmaProp(true)]).
+# Clean: node + JVM both REJECT (MaxChildrenCountForAtLeastOp = 255 -> throws).
+# Bugged: node folds to TrivialProp(true) -> Accept P:d3|1481, JVM still Reject -> AcceptReject.
+trigger_hex    = "009804028380020808d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d3"
+expected_canonical = ""
+note = "ORACLE reduce accept/reject. difftest --oracle --repro <trigger_hex> --surface reduce: clean AGREE (both REJECT), patched AcceptReject (rust Accept P:d3|1481 vs jvm Reject IllegalArgumentException)."
+
+# ---------------------------------------------------------------------------
+# 9. signed-header-version-no-size-gate
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "signed-header-version-no-size-gate"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs"
+reinject       = "In check_tree_version_supported (or equivalent pre-#103 gate), use unsigned comparison instead of signed"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+# Version field is 3 bits (max 7 = 0b111), so version is always < 8 and always positive as signed i8.
+# The signed-byte divergence is at BLOCK-version comparisons (PR #106), not at the ErgoTree tree-version field.
+# No wire-reachable trigger exists for the tree-surface; this bug needs a block header oracle.
+note = "TODO: The signed-byte version gate bug is at block-version comparisons (PR #106), not the 3-bit ErgoTree version field. No simple wire trigger exists at the ergo_tree surface."
+
+# ---------------------------------------------------------------------------
+# 10. fork-vote-rule407
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "fork-vote-rule407"
+surface        = "header"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-node/src/consensus/block_proc.rs"
+reinject       = "Remove or disable check_fork_vote_votes_collected_present in block.rs"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger is a crafted block header with a hostile softfork table (Some(start) epoch start but None votes). Complex to hand-craft as the header has many fields. Oracle header surface needed."
+
+# ---------------------------------------------------------------------------
+# 11. signed-header-version-comparisons
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "signed-header-version-comparisons"
+surface        = "header"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-node/src/block_proc.rs;ergo-sigma/src/evaluator/"
+reinject       = "Revert signed comparisons at the 4 header/block version sites back to unsigned"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger is a block header with version byte in 128..=255 range. The header wire format includes the version byte; need the exact header bytes."
+
+# ---------------------------------------------------------------------------
+# 12. prv3-v6method-reject-sizeless
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "prv3-v6method-reject-sizeless"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs;ergo-difftest/src/oracle.rs"
+reinject       = "In oracle.rs::deserialize_box_script, remove the check_resolvable_methods(&tree)? call"
+budget_iters   = 50000
+# v0 no-size; DB = PropertyCall; 6A=106 SGlobal type_id; 0A=10 SGlobal.none method_id; DD = Global receiver; 04 = SInt explicit type arg
+# Op root (PropertyCall) → determinable_root_type=None → check_sigma_prop_root passes
+# check_resolvable_methods: !has_size && version < 3, finds unresolved (106,10) method → rejects
+trigger_hex    = "00DB6A0ADD04"
+expected_canonical = ""
+note = "ORACLE: v0 sizeless tree with SGlobal.none[Int] PropertyCall. Bugged: accepts (no check_resolvable_methods); JVM: ValidationException → reject."
+
+# ---------------------------------------------------------------------------
+# 13. prv3-v6method-reject-box-read
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "prv3-v6method-reject-box-read"
+surface        = "ergo_box_candidate"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_box.rs"
+reinject       = "In read_ergo_box_candidate, remove the check_resolvable_methods call after read_ergo_tree"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger is a full ergo_box_candidate with a sizeless v0 script that has a v6-only method."
+
+# ---------------------------------------------------------------------------
+# 14. unparsed-tree-canonical
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "unparsed-tree-canonical"
+surface        = "ergo_tree"
+class          = "canonical"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs"
+reinject       = "In write_ergo_tree, remove the Expr::Unparsed(raw) shortcut and force re-serialize through the header+size writer even for unparsed bodies"
+budget_iters   = 50000
+# 0D = version=5 (bits 0-2 = 0b101=5) | has_size (bit3=0x08); 01 = size=1; D3 = body (TrueProp)
+# Version 5 > MAX_SUPPORTED_TREE_VERSION(3) → read_ergo_tree wraps as Unparsed(raw=[0D,01,D3])
+# Fixed: write_ergo_tree uses Unparsed shortcut → emits [0D,01,D3] verbatim
+# Bugged (no shortcut): write_ergo_tree tries to write header then write_body(Unparsed) → WriteError → exit FAILURE
+trigger_hex    = "0D01D3"
+expected_canonical = "0D01D3"
+note = "HERMETIC: difftest --repro 0D01D3 --surface ergo_tree --check-canonical 0D01D3"
+
+# ---------------------------------------------------------------------------
+# 15. ergtree-version-exceeds-activated
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "ergtree-version-exceeds-activated"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs;ergo-difftest/src/oracle.rs"
+reinject       = "In oracle.rs::deserialize_box_script, remove the check_tree_version_supported(&tree)? call"
+budget_iters   = 50000
+trigger_hex    = "0D01D3"
+# Same as unparsed-tree-canonical: 0D = header (version=5, has_size=1). Bugged (no check_tree_version): accepts; JVM: version > activatedVersion → reject
+expected_canonical = ""
+note = "ORACLE: version=5 > MAX(3). Bugged: Oracle accept (no version check); JVM: 'Tree version (5) is above activated script version' → reject."
+
+# ---------------------------------------------------------------------------
+# 16. ergtree-uintexact-count-overflow
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "ergtree-uintexact-count-overflow"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs;ergo-ser/src/opcode/parse.rs"
+reinject       = "Replace get_u32_exact with get_uint_to_i32 at the constant-count read in parse_body"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger needs a constant-segregated tree with count field encoding > 0x7FFFFFFF (requires multi-byte VLQ). Very large bytes needed."
+
+# ---------------------------------------------------------------------------
+# 17. ergtree-structure-size-delimited
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "ergtree-structure-size-delimited"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs"
+reinject       = "Change size-delimited body parse to use declared size as the hard limit rather than structure-parsing to MaxPropositionBytes"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger needs a size-delimited tree where declared size != structural parse length. Requires careful byte construction."
+
+# ---------------------------------------------------------------------------
+# 18. sbox-constant-inner-tree-skip
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "sbox-constant-inner-tree-skip"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs;ergo-ser/src/opcode/parse.rs"
+reinject       = "Remove structure-delimited bound on the SBox constant inner-tree read"
+budget_iters   = 50000
+trigger_hex    = ""
+expected_canonical = ""
+note = "TODO: trigger needs a const-segregated tree with an SBox constant whose inner ErgoTree has mismatched declared/structural size."
+
+# ---------------------------------------------------------------------------
+# 19. ergtree-method-resolution
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "ergtree-method-resolution"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/ergo_tree.rs;ergo-ser/src/opcode/parse.rs"
+reinject       = "In check_resolvable_methods, replace find_unresolved_v5_method with find_v3_only_method (check only v6-only, not genuinely unknown ids)"
+budget_iters   = 50000
+# DB = PropertyCall; 6A=0x6A=106 (SGlobal type_id); 2A=0x2A=42 (unknown method id); DD = Global receiver
+# find_unresolved_v5_method finds (106, 42): IS unresolved in v5 registry AND is NOT v3_only
+# Old gate (check only v3-only methods): misses (106,42) → accepts; New gate (find_unresolved): catches it → rejects
+trigger_hex    = "00DB6A2ADD"
+expected_canonical = ""
+note = "ORACLE: PropertyCall(SGlobal, method=42) — not v3-only but genuinely unknown at v5. Old narrow gate misses it."
+
+# ---------------------------------------------------------------------------
+# 20. sunsignedbigint-pre-v3-gate
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "sunsignedbigint-pre-v3-gate"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/sigma_type.rs"
+reinject       = "Remove the tree-version gate for SUnsignedBigInt embeddable type code at deserialize"
+budget_iters   = 50000
+trigger_hex    = ""
+# TODO: trigger needs a const-seg v0 tree with a SUnsignedBigInt constant.
+# 0x09 = SUnsignedBigInt embeddable type code; the version gate is in reader.rs set_ergo_tree_version.
+# Constructing valid bytes requires knowing the exact BigInt VLQ-length-prefixed wire encoding.
+expected_canonical = ""
+note = "ORACLE: v0 const-seg tree with SUnsignedBigInt constant. Bugged accepts; JVM rejects."
+
+# ---------------------------------------------------------------------------
+# 21. rule1001-sigma-prop-root-gate
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "rule1001-sigma-prop-root-gate"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-difftest/src/oracle.rs;ergo-ser/src/ergo_tree.rs"
+reinject       = "In oracle.rs::deserialize_box_script, remove the check_sigma_prop_root(&tree)? call"
+budget_iters   = 50000
+trigger_hex    = "000400"
+# 00 = v0 no-size no-cseg; 04 = Const type=SInt (code 4); 00 = value 0 (zigzag VLQ)
+# Sizeless tree whose root is Const(SInt, 0) — type SInt ≠ SSigmaProp → rule 1001 rejects
+# Bugged (no check): accepts; JVM: CheckDeserializedScriptIsSigmaProp → SerializerException
+expected_canonical = ""
+note = "ORACLE: v0 sizeless tree with SInt root constant. Bugged accepts; JVM rejects (rule 1001)."
+
+# ---------------------------------------------------------------------------
+# 22. erg-conservation-strict  [STATE-DEPENDENT]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "erg-conservation-strict"
+surface        = "transaction"
+class          = "tx-validity"
+wire_reachable = false
+fix_file       = "ergo-validation/src/tx/"
+reinject       = "Use non-strict i64 arithmetic for ERG conservation check"
+budget_iters   = 0
+trigger_hex    = ""
+note = "SD: requires UTXO state. Replay-driver path only."
+
+# ---------------------------------------------------------------------------
+# 23. zero-output-tx-reject  [STATE-DEPENDENT]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "zero-output-tx-reject"
+surface        = "transaction"
+class          = "tx-validity"
+wire_reachable = false
+fix_file       = "ergo-validation/src/tx/"
+reinject       = "Remove the zero-output and zero-amount-token checks"
+budget_iters   = 0
+trigger_hex    = ""
+note = "SD: transaction validation context required."
+
+# ---------------------------------------------------------------------------
+# 24. eip27-reemission-check  [STATE-DEPENDENT]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "eip27-reemission-check"
+surface        = "transaction"
+class          = "tx-validity"
+wire_reachable = false
+fix_file       = "ergo-validation/src/tx/;ergo-validation/src/eip27.rs"
+reinject       = "Remove the EIP-27 re-emission spending rule enforcement"
+budget_iters   = 0
+trigger_hex    = ""
+note = "SD: requires specific re-emission box context."
+
+# ---------------------------------------------------------------------------
+# 26. avl-verifier-panic  [PATCH VERIFIED, DEMONSTRATED]
+# ---------------------------------------------------------------------------
+# Bug #6 in known-bug-catalog.md: the upstream ergo_avltree_rust crate
+# panic!s at operation time (authenticated_tree_ops.rs:635) when a
+# structurally-valid-but-wrong proof is supplied (e.g. a Lookup proof used
+# for a Remove).  The Scala CAvlTreeVerifier catches that Throwable inside
+# performOneOperation's Try; the FIXED Rust side catches it in
+# AvlVerifier::guarded's catch_unwind.  A node without that guard crashes,
+# providing a consensus-DoS vector for any permissionless contract that
+# passes attacker-controlled AVL proof bytes.
+#
+# CLEAN HEAD:  verify_avl on trigger → Rust Rejected (guard catches panic)
+#              JVM: REJECT NoSuchElementException (Try.get on Failure)
+#              → AGREE (both reject)
+#
+# PATCHED HEAD: verify_avl on trigger → Rust PANICS (escapes guarded fn,
+#               caught by run_one's catch_unwind → Outcome::Bug)
+#               JVM: REJECT (unchanged)
+#               → DIVERGE (Bug vs Reject)
+[[bug]]
+id             = "avl-verifier-panic"
+surface        = "verify_avl"
+class          = "panic"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/avl.rs"
+reinject       = "In guarded(), remove catch_unwind(AssertUnwindSafe(move || { let r = f(&mut bv); (bv, r) })) and replace with: let r = f(&mut bv); self.0 = Some(bv); r — the op-time panic then escapes to the caller. Patch: known_bugs/patches/avl-verifier-panic.patch"
+budget_iters   = 10000
+# Frame: startingDigest(33) | keyLen(u8=32) | valueLenOpt(0=None) |
+# proofLen(vlq=140) | proof[140] | opCount(vlq=1) | [Remove | key_a[32]]
+# key_a = [0x01; 32], key_b = [0x0c; 32].  Lookup proof for key_a supplied
+# to a verifier that attempts Remove(key_a) → op-time panic at avl-ops:635.
+trigger_hex    = "85448a1a82283e81abf86173e19f177567b44108408e59e4b3d07d4f76ede0e70220008c0103e97b407dbcbf58aefc91cec7293c87b2afc236f1fbe52f88a0ec95cf3719ab210201010101010101010101010101010101010101010101010101010101010101010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c00000001ab035509930f17858131ed5c99f00c4afa1f1927f183c766e22a9de498051bc090ad0001040201030101010101010101010101010101010101010101010101010101010101010101"
+expected_canonical = ""
+note = "HERMETIC+ORACLE: clean → difftest --repro <trigger_hex> --surface verify_avl → Rejected (guard catches panic). Patched → Outcome::Bug (PANIC: ...authenticated_tree_ops.rs:635). Oracle: clean AGREE (both REJECT), patched DIVERGE (Rust Bug vs JVM REJECT)."
+
+# ---------------------------------------------------------------------------
+# 25. register-provenance-byteswithnore  [STATE-DEPENDENT]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "register-provenance-byteswithnore"
+surface        = "ergo_box"
+class          = "root"
+wire_reachable = false
+fix_file       = "ergo-ser/src/ergo_box.rs"
+reinject       = "Remove register-bytes provenance preservation in bytesWithNoRef; use re-serialized registers"
+budget_iters   = 0
+trigger_hex    = ""
+note = "SD: only triggered on the specific mainnet block h1808895 with its exact box register layout."

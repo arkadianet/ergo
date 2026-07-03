@@ -196,15 +196,13 @@ tx_roundtrip_test!(tx_roundtrip_700000, "transactions_700000.json");
 // Tracked broad fixtures: opt-in via --ignored.
 tx_roundtrip_test!(@ignored_broad tx_roundtrip_1_200, "transactions_1_200.json");
 tx_roundtrip_test!(@ignored_broad tx_roundtrip_1_1000, "transactions_1_1000.json");
-tx_roundtrip_test!(@ignored_broad tx_roundtrip_1_10000, "transactions_1_10000.json");
 tx_roundtrip_test!(
     @ignored_broad tx_roundtrip_205000_205200,
     "transactions_205000_205200.json"
 );
-tx_roundtrip_test!(
-    @ignored_broad tx_roundtrip_1761000_1762000,
-    "transactions_1761000_1762000.json"
-);
+// transactions_1_10000 / transactions_1761000_1762000 bulk ranges retired
+// (see test-vectors/mainnet/FIXTURES.md); deep contiguous roundtrip coverage
+// now runs via `ergo-difftest --bin replay`.
 
 // Gitignored fixtures: opt-in via --ignored after extracting the range.
 tx_roundtrip_test!(
@@ -264,7 +262,6 @@ const EXPECTED_TX_FILES: &[&str] = &[
     "transactions_1_10.json",
     "transactions_1_200.json",
     "transactions_1_1000.json",
-    "transactions_1_10000.json",
     "transactions_205000_205200.json",
     "transactions_417785_417800.json",
     "transactions_500000_501000.json",
@@ -279,7 +276,6 @@ const EXPECTED_TX_FILES: &[&str] = &[
     "transactions_1300000_1301000.json",
     "transactions_1500000_1501000.json",
     "transactions_1750000_1751000.json",
-    "transactions_1761000_1762000.json",
 ];
 
 #[test]

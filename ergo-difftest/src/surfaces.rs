@@ -11,6 +11,7 @@
 //!   with `Ok`/`Err`, never panic. The runner's `catch_unwind` turns a panic
 //!   into a [`Outcome::Bug`].
 
+use crate::avl_frame::{AvlFrame, AvlOp};
 use crate::Outcome;
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
@@ -52,7 +53,21 @@ where
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
-            return Outcome::bug(format!("re-decode of own output failed: {e:?}"), &b1);
+            // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
+            // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
+            // limit (only the 4096-byte proposition cap), so the node deliberately
+            // rejects 101..4096-deep *type descriptors* Scala accepts (QA SER-003,
+            // kept doc-only — see ergo-ser sigma_type.rs MAX_TYPE_DEPTH). A
+            // re-decode that trips ONLY that conservative cap is that documented
+            // divergence firing on a near-boundary re-encoding, not a codec
+            // inconsistency — so it is not a Bug. NOTE: this excludes the *type*
+            // guard only; the value/expression tree-depth guard (Scala MaxTreeDepth
+            // = 110) IS a real consensus limit and still counts as a Bug.
+            let msg = format!("{e:?}");
+            if msg.contains("type recursion depth") {
+                return Outcome::WriteRejected;
+            }
+            return Outcome::bug(format!("re-decode of own output failed: {msg}"), &b1);
         }
     };
 
@@ -99,6 +114,16 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         rw!("constant", sigma_value::read_constant, write_constant_pair),
         rw!(
             "ergo_tree",
+            ergo_tree::read_ergo_tree,
+            ergo_tree::write_ergo_tree
+        ),
+        // Eval-rich ErgoTree bodies (the `sigma_expr` generator) are ErgoTree
+        // wire bytes, so hermetically they run the SAME read/write fixed-point
+        // invariant as `ergo_tree`. The consensus-complete differential for them
+        // is the JVM `reduce` oracle surface; this hermetic entry just proves the
+        // generator emits no-panic, byte-stable trees.
+        rw!(
+            "sigma_expr",
             ergo_tree::read_ergo_tree,
             ergo_tree::write_ergo_tree
         ),
@@ -227,6 +252,70 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                     Err(_) => Outcome::Rejected,
                 },
             ),
+        },
+        // ----- `validate`: stateless transaction structural check -----
+        // Hermetic check: parse the transaction bytes and run the stateless
+        // structural rules (Scala `ErgoTransaction.statelessValidity`).
+        // No UTXO set or chain state needed. Accepted / rejected only; no
+        // write fixed-point (the surface has no independent canonical form).
+        Surface {
+            name: "validate",
+            run: Box::new(|b| {
+                use ergo_validation::tx::structural::validate_structural;
+                let mut r = VlqReader::new(b);
+                let tx = match ergo_ser::transaction::read_transaction(&mut r) {
+                    Ok(t) => t,
+                    Err(_) => return Outcome::Rejected,
+                };
+                let params = ergo_validation::context::ProtocolParams::mainnet_default();
+                match validate_structural(&tx, &params) {
+                    Ok(()) => Outcome::Accepted,
+                    Err(_) => Outcome::Rejected,
+                }
+            }),
+        },
+        // ----- `verify_avl`: AVL+ batch-proof verification -----
+        //
+        // Hermetic check that exercises the `AvlVerifier` panic guard (bug #6):
+        //   CLEAN HEAD  — `AvlVerifier::guarded` catches an op-time panic from
+        //                 the upstream crate and returns `Err(())` → `Rejected`.
+        //   PATCHED HEAD — the guard is removed; the panic escapes the surface
+        //                 run fn; `run_one`'s `catch_unwind` catches it →
+        //                 `Outcome::Bug("PANIC: …")`.
+        //
+        // This surface is the canonical re-injection detection channel for #6.
+        Surface {
+            name: "verify_avl",
+            run: Box::new(|b| {
+                let frame = match AvlFrame::decode(b) {
+                    Ok(f) => f,
+                    Err(_) => return Outcome::Rejected,
+                };
+                let mut verifier = match ergo_sigma::avl::AvlVerifier::new(
+                    &frame.starting_digest,
+                    &frame.proof,
+                    frame.key_len as usize,
+                    frame.value_len_opt.map(|n| n as usize),
+                ) {
+                    Ok(v) => v,
+                    Err(_) => return Outcome::Rejected,
+                };
+                for op in &frame.ops {
+                    let r = match op {
+                        AvlOp::Lookup { key } => verifier.lookup(key).map(|_| ()),
+                        AvlOp::Insert { key, value } => verifier.insert(key, value),
+                        AvlOp::Update { key, value } => verifier.update(key, value),
+                        AvlOp::Remove { key } => verifier.remove(key),
+                    };
+                    if r.is_err() {
+                        return Outcome::Rejected;
+                    }
+                }
+                match verifier.digest() {
+                    Some(_) => Outcome::Accepted,
+                    None => Outcome::Rejected,
+                }
+            }),
         },
     ];
 

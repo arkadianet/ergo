@@ -1,0 +1,182 @@
+name: Fuzz (nightly scheduled)
+
+# Nightly long campaign: structure-aware generators + corpus mutation.
+# This job is NOT gating (PRs land without waiting for it). It runs a longer
+# campaign to build coverage, grows the committed seed corpus over time, and
+# surfaces new invariant violations as loud failures.
+#
+# Note on cargo-fuzz / libFuzzer: the cargo-fuzz targets in
+# ergo-difftest/fuzz/ require a nightly toolchain and are intentionally NOT
+# part of this stable job. The hermetic structured campaign below is the stable
+# equivalent — same fuzz_one logic, coverage-guided by the structure-aware
+# generators rather than by libFuzzer instrumentation. See D1 in
+# ergo-difftest/docs/interface-contracts.md §6 for the design rationale.
+#
+# The JVM oracle differential requires scala-cli + a published local ergo-core
+# and stays manual/local. The streamed replay driver IS wired below (the `replay`
+# job) but is gated on a `REPLAY_NODE_URL` secret pointing at a reachable archival
+# Scala node — it no-ops when unset (GitHub-hosted runners have no node), so it
+# runs on a self-hosted runner or an operator `workflow_dispatch`. This is where
+# the deep contiguous state-root coverage retired from committed fixtures now
+# lives (see test-vectors/mainnet/FIXTURES.md).
+
+on:
+  schedule:
+    # 02:00 UTC every night (off-peak for cache efficiency)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual trigger for an on-demand long campaign.
+
+# Least privilege: fuzz jobs read the repo + upload artifacts; no write to contents.
+permissions:
+  contents: read
+
+jobs:
+  fuzz-structured:
+    name: structured campaign (2 000 000 iters, min-coverage 0.80)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      # Keep the difftest binary cached across nightly runs so only dependency
+      # changes trigger a rebuild (the generator code rarely changes).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-nightly
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest
+
+      # Long structured campaign (2 M iters ≈ 10–15 min on ubuntu-latest).
+      # Fails loudly on any invariant violation OR coverage drop below 80 %.
+      - name: structured campaign — 2 000 000 iters
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --structured --iters 2000000 --min-coverage 0.80
+
+  fuzz-corpus-mutation:
+    name: corpus mutation campaign (2 000 000 iters)
+    runs-on: ubuntu-latest
+    # Independent of fuzz-structured — a separate signal, runs in parallel.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-corpus-mutation
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest
+
+      # Byte-mutation campaign seeded from the committed corpus.
+      # Unlike the structured campaign (grammar-aware), this mutates real wire
+      # bytes — catching decoding bugs near the valid manifold.
+      - name: corpus mutation — 2 000 000 iters
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --iters 2000000 \
+            --corpus ergo-difftest/fuzz/corpus/ergo_tree
+
+      # Run ergo_tree and sigma_expr surfaces with the full corpus.
+      # Other surfaces use the default unstructured random (no --corpus flag).
+      - name: corpus mutation (sigma_expr) — 500 000 iters
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --surface sigma_expr --iters 500000 \
+            --corpus ergo-difftest/fuzz/corpus/sigma_expr
+
+  replay:
+    name: streamed archival replay (deep contiguous state-root)
+    runs-on: ubuntu-latest
+    # Reproduces the deep contiguous coverage retired from committed fixtures.
+    # Requires a reachable archival Scala node via the REPLAY_NODE_URL secret;
+    # no-ops when unset (GitHub-hosted runners have no node — use a self-hosted
+    # runner or a workflow_dispatch from an operator with node access).
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-driver
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest --bin replay
+
+      # Pass the node URL via env (a secret) — never interpolated into the shell.
+      # Skip cleanly when unset so the job is green on hosted runners without a node.
+      - name: streamed replay 1..10000 (verifies pins by hash, diffs state roots)
+        env:
+          REPLAY_NODE_URL: ${{ secrets.REPLAY_NODE_URL }}
+        run: |
+          if [ -z "$REPLAY_NODE_URL" ]; then
+            echo "REPLAY_NODE_URL unset — skipping streamed replay (needs a live archival node)."
+            exit 0
+          fi
+          cargo run --release -p ergo-difftest --bin replay -- \
+            --from 1 --to 10000 --node "$REPLAY_NODE_URL"
+
+  cargo-fuzz-nightly:
+    name: cargo-fuzz (nightly, libFuzzer + ASan)
+    runs-on: ubuntu-latest
+    # Coverage-guided libFuzzer fuzzing — requires nightly (SanitizerCoverage +
+    # ASan are unstable -Z features; see D1 in interface-contracts.md §6). This
+    # is the deeper, non-gating complement to the stable structured campaign: it
+    # reaches inputs bounded fuzzing misses. A bounded smoke per surface keeps the
+    # nightly runtime sane; crash artifacts are uploaded for triage.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-fuzz-${{ matrix.target }}
+          workspaces: ergo-difftest/fuzz
+
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Bounded smoke: build (ASan) + a short coverage-guided run seeded from the
+      # committed corpus/<surface>. -error_exitcode=1 makes a real crash fail the
+      # job (actionable red); the type-depth guard artifact is already filtered
+      # out of the Bug class (SER-003) so it will not spuriously fail this.
+      - name: fuzz ${{ matrix.target }} (bounded smoke)
+        working-directory: ergo-difftest
+        run: |
+          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=180 -error_exitcode=1
+
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: ergo-difftest/fuzz/artifacts/
+          if-no-files-found: ignore

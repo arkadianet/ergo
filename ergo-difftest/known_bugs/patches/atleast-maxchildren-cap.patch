@@ -1,0 +1,13 @@
+diff --git a/ergo-sigma/src/evaluator/opcodes/sigma.rs b/ergo-sigma/src/evaluator/opcodes/sigma.rs
+index 5542527..e021d2f 100644
+--- a/ergo-sigma/src/evaluator/opcodes/sigma.rs
++++ b/ergo-sigma/src/evaluator/opcodes/sigma.rs
+@@ -368,7 +368,7 @@ fn cand_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
+ /// number of children an `AtLeast` (k-of-n threshold) may carry. The
+ /// Cthreshold polynomial arithmetic uses single-byte inputs, so more than
+ /// 255 children cannot be represented.
+-const AT_LEAST_MAX_CHILDREN: usize = 255;
++const AT_LEAST_MAX_CHILDREN: usize = usize::MAX; // RE-INJECT #13: cap removed
+ 
+ /// Port of Scala `sigma.ast.AtLeast.reduce` (trees.scala). Folds trivial
+ /// children out and adjusts the bound so the result NEVER carries a nested

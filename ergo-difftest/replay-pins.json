@@ -1,0 +1,19 @@
+{
+  "network": "mainnet",
+  "node_version": "6.0.2",
+  "source": "archival Scala node :9053",
+  "comment": "Height -> committed (headerId, stateRoot) pins for the streamed differential replay driver (see docs/interface-contracts.md section 2). These make a retired block range reproducible with ZERO committed block bytes: the replay driver asserts GET /blocks/at/{h} matches headerId before applying, and diffs the Rust root_digest() against stateRoot. Heights 1-5 = hermetic genesis seed; the rest are known-gnarly incident heights (700000 curated corpus; 836113 diagnose block; 844665 range fixture; 1805523 adproofs mined-block reject; 1808895 register-provenance stall; 1818476 indexer-degrade incident).",
+  "heights": {
+    "1": {"headerId": "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b", "stateRoot": "18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303"},
+    "2": {"headerId": "855fc5c9eed868b43ea2c3df99ec17dd9d903187d891e2365a89b98125c994b2", "stateRoot": "6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e419803"},
+    "3": {"headerId": "3ff49e2419f779390a9347e8c3ee6391dd3f9e543c12dabcb0f1ebc8168754f4", "stateRoot": "7bb6a177e849e45ce5313ab7fa08e90daed00ceeadec13f271eea500df3e801303"},
+    "4": {"headerId": "d46df95124a711724990f40299bb166babc56d86de624db48776e2afb80e0302", "stateRoot": "c5410cbb9dff9a4a98f4c9016a156a6696e609601e8c81e9c19e79816c698e9904"},
+    "5": {"headerId": "875aaa0886c229607b3da2440f9cdb12f61ed2a0e56c6a9dd9536ac11079ff03", "stateRoot": "1803847b5e2d8a4fa6377c4ef47b51bda27b1ba8dda853f9b4f64cd5dc7367aa04"},
+    "700000": {"headerId": "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a", "stateRoot": "4dccb6a33364ac61932817ee99153bc1fe202ada20d37afc83c044ce9cb9708e18"},
+    "836113": {"headerId": "e34fc969875543f1857ec892c3f4a5ac3b50efe239561cbc5ccb3d7b93268ca1", "stateRoot": "dc11088bf9ad220d1a192c85ecb4cd3f460b0149e69fa27fedb8a943b73ac69619"},
+    "844665": {"headerId": "08e5ced489c2c8bbcc310e6ac1526bc2b10192d2eecccd67b4989f2d38256ca4", "stateRoot": "1851489e5f9dbbb7e87a12aa149c9f79cc2fd2ed642148bf977d88ab9ea4df2b19"},
+    "1805523": {"headerId": "c4c630ebb92fa0fe0bdeca756ac1c1597f2611639c45267ebde0ef062b21b3c0", "stateRoot": "4d3a4a75d4f0a280bcacadd027e846d8f483e3270c33a8c4ae7e996e4bc374791a"},
+    "1808895": {"headerId": "b031cc95294a233cce9173244e2d073ec30ab0949174d9b41914e0efe0b90821", "stateRoot": "555801c0dcf47b8fb4a68b6b8f75473a25ea955e31fb90c5ee961289eefd60ce1a"},
+    "1818476": {"headerId": "6f82795851b0d2911699cf36ebe2777efefb1de2b8335fdeb6f7307758553e99", "stateRoot": "94ce69c9b822f7ebedf3ef04dacdedd07b64e4a6dcb652d7fb357257d90f7b511a"}
+  }
+}

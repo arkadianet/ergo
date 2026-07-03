@@ -1,0 +1,34 @@
+--- a/ergo-sigma/src/avl.rs
++++ b/ergo-sigma/src/avl.rs
+@@ -151,27 +151,13 @@ impl AvlVerifier {
+     fn guarded<R>(
+         &mut self,
+         f: impl FnOnce(&mut BatchAVLVerifier) -> Result<R, ()>,
+     ) -> Result<R, ()> {
+-        // Already poisoned by an earlier caught panic → stay failed.
+         let mut bv = match self.0.take() {
+             Some(bv) => bv,
+             None => return Err(()),
+         };
+-        // `AssertUnwindSafe` is justified: `bv` is owned (not shared, no locks),
+-        // and on panic it is dropped during unwinding — no broken invariant is
+-        // ever observed, because the verifier is never reused after a panic.
+-        let _guard = AvlGuard::arm();
+-        match catch_unwind(AssertUnwindSafe(move || {
+-            let r = f(&mut bv);
+-            (bv, r)
+-        })) {
+-            // Op completed (Ok, or a clean crate Err) → keep the verifier.
+-            Ok((bv, r)) => {
+-                self.0 = Some(bv);
+-                r
+-            }
+-            // Panicked: `bv` was moved into the closure and dropped while
+-            // unwinding; `self.0` stays `None` (poisoned) and we fail closed.
+-            Err(_) => Err(()),
+-        }
++        // PATCHED: catch_unwind removed — op-time panics now escape to caller.
++        let r = f(&mut bv);
++        self.0 = Some(bv);
++        r
+     }

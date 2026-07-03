@@ -1,0 +1,13 @@
+diff --git a/ergo-sigma/src/evaluator/cost.rs b/ergo-sigma/src/evaluator/cost.rs
+index b682da2..05153fc 100644
+--- a/ergo-sigma/src/evaluator/cost.rs
++++ b/ergo-sigma/src/evaluator/cost.rs
+@@ -584,7 +584,7 @@ fn prim_coll_eq<T: PartialEq>(
+         k_eff += 1;
+         if ai != bi {
+             all_eq = false;
+-            break;
++            // RE-INJECT #15: no cost short-circuit (charge over full length)
+         }
+     }
+     let eq_coa = CostKind::PerItem {

@@ -1,0 +1,14 @@
+diff --git a/ergo-difftest/src/oracle.rs b/ergo-difftest/src/oracle.rs
+index e78be3a..a2229af 100644
+--- a/ergo-difftest/src/oracle.rs
++++ b/ergo-difftest/src/oracle.rs
+@@ -302,9 +302,6 @@ fn deserialize_box_script(
+             return (Err(e), consumed);
+         }
+     }
+-    if let Err(e) = ergo_ser::ergo_tree::check_header_size_bit(&tree) {
+-        return (Err(format!("{e:?}")), consumed);
+-    }
+     if let Err(e) = ergo_ser::ergo_tree::check_tree_version_supported(&tree) {
+         return (Err(format!("{e:?}")), consumed);
+     }

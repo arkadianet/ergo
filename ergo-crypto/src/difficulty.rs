@@ -505,7 +505,7 @@ mod tests {
         // `eip37_calculate`'s `assert!(len >= 2)` and panicked; the
         // helper must now intercept and return MissingEpochHeaders.
         let parent = load_header_at(
-            "../test-vectors/mainnet/headers_1761000_1762000.json",
+            "../test-vectors/mainnet/headers_1761792_1761795_eip37_curated.json",
             1_761_792,
         );
         // Post-EIP-37 epoch boundary on mainnet is every 128 blocks.

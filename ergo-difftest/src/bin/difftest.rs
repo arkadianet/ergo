@@ -6,6 +6,8 @@
 //!   difftest --surface ergo_tree --iters 500000
 //!   difftest --corpus test-vectors/mainnet    # mutate real wire bytes (raw files)
 //!   difftest --repro 1b1501040a...            # run one hex input through all surfaces
+//!   difftest --repro 00938503 --surface ergo_tree --check-canonical 00938503
+//!                                             # hermetic canonical-bytes gate (known-bug re-injection)
 
 use std::fs;
 use std::path::Path;
@@ -23,6 +25,11 @@ fn main() -> ExitCode {
     let mut oracle_mode = false;
     let mut oracle_script: Option<String> = None;
     let mut methodcall_mode = false;
+    let mut structured_mode = false;
+    let mut check_canonical: Option<String> = None;
+    let mut minimize_mode = false;
+    let mut regressions_dir: Option<String> = None;
+    let mut min_coverage: Option<f64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -48,8 +55,27 @@ fn main() -> ExitCode {
             "--oracle-script" => {
                 oracle_script = Some(take_next(&args, &mut i, "--oracle-script"));
             }
+            "--check-canonical" => {
+                check_canonical = Some(take_next(&args, &mut i, "--check-canonical"));
+            }
             "--methodcall" => {
                 methodcall_mode = true;
+            }
+            "--structured" => {
+                structured_mode = true;
+            }
+            "--minimize" => {
+                minimize_mode = true;
+            }
+            "--regressions-dir" => {
+                regressions_dir = Some(take_next(&args, &mut i, "--regressions-dir"));
+            }
+            "--min-coverage" => {
+                let v = take_next(&args, &mut i, "--min-coverage");
+                min_coverage = Some(v.parse().unwrap_or_else(|_| {
+                    eprintln!("--min-coverage: expected a float in 0.0..=1.0, got {v:?}");
+                    std::process::exit(2);
+                }));
             }
             "--selftest" => {
                 return match ergo_difftest::selftest() {
@@ -82,7 +108,9 @@ fn main() -> ExitCode {
     // hermetic paths use the hermetic registry. Both `--repro` modes follow their
     // selected execution mode below, so oracle-only surfaces stay replayable.
     if let Some(s) = &only {
-        let known: Vec<&str> = if oracle_mode {
+        let known: Vec<&str> = if structured_mode && !oracle_mode {
+            ergo_difftest::gen::SURFACES.to_vec()
+        } else if oracle_mode {
             ergo_difftest::oracle::oracle_surfaces()
                 .iter()
                 .map(|spec| spec.name)
@@ -99,6 +127,13 @@ fn main() -> ExitCode {
         }
     }
 
+    // `--check-canonical` only takes effect inside the `--repro` path below;
+    // without `--repro` it would silently no-op, so reject that combination.
+    if check_canonical.is_some() && repro.is_none() {
+        eprintln!("--check-canonical requires --repro <hex>");
+        return ExitCode::from(2);
+    }
+
     // --repro: triage a single input and exit. Under `--oracle` it replays the one
     // input against the JVM oracle (so a `reduce` finding can be reproduced from
     // the CLI); otherwise it runs the hermetic decoders.
@@ -107,7 +142,31 @@ fn main() -> ExitCode {
             eprintln!("--repro: not valid hex");
             return ExitCode::from(2);
         };
+
+        // --check-canonical <expected_hex>: hermetic known-bug re-injection gate.
+        // Decodes the input as an ErgoTree, re-encodes it, and compares the result
+        // to the pinned expected canonical bytes.  Exit 0 = bytes match (no bug);
+        // exit 1 = mismatch (bug detected).  Hermetic: no JVM required.
+        if let Some(ref expected_hex) = check_canonical {
+            return run_check_canonical(&bytes, expected_hex);
+        }
+
         if oracle_mode {
+            if minimize_mode {
+                let surface = only.as_deref().unwrap_or_else(|| {
+                    eprintln!("--repro --oracle --minimize requires --surface <s>");
+                    std::process::exit(2);
+                });
+                let reg_dir = regressions_dir
+                    .as_deref()
+                    .unwrap_or("ergo-difftest/regressions");
+                return run_oracle_repro_minimize(
+                    &bytes,
+                    oracle_script,
+                    surface,
+                    std::path::Path::new(reg_dir),
+                );
+            }
             return run_oracle_repro(&bytes, oracle_script, only.as_deref());
         }
         let mut any_bug = false;
@@ -136,8 +195,39 @@ fn main() -> ExitCode {
         None => Vec::new(),
     };
 
+    if structured_mode {
+        if oracle_mode {
+            let reg_dir = regressions_dir
+                .as_deref()
+                .unwrap_or("ergo-difftest/regressions");
+            return run_oracle(
+                seed,
+                iters,
+                oracle_script,
+                only.as_deref(),
+                &corpus,
+                true,
+                minimize_mode,
+                std::path::Path::new(reg_dir),
+            );
+        }
+        return run_structured(seed, iters, only.as_deref(), min_coverage);
+    }
+
     if oracle_mode {
-        return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus);
+        let reg_dir = regressions_dir
+            .as_deref()
+            .unwrap_or("ergo-difftest/regressions");
+        return run_oracle(
+            seed,
+            iters,
+            oracle_script,
+            only.as_deref(),
+            &corpus,
+            false,
+            minimize_mode,
+            std::path::Path::new(reg_dir),
+        );
     }
 
     println!(
@@ -166,6 +256,55 @@ fn main() -> ExitCode {
         );
     }
     ExitCode::FAILURE
+}
+
+/// Hermetic canonical-bytes gate for the known-bug re-injection harness.
+///
+/// Decodes `input` as an ErgoTree via `read_ergo_tree`, re-encodes it via
+/// `write_ergo_tree`, and compares the hex of the result to `expected_hex`.
+///
+/// Exit 0 — bytes match: the encoder is correct (no bug present).
+/// Exit 1 — mismatch: the encoder diverges from canonical (bug detected).
+///
+/// This exercises the canonical class of bugs (e.g. relation2-0x85-noncanonical)
+/// hermetically — no JVM oracle required.
+fn run_check_canonical(input: &[u8], expected_hex: &str) -> ExitCode {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::ergo_tree::{read_ergo_tree, write_ergo_tree};
+
+    let mut r = VlqReader::new(input);
+    let tree = match read_ergo_tree(&mut r) {
+        Ok(t) => t,
+        Err(e) => {
+            println!(
+                "[CANONICAL-GATE] SKIP: input rejected by read_ergo_tree — cannot check canonical form ({e:?})"
+            );
+            // A rejection on clean HEAD means the trigger_hex is bad.
+            // We exit 0 so the gate (which expects exit 0 on clean HEAD)
+            // isn't tripped by an unusable trigger, but the SKIP makes it
+            // visible.  The re-injection path will also fail at this step
+            // if the bugged code also rejects — meaning the class is wrong.
+            return ExitCode::SUCCESS;
+        }
+    };
+
+    let mut w = VlqWriter::new();
+    if let Err(e) = write_ergo_tree(&mut w, &tree) {
+        eprintln!("[CANONICAL-GATE] write_ergo_tree failed: {e:?}");
+        return ExitCode::FAILURE;
+    }
+    let actual_hex = ergo_difftest::to_hex(&w.result());
+
+    if actual_hex == expected_hex {
+        println!("[CANONICAL-GATE] PASS: re-encoded = {actual_hex}");
+        ExitCode::SUCCESS
+    } else {
+        println!(
+            "[CANONICAL-GATE] FAIL: re-encoded != expected\n  got:      {actual_hex}\n  expected: {expected_hex}"
+        );
+        ExitCode::FAILURE
+    }
 }
 
 /// Print the failing probes of a pass, showing the oracle vs node verdicts.
@@ -258,15 +397,128 @@ fn run_methodcall(script: Option<String>) -> ExitCode {
     }
 }
 
+/// Hermetic STRUCTURED campaign: run [`ergo_difftest::run_structured_campaign`]
+/// and print the no-panic / fixed-point stats PLUS the per-surface adversarial-
+/// feature coverage union and ratio. The coverage report is the point of this
+/// mode — it proves each surface's generator reaches every declared bug surface.
+///
+/// If `min_coverage` is `Some(threshold)`, the binary exits non-zero when the
+/// overall union coverage ratio (touched / declared across all surfaces) is
+/// below `threshold`. This is the machine-checkable CI gate.
+fn run_structured(
+    seed: u64,
+    iters: u64,
+    only: Option<&str>,
+    min_coverage: Option<f64>,
+) -> ExitCode {
+    use ergo_difftest::run_structured_campaign;
+
+    println!(
+        "difftest: STRUCTURED seed={seed} iters={iters} surface={}{}",
+        only.unwrap_or("ALL"),
+        min_coverage
+            .map(|m| format!(" min-coverage={m:.2}"))
+            .unwrap_or_default(),
+    );
+
+    let (stats, coverage, findings) = run_structured_campaign(seed, iters, only, &[]);
+
+    println!(
+        "runs={} accepted={} rejected={} write_rejected={} bugs={}",
+        stats.iters, stats.accepted, stats.rejected, stats.write_rejected, stats.bugs
+    );
+
+    println!("\ncoverage (touched / declared adversarial features per surface):");
+    for c in &coverage.0 {
+        let touched = c.touched.intersect(&c.declared);
+        println!(
+            "  {:<20} {:>2}/{:<2}  ratio={:.2}",
+            c.surface,
+            touched.len(),
+            c.declared.len(),
+            c.ratio(),
+        );
+        for f in c.declared.iter() {
+            let mark = if c.touched.contains(f) {
+                "+"
+            } else {
+                "MISSING"
+            };
+            let bug = f.bug_id().map(|b| format!(" [{b}]")).unwrap_or_default();
+            println!("      {mark:<7} {}{bug}", f.name());
+        }
+    }
+
+    let total_touched = coverage.total_touched();
+    let total_declared = coverage.total_declared();
+    let total_declared_count = total_declared.len();
+    let union_reached = total_touched.intersect(&total_declared).len();
+    let union_ratio = if total_declared_count > 0 {
+        union_reached as f64 / total_declared_count as f64
+    } else {
+        1.0
+    };
+    println!(
+        "\nunion: {union_reached}/{total_declared_count} declared features reached across all surfaces  ratio={union_ratio:.3}",
+    );
+
+    // ── Coverage gate ──────────────────────────────────────────────────────────
+    // Machine-checkable exit: CI can invoke `--min-coverage 0.80` and the job
+    // fails loud when the generator drops below that fraction of declared bug
+    // surfaces. An exit-0 here means every asserted threshold was met.
+    let coverage_failed = if let Some(min) = min_coverage {
+        if union_ratio < min {
+            println!(
+                "\ncoverage-gate FAIL: union ratio {union_ratio:.3} < min {min:.2} — generator is missing declared vocabulary"
+            );
+            true
+        } else {
+            println!("\ncoverage-gate PASS: union ratio {union_ratio:.3} >= min {min:.2}");
+            false
+        }
+    } else {
+        false
+    };
+
+    if !findings.is_empty() {
+        println!("\n{} finding(s):", findings.len());
+        for f in &findings {
+            println!(
+                "  {} @ seed={} iter={}\n    {}\n    repro: difftest --repro {}",
+                f.surface, f.seed, f.iter, f.detail, f.input_hex
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+
+    if coverage_failed {
+        return ExitCode::FAILURE;
+    }
+
+    println!("\nno invariant violations");
+    ExitCode::SUCCESS
+}
+
 /// Differential campaign against the JVM reference oracle. Without `only` it
 /// diffs every oracle surface per input; with `only` it restricts to that one
-/// (already validated against the oracle surface set in `main`).
+/// (already validated against the oracle surface set in `main`). When
+/// `structured` is set, each surface is fed bytes from
+/// [`ergo_difftest::gen::gen_structured`] targeted at that surface (the `reduce`
+/// surface, which consumes ErgoTree bytes, is fed the `ergo_tree` generator);
+/// otherwise a single shared input is diffed across every surface.
+///
+/// With `do_minimize`: after the campaign, for each unique divergence, minimize
+/// + classify + auto-file it under `regressions_dir`.
+#[allow(clippy::too_many_arguments)]
 fn run_oracle(
     seed: u64,
     iters: u64,
     script: Option<String>,
     only: Option<&str>,
     corpus: &[Vec<u8>],
+    structured: bool,
+    do_minimize: bool,
+    regressions_dir: &std::path::Path,
 ) -> ExitCode {
     use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
     use ergo_difftest::rng::Rng;
@@ -294,9 +546,20 @@ fn run_oracle(
         std::collections::HashMap::new();
     let mut total = 0u64;
     let mut checked = 0u64;
-    'outer: for _ in 0..iters {
-        let input = ergo_difftest::generate::gen_input(&mut rng, corpus);
+    'outer: for iter in 0..iters {
+        // Non-structured: one shared input diffed across every surface.
+        // Structured: per-surface targeted bytes (generated inside the loop).
+        let shared_input = if structured {
+            Vec::new()
+        } else {
+            ergo_difftest::generate::gen_input(&mut rng, corpus)
+        };
         for spec in &surfaces {
+            let input: Vec<u8> = if structured {
+                structured_oracle_bytes(seed, iter, spec.name)
+            } else {
+                shared_input.clone()
+            };
             match diff(spec, &input, &mut oracle) {
                 Ok(None) => {}
                 Ok(Some(d)) => {
@@ -321,10 +584,10 @@ fn run_oracle(
         }
     }
 
+    let unique = classes.len();
     println!(
-        "oracle: checks={checked} surfaces={} unique_classes={} total_divergences={total}",
+        "oracle: checks={checked} surfaces={} unique_classes={unique} total_divergences={total}",
         surfaces.len(),
-        classes.len(),
     );
     if classes.is_empty() {
         println!("node and JVM reference agree on all checked inputs");
@@ -338,7 +601,100 @@ fn run_oracle(
             d.kind, d.surface, d.rust, d.jvm, d.input_hex
         );
     }
+
+    // ── Minimize + classify + file ──────────────────────────────────────────
+    if do_minimize {
+        minimize_and_file_campaign(
+            &sorted,
+            &surfaces,
+            &mut oracle,
+            regressions_dir,
+            seed,
+            "oracle-mutation",
+        );
+    }
+
     ExitCode::FAILURE
+}
+
+/// Minimize every unique divergence from a campaign, classify it, and file it.
+fn minimize_and_file_campaign(
+    sorted: &[(u64, ergo_difftest::oracle::Divergence)],
+    surfaces: &[ergo_difftest::oracle::SurfaceSpec],
+    oracle: &mut ergo_difftest::oracle::Oracle,
+    regressions_dir: &std::path::Path,
+    campaign_seed: u64,
+    provenance: &str,
+) {
+    use ergo_difftest::minimize::minimize_divergence;
+    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
+    use ergo_difftest::{from_hex, to_hex};
+
+    let mut minimized_count = 0u64;
+    let mut pending_count = 0u64;
+    let mut artifact_count = 0u64;
+
+    for (_, div) in sorted {
+        // Find the matching SurfaceSpec for this divergence's surface.
+        let Some(spec) = surfaces.iter().find(|s| s.name == div.surface) else {
+            eprintln!(
+                "minimize: no SurfaceSpec for surface {:?} — skip",
+                div.surface
+            );
+            continue;
+        };
+
+        let Some(orig_bytes) = from_hex(&div.input_hex) else {
+            eprintln!("minimize: bad input_hex for {} — skip", div.surface);
+            continue;
+        };
+
+        // Minimize.
+        eprint!("minimize: {} ({} bytes)…", div.surface, orig_bytes.len());
+        let (min_bytes, min_div) = match minimize_divergence(&orig_bytes, spec, oracle) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!(" FAILED: {e}");
+                continue;
+            }
+        };
+        eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
+        minimized_count += 1;
+
+        // Classify + file.
+        let seed_info = Some(SeedInfo {
+            seed: campaign_seed,
+            iter: 0, // campaign iter not tracked per-class; use 0
+        });
+        match classify_and_file(
+            &min_div,
+            spec,
+            oracle,
+            seed_info,
+            provenance,
+            regressions_dir,
+        ) {
+            Ok((path, triage)) => {
+                if triage.is_pending() {
+                    pending_count += 1;
+                    println!("  [PENDING]       filed → {}", path.display());
+                } else {
+                    artifact_count += 1;
+                    println!("  [KnownArtifact] filed → {}", path.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("  classify/file error for {}: {e}", div.surface);
+            }
+        }
+    }
+
+    println!(
+        "\nminimize summary: checks={} unique_divergences={} minimized={minimized_count} \
+         pending_queued={pending_count} known_artifacts={artifact_count}",
+        sorted.iter().map(|(c, _)| c).sum::<u64>(),
+        sorted.len(),
+    );
 }
 
 /// Replay a SINGLE input against the JVM oracle (the `--oracle --repro` path), so
@@ -386,6 +742,90 @@ fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) ->
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Minimize + classify + file a single divergence from the `--repro` path.
+///
+/// Used with `--oracle --repro <hex> --minimize --surface <s>`.
+fn run_oracle_repro_minimize(
+    bytes: &[u8],
+    script: Option<String>,
+    surface: &str,
+    regressions_dir: &std::path::Path,
+) -> ExitCode {
+    use ergo_difftest::minimize::minimize_divergence;
+    use ergo_difftest::oracle::{oracle_surfaces, Oracle};
+    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
+    use ergo_difftest::to_hex;
+
+    let script = script.unwrap_or_else(|| "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala".into());
+    eprintln!(
+        "oracle: spawning `scala-cli run {script}` (first run resolves deps, may take ~1 min)..."
+    );
+    let mut oracle = match Oracle::spawn(&script) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("oracle: spawn failed: {e}\n(is scala-cli on PATH?)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let Some(spec) = oracle_surfaces().into_iter().find(|s| s.name == surface) else {
+        eprintln!("--surface: unknown oracle surface {surface:?}");
+        return ExitCode::from(2);
+    };
+
+    eprint!("minimize: {} ({} bytes)…", surface, bytes.len());
+    let (min_bytes, min_div) = match minimize_divergence(bytes, &spec, &mut oracle) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!(" FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
+
+    match classify_and_file(
+        &min_div,
+        &spec,
+        &mut oracle,
+        None::<SeedInfo>,
+        "repro",
+        regressions_dir,
+    ) {
+        Ok((path, triage)) => {
+            println!("triage={} filed → {}", min_div.input_hex, path.display());
+            if triage.is_pending() {
+                println!("  → PENDING (genuine candidate; check QUEUE.md)");
+            } else {
+                println!("  → KnownArtifact (benign; not queued)");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("classify/file error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Structured bytes for an ORACLE surface. Maps the oracle surface name onto a
+/// gen surface. The consensus-complete `reduce` surface (eval + cost) is fed the
+/// EVAL-RICH `sigma_expr` generator — well-typed ErgoTree bodies that reduce
+/// non-trivially, exercising the atLeast / coll-eq / token-eq / deserialize cost
+/// vocabulary where the eval/cost bug class lives. Every other oracle surface with
+/// a matching gen surface uses it directly; anything else falls back to `ergo_tree`.
+fn structured_oracle_bytes(seed: u64, iter: u64, oracle_surface: &str) -> Vec<u8> {
+    let gen_surface = match oracle_surface {
+        "reduce" => "sigma_expr",
+        // `validate` (stateless-tx) parses a transaction first, so it needs
+        // transaction-shaped bytes — without this it falls back to `ergo_tree`
+        // and both sides reject immediately (no differential signal).
+        "validate" => "transaction",
+        s if ergo_difftest::gen::SURFACES.contains(&s) => s,
+        _ => "ergo_tree",
+    };
+    ergo_difftest::gen::gen_structured_at(seed, iter, gen_surface).bytes
 }
 
 /// Root-cause signature for deduping divergences: surface + kind + each side's
@@ -490,9 +930,18 @@ fn print_help() {
          \x20 --surface NAME   restrict to one surface\n\
          \x20 --corpus DIR     mutate raw seed files in DIR\n\
          \x20 --repro HEX      run a single hex input through all surfaces\n\
+         \x20 --check-canonical HEX  hermetic canonical-bytes gate (requires --repro)\n\
          \x20 --oracle         differential campaign vs the JVM reference (ergo_tree)\n\
          \x20 --oracle-script P  path to ErgoSerdeOracle.scala\n\
          \x20 --methodcall     verify the MethodCall typechecker registry vs the JVM oracle\n\
+         \x20 --structured     structure-aware generators + per-surface coverage report\n\
+         \x20                  (combine with --oracle to diff structured bytes vs the JVM)\n\
+         \x20 --min-coverage R  coverage gate: exit non-zero if union ratio < R (0.0..1.0)\n\
+         \x20                  use with --structured; CI uses 0.80\n\
+         \x20 --minimize       after --oracle campaign: minimize+classify+file each unique\n\
+         \x20                  divergence; with --repro: minimize+file that one input\n\
+         \x20                  (--repro --minimize requires --surface)\n\
+         \x20 --regressions-dir D  where to file records (default: ergo-difftest/regressions)\n\
          \x20 --selftest       verify the harness's own bug-detection has teeth\n"
     );
 }

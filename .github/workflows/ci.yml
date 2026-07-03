@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: every job here only reads the repo (build/test/lint/audit).
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check, clippy, test (${{ matrix.os }})
@@ -129,3 +133,45 @@ jobs:
         run: cargo test --no-run -p ergo-mempool --features diagnostics
       - name: cargo test --features diagnostics --no-run (ergo-ser)
         run: cargo test --no-run -p ergo-ser --features diagnostics
+
+  difftest:
+    name: difftest (structured hermetic campaign + coverage gate)
+    runs-on: ubuntu-latest
+    # Fail fast if the structured campaign hangs rather than burning the runner.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: difftest
+
+      # Build in release mode so 50 000 iters stays under 2 minutes.
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest
+
+      # Unit tests for fuzz_one (stable, no nightly required).
+      - name: cargo test -p ergo-difftest
+        run: cargo test -p ergo-difftest
+
+      # Structured campaign: structure-aware generators + fixed-point invariant
+      # + coverage gate. Exit non-zero on any invariant violation (Bug) OR if the
+      # generator union coverage drops below 80 % of the declared adversarial
+      # vocabulary. This catches a broken generator that silently stops producing
+      # adversarial features.
+      #
+      # 50 000 iters ≈ 30 s on ubuntu-latest; full vocabulary is reachable in
+      # < 40 000 iters per surface (verified by gen_coverage tests).
+      #
+      # The JVM-oracle differential and replay driver are NOT run here — they
+      # need scala-cli + a live Scala node and are run manually by the operator.
+      - name: run structured campaign (50 000 iters, min-coverage 0.80)
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --structured --iters 50000 --min-coverage 0.80

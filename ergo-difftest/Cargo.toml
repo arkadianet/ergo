@@ -6,12 +6,35 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
+# `difftest` is the primary campaign runner; `replay` is the streamed archival
+# driver. Keep `cargo run -p ergo-difftest` pointing at difftest so the README /
+# doc invocations (`cargo run -p ergo-difftest -- ...`) keep working now that a
+# second binary exists.
+default-run = "difftest"
 
 [dependencies]
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
 ergo-sigma      = { workspace = true }
+ergo-state      = { workspace = true }
+ergo-validation = { workspace = true }
+ergo-rest-json  = { workspace = true }
+num-bigint      = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true }
+hex             = { workspace = true }
+tempfile        = { workspace = true }
+sha2            = { workspace = true }
+
+[dev-dependencies]
+# Used in avl_frame tests to generate proof fixtures via the prover side.
+ergo_avltree_rust = { workspace = true }
+bytes             = { workspace = true }
 
 [[bin]]
 name = "difftest"
 path = "src/bin/difftest.rs"
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"

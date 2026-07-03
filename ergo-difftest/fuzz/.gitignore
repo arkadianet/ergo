@@ -1,0 +1,7 @@
+# libFuzzer build artifacts and crash outputs — never committed.
+# Seed corpus under corpus/ IS committed (small, hermetic, curated).
+target/
+artifacts/
+
+# fuzz crate lockfile — regenerated on nightly; not pinned
+Cargo.lock

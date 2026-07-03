@@ -121,7 +121,7 @@ fn decode_scala_header_v1_roundtrips_mainnet_h1_through_h5() {
 
 #[test]
 fn decode_scala_header_v2_roundtrips_mainnet_700k() {
-    let headers = load_headers("headers_1761000_1762000.json");
+    let headers = load_headers("headers_1761792_1761795_eip37_curated.json");
     // Pick a few v2 headers — anything past h=417_792 is v2.
     let mut tested = 0;
     for hv in headers.iter().take(3) {
