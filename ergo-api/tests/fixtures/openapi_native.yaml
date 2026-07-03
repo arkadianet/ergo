@@ -53,6 +53,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiDifficultySeries'
+  /api/v1/events:
+    get:
+      tags:
+      - node
+      description: 'Operator event feed, oldest-first: block applies, reorgs, peer connects/disconnects, extra-index status transitions. Backed by a bounded node-side ring (512 events) projected into the lock-free snapshot each tick, so this read never touches live node state. `seq` is monotonic; a gap between polls means the ring evicted entries in between. Reorg detection is approximate: derived from the committed recent-block tail (a replaced block within the last 32 heights), so a reorg deeper than that tail surfaces as plain `blockApplied` events only.'
+      operationId: events_handler
+      parameters:
+      - name: since
+        in: query
+        description: Return only events with `seq` strictly greater than this. Poll with the previous response's `latestSeq` to receive only what is new. Omitted or non-numeric = the full retained tail.
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      responses:
+        '200':
+          description: Retained event tail (filtered by `since`), oldest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiNodeEvents'
   /api/v1/health:
     get:
       tags:
@@ -1920,6 +1942,76 @@ components:
           - 'null'
         reason:
           type: string
+    ApiNodeEvent:
+      type: object
+      description: |-
+        One operator event for `GET /api/v1/events` — flat shape with optional
+        per-kind fields so the feed renders without a type registry. `kind` is
+        one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
+        `indexerStatus`.
+      required:
+      - seq
+      - unixMs
+      - kind
+      properties:
+        addr:
+          type:
+          - string
+          - 'null'
+        detail:
+          type:
+          - string
+          - 'null'
+        headerId:
+          type:
+          - string
+          - 'null'
+        height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        kind:
+          type: string
+        seq:
+          type: integer
+          format: int64
+          description: Monotonic sequence number (gaps = ring eviction).
+          minimum: 0
+        sizeBytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        txs:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        unixMs:
+          type: integer
+          format: int64
+          minimum: 0
+    ApiNodeEvents:
+      type: object
+      description: |-
+        Event-feed page for `GET /api/v1/events`: the retained tail (bounded by
+        the node-side ring) plus the newest sequence number for `?since=` polls.
+      required:
+      - latestSeq
+      - events
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiNodeEvent'
+        latestSeq:
+          type: integer
+          format: int64
+          minimum: 0
     ApiParamChange:
       type: object
       description: A single parameter's change across one epoch boundary.

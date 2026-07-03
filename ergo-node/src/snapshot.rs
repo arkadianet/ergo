@@ -120,6 +120,8 @@ pub struct NodeSnapshot {
     /// precomputed each tick. Serves `GET /api/v1/blocks/recent` as a pure
     /// snapshot clone — no live store read on the request path.
     pub recent_blocks: Arc<Vec<ApiRecentBlock>>,
+    /// Operator event feed tail (bounded ring projection) + newest seq.
+    pub events: Arc<ergo_api::types::ApiNodeEvents>,
     /// Best network-known header height — `SyncState::best_known_header_height()`
     /// (our validated-header latch, initialized to the full-block tip and
     /// advanced by peer sync info). Matches Scala's `maxPeerHeight` notion
@@ -262,6 +264,7 @@ impl NodeSnapshot {
             delivery_counts: DeliveryCounters::default(),
             banned_ips: Arc::new(Vec::new()),
             recent_blocks: Arc::new(Vec::new()),
+            events: Arc::new(ergo_api::types::ApiNodeEvents::default()),
             max_peer_height: 0,
             mining_enabled: false,
             snapshot_manifests: Vec::new(),
@@ -461,6 +464,8 @@ pub struct SnapshotParts<'a> {
     /// per-tip cache so an unchanged full-block tip re-publishes the same
     /// allocation. Drives `GET /api/v1/blocks/recent`.
     pub recent_blocks: Arc<Vec<ApiRecentBlock>>,
+    /// Operator event feed tail (bounded ring projection) + newest seq.
+    pub events: Arc<ergo_api::types::ApiNodeEvents>,
     /// `SyncState::best_known_header_height()` — the network-best-height
     /// latch advanced by peer sync info. Feeds `/info.maxPeerHeight`.
     pub max_peer_height: u32,
@@ -612,6 +617,7 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         delivery_counts: p.delivery_counts,
         banned_ips: p.banned_ips,
         recent_blocks: p.recent_blocks,
+        events: p.events,
         max_peer_height: p.max_peer_height,
         mining_enabled: p.mining_enabled,
         snapshot_manifests: p.snapshot_manifests,
@@ -947,6 +953,7 @@ mod tests {
             banned_ips: Arc::new(Vec::new()),
             bootstrap: None,
             recent_blocks: Arc::new(Vec::new()),
+            events: Arc::new(ergo_api::types::ApiNodeEvents::default()),
             max_peer_height: 0,
             mining_enabled: false,
             snapshot_manifests: Vec::new(),

@@ -287,6 +287,60 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     // flush — the cache advances atomically with the in-memory tip.
     let active_params = state.store.active_params().clone();
 
+    // Operator event feed: diff this tick's observations against the previous
+    // tick's — the single derivation site (no subsystem instrumentation).
+    // Everything consumed here is already collected above on the hot path.
+    let api_events = {
+        let recent_tuples: Vec<(u32, String, u32, u64)> = recent_blocks
+            .iter()
+            .map(|b| (b.height, b.header_id.clone(), b.txs, b.size_bytes))
+            .collect();
+        let indexer_status = state.indexer_handle.as_ref().map(|h| {
+            use ergo_indexer::{IndexerQuery, IndexerStatus};
+            match h.status() {
+                IndexerStatus::Syncing => ("syncing".to_string(), None),
+                IndexerStatus::CaughtUp => ("caughtUp".to_string(), None),
+                IndexerStatus::Halted(r) => {
+                    ("halted".to_string(), Some(r.as_kebab_case().to_string()))
+                }
+            }
+        });
+        super::event_feed::derive_events(
+            &mut state.event_feed,
+            &mut state.event_feed_prev,
+            super::event_feed::FeedObservation {
+                unix_ms: now_unix_ms,
+                // COMMITTED tip — the newest entry of the committed tail
+                // itself, NOT the in-memory chain_state tip. During the
+                // async-persist window the in-memory tip runs ahead of the
+                // committed tail; feeding it here would advance the differ's
+                // cursor past heights `recent` doesn't contain yet and
+                // permanently drop their block events (codex High, PR review).
+                // Same-source tip + tail keeps the differ self-consistent:
+                // events simply emit a tick later, when the commit lands.
+                tip_height: recent_tuples.first().map(|(h, ..)| *h).unwrap_or(0),
+                tip_id: recent_tuples
+                    .first()
+                    .map(|(_, id, ..)| id.clone())
+                    .unwrap_or_default(),
+                recent: &recent_tuples,
+                peers: peers_vec.iter().map(|p| p.addr.to_string()).collect(),
+                indexer_status,
+            },
+        );
+        // Seq-keyed cache: a quiet tick re-publishes the same Arc instead of
+        // re-cloning 100 events per second.
+        let seq_now = state.event_feed.latest_seq();
+        match &state.event_feed_projection {
+            Some((cached_seq, cached)) if *cached_seq == seq_now => cached.clone(),
+            _ => {
+                let built = build_events_projection(&state.event_feed);
+                state.event_feed_projection = Some((seq_now, built.clone()));
+                built
+            }
+        }
+    };
+
     let parts = SnapshotParts {
         now_unix_ms,
         snapshot_built_at: now,
@@ -327,6 +381,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         banned_ips,
         bootstrap,
         recent_blocks,
+        events: api_events,
         max_peer_height,
         mining_enabled: state.mining_enabled,
         snapshot_manifests: state
@@ -856,6 +911,70 @@ fn project_mempool_transactions(
         transactions,
         weight_function,
     }
+}
+
+/// Project the ring tail into the API DTO. Called only when the ring's
+/// latest seq advanced (see the seq-keyed cache at the call site).
+fn build_events_projection(
+    ring: &crate::node::event_feed::EventFeedRing,
+) -> std::sync::Arc<ergo_api::types::ApiNodeEvents> {
+    use crate::node::event_feed::FeedEventKind as K;
+    let events = ring
+        .latest(100)
+        .into_iter()
+        .map(|e| {
+            let mut ev = ergo_api::types::ApiNodeEvent {
+                seq: e.seq,
+                unix_ms: e.unix_ms,
+                kind: String::new(),
+                height: None,
+                header_id: None,
+                txs: None,
+                size_bytes: None,
+                addr: None,
+                detail: None,
+            };
+            match e.kind {
+                K::BlockApplied {
+                    height,
+                    header_id,
+                    txs,
+                    size_bytes,
+                } => {
+                    ev.kind = "blockApplied".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.txs = Some(txs);
+                    ev.size_bytes = Some(size_bytes);
+                }
+                K::Reorg { height, header_id } => {
+                    ev.kind = "reorg".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                }
+                K::PeerConnected { addr } => {
+                    ev.kind = "peerConnected".into();
+                    ev.addr = Some(addr);
+                }
+                K::PeerDisconnected { addr } => {
+                    ev.kind = "peerDisconnected".into();
+                    ev.addr = Some(addr);
+                }
+                K::IndexerStatus { status, detail } => {
+                    ev.kind = "indexerStatus".into();
+                    ev.detail = Some(match detail {
+                        Some(d) => format!("{status} ({d})"),
+                        None => status,
+                    });
+                }
+            }
+            ev
+        })
+        .collect::<Vec<_>>();
+    std::sync::Arc::new(ergo_api::types::ApiNodeEvents {
+        latest_seq: ring.latest_seq(),
+        events,
+    })
 }
 
 #[cfg(test)]

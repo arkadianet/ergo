@@ -28,6 +28,7 @@ macro_rules! shutdown_log {
 mod action_loop;
 mod admission;
 mod boot;
+mod event_feed;
 mod events;
 mod first_deliverer;
 mod handle;

@@ -579,6 +579,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/api/v1/votes", get(votes_handler))
         .route("/api/v1/tip", get(tip_handler))
         .route("/api/v1/blocks/recent", get(recent_blocks_handler))
+        .route("/api/v1/events", get(events_handler))
         .route("/api/v1/sync", get(sync_handler))
         .route("/api/v1/peers", get(peers_handler))
         .route("/api/v1/mempool/summary", get(mempool_handler))
@@ -1396,6 +1397,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         set_votes_handler,
         tip_handler,
         recent_blocks_handler,
+        events_handler,
         sync_handler,
         peers_handler,
         mempool_handler,
@@ -1459,6 +1461,8 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiFullBlockRef,
         ApiDifficultyPoint,
         ApiDifficultySeries,
+        crate::types::ApiNodeEvent,
+        crate::types::ApiNodeEvents,
         crate::types::ApiIndexerStatus,
         crate::types::ApiIndexerRepair,
         crate::types::ApiIndexerTotals,
@@ -1652,6 +1656,43 @@ async fn recent_blocks_handler(
         .map(|v| v.clamp(1, 32) as u32)
         .unwrap_or(10);
     Json(read.recent_blocks(n)).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events",
+    tag = "node",
+    description = "Operator event feed, oldest-first: block applies, reorgs, peer \
+connects/disconnects, extra-index status transitions. Backed by a bounded node-side \
+ring (512 events) projected into the lock-free snapshot each tick, so this read never \
+touches live node state. `seq` is monotonic; a gap between polls means the ring \
+evicted entries in between. Reorg detection is approximate: derived from the committed \
+recent-block tail (a replaced block within the last 32 heights), so a reorg deeper \
+than that tail surfaces as plain `blockApplied` events only.",
+    params(
+        ("since" = Option<u64>, Query,
+         description = "Return only events with `seq` strictly greater than this. \
+Poll with the previous response's `latestSeq` to receive only what is new. \
+Omitted or non-numeric = the full retained tail."),
+    ),
+    responses(
+        (status = 200, description = "Retained event tail (filtered by `since`), oldest first",
+         body = crate::types::ApiNodeEvents, content_type = "application/json"),
+    ),
+)]
+async fn events_handler(
+    State(read): State<Arc<dyn NodeReadState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let since = params
+        .get("since")
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut feed = read.events();
+    if since > 0 {
+        feed.events.retain(|e| e.seq > since);
+    }
+    Json(feed).into_response()
 }
 
 #[utoipa::path(

@@ -1491,6 +1491,9 @@ async fn run_inner_with_backend(
         api_weight_function,
         recent_blocks_cache: None,
         first_deliverer_ring: crate::node::first_deliverer::FirstDelivererRing::new(),
+        event_feed: crate::node::event_feed::EventFeedRing::new(),
+        event_feed_prev: crate::node::event_feed::FeedPrev::default(),
+        event_feed_projection: None,
     };
 
     // Spawn the Step B anchor-map builder. Background task that

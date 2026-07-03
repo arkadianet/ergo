@@ -409,6 +409,11 @@ impl NodeReadState for SnapshotReadState {
         self.handle.load().peers.clone()
     }
 
+    fn events(&self) -> ergo_api::types::ApiNodeEvents {
+        // Pure snapshot clone of the projected event tail.
+        (*self.handle.load().events).clone()
+    }
+
     fn recent_blocks(&self, n: u32) -> Vec<ApiRecentBlock> {
         // Pure snapshot clone of the precomputed tail (newest-first),
         // truncated to the caller's bound.
