@@ -202,7 +202,12 @@ function tokenAmt(tid, amount) {
 // title attribute so a name that MIMICS an id can't hide the real one.
 function tokenLink(tid) {
   const m = tokenMeta.get(tid);
-  const a = link(`token/${tid}`, m?.name?.trim() ? m.name.trim().slice(0, 32) : truncMiddle(tid, 6, 6));
+  // Code-point-safe truncation: a bare String.slice counts UTF-16 units and
+  // can bisect a surrogate pair (emoji / astral chars) into a lone "�".
+  // Array.from splits by code points, so pairs stay intact; ZWJ-composed
+  // clusters can't be split either — BIDI_CONTROLS already strips ZWJ.
+  const name = m?.name?.trim() ? Array.from(m.name.trim()).slice(0, 32).join('') : '';
+  const a = link(`token/${tid}`, name || truncMiddle(tid, 6, 6));
   a.title = tid;
   return a;
 }
