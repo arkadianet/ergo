@@ -83,6 +83,18 @@ pub struct Token {
     pub kind: TokenKind,
     pub start: Pos,
     pub end: Pos,
+    /// True iff this token's immediate leading gap contains, AFTER the gap's
+    /// first newline, a block comment that is NOT terminated by a newline before
+    /// this token (only spaces/tabs, or another comment, follow it). This is the
+    /// one bit of comment structure `OneNLMax` needs: the reference's
+    /// `ConsumeComments = (WSChars.? ~ Comment ~ WSChars.? ~ Newline).rep`
+    /// (Literals.scala:58) matches a block comment via `MultilineComment = "/*"
+    /// ~/ …` — the `~/` cut means a matched block comment NOT followed by the
+    /// required `Newline` turns that `.rep` iteration into a HARD failure (a line
+    /// comment has no cut). `OneNLMax` is `NoCut`, so the caller backtracks — but
+    /// the continuation is refused. See `Cursor::one_nl_max`. oracle-mapped
+    /// (`a +\n/*c*/b` REJECT vs `a +\n/*c*/\nb` / `a + /*c*/b` ACCEPT).
+    pub bc_before: bool,
 }
 
 impl Token {
@@ -101,17 +113,23 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     let mut lx = Lexer::new(src);
     let mut tokens = Vec::new();
     loop {
-        lx.skip_gap(&mut tokens)?;
+        // `skip_gap` reports whether the gap it just consumed poisons a
+        // following `OneNLMax` continuation (a post-newline block comment with no
+        // terminating newline); the next real token — the one `OneNLMax` would
+        // land on — carries that as `bc_before`.
+        let bc_before = lx.skip_gap(&mut tokens)?;
         if lx.at_end() {
             let p = lx.pos as u32;
             tokens.push(Token {
                 kind: TokenKind::Eof,
                 start: p,
                 end: p,
+                bc_before,
             });
             return Ok(tokens);
         }
-        let tok = lx.lex_token()?;
+        let mut tok = lx.lex_token()?;
+        tok.bc_before = bc_before;
         tokens.push(tok);
     }
 }
@@ -208,6 +226,7 @@ impl<'a> Lexer<'a> {
             kind,
             start: start as u32,
             end: self.pos as u32,
+            bc_before: false,
         }
     }
 
@@ -219,8 +238,15 @@ impl<'a> Lexer<'a> {
     /// spaces/tabs and is cleared by a newline (Literals.scala:57-60). A lone
     /// `\r` not followed by `\n` is skipped silently like the implicit
     /// `ScalaWhitespace` (FP/Whitespace.scala:199) — never a newline token.
-    fn skip_gap(&mut self, tokens: &mut Vec<Token>) -> Result<(), ParseError> {
+    fn skip_gap(&mut self, tokens: &mut Vec<Token>) -> Result<bool, ParseError> {
         let mut last_was_comment = false;
+        // `OneNLMax`'s `ConsumeComments` `~/`-cut reconstruction: once a newline has
+        // been crossed (`seen_newline`), a block comment that is not immediately
+        // (modulo spaces/tabs) followed by another newline poisons the continuation
+        // — sticky for the whole gap. Comments BEFORE the first newline are the
+        // reference's leading `WS` (NoCut) and never poison. See `Token::bc_before`.
+        let mut seen_newline = false;
+        let mut bc_cut = false;
         loop {
             match self.peek_byte() {
                 Some(b' ') | Some(b'\t') => self.pos += 1,
@@ -234,6 +260,7 @@ impl<'a> Lexer<'a> {
                         start,
                     ));
                     last_was_comment = false;
+                    seen_newline = true;
                 }
                 Some(b'\r') if self.peek_byte_at(1) == Some(b'\n') => {
                     let start = self.pos;
@@ -245,6 +272,7 @@ impl<'a> Lexer<'a> {
                         start,
                     ));
                     last_was_comment = false;
+                    seen_newline = true;
                 }
                 Some(b'\r') => {
                     self.pos += 1; // lone \r: skipped, no token
@@ -253,14 +281,32 @@ impl<'a> Lexer<'a> {
                 Some(b'/') if self.peek_byte_at(1) == Some(b'/') => {
                     self.consume_line_comment();
                     last_was_comment = true;
+                    // A line comment carries no `~/` cut (Literals.scala:85) — it
+                    // never poisons `ConsumeComments`.
                 }
                 Some(b'/') if self.peek_byte_at(1) == Some(b'*') => {
                     self.consume_block_comment()?;
                     last_was_comment = true;
+                    if seen_newline && !self.block_comment_newline_terminated() {
+                        bc_cut = true;
+                    }
                 }
-                _ => return Ok(()), // token start or EOF
+                _ => return Ok(bc_cut), // token start or EOF
             }
         }
+    }
+
+    /// After a block comment in a post-newline gap: does a newline (`\n`/`\r\n`)
+    /// follow it, modulo spaces/tabs? If so it is a well-formed `ConsumeComments`
+    /// comment-line (Literals.scala:58); if not, the `MultilineComment` `~/` cut
+    /// makes it a hard `OneNLMax` failure. Pure lookahead — does not advance.
+    fn block_comment_newline_terminated(&self) -> bool {
+        let mut i = self.pos;
+        while matches!(self.bytes.get(i), Some(b' ') | Some(b'\t')) {
+            i += 1;
+        }
+        matches!(self.bytes.get(i), Some(b'\n'))
+            || (self.bytes.get(i) == Some(&b'\r') && self.bytes.get(i + 1) == Some(&b'\n'))
     }
 
     /// Line comment (Literals.scala:84-85): `//` up to (not including) a
@@ -471,13 +517,30 @@ impl<'a> Lexer<'a> {
     fn lex_op_run(&mut self, start: usize) -> Token {
         self.consume_op_run();
         let run = &self.src[start..self.pos];
-        let kind = match run {
-            ":" => TokenKind::Kw(Kw::Colon),
-            "=>" | "\u{21D2}" => TokenKind::Kw(Kw::FatArrow),
-            "=" => TokenKind::Kw(Kw::Assign),
-            "#" => TokenKind::Kw(Kw::Hash),
-            "@" => TokenKind::Kw(Kw::At),
-            _ => TokenKind::OpId,
+        // A symbolic-keyword op-run stopped DIRECTLY before a `//`/`/*` comment is an
+        // operator IDENTIFIER, not the keyword. Scala's reserved-check
+        // `SymbolicKeywords = (":"|";"|"=>"|"="|"#"|"@") ~ !OpChar`
+        // (Identifiers.scala:55-57) has no comment exception: for e.g. `=//c` the
+        // char after `=` is `/` (an op-char), so `!OpChar` FAILS and the run lexes as
+        // a `PlainId`. (The GRAMMAR keyword matchers `Key.O(...)`, Basic.scala:76-77,
+        // DO carry a comment exception, so the same text still works in keyword
+        // positions — reproduced parser-side by `Cursor::at_sym_kw`.) A run that is
+        // not a symbolic keyword is already an `OpId`, so this only reclassifies the
+        // six keyword runs. oracle: `a.=>/*c*/` ACCEPT vs `a.=>` REJECT; `x #/*c*/ y`
+        // rejects as an unknown infix, not at the keyword.
+        let before_comment = self.peek_byte() == Some(b'/')
+            && matches!(self.peek_byte_at(1), Some(b'/') | Some(b'*'));
+        let kind = if before_comment {
+            TokenKind::OpId
+        } else {
+            match run {
+                ":" => TokenKind::Kw(Kw::Colon),
+                "=>" | "\u{21D2}" => TokenKind::Kw(Kw::FatArrow),
+                "=" => TokenKind::Kw(Kw::Assign),
+                "#" => TokenKind::Kw(Kw::Hash),
+                "@" => TokenKind::Kw(Kw::At),
+                _ => TokenKind::OpId,
+            }
         };
         self.tok(kind, start)
     }
@@ -927,15 +990,35 @@ mod tests {
     }
     #[test]
     fn opid_stops_before_comment_start() {
-        // Identifiers.scala:22-24 + Basic.scala:76-77
-        assert_eq!(
-            kinds("=//c"),
-            vec![TokenKind::Kw(Kw::Assign), TokenKind::Eof]
-        );
+        // Identifiers.scala:22-24 + Basic.scala:76-77: the op-run munch stops before
+        // a `//`/`/*` comment start.
         assert_eq!(
             kinds("+/*c*/+"),
             vec![TokenKind::OpId, TokenKind::OpId, TokenKind::Eof]
         );
+    }
+    #[test]
+    fn symbolic_keyword_directly_before_comment_is_opid() {
+        // A symbolic-keyword op-run stopped DIRECTLY before a comment is an operator
+        // IDENTIFIER, not the keyword: `SymbolicKeywords ~ !OpChar`
+        // (Identifiers.scala:55-57) sees the comment's leading `/` (an op-char) and
+        // fails, so the run is a `PlainId`. Was pinned `Kw(Assign)`; the oracle
+        // proves it wrong (`a.=>/*c*/` — a `Select` on the field `=>` — is ACCEPT,
+        // only possible if `=>` before a comment is an identifier).
+        // oracle: ParserOracle sigma-state 6.0.2
+        for (src, run) in [
+            ("=//c", "="),
+            ("=>/*c*/", "=>"),
+            (":/*c*/x", ":"),
+            ("#//c", "#"),
+        ] {
+            let t = tokenize(src).unwrap();
+            assert_eq!(t[0].kind, TokenKind::OpId, "{src}");
+            assert_eq!(t[0].text(src), run, "{src}");
+        }
+        // A comment NOT directly adjacent leaves the keyword intact (the run ends at
+        // whitespace, and the reserved-check's `!OpChar` sees the space).
+        assert_eq!(kinds("= //c")[0], TokenKind::Kw(Kw::Assign));
     }
     #[test]
     fn numbers_hex_suffix_and_split() {
@@ -1104,6 +1187,29 @@ mod tests {
                 after_comment: false
             }
         );
+    }
+
+    #[test]
+    fn bc_before_marks_post_newline_dangling_block_comment() {
+        // `bc_before` = a block comment after the gap's first newline, NOT
+        // newline-terminated before the token. Drives `OneNLMax`'s ConsumeComments
+        // `~/` cut. oracle (via the infix `a + <gap> b`): the `true` rows REJECT,
+        // the `false` rows ACCEPT (ParserOracle sigma-state 6.0.2).
+        let last_real_bc = |src: &str| {
+            let t = tokenize(src).unwrap();
+            t[t.len() - 2].bc_before // the token before EOF
+        };
+        // block comment right after the sole newline, then `b` on the same line
+        assert!(last_real_bc("+\n/*c*/b")); // -> REJECT continuation
+        assert!(last_real_bc("+\n/*c*//*d*/b")); // two blocks, second dangles
+        assert!(last_real_bc("+\n /*c*/ b")); // spaces around the block
+                                              // block comment that IS newline-terminated (a clean comment-line)
+        assert!(!last_real_bc("+\n/*c*/\nb"));
+        // block comment BEFORE the sole newline: leading `WS` (NoCut) — never poisons
+        assert!(!last_real_bc("+/*c*/\nb"));
+        assert!(!last_real_bc("+ /*c*/b")); // no newline at all
+                                            // a line comment never poisons (no `~/` cut)
+        assert!(!last_real_bc("+\n//c\nb"));
     }
 
     // ----- happy path (strings and char/symbol literals) -----

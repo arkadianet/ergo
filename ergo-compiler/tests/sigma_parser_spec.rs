@@ -2320,3 +2320,101 @@ fn prefix_op_still_folds_across_whitespace_and_adjacency() {
     accept("-/*c*/x"); // Negation(Ident) — the operand is not an op-char
     accept("!//c");
 }
+
+// ----- oracle parity: round-3 comment/newline machinery -----
+
+#[test]
+fn r3_symbolic_keyword_before_comment_is_identifier() {
+    // A symbolic-keyword op-run DIRECTLY before a `//`/`/*` comment lexes as an
+    // operator identifier (the reserved-check's `!OpChar` sees the comment's `/`),
+    // so after a `.` it is a valid `Select` FIELD — while the bare reserved form is
+    // refused. oracle: ParserOracle sigma-state 6.0.2 — ACCEPT / REJECT as pinned.
+    accept("a.=>/*c*/");
+    accept("a.:/*c*/");
+    accept("a.@/*c*/");
+    accept("a.#/*c*/");
+    accept("a.=/*c*/");
+    fail_at("a.=>", 1, 3); // bare reserved `=>` after `.` is not a PlainId
+    fail_at("a.:", 1, 3);
+    fail_at("a.@", 1, 3);
+    // In identifier/infix position the op-id flows through `mkInfixOp`, which has no
+    // case for these — an "unknown binary operation" pinned to the left operand.
+    fail_at("a =//c\n b", 1, 1);
+    fail_at("x #/*c*/ y", 1, 1);
+    fail_at("x :/*c*/ Int", 1, 1);
+}
+
+#[test]
+fn r3_symbolic_keyword_before_comment_still_works_in_keyword_positions() {
+    // The GRAMMAR keyword matchers `Key.O(...)` carry a comment exception, so the
+    // same comment-adjacent op-id still binds as the keyword at `=`/`:`/`=>`/`@`
+    // sites (reproduced by `Cursor::at_sym_kw`). oracle: ACCEPT each.
+    accept("{ val x =//c\n 1; x }"); // `=` before a line comment
+    accept("{ val x =/*c*/ 1; x }"); // `=` before a block comment
+    accept("{ (x: Int) =>/*c*/ x }"); // lambda `=>`
+    accept("{ (x: Int) =>//c\n x }");
+    accept("{ (x:/*c*/ Int) => x }"); // lambda-arg `:`
+    accept("{ val x:/*c*/ Int = 1; x }"); // val-ascription `:`
+    accept("{ def f(x: Int):/*c*/ Int = x; 1 }"); // def result `:`
+    accept("{ def f(x: Int) =/*c*/ x; 1 }"); // def `=`
+    accept("{ (f: Int =>/*c*/ Long) => f }"); // function-type `=>`
+    accept("{ @/*c*/foo val x = 1; x }"); // annotation `@`
+    accept("{ def f[T:/*c*/ Int](x: Int) = x; 1 }"); // context-bound `:`
+}
+
+#[test]
+fn r3_one_nl_max_rejects_post_newline_dangling_block_comment() {
+    // `OneNLMax`'s `ConsumeComments` matches a block comment via `MultilineComment
+    // = "/*" ~/ …`; the `~/` cut turns a block comment NOT followed by the required
+    // `Newline` into a hard failure, so the infix continuation is refused and the
+    // operator becomes a postfix — the rhs is then trailing input. oracle: REJECT
+    // at the pinned position (the rhs on the continuation line).
+    fail_at("a +\n/*c*/b", 2, 6);
+    fail_at("a +\n/*c*//*d*/b", 2, 11);
+    fail_at("a +\n /*c*/ b", 2, 8);
+    // shares the fix with the TYPE-grammar infix (`InfixType`'s `OneNLMax`).
+    fail_at("{ val x: Int +\n/*c*/Long = y; x }", 1, 14);
+}
+
+#[test]
+fn r3_one_nl_max_still_accepts_clean_comment_continuations() {
+    // Regression: a line comment (no `~/` cut), a block comment that IS
+    // newline-terminated (a clean `ConsumeComments` line), a comment BEFORE the
+    // sole newline (leading `WS`, NoCut), and no-comment continuations all pass.
+    // oracle: ACCEPT each.
+    accept("a +\n//c\nb");
+    accept("a +\n/*c*/\nb");
+    accept("a + /*c*/\nb");
+    accept("a +/*c*/\nb");
+    accept("a +\nb");
+    accept("a + /*c*/b");
+    accept("{ val x: Int +\n Long = y; x }");
+}
+
+#[test]
+fn r3_no_newline_limit_before_def_arg_lists() {
+    // `FunDef = … Id.! ~ FunSig` and `FunArgs.rep`'s inter-iteration whitespace are
+    // implicit-`ScalaWhitespace` positions, so an arg list may follow any number of
+    // blank lines. oracle: ACCEPT each.
+    accept("{ def f\n\n(x: Int) = x; 1 }");
+    accept("{ def f(x: Int)\n\n(y: Int) = x; 1 }");
+    accept("{ def f\n\n(x: Int)\n\n(y: Int) = x; 1 }");
+    accept("{ def f\n\n[T](x: Int) = x; 1 }");
+    // The ONE live `OneNLMax`: the first arg list after a present `FunTypeArgs`
+    // (`FunTypeArgs.? ~~ FunArgs` joins them with RAW `~~`) — one newline ok, two not.
+    accept("{ def f[T]\n(x: Int) = x; 1 }");
+    reject("{ def f[T]\n\n(x: Int) = x; 1 }");
+}
+
+#[test]
+fn r3_block_lambda_and_raw_block_arg_newline_sites_unchanged() {
+    // The block-lambda head is reached through an implicit-whitespace position
+    // (`{` ~/ Block, and BaseBlock's leading `Semis.?`), so blank lines before it
+    // are fine — while the ExprSuffix block-arg `OneNLMax` sits in a raw `repX`
+    // position, so a `{ … }` on a new line does NOT continue a call in Stat context.
+    // oracle: ACCEPT the lambdas, REJECT the block-args.
+    accept("{\n\n(x: Int) => x }");
+    accept("{ (x: Int)\n\n=> x }");
+    reject("f\n\n{ 1 }");
+    reject("f\n{ 1 }");
+}

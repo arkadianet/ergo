@@ -166,6 +166,34 @@ impl<'a> Cursor<'a> {
         self.peek().kind == TokenKind::Kw(k)
     }
 
+    /// True iff the next token is the symbolic keyword `k`, accepting BOTH its
+    /// reserved `Kw` token AND the comment-adjacent `OpId` form. A symbolic-keyword
+    /// op-run lexed DIRECTLY before a `//`/`/*` comment is a `PlainId` operator
+    /// identifier (token.rs `lex_op_run`: the reserved-check's `!OpChar` sees the
+    /// comment's `/` and fails), yet the grammar keyword matcher `Key.O(...)`
+    /// (Basic.scala:76-77) carries a comment exception and still matches it here.
+    /// Used at every `=`/`:`/`=>`/`@` keyword site so `val x =//c 1`,
+    /// `(x:/*c*/ Int)`, `Int =>/*c*/ Long`, `@/*c*/foo val` all parse — while the
+    /// same op-id in an identifier position (`a.=>/*c*/`, an infix `x #/*c*/ y`)
+    /// flows through the ordinary `is_id` path. oracle-mapped.
+    fn at_sym_kw(&self, k: Kw) -> bool {
+        let t = self.peek();
+        if t.kind == TokenKind::Kw(k) {
+            return true;
+        }
+        if t.kind != TokenKind::OpId {
+            return false;
+        }
+        match k {
+            Kw::Colon => t.text(self.src) == ":",
+            Kw::Assign => t.text(self.src) == "=",
+            Kw::Hash => t.text(self.src) == "#",
+            Kw::At => t.text(self.src) == "@",
+            Kw::FatArrow => matches!(t.text(self.src), "=>" | "\u{21D2}"),
+            _ => false,
+        }
+    }
+
     /// `Ident` whose text is exactly `w` (grammar words `val`/`def`/`with`/… that
     /// are *not* reserved keywords, recon-lexical.md §2.3).
     fn at_word(&self, w: &str) -> bool {
@@ -275,6 +303,16 @@ impl<'a> Cursor<'a> {
             self.i = save;
             return false;
         }
+        // ConsumeComments' `~/`-cut: a block comment in the post-newline region
+        // that is not newline-terminated (a `MultilineComment` matched but the
+        // required trailing `Basic.Newline` is absent, Literals.scala:58,83) makes
+        // the `.rep` fail hard. `OneNLMax` is `NoCut` so the caller backtracks, but
+        // the continuation is refused. The lexer stamps this as `bc_before` on the
+        // token `OneNLMax` lands on. oracle: `a +\n/*c*/b` REJECT.
+        if self.i < self.toks.len() && self.toks[self.i].bc_before {
+            self.i = save;
+            return false;
+        }
         true
     }
 
@@ -325,7 +363,7 @@ fn starts_type(t: &Token) -> bool {
 /// discarded. The `=>`-prefix uses raw adjacency (`~~`) in Scala, but since it is
 /// discarded, consume-if-present is faithful.
 fn type_(c: &mut Cursor) -> Result<SType, ParseError> {
-    if c.at_kw(Kw::FatArrow) {
+    if c.at_sym_kw(Kw::FatArrow) {
         c.bump();
     }
     let t = postfix_type(c)?;
@@ -341,7 +379,7 @@ fn type_(c: &mut Cursor) -> Result<SType, ParseError> {
 /// any other lhs becomes a one-arg `SFunc`.
 fn postfix_type(c: &mut Cursor) -> Result<SType, ParseError> {
     let d = infix_type(c)?;
-    if c.at_kw(Kw::FatArrow) {
+    if c.at_sym_kw(Kw::FatArrow) {
         c.bump(); // `=>` ~/  — committed
         let r = type_(c)?;
         let dom = match d {
@@ -446,7 +484,7 @@ fn compound_type(c: &mut Cursor) -> Result<SType, ParseError> {
 /// Annotations are parsed and DISCARDED.
 fn annot_type(c: &mut Cursor) -> Result<SType, ParseError> {
     let t = simple_type(c)?;
-    while c.no_newline_before_next() && c.at_kw(Kw::At) {
+    while c.no_newline_before_next() && c.at_sym_kw(Kw::At) {
         annot(c)?;
     }
     Ok(t)
@@ -489,7 +527,7 @@ fn annot_arg_group(c: &mut Cursor) -> Result<(), ParseError> {
             break;
         }
         // (`:` ~/ `_*`).? — varargs ascription (Core.scala:47: `` `_*` = `_` ~ `*` ``).
-        if c.at_kw(Kw::Colon) {
+        if c.at_sym_kw(Kw::Colon) {
             c.bump(); // `:` ~/ — committed
             if !(c.peek().kind == TokenKind::Ident && c.peek().text(c.src) == "_") {
                 return Err(ParseError::Syntax {
@@ -995,7 +1033,7 @@ fn block_stat(c: &mut Cursor) -> Result<Expr, ParseError> {
 
 /// `Prelude = Annot.rep ~ `lazy`.?` (Exprs.scala:257). Parsed and discarded.
 fn prelude(c: &mut Cursor) -> Result<(), ParseError> {
-    while c.at_kw(Kw::At) {
+    while c.at_sym_kw(Kw::At) {
         annot(c)?;
     }
     if c.at_word("lazy") {
@@ -1073,7 +1111,7 @@ fn try_block_lambda(c: &mut Cursor) -> Result<Option<(Pos, ArgList)>, ParseError
         return Ok(None);
     }
     c.bump(); // ")"
-    if !c.at_kw(Kw::FatArrow) {
+    if !c.at_sym_kw(Kw::FatArrow) {
         c.restore(mark); // a paren group with no `=>` is not a lambda head
         return Ok(None);
     }
@@ -1121,7 +1159,7 @@ fn arg_list(c: &mut Cursor) -> Result<ArgList, ParseError> {
 /// One `Arg`/`FunArg` = `Annot.rep ~ Id.! ~ (`:` ~/ Type).?` (Exprs.scala:245-248,
 /// Types.scala:137-140). Annotations are discarded; an absent type is `NoType`.
 fn fun_arg(c: &mut Cursor) -> Result<(String, SType), ParseError> {
-    while c.at_kw(Kw::At) {
+    while c.at_sym_kw(Kw::At) {
         annot(c)?;
     }
     if !is_id(c.peek()) {
@@ -1132,7 +1170,7 @@ fn fun_arg(c: &mut Cursor) -> Result<(String, SType), ParseError> {
     }
     let name = c.bump();
     let name = name.text(c.src).to_string();
-    let tpe = if c.at_kw(Kw::Colon) {
+    let tpe = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
         type_(c)?
     } else {
@@ -1149,11 +1187,15 @@ fn fun_arg(c: &mut Cursor) -> Result<(String, SType), ParseError> {
 /// `val redemptionInputOk == …` rejects at the second `=`). The token lexer folds
 /// `==` into one `OpId`, so this granularity is restored here.
 fn expect_assign(c: &mut Cursor) -> Result<(), ParseError> {
-    let t = c.peek();
-    if t.kind == TokenKind::Kw(Kw::Assign) {
+    // The reserved `Kw::Assign` OR the comment-adjacent `OpId "="` (`val x =//c 1`,
+    // `def f() =/*c*/ x`): `Key.O("=")` carries a comment exception (Basic.scala:76-77),
+    // so a lone `=` before a `//`/`/*` — lexed as an operator id — still binds here.
+    // oracle: both ACCEPT. (`==`/`=>` below still error one byte past the `=`.)
+    if c.at_sym_kw(Kw::Assign) {
         c.bump(); // `=` ~/ — committed
         return Ok(());
     }
+    let t = c.peek();
     if t.kind == TokenKind::OpId && t.text(c.src).starts_with('=') {
         // `"="` matched the leading `=`; `!OpChar` fails one byte later.
         return Err(ParseError::Syntax {
@@ -1189,7 +1231,7 @@ fn val_def(c: &mut Cursor) -> Result<Expr, ParseError> {
     c.bump(); // `val` ~/ — committed
     let pos = c.peek().start; // Index (at the BindPattern)
     let pat = bind_pattern(c)?;
-    let given_type = if c.at_kw(Kw::Colon) {
+    let given_type = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
         type_(c)?
     } else {
@@ -1344,7 +1386,7 @@ fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
     let name = c.bump();
     let name = name.text(c.src).to_string();
     let arg_lists = fun_sig(c)?;
-    let res_type = if c.at_kw(Kw::Colon) {
+    let res_type = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
         Some(type_(c)?)
     } else {
@@ -1386,17 +1428,37 @@ fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
 /// `FunTypeArgs` (`[ … ]`) is parsed and DISCARDED via the real `TypeArg` grammar;
 /// the returned value is the list of `FunArgs` argument lists (each `OneNLMax ~ "("
 /// ~/ Args.? ~ ")"`).
+///
+/// FunArgs' leading `OneNLMax` is VACUOUS at almost every position: `FunDef = …
+/// Id.! ~ FunSig` (the `~` eats newlines before the first arg list) and
+/// `FunArgs.rep`'s inter-iteration whitespace (which also eats newlines) both sit
+/// in implicit-`ScalaWhitespace` positions, so the newlines are gone before
+/// `OneNLMax` runs. `peek`'s transparent newline-skip reproduces that with no
+/// gate. The ONE exception is the first arg list DIRECTLY after a present
+/// `FunTypeArgs`: `FunTypeArgs.? ~~ FunArgs.rep` (Types.scala:136) joins them with
+/// RAW `~~`, so there `OneNLMax` is live — at most one newline may follow `]`.
+/// oracle: `def f\n\n(x)=x` / `def f(x)\n\n(y)=x` / `def f[T]\n(x)=x` ACCEPT, but
+/// `def f[T]\n\n(x)=x` REJECT.
 fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
-    if c.peek().kind == TokenKind::LBracket {
+    let had_type_args = c.peek().kind == TokenKind::LBracket;
+    if had_type_args {
         fun_type_args(c)?; // FunTypeArgs — parsed and discarded
     }
     let mut lists = Vec::new();
+    let mut first = true;
     loop {
-        let mark = c.save();
-        if !c.one_nl_max() || c.peek().kind != TokenKind::LParen {
-            c.restore(mark);
+        // Live `OneNLMax` only for the first arg list after a present FunTypeArgs
+        // (the `~~` raw junction); everywhere else newlines are already eaten.
+        if had_type_args && first {
+            let mark = c.save();
+            if !c.one_nl_max() || c.peek().kind != TokenKind::LParen {
+                c.restore(mark);
+                break;
+            }
+        } else if c.peek().kind != TokenKind::LParen {
             break; // FunArgs.rep ends
         }
+        first = false;
         c.bump(); // "(" ~/ — committed
         let args = if starts_fun_arg(c.peek()) {
             arg_list(c)?
@@ -1417,7 +1479,7 @@ fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
 fn fun_type_args(c: &mut Cursor) -> Result<(), ParseError> {
     c.expect(&TokenKind::LBracket, "[")?; // "[" ~/ — committed
     loop {
-        while c.at_kw(Kw::At) {
+        while c.at_sym_kw(Kw::At) {
             annot(c)?; // Annot.rep — discarded
         }
         type_arg(c)?; // one TypeArg — discarded
@@ -1459,7 +1521,7 @@ fn type_arg(c: &mut Cursor) -> Result<(), ParseError> {
         type_arg_list(c)?; // TypeArgList.?
     }
     type_bounds(c)?; // TypeBounds
-    while c.at_kw(Kw::Colon) {
+    while c.at_sym_kw(Kw::Colon) {
         c.bump(); // CtxBounds: `:` ~/ — committed
         type_(c)?;
     }
@@ -1496,7 +1558,7 @@ fn type_arg_list(c: &mut Cursor) -> Result<(), ParseError> {
 /// `TypeArgVariant = Annot.rep ~ (`+` | `-`).? ~ TypeArg` (Types.scala:161). Parsed
 /// and DISCARDED.
 fn type_arg_variant(c: &mut Cursor) -> Result<(), ParseError> {
-    while c.at_kw(Kw::At) {
+    while c.at_sym_kw(Kw::At) {
         annot(c)?; // Annot.rep — discarded
     }
     if c.at_op("+") || c.at_op("-") {
@@ -1520,7 +1582,7 @@ fn try_dotty_subj(c: &mut Cursor) -> Result<Option<(String, SType)>, ParseError>
     }
     let id = c.bump();
     let id = id.text(c.src).to_string();
-    if !c.at_kw(Kw::Colon) {
+    if !c.at_sym_kw(Kw::Colon) {
         c.restore(mark);
         return Ok(None);
     }
