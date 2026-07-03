@@ -53,7 +53,21 @@ where
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
-            return Outcome::bug(format!("re-decode of own output failed: {e:?}"), &b1);
+            // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
+            // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
+            // limit (only the 4096-byte proposition cap), so the node deliberately
+            // rejects 101..4096-deep *type descriptors* Scala accepts (QA SER-003,
+            // kept doc-only — see ergo-ser sigma_type.rs MAX_TYPE_DEPTH). A
+            // re-decode that trips ONLY that conservative cap is that documented
+            // divergence firing on a near-boundary re-encoding, not a codec
+            // inconsistency — so it is not a Bug. NOTE: this excludes the *type*
+            // guard only; the value/expression tree-depth guard (Scala MaxTreeDepth
+            // = 110) IS a real consensus limit and still counts as a Bug.
+            let msg = format!("{e:?}");
+            if msg.contains("type recursion depth") {
+                return Outcome::WriteRejected;
+            }
+            return Outcome::bug(format!("re-decode of own output failed: {msg}"), &b1);
         }
     };
 

@@ -123,3 +123,49 @@ jobs:
           fi
           cargo run --release -p ergo-difftest --bin replay -- \
             --from 1 --to 10000 --node "$REPLAY_NODE_URL"
+
+  cargo-fuzz-nightly:
+    name: cargo-fuzz (nightly, libFuzzer + ASan)
+    runs-on: ubuntu-latest
+    # Coverage-guided libFuzzer fuzzing — requires nightly (SanitizerCoverage +
+    # ASan are unstable -Z features; see D1 in interface-contracts.md §6). This
+    # is the deeper, non-gating complement to the stable structured campaign: it
+    # reaches inputs bounded fuzzing misses. A bounded smoke per surface keeps the
+    # nightly runtime sane; crash artifacts are uploaded for triage.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-fuzz-${{ matrix.target }}
+          workspaces: ergo-difftest/fuzz
+
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Bounded smoke: build (ASan) + a short coverage-guided run seeded from the
+      # committed corpus/<surface>. -error_exitcode=1 makes a real crash fail the
+      # job (actionable red); the type-depth guard artifact is already filtered
+      # out of the Bug class (SER-003) so it will not spuriously fail this.
+      - name: fuzz ${{ matrix.target }} (bounded smoke)
+        working-directory: ergo-difftest
+        run: |
+          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=180 -error_exitcode=1
+
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: ergo-difftest/fuzz/artifacts/
+          if-no-files-found: ignore
