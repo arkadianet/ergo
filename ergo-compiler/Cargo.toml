@@ -11,4 +11,5 @@ publish    = false
 thiserror = { workspace = true }
 
 [dev-dependencies]
+ergo-ser   = { workspace = true }
 serde_json = { workspace = true }

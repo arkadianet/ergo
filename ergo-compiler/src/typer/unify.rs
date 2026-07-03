@@ -57,6 +57,40 @@ pub struct SFuncSpec {
     pub tpe_params: Vec<String>,
 }
 
+impl SFuncSpec {
+    /// Returns the argument types excluding the receiver (`dom[0]`).
+    ///
+    /// Mirrors the "tail" of `tDom` in method SFunc descriptors where `tDom[0]`
+    /// is always the receiver type (SType.scala:649, v6.0.2).
+    pub fn dom_tail(&self) -> &[SType] {
+        if self.dom.is_empty() {
+            &[]
+        } else {
+            &self.dom[1..]
+        }
+    }
+
+    /// True iff this method has no arguments beyond the receiver and no type parameters.
+    ///
+    /// Corresponds to zero-arg "property" methods (Scala `PropertyCall` shape:
+    /// `tDom = [receiver]`, no `tpeParams`).
+    pub fn is_nullary(&self) -> bool {
+        self.dom.len() == 1 && self.tpe_params.is_empty()
+    }
+
+    /// Returns a new `SFuncSpec` with `dom[0]` replaced by `recv`.
+    ///
+    /// Used by the typer to stamp the specialized receiver type onto a method
+    /// descriptor after `specialize_for` resolves type variables.
+    pub fn with_receiver_type(&self, recv: SType) -> SFuncSpec {
+        let mut new_spec = self.clone();
+        if !new_spec.dom.is_empty() {
+            new_spec.dom[0] = recv;
+        }
+        new_spec
+    }
+}
+
 /// Errors from the builder-side op layers and numeric conversions.
 ///
 /// These mirror the exception hierarchy from sigma.exceptions
