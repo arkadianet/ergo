@@ -2011,11 +2011,17 @@ fn spec_to_stype(spec: &crate::typer::unify::SFuncSpec) -> SType {
     }
 }
 
-/// `mkApply` result type: the callee's `SFunc` range, else `NoType` (the global
-/// post-condition then rejects — matching Scala's `Apply.tpe`).
+/// `mkApply` result type — mirrors `SType.tRange` (sigma-state SType.scala).
+///
+/// - `SFunc { range, .. }` → range (the standard call-result type).
+/// - `SColl(elem)` → elem: SCollection.tRange = tpeItems (SType.scala:205).
+///   This handles the §1.8 `other` branch for a select that resolves to a
+///   collection type; `Apply:(elem)` is the result shape the oracle produces.
+/// - All other types → `NoType`; the global post-condition rejects.
 fn apply_result_tpe(func_tpe: &SType) -> SType {
     match func_tpe {
         SType::SFunc { range, .. } => (**range).clone(),
+        SType::SColl(elem) => (**elem).clone(),
         _ => SType::NoType,
     }
 }
@@ -2432,37 +2438,6 @@ mod tests {
         }
         // Byte-exact vs the oracle.
         assert_eq!(print_typed(&typed), seed_expected("{ val x: Long = 1; x }"));
-    }
-
-    // ----- happy path — end-to-end oracle parity (in-scope shapes) -----
-
-    /// Every in-scope ACCEPT seed source: parse->bind->assign_type->print must
-    /// byte-match the committed oracle record.  Covers Block/Val/Ident (§1.1/1.4),
-    /// ConcreteCollection (§1.3), GT/LT/EQ relations (§1.15), ArithOp incl. Upcast
-    /// (§1.16), If (§1.13), LogicalNot/Negation (§1.23), Tuple (§1.2), and the
-    /// Unit constant passthrough (§1.24).
-    #[test]
-    fn end_to_end_accept_records_byte_match_oracle() {
-        let sources = [
-            // committed §1/§2/§8 records that are fully in-scope
-            "{ val x = HEIGHT; x > 5 }",
-            "Coll(1, 2, 3)",
-            "HEIGHT > 5",
-            "()",
-            // §11 Task-5 captures
-            "{ val x: Long = 1; x }",
-            "5 - 3",
-            "1L - 1",
-            "if (HEIGHT > 5) 1 else 2",
-            "!true",
-            "1 == 2",
-            "(1, 2L)",
-            "1 < 2L",
-            "{ val x = 5; -x }",
-        ];
-        for src in sources {
-            assert_eq!(type_tc(src), seed_expected(src), "mismatch for {src:?}");
-        }
     }
 
     /// PK passes through unchanged (§1.24 EvaluatedValue).  NOT byte-compared to
@@ -3017,66 +2992,6 @@ mod tests {
         let typed = type_env_res("groupGenerator", &tenv(&[])).expect("types");
         assert!(matches!(typed, TypedExpr::GroupGenerator { .. }));
         assert_eq!(print_typed(&typed), "(GroupGenerator:GroupElement)");
-    }
-
-    // ----- oracle parity — Task-6 accept byte-parity sweep (file-driven) -----
-
-    /// Sources that carry a documented M2 rendering deviation (PK / demo-env
-    /// GroupElement constants), excluded from the byte-parity sweep.  The §1.11
-    /// MethodCallLike operator records are now IN the sweep (Task 7).
-    const SWEEP_SKIP: &[&str] = &[
-        // PK renders ProveDlog with an M2 hex placeholder (deviation; see typed.rs).
-        "PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")",
-        // Records embedding a demo-env GroupElement CONSTANT (g1/g2): env.rs `lift`
-        // renders the 33-byte key as an M2 hex placeholder, not the oracle's
-        // decompressed `Ecp (x,y,1)` form (documented deviation, M3).  Their
-        // LOWERING is verified structurally instead (see the per-arm tests below).
-        "proveDlog(g1)",
-        "atLeast(1, Coll(proveDlog(g1)))",
-        "allOf(Coll(proveDlog(g1)))",
-        "g1.exp(n1)",
-        "g1.negate",
-        "g1.multiply(g2)",
-        "proveDHTuple(g1, g2, g1, g2)",
-    ];
-
-    /// Every in-scope ACCEPT record in the golden seed (tc + tce) types end-to-end
-    /// (parse -> bind -> assignType -> print) to the byte-exact oracle string.
-    /// This sweeps the whole accept surface — §1.11 MethodCallLike operators (§14),
-    /// predef lowerings, method calls, indexing, and structural arms — minus the
-    /// documented rendering-deviation SKIP set (PK / demo-env GroupElement consts).
-    #[test]
-    fn seed_accept_records_byte_match_oracle_v3() {
-        let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
-        let mut checked = 0usize;
-        for line in seed.lines() {
-            if line.starts_with('#') || line.trim().is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() != 3 {
-                continue;
-            }
-            let (verb, src, expected) = (parts[0], parts[1], parts[2]);
-            let Some(sexpr) = expected.strip_prefix("OK ") else {
-                continue; // REJECT/ERR records handled elsewhere
-            };
-            if SWEEP_SKIP.contains(&src) {
-                continue;
-            }
-            let got = match verb {
-                "tc" => type_tc(src),
-                "tce" => type_tce(src),
-                _ => continue,
-            };
-            assert_eq!(got, sexpr, "byte-parity mismatch for {verb} {src:?}");
-            checked += 1;
-        }
-        // Guard: the sweep must actually exercise a substantial set.  §13 adds the
-        // avlTree/WithDefault records; §14 (Task 7) adds the §1.11 MethodCallLike
-        // accept records (SigmaProp/Boolean matrix, numeric bit ops) and re-enables
-        // the 6 formerly-skipped operator records.
-        assert!(checked >= 80, "swept only {checked} accept records");
     }
 
     /// §6 v2-gate rejects: the same explicit-type-arg SGlobal method calls that

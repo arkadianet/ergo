@@ -271,3 +271,15 @@ tc	1.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Int @1) %Int.toBytes [] {})
 tc	1.toLong.toBytes	OK (MethodCall:Coll[Byte] (Select:Long (ConstantNode:Int @1) 'toLong') %Long.toBytes [] {})
 tc	1.toBigInt.toBytes	OK (MethodCall:Coll[Byte] (Select:BigInt (ConstantNode:Int @1) 'toBigInt') %BigInt.toBytes [] {})
 tc	serialize((1, 2L))	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Tuple:(Int,Long) [(ConstantNode:Int @1) (ConstantNode:Long @2)])] {})
+#
+# ── § 16: Task-9 gapcheck-mandated edge vectors ──────────────────────────────
+# All captured ORACLE_TREE_VERSION=3 (v6); fresh-JVM positions confirmed.
+# Empty containers → MethodNotFound (E4: SBoolean/SString have NO methods → None
+#   from getMethod → MethodNotFound, not the "non-product type" branch).
+tc	true.foo	REJECT 1:1 MethodNotFound
+tc	"x".foo	REJECT 1:1 MethodNotFound
+# ByIndex/BigInt upcast-placement probe:
+#   col1(0) produces a ByIndex:Long result; adding n1 (BigInt) triggers numeric
+#   widening.  Oracle confirms: Upcast wraps the ByIndex RESULT (not inside ByIndex).
+#   Shape: (ArithOp:BigInt (Upcast:BigInt (ByIndex:Long ...)) (ConstantNode:BigInt ...) @-102)
+tce	col1(0) + n1	OK (ArithOp:BigInt (Upcast:BigInt (ByIndex:Long (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) None)) (ConstantNode:BigInt (CBigInt @5)) @-102)
