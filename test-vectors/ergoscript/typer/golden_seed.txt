@@ -130,3 +130,29 @@ tc	PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (ConstantNode:S
 #   (deviation: MatchError → InvalidArguments; verdict parity holds).
 tc	PK("notanaddress")	REJECT 0:0 Exception
 tc	PK(1)	REJECT 1:1 TyperException
+#
+# ── § 11: Task-5 structural-arm captures (assignType core I) ─────
+# All captured ORACLE_TREE_VERSION=3 (v6), empty env (tc), deterministic across runs.
+# These pin the structural arms Task 5 implements end-to-end: Block (E1-lenient),
+# ValNode, Ident, If, relations, ArithOp (incl. Upcast), unary, Tuple.
+#
+# E1 (CRITICAL): the Val's explicit `Long` annotation is DISCARDED; x binds to SInt
+# (b1.tpe), the ValNode is :Int, and the result Ident x resolves to Int.
+# accept records (byte-graded end-to-end):
+tc	{ val x: Long = 1; x }	OK (Block:Int [(ValNode:Int 'x' (ConstantNode:Int @1))] (Ident:Int 'x'))
+tc	5 - 3	OK (ArithOp:Int (ConstantNode:Int @5) (ConstantNode:Int @3) @-103)
+tc	1L - 1	OK (ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-103)
+tc	if (HEIGHT > 5) 1 else 2	OK (If:Int (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (ConstantNode:Int @1) (ConstantNode:Int @2))
+tc	!true	OK (LogicalNot:Boolean (ConstantNode:Boolean @true))
+tc	1 == 2	OK (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @2))
+tc	(1, 2L)	OK (Tuple:(Int,Long) [(ConstantNode:Int @1) (ConstantNode:Long @2)])
+tc	1 < 2L	OK (LT:Boolean (Upcast:Long (ConstantNode:Int @1)) (ConstantNode:Long @2))
+tc	{ val x = 5; -x }	OK (Block:Int [(ValNode:Int 'x' (ConstantNode:Int @5))] (Negation:Int (Ident:Int 'x')))
+# reject records (class graded; line:col advisory, from fresh oracle, our pos=0):
+tc	Coll()	REJECT 1:1 TyperException	# empty collection, undefined element type (§1.3)
+tc	if (5) 1 else 2	REJECT 1:5 TyperException	# condition not Boolean (§1.13)
+tc	if (HEIGHT > 5) 1 else 2L	REJECT 1:17 TyperException	# branches differ Int vs Long (§1.13)
+tc	Coll(1, 2L)	REJECT 1:1 TyperException	# msgTypeOf: no numeric widening (§1.3)
+tc	HEIGHT.foo	REJECT 1:5 MethodNotFound	# SInt has no method foo (§1.5)
+tc	1 == true	REJECT 1:1 InvalidBinaryOperationParameters	# equalityOp SameType fail rewrapped (§1.15/§6)
+tc	{ val x = HEIGHT; val x = 5; x }	REJECT 1:23 TyperException	# duplicate val name in block (§1.1)
