@@ -79,3 +79,19 @@ tc	Global.none[Int]()	REJECT 1:1 MethodNotFound
 # Two representative records committed; enabledOperations behaves identically.
 tc	getVar[AvlTree](1).get.digest	OK (MethodCall:Coll[Byte] (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.digest [] {})
 tc	getVar[AvlTree](1).get.keyLength	OK (MethodCall:Int (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.keyLength [] {})
+#
+# ── § 8: Fix-round-1 oracle vectors (Unit constant + String constant) ────────────
+# All records captured ORACLE_TREE_VERSION=3 (v6). These pin the two critical
+# payload fixes: Unit emits @() (was suppressed), String emits 'text'.
+#
+# 2-subst probe summary: no 2-subst MethodCall producer found after 6 probes:
+#   col1.flatMap({(x:Long)=>Coll(x)}) — 0 subst (irBuilder lowers to MapCollection)
+#   Coll(1,2).zip(Coll(true,false))   — 0 subst
+#   Global.some[Coll[Int]](Coll(1))   — 1 subst (#T)
+#   Global.fromBigEndianBytes[Long]…  — 1 subst (#T)
+#   Coll(Coll(1,2),…).flatMap(…)      — 0 subst
+#   Coll(1,2).fold(0L, {…})           — lowers to Fold IR
+# Conclusion: sigma-state 6.0.2 has no method with 2+ type params surviving typecheck.
+# The comma-separator fix (N4) is verified by TyperOracle.scala:172-173 source read.
+tc	()	OK (ConstantNode:Unit @())
+tc	"ab" + "cd"	OK (ConstantNode:String 'abcd')

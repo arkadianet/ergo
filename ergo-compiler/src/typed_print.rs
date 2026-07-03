@@ -11,8 +11,9 @@
 //!        Nullable-wrapped) equals the node's own tpe. E6 extends this to
 //!        unwrap `Option[SType]` before the self-type test (Select.resType).
 //!   N3 — Node fields render recursively: `(ChildName:Type …)`.
-//!   N4 — typeSubst entries are sorted by rendered key, rendered as
-//!        `{#k->#v …}` or `{}`.
+//!   N4 — typeSubst entries are sorted by rendered full-entry string
+//!        (TyperOracle.scala:172 `.sorted`) then joined with "," (not space).
+//!        Renders as `{k1->v1,k2->v2}` or `{}`.
 //!   N5 — String fields render as `'text'`; numeric scalars as `@n`; SType
 //!        fields as `#TypeTermString`; MethodRef as `%Owner.name`; node
 //!        sequences as `[n1 n2 …]`; primitive arrays as `<@v1 @v2 …>`;
@@ -121,24 +122,20 @@ fn render_lambda_args(args: &[(String, SType)]) -> String {
     format!("[{}]", parts.join(" "))
 }
 
-/// Render `MethodCall.type_subst` as `{#k1->#v1 …}` sorted by key (N4).
+/// Render `MethodCall.type_subst` as `{k1->v1,k2->v2}` sorted by full entry
+/// string (N4, TyperOracle.scala:172 `.sorted` + `mkString("{", ",", "}")`).
 /// Empty → `{}`.
 fn render_type_subst(subst: &[(String, SType)]) -> String {
     if subst.is_empty() {
         return "{}".to_string();
     }
-    // Build (rendered_key, rendered_value) pairs.
-    let mut entries: Vec<(String, String)> = subst
+    // Build full entry strings `#K->#V`, then sort them (N4).
+    let mut entries: Vec<String> = subst
         .iter()
-        .map(|(k, v)| (format!("#{}", k), format!("#{}", to_term_string(v))))
+        .map(|(k, v)| format!("#{}->{}", k, render_hash_type(v)))
         .collect();
-    // N4: sort by rendered key (lexicographic on the `#<ident>` string).
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let parts: Vec<String> = entries
-        .iter()
-        .map(|(k, v)| format!("{}->{}", k, v))
-        .collect();
-    format!("{{{}}}", parts.join(" "))
+    entries.sort();
+    format!("{{{}}}", entries.join(","))
 }
 
 /// Render an `Option<Box<TypedExpr>>` field.
@@ -156,7 +153,8 @@ fn render_opt_node(opt: &Option<Box<TypedExpr>>) -> String {
 ///   Bool(b)             → `@true` / `@false`
 ///   numeric primitives  → `@n` (signed decimal)
 ///   BigInt(s)           → `(CBigInt @n)` — the CBigInt wrapper
-///   Unit                → `@()` (Scala productIterator value for unit)
+///   String(s)           → `'s'`
+///   Unit                → `@()` (Scala BoxedUnit in productIterator context)
 ///   ByteColl/LongColl   → `<@v1 @v2 …>` (N5 primitive-seq form)
 ///   GroupElement(s)     → `(CGroupElement (Ecp @s))` — wraps the Ecp string
 ///   SigmaProp(s)        → opaque string (M3 scope for full parity)
@@ -168,7 +166,11 @@ fn render_payload(p: &ConstPayload) -> String {
         ConstPayload::Int(n) => format!("@{}", n),
         ConstPayload::Long(n) => format!("@{}", n),
         ConstPayload::BigInt(s) => format!("(CBigInt @{})", s),
-        // Scala Unit renders as `@()` in productIterator context.
+        // String renders with single quotes per N5 `case s: String => "'" + s + "'"`.
+        // Verified: `"ab"+"cd"` → oracle `(ConstantNode:String 'abcd')`.
+        ConstPayload::String(s) => format!("'{}'", s),
+        // Unit renders as `@()` in productIterator context.
+        // Verified: `()` → oracle `(ConstantNode:Unit @())`.
         ConstPayload::Unit => "@()".to_string(),
         ConstPayload::ByteColl(vs) => {
             let parts: Vec<String> = vs.iter().map(|v| format!("@{}", v)).collect();
@@ -186,14 +188,15 @@ fn render_payload(p: &ConstPayload) -> String {
     }
 }
 
-/// Collect all rendered fields for a node in Scala productIterator order,
-/// applying N2 to skip SType fields that equal the node's own tpe.
-///
-/// Returns `Vec<String>` — the caller joins with " " and wraps in parens.
-#[allow(clippy::too_many_lines)] // this is inherently a large match
+// ── collect_fields split into logical groups ──────────────────────────────────
+//
+// The match is split into five helper functions to keep each function under
+// clippy's too_many_lines threshold (100 lines). `collect_fields` is the
+// dispatcher; helpers below cover non-overlapping variant subsets.
+
+/// Dispatch to the appropriate field-collector for `e`.
 fn collect_fields(e: &TypedExpr) -> Vec<String> {
     use TypedExpr::*;
-
     match e {
         // ── singletons: no fields ────────────────────────────────────────────
         Height { .. }
@@ -206,21 +209,78 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         | LastBlockUtxoRootHash { .. }
         | GroupGenerator { .. } => vec![],
 
+        // ── frontend nodes ────────────────────────────────────────────────────
+        Constant { .. }
+        | Block { .. }
+        | ValNode { .. }
+        | Ident { .. }
+        | Lambda { .. }
+        | Select { .. }
+        | Apply { .. }
+        | Tuple { .. }
+        | ConcreteCollection { .. }
+        | If { .. } => collect_frontend(e),
+
+        // ── arithmetic and boolean ops ────────────────────────────────────────
+        ArithOp { .. }
+        | BitOp { .. }
+        | Upcast { .. }
+        | Downcast { .. }
+        | GT { .. }
+        | GE { .. }
+        | LT { .. }
+        | LE { .. }
+        | EQ { .. }
+        | NEQ { .. }
+        | BinAnd { .. }
+        | BinOr { .. }
+        | BinXor { .. }
+        | LogicalNot { .. }
+        | Negation { .. }
+        | BitInversion { .. } => collect_arith_bool(e),
+
+        // ── collection transformers ───────────────────────────────────────────
+        MapCollection { .. }
+        | Append { .. }
+        | Slice { .. }
+        | Filter { .. }
+        | Exists { .. }
+        | ForAll { .. }
+        | Fold { .. }
+        | ByIndex { .. }
+        | SelectField { .. }
+        | SizeOf { .. } => collect_coll(e),
+
+        // ── sigma + group + option ops ────────────────────────────────────────
+        BoolToSigmaProp { .. }
+        | SigmaPropIsProven { .. }
+        | SigmaPropBytes { .. }
+        | SigmaAnd { .. }
+        | SigmaOr { .. }
+        | AND { .. }
+        | OR { .. }
+        | XorOf { .. }
+        | MultiplyGroup { .. }
+        | Exponentiate { .. }
+        | Xor { .. }
+        | OptionGet { .. }
+        | OptionGetOrElse { .. }
+        | OptionIsDefined { .. } => collect_sigma_group(e),
+
+        // ── context access + predef + MethodCall + pre-typed nodes ────────────
+        _ => collect_ctx_predef(e),
+    }
+}
+
+/// Fields for frontend / structural nodes.
+fn collect_frontend(e: &TypedExpr) -> Vec<String> {
+    use TypedExpr::*;
+    match e {
         // ── Constant ─────────────────────────────────────────────────────────
         // productIterator: [value, tpe].
         // N2: tpe == Constant.tpe → always stripped.
-        // If payload is Unit, Scala productIterator still has a value `()` but
-        // the oracle renders nothing beyond the type header.  For all other
-        // payloads, `render_payload` produces the appropriate @-or-parens form.
-        Constant { value, tpe: _ } => {
-            // Unit constant has no visible value field in the oracle format
-            // (Scala: "ConstantNode:Unit" with nothing after).
-            if matches!(value, ConstPayload::Unit) {
-                vec![]
-            } else {
-                vec![render_payload(value)]
-            }
-        }
+        // All payloads render via render_payload, including Unit → `@()`.
+        Constant { value, .. } => vec![render_payload(value)],
 
         // ── Block ─────────────────────────────────────────────────────────────
         // productIterator: [bindings: Seq[Val], result: SValue].
@@ -231,12 +291,7 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         // ── ValNode ───────────────────────────────────────────────────────────
         // productIterator: [name, givenType, body].
         // N2: givenType (bare SType) == ValNode.tpe (= givenType always) → STRIP.
-        ValNode {
-            name,
-            given_type: _,
-            body,
-            ..
-        } => vec![format!("'{}'", name), print_typed(body)],
+        ValNode { name, body, .. } => vec![format!("'{}'", name), print_typed(body)],
 
         // ── Ident ─────────────────────────────────────────────────────────────
         // productIterator: [name, tpe].
@@ -245,9 +300,6 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
 
         // ── Lambda ────────────────────────────────────────────────────────────
         // productIterator: [tpeParams, args, givenResType, body].
-        // givenResType is a bare SType; Lambda.tpe = SFunc(…) → never equal →
-        // N2 never strips it.
-        // body: Option[SValue] — None → "None", Some(e) → rendered node.
         Lambda {
             tpe_params,
             args,
@@ -264,7 +316,6 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         // ── Select ────────────────────────────────────────────────────────────
         // productIterator: [obj, field: String, resType: Option[SType]].
         // N2 (E6): unwrap Option[SType] → if inner == Select.tpe → STRIP.
-        // In practice all well-typed Select nodes have resType == Some(tpe).
         Select {
             obj,
             field,
@@ -272,7 +323,6 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
             tpe,
         } => {
             let mut fields = vec![print_typed(obj), format!("'{}'", field)];
-            // N2(E6): unwrap Option before self-type test.
             let stripped = match res_type {
                 None => false,
                 Some(t) => t == tpe,
@@ -288,22 +338,18 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         }
 
         // ── Apply ─────────────────────────────────────────────────────────────
-        // productIterator: [func, args: Seq[SValue]].
         Apply { func, args, .. } => vec![print_typed(func), render_seq(args)],
 
         // ── Tuple ─────────────────────────────────────────────────────────────
-        // productIterator: [items: Seq[SValue]].
         Tuple { items, .. } => vec![render_seq(items)],
 
         // ── ConcreteCollection ────────────────────────────────────────────────
-        // productIterator: [items: Seq, elementType: SType].
         // N2: elementType (e.g. SInt) ≠ node.tpe (SColl[SInt]) → never stripped.
         ConcreteCollection {
             items, elem_type, ..
         } => vec![render_seq(items), render_hash_type(elem_type)],
 
         // ── If ────────────────────────────────────────────────────────────────
-        // productIterator: [condition, trueBranch, falseBranch].
         If {
             condition,
             true_branch,
@@ -315,9 +361,16 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
             print_typed(false_branch),
         ],
 
+        _ => unreachable!("collect_frontend called on non-frontend variant"),
+    }
+}
+
+/// Fields for arithmetic, bitwise, and boolean-op nodes.
+fn collect_arith_bool(e: &TypedExpr) -> Vec<String> {
+    use TypedExpr::*;
+    match e {
         // ── ArithOp ───────────────────────────────────────────────────────────
-        // productIterator: [left, right, opCode: Byte].
-        // opCode renders as @n (signed decimal i8).
+        // productIterator: [left, right, opCode: Byte] (signed decimal).
         ArithOp {
             left,
             right,
@@ -330,7 +383,6 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         ],
 
         // ── BitOp ─────────────────────────────────────────────────────────────
-        // productIterator: [left, right, opCode: Byte].
         BitOp {
             left,
             right,
@@ -343,12 +395,10 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         ],
 
         // ── Upcast / Downcast ─────────────────────────────────────────────────
-        // productIterator: [input, tpe: R].
         // N2: tpe == node.tpe → always stripped.
         Upcast { input, .. } | Downcast { input, .. } => vec![print_typed(input)],
 
-        // ── Relations (GT/GE/LT/LE/EQ/NEQ) ──────────────────────────────────
-        // productIterator: [left, right]. No SType fields.
+        // ── Relations ────────────────────────────────────────────────────────
         GT { left, right, .. }
         | GE { left, right, .. }
         | LT { left, right, .. }
@@ -366,7 +416,14 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
             vec![print_typed(input)]
         }
 
-        // ── Collection transformers ───────────────────────────────────────────
+        _ => unreachable!("collect_arith_bool called on non-arith/bool variant"),
+    }
+}
+
+/// Fields for collection-transformer nodes.
+fn collect_coll(e: &TypedExpr) -> Vec<String> {
+    use TypedExpr::*;
+    match e {
         MapCollection { input, mapper, .. } => vec![print_typed(input), print_typed(mapper)],
         Append { input, col2, .. } => vec![print_typed(input), print_typed(col2)],
         Slice {
@@ -401,7 +458,14 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
             input, field_index, ..
         } => vec![print_typed(input), format!("@{}", field_index)],
         SizeOf { input, .. } => vec![print_typed(input)],
+        _ => unreachable!("collect_coll called on non-collection variant"),
+    }
+}
 
+/// Fields for sigma-prop, group-element, and option-op nodes.
+fn collect_sigma_group(e: &TypedExpr) -> Vec<String> {
+    use TypedExpr::*;
+    match e {
         // ── SigmaProp / bool coercions ────────────────────────────────────────
         BoolToSigmaProp { value, .. } => vec![print_typed(value)],
         SigmaPropIsProven { input, .. } => vec![print_typed(input)],
@@ -421,6 +485,14 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         OptionGetOrElse { input, default, .. } => vec![print_typed(input), print_typed(default)],
         OptionIsDefined { input, .. } => vec![print_typed(input)],
 
+        _ => unreachable!("collect_sigma_group called on non-sigma/group variant"),
+    }
+}
+
+/// Fields for context-access, predef, MethodCall, and pre-typed nodes.
+fn collect_ctx_predef(e: &TypedExpr) -> Vec<String> {
+    use TypedExpr::*;
+    match e {
         // ── Context access ────────────────────────────────────────────────────
         // GetVar productIterator: [varId: Byte, tpe: SOption[V]].
         // N2: tpe == GetVar.tpe → always stripped.
@@ -481,8 +553,6 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
         // ── MethodCall ────────────────────────────────────────────────────────
         // productIterator: [obj, method (SMethod), args (IndexedSeq), typeSubst (Map)].
         // The tpe is derived from method.stype.tRange — NOT a productIterator field.
-        // All four positional fields are always rendered (empty args → `[]`,
-        // empty subst → `{}`).
         MethodCall {
             obj,
             method,
@@ -495,6 +565,31 @@ fn collect_fields(e: &TypedExpr) -> Vec<String> {
             render_seq(args),
             render_type_subst(type_subst),
         ],
+
+        // ── Pre-typed / bound-tree nodes ──────────────────────────────────────
+        // These are never in post-typecheck oracle output (see typed.rs for rationale).
+
+        // ApplyTypes productIterator: [input (Value[SFunc]), typeArgs (Seq[SType])].
+        // typeArgs render as `[#T1 #T2 …]` (Seq[SType] → space-sep hash-types).
+        // source-derived shape: TyperOracle.scala:175 `case it: Iterable[_]` applied
+        // to Seq[SType] items each rendered by `case t: SType => "#" + typeTerm(t)`.
+        ApplyTypes {
+            input, type_args, ..
+        } => {
+            let type_fields: Vec<String> = type_args.iter().map(render_hash_type).collect();
+            vec![print_typed(input), format!("[{}]", type_fields.join(" "))]
+        }
+
+        // MethodCallLike productIterator: [obj, name: String, args (IndexedSeq), tpe (N2)].
+        // N2: tpe == node.tpe (NoType for pre-typed) → stripped (per extractSType match).
+        // source-derived shape: TyperOracle.scala renderNode positional fields.
+        MethodCallLike {
+            obj, name, args, ..
+        } => {
+            vec![print_typed(obj), format!("'{}'", name), render_seq(args)]
+        }
+
+        _ => unreachable!("collect_ctx_predef: unexpected variant (should be unreachable)"),
     }
 }
 
@@ -538,6 +633,29 @@ mod tests {
             right: Box::new(right),
             tpe: SType::SBoolean,
         }
+    }
+
+    /// Look up the expected oracle output for `source` in the committed seed file.
+    ///
+    /// The seed file (`test-vectors/ergoscript/typer/golden_seed.txt`) is embedded
+    /// at compile time so tests can't silently drift from the authoritative expected
+    /// values.  Only `OK` lines are indexed; `REJECT` lines are skipped.
+    fn seed_expected(source: &str) -> String {
+        let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+        for line in seed.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 && parts[1] == source {
+                let expected = parts[2];
+                if let Some(rest) = expected.strip_prefix("OK ") {
+                    return rest.to_string();
+                }
+                panic!("seed line for {:?} is not OK: {}", source, expected);
+            }
+        }
+        panic!("no seed line found for source: {:?}", source);
     }
 
     // ----- to_term_string unit tests -----
@@ -610,22 +728,17 @@ mod tests {
 
     // ----- happy path (golden seed fixtures) -----
 
-    /// golden seed line 19:
-    /// `tc sigmaProp(HEIGHT > 100)   OK (BoolToSigmaProp:SigmaProp (GT:Boolean (Height:Int) (ConstantNode:Int @100)))`
+    /// golden seed line 19: `tc sigmaProp(HEIGHT > 100)`
     #[test]
     fn fixture_bool_to_sigma_prop_height_gt_100() {
         let e = TypedExpr::BoolToSigmaProp {
             value: Box::new(int_gt(height(), int_const(100))),
             tpe: SType::SSigmaProp,
         };
-        assert_eq!(
-            print_typed(&e),
-            "(BoolToSigmaProp:SigmaProp (GT:Boolean (Height:Int) (ConstantNode:Int @100)))"
-        );
+        assert_eq!(print_typed(&e), seed_expected("sigmaProp(HEIGHT > 100)"));
     }
 
-    /// golden seed line 20:
-    /// `tc { val x = HEIGHT; x > 5 }   OK (Block:Boolean [(ValNode:Int 'x' (Height:Int))] (GT:Boolean (Ident:Int 'x') (ConstantNode:Int @5)))`
+    /// golden seed line 20: `tc { val x = HEIGHT; x > 5 }`
     #[test]
     fn fixture_block_val_x_height_gt_5() {
         let x_ident = TypedExpr::Ident {
@@ -644,14 +757,10 @@ mod tests {
             result: Box::new(result),
             tpe: SType::SBoolean,
         };
-        assert_eq!(
-            print_typed(&e),
-            "(Block:Boolean [(ValNode:Int 'x' (Height:Int))] (GT:Boolean (Ident:Int 'x') (ConstantNode:Int @5)))"
-        );
+        assert_eq!(print_typed(&e), seed_expected("{ val x = HEIGHT; x > 5 }"));
     }
 
-    /// golden seed line 21:
-    /// `tc INPUTS.map({(b:Box)=>b.value})   OK (MapCollection:Coll[Long] (Inputs:Coll[Box]) (Lambda:(Box) => Long [] [b:#Box] #Long (Select:Long (Ident:Box 'b') 'value')))`
+    /// golden seed line 21: `tc INPUTS.map({(b:Box)=>b.value})`
     #[test]
     fn fixture_inputs_map_b_value() {
         let b_ident = TypedExpr::Ident {
@@ -684,12 +793,11 @@ mod tests {
         };
         assert_eq!(
             print_typed(&e),
-            "(MapCollection:Coll[Long] (Inputs:Coll[Box]) (Lambda:(Box) => Long [] [b:#Box] #Long (Select:Long (Ident:Box 'b') 'value')))"
+            seed_expected("INPUTS.map({(b:Box)=>b.value})")
         );
     }
 
-    /// golden seed line 22 (tce, demo env a,b:Coll[Byte]):
-    /// `tce a ++ b   OK (Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))`
+    /// golden seed line 22: `tce a ++ b`
     #[test]
     fn fixture_append_byte_colls() {
         let a = TypedExpr::Constant {
@@ -705,14 +813,10 @@ mod tests {
             col2: Box::new(b),
             tpe: SType::SColl(Box::new(SType::SByte)),
         };
-        assert_eq!(
-            print_typed(&e),
-            "(Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))"
-        );
+        assert_eq!(print_typed(&e), seed_expected("a ++ b"));
     }
 
-    /// golden seed line 23:
-    /// `tc 1L + 1   OK (ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-102)`
+    /// golden seed line 23: `tc 1L + 1`
     #[test]
     fn fixture_arith_op_long_plus() {
         let upcast = TypedExpr::Upcast {
@@ -725,14 +829,10 @@ mod tests {
             opcode: ARITH_PLUS,
             tpe: SType::SLong,
         };
-        assert_eq!(
-            print_typed(&e),
-            "(ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-102)"
-        );
+        assert_eq!(print_typed(&e), seed_expected("1L + 1"));
     }
 
-    /// golden seed line 26:
-    /// `tc 1.toByte + 2.toByte   OK (ArithOp:Byte (Select:Byte (ConstantNode:Int @1) 'toByte') (Select:Byte (ConstantNode:Int @2) 'toByte') @-102)`
+    /// golden seed line 26: `tc 1.toByte + 2.toByte`
     #[test]
     fn fixture_arith_op_byte_select_tobyte() {
         let sel1 = TypedExpr::Select {
@@ -753,14 +853,10 @@ mod tests {
             opcode: ARITH_PLUS,
             tpe: SType::SByte,
         };
-        assert_eq!(
-            print_typed(&e),
-            "(ArithOp:Byte (Select:Byte (ConstantNode:Int @1) 'toByte') (Select:Byte (ConstantNode:Int @2) 'toByte') @-102)"
-        );
+        assert_eq!(print_typed(&e), seed_expected("1.toByte + 2.toByte"));
     }
 
-    /// golden seed line 27:
-    /// `tc true && (1 == 1)   OK (BinAnd:Boolean (ConstantNode:Boolean @true) (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))`
+    /// golden seed line 27: `tc true && (1 == 1)`
     #[test]
     fn fixture_bin_and_bool_eq() {
         let eq_node = TypedExpr::EQ {
@@ -773,14 +869,10 @@ mod tests {
             right: Box::new(eq_node),
             tpe: SType::SBoolean,
         };
-        assert_eq!(
-            print_typed(&e),
-            "(BinAnd:Boolean (ConstantNode:Boolean @true) (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))"
-        );
+        assert_eq!(print_typed(&e), seed_expected("true && (1 == 1)"));
     }
 
-    /// golden seed line 28:
-    /// `tc HEIGHT>5 && HEIGHT<9   OK (BinAnd:Boolean (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (LT:Boolean (Height:Int) (ConstantNode:Int @9)))`
+    /// golden seed line 28: `tc HEIGHT>5 && HEIGHT<9`
     #[test]
     fn fixture_bin_and_height_range() {
         let gt = int_gt(height(), int_const(5));
@@ -794,14 +886,10 @@ mod tests {
             right: Box::new(lt),
             tpe: SType::SBoolean,
         };
-        assert_eq!(
-            print_typed(&e),
-            "(BinAnd:Boolean (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (LT:Boolean (Height:Int) (ConstantNode:Int @9)))"
-        );
+        assert_eq!(print_typed(&e), seed_expected("HEIGHT>5 && HEIGHT<9"));
     }
 
-    /// golden seed line 29:
-    /// `tc Coll(1, 2, 3)   OK (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int)`
+    /// golden seed line 29: `tc Coll(1, 2, 3)`
     #[test]
     fn fixture_concrete_collection_ints() {
         let e = TypedExpr::ConcreteCollection {
@@ -809,14 +897,10 @@ mod tests {
             elem_type: SType::SInt,
             tpe: SType::SColl(Box::new(SType::SInt)),
         };
-        assert_eq!(
-            print_typed(&e),
-            "(ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int)"
-        );
+        assert_eq!(print_typed(&e), seed_expected("Coll(1, 2, 3)"));
     }
 
-    /// golden seed line 30 (tce, demo env col1:Coll[Long]):
-    /// `tce col1.exists({(x:Long)=>x>1L})   OK (Exists:Boolean (ConstantNode:Coll[Long] <@1 @2>) (Lambda:(Long) => Boolean [] [x:#Long] #Boolean (GT:Boolean (Ident:Long 'x') (ConstantNode:Long @1))))`
+    /// golden seed line 30: `tce col1.exists({(x:Long)=>x>1L})`
     #[test]
     fn fixture_exists_long_gt() {
         let col1 = TypedExpr::Constant {
@@ -849,12 +933,11 @@ mod tests {
         };
         assert_eq!(
             print_typed(&e),
-            "(Exists:Boolean (ConstantNode:Coll[Long] <@1 @2>) (Lambda:(Long) => Boolean [] [x:#Long] #Boolean (GT:Boolean (Ident:Long 'x') (ConstantNode:Long @1))))"
+            seed_expected("col1.exists({(x:Long)=>x>1L})")
         );
     }
 
-    /// golden seed line 46:
-    /// `tc Global.serialize(1)   OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConstantNode:Int @1)] {})`
+    /// golden seed line 46: `tc Global.serialize(1)`
     #[test]
     fn fixture_method_call_global_serialize() {
         let e = TypedExpr::MethodCall {
@@ -869,14 +952,10 @@ mod tests {
             type_subst: vec![],
             tpe: SType::SColl(Box::new(SType::SByte)),
         };
-        assert_eq!(
-            print_typed(&e),
-            "(MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConstantNode:Int @1)] {})"
-        );
+        assert_eq!(print_typed(&e), seed_expected("Global.serialize(1)"));
     }
 
-    /// golden seed line 47 (tce):
-    /// `tce Global.some[Int](1)   OK (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.some [(ConstantNode:Int @1)] {#T->#Int})`
+    /// golden seed line 47: `tce Global.some[Int](1)`
     #[test]
     fn fixture_method_call_global_some_int() {
         let e = TypedExpr::MethodCall {
@@ -891,14 +970,10 @@ mod tests {
             type_subst: vec![("T".to_string(), SType::SInt)],
             tpe: SType::SOption(Box::new(SType::SInt)),
         };
-        assert_eq!(
-            print_typed(&e),
-            "(MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.some [(ConstantNode:Int @1)] {#T->#Int})"
-        );
+        assert_eq!(print_typed(&e), seed_expected("Global.some[Int](1)"));
     }
 
-    /// golden seed line 80:
-    /// `tc getVar[AvlTree](1).get.digest   OK (MethodCall:Coll[Byte] (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.digest [] {})`
+    /// golden seed line 80: `tc getVar[AvlTree](1).get.digest`
     #[test]
     fn fixture_method_call_avl_digest() {
         let get_var = TypedExpr::GetVar {
@@ -921,26 +996,39 @@ mod tests {
         };
         assert_eq!(
             print_typed(&e),
-            "(MethodCall:Coll[Byte] (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.digest [] {})"
+            seed_expected("getVar[AvlTree](1).get.digest")
         );
     }
 
-    /// golden seed line 31:
-    /// `tc HEIGHT > 5   OK (GT:Boolean (Height:Int) (ConstantNode:Int @5))`
+    /// golden seed line 31: `tc HEIGHT > 5`
     #[test]
     fn fixture_height_gt_5() {
         let e = int_gt(height(), int_const(5));
-        assert_eq!(
-            print_typed(&e),
-            "(GT:Boolean (Height:Int) (ConstantNode:Int @5))"
-        );
+        assert_eq!(print_typed(&e), seed_expected("HEIGHT > 5"));
+    }
+
+    /// golden seed line 48: `tc Global.none[Int]()`
+    #[test]
+    fn fixture_method_call_global_none_int() {
+        let e = TypedExpr::MethodCall {
+            obj: Box::new(TypedExpr::Global {
+                tpe: SType::SGlobal,
+            }),
+            method: MethodRef {
+                owner: "SigmaDslBuilder".to_string(),
+                name: "none".to_string(),
+            },
+            args: vec![],
+            type_subst: vec![("T".to_string(), SType::SInt)],
+            tpe: SType::SOption(Box::new(SType::SInt)),
+        };
+        assert_eq!(print_typed(&e), seed_expected("Global.none[Int]()"));
     }
 
     // ----- round-trips -----
 
     #[test]
     fn singleton_singletons_render_without_fields() {
-        // Singletons have no payload fields — just the header.
         assert_eq!(
             print_typed(&TypedExpr::Height { tpe: SType::SInt }),
             "(Height:Int)"
@@ -969,10 +1057,18 @@ mod tests {
         );
     }
 
+    /// N4: multiple typeSubst entries are sorted by full rendered entry string and
+    /// joined with "," (TyperOracle.scala:172-173 `.sorted` + `mkString("{",",","}")`).
+    ///
+    /// source-derived: TyperOracle.scala:172-173 mkString(",") — no 2-subst producer
+    /// found in 6.0.2 typer output after 6 probes (col1.flatMap, Global.some[Coll[Int]],
+    /// Global.fromBigEndianBytes, Coll(1,2).zip(Coll(true,false)),
+    /// Coll(Coll(1,2),Coll(3,4)).flatMap, Coll(1,2).fold). All surviving MethodCall
+    /// nodes have 0 or 1 typeSubst entry in sigma-state 6.0.2.
     #[test]
-    fn type_subst_sorted_lexicographically() {
-        // N4: multiple typeSubst entries are sorted by rendered key.
-        // #T->#Int and #U->#Long → sort order: #T < #U.
+    fn type_subst_comma_separated_sorted_by_full_entry() {
+        // N4: multiple typeSubst entries → comma-separated, sorted by full `#K->#V` string.
+        // #T->#Int < #U->#Long lexicographically (T before U).
         let subst = vec![
             ("U".to_string(), SType::SLong),
             ("T".to_string(), SType::SInt),
@@ -989,9 +1085,9 @@ mod tests {
             type_subst: subst,
             tpe: SType::SUnit,
         };
-        // Should be {#T->#Int #U->#Long} — T before U.
+        // Comma-separated: `{#T->#Int,#U->#Long}`.
         let s = print_typed(&mc);
-        assert!(s.contains("{#T->#Int #U->#Long}"), "got: {}", s);
+        assert!(s.contains("{#T->#Int,#U->#Long}"), "got: {}", s);
     }
 
     // ----- error paths -----
@@ -1022,31 +1118,80 @@ mod tests {
             value: ConstPayload::ByteColl(vec![]),
             tpe: SType::SColl(Box::new(SType::SByte)),
         };
-        // Empty collection → `<>`.
         assert_eq!(print_typed(&e), "(ConstantNode:Coll[Byte] <>)");
     }
 
-    // ----- oracle parity -----
+    // ----- oracle parity — new §8 vectors (Fix round 1) -----
 
-    /// golden seed line 48:
-    /// `tc Global.none[Int]()   OK (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int})`
+    /// golden seed §8: `tc ()` → `(ConstantNode:Unit @())`
+    ///
+    /// Verifies Fix 2: Unit constant emits its `@()` payload (was erroneously
+    /// suppressed).  Pinned against ORACLE_TREE_VERSION=3.
     #[test]
-    fn fixture_method_call_global_none_int() {
-        let e = TypedExpr::MethodCall {
-            obj: Box::new(TypedExpr::Global {
-                tpe: SType::SGlobal,
-            }),
-            method: MethodRef {
-                owner: "SigmaDslBuilder".to_string(),
-                name: "none".to_string(),
-            },
-            args: vec![],
-            type_subst: vec![("T".to_string(), SType::SInt)],
-            tpe: SType::SOption(Box::new(SType::SInt)),
+    fn fixture_unit_constant_emits_at_unit() {
+        let e = TypedExpr::Constant {
+            value: ConstPayload::Unit,
+            tpe: SType::SUnit,
         };
+        assert_eq!(print_typed(&e), seed_expected("()"));
+    }
+
+    /// golden seed §8: `tc "ab" + "cd"` → `(ConstantNode:String 'abcd')`
+    ///
+    /// Verifies Fix 3: ConstPayload::String renders with single quotes.
+    /// The Scala typer const-folds string concatenation → one StringConstant.
+    /// Pinned against ORACLE_TREE_VERSION=3.
+    #[test]
+    fn fixture_string_constant_renders_single_quotes() {
+        let e = TypedExpr::Constant {
+            value: ConstPayload::String("abcd".to_string()),
+            tpe: SType::SString,
+        };
+        assert_eq!(print_typed(&e), seed_expected("\"ab\" + \"cd\""));
+    }
+
+    // ----- E11 bound-tree variant rendering (source-derived; no oracle vectors) -----
+
+    /// ApplyTypes renders as `(ApplyTypes:<tpe> <input> [#T1 #T2 …])`.
+    ///
+    /// Source-derived shape: TyperOracle.scala positional rendering — input rendered
+    /// as a node, typeArgs as `[#T1 #T2 …]` (Iterable[SType] → each `#typeTerm`).
+    /// Doc note: oracle never prints ApplyTypes because `typecheck` eliminates it.
+    #[test]
+    fn apply_types_renders_positionally() {
+        let e = TypedExpr::ApplyTypes {
+            input: Box::new(TypedExpr::Ident {
+                name: "f".to_string(),
+                tpe: SType::SFunc {
+                    dom: vec![],
+                    range: Box::new(SType::SLong),
+                },
+            }),
+            type_args: vec![SType::SLong, SType::SInt],
+            tpe: SType::SLong,
+        };
+        let s = print_typed(&e);
+        assert_eq!(s, "(ApplyTypes:Long (Ident:() => Long 'f') [#Long #Int])");
+    }
+
+    /// MethodCallLike renders as `(MethodCallLike:<tpe> <obj> '<name>' [args…])`.
+    ///
+    /// Source-derived shape: TyperOracle.scala positional rendering — obj, name
+    /// (String → single-quoted), args (sequence). tpe (NoType for pre-typed) is
+    /// stripped by N2 (== node.tpe).
+    /// Doc note: oracle never prints MethodCallLike because `typecheck` eliminates it.
+    #[test]
+    fn method_call_like_renders_positionally() {
+        let e = TypedExpr::MethodCallLike {
+            obj: Box::new(height()),
+            name: "foo".to_string(),
+            args: vec![int_const(1)],
+            tpe: SType::NoType,
+        };
+        let s = print_typed(&e);
         assert_eq!(
-            print_typed(&e),
-            "(MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int})"
+            s,
+            "(MethodCallLike:NoType (Height:Int) 'foo' [(ConstantNode:Int @1)])"
         );
     }
 }

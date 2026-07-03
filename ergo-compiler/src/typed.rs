@@ -81,7 +81,12 @@ pub enum ConstPayload {
     Long(i64),
     /// `(CBigInt @n)` — BigIntConstant (values.scala:476); n is decimal.
     BigInt(String),
-    /// No value rendered — UnitConstant (values.scala:497).
+    /// `'text'` — StringConstant. Renders with single quotes per N5.
+    /// Verified: `"ab"+"cd"` → oracle `(ConstantNode:String 'abcd')`.
+    String(String),
+    /// `@()` — UnitConstant (values.scala:497). Renders as `@()` (Scala
+    /// BoxedUnit toString in productIterator). Verified: `()` → oracle
+    /// `(ConstantNode:Unit @())`.
     Unit,
     /// `<@v1 @v2 …>` — ByteArrayConstant elements (values.scala:507).
     ByteColl(Vec<i8>),
@@ -520,6 +525,35 @@ pub enum TypedExpr {
         type_subst: Vec<(String, SType)>,
         tpe: SType,
     },
+
+    // ── pre-typed / bound tree nodes (never appear in post-typecheck oracle output) ─
+    //
+    // These two variants exist in the BOUND tree that the typer receives, but the typer
+    // eliminates them before returning.  `TyperOracle.scala` runs `typecheck`, so its
+    // output never contains `ApplyTypes` or `MethodCallLike`.  The printer renders them
+    // via the normal positional scheme for debuggability, but there are no oracle vectors
+    // for these nodes.
+    /// `ApplyTypes(input, typeArgs)` — values.scala:1257.
+    /// productIterator: [input (Value[SFunc]), typeArgs (Seq[SType])].
+    /// Present only in bound/pre-typed trees; the typer substitutes type args and
+    /// replaces with the typed input.  The oracle never prints this post-typecheck.
+    ApplyTypes {
+        input: Box<TypedExpr>,
+        type_args: Vec<SType>,
+        tpe: SType,
+    },
+
+    /// `MethodCallLike(obj, name, args)` — values.scala:1282.
+    /// Abstract class in Scala; concrete instances are pre-typed method invocations
+    /// with unresolved method names.  The typer resolves the name and replaces with
+    /// `Apply`, `MethodCall`, or an IR node.  The oracle never prints this post-typecheck.
+    /// tpe is `NoType` in pre-typed trees (values.scala:1282 default).
+    MethodCallLike {
+        obj: Box<TypedExpr>,
+        name: String,
+        args: Vec<TypedExpr>,
+        tpe: SType,
+    },
 }
 
 /// Return the node's assigned type.
@@ -601,7 +635,9 @@ pub fn node_tpe(e: &TypedExpr) -> &SType {
         | TypedExpr::CreateAvlTree { tpe, .. }
         | TypedExpr::TreeLookup { tpe, .. }
         | TypedExpr::ZKProofBlock { tpe, .. }
-        | TypedExpr::MethodCall { tpe, .. } => tpe,
+        | TypedExpr::MethodCall { tpe, .. }
+        | TypedExpr::ApplyTypes { tpe, .. }
+        | TypedExpr::MethodCallLike { tpe, .. } => tpe,
     }
 }
 
@@ -686,6 +722,8 @@ pub fn product_prefix(e: &TypedExpr) -> &'static str {
         TypedExpr::ZKProofBlock { .. } => "ZKProofBlock",
         // MethodCall and PropertyCall share the same Scala class (values.scala:1329-1330).
         TypedExpr::MethodCall { .. } => "MethodCall",
+        TypedExpr::ApplyTypes { .. } => "ApplyTypes",
+        TypedExpr::MethodCallLike { .. } => "MethodCallLike",
     }
 }
 
@@ -889,6 +927,7 @@ mod tests {
         let _ = ConstPayload::Int(42);
         let _ = ConstPayload::Long(1_000_000);
         let _ = ConstPayload::BigInt("5".into());
+        let _ = ConstPayload::String("hello".into());
         let _ = ConstPayload::Unit;
         let _ = ConstPayload::ByteColl(vec![1, 2]);
         let _ = ConstPayload::LongColl(vec![1, 2]);
