@@ -172,13 +172,72 @@
 //!   `lone_cr_in_gap_is_lexical_error_at_the_cr` and
 //!   `crlf_is_still_one_newline_and_cr_in_comment_or_string_is_content`.
 
+//! # M2: Binder + Typer
+//!
+//! The M2 pipeline:
+//! - **parse** (`parse.rs`, `token.rs`) → untyped `Expr` AST (same oracle bar as M1)
+//! - **bind** (`binder.rs`) → converts `Expr` → `TypedExpr` with `NoType` placeholders,
+//!   substitutes env constants, desugars predefined functions (Rules 1–11 from
+//!   `SigmaBinder.scala`), runs a single bottom-up pass (fixpoint-equivalent for
+//!   these rules — documented in `binder.rs`)
+//! - **typecheck** (`typer/`) → assigns concrete `SType` to every node via
+//!   `assign_type` dispatch (port of `SigmaTyper.assignType`, 6.0.2)
+//!
+//! Entry point: [`typecheck`] / [`typecheck_with_network`] (public API, E9).
+//!
+//! ## Oracle stack
+//!
+//! The typer is graded by a live JVM oracle pinned to sigma-state 6.0.2:
+//! - **Parser oracle** (`scripts/jvm_parser_oracle/`) — M1 accept/reject parity
+//! - **Typer oracle** (`scripts/jvm_typer_oracle/TyperOracle.scala`) — typed s-expression
+//!   from `SigmaCompiler.typecheck` with `lowerMethodCalls=true`,
+//!   `TransformingSigmaBuilder`
+//! - **tc1.sh** — fresh-JVM mode for position grading (avoids singleton contamination;
+//!   see R1 in `dev-docs/m2-recon/m2-oracle.md`)
+//! - **Golden seed** (`test-vectors/ergoscript/typer/golden_seed.txt`) — 33 committed
+//!   records; swept by `typer_oracle_parity::seed_golden_sweep`
+//! - **Corpus verdicts** (`test-vectors/ergoscript/typer/corpus_verdicts.json`) — 79-contract
+//!   JVM verdicts; swept by `typer_oracle_parity::corpus_typed_verdict_parity`
+//!
+//! ## Binding decisions (E-digest)
+//!
+//! - **E1 (lenient Block rule):** The `Val`'s explicit type annotation is DISCARDED in
+//!   v6.0.2 (`SigmaTyper.scala:53-66` at the v6.0.2 tag). `{ val x: Long = 1; x }`
+//!   accepts with `x: SInt`. The `isAssignableTo`/`getResultType` strict-check is a
+//!   post-6.0.2 commit and is NOT implemented here; oracle-confirmed (golden seed §11).
+//! - **E5 (oracle grading):** `ACCEPT` records grade s-expression byte equality; `REJECT`
+//!   records grade verdict + exception CLASS (advisory). Reject `line:col` is graded only
+//!   in fresh-JVM mode (`tc1.sh`) — batch mode contaminates singleton positions (R1).
+//! - **E12 (positions):** `TypedExpr` carries no source positions. Every [`TyperError`]
+//!   has `pos ≡ 0`. `Parse`/`Bind` errors DO carry positions — the typer is the sole
+//!   documented phase-level position gap (see D-T7 below). The 50 `typefail(env, x,
+//!   line, col)` assertions from `SigmaTyperTest.scala` port as class+verdict-only; each
+//!   original `(line, col)` is preserved in a comment in
+//!   `tests/sigma_typer_spec.rs` for a future position pass.
+//!
+//! ## M3 handoff notes
+//!
+//! - **SWEEP_SKIP = M3 rendering worklist.** Sources listed in `SWEEP_SKIP` in
+//!   `tests/typer_oracle_parity.rs` accept typecheck but their `print_typed` output
+//!   deviates from the oracle due to M2 printer limitations (D-T4/D-T6). Fix at M3:
+//!   replace M2 hex placeholders with the decompressed `Ecp (x,y,1)` form in
+//!   `typed.rs` + `typed_print.rs`.
+//! - **`deserialize` deferred (D-T2):** `predef_ir_builder` returns `None` for
+//!   `deserialize` unconditionally. Scala constant-folds `deserialize(lit)` at typecheck
+//!   time; M3 completes with `ValueSerializer` integration.
+//! - **Network-per-contract (M3 byte vectors):** The JVM oracle defaults to
+//!   `ORACLE_NETWORK=testnet`. When adding golden-seed records for `PK(...)`, run the
+//!   oracle with the matching network env var and record the network in the seed comment.
+//!   M3 byte-vector work must account for the network prefix embedded in P2PK addresses.
+//!
 //! # Known M2 deviations (typer layer)
 //!
-//! These are bounded gaps between the M2 ErgoScript typer and the Scala reference
-//! (`SigmaTyper.scala`, sigma-state 6.0.2) captured from oracle probes. M3 closes
-//! them. All entries here are oracle-grounded.
+//! These are bounded gaps between the M2 ErgoScript typer/binder and the Scala reference
+//! (`SigmaTyper.scala` / `SigmaBinder.scala`, sigma-state 6.0.2) captured from oracle
+//! probes and code review. M3 closes them unless noted as inert. All entries here are
+//! oracle-grounded or explicitly bounded.
 //!
-//! ## Consolidated ledger (Fix round 1)
+//! ## Consolidated ledger
 //!
 //! ### D-T1 — id-narrowing class-tag (ArithmeticException vs TyperError)
 //!
@@ -237,6 +296,67 @@
 //! `env::lift` stores a `GroupElement` as a raw hex string payload rather than
 //! the decompressed `(x,y,z)` affine form the oracle emits. This is the root
 //! cause of D-T4. M3 aligns the storage format.
+//!
+//! ### D-T7 — Typer error positions always 0 (E12)
+//!
+//! `TypedExpr` carries no source positions: every [`TyperError`] has `pos ≡ 0`.
+//! `Parse`/`Bind` errors DO carry real positions (from `span::line_col`).  The
+//! typer is therefore the sole documented phase-level position gap — the typer
+//! cannot cite a source location because no location was threaded through
+//! `TypedExpr` nodes.  Oracle reject positions for typer failures are advisory
+//! only (E5); the 50 `typefail(env, x, line, col)` assertions from
+//! `SigmaTyperTest.scala` are ported as class+verdict-only in
+//! `tests/sigma_typer_spec.rs`, with the original `(line, col)` preserved in
+//! comments for a future M3 position pass.
+//! Source: `typer/assign.rs` module doc; `typecheck.rs` `CompileError` doc.
+//!
+//! ### D-T8 — BindError class-tag for irBuilder arg-shape mismatch
+//!
+//! The `PK` and `serialize` irBuilders are applied via Scala's unconditional
+//! `PartialFunction` (`SigmaBinder.scala:105-109`); a non-matching arg shape
+//! (wrong arity, or a non-`String`-constant `PK` argument after children-first
+//! binding) causes a `scala.MatchError` crash, caught at the caller as a general
+//! `BinderException`.  We return a typed `BindError::InvalidArguments`.  The
+//! REJECT verdict matches; the error class is more specific (`InvalidArguments`
+//! vs the oracle's `TyperException` or bare `Exception`).
+//! The `PK(1)` golden-seed §10 reject has class deviation `TyperException` (oracle)
+//! vs `InvalidArguments` (Rust); listed in `CLASS_DEVIATION_SOURCES` in
+//! `tests/typer_oracle_parity.rs`.
+//! Source: `binder.rs:571-616`; golden seed §10.
+//!
+//! ### D-T9 — `specialize_for` returns `None` on unification failure
+//!
+//! Scala's `SMethod.specializeFor` (`methods.scala:193-199`) returns `this` (the
+//! unspecialized descriptor) when unification fails, silently accepting a
+//! type mismatch.  Our `specialize_for` returns `None`, letting the caller surface
+//! a `TypeMismatch` error.  The stricter behaviour is correct for a type-checker
+//! frontend; the Scala leniency exists to preserve IR round-trips through the
+//! evaluator.  No oracle vector or corpus contract exercises this path (the
+//! binder ensures well-typed method-call shapes before the typer runs).
+//! Source: `typer/methods.rs:773-778`.
+//!
+//! ### D-T10 — `container_exists` version-independence
+//!
+//! Scala's `MethodsContainer.contains` (`methods.scala:171-181`) is version-gated
+//! (types that gain method containers in V6 are absent at lower versions).  Our
+//! `container_exists` is version-independent — it returns `true` for all
+//! container types regardless of `tree_version`.  The deviation is inert in
+//! practice: the types that gain containers in V6 (`SUnsignedBigInt`, `SHeader`
+//! V6 additions) are unconstructable in pre-V6 trees, so the typer never reaches
+//! a method-lookup for them at `tree_version < 3`.
+//! Source: `typer/methods.rs:744-748`.
+//!
+//! ### D-T11 — ByIndex default-value comparison: typeCode vs structural equality
+//!
+//! Scala's `SigmaTyper.scala:497-498` checks that the ByIndex default value type
+//! matches the collection element type using `typeCode` equality (which ignores
+//! type parameters — `Coll[Int]` and `Coll[Boolean]` share the same `typeCode`).
+//! We compare structural `SType` equality, which is stricter.  The deviation is
+//! unreachable in practice: `ByIndex` is not produced by the M2 binder or any
+//! `assign_type` arm — it appears only as a pre-typed passthrough node, and
+//! neither the binder nor the oracle exercises a default value whose type differs
+//! by type-argument but shares a typeCode.
+//! Source: `typer/assign.rs:855-858`.
 
 pub mod ast;
 pub mod binder;

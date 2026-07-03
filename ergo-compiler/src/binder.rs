@@ -72,8 +72,9 @@ pub enum BindError {
     /// non-String-constant PK arg): the Scala strategy applies the irBuilder
     /// PartialFunction UNCONDITIONALLY (SigmaBinder.scala:105-109), so a
     /// non-matching shape is a `scala.MatchError` crash → REJECT. Verdict
-    /// parity holds; the class tag differs (deviation: Scala has no dedicated
-    /// class for this crash), positioned at the Apply.
+    /// parity holds; the class tag differs (deviation D-T8: Scala has no dedicated
+    /// class for this crash; we use `InvalidArguments`; see lib.rs § "Known M2
+    /// deviations" D-T8), positioned at the Apply.
     #[error("{msg} (offset {pos})")]
     InvalidArguments { pos: Pos, msg: String },
     /// `PK("addr")` address decode failure (SigmaPredef.scala:159-166):
@@ -568,7 +569,7 @@ fn bind_apply(
 ///
 /// A non-matching arg shape (wrong arity, or a non-String-constant arg after
 /// children-first binding) is a `scala.MatchError` crash in the reference —
-/// mapped to `InvalidArguments` here (verdict parity; class tag deviation).
+/// mapped to `InvalidArguments` here (verdict parity; class tag deviation D-T8).
 fn bind_pk(args: Vec<TypedExpr>, pos: Pos, network: NetworkPrefix) -> Result<TypedExpr, BindError> {
     match args.as_slice() {
         [TypedExpr::Constant {
@@ -613,7 +614,7 @@ fn bind_pk(args: Vec<TypedExpr>, pos: Pos, network: NetworkPrefix) -> Result<Typ
 /// (M3 lowering recomputes it). tpe = the method range, `Coll[Byte]`.
 ///
 /// Non-single arity is a `scala.MatchError` crash in the reference — mapped
-/// to `InvalidArguments` (verdict parity; class tag deviation).
+/// to `InvalidArguments` (verdict parity; class tag deviation D-T8).
 fn bind_serialize(args: Vec<TypedExpr>, pos: Pos) -> Result<TypedExpr, BindError> {
     if args.len() != 1 {
         return Err(BindError::InvalidArguments {

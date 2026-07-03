@@ -305,4 +305,6 @@ tc	fromBase64("RWT_REPO_NFT")	REJECT 0:0 IllegalArgumentException
 #   fromBase58("") → Oracle: OK (ConstantNode:Coll[Byte] <>)  [Scorex empty = BigInt(0) = emptyByteArray]
 #   fromBase64("") → Oracle: OK (ConstantNode:Coll[Byte] <>)  [Java decoder: empty input = empty output]
 #   fromBase64("YWJj") → Oracle: OK (ConstantNode:Coll[Byte] <@97 @98 @99>)  [= "abc"]
-# These are SWEEP_SKIP — verdict ACCEPT, s-expr shape deferred (Apply survives in M2).
+# Shape deferred to M3 — not committed as test records (Apply survives unlowered in M2;
+# M3 decodes to ByteArrayConstant once ValueSerializer is wired in).
+# These are NOT in SWEEP_SKIP: they are simply absent from the seed (not yet captured).

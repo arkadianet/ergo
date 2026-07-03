@@ -33,12 +33,13 @@
 //! post-6.0.2 commit) and is **NOT** implemented here.  `{ val x: Long = 1; x }`
 //! ACCEPTS with `x: SInt` (oracle-confirmed, golden_seed §11).
 //!
-//! # Positions (deviation)
+//! # Positions (deviation D-T7)
 //!
 //! `TypedExpr` carries no source positions (binder.rs; positions surface only in
-//! `BindError`).  Every `TyperError` therefore reports `pos = 0`.  This is
+//! `BindError`).  Every `TyperError` therefore reports `pos = 0` (E12).  This is
 //! consistent with the parity policy: reject **class** is graded, reject
 //! `line:col` is advisory and captured from the JVM oracle (E5, golden_seed §3).
+//! Ledger: `lib.rs` § "Known M2 deviations" D-T7.
 
 use crate::span::Pos;
 use crate::stype::SType;
@@ -852,10 +853,11 @@ fn assign_byindex(
         }
     };
     // default value type must match the element type (SigmaTyper.scala:497-498).
-    // deviation: Scala compares typeCode (which ignores type args); we compare
+    // deviation (D-T11): Scala compares typeCode (which ignores type args); we compare
     // structural equality.  ByIndex is not produced by the binder or any in-scope
     // arm — the index/default carry pre-typed children and are passed through
     // un-retyped, exactly as Scala does (SigmaTyper.scala:499).
+    // Ledger: lib.rs § "Known M2 deviations" D-T11.
     if let Some(v) = &default {
         if *node_tpe(v) != elem {
             return Err(TyperError::typer(format!(
