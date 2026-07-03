@@ -11,8 +11,19 @@ publish    = false
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
 ergo-sigma      = { workspace = true }
+ergo-state      = { workspace = true }
+ergo-validation = { workspace = true }
+ergo-rest-json  = { workspace = true }
 num-bigint      = { workspace = true }
+serde           = { workspace = true, features = ["derive"] }
+serde_json      = { workspace = true }
+hex             = { workspace = true }
+tempfile        = { workspace = true }
 
 [[bin]]
 name = "difftest"
 path = "src/bin/difftest.rs"
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"

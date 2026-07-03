@@ -667,9 +667,16 @@ name = "ergo-difftest"
 version = "0.5.0"
 dependencies = [
  "ergo-primitives",
+ "ergo-rest-json",
  "ergo-ser",
  "ergo-sigma",
+ "ergo-state",
+ "ergo-validation",
+ "hex",
  "num-bigint",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
