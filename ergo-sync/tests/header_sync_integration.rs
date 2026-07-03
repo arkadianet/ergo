@@ -1167,7 +1167,7 @@ fn process_header_at_eip37_boundary_with_truncated_lookback_buffers_not_penalize
     let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
     init_genesis(&mut store);
 
-    let headers = load_headers_file("headers_1761000_1762000.json");
+    let headers = load_headers_file("headers_1761792_1761795_eip37_curated.json");
 
     // Seed ONLY the parent at 1_761_792. None of the 8 older epoch
     // ancestors at 1_761_664, 1_761_536, ..., 1_760_768 are present —

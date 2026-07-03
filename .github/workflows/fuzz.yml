@@ -12,8 +12,13 @@ name: Fuzz (nightly scheduled)
 # generators rather than by libFuzzer instrumentation. See D1 in
 # ergo-difftest/docs/interface-contracts.md §6 for the design rationale.
 #
-# JVM oracle differential and replay driver are also NOT here — they require
-# scala-cli + a live Scala node and stay manual/local.
+# The JVM oracle differential requires scala-cli + a published local ergo-core
+# and stays manual/local. The streamed replay driver IS wired below (the `replay`
+# job) but is gated on a `REPLAY_NODE_URL` secret pointing at a reachable archival
+# Scala node — it no-ops when unset (GitHub-hosted runners have no node), so it
+# runs on a self-hosted runner or an operator `workflow_dispatch`. This is where
+# the deep contiguous state-root coverage retired from committed fixtures now
+# lives (see test-vectors/mainnet/FIXTURES.md).
 
 on:
   schedule:
@@ -84,3 +89,37 @@ jobs:
           cargo run --release -p ergo-difftest -- \
             --surface sigma_expr --iters 500000 \
             --corpus ergo-difftest/fuzz/corpus/sigma_expr
+
+  replay:
+    name: streamed archival replay (deep contiguous state-root)
+    runs-on: ubuntu-latest
+    # Reproduces the deep contiguous coverage retired from committed fixtures.
+    # Requires a reachable archival Scala node via the REPLAY_NODE_URL secret;
+    # no-ops when unset (GitHub-hosted runners have no node — use a self-hosted
+    # runner or a workflow_dispatch from an operator with node access).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-driver
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest --bin replay
+
+      # Pass the node URL via env (a secret) — never interpolated into the shell.
+      # Skip cleanly when unset so the job is green on hosted runners without a node.
+      - name: streamed replay 1..10000 (verifies pins by hash, diffs state roots)
+        env:
+          REPLAY_NODE_URL: ${{ secrets.REPLAY_NODE_URL }}
+        run: |
+          if [ -z "$REPLAY_NODE_URL" ]; then
+            echo "REPLAY_NODE_URL unset — skipping streamed replay (needs a live archival node)."
+            exit 0
+          fi
+          cargo run --release -p ergo-difftest --bin replay -- \
+            --from 1 --to 10000 --node "$REPLAY_NODE_URL"

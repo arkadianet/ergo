@@ -231,11 +231,16 @@ impl UtxoView for UtxoAllHistory {
 // ---- The self-consistency harness ----
 
 #[test]
-#[ignore = "slow; run with --ignored"]
+#[ignore = "slow; needs re-extractable modern corpus (retired from git — see test-vectors/mainnet/FIXTURES.md); run with --ignored after extracting via test-vectors/scripts or the replay driver"]
 fn mempool_admits_mainnet_corpus_1761k() {
-    let tx_data =
-        std::fs::read_to_string("../test-vectors/mainnet/transactions_1761000_1762000.json")
-            .expect("transactions_1761000_1762000.json not found");
+    // The 1761k modern bulk range is retired from git (deep coverage moved to
+    // `ergo-difftest --bin replay`). Skip cleanly if it hasn't been re-extracted.
+    let tx_path = "../test-vectors/mainnet/transactions_1761000_1762000.json";
+    if !std::path::Path::new(tx_path).exists() {
+        eprintln!("skip: {tx_path} retired from git; re-extract to run this diagnostic");
+        return;
+    }
+    let tx_data = std::fs::read_to_string(tx_path).expect("transactions_1761000_1762000.json");
     let vectors: Vec<TxVector> = serde_json::from_str(&tx_data).unwrap();
 
     let header_info = load_header_info("../test-vectors/mainnet/headers_1761000_1762000.json");
