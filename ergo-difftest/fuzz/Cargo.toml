@@ -26,37 +26,37 @@ ergo-difftest = { path = ".." }
 # logic is in that stable function; the targets are 3-line nightly shims.
 
 [[bin]]
-name = "fuzz_ergo_tree"
+name = "ergo_tree"
 path = "fuzz_targets/ergo_tree.rs"
 test = false
 doc  = false
 
 [[bin]]
-name = "fuzz_constant"
+name = "constant"
 path = "fuzz_targets/constant.rs"
 test = false
 doc  = false
 
 [[bin]]
-name = "fuzz_ergo_box_candidate"
+name = "ergo_box_candidate"
 path = "fuzz_targets/ergo_box_candidate.rs"
 test = false
 doc  = false
 
 [[bin]]
-name = "fuzz_transaction"
+name = "transaction"
 path = "fuzz_targets/transaction.rs"
 test = false
 doc  = false
 
 [[bin]]
-name = "fuzz_header"
+name = "header"
 path = "fuzz_targets/header.rs"
 test = false
 doc  = false
 
 [[bin]]
-name = "fuzz_sigma_expr"
+name = "sigma_expr"
 path = "fuzz_targets/sigma_expr.rs"
 test = false
 doc  = false

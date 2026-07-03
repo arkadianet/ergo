@@ -12,8 +12,8 @@ rustup toolchain install nightly
 cargo install cargo-fuzz
 
 # Run a surface with the committed seed corpus
-cargo +nightly fuzz run fuzz_ergo_tree -- -seed_inputs=corpus/ergo_tree
-cargo +nightly fuzz run fuzz_constant  -- -seed_inputs=corpus/constant
+cargo +nightly fuzz run ergo_tree
+cargo +nightly fuzz run constant
 
 # All surface names
 cargo +nightly fuzz list
@@ -63,7 +63,7 @@ help libFuzzer find interesting coverage quickly.
 
 ```bash
 # Seed from a larger set of real vectors (mutation basis, not committed)
-cargo +nightly fuzz run fuzz_ergo_tree -- \
+cargo +nightly fuzz run ergo_tree -- \
   -seed_inputs=corpus/ergo_tree            \
   -corpus=corpus/ergo_tree                 \
   -jobs=4
