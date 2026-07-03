@@ -2821,3 +2821,81 @@ fn r6_stray_brace_block_absurdity_is_deliberately_rejected() {
     reject("{ } a }"); // oracle: ACCEPT (sic) — deliberate M1 deviation, see lib.rs ledger
     reject("{}/}"); // oracle: ACCEPT (sic) — deliberate M1 deviation, see lib.rs ledger
 }
+
+// ----- oracle parity: round 7 (F1) — Unicode arrow `⇒` is an op-id, not a keyword -----
+
+#[test]
+fn r7_unicode_arrow_is_an_operator_identifier_not_a_keyword() {
+    // `⇒` (U+21D2) is not in SymbolicKeywords (Identifiers.scala:55-57), so it lexes
+    // as an ordinary op-id; only the `=>` KEYWORD matcher (Core.scala:23) also accepts
+    // it. Wherever an `Id` can match first — the expression infix layer — `⇒` is grabbed
+    // as an unknown binary operator. oracle: sigma-state 6.0.2.
+    //
+    // Top-level `(tuple) ⇒ body`: the infix layer grabs `⇒` before the `Fun` arrow →
+    // `mkBinaryOp("⇒", (x,y), 1)` → "Unknown binary operation", pinned to the lhs.
+    fail_at("(x,y) ⇒ 1", 1, 1); // vs ASCII `(x,y) => 1` which is a lambda (accepts)
+    accept("(x,y) => 1");
+    // A bare-identifier lhs is "Invalid declaration of lambda" for BOTH forms.
+    fail_at("x ⇒ 1", 1, 1);
+    fail_at("x => 1", 1, 1);
+    // Inside a val body the same infix grab fires, pinned to the tuple `(x,y)` (col 11).
+    fail_at("{ val f = (x,y) ⇒ x; 1 }", 1, 11);
+    // A `def` body expecting `=` sees the op-id `⇒` (not `=>`), so the error is at the
+    // arrow start (col 15), one column left of the ASCII `=>` form (col 16).
+    fail_at("def f(x: Int) ⇒ 1", 1, 15);
+    fail_at("def f(x: Int) => 1", 1, 16);
+    // In KEYWORD position (a block-lambda head) `⇒` IS accepted as the arrow, exactly
+    // like `=>` — via `Cursor::at_sym_kw`.
+    accept("{ (x) ⇒ x }");
+    accept("{ (x) => x }");
+}
+
+#[test]
+fn r7_unicode_arrow_in_type_is_an_infix_type_id_not_sfunc() {
+    // In the type grammar `InfixType`'s `Id.!` (Types.scala:70-95) grabs `⇒` as an
+    // infix type operator BEFORE `PostfixType`'s `=>` matcher, yielding a junk
+    // `STypeApply("⇒", [Int, Int])` — whereas the ASCII `Int => Int` is an `SFunc`.
+    check_type(
+        "Int ⇒ Int",
+        SType::STypeApply {
+            name: "\u{21D2}".to_string(),
+            args: vec![SInt, SInt],
+        },
+    );
+    check_type(
+        "Int => Int",
+        SType::SFunc {
+            dom: vec![SInt],
+            range: Box::new(SInt),
+        },
+    );
+}
+
+// ----- oracle parity: round 7 (F2) — signed numeric literal as a prefix-op operand -----
+
+#[test]
+fn r7_signed_literal_is_a_prefix_op_operand() {
+    // Literal `"-".? ~ Index ~ Int` under NoWhitespace (Literals.scala:106-112): a `-`
+    // byte-adjacent to the digits is part of the LITERAL. `PrefixExpr` allows only ONE
+    // `ExprPrefix` (Exprs.scala:85-88), so a second sign is absorbed by the Literal.
+    // oracle: sigma-state 6.0.2.
+    accept("! -1"); // `!` prefix, operand literal `-1`
+    accept("- -1"); // `-` prefix, operand `-1` → folds to +1
+    accept("~ /*c*/ -0x1"); // `~` prefix, comment gap, adjacent `-0x1`
+    accept("~ -1");
+    accept("! -0x1L"); // long-literal operand
+    accept("- -0x1L");
+    // Adjacency is required: a gap between the sign and the digits is NOT a literal
+    // sign (only ONE prefix is allowed), so `- 1` cannot be a SimpleExpr operand.
+    fail_at("! - 1", 1, 5);
+    fail_at("!-1", 1, 3); // `!-` munches into one op-id → not a prefix
+    fail_at("--1", 1, 3); // `--` is one op-id
+                          // `+` is not a literal sign and not a valid prefix op → "Unknown prefix operation".
+    fail_at("+ -1", 1, 4);
+    fail_at("! +1", 1, 4);
+    // Regressions: plain sign folds and infix-rhs signs are unaffected.
+    accept("-(-1)");
+    accept("1 - -1");
+    check("- -1", int(1)); // double negation constant-folds to +1
+    check("~ -1", bit_inversion(int(-1))); // `~` prefix over the folded `-1`
+}

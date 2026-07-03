@@ -177,6 +177,13 @@ impl<'a> Cursor<'a> {
     /// `(x:/*c*/ Int)`, `Int =>/*c*/ Long`, `@/*c*/foo val` all parse — while the
     /// same op-id in an identifier position (`a.=>/*c*/`, an infix `x #/*c*/ y`)
     /// flows through the ordinary `is_id` path. oracle-mapped.
+    ///
+    /// For `FatArrow` this OpId arm is ALSO the sole entry for the Unicode arrow `⇒`
+    /// (U+21D2): it is not a reserved symbolic keyword, so it always lexes as an
+    /// `OpId`, and only the keyword matcher `` `=>` = O("=>") | O("⇒") ``
+    /// (Core.scala:23) — i.e. `at_sym_kw` — treats it as the arrow. In an identifier
+    /// position the ordinary `is_id` path grabs it first (oracle: `(x,y) ⇒ 1` REJECT,
+    /// `{ (x) ⇒ x }` ACCEPT).
     fn at_sym_kw(&self, k: Kw) -> bool {
         let t = self.peek();
         if t.kind == TokenKind::Kw(k) {
@@ -948,6 +955,38 @@ fn simple_expr(c: &mut Cursor, _ctx: Ctx) -> Result<Expr, ParseError> {
         c.bump(); // ExprLiteral wins over StableId (`null`/`true` are literals)
         return Ok(e);
     }
+    // ExprLiteral's signed numeric literal (Literals.scala:106-112): `"-".? ~ Index ~
+    // Int` under `NoWhitespace`, so a `-` byte-adjacent to the digits is part of the
+    // LITERAL, not a prefix operator. `PrefixExpr = ExprPrefix.? ~ SimpleExpr`
+    // (Exprs.scala:85-88) allows only ONE prefix, so a sign reaching `SimpleExpr` sits
+    // AFTER an already-consumed prefix (`! -1`, `- -1`, `~ /*c*/ -0x1`). The magnitude
+    // was range-checked positive at lex, so negation never overflows (D4); the folded
+    // constant's pos is the digits' `Index` (after the sign). oracle: `! -1` / `- -1`
+    // (folds to `+1`) / `~ /*c*/ -0x1` ACCEPT; `! - 1` (gap) REJECT 1:5.
+    if t.kind == TokenKind::OpId && t.text(c.src) == "-" {
+        let sign_end = t.end;
+        let n = c.peek2();
+        let folded = if sign_end == n.start {
+            match n.kind {
+                TokenKind::IntLit(v) => Some(Expr::IntConst {
+                    value: -v,
+                    pos: n.start,
+                }),
+                TokenKind::LongLit(v) => Some(Expr::LongConst {
+                    value: -v,
+                    pos: n.start,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(e) = folded {
+            c.bump(); // "-"
+            c.bump(); // the byte-adjacent Int/Long literal
+            return Ok(e);
+        }
+    }
     if is_id(t) {
         return stable_id(c); // StableId (also the lone `_` atom)
     }
@@ -1326,14 +1365,14 @@ fn expect_assign(c: &mut Cursor) -> Result<(), ParseError> {
         });
     }
     // ASCII `=>` FatArrow (Core.scala:25): O("=") matches the leading `=`, then
-    // `!OpChar` fails at the following `>` — one byte past t.start, same as the
-    // OpId `==` arm. The Unicode alias `⇒` (U+21D2, three UTF-8 bytes starting
-    // 0xE2) does NOT start with `=`, so keep t.start for that form.
+    // `!OpChar` fails at the following `>` — one byte past t.start, same as the OpId
+    // `==` arm. Only the ASCII `=>` reaches here as `Kw::FatArrow`; the Unicode alias
+    // `⇒` (U+21D2) is an `OpId` that does NOT start with `=`, so it falls through to
+    // the generic `t.start` arm below (oracle: `def f(x: Int) ⇒ 1` REJECT 1:15, one
+    // column left of the ASCII `def f(x: Int) => 1` REJECT 1:16).
     if t.kind == TokenKind::Kw(Kw::FatArrow) {
-        let src_byte = c.src.as_bytes().get(t.start as usize).copied();
-        let pos_offset = if src_byte == Some(b'=') { 1 } else { 0 };
         return Err(ParseError::Syntax {
-            pos: t.start + pos_offset,
+            pos: t.start + 1,
             expected: "`=`".to_string(),
         });
     }

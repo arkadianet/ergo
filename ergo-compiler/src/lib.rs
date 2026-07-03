@@ -41,21 +41,33 @@
 //! - **Sm/So Unicode op-chars deferred** (`token.rs`): the full Unicode Sm/So
 //!   general-category op-char set is not checked (Rust std lacks a category
 //!   predicate). The ASCII operator set is exact and the single non-ASCII op-char
-//!   used in real contracts — `⇒` (U+21D2, `Core.scala:23`) — is special-cased.
-//!   Any other Unicode op-char would be mis-tokenized; the corpus oracle catches
-//!   any counterexample.
+//!   used in real contracts — `⇒` (U+21D2, `Core.scala:23`) — is included. `⇒` is
+//!   an op-char but NOT a reserved symbolic keyword: it lexes as an `OpId` and is
+//!   the arrow only in keyword position (`Cursor::at_sym_kw`). Any OTHER Unicode
+//!   op-char is mis-tokenized; a knock-on is that a So/Sm code point used as an
+//!   identifier tail (e.g. `xⒶ`, U+24B6) — which the JVM lexes as a separate
+//!   op-token, still ACCEPT — is folded into one identifier here (same ACCEPT), and
+//!   a So/Sm code point in a `'c'` char literal REJECTS one column early. The corpus
+//!   oracle catches any accept/reject counterexample.
 //!
-//! - **id-rest uses std predicates** (`token.rs`): identifier-interior characters
-//!   use `char::is_alphabetic` (≈ Lu/Ll/Lt/Lm/Lo) and `char::is_numeric` (wider
-//!   than Nd) rather than exact JVM `Character.getType` masks
-//!   (`Identifiers.scala:41-43`). Numeric literals use ASCII-only `is_ascii_digit`
-//!   (exact). Safe for all real contracts; corpus-verified.
+//! - **id-tail Unicode classes** (`token.rs`): identifier-interior characters use
+//!   the exact JVM `Character.isLetter` (`Lu|Ll|Lt|Lm|Lo`) and `Character.isDigit`
+//!   (`Nd`) masks (`Identifiers.scala:41-43`), reconstructed by narrowing Rust's
+//!   wider `char::is_alphabetic`/`is_numeric` with the `ALPHA_NOT_LETTER`/`ND` UCD
+//!   range tables and a BMP gate (supplementary code points reach fastparse as
+//!   surrogate halves and are never id-chars). Exact except that 60 BMP code points
+//!   Rust marks `is_alphabetic` but the JVM does not treat as letters — 52 `So`
+//!   (e.g. circled letters U+24B6) plus 8 `Cn` version-skew points — are still
+//!   accepted as id-tail chars; the `So` cases are JVM op-chars that form a separate
+//!   token, so the whole-input ACCEPT/REJECT verdict is unchanged. Numeric literals
+//!   use ASCII-only `is_ascii_digit` (exact).
 //!
-//! - **`is_printable_char` over-accepts** (`token.rs`): the `'c'`-form char
-//!   literal vs `'sym` symbol disambiguation uses `!c.is_control()` rather than
-//!   the exact fastparse `isPrintableChar` (which also excludes the Unicode
-//!   SPECIALS block and null-block code points). Affects only exotic Unicode
-//!   single-char literals no real contract uses.
+//! - **`is_printable_char` — SPECIALS excluded, null-block deferred** (`token.rs`):
+//!   the `'c'`-form char literal vs `'sym` symbol disambiguation now matches
+//!   fastparse `isPrintableChar` for `!isISOControl` (= `char::is_control`) and the
+//!   SPECIALS block (U+FFF0..=U+FFFF, excluded). The `block == null` clause
+//!   (unassigned no-block code points) is not reproduced — it affects only char
+//!   literals over such points, which no real contract uses.
 //!
 //! - **op-id string prefixes not merged** (`token.rs`): for an operator-id
 //!   immediately before a string literal (e.g. `*"foo"`), the reference merges

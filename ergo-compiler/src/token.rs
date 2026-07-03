@@ -21,8 +21,11 @@ use crate::span::Pos;
 /// `!LetterDigitDollarUnderscore` boundary (Basic.scala:74-75) — enforced here
 /// by maximal-munch: a run equal to the word only classifies as a keyword when
 /// no id-continuation char follows. Symbolic keywords (Identifiers.scala:55-57):
-/// an op-char run equal to one of these is the keyword, not an `OpId`. `⇒`
-/// (U+21D2) aliases `FatArrow` (Core.scala:23).
+/// an op-char run equal to one of these ASCII forms (`: ; => = # @`) is the
+/// keyword, not an `OpId`. The Unicode arrow `⇒` (U+21D2) is NOT in that reserved
+/// set, so it lexes as an ordinary symbolic-identifier `OpId`; only the `FatArrow`
+/// KEYWORD matcher (Core.scala:23 `` `=>` = O("=>") | O("⇒") ``) also accepts it,
+/// reproduced parser-side by `Cursor::at_sym_kw`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kw {
     Case,
@@ -139,9 +142,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 /// Op-char set (Basic.scala:38-45): the ASCII operators plus Unicode Sm/So.
 //
 // deviation: full Sm/So op-char classes are deferred (Rust std has no Unicode
-// general-category predicate); the single `⇒` (U+21D2, Core.scala:23) is
-// special-cased and the ASCII set is exact. No real contract uses another
-// Unicode operator, and the corpus oracle catches any counterexample.
+// general-category predicate); the single `⇒` (U+21D2, category Sm) is
+// special-cased and the ASCII set is exact. `⇒` is an op-char (so `⇒=` munches
+// into one `OpId`), but it is NOT a reserved symbolic keyword — a lone `⇒` lexes
+// as an `OpId`, matched as the arrow only in keyword position (Core.scala:23). No
+// real contract uses another Unicode operator, and the corpus oracle catches any
+// counterexample.
 fn is_op_char(c: char) -> bool {
     matches!(
         c,
@@ -175,16 +181,277 @@ fn is_id_start(c: char) -> bool {
 }
 
 /// A character allowed inside an identifier chunk: `'$' | isLetter | isDigit`
-/// (Identifiers.scala:41-43). Underscore is deliberately NOT an id-char — it is
-/// handled by the underscore chunks of `IdRest`.
-//
-// deviation: id-rest letters use `char::is_alphabetic` (≈ Lu/Ll/Lt/Lm/Lo) and
-// digits use `char::is_numeric` (wider than Nd) rather than exact JVM
-// `Character.getType` masks. Number *literals* use ASCII-only `is_ascii_digit`
-// (Basic.scala:12, exact). Corpus-checked.
+/// (Identifiers.scala:41-43), where `isLetter`/`isDigit` are fastparse's JVM
+/// `Character.isLetter` (categories `Lu|Ll|Lt|Lm|Lo`) and `Character.isDigit`
+/// (`Nd`). Underscore is deliberately NOT an id-char — it is handled by the
+/// underscore chunks of `IdRest`.
+///
+/// fastparse scans the JVM `String` as UTF-16 `Char`s, so a supplementary code
+/// point (> U+FFFF) reaches `IdCharacter` as two surrogate halves — each of
+/// category `Cs`, so neither `isLetter` nor `isDigit` — and can never be an
+/// id-tail char. Hence the BMP gate. oracle: `x𝟎` (U+1D7CE `Nd`) / `x𝐀` (U+1D400
+/// `Lu`) REJECT; `x²` (U+00B2 `No`) / `x①` (U+2460 `No`) / `xְ` (U+05B0 `Mn`)
+/// REJECT; `x५` (U+096B `Nd`) / `xＡ` (U+FF21 `Lu`) ACCEPT.
 fn is_id_char(c: char) -> bool {
-    c == '$' || c.is_alphabetic() || c.is_numeric()
+    if c == '$' {
+        return true;
+    }
+    if (c as u32) > 0xFFFF {
+        return false;
+    }
+    is_jvm_letter(c) || is_jvm_digit(c)
 }
+
+/// JVM `Character.isDigit` — general category `Nd`. Rust `char::is_numeric` is the
+/// wider `Nd|Nl|No`, so it is narrowed to `Nd` by the `ND` range table (ASCII is the
+/// hot path). oracle: `x²`/`x①` (`No`) REJECT, `x५` (`Nd`) ACCEPT.
+fn is_jvm_digit(c: char) -> bool {
+    c.is_ascii_digit() || (c.is_numeric() && in_ranges(c, ND))
+}
+
+/// JVM `Character.isLetter` — general category `Lu|Ll|Lt|Lm|Lo`. Rust
+/// `char::is_alphabetic` is the wider Unicode `Alphabetic` property (it also
+/// admits `Nl` and the `Other_Alphabetic` combining marks), narrowed here by
+/// subtracting the `ALPHA_NOT_LETTER` table. oracle: `xְ` (U+05B0 `Mn`) REJECT,
+/// `xＡ` (U+FF21 `Lu`) ACCEPT.
+fn is_jvm_letter(c: char) -> bool {
+    c.is_alphabetic() && !in_ranges(c, ALPHA_NOT_LETTER)
+}
+
+/// Membership test over a sorted, non-overlapping `[lo, hi]` table. The caller
+/// guarantees `c <= U+FFFF` (the BMP gate in `is_id_char`), so the code point fits
+/// in `u16`.
+fn in_ranges(c: char, table: &[(u16, u16)]) -> bool {
+    let cp = c as u16;
+    table
+        .binary_search_by(|&(lo, hi)| {
+            use core::cmp::Ordering;
+            if cp < lo {
+                Ordering::Greater
+            } else if cp > hi {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+// JVM identifier-class range tables (Unicode 16.0.0). Both are generated from the
+// intersection of Rust's own `char::is_numeric`/`char::is_alphabetic` sets with the
+// UCD general category (`unicodedata`), then collapsed to sorted `[lo, hi]` ranges;
+// see `scripts/` provenance in the round-7 report. They are the *difference* sets
+// that narrow Rust's wider predicates to the exact JVM `Character.isDigit`/`isLetter`
+// masks, so a change in either Rust's or the UCD's Unicode version can only shift a
+// handful of exotic code points (none in any real contract).
+/// Decimal-digit (`Nd`) code point ranges within the BMP.
+/// 370 code points in 37 ranges (Unicode 16.0.0, via UCD `unicodedata`).
+const ND: &[(u16, u16)] = &[
+    (0x0030, 0x0039),
+    (0x0660, 0x0669),
+    (0x06F0, 0x06F9),
+    (0x07C0, 0x07C9),
+    (0x0966, 0x096F),
+    (0x09E6, 0x09EF),
+    (0x0A66, 0x0A6F),
+    (0x0AE6, 0x0AEF),
+    (0x0B66, 0x0B6F),
+    (0x0BE6, 0x0BEF),
+    (0x0C66, 0x0C6F),
+    (0x0CE6, 0x0CEF),
+    (0x0D66, 0x0D6F),
+    (0x0DE6, 0x0DEF),
+    (0x0E50, 0x0E59),
+    (0x0ED0, 0x0ED9),
+    (0x0F20, 0x0F29),
+    (0x1040, 0x1049),
+    (0x1090, 0x1099),
+    (0x17E0, 0x17E9),
+    (0x1810, 0x1819),
+    (0x1946, 0x194F),
+    (0x19D0, 0x19D9),
+    (0x1A80, 0x1A89),
+    (0x1A90, 0x1A99),
+    (0x1B50, 0x1B59),
+    (0x1BB0, 0x1BB9),
+    (0x1C40, 0x1C49),
+    (0x1C50, 0x1C59),
+    (0xA620, 0xA629),
+    (0xA8D0, 0xA8D9),
+    (0xA900, 0xA909),
+    (0xA9D0, 0xA9D9),
+    (0xA9F0, 0xA9F9),
+    (0xAA50, 0xAA59),
+    (0xABF0, 0xABF9),
+    (0xFF10, 0xFF19),
+];
+
+/// BMP code points that Rust `char::is_alphabetic` accepts but JVM `Character.isLetter` rejects (categories `Mn`/`Mc`/`Nl`).
+/// 897 code points in 162 ranges (Unicode 16.0.0, via UCD `unicodedata`).
+const ALPHA_NOT_LETTER: &[(u16, u16)] = &[
+    (0x0345, 0x0345),
+    (0x0363, 0x036F),
+    (0x05B0, 0x05BD),
+    (0x05BF, 0x05BF),
+    (0x05C1, 0x05C2),
+    (0x05C4, 0x05C5),
+    (0x05C7, 0x05C7),
+    (0x0610, 0x061A),
+    (0x064B, 0x0657),
+    (0x0659, 0x065F),
+    (0x0670, 0x0670),
+    (0x06D6, 0x06DC),
+    (0x06E1, 0x06E4),
+    (0x06E7, 0x06E8),
+    (0x06ED, 0x06ED),
+    (0x0711, 0x0711),
+    (0x0730, 0x073F),
+    (0x07A6, 0x07B0),
+    (0x0816, 0x0817),
+    (0x081B, 0x0823),
+    (0x0825, 0x0827),
+    (0x0829, 0x082C),
+    (0x0897, 0x0897),
+    (0x08D4, 0x08DF),
+    (0x08E3, 0x08E9),
+    (0x08F0, 0x0903),
+    (0x093A, 0x093B),
+    (0x093E, 0x094C),
+    (0x094E, 0x094F),
+    (0x0955, 0x0957),
+    (0x0962, 0x0963),
+    (0x0981, 0x0983),
+    (0x09BE, 0x09C4),
+    (0x09C7, 0x09C8),
+    (0x09CB, 0x09CC),
+    (0x09D7, 0x09D7),
+    (0x09E2, 0x09E3),
+    (0x0A01, 0x0A03),
+    (0x0A3E, 0x0A42),
+    (0x0A47, 0x0A48),
+    (0x0A4B, 0x0A4C),
+    (0x0A51, 0x0A51),
+    (0x0A70, 0x0A71),
+    (0x0A75, 0x0A75),
+    (0x0A81, 0x0A83),
+    (0x0ABE, 0x0AC5),
+    (0x0AC7, 0x0AC9),
+    (0x0ACB, 0x0ACC),
+    (0x0AE2, 0x0AE3),
+    (0x0AFA, 0x0AFC),
+    (0x0B01, 0x0B03),
+    (0x0B3E, 0x0B44),
+    (0x0B47, 0x0B48),
+    (0x0B4B, 0x0B4C),
+    (0x0B56, 0x0B57),
+    (0x0B62, 0x0B63),
+    (0x0B82, 0x0B82),
+    (0x0BBE, 0x0BC2),
+    (0x0BC6, 0x0BC8),
+    (0x0BCA, 0x0BCC),
+    (0x0BD7, 0x0BD7),
+    (0x0C00, 0x0C04),
+    (0x0C3E, 0x0C44),
+    (0x0C46, 0x0C48),
+    (0x0C4A, 0x0C4C),
+    (0x0C55, 0x0C56),
+    (0x0C62, 0x0C63),
+    (0x0C81, 0x0C83),
+    (0x0CBE, 0x0CC4),
+    (0x0CC6, 0x0CC8),
+    (0x0CCA, 0x0CCC),
+    (0x0CD5, 0x0CD6),
+    (0x0CE2, 0x0CE3),
+    (0x0CF3, 0x0CF3),
+    (0x0D00, 0x0D03),
+    (0x0D3E, 0x0D44),
+    (0x0D46, 0x0D48),
+    (0x0D4A, 0x0D4C),
+    (0x0D57, 0x0D57),
+    (0x0D62, 0x0D63),
+    (0x0D81, 0x0D83),
+    (0x0DCF, 0x0DD4),
+    (0x0DD6, 0x0DD6),
+    (0x0DD8, 0x0DDF),
+    (0x0DF2, 0x0DF3),
+    (0x0E31, 0x0E31),
+    (0x0E34, 0x0E3A),
+    (0x0E4D, 0x0E4D),
+    (0x0EB1, 0x0EB1),
+    (0x0EB4, 0x0EB9),
+    (0x0EBB, 0x0EBC),
+    (0x0ECD, 0x0ECD),
+    (0x0F71, 0x0F83),
+    (0x0F8D, 0x0F97),
+    (0x0F99, 0x0FBC),
+    (0x102B, 0x1036),
+    (0x1038, 0x1038),
+    (0x103B, 0x103E),
+    (0x1056, 0x1059),
+    (0x105E, 0x1060),
+    (0x1062, 0x1064),
+    (0x1067, 0x106D),
+    (0x1071, 0x1074),
+    (0x1082, 0x108D),
+    (0x108F, 0x108F),
+    (0x109A, 0x109D),
+    (0x16EE, 0x16F0),
+    (0x1712, 0x1713),
+    (0x1732, 0x1733),
+    (0x1752, 0x1753),
+    (0x1772, 0x1773),
+    (0x17B6, 0x17C8),
+    (0x1885, 0x1886),
+    (0x18A9, 0x18A9),
+    (0x1920, 0x192B),
+    (0x1930, 0x1938),
+    (0x1A17, 0x1A1B),
+    (0x1A55, 0x1A5E),
+    (0x1A61, 0x1A74),
+    (0x1ABF, 0x1AC0),
+    (0x1ACC, 0x1ACE),
+    (0x1B00, 0x1B04),
+    (0x1B35, 0x1B43),
+    (0x1B80, 0x1B82),
+    (0x1BA1, 0x1BA9),
+    (0x1BAC, 0x1BAD),
+    (0x1BE7, 0x1BF1),
+    (0x1C24, 0x1C36),
+    (0x1DD3, 0x1DF4),
+    (0x2160, 0x2182),
+    (0x2185, 0x2188),
+    (0x2DE0, 0x2DFF),
+    (0x3007, 0x3007),
+    (0x3021, 0x3029),
+    (0x3038, 0x303A),
+    (0xA674, 0xA67B),
+    (0xA69E, 0xA69F),
+    (0xA6E6, 0xA6EF),
+    (0xA802, 0xA802),
+    (0xA80B, 0xA80B),
+    (0xA823, 0xA827),
+    (0xA880, 0xA881),
+    (0xA8B4, 0xA8C3),
+    (0xA8C5, 0xA8C5),
+    (0xA8FF, 0xA8FF),
+    (0xA926, 0xA92A),
+    (0xA947, 0xA952),
+    (0xA980, 0xA983),
+    (0xA9B4, 0xA9BF),
+    (0xA9E5, 0xA9E5),
+    (0xAA29, 0xAA36),
+    (0xAA43, 0xAA43),
+    (0xAA4C, 0xAA4D),
+    (0xAA7B, 0xAA7D),
+    (0xAAB0, 0xAAB0),
+    (0xAAB2, 0xAAB4),
+    (0xAAB7, 0xAAB8),
+    (0xAABE, 0xAABE),
+    (0xAAEB, 0xAAEF),
+    (0xAAF5, 0xAAF5),
+    (0xABE3, 0xABEA),
+    (0xFB1E, 0xFB1E),
+];
 
 // ----- lexer -----
 
@@ -511,9 +778,11 @@ impl<'a> Lexer<'a> {
     }
 
     /// Op-char run with maximal munch that stops before a `//`/`/*` comment
-    /// start (Identifiers.scala:22-24). A run exactly equal to a symbolic
-    /// keyword (`: => ⇒ = # @`, Identifiers.scala:55-57 + Core.scala:23) is that
-    /// keyword; every other run (`:: == <= ++ -` …) is an `OpId`.
+    /// start (Identifiers.scala:22-24). A run exactly equal to an ASCII symbolic
+    /// keyword (`: => = # @`, Identifiers.scala:55-57) is that keyword; every other
+    /// run (`:: == <= ++ -`, and the Unicode arrow `⇒` which is NOT reserved) is an
+    /// `OpId`. `⇒` reaches the `FatArrow` keyword only in keyword position, via
+    /// `Cursor::at_sym_kw` (Core.scala:23).
     fn lex_op_run(&mut self, start: usize) -> Token {
         self.consume_op_run();
         let run = &self.src[start..self.pos];
@@ -535,7 +804,11 @@ impl<'a> Lexer<'a> {
         } else {
             match run {
                 ":" => TokenKind::Kw(Kw::Colon),
-                "=>" | "\u{21D2}" => TokenKind::Kw(Kw::FatArrow),
+                // Only the ASCII `=>` is reserved; `⇒` (U+21D2) is not in
+                // SymbolicKeywords (Identifiers.scala:55-57), so it stays an `OpId`.
+                // oracle: `(x,y) ⇒ 1` REJECT 1:1 (infix `⇒` → unknown binary op) vs
+                // `(x,y) => 1` ACCEPT.
+                "=>" => TokenKind::Kw(Kw::FatArrow),
                 "=" => TokenKind::Kw(Kw::Assign),
                 "#" => TokenKind::Kw(Kw::Hash),
                 "@" => TokenKind::Kw(Kw::At),
@@ -942,15 +1215,22 @@ fn strip_quotes(s: &str) -> String {
     cur.to_string()
 }
 
-/// fastparse `isPrintableChar` (CharPredicates, referenced Literals.scala:98).
+/// fastparse `isPrintableChar` (CharPredicates, referenced Literals.scala:98):
+/// `!isISOControl && !isSurrogate && block != null && block != SPECIALS`.
+///
+/// Rust `char` can never be an unpaired surrogate (that clause is vacuous), and
+/// `char::is_control` is exactly JVM `isISOControl` (both = category `Cc`). The
+/// `SPECIALS` Unicode block is U+FFF0..=U+FFFF, excluded explicitly here. oracle:
+/// `'￰'` (U+FFF0) / `'￿'` (U+FFFF) REJECT as char literals; `'a'` ACCEPT.
 //
-// deviation: the exact predicate also excludes the SPECIALS block and code
-// points whose Unicode block is null; we approximate it with "not an ISO
-// control character" (Rust `char` can never be an unpaired surrogate). This is
-// only used to split the `'`-char form from the `'`-symbol form for a single
-// char; the printable chars any contract uses (`'a'` etc.) classify identically.
+// deviation: the `block == null` clause (code points in NO assigned Unicode block)
+// is not reproduced — it only affects char literals over unassigned no-block code
+// points that no real contract uses (a probed unassigned-but-in-block point such as
+// U+0378 is printable in both). A SPECIALS code point that is ALSO a JVM op-char
+// (So/Sm, e.g. U+FFFC) still REJECTS, but one column early, since our op-char set is
+// ASCII-only (see the Sm/So op-char deviation) — reject-parity holds either way.
 fn is_printable_char(c: char) -> bool {
-    !c.is_control()
+    !c.is_control() && !matches!(c as u32, 0xFFF0..=0xFFFF)
 }
 
 #[cfg(test)]
@@ -985,7 +1265,9 @@ mod tests {
         assert_eq!(kinds("=")[0], TokenKind::Kw(Kw::Assign));
         assert_eq!(kinds("==")[0], TokenKind::OpId); // == is an OpId, not Assign
         assert_eq!(kinds("=>")[0], TokenKind::Kw(Kw::FatArrow));
-        assert_eq!(kinds("⇒")[0], TokenKind::Kw(Kw::FatArrow)); // Core.scala:23
+        // `⇒` (U+21D2) is NOT a reserved symbolic keyword (Identifiers.scala:55-57);
+        // it lexes as an `OpId` and is the arrow only in keyword position (Core.scala:23).
+        assert_eq!(kinds("⇒")[0], TokenKind::OpId);
         assert_eq!(kinds("::")[0], TokenKind::OpId);
     }
     #[test]
@@ -996,6 +1278,49 @@ mod tests {
             kinds("+/*c*/+"),
             vec![TokenKind::OpId, TokenKind::OpId, TokenKind::Eof]
         );
+    }
+    #[test]
+    fn id_tail_unicode_classes_match_jvm_masks() {
+        // `IdCharacter = '$' | isLetter(Lu|Ll|Lt|Lm|Lo) | isDigit(Nd)`
+        // (Identifiers.scala:41-43), scanned over UTF-16 chars.
+        // Continues an identifier (single Ident token):
+        for src in ["x5", "x५", "xＡ", "xé", "x_$y"] {
+            let t = tokenize(src).unwrap();
+            assert_eq!(t[0].kind, TokenKind::Ident, "{src}");
+            assert_eq!(t[0].text(src), src, "{src}"); // whole run is ONE ident
+        }
+        // NOT an id-tail char, and not otherwise startable → hard lex error at the
+        // char. oracle: `x²`(U+00B2 No) / `x①`(U+2460 No) / `xְ`(U+05B0 Mn) REJECT 1:2;
+        // the supplementary digit `x𝟎`(U+1D7CE Nd) reaches fastparse as surrogate
+        // halves → REJECT.
+        for src in ["x²", "x①", "x\u{05B0}", "x\u{1D7CE}"] {
+            assert!(
+                matches!(tokenize(src), Err(ParseError::Lexical { .. })),
+                "{src}"
+            );
+        }
+        // The id-tail always STOPS at the exotic char (the BMP gate / class narrowing
+        // did its job). U+2160 (Nl) and the supplementary letter U+1D400 both then
+        // start a fresh token via `is_id_start` (a separate predicate), so the first
+        // token is the bare `x`.
+        for src in ["x\u{2160}", "x\u{1D400}"] {
+            let t = tokenize(src).unwrap();
+            assert_eq!(t[0].kind, TokenKind::Ident, "{src}");
+            assert_eq!(t[0].text(src), "x", "{src}");
+        }
+    }
+    #[test]
+    fn char_literal_printable_excludes_specials() {
+        // fastparse `isPrintableChar` excludes the SPECIALS block U+FFF0..=U+FFFF.
+        // oracle: `'a'` ACCEPT; `'￯'`(U+FFEF, just below SPECIALS) ACCEPT;
+        // `'￰'`(U+FFF0) / `'￿'`(U+FFFF) REJECT as char literals.
+        assert_eq!(kinds("'a'")[0], TokenKind::CharSym("'a'".into()));
+        assert!(matches!(
+            tokenize("'\u{FFEF}'").unwrap()[0].kind,
+            TokenKind::CharSym(_)
+        ));
+        assert!(matches!(lex_err("'\u{FFF0}'"), ParseError::Lexical { .. }));
+        assert!(matches!(lex_err("'\u{FFFF}'"), ParseError::Lexical { .. }));
     }
     #[test]
     fn symbolic_keyword_directly_before_comment_is_opid() {
