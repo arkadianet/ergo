@@ -532,12 +532,10 @@ pub fn const_upcast(
             "const_upcast from {from:?} to {to:?}: target must be >= source in the ladder"
         )));
     }
-    // BigInt/UnsignedBigInt source or target: v3 gate.
-    // Source: SType.scala:512, 528 (SBigInt.upcast), 543-557 (SUnsignedBigInt.upcast).
-    if (matches!(from, SType::SBigInt | SType::SUnsignedBigInt)
-        || matches!(to, SType::SBigInt | SType::SUnsignedBigInt))
-        && tree_version < 3
-    {
+    // v3 gate mirrors const_downcast: only BigInt-typed SOURCES are gated —
+    // SBigInt.upcast gates only its `case x: BigInt if isV3+` identity arm
+    // (SType.scala:506-515, v6.0.2); Byte/Short/Int/Long -> BigInt is ungated.
+    if matches!(from, SType::SBigInt | SType::SUnsignedBigInt) && tree_version < 3 {
         return Err(BuildError::BigIntGated(format!(
             "BigInt/UnsignedBigInt upcast requires tree_version >= 3 \
              (VersionContext.isV3OrLaterErgoTreeVersion); got {tree_version}"
@@ -964,6 +962,14 @@ mod tests {
         // Rule 12: anything that doesn't match → None.
         assert_eq!(unify_types(&SType::SInt, &SType::SBoolean), None);
         assert_eq!(unify_types(&coll(SType::SInt), &opt(SType::SInt)), None);
+    }
+
+    #[test]
+    fn unify_var_right_does_not_bind() {
+        // Scala has NO (_, STypeVar) rule: rule 2 requires the var on the LEFT
+        // (package.scala:44, v6.0.2); a right-side var falls through to rule 12 -> None.
+        assert_eq!(unify_types(&SType::SInt, &tvar("T")), None);
+        assert_eq!(unify_types(&coll(SType::SByte), &tvar("T")), None);
     }
 
     // ----- happy path — ordered precedence -----
@@ -1405,15 +1411,35 @@ mod tests {
     }
 
     #[test]
-    fn const_upcast_byte_to_bigint_requires_v3() {
-        // Byte → BigInt: BigInt target → v3 gate.
-        // SType.scala: BigInt upcast/downcast paths gated on isV3OrLaterErgoTreeVersion.
-        assert!(matches!(
+    fn const_upcast_byte_to_bigint_ungated_at_v2() {
+        // Byte → BigInt: no v3 gate on the upcast.
+        // SType.scala:506-515 (v6.0.2) — Byte->BigInt upcast has NO v3 gate; only the BigInt identity arm is gated.
+        assert_eq!(
             const_upcast(&ConstPayload::Byte(1), &SType::SByte, &SType::SBigInt, 2),
+            Ok(ConstPayload::BigInt("1".into()))
+        );
+    }
+
+    #[test]
+    fn const_upcast_bigint_identity_requires_v3() {
+        // BigInt → BigInt identity (same type) requires v3.
+        // SType.scala:506-515 (v6.0.2) — only the BigInt identity arm gates on isV3+.
+        assert!(matches!(
+            const_upcast(
+                &ConstPayload::BigInt("1".into()),
+                &SType::SBigInt,
+                &SType::SBigInt,
+                2
+            ),
             Err(BuildError::BigIntGated(_))
         ));
         assert_eq!(
-            const_upcast(&ConstPayload::Byte(1), &SType::SByte, &SType::SBigInt, 3),
+            const_upcast(
+                &ConstPayload::BigInt("1".into()),
+                &SType::SBigInt,
+                &SType::SBigInt,
+                3
+            ),
             Ok(ConstPayload::BigInt("1".into()))
         );
     }
