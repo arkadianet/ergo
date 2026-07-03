@@ -52,6 +52,7 @@ use crate::typed::{
     node_tpe, ConstPayload, MethodRef, TypedExpr, ARITH_DIVISION, ARITH_MAX, ARITH_MIN,
     ARITH_MINUS, ARITH_MODULO, BIT_AND, BIT_OR,
 };
+use crate::typer::get_method;
 
 // ── BindError ────────────────────────────────────────────────────────────────
 
@@ -226,7 +227,7 @@ fn bind_expr(
                     obj: Box::new(obj_b),
                     field: field.clone(),
                     res_type: None, // always None at parse time
-                    tpe: product_method_tpe(&obj_tpe, field, tree_version),
+                    tpe: declared_select_tpe(&obj_tpe, field, tree_version),
                 })
             }
         }
@@ -599,6 +600,38 @@ fn bind_pk(args: Vec<TypedExpr>, pos: Pos, network: NetworkPrefix) -> Result<Typ
             ),
             pos,
         }),
+    }
+}
+
+/// The bound (pre-typer) `tpe` of a `Select` node: the reference lazy `Value.tpe`
+/// on a bound tree (values.scala:1171-1178) —
+/// `resType.getOrElse(obj.tpe match { case p: SProduct => p.method(field).stype;
+/// case _ => NoType })`.  `resType` is always `None` at bind time, so this is the
+/// method's raw DECLARED signature: `SFunc` with the declared receiver in `dom[0]`
+/// and the method's own type parameters (e.g. `SELF.value → (Box) => Long`,
+/// `xs.size → (Coll[IV]) => Int`, `xs.map → [IV,OV](Coll[IV],(IV) => OV) => Coll[OV]`),
+/// or `NoType` when the receiver is not an `SProduct` or has no such method.
+///
+/// A bound Select's `tpe` is normally OVERWRITTEN by the typer — `assign_type`
+/// re-derives it in `assign_select` (via `get_method`) and fills `res_type` — so
+/// this value is only ever *observed* on a Select that survives un-typed: inside a
+/// binder-prebuilt `serialize(v)` argument, which §1.24 passes through unchanged.
+/// There the s-expression must match the reference byte-for-byte (`get_method`
+/// supplies the full declared `SFunc`, incl. `SBox`/`SGroupElement`/… receivers the
+/// parse-AST `product_method_tpe` port omits), and any `NoType` node makes the
+/// reference printer throw → REJECT (enforced by the §1.24 passthrough).
+///
+/// This does NOT change `Expr::parse_tpe` (a separate `product_method_tpe` call site
+/// on the untyped parse AST that drives unary/relation operand checks); only the
+/// bound `TypedExpr` Select carries this signature.
+fn declared_select_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType {
+    match get_method(obj_tpe, field, tree_version) {
+        Some(m) => SType::SFunc {
+            dom: m.stype.dom.clone(),
+            range: Box::new(m.stype.range.clone()),
+            tpe_params: m.stype.tpe_params.clone(),
+        },
+        None => SType::NoType,
     }
 }
 

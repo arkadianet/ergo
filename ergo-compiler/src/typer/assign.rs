@@ -492,23 +492,31 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         // §1.24 MethodCall passthrough (SigmaTyper.scala:538 `case v: MethodCall => v`)
         // — returned UNCHANGED; the typer does NOT re-type its args.
         //
-        // A3 (accept-invalid fix): the binder pre-builds `serialize(v)` as a
-        // `MethodCall(Global, serialize, [v])` (Rule-10, `bind_serialize`) with a
-        // BOUND-but-unresolved arg.  parseAsMethods operators (`+ ++ * || && ^ <<
-        // >> >>>`) survive as untyped `MethodCallLike` nodes (the typer resolves
-        // them ONLY when it recurses into them — which this passthrough does not).
-        // Such a survivor makes the tree malformed: the reference s-expression
-        // printer throws `RuntimeException` (verdict REJECT).  We mirror that reject.
-        // Boundary (oracle-pinned): relations (`==`/`>`), `if`, `Coll(...)`, and plain
-        // constants bind to fully-typed nodes and stay ACCEPT — only a surviving
-        // `MethodCallLike` rejects; `serialize(1)` still accepts + byte-matches, and
-        // the Select-form `Global.serialize(a ++ b)` (typed via §1.8) is unaffected.
+        // The binder pre-builds bare `serialize(v)` as `MethodCall(Global, serialize,
+        // [v])` (Rule-10, `bind_serialize`) with a BOUND-but-un-typed arg, then this
+        // passthrough returns it verbatim — mirroring the reference, whose bare
+        // `serialize` irBuilder also runs at bind time and whose typer likewise leaves
+        // the arg un-typed (`res_type` stays `None`).  The reference then RENDERS the
+        // bound arg, and its s-expression printer THROWS (`RuntimeException` → oracle
+        // REJECT) on any node with an unresolvable `tpe` (`NoType`): an unbound Ident,
+        // an un-lowered `MethodCallLike` operator (`+ ++ * …`), an unresolved predef
+        // `Apply`/`ApplyTypes` (`blake2b256(a)`, `getVar[Int](1)`, `xorOf(...)`), a
+        // Block with a NoType result, or a `.get`/property chained on a function-typed
+        // receiver (`SELF.R4[Long].get`, `SELF.tokens.size`).  We mirror that reject.
+        //
+        // Boundary (oracle-pinned): every node the binder types renders clean and stays
+        // ACCEPT — plain constants, `Coll(...)`, `if`, relations (`==`/`>`), `min`/`max`
+        // (→ ArithOp), collection index (`col1(0)`), a nested `serialize(...)`, AND a
+        // property/method `Select` (`SELF.value → Select:(Box) => Long`, `xs.size →
+        // (Coll[IV]) => Int`), whose bound `tpe` the binder supplies from the declared
+        // method signature (`bind_serialize` note / `declared_select_tpe`).  The
+        // Select-form `Global.serialize(v)` is typed via §1.8 and unaffected.
         node @ MethodCall { .. } => {
             if let MethodCall { args, .. } = &node {
-                if args.iter().any(expr_contains_method_call_like) {
+                if args.iter().any(expr_contains_untyped_node) {
                     return Err(TyperError::typer(
-                        "serialize: argument contains an unresolved operator expression \
-                         (MethodCallLike) that the reference typer cannot type"
+                        "serialize: argument contains an unresolved (NoType) node that the \
+                         reference s-expression printer cannot render (RuntimeException)"
                             .to_string(),
                     ));
                 }
@@ -2190,21 +2198,28 @@ fn free_type_vars(dom: &[SType], range: &SType) -> Vec<String> {
     acc
 }
 
-/// `true` iff `e` is, or transitively contains, an unresolved `MethodCallLike`
-/// node (a parseAsMethods operator the typer has not resolved).  Used by the A3
-/// guard on the §1.24 `MethodCall` passthrough: a surviving `MethodCallLike` in a
-/// binder-prebuilt `serialize(...)` MethodCall makes the tree unprintable and the
-/// reference typer rejects it.  The match is exhaustive (compiler-enforced) so a
-/// future `TypedExpr` variant cannot silently escape the scan.
-fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
+/// `true` iff `e` is, or transitively contains, a node whose `tpe` is `NoType` —
+/// an un-renderable node the reference s-expression printer throws on
+/// (`RuntimeException` → REJECT).  Used by the §1.24 `MethodCall` passthrough to
+/// reject a binder-prebuilt `serialize(v)` whose bound arg the reference typer
+/// likewise leaves un-typed: an unbound Ident, an un-lowered `MethodCallLike`
+/// operator, an unresolved predef `Apply`/`ApplyTypes`, a NoType-result Block, or
+/// a `.get`/property chained on a function-typed receiver.  A property/method
+/// `Select` carries the declared method `SFunc` (non-`NoType`, see
+/// `declared_select_tpe`) and stays ACCEPT.  The match is exhaustive
+/// (compiler-enforced) so a future `TypedExpr` variant cannot silently escape.
+fn expr_contains_untyped_node(e: &TypedExpr) -> bool {
     use TypedExpr::*;
-    let opt = |o: &Option<Box<TypedExpr>>| {
-        o.as_ref()
-            .is_some_and(|b| expr_contains_method_call_like(b))
-    };
+    if node_tpe(e) == &SType::NoType {
+        return true;
+    }
+    let opt =
+        |o: &Option<Box<TypedExpr>>| o.as_ref().is_some_and(|b| expr_contains_untyped_node(b));
     match e {
-        // The target.
-        MethodCallLike { .. } => true,
+        // Always `NoType` (caught above); recurse for exhaustiveness.
+        MethodCallLike { obj, args, .. } => {
+            expr_contains_untyped_node(obj) || args.iter().any(expr_contains_untyped_node)
+        }
         // Leaves — no child expressions.
         Height { .. }
         | Self_ { .. }
@@ -2239,14 +2254,14 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
         | ByteArrayToBigInt { input, .. }
         | ByteArrayToLong { input, .. }
         | LongToByteArray { input, .. }
-        | DecodePoint { input, .. } => expr_contains_method_call_like(input),
+        | DecodePoint { input, .. } => expr_contains_untyped_node(input),
         BoolToSigmaProp { value, .. } | CreateProveDlog { value, .. } => {
-            expr_contains_method_call_like(value)
+            expr_contains_untyped_node(value)
         }
-        ZKProofBlock { body, .. } => expr_contains_method_call_like(body),
-        Select { obj, .. } => expr_contains_method_call_like(obj),
-        ApplyTypes { input, .. } => expr_contains_method_call_like(input),
-        ValNode { body, .. } => expr_contains_method_call_like(body),
+        ZKProofBlock { body, .. } => expr_contains_untyped_node(body),
+        Select { obj, .. } => expr_contains_untyped_node(obj),
+        ApplyTypes { input, .. } => expr_contains_untyped_node(input),
+        ValNode { body, .. } => expr_contains_untyped_node(body),
         Lambda { body, .. } => opt(body),
         // Two children.
         ArithOp { left, right, .. }
@@ -2263,13 +2278,13 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
         | MultiplyGroup { left, right, .. }
         | Exponentiate { left, right, .. }
         | Xor { left, right, .. } => {
-            expr_contains_method_call_like(left) || expr_contains_method_call_like(right)
+            expr_contains_untyped_node(left) || expr_contains_untyped_node(right)
         }
         MapCollection { input, mapper, .. } => {
-            expr_contains_method_call_like(input) || expr_contains_method_call_like(mapper)
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(mapper)
         }
         Append { input, col2, .. } => {
-            expr_contains_method_call_like(input) || expr_contains_method_call_like(col2)
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(col2)
         }
         Filter {
             input, condition, ..
@@ -2279,12 +2294,12 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
         }
         | ForAll {
             input, condition, ..
-        } => expr_contains_method_call_like(input) || expr_contains_method_call_like(condition),
+        } => expr_contains_untyped_node(input) || expr_contains_untyped_node(condition),
         OptionGetOrElse { input, default, .. } => {
-            expr_contains_method_call_like(input) || expr_contains_method_call_like(default)
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(default)
         }
         AtLeast { bound, input, .. } => {
-            expr_contains_method_call_like(bound) || expr_contains_method_call_like(input)
+            expr_contains_untyped_node(bound) || expr_contains_untyped_node(input)
         }
         // Three children.
         If {
@@ -2293,16 +2308,16 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
             false_branch,
             ..
         } => {
-            expr_contains_method_call_like(condition)
-                || expr_contains_method_call_like(true_branch)
-                || expr_contains_method_call_like(false_branch)
+            expr_contains_untyped_node(condition)
+                || expr_contains_untyped_node(true_branch)
+                || expr_contains_untyped_node(false_branch)
         }
         Slice {
             input, from, until, ..
         } => {
-            expr_contains_method_call_like(input)
-                || expr_contains_method_call_like(from)
-                || expr_contains_method_call_like(until)
+            expr_contains_untyped_node(input)
+                || expr_contains_untyped_node(from)
+                || expr_contains_untyped_node(until)
         }
         Fold {
             input,
@@ -2310,9 +2325,9 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
             fold_op,
             ..
         } => {
-            expr_contains_method_call_like(input)
-                || expr_contains_method_call_like(zero)
-                || expr_contains_method_call_like(fold_op)
+            expr_contains_untyped_node(input)
+                || expr_contains_untyped_node(zero)
+                || expr_contains_untyped_node(fold_op)
         }
         SubstConstants {
             script_bytes,
@@ -2320,23 +2335,23 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
             new_values,
             ..
         } => {
-            expr_contains_method_call_like(script_bytes)
-                || expr_contains_method_call_like(positions)
-                || expr_contains_method_call_like(new_values)
+            expr_contains_untyped_node(script_bytes)
+                || expr_contains_untyped_node(positions)
+                || expr_contains_untyped_node(new_values)
         }
         TreeLookup {
             tree, key, proof, ..
         } => {
-            expr_contains_method_call_like(tree)
-                || expr_contains_method_call_like(key)
-                || expr_contains_method_call_like(proof)
+            expr_contains_untyped_node(tree)
+                || expr_contains_untyped_node(key)
+                || expr_contains_untyped_node(proof)
         }
         // Four children.
         CreateProveDHTuple { gv, hv, uv, vv, .. } => {
-            expr_contains_method_call_like(gv)
-                || expr_contains_method_call_like(hv)
-                || expr_contains_method_call_like(uv)
-                || expr_contains_method_call_like(vv)
+            expr_contains_untyped_node(gv)
+                || expr_contains_untyped_node(hv)
+                || expr_contains_untyped_node(uv)
+                || expr_contains_untyped_node(vv)
         }
         CreateAvlTree {
             operation_flags,
@@ -2345,10 +2360,10 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
             value_length_opt,
             ..
         } => {
-            expr_contains_method_call_like(operation_flags)
-                || expr_contains_method_call_like(digest)
-                || expr_contains_method_call_like(key_length)
-                || expr_contains_method_call_like(value_length_opt)
+            expr_contains_untyped_node(operation_flags)
+                || expr_contains_untyped_node(digest)
+                || expr_contains_untyped_node(key_length)
+                || expr_contains_untyped_node(value_length_opt)
         }
         // `input` + `index` + optional `default`.
         ByIndex {
@@ -2356,28 +2371,21 @@ fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
             index,
             default,
             ..
-        } => {
-            expr_contains_method_call_like(input)
-                || expr_contains_method_call_like(index)
-                || opt(default)
-        }
+        } => expr_contains_untyped_node(input) || expr_contains_untyped_node(index) || opt(default),
         DeserializeRegister { default, .. } => opt(default),
         // Collections of children.
         Tuple { items, .. }
         | ConcreteCollection { items, .. }
         | SigmaAnd { items, .. }
-        | SigmaOr { items, .. } => items.iter().any(expr_contains_method_call_like),
+        | SigmaOr { items, .. } => items.iter().any(expr_contains_untyped_node),
         Apply { func, args, .. } => {
-            expr_contains_method_call_like(func) || args.iter().any(expr_contains_method_call_like)
+            expr_contains_untyped_node(func) || args.iter().any(expr_contains_untyped_node)
         }
         Block {
             bindings, result, ..
-        } => {
-            bindings.iter().any(expr_contains_method_call_like)
-                || expr_contains_method_call_like(result)
-        }
+        } => bindings.iter().any(expr_contains_untyped_node) || expr_contains_untyped_node(result),
         MethodCall { obj, args, .. } => {
-            expr_contains_method_call_like(obj) || args.iter().any(expr_contains_method_call_like)
+            expr_contains_untyped_node(obj) || args.iter().any(expr_contains_untyped_node)
         }
     }
 }
@@ -3357,6 +3365,56 @@ mod tests {
         let sel = type_tce("Global.serialize(a ++ b)");
         assert_eq!(sel, seed_expected("Global.serialize(a ++ b)"));
         assert!(sel.contains("(Append:Coll[Byte]"));
+    }
+
+    /// §1.24 passthrough (broadened): the reference renders the BOUND arg, throwing
+    /// (RuntimeException → REJECT) on ANY node whose bound `tpe` is NoType — not only
+    /// an operator `MethodCallLike`.  Covers an unbound Ident, a NoType-result Block,
+    /// an unresolved predef `Apply`/`ApplyTypes` (`blake2b256`/`getVar`/`xorOf`), and a
+    /// property/method chained on a function-typed `Select` (`SELF.R4[Long].get`,
+    /// `SELF.tokens.size`).
+    #[test]
+    fn serialize_with_unrenderable_bound_arg_rejects() {
+        for src in [
+            "serialize(a)",
+            "serialize({val x = 1; x})",
+            "serialize(getVar[Int](1))",
+            "serialize(getVar[Int](1).get)",
+            "serialize(SELF.R4[Long].get)",
+            "serialize(xorOf(Coll(true, false)))",
+            "serialize(SELF.tokens.size)",
+            "serialize(SELF.value + 1)",
+        ] {
+            assert_eq!(type_err(src).class_tag(), "TyperException", "{src}");
+        }
+        // demo-env predef Apply with a BOUND (typed) arg still rejects: the reject is
+        // the un-lowered predef `Apply`, not an unbound variable.
+        let err = type_res("serialize(blake2b256(a))", &demo_script_env(), &tenv(&[]))
+            .expect_err("serialize(blake2b256(a)) rejects");
+        assert_eq!(err.class_tag(), "TyperException");
+    }
+
+    /// §1.24 passthrough (shape): a property/method `Select` surviving un-typed carries
+    /// the DECLARED method signature — `SELF.value → (Box) => Long`, `Coll(1,2).size →
+    /// (Coll[IV]) => Int` (receiver kept, IV un-substituted, res_type=None) — supplied
+    /// by `bind::declared_select_tpe`.  This is the reference bound form, distinct from
+    /// the typed Select (receiver dropped, IV→concrete).
+    #[test]
+    fn serialize_bound_select_arg_carries_declared_signature() {
+        assert_eq!(
+            type_tc("serialize(SELF.value)"),
+            seed_expected("serialize(SELF.value)")
+        );
+        assert_eq!(
+            type_tc("serialize(Coll(1, 2).size)"),
+            seed_expected("serialize(Coll(1, 2).size)")
+        );
+        // Un-substituted declared receiver / kept receiver in dom.
+        assert!(type_tc("serialize(SELF.value)").contains("(Select:(Box) => Long"));
+        assert!(type_tc("serialize(Coll(1, 2).size)").contains("(Select:(Coll[IV]) => Int"));
+        // Standalone (typed) Select is UNCHANGED — receiver dropped, IV→concrete.
+        assert_eq!(type_tc("SELF.value"), "(Select:Long (Self:Box) 'value')");
+        assert!(type_tc("Coll(1, 2, 3).map").starts_with("(Select:[OV]((Int) => OV) => Coll[OV]"));
     }
 
     /// A4 (SString `+` fold): a String constant `+` ANY other constant folds via the

@@ -391,3 +391,31 @@ tc	SELF.getReg	OK (Select:[T](Int) => Option[T] (Self:Box) 'getReg')
 tc	1.toBits	OK (MethodCall:Coll[Boolean] (ConstantNode:Int @1) %SNumericType.toBits [] {})
 tc	1L.toBits	OK (MethodCall:Coll[Boolean] (ConstantNode:Long @1) %SNumericType.toBits [] {})
 tc	1L.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Long @1) %SNumericType.toBytes [] {})
+#
+# ── § 22: M2 adversarial wave M2 — bare-serialize arg is the reference BOUND tree ──
+# A bare `serialize(v)` binds to `MethodCall(Global, serialize, [v])` with an un-typed
+# arg (Rule-10); §1.24 passes it through un-typed, mirroring the reference, which then
+# RENDERS the bound arg.  The reference s-expression printer THROWS (RuntimeException →
+# REJECT, non-reproducible class → verdict graded) on any node whose bound `tpe` is
+# NoType; every node the binder types renders clean and ACCEPTS with the bound shape.
+# A property/method `Select` carries the DECLARED method signature (`declared_select_tpe`),
+# NOT the resolved value type — `SELF.value → (Box) => Long`, `xs.size → (Coll[IV]) => Int`
+# (receiver kept, IV un-substituted, res_type=None) — distinct from the typed Select
+# (§20 B5: receiver dropped, IV→concrete).  Chaining a property/method on that
+# function-typed Select (`SELF.tokens.size`, `SELF.R4[Long].get`) yields NoType → REJECT.
+# REJECT — un-renderable (NoType) bound arg:
+tc	serialize(a)	REJECT 0:0 RuntimeException
+tc	serialize({val x = 1; x})	REJECT 0:0 RuntimeException
+tce	serialize(blake2b256(a))	REJECT 0:0 RuntimeException
+tc	serialize(getVar[Int](1))	REJECT 0:0 RuntimeException
+tc	serialize(getVar[Int](1).get)	REJECT 0:0 RuntimeException
+tc	serialize(SELF.R4[Long].get)	REJECT 0:0 RuntimeException
+tc	serialize(xorOf(Coll(true, false)))	REJECT 0:0 RuntimeException
+tc	serialize(SELF.tokens.size)	REJECT 0:0 RuntimeException
+tc	serialize(SELF.value + 1)	REJECT 0:0 RuntimeException
+# ACCEPT — bound Select/If carries the declared method signature, byte-for-byte:
+tc	serialize(SELF.value)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Long (Self:Box) 'value' None)] {})
+tc	serialize(SELF.id)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Coll[Byte] (Self:Box) 'id' None)] {})
+tc	serialize(OUTPUTS(0).value)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Long (Apply:Box (Outputs:Coll[Box]) [(ConstantNode:Int @0)]) 'value' None)] {})
+tc	serialize(Coll(1, 2).size)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Coll[IV]) => Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2)] #Int) 'size' None)] {})
+tc	serialize(if (HEIGHT > 5) SELF.value else SELF.id)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(If:(Box) => Long (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (Select:(Box) => Long (Self:Box) 'value' None) (Select:(Box) => Coll[Byte] (Self:Box) 'id' None))] {})
