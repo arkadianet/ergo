@@ -237,8 +237,8 @@ pub fn unify_type_lists(ts1: &[SType], ts2: &[SType]) -> Option<TypeSubst> {
 
 /// Apply a type substitution bottom-up to a type.
 ///
-/// For `SType::SFunc`: recurse into dom/range; no tpe_params to drop (use
-/// `apply_subst_func` for `SFuncSpec` when tpe_param dropping is needed).
+/// For `SType::SFunc`: recurse into dom/range and drop any `tpe_params`
+/// substituted by `subst` (mirrors Scala `applySubst`, package.scala:73-75).
 /// For `STypeVar`: replace if present in `subst`; identity otherwise.
 /// All other compound shapes recurse bottom-up; primitives are identity.
 ///
