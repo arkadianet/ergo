@@ -11,6 +11,7 @@ publish    = false
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
 ergo-sigma      = { workspace = true }
+num-bigint      = { workspace = true }
 
 [[bin]]
 name = "difftest"

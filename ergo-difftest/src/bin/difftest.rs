@@ -544,14 +544,16 @@ fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) ->
 }
 
 /// Structured bytes for an ORACLE surface. Maps the oracle surface name onto a
-/// gen surface (the `reduce` surface consumes ErgoTree bytes, so it is fed the
-/// `ergo_tree` generator; an oracle surface with no matching gen surface also
-/// falls back to `ergo_tree`), then returns [`ergo_difftest::gen::gen_structured_at`].
+/// gen surface. The consensus-complete `reduce` surface (eval + cost) is fed the
+/// EVAL-RICH `sigma_expr` generator — well-typed ErgoTree bodies that reduce
+/// non-trivially, exercising the atLeast / coll-eq / token-eq / deserialize cost
+/// vocabulary where the eval/cost bug class lives. Every other oracle surface with
+/// a matching gen surface uses it directly; anything else falls back to `ergo_tree`.
 fn structured_oracle_bytes(seed: u64, iter: u64, oracle_surface: &str) -> Vec<u8> {
-    let gen_surface = if ergo_difftest::gen::SURFACES.contains(&oracle_surface) {
-        oracle_surface
-    } else {
-        "ergo_tree"
+    let gen_surface = match oracle_surface {
+        "reduce" => "sigma_expr",
+        s if ergo_difftest::gen::SURFACES.contains(&s) => s,
+        _ => "ergo_tree",
     };
     ergo_difftest::gen::gen_structured_at(seed, iter, gen_surface).bytes
 }

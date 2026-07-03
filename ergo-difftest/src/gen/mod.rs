@@ -26,17 +26,23 @@ mod box_candidate;
 mod constant;
 mod ergo_tree;
 mod header;
+mod sigma_expr;
 mod transaction;
 
 /// The SER surfaces a structured generator targets. Names match the hermetic
 /// surface registry ([`crate::surfaces::registry`]) so a [`GenOutput`] can be
 /// fed straight through [`crate::run_one`].
-pub const SURFACES: [&str; 5] = [
+pub const SURFACES: [&str; 6] = [
     "ergo_tree",
     "constant",
     "ergo_box_candidate",
     "transaction",
     "header",
+    // Eval-rich ErgoTree bodies for the consensus-complete `reduce` oracle
+    // surface. Hermetically these are still ErgoTree bytes (a "sigma_expr"
+    // registry entry runs the ergo_tree read/write fixed-point invariant on
+    // them); the `reduce` oracle surface maps to this generator.
+    "sigma_expr",
 ];
 
 /// An adversarial wire feature a generator can place at a real grammar
@@ -77,11 +83,46 @@ pub enum Feature {
     TxEmptyOutputs,
     /// An output box token entry with amount 0.
     TxZeroAmountToken,
+
+    // ----- eval/cost vocabulary (the `reduce` surface, Slice 2c) -----
+    // These features live on well-typed ErgoTree bodies that REDUCE
+    // non-trivially against the dummy reduction context. On clean code they
+    // reduce identically on both sides; each `*_cost`/`atLeast` feature is the
+    // wire surface for an eval/cost catalog bug the re-injection gate resurrects.
+    /// Sigma-proposition roots: ProveDlog / ProveDHTuple / sigmaAnd / sigmaOr /
+    /// Bool→SigmaProp coercion. Reduces to a concrete SigmaBoolean.
+    EvalSigmaProps,
+    /// `atLeast(k, [props])` threshold — trivial-child fold + >255 cap (bug #13).
+    EvalAtLeast,
+    /// Boolean logic over `SBoolean`: AND/OR/XOR/NOT collections and If/else.
+    EvalBoolLogic,
+    /// Arithmetic (+,-,*,/,%,min,max) over Int/Long with edge values.
+    EvalArith,
+    /// BigInt arithmetic with edge magnitudes.
+    EvalBigIntArith,
+    /// Ordered/equality comparisons (Lt/Le/Gt/Ge/EQ/NEQ) over primitives.
+    EvalComparison,
+    /// EQ/NEQ over `Coll[Byte]`/`Coll[Int]` that differ EARLY vs late — the
+    /// short-circuit cost surface (bug #15 coll-equality-cost).
+    EvalCollEqEarly,
+    /// EQ over `Coll[(Coll[Byte],Long)]` token-shaped collections — the
+    /// per-token short-circuit cost surface (bug #16 token-equality-cost).
+    EvalTokenEq,
+    /// Collection transforms: map/filter/fold/exists/forall/slice/indexOf/size/
+    /// byIndex over a `Coll[Int]`/`Coll[Byte]`.
+    EvalCollOps,
+    /// Context accessors: HEIGHT, SELF.value/.id/.propositionBytes, INPUTS/
+    /// OUTPUTS, getVar.
+    EvalContext,
+    /// A `DeserializeContext`/`DeserializeRegister` node (bug #3 deser-subst cost).
+    EvalDeserializeNode,
+    /// Registers / tuples / options materialized and projected in the body.
+    EvalRegTupleOption,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Feature; 16] = [
+    pub const ALL: [Feature; 28] = [
         Feature::OnManifoldValid,
         Feature::HeaderVersionHighBit,
         Feature::TreeVersionNonZero,
@@ -98,6 +139,18 @@ impl Feature {
         Feature::OffCurveGroupElement,
         Feature::TxEmptyOutputs,
         Feature::TxZeroAmountToken,
+        Feature::EvalSigmaProps,
+        Feature::EvalAtLeast,
+        Feature::EvalBoolLogic,
+        Feature::EvalArith,
+        Feature::EvalBigIntArith,
+        Feature::EvalComparison,
+        Feature::EvalCollEqEarly,
+        Feature::EvalTokenEq,
+        Feature::EvalCollOps,
+        Feature::EvalContext,
+        Feature::EvalDeserializeNode,
+        Feature::EvalRegTupleOption,
     ];
 
     /// Stable identifier for reports.
@@ -119,6 +172,18 @@ impl Feature {
             Feature::OffCurveGroupElement => "off_curve_group_element",
             Feature::TxEmptyOutputs => "tx_empty_outputs",
             Feature::TxZeroAmountToken => "tx_zero_amount_token",
+            Feature::EvalSigmaProps => "eval_sigma_props",
+            Feature::EvalAtLeast => "eval_at_least",
+            Feature::EvalBoolLogic => "eval_bool_logic",
+            Feature::EvalArith => "eval_arith",
+            Feature::EvalBigIntArith => "eval_bigint_arith",
+            Feature::EvalComparison => "eval_comparison",
+            Feature::EvalCollEqEarly => "eval_coll_eq_early_mismatch",
+            Feature::EvalTokenEq => "eval_token_eq",
+            Feature::EvalCollOps => "eval_coll_ops",
+            Feature::EvalContext => "eval_context",
+            Feature::EvalDeserializeNode => "eval_deserialize_node",
+            Feature::EvalRegTupleOption => "eval_reg_tuple_option",
         }
     }
 
@@ -140,6 +205,21 @@ impl Feature {
             Feature::RegisterV6Type => Some("#5"),
             Feature::OffCurveGroupElement => Some("#4"),
             Feature::TxEmptyOutputs | Feature::TxZeroAmountToken => Some("#23"),
+            // Eval/cost bugs the `reduce` surface is the wire home for.
+            Feature::EvalAtLeast => Some("#13"),
+            Feature::EvalCollEqEarly => Some("#15"),
+            Feature::EvalTokenEq => Some("#16"),
+            Feature::EvalDeserializeNode => Some("#3"),
+            // Eval vocabulary with no single mapped catalog bug (calibration /
+            // reduce-path coverage). These MUST reduce identically on both sides.
+            Feature::EvalSigmaProps
+            | Feature::EvalBoolLogic
+            | Feature::EvalArith
+            | Feature::EvalBigIntArith
+            | Feature::EvalComparison
+            | Feature::EvalCollOps
+            | Feature::EvalContext
+            | Feature::EvalRegTupleOption => None,
         }
     }
 
@@ -249,6 +329,7 @@ pub fn gen_structured(rng: &mut Rng, surface: &str) -> GenOutput {
         "ergo_box_candidate" => box_candidate::gen(rng),
         "transaction" => transaction::gen(rng),
         "header" => header::gen(rng),
+        "sigma_expr" => sigma_expr::gen(rng),
         other => {
             debug_assert!(false, "gen_structured: unknown surface {other:?}");
             // Fall back to the crown-jewel surface rather than panic in a
@@ -267,6 +348,7 @@ pub fn gen_on_manifold(rng: &mut Rng, surface: &str) -> GenOutput {
         "ergo_box_candidate" => box_candidate::gen_valid(rng),
         "transaction" => transaction::gen_valid(rng),
         "header" => header::gen_valid(rng),
+        "sigma_expr" => sigma_expr::gen_valid(rng),
         other => {
             debug_assert!(false, "gen_on_manifold: unknown surface {other:?}");
             ergo_tree::gen_valid(rng)
@@ -334,6 +416,21 @@ pub fn declared_vocabulary(surface: &str) -> FeatureSet {
         ],
         "transaction" => &[OnManifoldValid, TxEmptyOutputs, TxZeroAmountToken],
         "header" => &[OnManifoldValid, HeaderVersionHighBit],
+        "sigma_expr" => &[
+            OnManifoldValid,
+            EvalSigmaProps,
+            EvalAtLeast,
+            EvalBoolLogic,
+            EvalArith,
+            EvalBigIntArith,
+            EvalComparison,
+            EvalCollEqEarly,
+            EvalTokenEq,
+            EvalCollOps,
+            EvalContext,
+            EvalDeserializeNode,
+            EvalRegTupleOption,
+        ],
         _ => &[],
     };
     FeatureSet::from_iter(features.iter().copied())

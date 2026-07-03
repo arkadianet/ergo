@@ -81,6 +81,45 @@ richer SIGMA/eval generators (Slice 2c) exercise the `reduce` surface deeply, or
 minimized + repro-verified on `reduce`/box/tx before a human sees it; the
 which-side-is-right call stays with the human.
 
+## Slice 2c — eval-rich SIGMA generators on the `reduce` surface (BUILT)
+
+The `sigma_expr` generator (`src/gen/sigma_expr.rs`) assembles **well-typed
+ErgoTree bodies that reduce non-trivially** and feeds them to the consensus-
+complete `reduce` oracle surface (mapped in `difftest.rs::structured_oracle_bytes`:
+`reduce → sigma_expr`). Vocabulary: sigma props (ProveDlog/DHTuple/sigmaAnd/Or +
+Bool→SigmaProp), boolean logic, Int/Long/BigInt arithmetic, comparisons,
+collection ops (map/filter/fold/exists/forall/slice/byIndex/size), context
+accessors (HEIGHT/SELF/INPUTS/getVar), registers/tuples/options, and the bug-
+bearing edges: `atLeast` (#13), early-vs-late `Coll` equality (#15), token-
+collection equality (#16), deserialize nodes (#3).
+
+**Clean baseline (the whole point).**
+`difftest --structured --oracle --surface reduce --iters 3000 --seed 1` →
+`checks=3000 unique_classes=0 total_divergences=0`. The eval-rich trees reduce to
+an IDENTICAL `P:<prop>|<cost>` on both sides on clean HEAD — so any divergence the
+generator surfaces is a genuine candidate, never generator noise.
+
+**Re-injection deltas (clean=agree → patched=diverge, on `reduce`).** Each mapped
+bug is rediscovered by a pinned trigger (`known_bugs/manifest.toml`, patches in
+`known_bugs/patches/`):
+
+| bug | trigger | clean | patched (bug re-injected into ergo-sigma) |
+|-----|---------|-------|-------------------------------------------|
+| #13 atLeast >255 cap | `atLeast(1, [256×sigmaProp(true)])` | both REJECT (agree) | node `Accept P:d3\|1481` vs jvm `Reject` → **AcceptReject** |
+| #15 coll-eq cost | `sigmaProp(Coll[Byte](200) == flip@0)` | both `P:d2\|43` | node `P:d2\|45` vs jvm `P:d2\|43` → **Canonical/cost** |
+| #16 token-eq cost | `sigmaProp(tokens == flip first id)` | both `P:d2\|60` | node `P:d2\|168` vs jvm `P:d2\|60` → **Canonical/cost** |
+
+**Coverage gap (reported, not hidden): #3 deser-subst cost.** The deserialize-
+substitution INIT cost lives in `reduce.rs::verify_spending` (the Scala
+`Interpreter.reductionWithDeserialize` twin). The `reduce` oracle surface calls
+`reduce_expr_with_cost` directly (`oracle.rs::reduce_verdict`) and the JVM oracle
+calls `CErgoTreeEvaluator.eval` with `initCost=0` — BOTH bypass that init-cost
+pass, so re-injecting `reduce.rs:211` yields **no delta on this surface**. The
+generator still emits the deserialize-node vocabulary (`Feature::EvalDeserializeNode`,
+a `DeserializeRegister/Context` on a dead `If` branch) for coverage. Closing #3
+needs both sides of the reduce surface to route through the full verify path — a
+lead-engineer oracle-contract change (deferred), or the replay driver.
+
 ## Recommended next steps (revised by these findings)
 1. **Point consensus-bug hunting at `reduce`** (and box/tx/header), not bare
    `ergo_tree`. The `reduce` surface's 0-baseline is the clean signal.

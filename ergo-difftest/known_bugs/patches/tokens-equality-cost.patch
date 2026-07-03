@@ -1,0 +1,13 @@
+diff --git a/ergo-sigma/src/evaluator/cost.rs b/ergo-sigma/src/evaluator/cost.rs
+index b682da2..2ea8e65 100644
+--- a/ergo-sigma/src/evaluator/cost.rs
++++ b/ergo-sigma/src/evaluator/cost.rs
+@@ -546,7 +546,7 @@ fn eq_coll_elems(
+         k_eff += 1;
+         if !eq_with_cost_inner(ai, bi, ctx, cost)? {
+             all_eq = false;
+-            break;
++            // RE-INJECT #16: no per-element short-circuit (charge every token)
+         }
+     }
+     let eq_coll = CostKind::PerItem {

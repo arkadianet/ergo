@@ -669,6 +669,7 @@ dependencies = [
  "ergo-primitives",
  "ergo-ser",
  "ergo-sigma",
+ "num-bigint",
 ]
 
 [[package]]

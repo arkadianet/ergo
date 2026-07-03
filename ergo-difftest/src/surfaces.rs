@@ -102,6 +102,16 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
             ergo_tree::read_ergo_tree,
             ergo_tree::write_ergo_tree
         ),
+        // Eval-rich ErgoTree bodies (the `sigma_expr` generator) are ErgoTree
+        // wire bytes, so hermetically they run the SAME read/write fixed-point
+        // invariant as `ergo_tree`. The consensus-complete differential for them
+        // is the JVM `reduce` oracle surface; this hermetic entry just proves the
+        // generator emits no-panic, byte-stable trees.
+        rw!(
+            "sigma_expr",
+            ergo_tree::read_ergo_tree,
+            ergo_tree::write_ergo_tree
+        ),
         rw!(
             "ergo_box_candidate",
             ergo_box::read_ergo_box_candidate,

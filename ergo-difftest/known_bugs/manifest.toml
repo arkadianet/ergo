@@ -94,49 +94,73 @@ expected_canonical = ""
 note = "TODO: trigger_hex is a P2PK tree with an off-curve point: 0008cd<33-byte off-curve SEC1 point>. Off-curve points have valid SEC1 prefix (02 or 03) but the x coordinate is not on the secp256k1 curve. Complex to hand-craft; use oracle structured mode. The re-inject is in oracle.rs (change check_group_elements=true→false in reduce_verdict's deserialize_box_script call)."
 
 # ---------------------------------------------------------------------------
-# 6. deserialize-subst-cost
+# 6. deserialize-subst-cost  [COVERAGE GAP — see note]
 # ---------------------------------------------------------------------------
 [[bug]]
 id             = "deserialize-subst-cost"
 surface        = "reduce"
 class          = "cost"
-wire_reachable = true
-fix_file       = "ergo-sigma/src/evaluator/"
-reinject       = "In the V6 Deserialize-node cost: use re-serialized tree length instead of script_bytes.len()"
+wire_reachable = false
+fix_file       = "ergo-sigma/src/reduce.rs"
+reinject       = "reduce.rs:211 self_box.script_bytes.len() -> serialized_ergo_tree_len(ergo_tree)"
 budget_iters   = 50000
 trigger_hex    = ""
 expected_canonical = ""
-note = "TODO: trigger requires a v6 tree with a Deserialize node. Re-inject needs exact file location from ergo-sigma evaluator."
+note = "COVERAGE GAP on the `reduce` oracle surface. The deserialize-substitution INIT cost (ergoTree.bytes.length * CostPerTreeByte) lives in reduce.rs `verify_spending` (the Scala `Interpreter.reductionWithDeserialize` twin). The `reduce` oracle surface calls `ergo_sigma::evaluator::reduce_expr_with_cost` DIRECTLY (see oracle.rs::reduce_verdict) and the JVM oracle calls `CErgoTreeEvaluator.eval` with initCost=0 (ErgoSerdeOracle.scala::reduce) — BOTH bypass reductionWithDeserialize, so re-injecting reduce.rs:211 produces NO delta here. The sigma_expr generator DOES emit the deserialize-node vocabulary (Feature::EvalDeserializeNode, a DeserializeRegister/Context on a dead If branch) for coverage, but this cost bug needs the reduce surface (both sides) to route through the full verify path — a lead-engineer oracle-contract change, not done here. Reachable via the REPLAY driver instead."
 
 # ---------------------------------------------------------------------------
-# 7. coll-equality-cost
+# 7. coll-equality-cost  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
 # ---------------------------------------------------------------------------
 [[bug]]
 id             = "coll-equality-cost"
 surface        = "reduce"
 class          = "cost"
 wire_reachable = true
-fix_file       = "ergo-sigma/src/evaluator/opcodes/"
-reinject       = "Remove the early-exit on first mismatch in Coll equality cost"
+fix_file       = "ergo-sigma/src/evaluator/cost.rs"
+reinject       = "In prim_coll_eq, delete the `break;` on first-mismatch so k_eff spans the FULL length (pre-#15: no cost short-circuit). Patch: known_bugs/patches/coll-equality-cost.patch"
 budget_iters   = 50000
-trigger_hex    = ""
+# sigma_expr::trigger_coll_eq_early(): sigmaProp(Coll[Byte](0..200) == same but byte0 flipped).
+# Clean: node + JVM both P:d2|43 (short-circuit charges the 1-element compared prefix).
+# Bugged: node P:d2|45 (full 200 → 2 cost chunks vs 1), JVM P:d2|43 -> Canonical cost divergence.
+trigger_hex    = "00d1930ec801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c70ec801ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7"
 expected_canonical = ""
-note = "TODO: trigger requires a Coll-equality expression. Cost oracle will detect the divergence."
+note = "ORACLE reduce cost. difftest --oracle --repro <trigger_hex> --surface reduce: clean AGREE (P:d2|43==43), patched Canonical (rust P:d2|45 vs jvm P:d2|43)."
 
 # ---------------------------------------------------------------------------
-# 8. tokens-equality-cost
+# 8. tokens-equality-cost  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
 # ---------------------------------------------------------------------------
 [[bug]]
 id             = "tokens-equality-cost"
 surface        = "reduce"
 class          = "cost"
 wire_reachable = true
-fix_file       = "ergo-sigma/src/evaluator/"
-reinject       = "Revert tokens-equality cost to pre-#115 form"
+fix_file       = "ergo-sigma/src/evaluator/cost.rs"
+reinject       = "In eq_coll_elems, delete the `break;` on first-unequal-element so every token's equalDataValues cost is charged (pre-#16 token/non-prim-coll cost). Patch: known_bugs/patches/tokens-equality-cost.patch"
 budget_iters   = 50000
-trigger_hex    = ""
+# sigma_expr::trigger_token_eq_early(): sigmaProp(tokens == same but FIRST token id flipped),
+# 5-token Coll[(Coll[Byte],Long)]. Clean: node + JVM both P:d2|60 (short-circuit at token 0).
+# Bugged: node P:d2|168 (all 5 tokens' inner costs + full EQ_Coll), JVM P:d2|60 -> Canonical.
+trigger_hex    = "00d1930c4d0e05201111111111111111111111111111111111111111111111111111111111111111d00f201212121212121212121212121212121212121212121212121212121212121212d20f201313131313131313131313131313131313131313131313131313131313131313d40f201414141414141414141414141414141414141414141414141414141414141414d60f201515151515151515151515151515151515151515151515151515151515151515d80f0c4d0e0520ee11111111111111111111111111111111111111111111111111111111111111d00f201212121212121212121212121212121212121212121212121212121212121212d20f201313131313131313131313131313131313131313131313131313131313131313d40f201414141414141414141414141414141414141414141414141414141414141414d60f201515151515151515151515151515151515151515151515151515151515151515d80f"
 expected_canonical = ""
-note = "TODO: trigger requires a tree that exercises token equality."
+note = "ORACLE reduce cost. difftest --oracle --repro <trigger_hex> --surface reduce: clean AGREE (P:d2|60==60), patched Canonical (rust P:d2|168 vs jvm P:d2|60)."
+
+# ---------------------------------------------------------------------------
+# 8b. atleast-maxchildren-cap  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "atleast-maxchildren-cap"
+surface        = "reduce"
+class          = "reduce"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/opcodes/sigma.rs"
+reinject       = "Set AT_LEAST_MAX_CHILDREN to usize::MAX so the >255-children cap never fires (catalog #13, the DoS/accept-invalid arm). Patch: known_bugs/patches/atleast-maxchildren-cap.patch"
+budget_iters   = 50000
+# sigma_expr::trigger_at_least_over_cap(): atLeast(1, [256 x sigmaProp(true)]).
+# Clean: node + JVM both REJECT (MaxChildrenCountForAtLeastOp = 255 -> throws).
+# Bugged: node folds to TrivialProp(true) -> Accept P:d3|1481, JVM still Reject -> AcceptReject.
+trigger_hex    = "009804028380020808d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d3"
+expected_canonical = ""
+note = "ORACLE reduce accept/reject. difftest --oracle --repro <trigger_hex> --surface reduce: clean AGREE (both REJECT), patched AcceptReject (rust Accept P:d3|1481 vs jvm Reject IllegalArgumentException)."
 
 # ---------------------------------------------------------------------------
 # 9. signed-header-version-no-size-gate
