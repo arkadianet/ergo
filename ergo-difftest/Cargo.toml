@@ -26,6 +26,11 @@ hex             = { workspace = true }
 tempfile        = { workspace = true }
 sha2            = { workspace = true }
 
+[dev-dependencies]
+# Used in avl_frame tests to generate proof fixtures via the prover side.
+ergo_avltree_rust = { workspace = true }
+bytes             = { workspace = true }
+
 [[bin]]
 name = "difftest"
 path = "src/bin/difftest.rs"

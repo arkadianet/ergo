@@ -666,12 +666,14 @@ dependencies = [
 name = "ergo-difftest"
 version = "0.5.0"
 dependencies = [
+ "bytes",
  "ergo-primitives",
  "ergo-rest-json",
  "ergo-ser",
  "ergo-sigma",
  "ergo-state",
  "ergo-validation",
+ "ergo_avltree_rust",
  "hex",
  "num-bigint",
  "serde",

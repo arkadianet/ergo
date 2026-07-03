@@ -185,6 +185,106 @@ object ErgoSerdeOracle {
                     else "WRAPOTHER rule=" + u.error.rule.id
                 }
               } catch { case e: Throwable => "THROW " + e.getClass.getSimpleName }
+            case "validate" =>
+              // Stateless structural validity — mirrors Scala ErgoTransaction.statelessValidity().
+              // No UTXO set or chain state needed; context-free checks only.
+              // ACCEPT on success, REJECT <ExcClass> on any validation failure.
+              val tx = org.ergoplatform.modifiers.mempool.ErgoTransactionSerializer.parseBytes(bytes)
+              tx.statelessValidity() match {
+                case scala.util.Success(_) => "ACCEPT"
+                case scala.util.Failure(e) => "REJECT " + e.getClass.getSimpleName
+              }
+            case "verify_avl" =>
+              // AVL+ batch-proof verification — twin of ergo_sigma::avl::AvlVerifier.
+              // Input = avl_frame blob defined in ergo-difftest/src/avl_frame.rs:
+              //   startingDigest(33) | keyLen(u8) | valueLenOpt(tag[+u8]) |
+              //   proofLen(vlq) | proof | opCount(vlq) |
+              //   [opTag(u8) | key[keyLen] | (Insert/Update: valLen(vlq) val)]*
+              //
+              // Uses sigmastate.eval.CAvlTreeVerifier — the same class the node
+              // uses inside the evaluator — so the parity with the Scala reference
+              // is exact.  Framing errors → ERR; op failure → REJECT; success →
+              // ACCEPT <finalDigestHex>.
+              //
+              // A per-query Try wraps the whole verification so a valid-but-wrong
+              // proof that causes a Throwable (the Scala CAvlTreeVerifier wraps
+              // performOneOperation in Try; the Rust AvlVerifier wraps in
+              // catch_unwind) surfaces as REJECT, not as a process abort.
+              scala.util.Try {
+                // ── tiny VLQ reader ────────────────────────────────────────────
+                var pos = 0
+                def readByte(): Int  = { val b = bytes(pos) & 0xff; pos += 1; b }
+                def readBytes(n: Int): Array[Byte] = {
+                  val arr = java.util.Arrays.copyOfRange(bytes, pos, pos + n)
+                  pos += n; arr
+                }
+                def readVlq(): Int = {
+                  var result = 0; var shift = 0; var cont = true
+                  while (cont) {
+                    val b = readByte()
+                    result |= (b & 0x7f) << shift
+                    shift  += 7
+                    cont    = (b & 0x80) != 0
+                  }
+                  result
+                }
+                // ── frame header ───────────────────────────────────────────────
+                val startDigest = readBytes(33)
+                val keyLen      = readByte()
+                val valueTag    = readByte()
+                val valueLenOpt: Option[Int] = valueTag match {
+                  case 0 => None
+                  case 1 => Some(readByte())
+                  case t => throw new IllegalArgumentException(s"bad valueLenOpt tag $t")
+                }
+                val proofBytes = readBytes(readVlq())
+                val opCount    = readVlq()
+                // ── construct verifier ─────────────────────────────────────────
+                // CAvlTreeVerifier wraps BatchAVLVerifier with Blake2b256Unsafe —
+                // byte-identical to the Rust BatchAVLVerifier with the same hash.
+                // The constructor is private[eval] in Scala source; use reflection
+                // to construct it from raw proof bytes outside the package.
+                val verifier: sigmastate.eval.CAvlTreeVerifier = {
+                  val ctor = classOf[sigmastate.eval.CAvlTreeVerifier].getDeclaredConstructors()(0)
+                  ctor.setAccessible(true)
+                  ctor.newInstance(startDigest, proofBytes,
+                    Integer.valueOf(keyLen), valueLenOpt
+                  ).asInstanceOf[sigmastate.eval.CAvlTreeVerifier]
+                }
+                // ── apply operations ───────────────────────────────────────────
+                for (_ <- 0 until opCount) {
+                  val opTag = readByte()
+                  val key   = readBytes(keyLen)
+                  val result = opTag match {
+                    case 0 => verifier.performLookup(key)
+                    case 1 => val v = readBytes(readVlq()); verifier.performInsert(key, v)
+                    case 2 => val v = readBytes(readVlq()); verifier.performUpdate(key, v)
+                    case 3 => verifier.performRemove(key)
+                    case t => throw new IllegalArgumentException(s"bad opTag $t")
+                  }
+                  // .get on Failure throws → caught by enclosing Try → REJECT
+                  result.get
+                }
+                // ── final digest ───────────────────────────────────────────────
+                // digest is declared without () in Scala source; calling it with
+                // () would apply the Option result, not call the method.
+                // ADDigest is a type alias for Array[Byte] — cast explicitly.
+                verifier.digest.fold("REJECT AvlVerifierPoisoned")(
+                  d => "ACCEPT " + hex(d.asInstanceOf[Array[Byte]])
+                )
+              } match {
+                // Framing errors (bad tags, truncated buffer) → ERR so the
+                // harness knows the oracle couldn't interpret the input, not
+                // that verification actually failed.
+                case scala.util.Failure(e: ArrayIndexOutOfBoundsException) =>
+                  "ERR frame-truncated:" + e.getMessage
+                case scala.util.Failure(e: IllegalArgumentException) =>
+                  "ERR frame-invalid:" + e.getMessage
+                // Verification failures → REJECT with the exception class name
+                // so the triage log shows which Scala exception fired.
+                case scala.util.Failure(e) => "REJECT " + e.getClass.getSimpleName
+                case scala.util.Success(s) => s
+              }
             case other => "ERR unsupported-surface:" + other
           }
           }

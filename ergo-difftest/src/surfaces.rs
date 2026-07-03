@@ -11,6 +11,7 @@
 //!   with `Ok`/`Err`, never panic. The runner's `catch_unwind` turns a panic
 //!   into a [`Outcome::Bug`].
 
+use crate::avl_frame::{AvlFrame, AvlOp};
 use crate::Outcome;
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
@@ -237,6 +238,70 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                     Err(_) => Outcome::Rejected,
                 },
             ),
+        },
+        // ----- `validate`: stateless transaction structural check -----
+        // Hermetic check: parse the transaction bytes and run the stateless
+        // structural rules (Scala `ErgoTransaction.statelessValidity`).
+        // No UTXO set or chain state needed. Accepted / rejected only; no
+        // write fixed-point (the surface has no independent canonical form).
+        Surface {
+            name: "validate",
+            run: Box::new(|b| {
+                use ergo_validation::tx::structural::validate_structural;
+                let mut r = VlqReader::new(b);
+                let tx = match ergo_ser::transaction::read_transaction(&mut r) {
+                    Ok(t) => t,
+                    Err(_) => return Outcome::Rejected,
+                };
+                let params = ergo_validation::context::ProtocolParams::mainnet_default();
+                match validate_structural(&tx, &params) {
+                    Ok(()) => Outcome::Accepted,
+                    Err(_) => Outcome::Rejected,
+                }
+            }),
+        },
+        // ----- `verify_avl`: AVL+ batch-proof verification -----
+        //
+        // Hermetic check that exercises the `AvlVerifier` panic guard (bug #6):
+        //   CLEAN HEAD  — `AvlVerifier::guarded` catches an op-time panic from
+        //                 the upstream crate and returns `Err(())` → `Rejected`.
+        //   PATCHED HEAD — the guard is removed; the panic escapes the surface
+        //                 run fn; `run_one`'s `catch_unwind` catches it →
+        //                 `Outcome::Bug("PANIC: …")`.
+        //
+        // This surface is the canonical re-injection detection channel for #6.
+        Surface {
+            name: "verify_avl",
+            run: Box::new(|b| {
+                let frame = match AvlFrame::decode(b) {
+                    Ok(f) => f,
+                    Err(_) => return Outcome::Rejected,
+                };
+                let mut verifier = match ergo_sigma::avl::AvlVerifier::new(
+                    &frame.starting_digest,
+                    &frame.proof,
+                    frame.key_len as usize,
+                    frame.value_len_opt.map(|n| n as usize),
+                ) {
+                    Ok(v) => v,
+                    Err(_) => return Outcome::Rejected,
+                };
+                for op in &frame.ops {
+                    let r = match op {
+                        AvlOp::Lookup { key } => verifier.lookup(key).map(|_| ()),
+                        AvlOp::Insert { key, value } => verifier.insert(key, value),
+                        AvlOp::Update { key, value } => verifier.update(key, value),
+                        AvlOp::Remove { key } => verifier.remove(key),
+                    };
+                    if r.is_err() {
+                        return Outcome::Rejected;
+                    }
+                }
+                match verifier.digest() {
+                    Some(_) => Outcome::Accepted,
+                    None => Outcome::Rejected,
+                }
+            }),
         },
     ];
 

@@ -420,6 +420,42 @@ trigger_hex    = ""
 note = "SD: requires specific re-emission box context."
 
 # ---------------------------------------------------------------------------
+# 26. avl-verifier-panic  [PATCH VERIFIED, DEMONSTRATED]
+# ---------------------------------------------------------------------------
+# Bug #6 in known-bug-catalog.md: the upstream ergo_avltree_rust crate
+# panic!s at operation time (authenticated_tree_ops.rs:635) when a
+# structurally-valid-but-wrong proof is supplied (e.g. a Lookup proof used
+# for a Remove).  The Scala CAvlTreeVerifier catches that Throwable inside
+# performOneOperation's Try; the FIXED Rust side catches it in
+# AvlVerifier::guarded's catch_unwind.  A node without that guard crashes,
+# providing a consensus-DoS vector for any permissionless contract that
+# passes attacker-controlled AVL proof bytes.
+#
+# CLEAN HEAD:  verify_avl on trigger → Rust Rejected (guard catches panic)
+#              JVM: REJECT NoSuchElementException (Try.get on Failure)
+#              → AGREE (both reject)
+#
+# PATCHED HEAD: verify_avl on trigger → Rust PANICS (escapes guarded fn,
+#               caught by run_one's catch_unwind → Outcome::Bug)
+#               JVM: REJECT (unchanged)
+#               → DIVERGE (Bug vs Reject)
+[[bug]]
+id             = "avl-verifier-panic"
+surface        = "verify_avl"
+class          = "panic"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/avl.rs"
+reinject       = "In guarded(), remove catch_unwind(AssertUnwindSafe(move || { let r = f(&mut bv); (bv, r) })) and replace with: let r = f(&mut bv); self.0 = Some(bv); r — the op-time panic then escapes to the caller. Patch: known_bugs/patches/avl-verifier-panic.patch"
+budget_iters   = 10000
+# Frame: startingDigest(33) | keyLen(u8=32) | valueLenOpt(0=None) |
+# proofLen(vlq=140) | proof[140] | opCount(vlq=1) | [Remove | key_a[32]]
+# key_a = [0x01; 32], key_b = [0x0c; 32].  Lookup proof for key_a supplied
+# to a verifier that attempts Remove(key_a) → op-time panic at avl-ops:635.
+trigger_hex    = "85448a1a82283e81abf86173e19f177567b44108408e59e4b3d07d4f76ede0e70220008c0103e97b407dbcbf58aefc91cec7293c87b2afc236f1fbe52f88a0ec95cf3719ab210201010101010101010101010101010101010101010101010101010101010101010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c00000001ab035509930f17858131ed5c99f00c4afa1f1927f183c766e22a9de498051bc090ad0001040201030101010101010101010101010101010101010101010101010101010101010101"
+expected_canonical = ""
+note = "HERMETIC+ORACLE: clean → difftest --repro <trigger_hex> --surface verify_avl → Rejected (guard catches panic). Patched → Outcome::Bug (PANIC: ...authenticated_tree_ops.rs:635). Oracle: clean AGREE (both REJECT), patched DIVERGE (Rust Bug vs JVM REJECT)."
+
+# ---------------------------------------------------------------------------
 # 25. register-provenance-byteswithnore  [STATE-DEPENDENT]
 # ---------------------------------------------------------------------------
 [[bug]]

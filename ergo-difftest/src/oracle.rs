@@ -180,6 +180,23 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
             compare_canonical: true,
             soft_fork_header: false,
         },
+        SurfaceSpec {
+            // stateless structural validity (Scala `ErgoTransaction.statelessValidity`).
+            // Accept/reject only — no canonical form to compare.
+            name: "validate",
+            rust_verdict: validate_verdict,
+            compare_canonical: false,
+            soft_fork_header: false,
+        },
+        SurfaceSpec {
+            // AVL+ batch-proof verification twin.
+            // `compare_canonical = true`: when both sides accept, compare the
+            // final digest hex — a mismatch is an accept-wrong-digest divergence.
+            name: "verify_avl",
+            rust_verdict: verify_avl_verdict,
+            compare_canonical: true,
+            soft_fork_header: false,
+        },
     ]
 }
 
@@ -449,6 +466,90 @@ fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
             )
         }
         Err(e) => (Verdict::Reject(format!("{e:?}")), consumed),
+    }
+}
+
+/// `validate`: stateless structural transaction validity.
+///
+/// Mirrors Scala `ErgoTransaction.statelessValidity()`: the context-free checks
+/// that need only the serialized transaction (no UTXO set, no state context).
+/// These are: non-empty inputs, non-empty outputs, count caps at `Short.MaxValue`,
+/// no duplicate inputs, per-output box-size / proposition-size / value / token-count
+/// limits.
+///
+/// Group-element curve-checks and canonical-encoding checks are **not** included:
+/// Scala performs GE checks at deserialization time (not inside `statelessValidity`)
+/// and canonical encoding is a separate check (`ergoTransactionNonCanonical`) run
+/// by the full validator, not by `statelessValidity`.
+fn validate_verdict(bytes: &[u8]) -> (Verdict, usize) {
+    let mut r = VlqReader::new(bytes);
+    let tx = match ergo_ser::transaction::read_transaction(&mut r) {
+        Err(e) => return (Verdict::Reject(format!("{e:?}")), r.position()),
+        Ok(tx) => tx,
+    };
+    let consumed = r.position();
+    let params = ergo_validation::context::ProtocolParams::mainnet_default();
+    match ergo_validation::tx::structural::validate_structural(&tx, &params) {
+        Ok(()) => (Verdict::Accept(String::new()), consumed),
+        Err(e) => (Verdict::Reject(format!("{e:?}")), consumed),
+    }
+}
+
+/// `verify_avl`: AVL+ batch-proof verification.
+///
+/// Decodes an [`crate::avl_frame::AvlFrame`], constructs the
+/// `ergo_sigma::avl::AvlVerifier` (the guarded wrapper around the upstream
+/// `ergo_avltree_rust::BatchAVLVerifier`), and applies every operation in
+/// the frame. On success returns the final tree digest as hex; on any op
+/// failure returns `Reject`.
+///
+/// The guard's `catch_unwind` boundary is the load-bearing element for bug #6:
+/// a structurally-valid-but-wrong proof (e.g. a Lookup proof used for a Remove)
+/// causes the upstream crate to `panic!` at op-time; the guard catches it and
+/// returns `Err(())`, which surfaces here as `Verdict::Reject`. On a patched
+/// (unguarded) codebase the panic escapes this function and is caught by
+/// `run_one`'s outer `catch_unwind`, yielding `Outcome::Bug`.
+fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
+    use crate::avl_frame::{AvlFrame, AvlOp};
+    use ergo_sigma::avl::AvlVerifier;
+
+    let frame = match AvlFrame::decode(bytes) {
+        Ok(f) => f,
+        // Framing errors are oracle/harness problems → Err, not Reject.
+        Err(e) => return (Verdict::Err(format!("avl_frame: {e}")), 0),
+    };
+    // The frame consumes all of `bytes` (no concatenation with other fields).
+    let consumed = bytes.len();
+
+    let mut verifier = match AvlVerifier::new(
+        &frame.starting_digest,
+        &frame.proof,
+        frame.key_len as usize,
+        frame.value_len_opt.map(|n| n as usize),
+    ) {
+        Ok(v) => v,
+        Err(e) => return (Verdict::Reject(format!("construction: {e}")), consumed),
+    };
+
+    for (i, op) in frame.ops.iter().enumerate() {
+        let result = match op {
+            AvlOp::Lookup { key } => verifier.lookup(key).map(|_| ()),
+            AvlOp::Insert { key, value } => verifier.insert(key, value),
+            AvlOp::Update { key, value } => verifier.update(key, value),
+            AvlOp::Remove { key } => verifier.remove(key),
+        };
+        if result.is_err() {
+            return (Verdict::Reject(format!("op[{i}] failed")), consumed);
+        }
+    }
+
+    match verifier.digest() {
+        Some(d) => (Verdict::Accept(to_hex(&d)), consumed),
+        // digest() returns None only when the verifier was poisoned by a
+        // caught op-time panic.  This is a stronger rejection than a clean
+        // operation failure; surface it as Reject to match the JVM's behaviour
+        // (a failed op leaves topNode = None → subsequent digest() returns None).
+        None => (Verdict::Reject("AvlVerifierPoisoned".into()), consumed),
     }
 }
 

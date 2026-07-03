@@ -17,6 +17,7 @@
 
 use std::panic::{self, AssertUnwindSafe};
 
+pub mod avl_frame;
 pub mod gen;
 pub mod generate;
 pub mod methodcall;
