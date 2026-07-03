@@ -94,6 +94,10 @@ export const api = {
   recentBlocks: (n = 10) => getJson(`/api/v1/blocks/recent?n=${n}`),
   // Operator event feed (bounded ring tail). `since` = last-seen seq.
   events: (since = 0) => getJson(`/api/v1/events${since ? `?since=${since}` : ''}`),
+  // Mining surface — routes mount only when mining is wired (404 = off).
+  // candidate is cheap on repeat calls (same-tip template cache node-side).
+  miningCandidate: () => getJson('/mining/candidate'),
+  miningRewardAddress: () => getJson('/mining/rewardAddress'),
   difficultyHistory: (b = 60) => getJson(`/api/v1/difficulty/history?blocks=${b}`),
   // Mempool wait-time histogram: bins+1 buckets of {nTxns, totalFee}.
   poolHistogram: (bins = 10, maxtimeMs = 3_600_000) =>
