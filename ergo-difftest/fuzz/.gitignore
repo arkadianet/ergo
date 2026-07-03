@@ -1,0 +1,4 @@
+# libFuzzer build artifacts and crash outputs — never committed.
+# Seed corpus under corpus/ IS committed (small, hermetic, curated).
+target/
+artifacts/

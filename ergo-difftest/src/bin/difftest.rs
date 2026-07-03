@@ -29,6 +29,7 @@ fn main() -> ExitCode {
     let mut check_canonical: Option<String> = None;
     let mut minimize_mode = false;
     let mut regressions_dir: Option<String> = None;
+    let mut min_coverage: Option<f64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -68,6 +69,13 @@ fn main() -> ExitCode {
             }
             "--regressions-dir" => {
                 regressions_dir = Some(take_next(&args, &mut i, "--regressions-dir"));
+            }
+            "--min-coverage" => {
+                let v = take_next(&args, &mut i, "--min-coverage");
+                min_coverage = Some(v.parse().unwrap_or_else(|_| {
+                    eprintln!("--min-coverage: expected a float in 0.0..=1.0, got {v:?}");
+                    std::process::exit(2);
+                }));
             }
             "--selftest" => {
                 return match ergo_difftest::selftest() {
@@ -196,7 +204,7 @@ fn main() -> ExitCode {
                 std::path::Path::new(reg_dir),
             );
         }
-        return run_structured(seed, iters, only.as_deref());
+        return run_structured(seed, iters, only.as_deref(), min_coverage);
     }
 
     if oracle_mode {
@@ -386,12 +394,24 @@ fn run_methodcall(script: Option<String>) -> ExitCode {
 /// and print the no-panic / fixed-point stats PLUS the per-surface adversarial-
 /// feature coverage union and ratio. The coverage report is the point of this
 /// mode — it proves each surface's generator reaches every declared bug surface.
-fn run_structured(seed: u64, iters: u64, only: Option<&str>) -> ExitCode {
+///
+/// If `min_coverage` is `Some(threshold)`, the binary exits non-zero when the
+/// overall union coverage ratio (touched / declared across all surfaces) is
+/// below `threshold`. This is the machine-checkable CI gate.
+fn run_structured(
+    seed: u64,
+    iters: u64,
+    only: Option<&str>,
+    min_coverage: Option<f64>,
+) -> ExitCode {
     use ergo_difftest::run_structured_campaign;
 
     println!(
-        "difftest: STRUCTURED seed={seed} iters={iters} surface={}",
+        "difftest: STRUCTURED seed={seed} iters={iters} surface={}{}",
         only.unwrap_or("ALL"),
+        min_coverage
+            .map(|m| format!(" min-coverage={m:.2}"))
+            .unwrap_or_default(),
     );
 
     let (stats, coverage, findings) = run_structured_campaign(seed, iters, only, &[]);
@@ -424,11 +444,34 @@ fn run_structured(seed: u64, iters: u64, only: Option<&str>) -> ExitCode {
 
     let total_touched = coverage.total_touched();
     let total_declared = coverage.total_declared();
+    let total_declared_count = total_declared.len();
+    let union_reached = total_touched.intersect(&total_declared).len();
+    let union_ratio = if total_declared_count > 0 {
+        union_reached as f64 / total_declared_count as f64
+    } else {
+        1.0
+    };
     println!(
-        "\nunion: {}/{} declared features reached across all surfaces",
-        total_touched.intersect(&total_declared).len(),
-        total_declared.len(),
+        "\nunion: {union_reached}/{total_declared_count} declared features reached across all surfaces  ratio={union_ratio:.3}",
     );
+
+    // ── Coverage gate ──────────────────────────────────────────────────────────
+    // Machine-checkable exit: CI can invoke `--min-coverage 0.80` and the job
+    // fails loud when the generator drops below that fraction of declared bug
+    // surfaces. An exit-0 here means every asserted threshold was met.
+    let coverage_failed = if let Some(min) = min_coverage {
+        if union_ratio < min {
+            println!(
+                "\ncoverage-gate FAIL: union ratio {union_ratio:.3} < min {min:.2} — generator is missing declared vocabulary"
+            );
+            true
+        } else {
+            println!("\ncoverage-gate PASS: union ratio {union_ratio:.3} >= min {min:.2}");
+            false
+        }
+    } else {
+        false
+    };
 
     if !findings.is_empty() {
         println!("\n{} finding(s):", findings.len());
@@ -440,6 +483,11 @@ fn run_structured(seed: u64, iters: u64, only: Option<&str>) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
+
+    if coverage_failed {
+        return ExitCode::FAILURE;
+    }
+
     println!("\nno invariant violations");
     ExitCode::SUCCESS
 }
@@ -877,6 +925,8 @@ fn print_help() {
          \x20 --methodcall     verify the MethodCall typechecker registry vs the JVM oracle\n\
          \x20 --structured     structure-aware generators + per-surface coverage report\n\
          \x20                  (combine with --oracle to diff structured bytes vs the JVM)\n\
+         \x20 --min-coverage R  coverage gate: exit non-zero if union ratio < R (0.0..1.0)\n\
+         \x20                  use with --structured; CI uses 0.80\n\
          \x20 --minimize       after --oracle campaign: minimize+classify+file each unique\n\
          \x20                  divergence; with --repro: minimize+file that one input\n\
          \x20                  (--repro --minimize requires --surface)\n\

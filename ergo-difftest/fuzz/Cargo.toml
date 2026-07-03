@@ -1,0 +1,62 @@
+# cargo-fuzz crate for ergo-difftest.
+#
+# IMPORTANT: this crate is intentionally EXCLUDED from the stable workspace.
+# The [workspace] declaration below makes it a detached workspace so that
+# `cargo clippy --workspace` from the repo root does NOT try to build these
+# targets with the pinned stable 1.95.0 toolchain (libfuzzer-sys requires
+# nightly). See ergo-difftest/fuzz/README.md for how to run fuzz targets.
+[workspace]
+
+[package]
+name    = "ergo-difftest-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ergo-difftest = { path = ".." }
+
+# ── Fuzz targets ─────────────────────────────────────────────────────────────
+# One target per structured SER surface. The ENTIRE body of each target is a
+# single call to `ergo_difftest::fuzz::fuzz_one("<surface>", data)`. All real
+# logic is in that stable function; the targets are 3-line nightly shims.
+
+[[bin]]
+name = "fuzz_ergo_tree"
+path = "fuzz_targets/ergo_tree.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_constant"
+path = "fuzz_targets/constant.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_ergo_box_candidate"
+path = "fuzz_targets/ergo_box_candidate.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_transaction"
+path = "fuzz_targets/transaction.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_header"
+path = "fuzz_targets/header.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_sigma_expr"
+path = "fuzz_targets/sigma_expr.rs"
+test = false
+doc  = false

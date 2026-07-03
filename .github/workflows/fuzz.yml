@@ -1,0 +1,86 @@
+name: Fuzz (nightly scheduled)
+
+# Nightly long campaign: structure-aware generators + corpus mutation.
+# This job is NOT gating (PRs land without waiting for it). It runs a longer
+# campaign to build coverage, grows the committed seed corpus over time, and
+# surfaces new invariant violations as loud failures.
+#
+# Note on cargo-fuzz / libFuzzer: the cargo-fuzz targets in
+# ergo-difftest/fuzz/ require a nightly toolchain and are intentionally NOT
+# part of this stable job. The hermetic structured campaign below is the stable
+# equivalent — same fuzz_one logic, coverage-guided by the structure-aware
+# generators rather than by libFuzzer instrumentation. See D1 in
+# ergo-difftest/docs/interface-contracts.md §6 for the design rationale.
+#
+# JVM oracle differential and replay driver are also NOT here — they require
+# scala-cli + a live Scala node and stay manual/local.
+
+on:
+  schedule:
+    # 02:00 UTC every night (off-peak for cache efficiency)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual trigger for an on-demand long campaign.
+
+jobs:
+  fuzz-structured:
+    name: structured campaign (2 000 000 iters, min-coverage 0.80)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      # Keep the difftest binary cached across nightly runs so only dependency
+      # changes trigger a rebuild (the generator code rarely changes).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-nightly
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest
+
+      # Long structured campaign (2 M iters ≈ 10–15 min on ubuntu-latest).
+      # Fails loudly on any invariant violation OR coverage drop below 80 %.
+      - name: structured campaign — 2 000 000 iters
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --structured --iters 2000000 --min-coverage 0.80
+
+  fuzz-corpus-mutation:
+    name: corpus mutation campaign (2 000 000 iters)
+    runs-on: ubuntu-latest
+    # Run even if the structured campaign found a bug — separate signal.
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-corpus-mutation
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest
+
+      # Byte-mutation campaign seeded from the committed corpus.
+      # Unlike the structured campaign (grammar-aware), this mutates real wire
+      # bytes — catching decoding bugs near the valid manifold.
+      - name: corpus mutation — 2 000 000 iters
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --iters 2000000 \
+            --corpus ergo-difftest/fuzz/corpus/ergo_tree
+
+      # Run ergo_tree and sigma_expr surfaces with the full corpus.
+      # Other surfaces use the default unstructured random (no --corpus flag).
+      - name: corpus mutation (sigma_expr) — 500 000 iters
+        run: |
+          cargo run --release -p ergo-difftest -- \
+            --surface sigma_expr --iters 500000 \
+            --corpus ergo-difftest/fuzz/corpus/sigma_expr
