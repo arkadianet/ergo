@@ -176,7 +176,16 @@ fn is_op_char(c: char) -> bool {
 /// `is_lowercase`/`is_uppercase` mirror Java's `isLowerCase`/`isUpperCase`
 /// (both exclude titlecase Lt and case-less Lo), so a case-less letter cannot
 /// start a plain id — matching the reference.
+///
+/// fastparse scans the JVM `String` as UTF-16 `Char`s, so a supplementary
+/// code point (> U+FFFF) reaches the id-start check as two surrogate halves,
+/// each of category `Cs`, which are never `isLowerCase` or `isUpperCase` and
+/// can never start an identifier. Hence the BMP gate (mirrors `is_id_char`).
+/// oracle: `𝐀` (U+1D400, `Lu`) REJECT 1:1; `{ val x = 𝐀 }` REJECT 1:11.
 fn is_id_start(c: char) -> bool {
+    if (c as u32) > 0xFFFF {
+        return false;
+    }
     c.is_lowercase() || c.is_uppercase() || c == '$' || c == '_'
 }
 
@@ -498,13 +507,16 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consume inter-token whitespace, comments and newlines, pushing one
-    /// `Newline` token per `\n`/`\r\n` outside comments (Basic.scala:33-34).
+    /// `Newline` token per `\n`/`\r\n`/lone-`\r` outside comments
+    /// (Basic.scala:33-34).
     ///
     /// `after_comment` is true iff only spaces/tabs separate the newline from
     /// the end of the previous comment — `last_was_comment` stays set across
     /// spaces/tabs and is cleared by a newline (Literals.scala:57-60). A lone
-    /// `\r` not followed by `\n` is skipped silently like the implicit
-    /// `ScalaWhitespace` (FP/Whitespace.scala:199) — never a newline token.
+    /// `\r` (not followed by `\n`) emits one `Newline` token, equivalent to
+    /// `\n` for newline-significance purposes. oracle: `1\r+2` REJECT (same
+    /// verdict as `1\n+2`); `\r1` / `1\r` / `{ val x = 1\r}` ACCEPT. UNTOUCHED:
+    /// `\r\n` (one Newline), `\r` inside line-comment content or string literals.
     fn skip_gap(&mut self, tokens: &mut Vec<Token>) -> Result<bool, ParseError> {
         let mut last_was_comment = false;
         // `OneNLMax`'s `ConsumeComments` `~/`-cut reconstruction: once a newline has
@@ -542,8 +554,18 @@ impl<'a> Lexer<'a> {
                     seen_newline = true;
                 }
                 Some(b'\r') => {
-                    self.pos += 1; // lone \r: skipped, no token
-                    last_was_comment = false; // not a comment; breaks comment-adjacency (Literals.scala:57-60)
+                    // lone \r: treated as a newline (same as \n).
+                    // oracle: `1\r+2` REJECT; `\r1`/`1\r` ACCEPT.
+                    let start = self.pos;
+                    self.pos += 1;
+                    tokens.push(self.tok(
+                        TokenKind::Newline {
+                            after_comment: last_was_comment,
+                        },
+                        start,
+                    ));
+                    last_was_comment = false;
+                    seen_newline = true;
                 }
                 Some(b'/') if self.peek_byte_at(1) == Some(b'/') => {
                     self.consume_line_comment();
@@ -1218,10 +1240,15 @@ fn strip_quotes(s: &str) -> String {
 /// fastparse `isPrintableChar` (CharPredicates, referenced Literals.scala:98):
 /// `!isISOControl && !isSurrogate && block != null && block != SPECIALS`.
 ///
-/// Rust `char` can never be an unpaired surrogate (that clause is vacuous), and
-/// `char::is_control` is exactly JVM `isISOControl` (both = category `Cc`). The
-/// `SPECIALS` Unicode block is U+FFF0..=U+FFFF, excluded explicitly here. oracle:
-/// `'￰'` (U+FFF0) / `'￿'` (U+FFFF) REJECT as char literals; `'a'` ACCEPT.
+/// Rust `char` can never be an unpaired surrogate. However, Rust `char` CAN
+/// represent supplementary scalars (> U+FFFF); the JVM's `Char`-based parser
+/// sees them as two surrogate halves, each of category `Cs`, which fail
+/// `!isSurrogate` — so they are not printable. The BMP gate `(c as u32) <=
+/// 0xFFFF` reproduces this. `char::is_control` is exactly JVM `isISOControl`
+/// (both = category `Cc`). The `SPECIALS` block is U+FFF0..=U+FFFF, excluded
+/// explicitly. oracle: `'a'` ACCEPT; `'😀'` (U+1F600) / `'𝐀'` (U+1D400) REJECT
+/// 1:2 (supplementary, BMP-gated); `'￰'` (U+FFF0) / `'￿'` (U+FFFF) REJECT
+/// 1:2 (SPECIALS).
 //
 // deviation: the `block == null` clause (code points in NO assigned Unicode block)
 // is not reproduced — it only affects char literals over unassigned no-block code
@@ -1230,7 +1257,7 @@ fn strip_quotes(s: &str) -> String {
 // (So/Sm, e.g. U+FFFC) still REJECTS, but one column early, since our op-char set is
 // ASCII-only (see the Sm/So op-char deviation) — reject-parity holds either way.
 fn is_printable_char(c: char) -> bool {
-    !c.is_control() && !matches!(c as u32, 0xFFF0..=0xFFFF)
+    (c as u32) <= 0xFFFF && !c.is_control() && !matches!(c as u32, 0xFFF0..=0xFFFF)
 }
 
 #[cfg(test)]
@@ -1300,14 +1327,18 @@ mod tests {
             );
         }
         // The id-tail always STOPS at the exotic char (the BMP gate / class narrowing
-        // did its job). U+2160 (Nl) and the supplementary letter U+1D400 both then
-        // start a fresh token via `is_id_start` (a separate predicate), so the first
-        // token is the bare `x`.
-        for src in ["x\u{2160}", "x\u{1D400}"] {
-            let t = tokenize(src).unwrap();
-            assert_eq!(t[0].kind, TokenKind::Ident, "{src}");
-            assert_eq!(t[0].text(src), "x", "{src}");
-        }
+        // did its job). U+2160 (Nl, BMP) then starts a fresh token via `is_id_start`
+        // (which is also BMP-gated), so the first token is the bare `x`.
+        let t = tokenize("x\u{2160}").unwrap();
+        assert_eq!(t[0].kind, TokenKind::Ident);
+        assert_eq!(t[0].text("x\u{2160}"), "x");
+        // U+1D400 (supplementary Lu): fails both is_id_char (BMP gate) AND is_id_start
+        // (BMP gate added by F1 fix) → lex error at the supplementary char.
+        // oracle: `x𝐀` REJECT 1:2.
+        assert!(
+            matches!(tokenize("x\u{1D400}"), Err(ParseError::Lexical { .. })),
+            "x𝐀 (supplementary) should lex-error after BMP-gate on is_id_start"
+        );
     }
     #[test]
     fn char_literal_printable_excludes_specials() {
@@ -1321,6 +1352,44 @@ mod tests {
         ));
         assert!(matches!(lex_err("'\u{FFF0}'"), ParseError::Lexical { .. }));
         assert!(matches!(lex_err("'\u{FFFF}'"), ParseError::Lexical { .. }));
+    }
+    #[test]
+    fn id_start_supplementary_scalar_rejected() {
+        // F1 (P2): is_id_start BMP gate — supplementary code points (> U+FFFF)
+        // appear as surrogate halves in JVM's UTF-16 scanner, which are never
+        // isUpperCase/isLowerCase, so they can never start an identifier.
+        // oracle: `𝐀` (U+1D400, Lu supplementary) REJECT 1:1;
+        //         `{ val x = 𝐀 }` REJECT 1:11.
+        assert!(
+            matches!(tokenize("\u{1D400}"), Err(ParseError::Lexical { .. })),
+            "𝐀 (U+1D400, supplementary Lu) must not start an identifier"
+        );
+        // Regression: BMP code point that is id-start stays accepted.
+        // oracle: `Ⅰ` (U+2160, BMP Nl, isUpperCase=true in both JVM and Rust) ACCEPT.
+        let t = tokenize("\u{2160}").unwrap();
+        assert_eq!(
+            t[0].kind,
+            TokenKind::Ident,
+            "Ⅰ (U+2160, BMP) must lex as Ident"
+        );
+    }
+    #[test]
+    fn char_literal_supplementary_scalar_rejected() {
+        // F3 (P2): is_printable_char BMP gate — supplementary scalars (> U+FFFF)
+        // are not printable because the JVM sees them as surrogate halves, which
+        // fail `isPrintableChar`'s `!isSurrogate` check.
+        // oracle: `'😀'` (U+1F600) REJECT 1:2; `'𝐀'` (U+1D400) REJECT 1:2.
+        assert!(
+            matches!(lex_err("'\u{1F600}'"), ParseError::Lexical { .. }),
+            "'😀' (U+1F600, supplementary) must reject as char literal"
+        );
+        assert!(
+            matches!(lex_err("'\u{1D400}'"), ParseError::Lexical { .. }),
+            "'𝐀' (U+1D400, supplementary) must reject as char literal"
+        );
+        // Regression: plain ASCII char still accepted.
+        // oracle: `'a'` ACCEPT.
+        assert_eq!(kinds("'a'")[0], TokenKind::CharSym("'a'".into()));
     }
     #[test]
     fn symbolic_keyword_directly_before_comment_is_opid() {
@@ -1471,14 +1540,21 @@ mod tests {
         assert_eq!(kinds("⇒=")[0], TokenKind::OpId);
     }
     #[test]
-    fn lone_cr_between_tokens_is_skipped_no_newline() {
-        // recon-lexical.md §1.1: a lone `\r` is skipped like ScalaWhitespace and
-        // never emits a Newline token.
+    fn lone_cr_emits_one_newline_rn_also_one() {
+        // oracle: lone \r is treated as a newline token (same as \n).
+        // `a\rb` → [Ident, Newline, Ident, Eof].
         assert_eq!(
             kinds("a\rb"),
-            vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Eof]
+            vec![
+                TokenKind::Ident,
+                TokenKind::Newline {
+                    after_comment: false
+                },
+                TokenKind::Ident,
+                TokenKind::Eof
+            ]
         );
-        // `\r\n` is one Newline (Basic.scala:34).
+        // `\r\n` is still ONE Newline (Basic.scala:34) — the \r\n arm takes priority.
         assert_eq!(
             kinds("a\r\nb"),
             vec![
@@ -1492,25 +1568,50 @@ mod tests {
         );
     }
     #[test]
-    fn newline_after_comment_and_bare_cr_not_after_comment() {
-        // Literals.scala:57-60 OneNLMax comment-absorption: a Newline has
-        // after_comment=true only when it is immediately preceded (in whitespace)
-        // by a comment. A lone \r between the comment and the \n is NOT a comment
-        // and must break comment-adjacency → after_comment=false.
+    fn lone_cr_emits_newline_token() {
+        // oracle: lone \r is treated as a newline (same significance as \n).
+        // `1\r+2` REJECT (same as `1\n+2`); `\r1` / `1\r` ACCEPT.
         //
-        // "a /*c*/ \r \nb": skip_gap sees space, then /*c*/ (last_was_comment=true),
-        // then space, then lone \r (resets last_was_comment=false), then space,
-        // then \n → Newline { after_comment: false }.
+        // Tokenizer: lone \r between tokens emits Newline { after_comment }.
+        // "a /*c*/ \r \nb": skip_gap sees space, /*c*/ (last_was_comment=true),
+        // space, lone \r → Newline { after_comment: true }, then space,
+        // \n → Newline { after_comment: false }.
         let toks = tokenize("a /*c*/ \r \nb").unwrap();
-        let nl = toks
+        let newlines: Vec<_> = toks
             .iter()
-            .find(|t| matches!(t.kind, TokenKind::Newline { .. }))
-            .unwrap();
+            .filter(|t| matches!(t.kind, TokenKind::Newline { .. }))
+            .collect();
+        assert_eq!(newlines.len(), 2, "lone \\r + \\n → two Newline tokens");
         assert_eq!(
-            nl.kind,
+            newlines[0].kind,
             TokenKind::Newline {
-                after_comment: false
+                after_comment: true // \r immediately follows the block comment
             }
+        );
+        assert_eq!(
+            newlines[1].kind,
+            TokenKind::Newline {
+                after_comment: false // \r reset last_was_comment
+            }
+        );
+        // Boundary cases: lone \r at start/end of input is fine (same as \n).
+        // "oracle: \r1 ACCEPT; 1\r ACCEPT."
+        let t = tokenize("\r1").unwrap();
+        assert!(t
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Newline { .. })));
+        let t = tokenize("1\r").unwrap();
+        assert!(t
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Newline { .. })));
+        // \r\n regression: still ONE Newline token (not two).
+        let t = tokenize("a\r\nb").unwrap();
+        assert_eq!(
+            t.iter()
+                .filter(|t| matches!(t.kind, TokenKind::Newline { .. }))
+                .count(),
+            1,
+            "\\r\\n must produce exactly one Newline token"
         );
     }
 
