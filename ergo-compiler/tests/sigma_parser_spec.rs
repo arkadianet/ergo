@@ -2056,7 +2056,9 @@ fn quirk_trailing_postfix_lone_id() {
     // spec-derived: Exprs.scala:99-116 — a trailing lone id is a zero-arg
     // PostFix MethodCallLike.
     check("x id", mcl0(ident("x"), "id"));
-    // spec-derived: PostFix `~ Newline.?` (Exprs.scala:100) consumes one newline.
+    // PostFix's `~ Newline.?` (Exprs.scala:100) is left UNCONSUMED (see the round-5
+    // fix): a trailing newline after a lone postfix is transparent to the top-level
+    // `~ End` (skipped by `peek`), so `x id\n` still yields the bare MethodCallLike.
     check("x id\n", mcl0(ident("x"), "id"));
 }
 
@@ -2544,4 +2546,178 @@ fn r4_val_tuple_pattern_uses_real_tupleex() {
     fail_at("{ val (a, b) = t; a }", 1, 7); // well-formed tuple → non-name reject
     fail_at("{ val (x: ) = 1; 1 }", 1, 9); // empty TypePat, inner reject
     fail_at("{ val (a, b = t; a }", 1, 13); // unterminated inner group
+}
+
+// -----------------------------------------------------------------------------
+// Codex round-5 parity fixes: the block-lambda / LambdaRhs / PostFix chunking
+// machinery. `LambdaRhs = Index ~ BlockChunk` is a LONE chunk (only `;` continues,
+// a newline ends it) while the block `Body = BlockChunk.repX(sep = Semis)` spans
+// many chunks; a BlockLambda head at any chunk start is a `MatchError`; and a lone
+// PostFix must leave its trailing newline as the block separator. Every case is
+// oracle-pinned against ParserOracle (sigma-state 6.0.2).
+// -----------------------------------------------------------------------------
+
+// ----- oracle parity: Finding 1 — tuple-lambda RHS is a single BlockChunk -----
+
+#[test]
+fn r5_lambda_rhs_single_chunk_stops_at_newline() {
+    // `LambdaRhs = Index ~ BlockChunk` (Exprs.scala:59) — a LONE chunk. Its
+    // `BlockStat.rep(sep = Semis)` continues only across a `;`; a newline-separated
+    // statement opens a NEW chunk that belongs to the ENCLOSING block. So the lambda
+    // body is just `x`, and `f` is the outer block's result.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT; body shape pinned.
+    check(
+        "{ val f = (x,y)=>x\nf }",
+        block(
+            vec![val_def(
+                "f",
+                NoType,
+                lambda(
+                    vec![("x", NoType), ("y", NoType)],
+                    block(vec![], ident("x")),
+                ),
+            )],
+            ident("f"),
+        ),
+    );
+    // Newline-separated trailing statements (a following `val` or bare exprs) all go
+    // to the enclosing block, never the lambda body.
+    accept("{ val f = (x,y)=>x\nval g = 1\ng }"); // val after the lambda
+    accept("{ val f = (x,y)=>val y=1; y\nf }"); // `;`-chunk body, then `\nf`
+    accept("{ val f = (x,y)=>val y=1\nf }"); // val-only body, then `\nf`
+}
+
+#[test]
+fn r5_lambda_rhs_semicolon_absorbs_next_stat_into_body() {
+    // A `;` DOES continue the single chunk, so `; f` is pulled into the lambda body
+    // → `block([x, f])`, where `x` is a non-Val in non-tail position: a block-shape
+    // error pinned to `x` (1:18). Contrast `\nf` above (ACCEPT).
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT at 1:18.
+    fail_at("{ val f = (x,y)=>x; f }", 1, 18);
+    fail_at("{ val f = (x,y)=>x; y\nf }", 1, 18); // `; y` absorbed, then `\nf` splits
+    fail_at("{ val f = (x,y)=>x;; f }", 1, 18); // `;;` still one separator
+    fail_at("{ val f = (x,y)=>x\n;y }", 1, 18); // a `;` anywhere in the run continues
+}
+
+#[test]
+fn r5_lambda_rhs_second_newline_statement_is_end_error() {
+    // With the single-chunk body stopping at the first newline, a SECOND newline-
+    // separated statement in the enclosing context is trailing input. At top level
+    // (`StatCtx.Expr ~ End`) the leftover fails the `End` at the stranded token.
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT at the leftover token.
+    fail_at("(x,y)=>x\nf", 2, 1); // top level: `f` after the single-chunk body
+    fail_at("{ val f = (x,y)=>x\ng\nh }", 2, 1); // `g` is a non-Val non-tail in the block
+}
+
+// ----- oracle parity: Finding 2 — leading block-lambda + `;` + statement -----
+
+#[test]
+fn r5_leading_lambda_semicolon_then_body_statement() {
+    // `{ (x)=>; x }`: the leading `;` opens an empty first `Body` chunk; the `;` is a
+    // `repX` separator, and `x` is the next chunk's stat — the lambda body. Two
+    // chunks → BaseBlock's second map arm wraps it: `block([x])` (Exprs.scala:286-292).
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT; body shape pinned.
+    check(
+        "{ (x)=>; x }",
+        lambda(vec![("x", NoType)], block(vec![], ident("x"))),
+    );
+    check(
+        "{ (x)=>;; x }",
+        lambda(vec![("x", NoType)], block(vec![], ident("x"))),
+    );
+    check(
+        "{ (x)=>; val y=1; y }",
+        lambda(
+            vec![("x", NoType)],
+            block(vec![val_def("y", NoType, int(1))], ident("y")),
+        ),
+    );
+    // A newline (not a `;`) after the head needs no special handling — `peek` skips
+    // it — and, being a single one-stat chunk, yields the RAW body `x` (first arm).
+    check("{ (x)=> x }", lambda(vec![("x", NoType)], ident("x")));
+    check("{ (x)=>\n x }", lambda(vec![("x", NoType)], ident("x")));
+}
+
+// ----- oracle parity: Finding 3 — block-lambda head in any later chunk -----
+
+#[test]
+fn r5_block_lambda_head_in_later_chunk_rejects() {
+    // A `BlockLambda` head at any `Body` chunk start makes that chunk's
+    // `BlockLambda.rep` non-empty → the flatMap `case (Seq(), exprs)` is a
+    // `scala.MatchError` (Exprs.scala:288-296): position-less REJECT `0:0` in the
+    // reference; we reject it (Semantic, pinned to the head — D5 error-class +
+    // position deviation, both sides REJECT).
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT each.
+    reject("{ val x = 1\n(x,y)=>x }"); // later chunk after a newline gap
+    reject("{ val x = 1\n(a)=>a }"); // single-param head is also a BlockLambda head
+    reject("{ (a)=>a\n(b)=>b }"); // leading lambda, stat, newline, head
+    reject("{ (a)=>(b)=>c }"); // consecutive leading heads (D5)
+    reject("{ (x)=>; (a,b)=>c }"); // empty chunk, `;` separator, then a head
+    reject("{ val x=1\n(a,b)=>a\n(c,d)=>c }"); // head starting a later chunk
+}
+
+#[test]
+fn r5_semicolon_continued_lambda_is_an_expression_lambda() {
+    // After a `;` that CONTINUES a non-empty chunk, a `(a,b)=>e` is a `StatCtx.Expr`
+    // expression lambda (NOT a BlockLambda head) — so it is accepted as a block
+    // binding's neighbour, while a single-ident `(a)=>b` there is the ordinary
+    // "Invalid declaration of lambda" error.
+    // oracle: ParserOracle sigma-state 6.0.2.
+    check(
+        "{ val x = 1; (x,y)=>x }",
+        block(
+            vec![val_def("x", NoType, int(1))],
+            lambda(
+                vec![("x", NoType), ("y", NoType)],
+                block(vec![], ident("x")),
+            ),
+        ),
+    );
+    fail_at("{ (a)=>a; (b)=>b }", 1, 11); // 2nd `(b)=>b` = invalid-lambda at its `(`
+    fail_at("{ (a)=>a; (b,c)=>d }", 1, 8); // valid expr lambda, but `a` non-Val non-tail
+}
+
+#[test]
+fn r5_expression_level_tuple_lambdas_still_accepted() {
+    // Tuple-lambdas OUTSIDE a chunk boundary keep working: a nested argument, an IIFE
+    // application, and a bare tuple (no `=>`) at a chunk boundary are NOT heads.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each.
+    accept("{ f((x,y)=>x) }"); // lambda in argument position
+    accept("((x,y)=>x)(1,2)"); // immediately-applied lambda
+    accept("{ val x=1\n(a,b) }"); // later chunk is a bare Tuple, not a head
+}
+
+// ----- oracle parity: Finding 4 — PostFix leaves the block-separator newline -----
+
+#[test]
+fn r5_postfix_leaves_newline_for_block_separator() {
+    // A lone `*` PostFix ends the val, and the `\n` separates the next statement:
+    // `val x = "s".*` (binding) then the `if` (result) → a valid block.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT; shape pinned.
+    check(
+        "{ val x = \"s\" *\nif (true) z else () }",
+        block(
+            vec![val_def("x", NoType, mcl0(string("s"), "*"))],
+            if_(boolean(true), ident("z"), unit()),
+        ),
+    );
+    accept("{ val a = z *; if (true) x else y }"); // a `;` separates just the same
+                                                   // A lone PostFix as the sole/last statement is a plain zero-arg MethodCallLike.
+    check("{ z * }", block(vec![], mcl0(ident("z"), "*")));
+}
+
+#[test]
+fn r5_bare_postfix_statement_then_next_is_block_shape_error() {
+    // When the postfix statement is a BARE expression (not a `val`), the `\n` still
+    // separates the next statement — so `z.*` lands as a non-Val in non-tail position
+    // and the block-shape error pins to `z` (1:3). NOT a "missing separator" reject.
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT at 1:3.
+    fail_at("{ z *\nif (true) a else b }", 1, 3);
+    fail_at("{ z *\nval a = 1\na }", 1, 3);
+    fail_at("{ z *\n\nif (true) a else b }", 1, 3); // two newlines, same result
+    fail_at("{ z tl\ny }", 1, 3); // a non-operator lone postfix, same shape
+                                  // Inside parens (`ExprCtx`) a following expression makes the lone id an INFIX op
+                                  // whose unknown operator rejects at the left operand.
+    fail_at("(x id\ny)", 1, 2);
+    fail_at("{ x id\ny }", 1, 3);
 }

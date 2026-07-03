@@ -260,6 +260,34 @@ impl<'a> Cursor<'a> {
             .any(|t| t.kind == TokenKind::Semi)
     }
 
+    /// `BlockStat.rep(sep = Semis)` continuation for a SINGLE `BlockChunk`
+    /// (Exprs.scala:259): consume the upcoming `Newline`/`Semi` run and return
+    /// `true` ONLY when it contains a literal `;`; otherwise consume NOTHING and
+    /// return `false`.
+    ///
+    /// Within a `.rep(sep = Semis)` the implicit `ScalaWhitespace` eats the trailing
+    /// newlines BEFORE the `Semis` separator runs, so `Semis`' `Newline+` alternative
+    /// is dead and only a `;` continues the statement list. A bare-newline run thus
+    /// ends the chunk — its statements belong to the enclosing block's NEXT
+    /// `BlockChunk`. Used by `lambda_rhs` (a lone `BlockChunk`) and `block_body`'s
+    /// intra-chunk loop. oracle: `{ val f = (x,y)=>x\nf }` ACCEPT (body `x`, `f` is
+    /// the block result) vs `{ val f = (x,y)=>x; f }` REJECT 1:18 (body `block([x,f])`,
+    /// `x` a non-Val non-tail).
+    fn skip_semis_if_lit(&mut self) -> bool {
+        let mut j = self.i;
+        let mut has_semi = false;
+        while j < self.toks.len()
+            && (Self::is_nl(&self.toks[j]) || self.toks[j].kind == TokenKind::Semi)
+        {
+            has_semi |= self.toks[j].kind == TokenKind::Semi;
+            j += 1;
+        }
+        if has_semi {
+            self.i = j;
+        }
+        has_semi
+    }
+
     /// `Semi.?` (Literals.scala:50): consume AT MOST one leading `;`. Newlines are
     /// transparently skipped by `peek`, so the only observable effect of the
     /// single-`Semi` option is a lone `;` (a second `;` is left for the caller —
@@ -941,9 +969,13 @@ type ArgList = Vec<(String, SType)>;
 /// ~/ BlockEnd`. The caller (`block_expr`) has consumed `{` and will consume `}`.
 ///
 /// Shape-for-shape port of the result map (Exprs.scala:283-299):
-/// - leading `BlockLambda` + exactly one stat → `Lambda(args, NoType, stat)`
+/// - leading `BlockLambda` + a lone one-statement chunk → `Lambda(args, NoType,
+///   stat)` (first arm `Seq((Seq(), Seq(b)))`, :284-285) — the body is that stat RAW.
 /// - leading `BlockLambda` + any other body → `Lambda(args, NoType, block(stats))`
-/// - no leading `BlockLambda` → `block(stats)`
+///   (second arm, :286-292). "Any other" = a leading/trailing `;`, a newline gap, or
+///   more than one statement — exactly the cases where a `Semis` separator was
+///   consumed, tracked by `block_body`'s `multi_chunk` return.
+/// - no leading `BlockLambda` → `block(stats)`.
 ///
 /// A plain empty block (no leading lambda, zero stats) is REJECTED unless a
 /// literal `;` was consumed between the braces. `extractBlockStats`' empty arm
@@ -952,37 +984,24 @@ type ArgList = Vec<(String, SType)>;
 /// newlines/comments before `BaseBlock`'s leading `Semis.?` can match
 /// (oracle-verified). The failure is reported one past the closing `}`.
 ///
-/// A `BlockLambda` in a non-first chunk is a `scala.MatchError` in the reference
-/// (the flatMap only matches `case (Seq(), exprs)`, :288-296); a second
-/// consecutive block-lambda at the block head is the only reachable form of that
-/// (the greedy `BlockStat.rep` grabs any `(a,b) => e` after a `Semis` as an
-/// expression lambda), and it is rejected here as a Semantic error (D5).
+/// A `BlockLambda` head at ANY `Body` chunk start (the consecutive-head D5 case, or
+/// a head in a later chunk after a newline gap / `;`-separated empty chunk) is a
+/// `scala.MatchError` in the reference — `block_body` enforces this via
+/// `reject_chunk_lambda_head`.
 fn base_block(c: &mut Cursor) -> Result<Expr, ParseError> {
     let pos = c.peek().start; // Index (before Semis.?)
     let saw_semi = c.skip_semis_lit(); // Semis.? — was a literal `;` among the run?
     let lead = try_block_lambda(c)?.map(|(_, args)| args); // BlockLambda.?
-                                                           // Body's first BlockChunk runs `BlockLambda.rep`; a match here (a second
-                                                           // consecutive head) makes that chunk's lambda-list non-empty → MatchError.
-    if let Some((lam_pos, _)) = try_block_lambda(c)? {
-        return Err(ParseError::Semantic {
-            pos: lam_pos,
-            msg: "block lambda is only allowed at the start of a block".to_string(),
-        });
-    }
-    let stats = block_body(c)?;
-    // `BlockEnd = Semis.? ~ &("}")` (Exprs.scala:281): absorb a trailing `Semis`
-    // run before the closer. `block_body`'s own loop already eats the separators
-    // *between* statements, but when it returns early with an empty body — e.g. a
-    // leading block-lambda followed directly by `;` (`{ (x,y)=>; }`) or a body that
-    // begins with a `;` — the run is still pending here. Without this, the residual
-    // `;` would defeat the `}` expectation. oracle: `{ (x,y)=>; }` / `{ (x,y)=>;; }`
-    // / `{ ()=>; }` ACCEPT (lambda body = `Block([], ())`).
-    c.skip_semis();
+                                                           // Body = BlockChunk.repX(sep = Semis). `block_body` parses every chunk, rejects
+                                                           // a BlockLambda head at any chunk start, absorbs the trailing `BlockEnd` Semis,
+                                                           // and reports whether more than a single one-statement chunk was consumed.
+    let (stats, multi_chunk) = block_body(c)?;
     match lead {
         Some(args) => {
-            // Single-stat single-chunk → the stat is the body directly (:284-285);
-            // otherwise the stats are wrapped in a block (:286-292).
-            let body = if stats.len() == 1 {
+            // A lone one-statement chunk yields that stat RAW (first map arm,
+            // :284-285); every other body wraps the stats in `block(...)` (:286-292).
+            // A single one-stat chunk is exactly one that consumed no `Semis`.
+            let body = if stats.len() == 1 && !multi_chunk {
                 stats.into_iter().next().unwrap()
             } else {
                 block_from_stats(stats, pos)?
@@ -1012,23 +1031,93 @@ fn base_block(c: &mut Cursor) -> Result<Expr, ParseError> {
     }
 }
 
-/// `Body = BlockChunk.repX(sep = Semis)` flattened to a statement list
-/// (Exprs.scala:282). `BlockChunk = BlockLambda.rep ~ BlockStat.rep(sep = Semis)`;
-/// the greedy `BlockStat.rep` means all statements land in one flat list here.
-/// Stops at the `}` / end (`BlockEnd = Semis.? ~ &("}")`, :281).
-fn block_body(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
+/// `Body = BlockChunk.repX(sep = Semis)` flattened to a statement list, plus a flag
+/// that is `true` once ANY `Semis` separator was consumed (i.e. the Body is more
+/// than a single one-statement chunk — `base_block` uses it to pick the leading-
+/// lambda map arm, Exprs.scala:283-292). Also absorbs the trailing `BlockEnd` Semis.
+///
+/// `BlockChunk = BlockLambda.rep ~ BlockStat.rep(sep = Semis)` (Exprs.scala:259).
+/// Both flatMaps (BaseBlock :288-296, LambdaRhs :59-60) keep only chunks whose
+/// `BlockLambda.rep` is EMPTY (`case (Seq(), exprs)`); a BlockLambda head at a chunk
+/// start makes that list non-empty → `scala.MatchError` (REJECT). So a head is
+/// rejected at every chunk start: the first chunk (right after the leading
+/// `BlockLambda.?` — the consecutive-head D5 case) and every later chunk.
+///
+/// Chunk mechanics (the `.rep`-vs-`repX` / ScalaWhitespace asymmetry): WITHIN a
+/// chunk `BlockStat.rep(sep = Semis)` continues only across a literal `;` (the
+/// implicit whitespace eats trailing newlines, killing `Semis`' `Newline+`
+/// alternative, `Cursor::skip_semis_if_lit`); BETWEEN chunks the outer `repX`'s
+/// `Semis` (no whitespace pre-eaten) also matches a bare newline, so a newline-only
+/// gap — or a `;` after an empty chunk — opens a NEW chunk. oracle:
+/// `{ val x=1\n(x,y)=>x }` REJECT (later-chunk head); `{ val x=1; (x,y)=>x }` ACCEPT
+/// (`;`-continued expression lambda, same chunk); `{ (x)=>; (a,b)=>c }` REJECT
+/// (empty chunk, `;` separator, then a head).
+fn block_body(c: &mut Cursor) -> Result<(Vec<Expr>, bool), ParseError> {
     let mut stats = Vec::new();
-    if !starts_block_stat(c.peek()) {
-        return Ok(stats); // empty body (e.g. `{}`)
-    }
+    let mut multi_chunk = false;
     loop {
-        stats.push(block_stat(c)?);
-        // BlockStat.rep separator = Semis; BlockEnd absorbs the trailing run.
-        if !c.skip_semis() {
-            break; // no separator → statement list ends
+        // Chunk start: `BlockLambda.rep` must be empty (a head → MatchError).
+        reject_chunk_lambda_head(c)?;
+        // `BlockStat.rep(sep = Semis)`: first stat, then `;`-continued stats only.
+        if starts_block_stat(c.peek()) {
+            stats.push(block_stat(c)?);
+            while c.skip_semis_if_lit() {
+                multi_chunk = true;
+                if !starts_block_stat(c.peek()) {
+                    break;
+                }
+                stats.push(block_stat(c)?);
+            }
         }
+        // `repX` separator: a `Semis` run (newlines and/or a leftover `;`) opens the
+        // next chunk. A `(...)=>` head there begins a `BlockStat` (`(`), so the loop
+        // re-enters and `reject_chunk_lambda_head` fires.
+        if !c.skip_semis() {
+            break; // no separator → Body ends (BlockEnd = Semis.? ~ &("}"))
+        }
+        multi_chunk = true;
         if !starts_block_stat(c.peek()) {
-            break; // trailing Semis before `}` / end
+            break; // trailing Semis before `}` / end (an empty final chunk)
+        }
+    }
+    Ok((stats, multi_chunk))
+}
+
+/// A `BlockChunk` starts with `BlockLambda.rep` (Exprs.scala:259). The BaseBlock and
+/// LambdaRhs flatMaps keep only chunks with an EMPTY lambda list (`case (Seq(),
+/// exprs)`, :289/296), so a `BlockLambda` head at a chunk start makes the list
+/// non-empty and is a `scala.MatchError` — a position-less REJECT (`0:0`) in the
+/// reference. We keep it a Semantic reject pinned to the head (D5 deviation: error
+/// class + position only; both sides REJECT). No cut is left behind — the head
+/// lookahead is fully restored. oracle: `{ (a)=>(b)=>c }`, `{ val x=1\n(x,y)=>x }`,
+/// `{ (x)=>; (a,b)=>c }` all REJECT.
+fn reject_chunk_lambda_head(c: &mut Cursor) -> Result<(), ParseError> {
+    let mark = c.save();
+    if let Some((lam_pos, _)) = try_block_lambda(c)? {
+        c.restore(mark); // undo the head consumption — we reject anyway
+        return Err(ParseError::Semantic {
+            pos: lam_pos,
+            msg: "block lambda is only allowed at the start of a block".to_string(),
+        });
+    }
+    Ok(()) // None → `try_block_lambda` already restored the cursor
+}
+
+/// A single `BlockChunk`'s `BlockStat.rep(sep = Semis)` (Exprs.scala:259) as used by
+/// `lambda_rhs`: statements continued ONLY across a literal `;`
+/// (`Cursor::skip_semis_if_lit`). Unlike the block `Body`, a newline-separated
+/// following statement is NOT part of this chunk — it stays in the input for the
+/// enclosing block's next `BlockChunk`. oracle: `{ val f = (x,y)=>x\nf }` — the
+/// lambda body is `x`, `f` is the enclosing block's result.
+fn block_chunk_stats(c: &mut Cursor) -> Result<Vec<Expr>, ParseError> {
+    let mut stats = Vec::new();
+    if starts_block_stat(c.peek()) {
+        stats.push(block_stat(c)?);
+        while c.skip_semis_if_lit() {
+            if !starts_block_stat(c.peek()) {
+                break;
+            }
+            stats.push(block_stat(c)?);
         }
     }
     Ok(stats)
@@ -1710,10 +1799,17 @@ fn postfix_lambda(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
     }
 }
 
-/// `LambdaRhs` (Exprs.scala:57-63): in a semi-inference context a `BlockChunk`
-/// wrapped via `block()` (which always succeeds — an empty chunk yields `Block([],
-/// Unit)`); otherwise an optional `Expr`. Returns the lambda body, or `None` when
-/// (only possible in the `Expr` branch) no expression follows the `=>`.
+/// `LambdaRhs` (Exprs.scala:57-63): in a semi-inference context a SINGLE
+/// `BlockChunk` wrapped via `block()` (which always succeeds — an empty chunk yields
+/// `Block([], Unit)`); otherwise an optional `Expr`. Returns the lambda body, or
+/// `None` when (only possible in the `Expr` branch) no expression follows the `=>`.
+///
+/// Crucially the semi-inference branch is `Index ~ BlockChunk` — a LONE chunk, NOT
+/// the block `Body`'s `BlockChunk.repX`. So `block_chunk_stats` continues its
+/// `BlockStat.rep` across a literal `;` only: a newline-separated following
+/// statement opens a new chunk that belongs to the ENCLOSING block, not this lambda
+/// body. oracle: `{ val f = (x,y)=>x\nf }` ACCEPT (body `x`, `f` the block result)
+/// vs `{ val f = (x,y)=>x; f }` REJECT 1:18 (body `block([x,f])`, `x` a non-Val).
 fn lambda_rhs(c: &mut Cursor, ctx: Ctx) -> Result<Option<Expr>, ParseError> {
     if ctx.semi_inference() {
         let pos = c.peek().start; // LambdaRhs `Index`, before the BlockChunk
@@ -1721,7 +1817,7 @@ fn lambda_rhs(c: &mut Cursor, ctx: Ctx) -> Result<Option<Expr>, ParseError> {
                                   // Exprs.scala:59-60 SILENTLY DISCARDS the leading `BlockLambda.rep`, so the
                                   // body is only the BlockStat list — e.g. `(x,y) => (a) => c` has body `c`.
         while try_block_lambda(c)?.is_some() {} // drop leading BlockLambda heads
-        let stats = block_body(c)?; // BlockChunk's BlockStat.rep(sep = Semis)
+        let stats = block_chunk_stats(c)?; // a SINGLE BlockChunk (not the block Body)
         Ok(Some(block_from_stats(stats, pos)?))
     } else if starts_full_expr(c.peek()) {
         Ok(Some(expr(c, ctx)?))
@@ -2126,14 +2222,20 @@ fn postfix_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
         }
 
         // PostFix: `NoSemis ~~ WL ~~ Id.! ~ Newline.?`. Rewind the InfixSuffix
-        // attempt (the op and any OneNLMax newline) and re-consume the Id here,
-        // then optionally one trailing Newline.
+        // attempt (the op and any OneNLMax newline) and re-consume the Id here.
+        //
+        // The trailing `Newline.?` is NOT consumed: a lone-postfix statement must
+        // leave the following newline for the enclosing block's `Semis` separator,
+        // otherwise the next statement is stranded. In fastparse the enclosing
+        // failure backtracks `PostFix`'s greedy `Newline.?`; in our token model a
+        // trailing `Newline` is transparent to `peek`/`End` and absorbed by the
+        // block separator (`skip_semis`), so leaving it reproduces the reference.
+        // oracle: `{ val x = "s" *\nif (true) z else () }` ACCEPT (the `*` postfix
+        // ends the val, the `\n` separates the `if`); `{ z *\nif (…) a else b }`
+        // REJECT 1:3 (the `\n` still separates, but `z.*` is a non-Val non-tail).
         c.restore(mark);
         let id_tok = c.bump();
         postfix_name = Some(id_tok.text(c.src).to_string());
-        if c.i < c.toks.len() && Cursor::is_nl(&c.toks[c.i]) {
-            c.i += 1; // Newline.?
-        }
         break; // PostFix.? — at most one, and it is terminal
     }
 

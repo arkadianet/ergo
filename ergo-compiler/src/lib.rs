@@ -70,10 +70,15 @@
 //!   differs. The practical consequence is that `-2147483648` is rejected (as in
 //!   Scala: the positive magnitude overflows before the sign is applied).
 //!
-//! - **D5 — consecutive block-lambda parity** (`parse.rs`): a second block-lambda
-//!   at the head of a block is a `scala.MatchError` crash in the reference; M1
-//!   returns `ParseError::Semantic`. Both sides REJECT; the error class differs.
-//!   Bounded to `{ (a,b) => e1; (c,d) => e2 }` which no real contract produces.
+//! - **D5 — block-lambda head at a non-first chunk** (`parse.rs`): a `BlockLambda`
+//!   head at any `Body` chunk start — a consecutive head (`{ (a,b)=>(c,d)=>e }`) or
+//!   a head in a later chunk after a newline gap / `;`-separated empty chunk
+//!   (`{ val x=1\n(x,y)=>x }`, `{ (x)=>; (a,b)=>c }`) — is a `scala.MatchError` crash
+//!   in the reference (a position-less `REJECT 0:0`); M1 returns `ParseError::Semantic`
+//!   pinned to the head. Both sides REJECT; the error class AND the reject position
+//!   (head vs `0:0`) differ. Bounded to block-lambda heads mid-block that no real
+//!   contract produces (corpus-verified). A head after a `;` that CONTINUES a
+//!   non-empty chunk is an expression lambda, not a head, and is unaffected.
 //!
 //! - **`|`-separated pattern with a `|`-prefixed op-id** (`parse.rs`): in an
 //!   extractor `TupleEx` element, a `Pattern` alternative separator is the literal
