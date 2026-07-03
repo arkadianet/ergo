@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: every job here only reads the repo (build/test/lint/audit).
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check, clippy, test (${{ matrix.os }})

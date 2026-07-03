@@ -127,6 +127,13 @@ fn main() -> ExitCode {
         }
     }
 
+    // `--check-canonical` only takes effect inside the `--repro` path below;
+    // without `--repro` it would silently no-op, so reject that combination.
+    if check_canonical.is_some() && repro.is_none() {
+        eprintln!("--check-canonical requires --repro <hex>");
+        return ExitCode::from(2);
+    }
+
     // --repro: triage a single input and exit. Under `--oracle` it replays the one
     // input against the JVM oracle (so a `reduce` finding can be reproduced from
     // the CLI); otherwise it runs the hermetic decoders.
@@ -811,6 +818,10 @@ fn run_oracle_repro_minimize(
 fn structured_oracle_bytes(seed: u64, iter: u64, oracle_surface: &str) -> Vec<u8> {
     let gen_surface = match oracle_surface {
         "reduce" => "sigma_expr",
+        // `validate` (stateless-tx) parses a transaction first, so it needs
+        // transaction-shaped bytes — without this it falls back to `ergo_tree`
+        // and both sides reject immediately (no differential signal).
+        "validate" => "transaction",
         s if ergo_difftest::gen::SURFACES.contains(&s) => s,
         _ => "ergo_tree",
     };

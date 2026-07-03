@@ -54,8 +54,7 @@ use serde::Deserialize;
 
 /// The 3 Ergo genesis boxes, embedded at compile time.
 /// Same file as `ergo-state/tests/chain_validate_1_*.rs`.
-static GENESIS_BOXES_JSON: &str =
-    include_str!("../../../../../../test-vectors/mainnet/genesis_boxes.json");
+static GENESIS_BOXES_JSON: &str = include_str!("../../../test-vectors/mainnet/genesis_boxes.json");
 
 // ── CLI args ────────────────────────────────────────────────────────────────
 

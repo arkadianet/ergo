@@ -131,7 +131,10 @@ impl AvlFrame {
             .to_vec();
 
         let op_count = r.get_u32_exact().map_err(|e| format!("opCount: {e:?}"))? as usize;
-        let mut ops = Vec::with_capacity(op_count);
+        // Bound the pre-allocation: `op_count` is untrusted, so a malformed frame
+        // could otherwise request a multi-GB `Vec` before a single op is read. The
+        // loop still reads `op_count` ops and errors on buffer exhaustion.
+        let mut ops = Vec::with_capacity(op_count.min(1 << 12));
         for i in 0..op_count {
             let op_tag = r.get_u8().map_err(|e| format!("op[{i}] tag: {e:?}"))?;
             let key = r

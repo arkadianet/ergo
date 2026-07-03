@@ -264,11 +264,20 @@ pub fn auto_file(record: &DivergenceRecord, regressions_dir: &Path) -> io::Resul
             "- [PENDING] {}/{short_hash} — {}\n",
             record.surface, record.repro
         );
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&queue_path)?;
-        f.write_all(entry.as_bytes())?;
+        // Idempotent like the record file: skip if this record's content-addressed
+        // key is already queued, so re-filing the same divergence doesn't duplicate
+        // its QUEUE.md line.
+        let key = format!("{}/{short_hash} —", record.surface);
+        let already_queued = std::fs::read_to_string(&queue_path)
+            .map(|q| q.contains(&key))
+            .unwrap_or(false);
+        if !already_queued {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&queue_path)?;
+            f.write_all(entry.as_bytes())?;
+        }
     }
 
     Ok(path)

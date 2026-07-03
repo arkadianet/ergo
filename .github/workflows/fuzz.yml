@@ -27,6 +27,10 @@ on:
   workflow_dispatch:
     # Allow manual trigger for an on-demand long campaign.
 
+# Least privilege: fuzz jobs read the repo + upload artifacts; no write to contents.
+permissions:
+  contents: read
+
 jobs:
   fuzz-structured:
     name: structured campaign (2 000 000 iters, min-coverage 0.80)
@@ -57,8 +61,7 @@ jobs:
   fuzz-corpus-mutation:
     name: corpus mutation campaign (2 000 000 iters)
     runs-on: ubuntu-latest
-    # Run even if the structured campaign found a bug — separate signal.
-    needs: []
+    # Independent of fuzz-structured — a separate signal, runs in parallel.
     steps:
       - uses: actions/checkout@v4
 

@@ -73,7 +73,7 @@ New binary `ergo-difftest --replay` (or `src/bin/replay.rs`). Purpose: make the
 immutable chain the oracle instead of committed block bytes.
 
 **Input:**
-```
+```text
 --from <height> --to <height>
 --node <url>            default http://127.0.0.1:9053
 --pins <path>          height→hash pin file (default ergo-difftest/docs/replay-pins.json)

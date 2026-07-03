@@ -215,6 +215,12 @@ object ErgoSerdeOracle {
                 var pos = 0
                 def readByte(): Int  = { val b = bytes(pos) & 0xff; pos += 1; b }
                 def readBytes(n: Int): Array[Byte] = {
+                  // copyOfRange zero-pads when `to > length` instead of throwing,
+                  // which would silently accept a truncated frame. Bounds-check
+                  // first so truncation surfaces as ERR frame-truncated.
+                  if (n < 0 || pos.toLong + n > bytes.length)
+                    throw new ArrayIndexOutOfBoundsException(
+                      s"readBytes out of range: pos=$pos n=$n len=${bytes.length}")
                   val arr = java.util.Arrays.copyOfRange(bytes, pos, pos + n)
                   pos += n; arr
                 }
