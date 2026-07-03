@@ -1829,10 +1829,10 @@ fn try_dotty_subj(
 fn postfix_lambda(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
     let pos = c.peek().start; // Index
     let e = postfix_expr(c, ctx)?;
-    let body: Option<Expr> = if c.at_kw(Kw::FatArrow) {
+    let body: Option<Expr> = if c.at_sym_kw(Kw::FatArrow) {
         c.bump(); // `=>`
         lambda_rhs(c, ctx)?
-    } else if c.at_kw(Kw::Assign) {
+    } else if c.at_sym_kw(Kw::Assign) {
         c.bump(); // `=` ~/ — SuperPostfixSuffix
         Some(expr(c, ctx)?)
     } else {
@@ -3713,6 +3713,30 @@ mod expr_tests {
                 ident0("a")
             )
         );
+    }
+
+    #[test]
+    fn postfix_lambda_sym_kw_forms_accept() {
+        // postfix_lambda must use at_sym_kw (not at_kw) so that comment-adjacent and
+        // Unicode-arrow forms are matched. Oracle-pinned via ParserOracle.scala:
+        //
+        // oracle: `(a,b)\n⇒b`           → ACCEPT (U+21D2 lexes OpId, not Kw::FatArrow)
+        // oracle: `(a,b)\n=>/*c*/b`      → ACCEPT (comment-adjacent => lexes OpId)
+        // oracle: `(a,b)\n=/*c*/b`       → ACCEPT (comment-adjacent = lexes OpId)
+        let body_a = lambda(
+            vec![("a", SType::NoType), ("b", SType::NoType)],
+            block(vec![], ident0("b")),
+        );
+        let body_eq = lambda(
+            vec![("a", SType::NoType), ("b", SType::NoType)],
+            ident0("b"),
+        );
+        // Unicode ⇒
+        assert_eq!(strip_pos(&p("(a,b)\n\u{21D2}b")), body_a);
+        // comment-adjacent =>
+        assert_eq!(strip_pos(&p("(a,b)\n=>/*c*/b")), body_a);
+        // comment-adjacent = (SuperPostfixSuffix — raw Expr body, not LambdaRhs block)
+        assert_eq!(strip_pos(&p("(a,b)\n=/*c*/b")), body_eq);
     }
 
     #[test]
