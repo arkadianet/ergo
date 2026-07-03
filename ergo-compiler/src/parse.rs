@@ -839,13 +839,23 @@ fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
     if c.at_kw(Kw::If) {
         return if_expr(c, ctx);
     }
-    // Fun — `def` FunDef with NO cut after `def` (Exprs.scala:55): a FunDef failure
-    // backtracks and lets `def` parse as an ordinary identifier via PostfixLambda.
+    // Fun — `def` FunDef with NO cut after `def` (Exprs.scala:55): the ``def``
+    // keyword itself carries no cut, so a FunDef that fails *before* consuming any
+    // cut backtracks and lets `def` parse as an ordinary identifier via
+    // PostfixLambda. But once FunDef crosses one of its cuts — an opened arg-list
+    // `(`, a FunTypeArgs `[`, a DottyExtMethodSubj `(`, a result-type `:`, or the
+    // Body `=` — fastparse's `|` cannot backtrack past it, so the failure is hard
+    // and propagates instead of falling back (Exprs.scala:74 `If | Fun | …`).
+    // `fun_def` reports which case via `committed`.
+    // oracle: `def`/`def f`/`def +`/`def * 2` ACCEPT (pre-cut fallback);
+    // `def +(x)`/`def ||()`/`def(1)`/`def f[T]`/`def (x) = 1` REJECT (post-cut).
     if c.at_word("def") {
         let mark = c.save();
         c.bump(); // `def`
-        match fun_def(c) {
+        let mut committed = false;
+        match fun_def(c, &mut committed) {
             Ok(v) => return Ok(v),
+            Err(e) if committed => return Err(e),
             Err(_) => c.restore(mark),
         }
     }
@@ -960,6 +970,14 @@ fn base_block(c: &mut Cursor) -> Result<Expr, ParseError> {
         });
     }
     let stats = block_body(c)?;
+    // `BlockEnd = Semis.? ~ &("}")` (Exprs.scala:281): absorb a trailing `Semis`
+    // run before the closer. `block_body`'s own loop already eats the separators
+    // *between* statements, but when it returns early with an empty body — e.g. a
+    // leading block-lambda followed directly by `;` (`{ (x,y)=>; }`) or a body that
+    // begins with a `;` — the run is still pending here. Without this, the residual
+    // `;` would defeat the `}` expectation. oracle: `{ (x,y)=>; }` / `{ (x,y)=>;; }`
+    // / `{ ()=>; }` ACCEPT (lambda body = `Block([], ())`).
+    c.skip_semis();
     match lead {
         Some(args) => {
             // Single-stat single-chunk → the stat is the body directly (:284-285);
@@ -1268,7 +1286,7 @@ enum BindPat {
 /// reference's parse-then-map order).
 fn bind_pattern(c: &mut Cursor) -> Result<BindPat, ParseError> {
     if c.peek().kind == TokenKind::LParen {
-        consume_tuple_ex(c)?; // TupleEx `( Pattern,* )`
+        tuple_ex(c)?; // TupleEx `( Pattern,* )` — parsed with the real Pattern grammar
         return Ok(BindPat::Other);
     }
     if !is_id(c.peek()) {
@@ -1310,13 +1328,14 @@ fn bind_pattern(c: &mut Cursor) -> Result<BindPat, ParseError> {
 
 /// `TupleEx = "(" ~/ Pattern.rep(0, ",") ~ TrailingComma ~ ")"` (Exprs.scala:235).
 /// Parsed and DISCARDED (the Extractor drops it, :236). The `(` is a cut, so a
-/// malformed inner pattern is a hard reject — the contents are parsed with the real
-/// `SimplePattern` machinery (`bind_pattern`), not a balanced-paren scan.
+/// malformed inner pattern is a hard reject — each element is parsed with the real
+/// `Pattern` grammar (`pattern`: `TypeOrBindPattern` alternatives), not merely a
+/// `SimplePattern` and not a balanced-paren scan.
 fn tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
     c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
     if starts_pattern(c.peek()) {
         loop {
-            bind_pattern(c)?; // one Pattern — discarded
+            pattern(c)?; // one full Pattern — discarded
             if c.peek().kind != TokenKind::Comma {
                 break;
             }
@@ -1341,32 +1360,75 @@ fn tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
 }
 
 /// A token that can begin a `SimplePattern` (Exprs.scala:234-240): a `(` (TupleEx)
-/// or an `Id` (Extractor `StableId` / `VarId`).
+/// or an `Id` (Extractor `StableId` / `VarId`). Also the start set of a full
+/// `Pattern`, whose `TypePattern` head (`_`/backtick/`VarId`) is itself an `Id`.
 fn starts_pattern(t: &Token) -> bool {
     t.kind == TokenKind::LParen || is_id(t)
 }
 
-/// Consume a balanced `( … )` region (a `TupleEx` pattern group, Exprs.scala:235).
-/// The contents are pattern syntax that the `val` binder discards, so a
-/// token-level balanced-paren scan is faithful; an unterminated group is an error.
-fn consume_tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
-    let open = c.expect(&TokenKind::LParen, "(")?;
-    let mut depth = 1usize;
-    while depth > 0 {
-        let t = c.bump();
-        match t.kind {
-            TokenKind::LParen => depth += 1,
-            TokenKind::RParen => depth -= 1,
-            TokenKind::Eof => {
-                return Err(ParseError::Syntax {
-                    pos: open.start,
-                    expected: "`)`".to_string(),
-                })
-            }
-            _ => {}
-        }
+/// `Pattern = (WL ~ TypeOrBindPattern).rep(1, sep = "|"./)` (Exprs.scala:304).
+/// Parsed and DISCARDED (a `TupleEx` element the `Extractor` drops, :235-236). The
+/// `|` alternation separator carries a cut (`"|"./`), so a `|` with no following
+/// alternative is a HARD reject. oracle: `Some(x | y)` / `Some(Foo | x)` ACCEPT,
+/// `Some(x |)` REJECT 1:15.
+fn pattern(c: &mut Cursor) -> Result<(), ParseError> {
+    type_or_bind_pattern(c)?;
+    while c.at_op("|") {
+        c.bump(); // "|" ./ — cut: another alternative MUST follow
+        type_or_bind_pattern(c)?;
     }
     Ok(())
+}
+
+/// `TypeOrBindPattern = (TypePattern | BindPattern).ignore` (Exprs.scala:305): a
+/// typed pattern `v : T`, else the `SimplePattern` machinery. Both are DISCARDED.
+fn type_or_bind_pattern(c: &mut Cursor) -> Result<(), ParseError> {
+    if try_type_pattern(c)? {
+        return Ok(());
+    }
+    bind_pattern(c).map(|_| ()) // BindPattern = SimplePattern (Exprs.scala:309-312)
+}
+
+/// `TypePattern = (`_` | BacktickId | VarId) ~ `:` ~ TypePat` with `TypePat =
+/// CompoundType` (Exprs.scala:306, 314). There is NO cut, so any non-match — a
+/// non-`VarId` head, a missing `:`, or a `CompoundType` that fails — restores the
+/// cursor and returns `false` to hand the element to `BindPattern`. oracle:
+/// `Some(x: Int)` / `Some(_: Int)` / `` Some(`A`: Int) `` / `Some(x: Coll[Int])`
+/// ACCEPT; `Some(Foo: Int)` REJECT (uppercase head is a constructor `StableId`, so
+/// the `:` is stranded before `)`); `Some(x: )` REJECT (empty `TypePat` → the `x`
+/// re-parses as a bind, `:` then stranded).
+fn try_type_pattern(c: &mut Cursor) -> Result<bool, ParseError> {
+    if !is_var_id_head(c.peek(), c.src) {
+        return Ok(false);
+    }
+    let mark = c.save();
+    c.bump(); // (`_` | BacktickId | VarId)
+    if !c.at_sym_kw(Kw::Colon) {
+        c.restore(mark);
+        return Ok(false);
+    }
+    c.bump(); // `:`
+    if compound_type(c).is_err() {
+        c.restore(mark); // TypePat failed → let BindPattern re-parse the head
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// A `TypePattern` head (Exprs.scala:306): the `_` word, a backtick id, or a `VarId`
+/// — an id whose first char is `Lower` (a lowercase letter, `_`, or `$`;
+/// Basic.scala:52, Identifiers.scala:28). An `UppercaseId` head (`Foo`) is a
+/// constructor `StableId`, NOT a `VarId`, and an operator id is never a `VarId`, so
+/// both are excluded.
+fn is_var_id_head(t: &Token, src: &str) -> bool {
+    match t.kind {
+        TokenKind::BacktickId => true,
+        TokenKind::Ident => matches!(
+            t.text(src).chars().next(),
+            Some(ch) if ch.is_lowercase() || ch == '_' || ch == '$'
+        ),
+        _ => false,
+    }
 }
 
 /// `Fun = `def` ~ FunDef` body (Exprs.scala:214-232). The caller has consumed
@@ -1374,9 +1436,9 @@ fn consume_tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
 /// at the production start. No dotty subject: `args` = the FIRST arg list only —
 /// extra lists are silently dropped (`args.headOption`, :220). With a dotty subject
 /// and ≤1 lists: `args = [subj] ++ first`; with >1 lists: Semantic error (:229-231).
-fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
+fn fun_def(c: &mut Cursor, committed: &mut bool) -> Result<Expr, ParseError> {
     let pos = c.peek().start; // Index (at DottyExtMethodSubj? / Id)
-    let dotty = try_dotty_subj(c)?;
+    let dotty = try_dotty_subj(c, committed)?;
     if !is_id(c.peek()) {
         return Err(ParseError::Syntax {
             pos: c.peek().start,
@@ -1385,14 +1447,16 @@ fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
     }
     let name = c.bump();
     let name = name.text(c.src).to_string();
-    let arg_lists = fun_sig(c)?;
+    let arg_lists = fun_sig(c, committed)?;
     let res_type = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
+        *committed = true; // the result-type `:` cut fired
         Some(type_(c)?)
     } else {
         None
     };
     expect_assign(c)?; // `=` ~/ — committed
+    *committed = true; // the Body `=` cut fired
     let body = expr(c, Ctx::Free)?; // FreeCtx.Expr
     let res = res_type.unwrap_or(SType::NoType);
 
@@ -1439,9 +1503,10 @@ fn fun_def(c: &mut Cursor) -> Result<Expr, ParseError> {
 /// RAW `~~`, so there `OneNLMax` is live — at most one newline may follow `]`.
 /// oracle: `def f\n\n(x)=x` / `def f(x)\n\n(y)=x` / `def f[T]\n(x)=x` ACCEPT, but
 /// `def f[T]\n\n(x)=x` REJECT.
-fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
+fn fun_sig(c: &mut Cursor, committed: &mut bool) -> Result<Vec<ArgList>, ParseError> {
     let had_type_args = c.peek().kind == TokenKind::LBracket;
     if had_type_args {
+        *committed = true; // FunTypeArgs `[` ~/ cut is about to fire
         fun_type_args(c)?; // FunTypeArgs — parsed and discarded
     }
     let mut lists = Vec::new();
@@ -1460,6 +1525,7 @@ fn fun_sig(c: &mut Cursor) -> Result<Vec<ArgList>, ParseError> {
         }
         first = false;
         c.bump(); // "(" ~/ — committed
+        *committed = true; // the FunArgs `(` cut fired
         let args = if starts_fun_arg(c.peek()) {
             arg_list(c)?
         } else {
@@ -1567,30 +1633,43 @@ fn type_arg_variant(c: &mut Cursor) -> Result<(), ParseError> {
     type_arg(c)
 }
 
-/// `DottyExtMethodSubj = "(" ~/ Id ~ `:` ~/ Type ~ ")"` (Types.scala:150), the
-/// (rarely used) extension-method subject. Returns `None` with the cursor restored
-/// when the leading `(` does not open a `( Id : Type )` group.
-fn try_dotty_subj(c: &mut Cursor) -> Result<Option<(String, SType)>, ParseError> {
+/// `DottyExtMethodSubj = "(" ~/ Id.! ~ `:` ~/ Type ~ ")"` (Types.scala:150), the
+/// (rarely used) extension-method subject. Returns `None` (cursor unmoved) only when
+/// there is no leading `(`. Once the `(` matches, the `~/` cut fires — `*committed`
+/// is set and every subsequent mismatch is a HARD error, not a `None` backtrack (a
+/// leading `(` after `def` can only be a DottyExtMethodSubj, since `Id.!` cannot
+/// match `(`). oracle: `def(1)` REJECT 1:5, `def (x) = 1` REJECT 1:7,
+/// `def (x: Int) foo = x` ACCEPT.
+fn try_dotty_subj(
+    c: &mut Cursor,
+    committed: &mut bool,
+) -> Result<Option<(String, SType)>, ParseError> {
     if c.peek().kind != TokenKind::LParen {
         return Ok(None);
     }
-    let mark = c.save();
-    c.bump(); // "("
+    c.bump(); // "(" ~/ — committed to a DottyExtMethodSubj
+    *committed = true;
     if !is_id(c.peek()) {
-        c.restore(mark);
-        return Ok(None);
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "identifier".to_string(),
+        });
     }
     let id = c.bump();
     let id = id.text(c.src).to_string();
     if !c.at_sym_kw(Kw::Colon) {
-        c.restore(mark);
-        return Ok(None);
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "`:`".to_string(),
+        });
     }
-    c.bump(); // `:`
+    c.bump(); // `:` ~/
     let ty = type_(c)?;
     if c.peek().kind != TokenKind::RParen {
-        c.restore(mark);
-        return Ok(None);
+        return Err(ParseError::Syntax {
+            pos: c.peek().start,
+            expected: "`)`".to_string(),
+        });
     }
     c.bump(); // ")"
     Ok(Some((id, ty)))

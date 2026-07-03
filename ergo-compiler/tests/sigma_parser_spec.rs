@@ -2198,8 +2198,9 @@ fn quirk_empty_block_with_semi_accepts() {
 
 #[test]
 fn quirk_def_alone_is_ident() {
-    // spec-derived: Exprs.scala:55 — `def` has no cut, so `def` alone backtracks
-    // to an ordinary identifier.
+    // Exprs.scala:55 — `def` has no cut, so `def` alone (FunDef fails at the missing
+    // name before any cut) backtracks to an ordinary identifier.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT as Ident.
     check("def", ident("def"));
 }
 
@@ -2417,4 +2418,130 @@ fn r3_block_lambda_and_raw_block_arg_newline_sites_unchanged() {
     accept("{ (x: Int)\n\n=> x }");
     reject("f\n\n{ 1 }");
     reject("f\n{ 1 }");
+}
+
+// -----------------------------------------------------------------------------
+// Codex round-4 parity fixes: committed-`def` no-fallback, block-lambda `BlockEnd`
+// semis, full `Pattern` grammar in extractor `TupleEx`. Every case oracle-pinned
+// against ParserOracle (sigma-state 6.0.2).
+// -----------------------------------------------------------------------------
+
+// ----- oracle parity: F1 committed-`def` fallback boundary -----
+
+#[test]
+fn r4_def_committed_cut_failure_rejects() {
+    // `Fun = `def` ~ FunDef` (Exprs.scala:55) has NO cut after `def`: a FunDef that
+    // fails before crossing a cut backtracks to parse `def` as an identifier, but
+    // once a FunDef cut fires — an opened FunArgs `(`, a FunTypeArgs `[`, a
+    // DottyExtMethodSubj `(`, a result `:`, or the Body `=` — fastparse's `|` cannot
+    // backtrack past it and the failure is hard (Types.scala:142-143,150; Exprs.scala:216).
+    // oracle: ParserOracle sigma-state 6.0.2 — REJECT at the cited position.
+    fail_at("def +(x)", 1, 9); // opened FunArgs `(`, then Body `=` missing
+    fail_at("def ||()", 1, 9);
+    fail_at("def +(x): Int", 1, 14); // result `:` present, Body `=` missing
+    fail_at("def + : Int", 1, 12); // bare op-id name, result-`:` cut
+    fail_at("def f[T]", 1, 9); // FunTypeArgs `[` cut
+    fail_at("def f[T](x)", 1, 12);
+    fail_at("def f()", 1, 8); // empty FunArgs `(` cut, Body `=` missing
+    fail_at("def f: Int", 1, 11); // result-`:` cut, Body `=` missing
+    fail_at("def(1)", 1, 5); // DottyExtMethodSubj `(` cut, name expected
+    fail_at("def (x) = 1", 1, 7); // dotty `(` cut, inner `:` expected
+    fail_at("def f[123]", 1, 7); // FunTypeArgs cut, bad type arg
+    fail_at("def f[]", 1, 7);
+}
+
+#[test]
+fn r4_def_precut_failure_falls_back_to_ident() {
+    // No cut fired → `def` is an ordinary identifier and the rest parses via
+    // PostfixLambda. oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each.
+    check("def", ident("def"));
+    accept("def f"); // name only, no cut, no `=`
+    accept("def + 1"); // op-id name as infix, no cut
+    accept("def +");
+    accept("def ||");
+    accept("def * 2");
+    accept("x + def");
+    accept("def.toString");
+    accept("def + def");
+    accept("{ def x = 1; x }"); // a real def inside a block still parses
+}
+
+#[test]
+fn r4_def_committed_and_complete_accepts() {
+    // The committed forms that reach the Body `=` are ordinary defs.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each.
+    accept("def +(x) = x");
+    accept("def +(x): Int = x");
+    accept("def f = 1");
+    accept("def f() = 1");
+    accept("def (x: Int) foo = x"); // DottyExtMethodSubj succeeds, then name `foo`
+}
+
+// ----- oracle parity: F2 block-lambda `BlockEnd` trailing semis -----
+
+#[test]
+fn r4_block_lambda_empty_body_trailing_semis_accept() {
+    // `BlockEnd = Semis.? ~ &("}")` (Exprs.scala:281) absorbs a trailing `;` run
+    // before the closer even when the block-lambda body is empty; the body is then
+    // `block(Seq())` = `Block([], ())` (Exprs.scala:286-292, 271-272).
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT; body shape pinned via check().
+    check(
+        "{ (x,y)=>; }",
+        lambda(vec![("x", NoType), ("y", NoType)], block(vec![], unit())),
+    );
+    check(
+        "{ (x,y)=> }",
+        lambda(vec![("x", NoType), ("y", NoType)], block(vec![], unit())),
+    );
+    check("{ ()=>; }", lambda(vec![], block(vec![], unit())));
+    accept("{ (x,y)=>;; }");
+    accept("{ (x,y)=>;}");
+    accept("{ (x,y)=> ; ; }");
+}
+
+// ----- oracle parity: F3 extractor `TupleEx` full `Pattern` grammar -----
+
+#[test]
+fn r4_extractor_pattern_full_grammar_accepts() {
+    // `TupleEx` elements are full `Pattern`s (Exprs.scala:304-306): a `TypePattern`
+    // `v : CompoundType` (head is `_`/backtick/`VarId`) and `|`-alternation, all
+    // parsed-and-DISCARDED (the extractor keeps only the `StableId` name, :236).
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT each.
+    accept("{ val Some(x: Int) = 1; 1 }");
+    accept("{ val Some(_: Int) = 1; 1 }");
+    accept("{ val Some(_x: Int) = 1; 1 }");
+    accept("{ val Some($x: Int) = 1; 1 }");
+    accept("{ val Some(`A`: Int) = 1; 1 }"); // backtick head escapes the uppercase rule
+    accept("{ val Some(x: Coll[Int]) = 1; 1 }"); // TypePat = CompoundType
+    accept("{ val Some(x | y) = 1; 1 }");
+    accept("{ val Some(Foo | x) = 1; 1 }");
+    accept("{ val Some(x: Int | y) = 1; 1 }"); // CompoundType stops at `|`
+    accept("{ val Some(x, y: Int) = 1; 1 }");
+    accept("{ val Some(x: Int, y) = 1; 1 }");
+}
+
+#[test]
+fn r4_extractor_pattern_malformed_rejects() {
+    // The `|` separator carries a cut (`"|"./`) and the `(` carries a cut; an
+    // UppercaseId head is a constructor `StableId` (not a `VarId`), so a typed
+    // uppercase element strands the `:` before `)`. oracle: sigma-state 6.0.2 —
+    // REJECT at the cited position.
+    fail_at("{ val Some(x |) = 1; 1 }", 1, 15); // `|` cut, no following alternative
+    fail_at("{ val Some(x: ) = 1; 1 }", 1, 13); // empty TypePat → bind `x`, `:` stranded
+    fail_at("{ val Some(Foo: Int) = 1; 1 }", 1, 15); // uppercase head → StableId
+    fail_at("{ val Some(A.b: Int) = 1; 1 }", 1, 15); // dotted StableId, then `:`
+    fail_at("{ val Some((a,b): Int) = 1; 1 }", 1, 17); // nested tuple, then `:`
+    fail_at("{ val Some(Foo(y): Int) = 1; 1 }", 1, 18); // extractor, then `:`
+    fail_at("{ val Some((x |)) = 1; 1 }", 1, 16); // nested `TupleEx` applies the `|` cut
+}
+
+#[test]
+fn r4_val_tuple_pattern_uses_real_tupleex() {
+    // The `val (…)` binder's `TupleEx` is now the real `Pattern` grammar (not a
+    // balanced-paren scan): a well-formed tuple reduces to the non-name `Other` and
+    // is rejected at the pattern start, while a malformed inner pattern hard-rejects
+    // at its own position. oracle: ParserOracle sigma-state 6.0.2.
+    fail_at("{ val (a, b) = t; a }", 1, 7); // well-formed tuple → non-name reject
+    fail_at("{ val (x: ) = 1; 1 }", 1, 9); // empty TypePat, inner reject
+    fail_at("{ val (a, b = t; a }", 1, 13); // unterminated inner group
 }

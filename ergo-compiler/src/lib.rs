@@ -75,13 +75,12 @@
 //!   returns `ParseError::Semantic`. Both sides REJECT; the error class differs.
 //!   Bounded to `{ (a,b) => e1; (c,d) => e2 }` which no real contract produces.
 //!
-//! - **`tuple_ex` uses `SimplePattern`-not-`Pattern` recursion** (`parse.rs`):
-//!   `TupleEx` (extractor arg list) recurses through `bind_pattern` (=
-//!   `SimplePattern`) instead of the full `Pattern` grammar (which allows
-//!   alternatives and guards). Safe because extractor args are parsed and
-//!   DISCARDED — the reference drops the `TupleEx` result and only keeps the
-//!   `StableId` name (`Exprs.scala:236`). No AST difference; no accept/reject
-//!   divergence on real contracts.
+//! - **`|`-separated pattern with a `|`-prefixed op-id** (`parse.rs`): in an
+//!   extractor `TupleEx` element, a `Pattern` alternative separator is the literal
+//!   char `|`, but the lexer folds a `|`-led operator run (`|:`) into one `OpId`.
+//!   So `Some(x |: T)` reports the reject one column early (at the `|:` token, not
+//!   inside it). Reject-parity holds; position-only, and only on mid-pattern junk no
+//!   real contract contains.
 //!
 //! - **`line_col` past-end and empty-last-line quirks** (`span.rs`): two
 //!   minor deviations from `SourceContext.scala` arithmetic: byte positions
