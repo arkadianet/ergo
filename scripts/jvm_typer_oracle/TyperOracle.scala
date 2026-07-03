@@ -38,9 +38,7 @@
 // with builder = TransformingSigmaBuilder (default). lowerMethodCalls=true means
 // methods WITH an irBuilder are replaced by their specialized IR node (e.g. Append,
 // MapCollection, Filter, ForAll, Slice, Fold, Exponentiate, MultiplyGroup, ByIndex …).
-// Methods WITHOUT an irBuilder SURVIVE as MethodCall (e.g. SGlobal v6 methods:
-// serialize, some, none, fromBigEndianBytes, deserializeTo; BigInt.toBytes;
-// GroupElement.negate; SCollection.zip/patch/updated/updateMany/flatMap/indexOf).
+// methods WITH the generic MethodCallIrBuilder survive as MethodCall; methods with NO irBuilder survive as Select; custom builders lower
 //
 // § Canonical s-expression format (diff target for the Rust typed_print.rs) ────
 //

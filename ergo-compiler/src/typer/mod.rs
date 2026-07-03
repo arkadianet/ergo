@@ -43,7 +43,7 @@ pub use unify::{
 /// iteration in error messages / tests.  The caller pre-seeds it: block `val`
 /// names and lambda parameters are added by the typer itself as it descends;
 /// the top-level `predefinedEnv` wiring (predefined func names → their `SFunc`
-/// declaration types) is Task 6/8 — for now the caller seeds any needed entries.
+/// declaration types) lives in `typecheck.rs`.
 pub type TypeEnv = BTreeMap<String, SType>;
 
 /// Knobs threaded through the typer dispatch.

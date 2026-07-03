@@ -648,8 +648,14 @@ fn is_base58_char(c: char) -> bool {
 ///
 /// Returns `Ok(())` if the string is a structurally valid base64 input
 /// (all chars in alphabet; at most 2 trailing `=` signs; no interior `=`;
-/// length % 4 ≠ 1).  Returns `Err(msg)` otherwise, mirroring the
-/// `IllegalArgumentException` that the Java decoder throws.
+/// length % 4 ≠ 1; when padding is present, length must be a multiple of 4).
+/// Returns `Err(msg)` otherwise, mirroring the `IllegalArgumentException`
+/// that the Java decoder throws.
+///
+/// Oracle-confirmed (2026-07-04, ORACLE_TREE_VERSION=3):
+///   `fromBase64("a=")` → REJECT (pad present, len 2, 2 % 4 ≠ 0)
+///   `fromBase64("abcde=")` → REJECT (pad present, len 6, 6 % 4 ≠ 0)
+///   `fromBase64("ab")` → OK (no padding, len 2, no structural check)
 ///
 /// (SigmaPredef.scala:249 / `java.util.Base64.getDecoder().decode(s)`)
 fn validate_base64(s: &str) -> Result<(), String> {
@@ -672,6 +678,15 @@ fn validate_base64(s: &str) -> Result<(), String> {
     if s.len() % 4 == 1 {
         return Err(format!(
             "Invalid base64 string length: {} (remainder 1 is undecodable)",
+            s.len()
+        ));
+    }
+    // Java's decoder rejects padded strings whose total length is not a multiple of 4.
+    // e.g. "a=" (len 2) and "abcde=" (len 6) → IllegalArgumentException.
+    // Unpadded strings (pad_count == 0) are not subject to this check ("ab" ACCEPTS).
+    if pad_count > 0 && !s.len().is_multiple_of(4) {
+        return Err(format!(
+            "Invalid base64 string length: {} (padding present but length is not a multiple of 4)",
             s.len()
         ));
     }
@@ -933,6 +948,52 @@ mod tests {
         let res = predef_ir_builder("fromBase64", &f, &[str_const("RWT_REPO_NFT")])
             .expect("isDefinedAt true for '_'");
         assert!(res.is_err(), "'_' not in standard Base64 alphabet");
+    }
+
+    // ----- fromBase64 structural padding validation (oracle §17) -----
+
+    /// `fromBase64("a=")` → Err: padding present but len 2, not a multiple of 4.
+    /// Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    ///   `fromBase64("a=")` → REJECT 0:0 IllegalArgumentException
+    /// Java's `Base64.getDecoder().decode("a=")` throws because length 2 ≢ 0 (mod 4).
+    #[test]
+    fn from_base64_padded_wrong_length_rejects() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("a=")])
+            .expect("isDefinedAt true for padded input");
+        assert!(
+            res.is_err(),
+            "\"a=\" has padding but len 2, not a multiple of 4"
+        );
+    }
+
+    /// `fromBase64("abcde=")` → Err: padding present but len 6, not a multiple of 4.
+    /// Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    ///   `fromBase64("abcde=")` → REJECT 0:0 IllegalArgumentException
+    #[test]
+    fn from_base64_padded_length_six_rejects() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("abcde=")])
+            .expect("isDefinedAt true for padded input");
+        assert!(
+            res.is_err(),
+            "\"abcde=\" has padding but len 6, not a multiple of 4"
+        );
+    }
+
+    /// `fromBase64("ab")` → None (valid, no padding, falls through).
+    /// Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    ///   `fromBase64("ab")` → OK (ConstantNode:Coll[Byte] <@105>)
+    /// Unpadded inputs are not subject to the length-mod-4 check; "ab" is structurally
+    /// valid (2 data chars decode to 1 byte). Shape deferred to M3.
+    #[test]
+    fn from_base64_unpadded_short_falls_through() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        // None = valid input, deferred; the Apply survives unlowered until M3.
+        assert!(
+            predef_ir_builder("fromBase64", &f, &[str_const("ab")]).is_none(),
+            "\"ab\" is valid base64 (unpadded, len 2); must fall through"
+        );
     }
 
     /// An unknown name has no irBuilder → None.

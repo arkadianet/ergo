@@ -650,7 +650,8 @@ mod tests {
     ///
     /// The seed file (`test-vectors/ergoscript/typer/golden_seed.txt`) is embedded
     /// at compile time so tests can't silently drift from the authoritative expected
-    /// values.  Only `OK` lines are indexed; `REJECT` lines are skipped.
+    /// values.  Panics on a first-match `REJECT` line (fail-loud); only `OK` lines
+    /// produce a return value.
     fn seed_expected(source: &str) -> String {
         let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
         for line in seed.lines() {

@@ -194,8 +194,8 @@
 //!   `TransformingSigmaBuilder`
 //! - **tc1.sh** — fresh-JVM mode for position grading (avoids singleton contamination;
 //!   see R1 in `dev-docs/m2-recon/m2-oracle.md`)
-//! - **Golden seed** (`test-vectors/ergoscript/typer/golden_seed.txt`) — 33 committed
-//!   records; swept by `typer_oracle_parity::seed_golden_sweep`
+//! - **Golden seed** (`test-vectors/ergoscript/typer/golden_seed.txt`) — 143 committed
+//!   records (counted 2026-07-04); swept by `typer_oracle_parity::seed_golden_sweep`
 //! - **Corpus verdicts** (`test-vectors/ergoscript/typer/corpus_verdicts.json`) — 79-contract
 //!   JVM verdicts; swept by `typer_oracle_parity::corpus_typed_verdict_parity`
 //!
@@ -252,15 +252,15 @@
 //!
 //! ### D-T2 — fromBase58/fromBase64 validation (verdict parity); deserialize deferred
 //!
-//! **`fromBase58` and `fromBase64`**: literal validation is now implemented in
-//! `predef_ir_builder` (Fix round 1, 2026-07-04).  An invalid character causes a
-//! `TyperError` — REJECT verdict matches Scala (which throws `AssertionError` for
-//! Base58 via Scorex `Predef.ensuring("Wrong char in Base58 string")`, and
-//! `IllegalArgumentException` for Base64 via `java.util.Base64.getDecoder().decode`).
-//! The error *class* differs (oracle: JVM-runtime exception; Rust: `TyperError`) —
-//! both are non-reproducible oracle classes, so class parity is not asserted.
-//! A valid (or empty) literal still returns `None` so the `Apply` survives unlowered;
-//! M3 decodes to `ByteArrayConstant`.
+//! **`fromBase58` and `fromBase64`**: both character-class AND structural padding
+//! validation are implemented in `predef_ir_builder` and now match Scala's verdicts.
+//! Invalid characters cause a `TyperError`; for Base64, padded strings whose total
+//! length is not a multiple of 4 are also rejected (oracle-confirmed 2026-07-04:
+//! `fromBase64("a=")` and `fromBase64("abcde=")` REJECT; `fromBase64("ab")` ACCEPTS).
+//! Scala throws `AssertionError` (Base58) or `IllegalArgumentException` (Base64) —
+//! both non-reproducible oracle classes, so class parity is not asserted; verdict
+//! parity holds.  Canonical node build (decoding valid literals to `ByteArrayConstant`)
+//! is still M3.  A valid literal returns `None` so the `Apply` survives unlowered.
 //!
 //! **`deserialize`**: remains fully deferred — `predef_ir_builder` returns `None`
 //! unconditionally.  Scala constant-folds `deserialize(lit)` at type-check time
