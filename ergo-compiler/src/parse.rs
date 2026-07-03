@@ -77,7 +77,8 @@ fn clamp_zero_progress(err: ParseError, c: &Cursor) -> ParseError {
 pub fn parse_type(source: &str, tree_version: u8) -> Result<SType, ParseError> {
     let toks = tokenize(source)?;
     let mut c = Cursor::new(source, toks, tree_version);
-    let t = type_(&mut c)?;
+    // Top-level entry: the leading `=>` must be raw-adjacent to offset 0.
+    let t = type_(&mut c, true)?;
     // `~ End`: trailing whitespace/newlines/comments are skipped by `peek`.
     let tail = c.peek();
     if tail.kind != TokenKind::Eof {
@@ -388,10 +389,24 @@ fn starts_type(t: &Token) -> bool {
 
 /// `Type` (Types.scala:63): `` `=>`.? ~~ PostfixType ~ TypeBounds ~ `*`.? ``.
 /// The leading `=>`, the `TypeBounds`, and the trailing `*` are parsed and
-/// discarded. The `=>`-prefix uses raw adjacency (`~~`) in Scala, but since it is
-/// discarded, consume-if-present is faithful.
-fn type_(c: &mut Cursor) -> Result<SType, ParseError> {
-    if c.at_sym_kw(Kw::FatArrow) {
+/// discarded.
+///
+/// The leading `` `=>`.? `` is RAW-adjacent to the production start (the `~~`,
+/// Types.scala:63): it matches an arrow ONLY when no input is skipped between the
+/// production entry and the arrow. This bites at exactly ONE place — the top-level
+/// `parse_type` entry (`raw_entry = true`), the only Type invoked with no preceding
+/// `~`/`~/` to consume leading whitespace. Every NESTED Type (a tuple/type-arg
+/// element, the `` `=>` ~/ Type `` RHS, a `TypeBounds` RHS) is entered after a
+/// caller sequence op that already consumed the gap, so from Type's local view the
+/// arrow is adjacent regardless of source spacing (`raw_entry = false`). oracle:
+/// top-level ` => Int` / `\n=>Int` / `/*c*/=>Int` REJECT, but `=> Int` / `=>Int`
+/// ACCEPT; nested `Coll[ => Int]` / `( => Int) => Int` ACCEPT.
+///
+/// At the raw entry the top-level production begins at byte 0, so a leading arrow
+/// is recognised only when the `=>` token starts at offset 0 (any leading
+/// space/newline/comment pushes its start past 0 and breaks the raw match).
+fn type_(c: &mut Cursor, raw_entry: bool) -> Result<SType, ParseError> {
+    if c.at_sym_kw(Kw::FatArrow) && (!raw_entry || c.peek().start == 0) {
         c.bump();
     }
     let t = postfix_type(c)?;
@@ -409,7 +424,7 @@ fn postfix_type(c: &mut Cursor) -> Result<SType, ParseError> {
     let d = infix_type(c)?;
     if c.at_sym_kw(Kw::FatArrow) {
         c.bump(); // `=>` ~/  — committed
-        let r = type_(c)?;
+        let r = type_(c, false)?;
         let dom = match d {
             SType::STuple(items) => items,
             other => vec![other],
@@ -668,7 +683,7 @@ fn type_list(c: &mut Cursor) -> Result<Vec<SType>, ParseError> {
     let mut items = Vec::new();
     if starts_type(c.peek()) {
         loop {
-            items.push(type_(c)?);
+            items.push(type_(c, false)?);
             if c.peek().kind != TokenKind::Comma {
                 break;
             }
@@ -744,11 +759,11 @@ fn type_id(c: &mut Cursor) -> Result<SType, ParseError> {
 fn type_bounds(c: &mut Cursor) -> Result<(), ParseError> {
     if c.at_op(">:") {
         c.bump();
-        type_(c)?;
+        type_(c, false)?;
     }
     if c.at_op("<:") {
         c.bump();
-        type_(c)?;
+        type_(c, false)?;
     }
     Ok(())
 }
@@ -1279,7 +1294,7 @@ fn fun_arg(c: &mut Cursor) -> Result<(String, SType), ParseError> {
     let name = name.text(c.src).to_string();
     let tpe = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
-        type_(c)?
+        type_(c, false)?
     } else {
         SType::NoType
     };
@@ -1340,7 +1355,7 @@ fn val_def(c: &mut Cursor) -> Result<Expr, ParseError> {
     let pat = bind_pattern(c)?;
     let given_type = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
-        type_(c)?
+        type_(c, false)?
     } else {
         SType::NoType
     };
@@ -1540,7 +1555,7 @@ fn fun_def(c: &mut Cursor, committed: &mut bool) -> Result<Expr, ParseError> {
     let res_type = if c.at_sym_kw(Kw::Colon) {
         c.bump(); // `:` ~/ — committed
         *committed = true; // the result-type `:` cut fired
-        Some(type_(c)?)
+        Some(type_(c, false)?)
     } else {
         None
     };
@@ -1678,7 +1693,7 @@ fn type_arg(c: &mut Cursor) -> Result<(), ParseError> {
     type_bounds(c)?; // TypeBounds
     while c.at_sym_kw(Kw::Colon) {
         c.bump(); // CtxBounds: `:` ~/ — committed
-        type_(c)?;
+        type_(c, false)?;
     }
     Ok(())
 }
@@ -1753,7 +1768,7 @@ fn try_dotty_subj(
         });
     }
     c.bump(); // `:` ~/
-    let ty = type_(c)?;
+    let ty = type_(c, false)?;
     if c.peek().kind != TokenKind::RParen {
         return Err(ParseError::Syntax {
             pos: c.peek().start,
@@ -2114,7 +2129,7 @@ fn prefix_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
     let op = prefix_op(c);
     let e = simple_expr(c, ctx)?;
     match op {
-        Some(op) => mk_unary_op(&op, e),
+        Some(op) => mk_unary_op(&op, e, c.tree_version),
         None => Ok(e),
     }
 }
@@ -2239,7 +2254,7 @@ fn postfix_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
         break; // PostFix.? — at most one, and it is terminal
     }
 
-    let obj = mk_infix_tree(lhs, infix_ops)?;
+    let obj = mk_infix_tree(lhs, infix_ops, c.tree_version)?;
     match postfix_name {
         // mkMethodCallLike pinned to `obj.sourceContext` (Exprs.scala:113).
         Some(name) => {
@@ -2280,7 +2295,11 @@ fn precedence_of(op: &str) -> u8 {
 /// precedence. Reduces while the stacked op's precedence `>=` the incoming op's,
 /// i.e. left-associative at equal precedence. There is NO right-associativity for
 /// trailing-`:` operators in expressions (that rule is type-grammar only).
-fn mk_infix_tree(lhs: Expr, rest: Vec<(String, Expr)>) -> Result<Expr, ParseError> {
+fn mk_infix_tree(
+    lhs: Expr,
+    rest: Vec<(String, Expr)>,
+    tree_version: u8,
+) -> Result<Expr, ParseError> {
     let mut wait: Vec<(Expr, String)> = Vec::new();
     let mut x = lhs;
     let mut rest = rest.into_iter().peekable();
@@ -2291,7 +2310,7 @@ fn mk_infix_tree(lhs: Expr, rest: Vec<(String, Expr)>) -> Result<Expr, ParseErro
                 let p_incoming = precedence_of(&rest.peek().unwrap().0);
                 if p_stacked >= p_incoming {
                     let (l, op1) = wait.pop().unwrap();
-                    x = mk_binary_op(l, &op1, x)?; // reduce; rest unchanged
+                    x = mk_binary_op(l, &op1, x, tree_version)?; // reduce; rest unchanged
                 } else {
                     let (op2, r) = rest.next().unwrap();
                     wait.push((x, op2)); // shift
@@ -2306,7 +2325,7 @@ fn mk_infix_tree(lhs: Expr, rest: Vec<(String, Expr)>) -> Result<Expr, ParseErro
             }
             (true, false) => {
                 let (l, op) = wait.pop().unwrap();
-                x = mk_binary_op(l, &op, x)?;
+                x = mk_binary_op(l, &op, x, tree_version)?;
             }
         }
     }
@@ -2314,7 +2333,7 @@ fn mk_infix_tree(lhs: Expr, rest: Vec<(String, Expr)>) -> Result<Expr, ParseErro
 
 /// `mkUnaryOp` (SigmaParser.scala:40-69). Every node and error is pinned to the
 /// ARG's position (`currentSrcCtx.withValue(arg.sourceContext)`, :41).
-fn mk_unary_op(op: &str, arg: Expr) -> Result<Expr, ParseError> {
+fn mk_unary_op(op: &str, arg: Expr, tree_version: u8) -> Result<Expr, ParseError> {
     let pos = arg.pos();
     // "-" on a numeric constant: parser-level constant fold (:43-48). Magnitudes
     // are validated positive at lex (no `-2147483648`), so negation never
@@ -2337,7 +2356,7 @@ fn mk_unary_op(op: &str, arg: Expr) -> Result<Expr, ParseError> {
             pos,
         }), // :52 — no guard
         "-" => {
-            if arg.is_num_type_or_no_type() {
+            if arg.is_num_type_or_no_type(tree_version) {
                 Ok(Expr::Negation {
                     input: Box::new(arg),
                     pos,
@@ -2350,7 +2369,7 @@ fn mk_unary_op(op: &str, arg: Expr) -> Result<Expr, ParseError> {
             }
         }
         "~" => {
-            if arg.is_num_type_or_no_type() {
+            if arg.is_num_type_or_no_type(tree_version) {
                 Ok(Expr::BitInversion {
                     input: Box::new(arg),
                     pos,
@@ -2384,7 +2403,7 @@ fn is_parse_as_method(op: &str) -> bool {
 /// match order is exactly the Scala `opName match`: `|`/`&` (with a both-operands
 /// numeric-or-NoType guard) are checked BEFORE `parseAsMethods`, so `true | false`
 /// errors at parse time while `x | y` passes via `NoType`.
-fn mk_binary_op(l: Expr, op: &str, r: Expr) -> Result<Expr, ParseError> {
+fn mk_binary_op(l: Expr, op: &str, r: Expr, tree_version: u8) -> Result<Expr, ParseError> {
     let pos = l.pos();
     let rel = |kind: RelKind, l: Expr, r: Expr| Expr::Relation {
         kind,
@@ -2408,7 +2427,7 @@ fn mk_binary_op(l: Expr, op: &str, r: Expr) -> Result<Expr, ParseError> {
         "-" => arith(ArithKind::Minus, l, r), // :82
         "|" => {
             // :84-88 — guard both operands BEFORE the parseAsMethods fall-through.
-            if l.is_num_type_or_no_type() && r.is_num_type_or_no_type() {
+            if l.is_num_type_or_no_type(tree_version) && r.is_num_type_or_no_type(tree_version) {
                 Expr::BitOp {
                     kind: BitKind::Or,
                     left: Box::new(l),
@@ -2424,7 +2443,7 @@ fn mk_binary_op(l: Expr, op: &str, r: Expr) -> Result<Expr, ParseError> {
         }
         "&" => {
             // :90-94
-            if l.is_num_type_or_no_type() && r.is_num_type_or_no_type() {
+            if l.is_num_type_or_no_type(tree_version) && r.is_num_type_or_no_type(tree_version) {
                 Expr::BitOp {
                     kind: BitKind::And,
                     left: Box::new(l),

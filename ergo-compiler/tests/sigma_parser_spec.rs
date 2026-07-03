@@ -58,6 +58,23 @@ fn reject(src: &str) {
     assert!(parse(src, 3).is_err(), "expected parse error for {src:?}");
 }
 
+/// `reject_type(src)` — `SigmaParser.parseType` errs (accept/reject parity only).
+fn reject_type(src: &str) {
+    assert!(
+        parse_type(src, 3).is_err(),
+        "expected parseType error for {src:?}"
+    );
+}
+
+/// `accept_type(src)` — `SigmaParser.parseType` succeeds (accept-parity only; used
+/// where the exact `SType` shape is not the point).
+fn accept_type(src: &str) {
+    assert!(
+        parse_type(src, 3).is_ok(),
+        "expected parseType accept for {src:?}"
+    );
+}
+
 /// `accept(src)` — parse succeeds (accept-parity only; used where the exact AST
 /// is not the point) and every node position is within bounds.
 fn accept(src: &str) {
@@ -2720,4 +2737,87 @@ fn r5_bare_postfix_statement_then_next_is_block_shape_error() {
                                   // whose unknown operator rejects at the left operand.
     fail_at("(x id\ny)", 1, 2);
     fail_at("{ x id\ny }", 1, 3);
+}
+
+// ----- oracle parity: round 6 (F1) — Select.tpe product-method lookup -----
+
+#[test]
+fn r6_product_select_type_fails_the_numeric_guard() {
+    // Scala `Select.tpe` (values.scala:1171-1178) looks up the field method on a
+    // parse-time-typed product object; a FOUND method makes the Select an `SFunc`
+    // (its `m.stype`), which is non-numeric and fails the mkUnaryOp/mkBinaryOp guard.
+    // A tuple literal `(a,b)._i` (i in range) and a numeric-constant cast/bitwise
+    // method are the reachable cases. oracle: ParserOracle sigma-state 6.0.2 — REJECT.
+    fail_at("-((1,2)._1)", 1, 3); // Negation guard, tuple `_1` → SFunc
+    fail_at("~((1,2)._1)", 1, 3); // BitInversion guard, same
+    fail_at("-((1,2)._2)", 1, 3); // in-range on a 2-tuple
+    fail_at("-((1,2,3)._3)", 1, 3); // in-range on a 3-tuple
+    fail_at("-((1,2).size)", 1, 3); // inherited Coll `size`
+    fail_at("~((1,2).apply)", 1, 3); // inherited Coll `apply`
+    fail_at("((1,true)._2) | 1", 1, 2); // `|` guard, tuple `_2` → SFunc
+    fail_at("((1,2)._1) & 1", 1, 2); // `&` guard, tuple `_1` → SFunc
+    fail_at("-(5.toByte)", 1, 3); // SInt cast method → SFunc
+    fail_at("-(5L.toByte)", 1, 3); // SLong cast method → SFunc
+    fail_at("-(5.toBytes(0))", 1, 3); // Apply of `.toBytes` → SColl[SByte], non-numeric
+    fail_at("-(5.bitwiseOr)", 1, 3); // v6-only numeric method (tree_version=3) → SFunc
+                                     // `-(1,2)._1`: the prefix `-` binds the `(1,2)` atom FIRST (a tuple, non-numeric),
+                                     // so the guard rejects at the tuple `1:2` before `._1` is ever reached.
+    fail_at("-(1,2)._1", 1, 2);
+}
+
+#[test]
+fn r6_non_product_select_still_passes_the_numeric_guard() {
+    // A NoType object (identifier-rooted), an out-of-range / non-canonical tuple
+    // component, a missing tuple/String/Boolean method, and a Unit receiver (not
+    // SProduct) all keep the Select `NoType`, which passes the guard.
+    // oracle: ParserOracle sigma-state 6.0.2 — ACCEPT.
+    accept("-OUTPUTS.size"); // Ident object → NoType (StableId consumed the dot chain)
+    accept("-((1,2)._3)"); // `_3` out of range on a 2-tuple → None → NoType
+    accept("-((1,2)._0)"); // `_0` is not a component name
+    accept("-((1,2)._01)"); // non-canonical index form
+    accept("-((1,2).nope)"); // no such tuple method
+    accept("-(\"ab\".size)"); // SString defines no methods
+    accept("-(true.toByte)"); // SBoolean defines no methods
+    accept("-(().foo)"); // SUnit is not an SProduct
+    accept("-(5.toByte(0))"); // Apply of `.toByte` → SByte (numeric) passes
+    accept("-((1,2)._1(0))"); // Apply of tuple `_1` → SInt (numeric) passes
+}
+
+// ----- oracle parity: round 6 (F2) — raw leading `=>` at the Type entry -----
+
+#[test]
+fn r6_leading_type_arrow_is_raw_only_at_the_top_level_entry() {
+    // `Type = `=>`.? ~~ PostfixType` (Types.scala:63): the leading arrow is
+    // raw-adjacent to the production start. At the top-level parse_type entry a
+    // leading gap breaks the raw match (the arrow then falls to PostfixType, which
+    // can't parse `=>` as a compound type). oracle: sigma-state 6.0.2.
+    reject_type(" => Int"); // leading space
+    reject_type("\n=>Int"); // leading newline
+    reject_type("/*c*/=>Int"); // leading comment
+    reject_type("  =>Int"); // leading spaces
+    check_type("=> Int", SInt); // arrow at offset 0 → discarded → `Int`
+    check_type("=>Int", SInt);
+    check_type("=>/*c*/Int", SInt); // comment AFTER the arrow is fine
+    check_type("=>  Int", SInt); // gap AFTER the arrow is fine
+                                 // A NON-arrow leading gap is always fine (PostfixType consumes leading WS).
+    check_type(" Int", SInt);
+    // NESTED Type positions accept a gap before `=>` — the caller `~`/`~/` already
+    // consumed it, so from Type's local view the arrow is adjacent.
+    check_type("Coll[ => Int]", SType::SColl(Box::new(SInt)));
+    check_type("Coll[=> Int]", SType::SColl(Box::new(SInt)));
+    accept_type("( => Int) => Int"); // arrow-gap inside a tuple element
+    accept_type("Int => => Int"); // arrow-gap on the `=>` RHS Type
+}
+
+// ----- oracle parity: round 6 (F3) — stray-brace deviation (deliberate) -----
+
+#[test]
+fn r6_stray_brace_block_absurdity_is_deliberately_rejected() {
+    // SigmaParser ACCEPTS these malformed inputs as blocks (result `a` / `/`) — a
+    // genuine reference-parser misbehavior on garbage input. M1 rejects at the first
+    // `}` (bare-empty-block reject). Reproducing the accept would mean emitting a
+    // valid tree for garbage, so we deliberately keep the reject-side divergence.
+    // See the "Known M1 deviations" ledger in lib.rs.
+    reject("{ } a }"); // oracle: ACCEPT (sic) — deliberate M1 deviation, see lib.rs ledger
+    reject("{}/}"); // oracle: ACCEPT (sic) — deliberate M1 deviation, see lib.rs ledger
 }

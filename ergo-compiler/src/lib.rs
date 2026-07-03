@@ -106,6 +106,18 @@
 //!   reports `1:5` (past the outer `}`) while our recursive descent fails at the
 //!   inner empty block (`1:4`, one past the inner `}`). Position-only, reject-parity
 //!   holds; bounded to nested bare empty blocks no real contract produces.
+//!
+//! - **Stray-brace block absurdity rejected** (`parse.rs`): SigmaParser ACCEPTS the
+//!   malformed inputs `{ } a }` (block with result `a`) and `{}/}` (block with
+//!   result `/`) — a genuine reference-parser misbehavior where a stray closing `}`
+//!   after an empty-looking `{}` still yields a valid block. M1 rejects both at the
+//!   first `}` (the bare-empty-block reject). This is a DELIBERATE non-reproduction:
+//!   for a compiler frontend the safe direction is rejecting malformed input — a
+//!   wrong-accept would emit a bogus tree/address downstream (funds risk), whereas a
+//!   wrong-reject only surfaces a user error. Reject-side divergence only, bounded to
+//!   garbage no real contract contains. oracle: `parse("{ } a }")` / `parse("{}/}")`
+//!   ACCEPT (sic), sigma-state 6.0.2; pinned by
+//!   `r6_stray_brace_block_absurdity_is_deliberately_rejected`.
 
 pub mod ast;
 pub mod error;

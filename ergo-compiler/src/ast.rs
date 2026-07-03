@@ -172,6 +172,106 @@ fn or_no_type(given: &SType, fallback: impl FnOnce() -> SType) -> SType {
     }
 }
 
+/// Scala `Select.tpe`'s product branch (values.scala:1171-1178):
+/// `obj.tpe match { case p: SProduct => MethodsContainer.getMethod(p, field)
+/// .map(_.stype).getOrElse(NoType); case _ => NoType }`. Every `SMethod.stype` is
+/// an `SFunc` (methods.scala:216-228 `propertyCall`, and every `SMethod`
+/// constructor), so a FOUND method yields an `SFunc` (never numeric, never
+/// `NoType` — it fails the mkUnaryOp/mkBinaryOp numeric guard); a MISSING method,
+/// or a non-`SProduct` receiver, yields `NoType` (which passes the guard). The
+/// returned `SFunc`'s RANGE is the method's real result type — it is read by
+/// `Apply.parse_tpe` (values.scala:1218-1222), e.g. `-(5.toBytes(0))` REJECTs
+/// because `Apply(Select(5,toBytes),[0]).tpe = SColl[SByte]`. The DOM is never
+/// inspected by any `parse_tpe` consumer, so the receiver stands in for it.
+///
+/// Parse-time-reachable `SProduct` receivers (every other object — a NoType
+/// identifier, `SFunc`, `SColl`, `SOption`, … — hits the `_ => NoType` arm):
+/// - `STuple` (a tuple literal / paren≥2) — `getTupleMethod` (methods.scala:1248-
+///   1257): the inherited Coll `size`/`apply` (methods.scala:1240-1246) or an `_i`
+///   component with `1 <= i <= len`.
+/// - a numeric constant/expr (`SInt`/`SLong`; the other numerics share the same
+///   table but are not parse-time-reachable) — `SNumericTypeMethods`
+///   (methods.scala:461-478).
+/// - `SBoolean`/`SString` are `SProduct` but define NO methods
+///   (`SBooleanMethods`/`SStringMethods` `getMethods = super = Nil`) → `NoType`.
+/// - `SUnit`/`SAny` are NOT `SProduct` (SType.scala:626/639) → the `_ => NoType` arm.
+fn product_method_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType {
+    let range = match obj_tpe {
+        SType::STuple(items) => tuple_method_range(items, field),
+        SType::SByte
+        | SType::SShort
+        | SType::SInt
+        | SType::SLong
+        | SType::SBigInt
+        | SType::SUnsignedBigInt => numeric_method_range(field, obj_tpe, tree_version),
+        _ => None,
+    };
+    match range {
+        Some(res) => SType::SFunc {
+            dom: vec![obj_tpe.clone()],
+            range: Box::new(res),
+        },
+        None => SType::NoType,
+    }
+}
+
+/// `STupleMethods.getTupleMethod` result type (methods.scala:1248-1257) for a tuple
+/// receiver, or `None` when `field` is not a tuple method.
+fn tuple_method_range(items: &[SType], field: &str) -> Option<SType> {
+    // colMethods inherited from Coll (methods.scala:1240-1246): `size` (id 1) →
+    // `SInt`, `apply` (id 10) → `SAny` (elemType after the `tIV -> SAny` subst).
+    match field {
+        "size" => return Some(SType::SInt),
+        "apply" => return Some(SType::SAny),
+        _ => {}
+    }
+    // `_i` component: `SFunc(tup, tup.items(i-1))`, valid iff
+    // `componentNames.lastIndexOf("_i", end = len-1) != -1`, i.e. `1 <= i <= len`
+    // (methods.scala:1250). `componentNames` holds exactly "_1".."_MaxTupleLength",
+    // so a non-canonical form ("_0", "_01", "_-1") never matches.
+    let rest = field.strip_prefix('_')?;
+    let i: usize = rest.parse().ok()?;
+    if i >= 1 && i <= items.len() && rest == i.to_string() {
+        Some(items[i - 1].clone())
+    } else {
+        None
+    }
+}
+
+/// `SNumericTypeMethods` result type (methods.scala:288-478) for a numeric receiver
+/// `recv`; the `tNum` type variable is substituted by `recv` (methods.scala:235).
+/// `None` when `field` is not a numeric method at `tree_version`.
+fn numeric_method_range(field: &str, recv: &SType, tree_version: u8) -> Option<SType> {
+    // v5 set (methods.scala:288-336, 461-469): present at every version.
+    match field {
+        "toByte" => return Some(SType::SByte),
+        "toShort" => return Some(SType::SShort),
+        "toInt" => return Some(SType::SInt),
+        "toLong" => return Some(SType::SLong),
+        "toBigInt" => return Some(SType::SBigInt),
+        "toBytes" => return Some(SType::SColl(Box::new(SType::SByte))),
+        "toBits" => return Some(SType::SColl(Box::new(SType::SBoolean))),
+        _ => {}
+    }
+    // v6-only additions (`isV3OrLaterErgoTreeVersion` == `tree_version >= 3`;
+    // methods.scala:356-458, 471-478): each returns the receiver numeric type.
+    if tree_version >= 3
+        && matches!(
+            field,
+            "bitwiseInverse"
+                | "bitwiseOr"
+                | "bitwiseAnd"
+                | "bitwiseXor"
+                | "shiftLeft"
+                | "shiftRight"
+        )
+    {
+        Some(recv.clone())
+    } else {
+        None
+    }
+}
+
 impl Expr {
     /// The node's source position (every node has one —
     /// SigmaParserTest `assertSrcCtxForAllNodes`, LangTests.scala).
@@ -214,11 +314,14 @@ impl Expr {
     /// - `Ident` — its `tpe` field (values.scala:1192; `NoType` except the
     ///   ZKProof callee, which carries `SFunc`).
     /// - `Select` — `resType.getOrElse(obj.tpe match { SProduct => method-lookup;
-    ///   _ => NoType })` (values.scala:1171-1178). At parse time `resType` is
-    ///   `None` and `obj.tpe` is `NoType` for every identifier-rooted object
-    ///   (the only realistic parse-time object), so the fallback yields `NoType`;
-    ///   the `SProduct` method-lookup branch is deferred to the typer and left as
-    ///   `NoType` here (never a false-reject — `NoType` always passes the guard).
+    ///   _ => NoType })` (values.scala:1171-1178), delegated to
+    ///   [`product_method_tpe`]. `resType` is `None` at parse time; a
+    ///   NoType/identifier-rooted object stays `NoType` (so `-OUTPUTS.size`
+    ///   accepts), but a parse-time-typed *product* object — a tuple literal
+    ///   `(a,b)._i`, a numeric constant `.toByte` — resolves through the reference
+    ///   method tables, and a FOUND method makes the Select an `SFunc`
+    ///   (non-numeric). This is why `-((1,2)._1)` / `((1,true)._2) | 1` /
+    ///   `-(5.toByte)` REJECT (oracle-verified) while we used to accept.
     /// - `Apply` — `func.tpe match { SFunc => range; SColl => elem; _ => NoType }`
     ///   (values.scala:1218-1222).
     /// - `ApplyTypes` — `input.tpe` (values.scala:1262-1267; `applySubst` on an
@@ -235,7 +338,7 @@ impl Expr {
     /// - `Relation` — `SBoolean` (trees.scala:1072-1073, `NotReadyValueBoolean`).
     /// - `ArithOp` — `left.tpe` (trees.scala:704-707).
     /// - `BitOp` — `left.tpe` (trees.scala:911-915).
-    pub fn parse_tpe(&self) -> SType {
+    pub fn parse_tpe(&self, tree_version: u8) -> SType {
         match self {
             Expr::IntConst { .. } => SType::SInt,
             Expr::LongConst { .. } => SType::SLong,
@@ -243,13 +346,15 @@ impl Expr {
             Expr::StringConst { .. } => SType::SString,
             Expr::UnitConst { .. } => SType::SUnit,
             Expr::Ident { tpe, .. } => tpe.clone(),
-            Expr::Select { .. } => SType::NoType,
-            Expr::Apply { func, .. } => match func.parse_tpe() {
+            Expr::Select { obj, field, .. } => {
+                product_method_tpe(&obj.parse_tpe(tree_version), field, tree_version)
+            }
+            Expr::Apply { func, .. } => match func.parse_tpe(tree_version) {
                 SType::SFunc { range, .. } => *range,
                 SType::SColl(elem) => *elem,
                 _ => SType::NoType,
             },
-            Expr::ApplyTypes { input, .. } => input.parse_tpe(),
+            Expr::ApplyTypes { input, .. } => input.parse_tpe(tree_version),
             Expr::MethodCallLike { .. } => SType::NoType,
             Expr::Lambda {
                 args,
@@ -258,18 +363,22 @@ impl Expr {
                 ..
             } => SType::SFunc {
                 dom: args.iter().map(|(_, t)| t.clone()).collect(),
-                range: Box::new(or_no_type(given_res_type, || body.parse_tpe())),
+                range: Box::new(or_no_type(given_res_type, || body.parse_tpe(tree_version))),
             },
-            Expr::Val(val_def) => or_no_type(&val_def.given_type, || val_def.body.parse_tpe()),
-            Expr::Block { result, .. } => result.parse_tpe(),
-            Expr::Tuple { items, .. } => SType::STuple(items.iter().map(Expr::parse_tpe).collect()),
-            Expr::If { true_branch, .. } => true_branch.parse_tpe(),
+            Expr::Val(val_def) => {
+                or_no_type(&val_def.given_type, || val_def.body.parse_tpe(tree_version))
+            }
+            Expr::Block { result, .. } => result.parse_tpe(tree_version),
+            Expr::Tuple { items, .. } => {
+                SType::STuple(items.iter().map(|e| e.parse_tpe(tree_version)).collect())
+            }
+            Expr::If { true_branch, .. } => true_branch.parse_tpe(tree_version),
             Expr::LogicalNot { .. } => SType::SBoolean,
-            Expr::Negation { input, .. } => input.parse_tpe(),
-            Expr::BitInversion { input, .. } => input.parse_tpe(),
+            Expr::Negation { input, .. } => input.parse_tpe(tree_version),
+            Expr::BitInversion { input, .. } => input.parse_tpe(tree_version),
             Expr::Relation { .. } => SType::SBoolean,
-            Expr::ArithOp { left, .. } => left.parse_tpe(),
-            Expr::BitOp { left, .. } => left.parse_tpe(),
+            Expr::ArithOp { left, .. } => left.parse_tpe(tree_version),
+            Expr::BitOp { left, .. } => left.parse_tpe(tree_version),
         }
     }
 
@@ -277,8 +386,8 @@ impl Expr {
     /// type is numeric (`SNumericType`: Byte/Short/Int/Long/BigInt/UnsignedBigInt,
     /// SType.scala:412-547) or `NoType`. Used by `mk_unary_op`/`mk_binary_op` for
     /// `-`/`~`/`|`/`&`.
-    pub fn is_num_type_or_no_type(&self) -> bool {
-        let t = self.parse_tpe();
+    pub fn is_num_type_or_no_type(&self, tree_version: u8) -> bool {
+        let t = self.parse_tpe(tree_version);
         is_numeric(&t) || t == SType::NoType
     }
 
@@ -461,7 +570,7 @@ mod tests {
             value: 42,
             pos: make_pos(0),
         };
-        assert!(expr.is_num_type_or_no_type());
+        assert!(expr.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -470,7 +579,7 @@ mod tests {
             value: 42i64,
             pos: make_pos(0),
         };
-        assert!(expr.is_num_type_or_no_type());
+        assert!(expr.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -479,7 +588,7 @@ mod tests {
             value: false,
             pos: make_pos(0),
         };
-        assert!(!expr.is_num_type_or_no_type());
+        assert!(!expr.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -488,13 +597,13 @@ mod tests {
             value: "test".to_string(),
             pos: make_pos(0),
         };
-        assert!(!expr.is_num_type_or_no_type());
+        assert!(!expr.is_num_type_or_no_type(3));
     }
 
     #[test]
     fn is_num_type_or_no_type_unit_const_false() {
         let expr = Expr::UnitConst { pos: make_pos(0) };
-        assert!(!expr.is_num_type_or_no_type());
+        assert!(!expr.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -504,7 +613,7 @@ mod tests {
             tpe: SType::NoType,
             pos: make_pos(0),
         };
-        assert!(expr.is_num_type_or_no_type());
+        assert!(expr.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -518,16 +627,19 @@ mod tests {
             args: vec![],
             pos: make_pos(0),
         };
-        assert!(expr.is_num_type_or_no_type());
+        assert!(expr.is_num_type_or_no_type(3));
     }
 
     // ----- parse-time type derivation (parse_tpe) -----
 
     #[test]
     fn parse_tpe_constants_are_their_own_type() {
-        assert_eq!(Expr::IntConst { value: 1, pos: 0 }.parse_tpe(), SType::SInt);
         assert_eq!(
-            Expr::LongConst { value: 1, pos: 0 }.parse_tpe(),
+            Expr::IntConst { value: 1, pos: 0 }.parse_tpe(3),
+            SType::SInt
+        );
+        assert_eq!(
+            Expr::LongConst { value: 1, pos: 0 }.parse_tpe(3),
             SType::SLong
         );
         assert_eq!(
@@ -535,7 +647,7 @@ mod tests {
                 value: true,
                 pos: 0
             }
-            .parse_tpe(),
+            .parse_tpe(3),
             SType::SBoolean
         );
         assert_eq!(
@@ -543,10 +655,10 @@ mod tests {
                 value: "s".into(),
                 pos: 0
             }
-            .parse_tpe(),
+            .parse_tpe(3),
             SType::SString
         );
-        assert_eq!(Expr::UnitConst { pos: 0 }.parse_tpe(), SType::SUnit);
+        assert_eq!(Expr::UnitConst { pos: 0 }.parse_tpe(3), SType::SUnit);
     }
 
     #[test]
@@ -558,8 +670,8 @@ mod tests {
             right: Box::new(Expr::IntConst { value: 2, pos: 0 }),
             pos: 0,
         };
-        assert_eq!(rel.parse_tpe(), SType::SBoolean);
-        assert!(!rel.is_num_type_or_no_type()); // SBoolean fails the numeric guard
+        assert_eq!(rel.parse_tpe(3), SType::SBoolean);
+        assert!(!rel.is_num_type_or_no_type(3)); // SBoolean fails the numeric guard
         let not = Expr::LogicalNot {
             input: Box::new(Expr::Ident {
                 name: "x".into(),
@@ -568,8 +680,8 @@ mod tests {
             }),
             pos: 0,
         };
-        assert_eq!(not.parse_tpe(), SType::SBoolean);
-        assert!(!not.is_num_type_or_no_type());
+        assert_eq!(not.parse_tpe(3), SType::SBoolean);
+        assert!(!not.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -586,10 +698,10 @@ mod tests {
             pos: 0,
         };
         assert_eq!(
-            t.parse_tpe(),
+            t.parse_tpe(3),
             SType::STuple(vec![SType::SInt, SType::SBoolean])
         );
-        assert!(!t.is_num_type_or_no_type()); // STuple fails the numeric guard
+        assert!(!t.is_num_type_or_no_type(3)); // STuple fails the numeric guard
     }
 
     #[test]
@@ -605,8 +717,8 @@ mod tests {
             }),
             pos: 0,
         };
-        assert_eq!(numeric_result.parse_tpe(), SType::NoType);
-        assert!(numeric_result.is_num_type_or_no_type());
+        assert_eq!(numeric_result.parse_tpe(3), SType::NoType);
+        assert!(numeric_result.is_num_type_or_no_type(3));
         let bool_result = Expr::Block {
             bindings: vec![],
             result: Box::new(Expr::BoolConst {
@@ -615,8 +727,8 @@ mod tests {
             }),
             pos: 0,
         };
-        assert_eq!(bool_result.parse_tpe(), SType::SBoolean);
-        assert!(!bool_result.is_num_type_or_no_type());
+        assert_eq!(bool_result.parse_tpe(3), SType::SBoolean);
+        assert!(!bool_result.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -628,8 +740,8 @@ mod tests {
             right: Box::new(Expr::IntConst { value: 2, pos: 0 }),
             pos: 0,
         };
-        assert_eq!(arith.parse_tpe(), SType::SInt);
-        assert!(arith.is_num_type_or_no_type());
+        assert_eq!(arith.parse_tpe(3), SType::SInt);
+        assert!(arith.is_num_type_or_no_type(3));
         let if_bool = Expr::If {
             condition: Box::new(Expr::Ident {
                 name: "c".into(),
@@ -646,8 +758,8 @@ mod tests {
             }),
             pos: 0,
         };
-        assert_eq!(if_bool.parse_tpe(), SType::SBoolean);
-        assert!(!if_bool.is_num_type_or_no_type());
+        assert_eq!(if_bool.parse_tpe(3), SType::SBoolean);
+        assert!(!if_bool.is_num_type_or_no_type(3));
     }
 
     #[test]
@@ -671,7 +783,7 @@ mod tests {
             }],
             pos: 0,
         };
-        assert_eq!(zk.parse_tpe(), SType::SBoolean);
+        assert_eq!(zk.parse_tpe(3), SType::SBoolean);
         let plain = Expr::Apply {
             func: Box::new(Expr::Ident {
                 name: "f".into(),
@@ -681,7 +793,7 @@ mod tests {
             args: vec![],
             pos: 0,
         };
-        assert_eq!(plain.parse_tpe(), SType::NoType);
+        assert_eq!(plain.parse_tpe(3), SType::NoType);
     }
 
     #[test]
@@ -697,8 +809,136 @@ mod tests {
             }),
             pos: 0,
         };
-        assert!(matches!(lam.parse_tpe(), SType::SFunc { .. }));
-        assert!(!lam.is_num_type_or_no_type());
+        assert!(matches!(lam.parse_tpe(3), SType::SFunc { .. }));
+        assert!(!lam.is_num_type_or_no_type(3));
+    }
+
+    // ----- Select product-method lookup (values.scala:1171-1178) -----
+
+    fn select(obj: Expr, field: &str) -> Expr {
+        Expr::Select {
+            obj: Box::new(obj),
+            field: field.into(),
+            pos: 0,
+        }
+    }
+
+    fn tuple2(a: Expr, b: Expr) -> Expr {
+        Expr::Tuple {
+            items: vec![a, b],
+            pos: 0,
+        }
+    }
+
+    fn int(v: i32) -> Expr {
+        Expr::IntConst { value: v, pos: 0 }
+    }
+
+    #[test]
+    fn parse_tpe_select_tuple_component_in_range_is_sfunc() {
+        // `(1,2)._1`: STuple is SProduct, `_1` resolves (1<=1<=2) to
+        // SFunc(tup, items(0)) → non-numeric → the numeric guard FAILS.
+        // oracle: `-((1,2)._1)` REJECT.
+        let s = select(tuple2(int(1), int(2)), "_1");
+        assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }));
+        assert!(!s.is_num_type_or_no_type(3));
+    }
+
+    #[test]
+    fn parse_tpe_select_tuple_component_out_of_range_is_no_type() {
+        // `(1,2)._3`: `_3` is out of range on a 2-tuple → None → NoType → guard
+        // passes. oracle: `-((1,2)._3)` ACCEPT.
+        let s = select(tuple2(int(1), int(2)), "_3");
+        assert_eq!(s.parse_tpe(3), SType::NoType);
+        assert!(s.is_num_type_or_no_type(3));
+    }
+
+    #[test]
+    fn parse_tpe_select_tuple_non_canonical_component_is_no_type() {
+        // `_0` / `_01` are not in `componentNames` → NoType. oracle:
+        // `-((1,2)._0)` / `-((1,2)._01)` ACCEPT.
+        for field in ["_0", "_01"] {
+            let s = select(tuple2(int(1), int(2)), field);
+            assert_eq!(s.parse_tpe(3), SType::NoType, "{field}");
+        }
+    }
+
+    #[test]
+    fn parse_tpe_select_tuple_coll_method_is_sfunc() {
+        // `(1,2).size` / `(1,2).apply` inherit Coll methods → SFunc. oracle:
+        // `-((1,2).size)` / `~((1,2).apply)` REJECT.
+        for field in ["size", "apply"] {
+            let s = select(tuple2(int(1), int(2)), field);
+            assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }), "{field}");
+        }
+    }
+
+    #[test]
+    fn parse_tpe_select_numeric_cast_method_is_sfunc_with_result_range() {
+        // `5.toBytes`: SInt has `toBytes` → SFunc(SInt, SColl[SByte]); the Select
+        // itself is SFunc (guard fails), and an Apply of it takes the range.
+        // oracle: `-(5.toBytes(0))` REJECT (range SColl non-numeric),
+        // `-(5.toByte(0))` ACCEPT (range SByte numeric).
+        let s = select(int(5), "toBytes");
+        match s.parse_tpe(3) {
+            SType::SFunc { range, .. } => assert_eq!(*range, SType::SColl(Box::new(SType::SByte))),
+            other => panic!("expected SFunc, got {other:?}"),
+        }
+        assert!(!s.is_num_type_or_no_type(3));
+        let apply = Expr::Apply {
+            func: Box::new(select(int(5), "toByte")),
+            args: vec![int(0)],
+            pos: 0,
+        };
+        assert_eq!(apply.parse_tpe(3), SType::SByte); // numeric → guard passes
+        assert!(apply.is_num_type_or_no_type(3));
+    }
+
+    #[test]
+    fn parse_tpe_select_numeric_bitwise_method_is_version_gated() {
+        // `bitwiseOr` is a v6-only numeric method (tree_version>=3). oracle:
+        // `-(5.bitwiseOr)` REJECT at v6.
+        let s = select(int(5), "bitwiseOr");
+        assert!(matches!(s.parse_tpe(3), SType::SFunc { .. }));
+        assert!(!s.is_num_type_or_no_type(3));
+        // At v5 the method does not exist → NoType → guard passes.
+        assert_eq!(s.parse_tpe(0), SType::NoType);
+        assert!(s.is_num_type_or_no_type(0));
+    }
+
+    #[test]
+    fn parse_tpe_select_no_type_or_empty_product_object_is_no_type() {
+        // A NoType identifier object (`OUTPUTS.size`), and SBoolean/SString/SUnit
+        // receivers (no methods / not SProduct), all stay NoType → guard passes.
+        // oracle: `-OUTPUTS.size`, `-(true.toByte)`, `-("ab".size)`, `-(().foo)`
+        // all ACCEPT.
+        let ident_obj = select(
+            Expr::Ident {
+                name: "OUTPUTS".into(),
+                tpe: SType::NoType,
+                pos: 0,
+            },
+            "size",
+        );
+        assert_eq!(ident_obj.parse_tpe(3), SType::NoType);
+        let bool_obj = select(
+            Expr::BoolConst {
+                value: true,
+                pos: 0,
+            },
+            "toByte",
+        );
+        assert_eq!(bool_obj.parse_tpe(3), SType::NoType);
+        let str_obj = select(
+            Expr::StringConst {
+                value: "ab".into(),
+                pos: 0,
+            },
+            "size",
+        );
+        assert_eq!(str_obj.parse_tpe(3), SType::NoType);
+        let unit_obj = select(Expr::UnitConst { pos: 0 }, "foo");
+        assert_eq!(unit_obj.parse_tpe(3), SType::NoType);
     }
 
     #[test]
