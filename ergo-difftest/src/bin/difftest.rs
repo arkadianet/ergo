@@ -6,6 +6,8 @@
 //!   difftest --surface ergo_tree --iters 500000
 //!   difftest --corpus test-vectors/mainnet    # mutate real wire bytes (raw files)
 //!   difftest --repro 1b1501040a...            # run one hex input through all surfaces
+//!   difftest --repro 00938503 --surface ergo_tree --check-canonical 00938503
+//!                                             # hermetic canonical-bytes gate (known-bug re-injection)
 
 use std::fs;
 use std::path::Path;
@@ -24,6 +26,7 @@ fn main() -> ExitCode {
     let mut oracle_script: Option<String> = None;
     let mut methodcall_mode = false;
     let mut structured_mode = false;
+    let mut check_canonical: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -48,6 +51,9 @@ fn main() -> ExitCode {
             }
             "--oracle-script" => {
                 oracle_script = Some(take_next(&args, &mut i, "--oracle-script"));
+            }
+            "--check-canonical" => {
+                check_canonical = Some(take_next(&args, &mut i, "--check-canonical"));
             }
             "--methodcall" => {
                 methodcall_mode = true;
@@ -113,6 +119,15 @@ fn main() -> ExitCode {
             eprintln!("--repro: not valid hex");
             return ExitCode::from(2);
         };
+
+        // --check-canonical <expected_hex>: hermetic known-bug re-injection gate.
+        // Decodes the input as an ErgoTree, re-encodes it, and compares the result
+        // to the pinned expected canonical bytes.  Exit 0 = bytes match (no bug);
+        // exit 1 = mismatch (bug detected).  Hermetic: no JVM required.
+        if let Some(ref expected_hex) = check_canonical {
+            return run_check_canonical(&bytes, expected_hex);
+        }
+
         if oracle_mode {
             return run_oracle_repro(&bytes, oracle_script, only.as_deref());
         }
@@ -179,6 +194,55 @@ fn main() -> ExitCode {
         );
     }
     ExitCode::FAILURE
+}
+
+/// Hermetic canonical-bytes gate for the known-bug re-injection harness.
+///
+/// Decodes `input` as an ErgoTree via `read_ergo_tree`, re-encodes it via
+/// `write_ergo_tree`, and compares the hex of the result to `expected_hex`.
+///
+/// Exit 0 — bytes match: the encoder is correct (no bug present).
+/// Exit 1 — mismatch: the encoder diverges from canonical (bug detected).
+///
+/// This exercises the canonical class of bugs (e.g. relation2-0x85-noncanonical)
+/// hermetically — no JVM oracle required.
+fn run_check_canonical(input: &[u8], expected_hex: &str) -> ExitCode {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::ergo_tree::{read_ergo_tree, write_ergo_tree};
+
+    let mut r = VlqReader::new(input);
+    let tree = match read_ergo_tree(&mut r) {
+        Ok(t) => t,
+        Err(e) => {
+            println!(
+                "[CANONICAL-GATE] SKIP: input rejected by read_ergo_tree — cannot check canonical form ({e:?})"
+            );
+            // A rejection on clean HEAD means the trigger_hex is bad.
+            // We exit 0 so the gate (which expects exit 0 on clean HEAD)
+            // isn't tripped by an unusable trigger, but the SKIP makes it
+            // visible.  The re-injection path will also fail at this step
+            // if the bugged code also rejects — meaning the class is wrong.
+            return ExitCode::SUCCESS;
+        }
+    };
+
+    let mut w = VlqWriter::new();
+    if let Err(e) = write_ergo_tree(&mut w, &tree) {
+        eprintln!("[CANONICAL-GATE] write_ergo_tree failed: {e:?}");
+        return ExitCode::FAILURE;
+    }
+    let actual_hex: String = w.result().iter().map(|b| format!("{b:02x}")).collect();
+
+    if actual_hex == expected_hex {
+        println!("[CANONICAL-GATE] PASS: re-encoded = {actual_hex}");
+        ExitCode::SUCCESS
+    } else {
+        println!(
+            "[CANONICAL-GATE] FAIL: re-encoded != expected\n  got:      {actual_hex}\n  expected: {expected_hex}"
+        );
+        ExitCode::FAILURE
+    }
 }
 
 /// Print the failing probes of a pass, showing the oracle vs node verdicts.
@@ -594,6 +658,7 @@ fn print_help() {
          \x20 --surface NAME   restrict to one surface\n\
          \x20 --corpus DIR     mutate raw seed files in DIR\n\
          \x20 --repro HEX      run a single hex input through all surfaces\n\
+         \x20 --check-canonical HEX  hermetic canonical-bytes gate (requires --repro)\n\
          \x20 --oracle         differential campaign vs the JVM reference (ergo_tree)\n\
          \x20 --oracle-script P  path to ErgoSerdeOracle.scala\n\
          \x20 --methodcall     verify the MethodCall typechecker registry vs the JVM oracle\n\

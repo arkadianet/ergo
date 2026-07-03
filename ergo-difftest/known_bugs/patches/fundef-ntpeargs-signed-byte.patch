@@ -1,0 +1,26 @@
+diff --git a/ergo-ser/src/opcode/parse.rs b/ergo-ser/src/opcode/parse.rs
+index 5b56a13..6516d6b 100644
+--- a/ergo-ser/src/opcode/parse.rs
++++ b/ergo-ser/src/opcode/parse.rs
+@@ -167,20 +167,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
+             // (`r.getType().asInstanceOf[STypeVar]` — a non-typevar
+             // type fails the cast and the whole parse).
+             //
+-            // Scala reads nTpeArgs as a SIGNED Byte (`r.getByte()`) and passes
+-            // it to `safeNewArray[STypeVar](nTpeArgs)`, which throws
+-            // NegativeArraySizeException for a negative count. Wire bytes
+-            // 0x80..=0xFF are negative-as-signed, so they are an unconditional
+-            // deserialization failure — reject them rather than reading them as
+-            // an unsigned 128..=255 count and over-reading that many type args.
+-            let n_tpe_args_byte = r.get_u8()?;
+-            if n_tpe_args_byte > 0x7f {
+-                return Err(ReadError::InvalidData(format!(
+-                    "FunDef nTpeArgs {n_tpe_args_byte} is negative as a signed \
+-                     Byte (Scala safeNewArray rejects the negative count)"
+-                )));
+-            }
+-            let n_tpe_args = n_tpe_args_byte as usize;
++            let n_tpe_args = r.get_u8()? as usize;
+             let mut tpe_args = Vec::with_capacity(n_tpe_args);
+             for _ in 0..n_tpe_args {
+                 let t = read_type(r)?;

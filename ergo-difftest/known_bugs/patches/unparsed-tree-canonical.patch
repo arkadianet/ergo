@@ -1,0 +1,18 @@
+diff --git a/ergo-ser/src/ergo_tree.rs b/ergo-ser/src/ergo_tree.rs
+index e9a1426..51fd660 100644
+--- a/ergo-ser/src/ergo_tree.rs
++++ b/ergo-ser/src/ergo_tree.rs
+@@ -53,13 +53,6 @@ pub struct ErgoTree {
+ 
+ /// Serialize an ErgoTree to bytes.
+ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteError> {
+-    // A soft-fork-wrapped (unparsed) tree re-emits its preserved original bytes
+-    // verbatim — header + size + body, byte-identical to the wire form — exactly
+-    // as Scala re-serializes an `UnparsedErgoTree` from its kept `propositionBytes`.
+-    if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
+-        w.put_bytes(raw);
+-        return Ok(());
+-    }
+     let header = (tree.version & VERSION_MASK)
+         | if tree.has_size { SIZE_FLAG } else { 0 }
+         | if tree.constant_segregation {
