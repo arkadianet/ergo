@@ -19,6 +19,7 @@ serde           = { workspace = true, features = ["derive"] }
 serde_json      = { workspace = true }
 hex             = { workspace = true }
 tempfile        = { workspace = true }
+sha2            = { workspace = true }
 
 [[bin]]
 name = "difftest"

@@ -20,7 +20,9 @@ use std::panic::{self, AssertUnwindSafe};
 pub mod gen;
 pub mod generate;
 pub mod methodcall;
+pub mod minimize;
 pub mod oracle;
+pub mod regressions;
 pub mod rng;
 pub mod surfaces;
 

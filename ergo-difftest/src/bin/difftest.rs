@@ -27,6 +27,8 @@ fn main() -> ExitCode {
     let mut methodcall_mode = false;
     let mut structured_mode = false;
     let mut check_canonical: Option<String> = None;
+    let mut minimize_mode = false;
+    let mut regressions_dir: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -60,6 +62,12 @@ fn main() -> ExitCode {
             }
             "--structured" => {
                 structured_mode = true;
+            }
+            "--minimize" => {
+                minimize_mode = true;
+            }
+            "--regressions-dir" => {
+                regressions_dir = Some(take_next(&args, &mut i, "--regressions-dir"));
             }
             "--selftest" => {
                 return match ergo_difftest::selftest() {
@@ -129,6 +137,21 @@ fn main() -> ExitCode {
         }
 
         if oracle_mode {
+            if minimize_mode {
+                let surface = only.as_deref().unwrap_or_else(|| {
+                    eprintln!("--repro --oracle --minimize requires --surface <s>");
+                    std::process::exit(2);
+                });
+                let reg_dir = regressions_dir
+                    .as_deref()
+                    .unwrap_or("ergo-difftest/regressions");
+                return run_oracle_repro_minimize(
+                    &bytes,
+                    oracle_script,
+                    surface,
+                    std::path::Path::new(reg_dir),
+                );
+            }
             return run_oracle_repro(&bytes, oracle_script, only.as_deref());
         }
         let mut any_bug = false;
@@ -159,13 +182,37 @@ fn main() -> ExitCode {
 
     if structured_mode {
         if oracle_mode {
-            return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus, true);
+            let reg_dir = regressions_dir
+                .as_deref()
+                .unwrap_or("ergo-difftest/regressions");
+            return run_oracle(
+                seed,
+                iters,
+                oracle_script,
+                only.as_deref(),
+                &corpus,
+                true,
+                minimize_mode,
+                std::path::Path::new(reg_dir),
+            );
         }
         return run_structured(seed, iters, only.as_deref());
     }
 
     if oracle_mode {
-        return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus, false);
+        let reg_dir = regressions_dir
+            .as_deref()
+            .unwrap_or("ergo-difftest/regressions");
+        return run_oracle(
+            seed,
+            iters,
+            oracle_script,
+            only.as_deref(),
+            &corpus,
+            false,
+            minimize_mode,
+            std::path::Path::new(reg_dir),
+        );
     }
 
     println!(
@@ -404,6 +451,10 @@ fn run_structured(seed: u64, iters: u64, only: Option<&str>) -> ExitCode {
 /// [`ergo_difftest::gen::gen_structured`] targeted at that surface (the `reduce`
 /// surface, which consumes ErgoTree bytes, is fed the `ergo_tree` generator);
 /// otherwise a single shared input is diffed across every surface.
+///
+/// With `do_minimize`: after the campaign, for each unique divergence, minimize
+/// + classify + auto-file it under `regressions_dir`.
+#[allow(clippy::too_many_arguments)]
 fn run_oracle(
     seed: u64,
     iters: u64,
@@ -411,6 +462,8 @@ fn run_oracle(
     only: Option<&str>,
     corpus: &[Vec<u8>],
     structured: bool,
+    do_minimize: bool,
+    regressions_dir: &std::path::Path,
 ) -> ExitCode {
     use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
     use ergo_difftest::rng::Rng;
@@ -476,10 +529,10 @@ fn run_oracle(
         }
     }
 
+    let unique = classes.len();
     println!(
-        "oracle: checks={checked} surfaces={} unique_classes={} total_divergences={total}",
+        "oracle: checks={checked} surfaces={} unique_classes={unique} total_divergences={total}",
         surfaces.len(),
-        classes.len(),
     );
     if classes.is_empty() {
         println!("node and JVM reference agree on all checked inputs");
@@ -493,7 +546,100 @@ fn run_oracle(
             d.kind, d.surface, d.rust, d.jvm, d.input_hex
         );
     }
+
+    // ── Minimize + classify + file ──────────────────────────────────────────
+    if do_minimize {
+        minimize_and_file_campaign(
+            &sorted,
+            &surfaces,
+            &mut oracle,
+            regressions_dir,
+            seed,
+            "oracle-mutation",
+        );
+    }
+
     ExitCode::FAILURE
+}
+
+/// Minimize every unique divergence from a campaign, classify it, and file it.
+fn minimize_and_file_campaign(
+    sorted: &[(u64, ergo_difftest::oracle::Divergence)],
+    surfaces: &[ergo_difftest::oracle::SurfaceSpec],
+    oracle: &mut ergo_difftest::oracle::Oracle,
+    regressions_dir: &std::path::Path,
+    campaign_seed: u64,
+    provenance: &str,
+) {
+    use ergo_difftest::minimize::minimize_divergence;
+    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
+    use ergo_difftest::{from_hex, to_hex};
+
+    let mut minimized_count = 0u64;
+    let mut pending_count = 0u64;
+    let mut artifact_count = 0u64;
+
+    for (_, div) in sorted {
+        // Find the matching SurfaceSpec for this divergence's surface.
+        let Some(spec) = surfaces.iter().find(|s| s.name == div.surface) else {
+            eprintln!(
+                "minimize: no SurfaceSpec for surface {:?} — skip",
+                div.surface
+            );
+            continue;
+        };
+
+        let Some(orig_bytes) = from_hex(&div.input_hex) else {
+            eprintln!("minimize: bad input_hex for {} — skip", div.surface);
+            continue;
+        };
+
+        // Minimize.
+        eprint!("minimize: {} ({} bytes)…", div.surface, orig_bytes.len());
+        let (min_bytes, min_div) = match minimize_divergence(&orig_bytes, spec, oracle) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!(" FAILED: {e}");
+                continue;
+            }
+        };
+        eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
+        minimized_count += 1;
+
+        // Classify + file.
+        let seed_info = Some(SeedInfo {
+            seed: campaign_seed,
+            iter: 0, // campaign iter not tracked per-class; use 0
+        });
+        match classify_and_file(
+            &min_div,
+            spec,
+            oracle,
+            seed_info,
+            provenance,
+            regressions_dir,
+        ) {
+            Ok((path, triage)) => {
+                if triage.is_pending() {
+                    pending_count += 1;
+                    println!("  [PENDING]       filed → {}", path.display());
+                } else {
+                    artifact_count += 1;
+                    println!("  [KnownArtifact] filed → {}", path.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("  classify/file error for {}: {e}", div.surface);
+            }
+        }
+    }
+
+    println!(
+        "\nminimize summary: checks={} unique_divergences={} minimized={minimized_count} \
+         pending_queued={pending_count} known_artifacts={artifact_count}",
+        sorted.iter().map(|(c, _)| c).sum::<u64>(),
+        sorted.len(),
+    );
 }
 
 /// Replay a SINGLE input against the JVM oracle (the `--oracle --repro` path), so
@@ -540,6 +686,71 @@ fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) ->
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Minimize + classify + file a single divergence from the `--repro` path.
+///
+/// Used with `--oracle --repro <hex> --minimize --surface <s>`.
+fn run_oracle_repro_minimize(
+    bytes: &[u8],
+    script: Option<String>,
+    surface: &str,
+    regressions_dir: &std::path::Path,
+) -> ExitCode {
+    use ergo_difftest::minimize::minimize_divergence;
+    use ergo_difftest::oracle::{oracle_surfaces, Oracle};
+    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
+    use ergo_difftest::to_hex;
+
+    let script = script.unwrap_or_else(|| "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala".into());
+    eprintln!(
+        "oracle: spawning `scala-cli run {script}` (first run resolves deps, may take ~1 min)..."
+    );
+    let mut oracle = match Oracle::spawn(&script) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("oracle: spawn failed: {e}\n(is scala-cli on PATH?)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let Some(spec) = oracle_surfaces().into_iter().find(|s| s.name == surface) else {
+        eprintln!("--surface: unknown oracle surface {surface:?}");
+        return ExitCode::from(2);
+    };
+
+    eprint!("minimize: {} ({} bytes)…", surface, bytes.len());
+    let (min_bytes, min_div) = match minimize_divergence(bytes, &spec, &mut oracle) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!(" FAILED: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
+
+    match classify_and_file(
+        &min_div,
+        &spec,
+        &mut oracle,
+        None::<SeedInfo>,
+        "repro",
+        regressions_dir,
+    ) {
+        Ok((path, triage)) => {
+            println!("triage={} filed → {}", min_div.input_hex, path.display());
+            if triage.is_pending() {
+                println!("  → PENDING (genuine candidate; check QUEUE.md)");
+            } else {
+                println!("  → KnownArtifact (benign; not queued)");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("classify/file error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -666,6 +877,10 @@ fn print_help() {
          \x20 --methodcall     verify the MethodCall typechecker registry vs the JVM oracle\n\
          \x20 --structured     structure-aware generators + per-surface coverage report\n\
          \x20                  (combine with --oracle to diff structured bytes vs the JVM)\n\
+         \x20 --minimize       after --oracle campaign: minimize+classify+file each unique\n\
+         \x20                  divergence; with --repro: minimize+file that one input\n\
+         \x20                  (--repro --minimize requires --surface)\n\
+         \x20 --regressions-dir D  where to file records (default: ergo-difftest/regressions)\n\
          \x20 --selftest       verify the harness's own bug-detection has teeth\n"
     );
 }
