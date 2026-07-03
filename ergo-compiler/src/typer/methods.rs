@@ -57,6 +57,11 @@ pub struct SMethodDesc {
     /// Full function signature including receiver in `dom[0]`.
     pub stype: SFuncSpec,
     /// `true` iff the Scala `SMethod.irInfo.irBuilder` is `Some(...)`.
+    ///
+    /// This is a 2-way flag: it records *presence* only.  The distinction between
+    /// `MethodCallIrBuilder` (→ `MethodCall` in the typed tree) and a custom builder
+    /// (→ a specialized IR node, e.g. `Exponentiate`, `MapCollection`) is handled by
+    /// the lowering dispatch in Tasks 5–7 — do **not** add a 3-way enum here.
     pub has_ir_builder: bool,
     /// `true` iff the on-wire encoding carries an explicit type argument
     /// (`hasExplicitTypeArgs = Seq(tT)` in Scala; affects wire format).
@@ -323,8 +328,10 @@ fn option_methods() -> &'static Vec<SMethodDesc> {
         };
         vec![
             // id 1 absent
-            md!(v5; "isDefined",  2, vec![this.clone()],                           SType::SBoolean,    vec!["T".into()]),
-            md!(v5; "get",        3, vec![this.clone()],                           t.clone(),          vec!["T".into()]),
+            // isDefined/get: Scala tpeParams=Nil (methods.scala:750/:758 — 2-arg SFunc;
+            // T is bound from the receiver SOption(T) via specialize_for unification).
+            md!(v5; "isDefined",  2, vec![this.clone()],                           SType::SBoolean,    vec![]),
+            md!(v5; "get",        3, vec![this.clone()],                           t.clone(),          vec![]),
             md!(v5; "getOrElse",  4, vec![this.clone(), t.clone()],                t.clone(),          vec!["T".into()]),
             // ids 5, 6 absent
             md!(v5; "map",        7, vec![this.clone(), func_t_r],                 sopt(r.clone()),    vec!["T".into(), "R".into()]),
@@ -366,7 +373,8 @@ fn collection_methods() -> &'static Vec<SMethodDesc> {
         let zip_range = scoll(stup(vec![iv.clone(), ov.clone()]));
         vec![
             // id 1: NO withIRInfo → Select → SizeOf opcode 0xB1
-            md!(v5s; "size",        1,  vec![this.clone()],                                    SType::SInt,     vec!["IV".into()]),
+            // size: Scala tpeParams=Nil (methods.scala:821 — 2-arg SFunc; IV bound from receiver).
+            md!(v5s; "size",        1,  vec![this.clone()],                                    SType::SInt,     vec![]),
             md!(v5; "getOrElse",    2,  vec![this.clone(), SType::SInt, iv.clone()],           iv.clone(),      vec!["IV".into()]),
             md!(v5; "map",          3,  vec![this.clone(), func_iv_ov.clone()],                this_ov.clone(), vec!["IV".into(), "OV".into()]),
             md!(v5; "exists",       4,  vec![this.clone(), func_iv_bool.clone()],              SType::SBoolean, vec!["IV".into()]),
@@ -377,7 +385,8 @@ fn collection_methods() -> &'static Vec<SMethodDesc> {
             md!(v5; "append",       9,  vec![this.clone(), this.clone()],                      this.clone(),    vec!["IV".into()]),
             md!(v5; "apply",        10, vec![this.clone(), SType::SInt],                       iv.clone(),      vec!["IV".into()]),
             // ids 11-13 absent
-            md!(v5; "indices",      14, vec![this.clone()],                                    scoll(SType::SInt), vec!["IV".into()]),
+            // indices: Scala tpeParams=Nil (methods.scala:954 — 2-arg SFunc; IV bound from receiver).
+            md!(v5; "indices",      14, vec![this.clone()],                                    scoll(SType::SInt), vec![]),
             md!(v5; "flatMap",      15, vec![this.clone(), func_iv_coll_ov.clone()],           this_ov.clone(), vec!["IV".into(), "OV".into()]),
             // ids 16-18 absent
             md!(v5; "patch",        19, vec![this.clone(), SType::SInt, this.clone(), SType::SInt], this.clone(), vec!["IV".into()]),
@@ -731,6 +740,12 @@ pub fn get_method(receiver: &SType, name: &str, tree_version: u8) -> Option<SMet
 /// In the typer: a `MethodNotFound` error is appropriate when `container_exists`
 /// is true but `get_method` returns None; a `NonProductType` error applies when
 /// `container_exists` is false.
+///
+/// **Version-independence deviation:** The Scala `MethodsContainer.contains` is
+/// version-gated (methods.scala:171–181); this function is version-independent.
+/// The deviation is inert in practice because the types that gain containers in V6
+/// (`SUnsignedBigInt`, `SHeader` V6 additions) are unconstructable in pre-V6 trees
+/// — the typer never reaches a method-lookup for them at `tree_version < 3`.
 pub fn container_exists(receiver: &SType) -> bool {
     container_static_methods(receiver).is_some()
 }
@@ -755,7 +770,12 @@ pub fn global_method(name: &str, tree_version: u8) -> Option<SMethodDesc> {
 ///
 /// Returns `None` if the types are incompatible (unification fails).
 ///
-/// Mirrors `SMethod.specializeFor` in methods.scala (v6.0.2).
+/// **Deviation from Scala:** `SMethod.specializeFor` (methods.scala:193–199) returns
+/// `this` (the unspecialized descriptor) on unification failure, silently accepting
+/// a mismatch.  This implementation returns `None` instead, leaving the type error
+/// to the caller — the typer raises it as a `TypeMismatch`.  The stricter behaviour
+/// is correct for a frontend type-checker; the Scala leniency exists to preserve
+/// IR round-trips through the evaluator.
 pub fn specialize_for(
     desc: &SMethodDesc,
     obj_tpe: &SType,
@@ -788,13 +808,16 @@ pub fn owner_name_for_type(t: &SType) -> Option<&'static str> {
         SType::SHeader => Some("Header"),
         SType::SPreHeader => Some("PreHeader"),
         SType::SSigmaProp => Some("SigmaProp"),
-        SType::SOption(_) => Some("Option"),
+        // SOption.typeName = getClass.getSimpleName → "SOption" (methods.scala:701, SType.scala:238-244).
+        // Confirmed by live oracle: `getVar[Int](1).map(...)` → `%SOption.map` (golden_seed §9).
+        SType::SOption(_) => Some("SOption"),
         SType::SByte => Some("Byte"),
         SType::SShort => Some("Short"),
         SType::SInt => Some("Int"),
         SType::SLong => Some("Long"),
         SType::SUnsignedBigInt => Some("UnsignedBigInt"),
-        SType::STuple(_) => Some("Tuple"),
+        // STuple.typeName = getClass.getSimpleName → "STuple" (methods.scala:833, SType.scala:238-244).
+        SType::STuple(_) => Some("STuple"),
         SType::SBoolean => Some("Boolean"),
         _ => None,
     }
@@ -1294,6 +1317,35 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    /// Oracle-grounded owner name for SOption.
+    ///
+    /// golden_seed §9: `getVar[Int](1).map(...)` → `%SOption.map`.
+    /// Confirms that `owner_name_for_type(SOption(_))` must return `"SOption"`,
+    /// not `"Option"`.  The Scala source is `STypeCompanion.typeName =
+    /// getClass.getSimpleName` (SType.scala:238-244); the companion object at
+    /// methods.scala:701 is `SOption`, so its `getSimpleName` is `"SOption"`.
+    #[test]
+    fn owner_name_soption_oracle_grounded() {
+        // The oracle printed `%SOption.map` — owner substring is "SOption".
+        let name = owner_name_for_type(&SType::SOption(Box::new(SType::SInt)));
+        assert_eq!(
+            name,
+            Some("SOption"),
+            "owner must match oracle output %SOption.map (golden_seed §9)"
+        );
+    }
+
+    /// STuple owner name follows the same getSimpleName rule (methods.scala:833).
+    #[test]
+    fn owner_name_stuple_matches_type_name() {
+        let name = owner_name_for_type(&SType::STuple(vec![SType::SInt, SType::SByte]));
+        assert_eq!(
+            name,
+            Some("STuple"),
+            "STuple.typeName = getSimpleName = \"STuple\" (methods.scala:833)"
+        );
+    }
 
     /// Verify the method_id of every container aligns with Scala's methods.scala.
     /// Uses known spot checks against the methods.scala line references in m2-tables.md.

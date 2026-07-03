@@ -95,3 +95,13 @@ tc	getVar[AvlTree](1).get.keyLength	OK (MethodCall:Int (OptionGet:AvlTree (GetVa
 # The comma-separator fix (N4) is verified by TyperOracle.scala:172-173 source read.
 tc	()	OK (ConstantNode:Unit @())
 tc	"ab" + "cd"	OK (ConstantNode:String 'abcd')
+#
+# ── § 9: Fix-round-1 owner-name oracle (SOption.map probe) ──────────────────────
+# Source: `getVar[Int](1).map({(x:Int)=>x})`
+# Goal: confirm the %Owner string printed for SOption methods.
+# Result: oracle prints `%SOption.map` — confirming typeName = "SOption" (not "Option").
+# Scala truth: STypeCompanion.typeName = getClass.getSimpleName (SType.scala:238-244);
+#   SOption companion object → "SOption" (methods.scala:701).
+# Note: SOption.map has MethodCallIrBuilder → survives as MethodCall (has_ir_builder=true).
+# ORACLE_TREE_VERSION=3 (v6), empty env (`tc`).
+tc	getVar[Int](1).map({(x:Int)=>x})	OK (MethodCall:Option[Int] (GetVar:Option[Int] @1) %SOption.map [(Lambda:(Int) => Int [] [x:#Int] #Int (Ident:Int 'x'))] {})
