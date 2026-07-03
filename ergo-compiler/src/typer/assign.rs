@@ -929,16 +929,18 @@ fn assign_apply_explicit_method(
     args: Vec<TypedExpr>,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
-    // getVarFromInput arg-narrow hack (SigmaTyper.scala:139-147): both args are
-    // numeric constants -> (Short, Byte).
+    // getVarFromInput arg-narrow (SigmaTyper.scala:139-147): both args are
+    // numeric constants -> (Short, Byte).  Range-checked via const_downcast
+    // (Scala toShortExact/toByteExact throw ArithmeticException on overflow;
+    // we propagate as TyperError — verdict parity, class-tag differs).
     let n_args = if field == "getVarFromInput"
         && args.len() == 2
         && numeric_const_value(&args[0]).is_some()
         && numeric_const_value(&args[1]).is_some()
     {
         vec![
-            short_const(numeric_const_value(&args[0]).unwrap() as i16),
-            byte_const(numeric_const_value(&args[1]).unwrap() as i8),
+            narrow_numeric_const_to(&args[0], &SType::SShort, ctx.tree_version)?,
+            narrow_numeric_const_to(&args[1], &SType::SByte, ctx.tree_version)?,
         ]
     } else {
         args
@@ -1116,7 +1118,7 @@ fn assign_apply_generic(
                 ));
             }
             let typed_args = type_all(env, args, ctx)?;
-            let adapted = adapt_apply_args(&new_f, typed_args)?;
+            let adapted = adapt_apply_args(&new_f, typed_args, ctx)?;
             let actual: Vec<SType> = adapted.iter().map(|a| node_tpe(a).clone()).collect();
             if unify_type_lists(&dom, &actual).is_none() {
                 return Err(TyperError::typer(format!(
@@ -1458,6 +1460,7 @@ fn lower_method(
 fn adapt_apply_args(
     new_f: &TypedExpr,
     typed_args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
 ) -> Result<Vec<TypedExpr>, TyperError> {
     let name = match new_f {
         TypedExpr::Ident { name, .. } => name.as_str(),
@@ -1468,20 +1471,26 @@ fn adapt_apply_args(
             // adaptSigmaPropToBoolean(typedArgs, argTypes) with argTypes = [Coll[Bool]].
             adapt_sigma_prop_to_boolean(typed_args, &[SType::SColl(Box::new(SType::SBoolean))])
         }
+        // Range-checked via const_downcast (Scala toByteExact throws ArithmeticException
+        // on overflow; we propagate as TyperError — verdict parity, class-tag differs).
         "getVar" | "executeFromVar"
             if typed_args.len() == 1 && numeric_const_value(&typed_args[0]).is_some() =>
         {
-            let id = numeric_const_value(&typed_args[0]).unwrap();
-            Ok(vec![byte_const(id as i8)])
+            Ok(vec![narrow_numeric_const_to(
+                &typed_args[0],
+                &SType::SByte,
+                ctx.tree_version,
+            )?])
         }
         "getVarFromInput"
             if typed_args.len() == 2
                 && numeric_const_value(&typed_args[0]).is_some()
                 && numeric_const_value(&typed_args[1]).is_some() =>
         {
-            let input_id = numeric_const_value(&typed_args[0]).unwrap();
-            let var_id = numeric_const_value(&typed_args[1]).unwrap();
-            Ok(vec![short_const(input_id as i16), byte_const(var_id as i8)])
+            Ok(vec![
+                narrow_numeric_const_to(&typed_args[0], &SType::SShort, ctx.tree_version)?,
+                narrow_numeric_const_to(&typed_args[1], &SType::SByte, ctx.tree_version)?,
+            ])
         }
         _ => Ok(typed_args),
     }
@@ -1580,18 +1589,27 @@ fn numeric_constant_parts(e: &TypedExpr) -> Option<(ConstPayload, SType)> {
     }
 }
 
-fn byte_const(v: i8) -> TypedExpr {
-    TypedExpr::Constant {
-        value: ConstPayload::Byte(v),
-        tpe: SType::SByte,
-    }
-}
-
-fn short_const(v: i16) -> TypedExpr {
-    TypedExpr::Constant {
-        value: ConstPayload::Short(v),
-        tpe: SType::SShort,
-    }
+/// Range-check and narrow a numeric constant to `target` via Scala's
+/// `SByte.downcast` / `SShort.downcast` (= `toByteExact` / `toShortExact`).
+///
+/// Scala throws `ArithmeticException` on overflow; we return `Err(TyperError)`.
+/// Verdict parity is exact (both sides REJECT on out-of-range input).
+/// Class-tag deviation: ArithmeticException vs TyperError — recorded in
+/// lib.rs § "Known M2 deviations".
+fn narrow_numeric_const_to(
+    e: &TypedExpr,
+    target: &SType,
+    tree_version: u8,
+) -> Result<TypedExpr, TyperError> {
+    let (payload, ctype) = numeric_constant_parts(e).ok_or_else(|| {
+        TyperError::typer("narrow_numeric_const_to: not a numeric constant".to_string())
+    })?;
+    let narrowed =
+        const_downcast(&payload, &ctype, target, tree_version).map_err(build_to_typer)?;
+    Ok(TypedExpr::Constant {
+        value: narrowed,
+        tpe: target.clone(),
+    })
 }
 
 /// Destructure an `SType::SFunc` into `(dom, range)`; empty/NoType for non-funcs.
@@ -2349,6 +2367,45 @@ mod tests {
         }
     }
 
+    /// id-narrowing overflow rejects — oracle-confirmed §13.
+    ///
+    /// Scala `SByte.downcast` / `SShort.downcast` = `toByteExact` / `toShortExact`:
+    /// throw `ArithmeticException` on overflow.  We reject with `TyperError`.
+    /// Verdict parity is exact; class-tag differs (ArithmeticException vs TyperError
+    /// — see lib.rs Known M2 deviations).
+    #[test]
+    fn id_narrowing_overflow_rejects() {
+        // getVar[Int](200): 200 > i8::MAX (127) → ArithmeticException (oracle §13).
+        let err = type_err("getVar[Int](200)");
+        assert_eq!(
+            err.class_tag(),
+            "TyperException",
+            "getVar[Int](200) must reject"
+        );
+        // executeFromVar[Int](300): 300 > 127 → ArithmeticException (oracle §13).
+        let err2 = type_err("executeFromVar[Int](300)");
+        assert_eq!(
+            err2.class_tag(),
+            "TyperException",
+            "executeFromVar[Int](300) must reject"
+        );
+        // getVarFromInput[Int](70000, 1): 70000 > i16::MAX (32767) → same (oracle §13).
+        let err3 = type_err("getVarFromInput[Int](70000, 1)");
+        assert_eq!(
+            err3.class_tag(),
+            "TyperException",
+            "getVarFromInput[Int](70000, 1) must reject"
+        );
+    }
+
+    /// unsignedBigInt negative literal rejects — oracle-confirmed §13 (InvalidArguments).
+    #[test]
+    fn unsigned_big_int_negative_literal_rejects() {
+        let err = type_err("unsignedBigInt(\"-5\")");
+        // Scala: InvalidArguments; we map to TyperException (verdict parity).
+        assert_eq!(err.class_tag(), "TyperException", "unsignedBigInt(\"-5\")");
+    }
+
     /// §1.5: field access on a non-product type is a TyperException (not MethodNotFound).
     #[test]
     fn select_on_non_product_type_errors_typer_exception() {
@@ -2504,7 +2561,8 @@ mod tests {
             checked += 1;
         }
         // Guard: the sweep must actually exercise a substantial set.
-        assert!(checked >= 45, "swept only {checked} accept records");
+        // §13 adds 2 new accept records (avlTree 4-arg + executeFromSelfRegWithDefault).
+        assert!(checked >= 47, "swept only {checked} accept records");
     }
 
     /// §6 v2-gate rejects: the same explicit-type-arg SGlobal method calls that

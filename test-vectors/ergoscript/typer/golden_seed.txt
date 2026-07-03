@@ -205,3 +205,14 @@ tc	deserializeTo[Long](fromBase16("0e"))	OK (MethodCall:Long (Global:SigmaDslBui
 tc	bigInt("12345678901234567890")	OK (ConstantNode:BigInt (CBigInt @12345678901234567890))
 tc	fromBase16("deadbeef")	OK (ConstantNode:Coll[Byte] <@-34 @-83 @-66 @-17>)
 tc	executeFromSelfReg[Int](4)	OK (DeserializeRegister:Int @R4 None)
+#
+# ── § 13: Fix-round-1 oracle captures (id-narrowing + avlTree 4-arg + WithDefault) ──
+# All captured ORACLE_TREE_VERSION=3 (v6); tc = empty env, tce = demo env.
+# Reject records: oracle confirms ArithmeticException / InvalidArguments on overflow/negative.
+tc	getVar[Int](200)	REJECT 0:0 ArithmeticException
+tc	executeFromVar[Int](300)	REJECT 0:0 ArithmeticException
+tc	getVarFromInput[Int](70000, 1)	REJECT 0:0 ArithmeticException
+tc	unsignedBigInt("-5")	REJECT 0:0 InvalidArguments
+# Accept records: avlTree 4-arg form (reviewer probe-3) and executeFromSelfRegWithDefault.
+tce	avlTree(1.toByte, a, 32, Global.none[Int]())	OK (CreateAvlTree:AvlTree (Select:Byte (ConstantNode:Int @1) 'toByte') (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Int @32) (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int}))
+tc	executeFromSelfRegWithDefault[Int](4, 0)	OK (DeserializeRegister:Int @R4 (ConstantNode:Int @0))

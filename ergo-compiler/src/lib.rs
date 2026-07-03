@@ -172,6 +172,64 @@
 //!   `lone_cr_in_gap_is_lexical_error_at_the_cr` and
 //!   `crlf_is_still_one_newline_and_cr_in_comment_or_string_is_content`.
 
+//! # Known M2 deviations (typer layer)
+//!
+//! These are bounded gaps between the M2 ErgoScript typer and the Scala reference
+//! (`SigmaTyper.scala`, sigma-state 6.0.2) captured from oracle probes. M3 closes
+//! them. All entries here are oracle-grounded.
+//!
+//! ## Consolidated ledger (Fix round 1)
+//!
+//! ### D-T1 — id-narrowing class-tag (ArithmeticException vs TyperError)
+//!
+//! Scala's `SByte.downcast` / `SShort.downcast` (= `toByteExact` / `toShortExact`,
+//! `SType.scala:409,433`) throw `java.lang.ArithmeticException` when a `getVar`,
+//! `executeFromVar`, or `getVarFromInput` id constant overflows `Byte`/`Short`.
+//! Oracle: `getVar[Int](200)` → `REJECT 0:0 ArithmeticException`; same for
+//! `executeFromVar[Int](300)` and `getVarFromInput[Int](70000, 1)`.
+//! We route through `const_downcast` and return a `TyperError` — REJECT verdict
+//! matches, error class differs. Bounded to out-of-range literal ids which no
+//! real contract uses.
+//!
+//! ### D-T2 — fromBase58 / fromBase64 / deserialize accept-invalid on malformed input
+//!
+//! These three predefined functions are deferred in M2 (no vendored decoder /
+//! no M3 `ValueSerializer`): `predef_ir_builder` returns `None` and the `Apply`
+//! node survives unlowered. This means a malformed argument (bad Base58 encoding,
+//! bad Base64 padding, undeserializable bytes) is **accepted** where Scala would
+//! reject at compile time. Only input-validity is affected; the result type and
+//! node shape are otherwise correct. No real contract passes malformed literals to
+//! these functions. M3 completes them with real decoders + byte validation.
+//!
+//! ### D-T3 — unsignedBigInt deferred shape (non-negative literals)
+//!
+//! `unsignedBigInt(s)` for a valid non-negative decimal returns a deferred `Apply`
+//! node (M2 cannot build the `UnsignedBigInt` constant payload). Negative literals
+//! ARE rejected (oracle: `unsignedBigInt("-5")` → `REJECT 0:0 InvalidArguments`).
+//! Oracle for valid input: `unsignedBigInt("5")` → `OK (ConstantNode:UnsignedBigInt
+//! (CUnsignedBigInt @5))` — M3 completes the canonical node.
+//!
+//! ### D-T4 — ProveDlog placeholder rendering
+//!
+//! `proveDlog(g1)` lowers to `CreateProveDlog` correctly, but the inner
+//! `GroupElement` constant prints as a hex placeholder (`<0x...>`) instead of the
+//! oracle's decompressed `Ecp (x,y,1)` form. The node shape is correct; the printer
+//! deviation is bounded to GroupElement constants from the script environment.
+//! M3 replaces the hex placeholder with the full decompressed form.
+//!
+//! ### D-T5 — GroupElement on-curve validation deferred
+//!
+//! We accept an arbitrary hex string as a `GroupElement` literal in `env::lift`
+//! without checking it lies on the curve. Scala rejects off-curve points at
+//! `SigmaPredef.scala:proveDlog` / `decodePoint` evaluation. No real contract
+//! supplies an off-curve point literal. M3 adds the curve check.
+//!
+//! ### D-T6 — GroupElement hex lift shape
+//!
+//! `env::lift` stores a `GroupElement` as a raw hex string payload rather than
+//! the decompressed `(x,y,z)` affine form the oracle emits. This is the root
+//! cause of D-T4. M3 aligns the storage format.
+
 pub mod ast;
 pub mod binder;
 pub mod env;

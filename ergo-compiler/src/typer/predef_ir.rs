@@ -24,15 +24,22 @@
 //!   - `Some(Err(e))` — `isDefinedAt` true, the builder body threw (e.g.
 //!     `executeFromSelfReg` bad index) → propagated by the caller.
 //!
-//! # Deferred irBuilders (documented deviations — no M2 oracle coverage)
+//! # Deferred irBuilders (documented deviations)
 //!
-//! `fromBase58`/`fromBase64` (need Base58/Base64 decoders not vendored into this
-//! leaf crate), `unsignedBigInt` (needs an `UnsignedBigInt` constant payload), and
-//! `deserialize` (needs the M3 `ValueSerializer`) keep their env declarations so
-//! calls still type-check and accept, but their `predef_ir_builder` returns `None`
-//! → the `Apply` survives unlowered (correct verdict + result type, non-canonical
-//! node).  M3 completes them.  `fromBase16`/`bigInt` ARE implemented (oracle-verified
-//! against the JVM typer).
+//! `unsignedBigInt` validates the sign (negative → reject, matching Scala
+//! `InvalidArguments`), but for a valid non-negative literal it returns `None`
+//! so the `Apply` survives unlowered.  M3 constructs the `UBI` constant payload.
+//!
+//! `fromBase58`, `fromBase64`, and `deserialize` return `None` unconditionally —
+//! **ACCEPT-INVALID deviation**: Scala rejects malformed inputs at compile time
+//! (e.g. bad Base58 encoding, bad Base64 padding, undeserializable bytes) while we
+//! accept them as unlowered `Apply` nodes.  This is a bounded M2 gap: real contracts
+//! do not pass runtime-malformed literals to these functions.  See lib.rs
+//! § "Known M2 deviations" for the full ledger.  M3 completes them with real
+//! decoders + byte validation.
+//!
+//! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
+//! typer).
 
 use crate::stype::SType;
 use crate::typed::{ConstPayload, MethodRef, TypedExpr};
@@ -399,8 +406,21 @@ pub fn predef_ir_builder(
             Some(decode_base16(s))
         }
 
-        // ── deferred (see module docs); fall through so the Apply survives ────
-        "fromBase58" | "fromBase64" | "unsignedBigInt" | "deserialize" => None,
+        // ── deferred / validated (see module docs) ───────────────────────────
+        // unsignedBigInt: reject negative literals (Scala InvalidArguments);
+        // valid non-negative → Apply survives unlowered (M3 builds UBI payload).
+        "unsignedBigInt" => {
+            let s = string_const(args.first()?)?;
+            if s.starts_with('-') {
+                Some(Err(typer_err(format!(
+                    "Negative unsigned big integer: \"{s}\""
+                ))))
+            } else {
+                None
+            }
+        }
+        // fromBase58/fromBase64/deserialize: accept-invalid in M2 (see module docs).
+        "fromBase58" | "fromBase64" | "deserialize" => None,
         // allZK/anyZK/outerJoin/serialize(binder-handled)/PK(binder-handled):
         // no typer-time irBuilder → fall through.
         _ => None,
@@ -761,5 +781,36 @@ mod tests {
     fn unknown_name_returns_none() {
         let f = ident("nope", vec![SType::SInt], SType::SInt);
         assert!(predef_ir_builder("nope", &f, &[byte_const(1)]).is_none());
+    }
+
+    // ----- unsignedBigInt validation (oracle §13) -----
+
+    /// `unsignedBigInt("-5")` → Err (Scala: InvalidArguments; oracle §13).
+    #[test]
+    fn unsigned_big_int_negative_rejects() {
+        let f = ident(
+            "unsignedBigInt",
+            vec![SType::SString],
+            SType::SUnsignedBigInt,
+        );
+        let res = predef_ir_builder("unsignedBigInt", &f, &[str_const("-5")])
+            .expect("isDefinedAt true for negative literal");
+        assert!(res.is_err(), "negative unsignedBigInt must error");
+    }
+
+    /// `unsignedBigInt("5")` → None (deferred, Apply survives); oracle §13 accepts
+    /// with `ConstantNode:UnsignedBigInt` — completed in M3.
+    #[test]
+    fn unsigned_big_int_non_negative_deferred() {
+        let f = ident(
+            "unsignedBigInt",
+            vec![SType::SString],
+            SType::SUnsignedBigInt,
+        );
+        // Non-negative → fall-through (None), Apply node survives.
+        assert!(
+            predef_ir_builder("unsignedBigInt", &f, &[str_const("5")]).is_none(),
+            "valid unsignedBigInt must fall through (deferred)"
+        );
     }
 }
