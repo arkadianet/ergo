@@ -6,22 +6,24 @@
 //! Spec: `dev-docs/m2-recon/m2-typer.md` §1.1-1.25, §5, §6 (with the E1
 //! correction from the M2 plan — see below).
 //!
-//! # Scope (M2 Tasks 5-6 — structural arms + Apply arms + predef lowering)
+//! # Scope (M2 Tasks 5-7 — the complete `assignType` accept surface)
 //!
 //! Implemented here (source order matters, first-match): §1.1 Block (E1-lenient),
 //! §1.2 Tuple, §1.3 ConcreteCollection, §1.4 Ident, §1.5 Select (resolver),
 //! §1.6 Lambda, §1.7 Apply(ApplyTypes(Select…)) explicit type args, §1.8
 //! Apply(Select…) method call, §1.9 Apply(Ident) SGlobal method, §1.10 generic
-//! Apply (predef funcs / collection & tuple index), §1.12 ApplyTypes, §1.13 If,
-//! §1.14 AND/OR, §1.15 relations, §1.16 ArithOp, §1.17 BitOp, §1.18
+//! Apply (predef funcs / collection & tuple index), §1.11 MethodCallLike receiver
+//! dispatch (the `* ++ || && + ^ << >> >>>` operators), §1.12 ApplyTypes, §1.13
+//! If, §1.14 AND/OR, §1.15 relations, §1.16 ArithOp, §1.17 BitOp, §1.18
 //! Xor/MultiplyGroup, §1.19 Exponentiate, §1.20 ByIndex, §1.21 SizeOf, §1.22
 //! SigmaProp ops, §1.23 unary, §1.24 passthroughs, §1.25 fallthrough.  The §6
 //! `bimap`/`bimap2`/`unmap` harness and the predef irBuilder lowering table
 //! (`predef_ir.rs`) + method-lowering catalog (`lower_method`) are ported here.
 //!
-//! Deferred to Task 7 (returned as [`TyperError::NotYetImplemented`], a grep-able
-//! marker — never `todo!`/`unimplemented!`): §1.11 MethodCallLike receiver
-//! dispatch (the `* ++ || && + ^ << >> >>>` operators).
+//! `MethodCallLike` (and `ApplyTypes`) are **always eliminated** by the typer — the
+//! entry point `assign_type` `debug_assert!`s that no returned node is either.  Every
+//! arm is now ported: no deferred-arm markers or panics remain, and the accept
+//! surface is complete.
 //!
 //! # E1 (CRITICAL) — lenient v6.0.2 Block rule
 //!
@@ -42,7 +44,8 @@ use crate::span::Pos;
 use crate::stype::SType;
 use crate::typed::{
     node_tpe, product_prefix, ConstPayload, MethodRef, TypedExpr, ARITH_DIVISION, ARITH_MAX,
-    ARITH_MIN, ARITH_MINUS, ARITH_MODULO, ARITH_MULTIPLY, ARITH_PLUS, BIT_AND, BIT_OR, BIT_XOR,
+    ARITH_MIN, ARITH_MINUS, ARITH_MODULO, ARITH_MULTIPLY, ARITH_PLUS, BIT_AND, BIT_OR,
+    BIT_SHIFT_LEFT, BIT_SHIFT_RIGHT, BIT_SHIFT_RIGHT_ZEROED, BIT_XOR,
 };
 use crate::typer::methods::{
     container_exists, get_method, global_method, owner_name_for_type, SMethodDesc,
@@ -67,8 +70,7 @@ use crate::typer::{coll_elem, is_collection_like, TypeEnv, TyperCtx};
 /// CompilerExceptions.scala / SigmaTyperExceptions.scala):
 /// `TyperException`, `InvalidBinaryOperationParameters`,
 /// `InvalidUnaryOperationParameters`, `MethodNotFound`, `NonApplicableMethod`,
-/// `NotImplementedError`.  `NotYetImplemented` is a Task-5 handoff marker (not a
-/// Scala class): the arm exists in `SigmaTyper` but is ported in Task 6/7.
+/// `NotImplementedError`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TyperError {
     /// `TyperException` — thrown by `SigmaTyper.error` (SigmaTyper.scala:640).
@@ -87,18 +89,13 @@ pub enum TyperError {
     #[error("{msg} (pos {pos})")]
     MethodNotFound { pos: Pos, msg: String },
     /// `NonApplicableMethod` — unknown operator symbol in a MethodCallLike arm
-    /// (SigmaTyper.scala:336…; produced by Task 7).
+    /// (SigmaTyper.scala:336,345,361,386,407,417 — §1.11).
     #[error("{msg} (pos {pos})")]
     NonApplicableMethod { pos: Pos, msg: String },
-    /// `scala.NotImplementedError` — `SigmaProp ^ SigmaProp` (SigmaTyper.scala:379;
-    /// produced by Task 7).
+    /// `scala.NotImplementedError` — `SigmaProp ^ SigmaProp` (SigmaTyper.scala:379 —
+    /// §1.11).
     #[error("{msg} (pos {pos})")]
     NotImplementedError { pos: Pos, msg: String },
-    /// Task 6/7 handoff marker — an in-scope arm reached a node whose typing is
-    /// implemented in a later task (Apply/ApplyTypes/MethodCallLike, global
-    /// property lowering).  Grep-able; never a panic.
-    #[error("typer arm not yet implemented: {arm}")]
-    NotYetImplemented { arm: &'static str },
 }
 
 impl TyperError {
@@ -111,7 +108,6 @@ impl TyperError {
             | TyperError::MethodNotFound { pos, .. }
             | TyperError::NonApplicableMethod { pos, .. }
             | TyperError::NotImplementedError { pos, .. } => *pos,
-            TyperError::NotYetImplemented { .. } => 0,
         }
     }
 
@@ -126,7 +122,6 @@ impl TyperError {
             TyperError::MethodNotFound { .. } => "MethodNotFound",
             TyperError::NonApplicableMethod { .. } => "NonApplicableMethod",
             TyperError::NotImplementedError { .. } => "NotImplementedError",
-            TyperError::NotYetImplemented { .. } => "NotYetImplemented",
         }
     }
 
@@ -143,6 +138,12 @@ impl TyperError {
     }
     fn method_not_found(msg: String) -> Self {
         TyperError::MethodNotFound { pos: 0, msg }
+    }
+    fn non_applicable(msg: String) -> Self {
+        TyperError::NonApplicableMethod { pos: 0, msg }
+    }
+    fn not_implemented(msg: String) -> Self {
+        TyperError::NotImplementedError { pos: 0, msg }
     }
 }
 
@@ -177,6 +178,17 @@ fn coll_byte() -> SType {
 /// be narrowed once Task 8's `typecheck` API consumes it in-crate.
 pub fn assign_type(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, TyperError> {
     let result = dispatch(env, e, ctx)?;
+    // §7 post-condition: the typer eliminates `MethodCallLike` (§1.11) and
+    // `ApplyTypes` (§1.12) on EVERY node — they never survive into typed output.
+    // `assign_type` is the recursion point, so this covers the whole tree.
+    debug_assert!(
+        !matches!(
+            result,
+            TypedExpr::MethodCallLike { .. } | TypedExpr::ApplyTypes { .. }
+        ),
+        "typer must eliminate MethodCallLike/ApplyTypes; got {}",
+        product_prefix(&result)
+    );
     // .ensuring(v => v.tpe != NoType, ...) (SigmaTyper.scala:541-542)
     if *node_tpe(&result) == SType::NoType {
         return Err(TyperError::typer(format!(
@@ -238,10 +250,10 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         ApplyTypes {
             input, type_args, ..
         } => assign_apply_types(env, *input, type_args, ctx),
-        // §1.11 MethodCallLike receiver dispatch — Task 7.
-        MethodCallLike { .. } => Err(TyperError::NotYetImplemented {
-            arm: "MethodCallLike (§1.11, Task 7)",
-        }),
+        // §1.11 MethodCallLike receiver dispatch — SigmaTyper.scala:302-421.
+        MethodCallLike {
+            obj, name, args, ..
+        } => assign_method_call_like(env, *obj, name, args, ctx),
 
         // §1.13 If — SigmaTyper.scala:440-449
         If {
@@ -1292,6 +1304,376 @@ fn assign_apply_types(
             "Invalid application of type arguments: function doesn't have type parameters"
                 .to_string(),
         )),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §1.11 MethodCallLike receiver dispatch (SigmaTyper.scala:302-421)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `MethodCallLike(obj, m, args)` — SigmaTyper.scala:302-421.
+///
+/// Operator resolution keyed on the receiver's assigned type.  A `MethodCallLike`
+/// is **always eliminated**: rewritten to a dedicated op / `MethodCall`, or an
+/// error is thrown.  The only `m` values reaching here are the infix
+/// `parseAsMethods` set (`* ++ || && + ^ << >> >>>`, SigmaParser.scala:71) and the
+/// postfix-ident form `obj name` (Exprs.scala:113, `args = []`).
+fn assign_method_call_like(
+    env: &TypeEnv,
+    obj: TypedExpr,
+    name: String,
+    args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    // newObj = assignType(env, obj); newArgs = args.map(assignType) (:303-304).
+    let new_obj = assign_type(env, obj, ctx)?;
+    let new_args = type_all(env, args, ctx)?;
+    let recv = node_tpe(&new_obj).clone();
+    match &recv {
+        // SCollectionType[a] (:306-337).
+        SType::SColl(_) => mcl_collection(new_obj, recv, &name, new_args, ctx),
+        // SGroupElement (:338-346).
+        SType::SGroupElement => mcl_group_element(new_obj, &name, new_args),
+        // SSigmaProp (:364-387).
+        SType::SSigmaProp => mcl_sigma_prop(new_obj, &name, new_args),
+        // SBoolean (:388-408).
+        SType::SBoolean => mcl_boolean(new_obj, &name, new_args),
+        // SString (:409-418).
+        SType::SString => mcl_string(new_obj, &name, new_args),
+        // SNumericType (:347-362) — SByte/SShort/SInt/SLong/SBigInt/SUnsignedBigInt.
+        t if is_numeric(t) => mcl_numeric(env, ctx, new_obj, &name, new_args),
+        // else (:419-420) — a valid operator on an unsupported receiver.
+        t => Err(TyperError::typer(format!(
+            "Invalid operation MethodCallLike({name}) on type {t:?}"
+        ))),
+    }
+}
+
+/// Receiver `SCollectionType[a]` (SigmaTyper.scala:306-337).
+fn mcl_collection(
+    new_obj: TypedExpr,
+    recv: SType,
+    name: &str,
+    new_args: Vec<TypedExpr>,
+    ctx: &TyperCtx,
+) -> Result<TypedExpr, TyperError> {
+    // ("++", Seq(r)): exact-type Append (:307-311).
+    if name == "++" && new_args.len() == 1 {
+        let mut it = new_args.into_iter();
+        let r = it.next().unwrap();
+        if *node_tpe(&r) == recv {
+            return Ok(TypedExpr::Append {
+                input: Box::new(new_obj),
+                col2: Box::new(r),
+                tpe: recv,
+            });
+        }
+        return Err(TyperError::typer(format!(
+            "Invalid argument type for {name}, expected {recv:?} but was {:?}",
+            node_tpe(&r)
+        )));
+    }
+    // (SCollectionMethods(method), _): resolve a collection method by name (:312-333).
+    // Reachable in practice only via the postfix-ident form (`xs size`) — no infix
+    // operator symbol is a collection-method name.
+    match get_method(&recv, name, ctx.tree_version) {
+        Some(method) => {
+            // method.stype is the FULL SFunc (dom[0] = receiver); actualTypes prepends
+            // the receiver's concrete type (:315-316).
+            let new_arg_types: Vec<SType> = new_args.iter().map(|a| node_tpe(a).clone()).collect();
+            let mut actual_types = Vec::with_capacity(1 + new_arg_types.len());
+            actual_types.push(recv.clone());
+            actual_types.extend(new_arg_types.iter().cloned());
+            match unify_type_lists(&method.stype.dom, &actual_types) {
+                Some(subst) => {
+                    // concrFunTpe = applySubst(sfunc, subst); post-subst arg-type
+                    // EQUALITY check on the tail (:319-323).
+                    let concr = apply_subst_func(&method.stype, &subst);
+                    if new_arg_types.as_slice() != concr.dom_tail() {
+                        return Err(TyperError::typer(format!(
+                            "Invalid method {name} argument type: expected {:?}; actual: {new_arg_types:?}",
+                            concr.dom_tail()
+                        )));
+                    }
+                    // irBuilder(lowerMethodCalls).lift(...).getOrElse(mkMethodCall(subst))
+                    // (:330-333).  lowerMethodCalls is always true in our typer.  The
+                    // custom lowerings (map/filter/…) ignore the subst; a surviving
+                    // MethodCall (MethodCallIrBuilder or no irBuilder) carries it.
+                    let lowered = lower_method(&recv, name, new_obj, new_args, concr.range.clone());
+                    Ok(thread_method_subst(lowered, &subst))
+                }
+                // None: unification failed (:325-326).
+                None => Err(TyperError::typer(format!(
+                    "Invalid argument type of method call MethodCallLike({name}): expected {:?}; actual: {actual_types:?}",
+                    method.stype.dom
+                ))),
+            }
+        }
+        // else: unknown symbol (:335-336).
+        None => Err(TyperError::non_applicable(format!(
+            "Unknown symbol {name}, which is used as operation with arguments on {recv:?}"
+        ))),
+    }
+}
+
+/// Receiver `SGroupElement` (SigmaTyper.scala:338-346).
+fn mcl_group_element(
+    new_obj: TypedExpr,
+    name: &str,
+    new_args: Vec<TypedExpr>,
+) -> Result<TypedExpr, TyperError> {
+    // ("*", Seq(r)): GroupElement-only MultiplyGroup (:339-343).
+    if name == "*" && new_args.len() == 1 {
+        let mut it = new_args.into_iter();
+        let r = it.next().unwrap();
+        if *node_tpe(&r) == SType::SGroupElement {
+            return Ok(TypedExpr::MultiplyGroup {
+                left: Box::new(new_obj),
+                right: Box::new(r),
+                tpe: SType::SGroupElement,
+            });
+        }
+        return Err(TyperError::typer(format!(
+            "Invalid argument type for {name}, expected GroupElement but was {:?}",
+            node_tpe(&r)
+        )));
+    }
+    // else (:344-345).
+    Err(TyperError::non_applicable(format!(
+        "Unknown symbol {name}, which is used as (GroupElement) {name} (args)"
+    )))
+}
+
+/// Receiver `SNumericType` (SigmaTyper.scala:347-362).
+fn mcl_numeric(
+    env: &TypeEnv,
+    ctx: &TyperCtx,
+    new_obj: TypedExpr,
+    name: &str,
+    new_args: Vec<TypedExpr>,
+) -> Result<TypedExpr, TyperError> {
+    // ("+"|"*"|"^"|">>"|"<<"|">>>", Seq(r)) (:348).  `-`/`/`/`%` never arrive here
+    // (the parser emits ArithOp for those); `|`/`&` emit BitOp directly.
+    let is_num_op = matches!(name, "+" | "*" | "^" | ">>" | "<<" | ">>>");
+    if is_num_op && new_args.len() == 1 {
+        let mut it = new_args.into_iter();
+        let r = it.next().unwrap();
+        // r.tpe: numeric → bimap; non-numeric → InvalidBinaryOperationParameters (:357-358).
+        if !is_numeric(node_tpe(&r)) {
+            return Err(TyperError::invalid_binary(format!(
+                "Invalid argument type for {name}, expected {:?} but was {:?}",
+                node_tpe(&new_obj),
+                node_tpe(&r)
+            )));
+        }
+        // Dispatch to the mk* node builder via bimap(env, op, l, r)(mk)(tT, tT) (:349-356).
+        // `+`/`*` → mkPlus/mkMultiply (arithOp: upcast then ArithOp).
+        // `^`/`>>`/`<<`/`>>>` → mkBitXor/mkBitShiftRight/Left/RightZeroed (BitOp direct,
+        // NO upcast — SigmaBuilder.scala:636-646).
+        let opcode = match name {
+            "*" => ARITH_MULTIPLY,
+            "+" => ARITH_PLUS,
+            "^" => BIT_XOR,
+            ">>" => BIT_SHIFT_RIGHT,
+            "<<" => BIT_SHIFT_LEFT,
+            ">>>" => BIT_SHIFT_RIGHT_ZEROED,
+            _ => unreachable!("guarded by is_num_op"),
+        };
+        let is_arith = matches!(name, "+" | "*");
+        return bimap(
+            env,
+            ctx,
+            name,
+            new_obj,
+            r,
+            move |l, r| {
+                if is_arith {
+                    let (l, r) = arith_op(l, r)?;
+                    let tpe = node_tpe(&l).clone();
+                    Ok(TypedExpr::ArithOp {
+                        left: Box::new(l),
+                        right: Box::new(r),
+                        opcode,
+                        tpe,
+                    })
+                } else {
+                    let tpe = node_tpe(&l).clone();
+                    Ok(TypedExpr::BitOp {
+                        left: Box::new(l),
+                        right: Box::new(r),
+                        opcode,
+                        tpe,
+                    })
+                }
+            },
+            tt(),
+            tt(),
+        );
+    }
+    // else (:360-361).
+    Err(TyperError::non_applicable(format!(
+        "Unknown symbol {name}, which is used as ({:?}) {name} (args)",
+        node_tpe(&new_obj)
+    )))
+}
+
+/// Receiver `SSigmaProp` (SigmaTyper.scala:364-387).
+fn mcl_sigma_prop(
+    new_obj: TypedExpr,
+    name: &str,
+    new_args: Vec<TypedExpr>,
+) -> Result<TypedExpr, TyperError> {
+    // ("||"|"&&"|"^", Seq(r)) (:365).
+    if matches!(name, "||" | "&&" | "^") && new_args.len() == 1 {
+        let mut it = new_args.into_iter();
+        let r = it.next().unwrap();
+        return match node_tpe(&r) {
+            // rhs Boolean: coerce the LEFT sigma to Bool via Select(isProven), then Bin* (:366-373).
+            SType::SBoolean => {
+                let a = TypedExpr::Select {
+                    obj: Box::new(new_obj),
+                    field: "isProven".to_string(),
+                    res_type: Some(SType::SBoolean),
+                    tpe: SType::SBoolean,
+                };
+                Ok(build_bin_bool(a, r, name))
+            }
+            // rhs SigmaProp: SigmaOr/SigmaAnd(Seq(a,b)); `^` is NotImplementedError (:374-381).
+            SType::SSigmaProp => match name {
+                "||" => Ok(TypedExpr::SigmaOr {
+                    items: vec![new_obj, r],
+                    tpe: SType::SSigmaProp,
+                }),
+                "&&" => Ok(TypedExpr::SigmaAnd {
+                    items: vec![new_obj, r],
+                    tpe: SType::SSigmaProp,
+                }),
+                "^" => Err(TyperError::not_implemented(
+                    "Xor operation is not defined between SigmaProps".to_string(),
+                )),
+                _ => unreachable!("guarded by matches!"),
+            },
+            // else (:382-383).
+            other => Err(TyperError::typer(format!(
+                "Invalid argument type for {name}, expected SigmaProp but was {other:?}"
+            ))),
+        };
+    }
+    // else (:385-386).
+    Err(TyperError::non_applicable(format!(
+        "Unknown symbol {name}, which is used as (SigmaProp) {name} (args)"
+    )))
+}
+
+/// Receiver `SBoolean` (SigmaTyper.scala:388-408).
+fn mcl_boolean(
+    new_obj: TypedExpr,
+    name: &str,
+    new_args: Vec<TypedExpr>,
+) -> Result<TypedExpr, TyperError> {
+    // ("||"|"&&"|"^", Seq(r)) (:389).
+    if matches!(name, "||" | "&&" | "^") && new_args.len() == 1 {
+        let mut it = new_args.into_iter();
+        let r = it.next().unwrap();
+        return match node_tpe(&r) {
+            // rhs Boolean: Bin*(newObj, r) (:390-394).
+            SType::SBoolean => Ok(build_bin_bool(new_obj, r, name)),
+            // rhs SigmaProp: coerce the RIGHT sigma via Select(isProven), then Bin* (:395-402).
+            SType::SSigmaProp => {
+                let b = TypedExpr::Select {
+                    obj: Box::new(r),
+                    field: "isProven".to_string(),
+                    res_type: Some(SType::SBoolean),
+                    tpe: SType::SBoolean,
+                };
+                Ok(build_bin_bool(new_obj, b, name))
+            }
+            // else (:403-404).
+            other => Err(TyperError::typer(format!(
+                "Invalid argument type for {name}, expected Boolean but was {other:?}"
+            ))),
+        };
+    }
+    // else (:406-407).
+    Err(TyperError::non_applicable(format!(
+        "Unknown symbol {name}, which is used as (Boolean) {name} (args)"
+    )))
+}
+
+/// Receiver `SString` (SigmaTyper.scala:409-418).
+fn mcl_string(
+    new_obj: TypedExpr,
+    name: &str,
+    new_args: Vec<TypedExpr>,
+) -> Result<TypedExpr, TyperError> {
+    // ("+", Seq(r)) with BOTH constants: compile-time concat → StringConstant (:410-414).
+    if name == "+" && new_args.len() == 1 {
+        let mut it = new_args.into_iter();
+        let r = it.next().unwrap();
+        return match (&new_obj, &r) {
+            (
+                TypedExpr::Constant {
+                    value: ConstPayload::String(cl),
+                    ..
+                },
+                TypedExpr::Constant {
+                    value: ConstPayload::String(cr),
+                    ..
+                },
+            ) => Ok(TypedExpr::Constant {
+                value: ConstPayload::String(format!("{cl}{cr}")),
+                tpe: SType::SString,
+            }),
+            // Non-constant operands (unreachable: the parser only makes string
+            // constants) → InvalidBinaryOperationParameters (:413-414).
+            _ => Err(TyperError::invalid_binary(format!(
+                "Invalid argument type for {name}, expected String but was {:?}",
+                node_tpe(&r)
+            ))),
+        };
+    }
+    // else (:416-417).
+    Err(TyperError::non_applicable(format!(
+        "Unknown symbol {name}, which is used as (String) {name} (args)"
+    )))
+}
+
+/// Build `BinOr`/`BinAnd`/`BinXor(l, r)` for the `||`/`&&`/`^` bool ops (§1.11
+/// SigmaProp/Boolean arms).  Result type is always `SBoolean`.
+fn build_bin_bool(l: TypedExpr, r: TypedExpr, op: &str) -> TypedExpr {
+    let (left, right) = (Box::new(l), Box::new(r));
+    let tpe = SType::SBoolean;
+    match op {
+        "||" => TypedExpr::BinOr { left, right, tpe },
+        "&&" => TypedExpr::BinAnd { left, right, tpe },
+        "^" => TypedExpr::BinXor { left, right, tpe },
+        _ => unreachable!("build_bin_bool only called for ||/&&/^"),
+    }
+}
+
+/// Thread the §1.11 unify substitution onto a lowered `MethodCall` node.
+///
+/// `mkMethodCall(newObj, method, newArgs, typeSubst)` (SigmaTyper.scala:333) carries
+/// the unify subst; `lower_method`'s MethodCall fallback uses an empty subst (correct
+/// for §1.5/§1.8, which resolve the subst through the Select machinery).  For §1.11
+/// we thread it back on.  Custom-lowered nodes (`Append`/`MapCollection`/…) have no
+/// subst field and pass through unchanged.
+fn thread_method_subst(node: TypedExpr, subst: &TypeSubst) -> TypedExpr {
+    match node {
+        TypedExpr::MethodCall {
+            obj,
+            method,
+            args,
+            tpe,
+            ..
+        } => TypedExpr::MethodCall {
+            obj,
+            method,
+            args,
+            type_subst: subst.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            tpe,
+        },
+        other => other,
     }
 }
 
@@ -2360,6 +2742,14 @@ mod tests {
                 "{ val x = HEIGHT; val x = 5; x }",
                 "TyperException", // §1.1 duplicate name
             ),
+            // §1.11 MethodCallLike reject surface (live oracle §14).
+            ("(1, 2) ++ Coll(3)", "TyperException"), // else-arm: tuple receiver
+            ("HEIGHT ^ true", "InvalidBinaryOperationParameters"), // numeric non-numeric rhs
+            ("HEIGHT && true", "NonApplicableMethod"), // numeric unknown op
+            (
+                "sigmaProp(true) ^ sigmaProp(false)",
+                "NotImplementedError", // SigmaProp ^ SigmaProp
+            ),
         ];
         for (src, cls) in cases {
             let err = type_err(src);
@@ -2441,23 +2831,151 @@ mod tests {
         assert_eq!(err.class_tag(), "TyperException");
     }
 
-    // ----- oracle parity — Task-7 handoff marker (MethodCallLike only) -----
+    // ----- §1.11 MethodCallLike receiver dispatch (SigmaTyper.scala:302-421) -----
 
-    /// §1.11: a MethodCallLike (`+`, `*`, `++`, `&&`, …) is Task 7.  This is the
-    /// ONLY remaining NotYetImplemented arm after Task 6.
+    /// §7 post-condition: `MethodCallLike` is ALWAYS eliminated — the typed output
+    /// (and, via the `assign_type` `debug_assert`, every subtree) never contains a
+    /// `MethodCallLike` or `ApplyTypes` node.  The printed s-expression covers the
+    /// whole tree by construction.
     #[test]
-    fn method_call_like_input_is_not_yet_implemented() {
-        // `1 + 2` binds to MethodCallLike("+").
-        let err = type_err("1 + 2");
-        assert!(
-            matches!(err, TyperError::NotYetImplemented { .. }),
-            "got {err:?}"
-        );
-        assert_eq!(err.class_tag(), "NotYetImplemented");
+    fn method_call_like_is_always_eliminated() {
+        // Each source's top node arrives as a MethodCallLike from the binder; after
+        // typing, neither the top node nor any descendant may remain.
+        let tc_srcs = [
+            "1 + 2",
+            "1L + 1",
+            "5 * 2",
+            "5 ^ 3",
+            "5 << 1",
+            "5 >> 1",
+            "5 >>> 1",
+            "true && (1 == 1)",
+            "true ^ false",
+            "\"ab\" + \"cd\"",
+            // nested: a MethodCallLike buried inside an If branch and a Block body.
+            "if (true) 1 + 2 else 3",
+            "{ val x = 1 + 2; x * 4 }",
+        ];
+        for src in tc_srcs {
+            let printed = type_tc(src);
+            assert!(
+                !printed.contains("MethodCallLike") && !printed.contains("ApplyTypes"),
+                "residual node in {src:?}: {printed}"
+            );
+        }
+        // Demo-env records (Coll ++, SigmaProp combiners).
+        for src in ["a ++ b", "sigmaProp(true) && sigmaProp(false)"] {
+            let printed = type_tce(src);
+            assert!(
+                !printed.contains("MethodCallLike") && !printed.contains("ApplyTypes"),
+                "residual node in {src:?}: {printed}"
+            );
+        }
     }
 
-    /// §1.10: an Apply whose callee is unbound (not env/predef) errors at the
-    /// callee Ident, NOT NotYetImplemented (SigmaTyper.scala:232 → §1.4).
+    /// §1.11 SColl `("++", r)`: exact-type `Append` (SigmaTyper.scala:307-311).
+    #[test]
+    fn mcl_collection_append_exact_type() {
+        assert_eq!(type_tce("a ++ b"), seed_expected("a ++ b"));
+    }
+
+    /// §1.11 SColl `++` type mismatch: `col1 ++ a` (Coll[Long] ++ Coll[Byte]) rejects
+    /// with `TyperException` (SigmaTyper.scala:310-311; live oracle §14).
+    #[test]
+    fn mcl_collection_append_type_mismatch_rejects() {
+        let err = type_res("col1 ++ a", &demo_script_env(), &tenv(&[])).expect_err("reject");
+        assert_eq!(err.class_tag(), "TyperException");
+    }
+
+    /// §1.11 SNumeric `+`/`*` → ArithOp (upcast); `1L + 1` inserts `Upcast:Long`
+    /// (SigmaTyper.scala:350-351; seed §1/§2).
+    #[test]
+    fn mcl_numeric_plus_multiply_byte_parity() {
+        assert_eq!(type_tc("1L + 1"), seed_expected("1L + 1"));
+        assert_eq!(
+            type_tc("1.toByte + 2.toByte"),
+            seed_expected("1.toByte + 2.toByte")
+        );
+        assert_eq!(type_tc("5 * 2"), seed_expected("5 * 2"));
+    }
+
+    /// §1.11 SNumeric `^`/`>>`/`<<`/`>>>` → BitOp (NO upcast, direct node)
+    /// (SigmaTyper.scala:352-355; live oracle §14).
+    #[test]
+    fn mcl_numeric_bit_ops_byte_parity() {
+        for src in ["5 ^ 3", "5 >> 1", "5 << 1", "5 >>> 1"] {
+            assert_eq!(type_tc(src), seed_expected(src), "{src}");
+        }
+    }
+
+    /// §1.11 SNumeric non-numeric rhs → `InvalidBinaryOperationParameters`
+    /// (SigmaTyper.scala:357-358; live oracle §14 `HEIGHT ^ true`).
+    #[test]
+    fn mcl_numeric_non_numeric_rhs_rejects() {
+        let err = type_err("HEIGHT ^ true");
+        assert_eq!(err.class_tag(), "InvalidBinaryOperationParameters");
+    }
+
+    /// §1.11 SNumeric unknown op (`&&` on Int) → `NonApplicableMethod`
+    /// (SigmaTyper.scala:360-361; seed §3 `HEIGHT && true`).
+    #[test]
+    fn mcl_numeric_unknown_op_non_applicable() {
+        let err = type_err("HEIGHT && true");
+        assert_eq!(err.class_tag(), "NonApplicableMethod");
+    }
+
+    /// §1.11 SSigmaProp/SBoolean coercion matrix (SigmaTyper.scala:364-408; live
+    /// oracle §14): prop∘prop → SigmaOr/SigmaAnd; prop∘bool → left isProven; bool∘prop
+    /// → right isProven.
+    #[test]
+    fn mcl_sigma_prop_boolean_coercion_matrix() {
+        for src in [
+            "sigmaProp(true) && sigmaProp(false)",
+            "sigmaProp(true) || sigmaProp(false)",
+            "sigmaProp(true) && (1 == 1)",
+            "(1 == 1) && sigmaProp(true)",
+            "sigmaProp(true) ^ (1 == 1)",
+            "(1 == 1) ^ sigmaProp(true)",
+            "true ^ false",
+            "true && (1 == 1)",
+        ] {
+            assert_eq!(type_tc(src), seed_expected(src), "{src}");
+        }
+    }
+
+    /// §1.11 SSigmaProp `^` between two SigmaProps → `NotImplementedError`
+    /// (SigmaTyper.scala:379; live oracle §14).
+    #[test]
+    fn mcl_sigma_prop_xor_between_sigmaprops_not_implemented() {
+        let err = type_err("sigmaProp(true) ^ sigmaProp(false)");
+        assert_eq!(err.class_tag(), "NotImplementedError");
+    }
+
+    /// §1.11 SString `"a" + "b"`: compile-time concat fold → StringConstant
+    /// (SigmaTyper.scala:410-414; seed §8).
+    #[test]
+    fn mcl_string_const_concat_fold() {
+        assert_eq!(type_tc("\"ab\" + \"cd\""), seed_expected("\"ab\" + \"cd\""));
+    }
+
+    /// §1.11 else-arm: a valid operator on an unsupported receiver (tuple `++`)
+    /// → `TyperException` (SigmaTyper.scala:419-420; live oracle §14).
+    #[test]
+    fn mcl_else_arm_invalid_operation_rejects() {
+        let err = type_err("(1, 2) ++ Coll(3)");
+        assert_eq!(err.class_tag(), "TyperException");
+    }
+
+    /// §1.11 unknown alphanumeric infix (`x foo y`) is rejected at PARSE time
+    /// (SigmaParser.scala:99 "Unknown binary operation"), never reaching §1.11.
+    /// End-to-end verdict is REJECT, matching the M1-era expectation.
+    #[test]
+    fn unknown_alpha_infix_rejected_at_parse() {
+        assert!(parse("a foo b", 3).is_err(), "`a foo b` must fail to parse");
+    }
+
+    /// §1.10: an Apply whose callee is unbound (not env/predef) errors with a
+    /// `TyperException` at the callee Ident (SigmaTyper.scala:232 → §1.4).
     #[test]
     fn apply_unbound_callee_errors_typer_exception() {
         // `f(1)` with f unbound binds to Apply(Ident(f), [1]); new_f resolution
@@ -2503,16 +3021,10 @@ mod tests {
 
     // ----- oracle parity — Task-6 accept byte-parity sweep (file-driven) -----
 
-    /// Sources that remain Task-7 (MethodCallLike operators) or carry a documented
-    /// M2 rendering deviation (PK), excluded from the byte-parity sweep.
+    /// Sources that carry a documented M2 rendering deviation (PK / demo-env
+    /// GroupElement constants), excluded from the byte-parity sweep.  The §1.11
+    /// MethodCallLike operator records are now IN the sweep (Task 7).
     const SWEEP_SKIP: &[&str] = &[
-        // §1.11 MethodCallLike (`* ++ || && + ^ << >> >>>`) — Task 7.
-        "1L + 1",
-        "1.toByte + 2.toByte",
-        "true && (1 == 1)",
-        "HEIGHT>5 && HEIGHT<9",
-        "a ++ b",
-        "\"ab\" + \"cd\"",
         // PK renders ProveDlog with an M2 hex placeholder (deviation; see typed.rs).
         "PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")",
         // Records embedding a demo-env GroupElement CONSTANT (g1/g2): env.rs `lift`
@@ -2530,9 +3042,9 @@ mod tests {
 
     /// Every in-scope ACCEPT record in the golden seed (tc + tce) types end-to-end
     /// (parse -> bind -> assignType -> print) to the byte-exact oracle string.
-    /// This sweeps ALL previously-NYI-blocked records that Task 6 now enables
-    /// (§1/§4/§7/§9/§12 predef lowerings, method calls, indexing) plus the Task-5
-    /// structural records — the whole accept surface minus the Task-7 SKIP set.
+    /// This sweeps the whole accept surface — §1.11 MethodCallLike operators (§14),
+    /// predef lowerings, method calls, indexing, and structural arms — minus the
+    /// documented rendering-deviation SKIP set (PK / demo-env GroupElement consts).
     #[test]
     fn seed_accept_records_byte_match_oracle_v3() {
         let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
@@ -2560,9 +3072,11 @@ mod tests {
             assert_eq!(got, sexpr, "byte-parity mismatch for {verb} {src:?}");
             checked += 1;
         }
-        // Guard: the sweep must actually exercise a substantial set.
-        // §13 adds 2 new accept records (avlTree 4-arg + executeFromSelfRegWithDefault).
-        assert!(checked >= 47, "swept only {checked} accept records");
+        // Guard: the sweep must actually exercise a substantial set.  §13 adds the
+        // avlTree/WithDefault records; §14 (Task 7) adds the §1.11 MethodCallLike
+        // accept records (SigmaProp/Boolean matrix, numeric bit ops) and re-enables
+        // the 6 formerly-skipped operator records.
+        assert!(checked >= 80, "swept only {checked} accept records");
     }
 
     /// §6 v2-gate rejects: the same explicit-type-arg SGlobal method calls that

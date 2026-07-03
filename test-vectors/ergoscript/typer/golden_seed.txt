@@ -216,3 +216,32 @@ tc	unsignedBigInt("-5")	REJECT 0:0 InvalidArguments
 # Accept records: avlTree 4-arg form (reviewer probe-3) and executeFromSelfRegWithDefault.
 tce	avlTree(1.toByte, a, 32, Global.none[Int]())	OK (CreateAvlTree:AvlTree (Select:Byte (ConstantNode:Int @1) 'toByte') (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Int @32) (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int}))
 tc	executeFromSelfRegWithDefault[Int](4, 0)	OK (DeserializeRegister:Int @R4 (ConstantNode:Int @0))
+#
+# ── § 14: Task-7 §1.11 MethodCallLike receiver-dispatch captures ─────────────────
+# All captured ORACLE_TREE_VERSION=3 (v6) via scripts/jvm_typer_oracle (batch);
+# tc = empty env, tce = demo env. These pin the §1.11 operator-resolution arms:
+# SColl ++, SNumeric +/*/^/<</>>/>>>, SSigmaProp/SBoolean ||/&&/^ (asymmetric
+# isProven coercion), SString const-concat fold, and the reject surface.
+#
+# SSigmaProp/SBoolean coercion matrix (SigmaTyper.scala:364-408):
+#   prop∘prop  → SigmaAnd/SigmaOr(Seq(a,b)); `^` between props → NotImplementedError
+#   prop∘bool  → LEFT wrapped in Select(isProven, Boolean) then Bin*
+#   bool∘prop  → RIGHT wrapped in Select(isProven, Boolean) then Bin*
+tc	sigmaProp(true) && sigmaProp(false)	OK (SigmaAnd:SigmaProp [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @false))])
+tc	sigmaProp(true) || sigmaProp(false)	OK (SigmaOr:SigmaProp [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @false))])
+tc	sigmaProp(true) && (1 == 1)	OK (BinAnd:Boolean (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven') (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))
+tc	(1 == 1) && sigmaProp(true)	OK (BinAnd:Boolean (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)) (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven'))
+tc	sigmaProp(true) ^ (1 == 1)	OK (BinXor:Boolean (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven') (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))
+tc	(1 == 1) ^ sigmaProp(true)	OK (BinXor:Boolean (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)) (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven'))
+tc	true ^ false	OK (BinXor:Boolean (ConstantNode:Boolean @true) (ConstantNode:Boolean @false))
+# SNumeric arm: `+`/`*` → ArithOp (arithOp upcast); `^`/`<<`/`>>`/`>>>` → BitOp (NO upcast).
+tc	5 * 2	OK (ArithOp:Int (ConstantNode:Int @5) (ConstantNode:Int @2) @-100)
+tc	5 ^ 3	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @3) @-11)
+tc	5 << 1	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @1) @-9)
+tc	5 >> 1	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @1) @-10)
+tc	5 >>> 1	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @1) @-8)
+# Reject records (class graded; positions batch-mode, advisory):
+tce	col1 ++ a	REJECT 1:9 TyperException	# ++ Coll[Long] vs Coll[Byte] exact-type mismatch (§1.11 SColl)
+tc	(1, 2) ++ Coll(3)	REJECT 1:1 TyperException	# ++ on tuple receiver → else-arm (§1.11:419-420)
+tc	HEIGHT ^ true	REJECT 1:10 InvalidBinaryOperationParameters	# numeric ^ non-numeric rhs (§1.11 SNumeric:357-358)
+tc	sigmaProp(true) ^ sigmaProp(false)	REJECT 0:0 NotImplementedError	# SigmaProp ^ SigmaProp (§1.11:379)
