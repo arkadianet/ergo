@@ -486,8 +486,34 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         | Downcast { .. }
         | Select {
             res_type: Some(_), ..
+        }) => Ok(node),
+
+        // §1.24 MethodCall passthrough (SigmaTyper.scala:538 `case v: MethodCall => v`)
+        // — returned UNCHANGED; the typer does NOT re-type its args.
+        //
+        // A3 (accept-invalid fix): the binder pre-builds `serialize(v)` as a
+        // `MethodCall(Global, serialize, [v])` (Rule-10, `bind_serialize`) with a
+        // BOUND-but-unresolved arg.  parseAsMethods operators (`+ ++ * || && ^ <<
+        // >> >>>`) survive as untyped `MethodCallLike` nodes (the typer resolves
+        // them ONLY when it recurses into them — which this passthrough does not).
+        // Such a survivor makes the tree malformed: the reference s-expression
+        // printer throws `RuntimeException` (verdict REJECT).  We mirror that reject.
+        // Boundary (oracle-pinned): relations (`==`/`>`), `if`, `Coll(...)`, and plain
+        // constants bind to fully-typed nodes and stay ACCEPT — only a surviving
+        // `MethodCallLike` rejects; `serialize(1)` still accepts + byte-matches, and
+        // the Select-form `Global.serialize(a ++ b)` (typed via §1.8) is unaffected.
+        node @ MethodCall { .. } => {
+            if let MethodCall { args, .. } = &node {
+                if args.iter().any(expr_contains_method_call_like) {
+                    return Err(TyperError::typer(
+                        "serialize: argument contains an unresolved operator expression \
+                         (MethodCallLike) that the reference typer cannot type"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(node)
         }
-        | MethodCall { .. }) => Ok(node),
 
         // §1.25 fallthrough — SigmaTyper.scala:539-540
         other => Err(TyperError::typer(format!(
@@ -1068,6 +1094,26 @@ fn assign_apply_select(
                     let t_obj = node_tpe(&new_obj).clone();
                     match get_method(&t_obj, &n, ctx.tree_version) {
                         Some(method) if method.has_ir_builder => {
+                            // A1 (accept-invalid fix): a type-parametric SMethod that
+                            // requires an on-wire explicit type argument (getReg /
+                            // getVarFromInput / some / none / deserializeTo /
+                            // fromBigEndianBytes — the six `explicit_type_args` methods),
+                            // or one whose specialized result still carries an unresolved
+                            // type var, MUST be applied through an explicit `[T]`
+                            // ApplyTypes (§1.7).  Reached here via the no-type-arg
+                            // Apply(Select) path, the reference typer throws
+                            // IllegalArgumentException at MethodCall construction (the
+                            // method still carries unresolved tpeParams).  We reject for
+                            // verdict parity — the JVM `IllegalArgumentException` class is
+                            // non-reproducible, so we map to `TyperException` (E5-advisory,
+                            // like the D-T1 family).  Boundary (oracle-pinned): the
+                            // predef-IR `getVar(1)` → `Option[T]` still ACCEPTS on both
+                            // sides — that path does not reach here.
+                            if method.explicit_type_args || stype_has_free_type_var(&concr_range) {
+                                return Err(TyperError::typer(format!(
+                                    "Method '{n}' is type-parametric and requires an explicit type argument [T]"
+                                )));
+                            }
                             // expectedArgs = concrFunTpe.tDom (receiver already dropped).
                             if concr_dom.len() != new_arg_types.len()
                                 || !concr_dom
@@ -1602,37 +1648,79 @@ fn mcl_boolean(
     )))
 }
 
+/// The JVM `.toString` of a constant payload, for the `String + <const>` fold
+/// (A4).  `Some` for payloads whose Scala `.toString` we reproduce byte-exactly;
+/// `None` for GroupElement / SigmaProp / ProveDlog / Coll payloads whose runtime
+/// forms are not reproducible from our stored representation (see `mcl_string`).
+fn const_java_to_string(p: &ConstPayload) -> Option<String> {
+    match p {
+        ConstPayload::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
+        ConstPayload::Byte(v) => Some(v.to_string()),
+        ConstPayload::Short(v) => Some(v.to_string()),
+        ConstPayload::Int(v) => Some(v.to_string()),
+        ConstPayload::Long(v) => Some(v.to_string()),
+        // BigIntConstant.value.toString → "CBigInt(<decimal>)" (oracle-pinned).
+        ConstPayload::BigInt(s) => Some(format!("CBigInt({s})")),
+        ConstPayload::String(s) => Some(s.clone()),
+        // UnitConstant → "()" (Scala BoxedUnit toString).
+        ConstPayload::Unit => Some("()".to_string()),
+        // Non-reproducible runtime `.toString` forms — keep the reject.
+        ConstPayload::ByteColl(_)
+        | ConstPayload::LongColl(_)
+        | ConstPayload::GroupElement(_)
+        | ConstPayload::SigmaProp(_)
+        | ConstPayload::ProveDlog(_) => None,
+    }
+}
+
 /// Receiver `SString` (SigmaTyper.scala:409-418).
 fn mcl_string(
     new_obj: TypedExpr,
     name: &str,
     new_args: Vec<TypedExpr>,
 ) -> Result<TypedExpr, TyperError> {
-    // ("+", Seq(r)) with BOTH constants: compile-time concat → StringConstant (:410-414).
+    // ("+", Seq(r)): compile-time concat fold → StringConstant (:410-414).
     if name == "+" && new_args.len() == 1 {
         let mut it = new_args.into_iter();
         let r = it.next().unwrap();
-        return match (&new_obj, &r) {
-            (
-                TypedExpr::Constant {
-                    value: ConstPayload::String(cl),
-                    ..
-                },
-                TypedExpr::Constant {
-                    value: ConstPayload::String(cr),
-                    ..
-                },
-            ) => Ok(TypedExpr::Constant {
-                value: ConstPayload::String(format!("{cl}{cr}")),
-                tpe: SType::SString,
-            }),
-            // Non-constant operands (unreachable: the parser only makes string
-            // constants) → InvalidBinaryOperationParameters (:413-414).
-            _ => Err(TyperError::invalid_binary(format!(
-                "Invalid argument type for {name}, expected String but was {:?}",
-                node_tpe(&r)
-            ))),
-        };
+        // Scala's SString arm matches `(cl: Constant[SString]@unchecked, cr:
+        // Constant[SString]@unchecked)`; the `@unchecked` type arg is ERASED at
+        // runtime, so the real guard is "both operands are `Constant` of ANY type".
+        // `mkStringConcat` then builds `StringConstant(cl.value + cr.value)`, and
+        // Scala `String + Any` calls `.toString` on the RHS — so an Int folds to
+        // its decimal, a Bool to "true"/"false", Unit to "()", a BigInt to
+        // "CBigInt(n)", etc. (adversarial finding A4; oracle-pinned).  The LEFT
+        // operand is always a String constant here (this arm is reached only for an
+        // SString receiver; a non-constant String value, e.g. a `val`-bound Ident,
+        // is not a `Constant` and correctly falls through to the reject).
+        if let (
+            TypedExpr::Constant {
+                value: ConstPayload::String(cl),
+                ..
+            },
+            TypedExpr::Constant { value: rp, .. },
+        ) = (&new_obj, &r)
+        {
+            if let Some(rs) = const_java_to_string(rp) {
+                return Ok(TypedExpr::Constant {
+                    value: ConstPayload::String(format!("{cl}{rs}")),
+                    tpe: SType::SString,
+                });
+            }
+            // Reproducibility boundary (D-T6 sub-deviation): a GroupElement /
+            // SigmaProp / ProveDlog / Coll RHS folds in Scala via a JVM-runtime
+            // `.toString` (e.g. `GroupElement(ECPoint(<hex>,...))`) that we cannot
+            // reproduce byte-exactly from our stored payload.  We REJECT rather than
+            // fold wrong bytes — a NAMED verdict divergence on `String + GE-const`
+            // only (see the lib.rs deviation ledger).  Falls through to the Err.
+        }
+        // Non-constant RHS (Height/Select/EQ/ConcreteCollection/…), or a Constant
+        // RHS with a non-reproducible payload → InvalidBinaryOperationParameters
+        // (:413-414).  A non-constant LHS likewise reaches here.
+        return Err(TyperError::invalid_binary(format!(
+            "Invalid argument type for {name}, expected String but was {:?}",
+            node_tpe(&r)
+        )));
     }
     // else (:416-417).
     Err(TyperError::non_applicable(format!(
@@ -1690,6 +1778,21 @@ fn process_global_method(
     method: &SMethodDesc,
     args: Vec<TypedExpr>,
 ) -> Result<TypedExpr, TyperError> {
+    // A1 (accept-invalid fix): a bare `fromBigEndianBytes(a)` / `deserializeTo(a)` /
+    // `some(x)` / `none()` call (§1.9 `Apply(Ident)` → SGlobal method) without an
+    // explicit `[T]` reaches here with `method.explicit_type_args` set (or a result
+    // still carrying a free type var).  The reference typer REJECTS
+    // (IllegalArgumentException — unresolved tpeParams at MethodCall construction);
+    // we reject for verdict parity.  `groupGenerator`/`xor`/`serialize` are
+    // monomorphic (explicit_type_args=false, concrete range) and unaffected.
+    // Oracle-pinned; boundary: predef `getVar(1)` → `Option[T]` is NOT an SGlobal
+    // method and does not reach here.
+    if method.explicit_type_args || stype_has_free_type_var(&method.stype.range) {
+        return Err(TyperError::typer(format!(
+            "Global method '{}' is type-parametric and requires an explicit type argument [T]",
+            method.name
+        )));
+    }
     match method.name {
         "groupGenerator" if args.is_empty() => Ok(TypedExpr::GroupGenerator {
             tpe: SType::SGroupElement,
@@ -2037,6 +2140,207 @@ fn free_type_vars(dom: &[SType], range: &SType) -> Vec<String> {
     }
     collect_type_vars(range, &mut acc);
     acc
+}
+
+/// `true` iff `e` is, or transitively contains, an unresolved `MethodCallLike`
+/// node (a parseAsMethods operator the typer has not resolved).  Used by the A3
+/// guard on the §1.24 `MethodCall` passthrough: a surviving `MethodCallLike` in a
+/// binder-prebuilt `serialize(...)` MethodCall makes the tree unprintable and the
+/// reference typer rejects it.  The match is exhaustive (compiler-enforced) so a
+/// future `TypedExpr` variant cannot silently escape the scan.
+fn expr_contains_method_call_like(e: &TypedExpr) -> bool {
+    use TypedExpr::*;
+    let opt = |o: &Option<Box<TypedExpr>>| {
+        o.as_ref()
+            .is_some_and(|b| expr_contains_method_call_like(b))
+    };
+    match e {
+        // The target.
+        MethodCallLike { .. } => true,
+        // Leaves — no child expressions.
+        Height { .. }
+        | Self_ { .. }
+        | Inputs { .. }
+        | Outputs { .. }
+        | Context { .. }
+        | Global { .. }
+        | MinerPubkey { .. }
+        | LastBlockUtxoRootHash { .. }
+        | GroupGenerator { .. }
+        | Constant { .. }
+        | Ident { .. }
+        | GetVar { .. }
+        | DeserializeContext { .. } => false,
+        // Single child (`input`/`value`/`body`).
+        Upcast { input, .. }
+        | Downcast { input, .. }
+        | LogicalNot { input, .. }
+        | Negation { input, .. }
+        | BitInversion { input, .. }
+        | SelectField { input, .. }
+        | SizeOf { input, .. }
+        | SigmaPropIsProven { input, .. }
+        | SigmaPropBytes { input, .. }
+        | AND { input, .. }
+        | OR { input, .. }
+        | XorOf { input, .. }
+        | OptionGet { input, .. }
+        | OptionIsDefined { input, .. }
+        | CalcBlake2b256 { input, .. }
+        | CalcSha256 { input, .. }
+        | ByteArrayToBigInt { input, .. }
+        | ByteArrayToLong { input, .. }
+        | LongToByteArray { input, .. }
+        | DecodePoint { input, .. } => expr_contains_method_call_like(input),
+        BoolToSigmaProp { value, .. } | CreateProveDlog { value, .. } => {
+            expr_contains_method_call_like(value)
+        }
+        ZKProofBlock { body, .. } => expr_contains_method_call_like(body),
+        Select { obj, .. } => expr_contains_method_call_like(obj),
+        ApplyTypes { input, .. } => expr_contains_method_call_like(input),
+        ValNode { body, .. } => expr_contains_method_call_like(body),
+        Lambda { body, .. } => opt(body),
+        // Two children.
+        ArithOp { left, right, .. }
+        | BitOp { left, right, .. }
+        | GT { left, right, .. }
+        | GE { left, right, .. }
+        | LT { left, right, .. }
+        | LE { left, right, .. }
+        | EQ { left, right, .. }
+        | NEQ { left, right, .. }
+        | BinAnd { left, right, .. }
+        | BinOr { left, right, .. }
+        | BinXor { left, right, .. }
+        | MultiplyGroup { left, right, .. }
+        | Exponentiate { left, right, .. }
+        | Xor { left, right, .. } => {
+            expr_contains_method_call_like(left) || expr_contains_method_call_like(right)
+        }
+        MapCollection { input, mapper, .. } => {
+            expr_contains_method_call_like(input) || expr_contains_method_call_like(mapper)
+        }
+        Append { input, col2, .. } => {
+            expr_contains_method_call_like(input) || expr_contains_method_call_like(col2)
+        }
+        Filter {
+            input, condition, ..
+        }
+        | Exists {
+            input, condition, ..
+        }
+        | ForAll {
+            input, condition, ..
+        } => expr_contains_method_call_like(input) || expr_contains_method_call_like(condition),
+        OptionGetOrElse { input, default, .. } => {
+            expr_contains_method_call_like(input) || expr_contains_method_call_like(default)
+        }
+        AtLeast { bound, input, .. } => {
+            expr_contains_method_call_like(bound) || expr_contains_method_call_like(input)
+        }
+        // Three children.
+        If {
+            condition,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            expr_contains_method_call_like(condition)
+                || expr_contains_method_call_like(true_branch)
+                || expr_contains_method_call_like(false_branch)
+        }
+        Slice {
+            input, from, until, ..
+        } => {
+            expr_contains_method_call_like(input)
+                || expr_contains_method_call_like(from)
+                || expr_contains_method_call_like(until)
+        }
+        Fold {
+            input,
+            zero,
+            fold_op,
+            ..
+        } => {
+            expr_contains_method_call_like(input)
+                || expr_contains_method_call_like(zero)
+                || expr_contains_method_call_like(fold_op)
+        }
+        SubstConstants {
+            script_bytes,
+            positions,
+            new_values,
+            ..
+        } => {
+            expr_contains_method_call_like(script_bytes)
+                || expr_contains_method_call_like(positions)
+                || expr_contains_method_call_like(new_values)
+        }
+        TreeLookup {
+            tree, key, proof, ..
+        } => {
+            expr_contains_method_call_like(tree)
+                || expr_contains_method_call_like(key)
+                || expr_contains_method_call_like(proof)
+        }
+        // Four children.
+        CreateProveDHTuple { gv, hv, uv, vv, .. } => {
+            expr_contains_method_call_like(gv)
+                || expr_contains_method_call_like(hv)
+                || expr_contains_method_call_like(uv)
+                || expr_contains_method_call_like(vv)
+        }
+        CreateAvlTree {
+            operation_flags,
+            digest,
+            key_length,
+            value_length_opt,
+            ..
+        } => {
+            expr_contains_method_call_like(operation_flags)
+                || expr_contains_method_call_like(digest)
+                || expr_contains_method_call_like(key_length)
+                || expr_contains_method_call_like(value_length_opt)
+        }
+        // `input` + `index` + optional `default`.
+        ByIndex {
+            input,
+            index,
+            default,
+            ..
+        } => {
+            expr_contains_method_call_like(input)
+                || expr_contains_method_call_like(index)
+                || opt(default)
+        }
+        DeserializeRegister { default, .. } => opt(default),
+        // Collections of children.
+        Tuple { items, .. }
+        | ConcreteCollection { items, .. }
+        | SigmaAnd { items, .. }
+        | SigmaOr { items, .. } => items.iter().any(expr_contains_method_call_like),
+        Apply { func, args, .. } => {
+            expr_contains_method_call_like(func) || args.iter().any(expr_contains_method_call_like)
+        }
+        Block {
+            bindings, result, ..
+        } => {
+            bindings.iter().any(expr_contains_method_call_like)
+                || expr_contains_method_call_like(result)
+        }
+        MethodCall { obj, args, .. } => {
+            expr_contains_method_call_like(obj) || args.iter().any(expr_contains_method_call_like)
+        }
+    }
+}
+
+/// `true` iff `t` contains any free `STypeVar` (an unresolved type parameter).
+/// Used by the A1 guards (§1.8 method calls and the predef-IR `global_deserialize`
+/// path) to reject a type-parametric SMethod reached without an explicit `[T]`.
+pub(crate) fn stype_has_free_type_var(t: &SType) -> bool {
+    let mut acc = Vec::new();
+    collect_type_vars(t, &mut acc);
+    !acc.is_empty()
 }
 
 fn collect_type_vars(t: &SType, acc: &mut Vec<String>) {
@@ -2933,6 +3237,146 @@ mod tests {
     #[test]
     fn mcl_string_const_concat_fold() {
         assert_eq!(type_tc("\"ab\" + \"cd\""), seed_expected("\"ab\" + \"cd\""));
+    }
+
+    // ----- M2 adversarial wave A — verdict parity (seed §18/§19) -----
+
+    /// A1 (§1.8/§1.9): a type-parametric SGlobal/SBox method reached WITHOUT an
+    /// explicit `[T]` ApplyTypes is rejected (the reference throws
+    /// IllegalArgumentException at MethodCall construction; we reject for verdict
+    /// parity, class → TyperException).  Covers both the `Global.<m>(...)` Select
+    /// path (§1.8) and the bare `Ident(...)` SGlobal path (§1.9).
+    #[test]
+    fn type_parametric_method_without_explicit_type_arg_rejects() {
+        for src in ["Global.some(1)", "Global.none()", "SELF.getReg(4)"] {
+            let err = type_err(src);
+            assert_eq!(err.class_tag(), "TyperException", "{src}");
+        }
+        // bare `Ident` SGlobal call (§1.9) + Select form (§1.8), demo env for `a`.
+        for src in ["fromBigEndianBytes(a)", "Global.fromBigEndianBytes(a)"] {
+            let err = type_res(src, &demo_script_env(), &tenv(&[])).expect_err(src);
+            assert_eq!(err.class_tag(), "TyperException", "{src}");
+        }
+    }
+
+    /// A1 boundary: the explicit-`[T]` control still ACCEPTS (both paths), and the
+    /// predef `getVar(1)` — a free `T` nested inside `SOption` — is tolerated by the
+    /// reference and ACCEPTS on both sides (it does not reach the §1.8/§1.9 guard).
+    #[test]
+    fn type_parametric_method_boundary_accepts() {
+        assert_eq!(type_tc("getVar(1)"), "(GetVar:Option[T] @1)");
+        // explicit [T] control (byte-pinned by seed §4 / §18).
+        assert!(type_tc("Global.some[Int](1)").contains("{#T->#Int}"));
+        // bare Ident explicit [T] via demo env.
+        let ok = type_res("fromBigEndianBytes[Int](a)", &demo_script_env(), &tenv(&[]))
+            .expect("explicit [T] accepts");
+        assert_eq!(node_tpe(&ok), &SType::SInt);
+    }
+
+    /// A3 (§1.24 MethodCall passthrough): a binder-prebuilt `serialize(<operator
+    /// expr>)` embeds an untyped `MethodCallLike` (parseAsMethods `+ ++ …`) that the
+    /// reference typer cannot type → RuntimeException (verdict REJECT).  Fires for a
+    /// top-level operator arg AND for one nested inside a relation.
+    #[test]
+    fn serialize_with_unresolved_operator_arg_rejects() {
+        for src in ["serialize(1 + 1)", "serialize((1 + 1) == 2)"] {
+            let err = type_err(src);
+            assert_eq!(err.class_tag(), "TyperException", "{src}");
+        }
+        // demo-env `++` operator arg (bare-serialize binder path).
+        let err = type_res("serialize(a ++ b)", &demo_script_env(), &tenv(&[]))
+            .expect_err("serialize(a ++ b) rejects");
+        assert_eq!(err.class_tag(), "TyperException");
+    }
+
+    /// A3 boundary: typed args (constant / relation / `if` / `Coll`) still ACCEPT
+    /// and byte-match; the Select-form `Global.serialize(a ++ b)` (typed via §1.8,
+    /// arg lowered to `Append`) is unaffected.
+    #[test]
+    fn serialize_with_typed_arg_accepts_and_select_form_unaffected() {
+        assert_eq!(type_tc("serialize(1)"), seed_expected("serialize(1)"));
+        assert_eq!(
+            type_tc("serialize(Coll(1, 2))"),
+            seed_expected("serialize(Coll(1, 2))")
+        );
+        // relations / if stay typed → accept.
+        assert!(type_tc("serialize(1 == 2)").contains("(EQ:Boolean"));
+        assert!(type_tc("serialize(if (1 == 1) 1 else 2)").contains("(If:Int"));
+        // Select form: arg lowered to Append (not a MethodCallLike survivor).
+        let sel = type_tce("Global.serialize(a ++ b)");
+        assert_eq!(sel, seed_expected("Global.serialize(a ++ b)"));
+        assert!(sel.contains("(Append:Coll[Byte]"));
+    }
+
+    /// A4 (SString `+` fold): a String constant `+` ANY other constant folds via the
+    /// JVM `.toString` — the reference's `@unchecked` type args are erased, so the
+    /// guard is "both operands are Constant".  Oracle-pinned decimal/bool/unit/BigInt
+    /// forms (seed §19).
+    #[test]
+    fn mcl_string_const_plus_any_const_folds() {
+        assert_eq!(type_tc("\"ab\" + 1"), "(ConstantNode:String 'ab1')");
+        assert_eq!(type_tc("\"ab\" + 1L"), "(ConstantNode:String 'ab1')");
+        assert_eq!(type_tc("\"ab\" + true"), "(ConstantNode:String 'abtrue')");
+        assert_eq!(type_tc("\"ab\" + ()"), "(ConstantNode:String 'ab()')");
+        assert_eq!(type_tc("\"ab\" + -1"), "(ConstantNode:String 'ab-1')");
+        // BigInt RHS → "CBigInt(<decimal>)" (demo env `n1 = 5`).
+        assert_eq!(
+            type_tce("\"ab\" + n1"),
+            "(ConstantNode:String 'abCBigInt(5)')"
+        );
+    }
+
+    /// A4 sub-deviation (D-T6): a GroupElement-constant RHS folds in Scala via a
+    /// non-reproducible JVM `.toString` (`GroupElement(ECPoint(<hex>,...))`).  Rather
+    /// than fold wrong bytes we keep the REJECT — a NAMED verdict divergence on
+    /// `String + GE-const` only (documented in the lib.rs deviation ledger).
+    #[test]
+    fn mcl_string_const_plus_group_element_const_rejects_subdeviation() {
+        let err = type_res("\"ab\" + g1", &demo_script_env(), &tenv(&[]))
+            .expect_err("GE-const RHS kept as reject (D-T6)");
+        assert_eq!(err.class_tag(), "InvalidBinaryOperationParameters");
+    }
+
+    /// A2: `min`/`max` are valid idents in `predefined_env` (word-named infixFuncs).
+    /// Bare `min` ACCEPTS as a polymorphic function value.  NOTE (wave B): our
+    /// `SType::SFunc` has no `tpe_params` slot, so it prints `(T,T) => T` WITHOUT the
+    /// oracle's leading `[T]` binder — a printed-shape gap deferred to wave B.  Here
+    /// we assert the VERDICT (accept) and the type modulo the `[T]` prefix.
+    #[test]
+    fn predef_env_min_max_bare_accepts_modulo_type_param_prefix() {
+        for src in ["min", "max"] {
+            let printed = type_tc(src);
+            assert!(
+                printed.contains(&format!("(T,T) => T '{src}')")),
+                "{src} bare accept (wave-B: missing [T] prefix): {printed}"
+            );
+        }
+        // value form: `{ val x = min; x }` accepts (the SFunc flows through the val).
+        assert!(type_tc("{ val x = min; x }").contains("(T,T) => T"));
+    }
+
+    /// A2: because `min`/`max` are in the env, shadowing them in a block is a
+    /// duplicate-name error (SigmaTyper.scala:58-59) — the accept-invalid form that
+    /// previously slipped through (the 2-arg application desugars to `ArithOp`, but
+    /// the bare/shadow forms must see the env entry).
+    #[test]
+    fn predef_env_min_shadow_rejects_duplicate() {
+        for src in ["{ val min = 1; min }", "{ val max = 1; max }"] {
+            let err = type_err(src);
+            assert_eq!(err.class_tag(), "TyperException", "{src}");
+        }
+    }
+
+    /// A2: `PK` is NOT a func ident (it is a binder-only rewrite, `SigmaPredef`
+    /// `PKFunc`, not a member of `funcs`).  Removed from the typer env: bare `PK`
+    /// rejects (not found), and `{ val PK = 1; PK }` does NOT spuriously duplicate.
+    #[test]
+    fn predef_env_pk_is_binder_only_not_a_func_ident() {
+        assert_eq!(type_err("PK").class_tag(), "TyperException");
+        assert_eq!(
+            type_tc("{ val PK = 1; PK }"),
+            seed_expected("{ val PK = 1; PK }")
+        );
     }
 
     /// §1.11 else-arm: a valid operator on an unsupported receiver (tuple `++`)

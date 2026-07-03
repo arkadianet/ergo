@@ -352,10 +352,14 @@ pub fn is_prim_type(t: &SType) -> bool {
 
 /// Position of a numeric type in the implicit upcast ladder.
 ///
-/// Ladder: `SByte(0) < SShort(1) < SInt(2) < SLong(3) < SBigInt(4)`.
-/// `SUnsignedBigInt(5)` is on the ladder by index but is NOT implicitly
-/// reachable from the signed side — use explicit `.toUnsigned` (no implicit
-/// cross-sign upcast; SBigInt.upcast and SUnsignedBigInt.upcast are disjoint).
+/// Ladder: `SByte(0) < SShort(1) < SInt(2) < SLong(3) < SBigInt(4) <
+/// SUnsignedBigInt(5)`.  `SUnsignedBigInt` DOES participate in the ladder: once a
+/// `UnsignedBigInt` operand is present, binary-op operand widening upcasts the
+/// lower operand toward it — oracle-confirmed that `1 + <UBI>`, `1.toBigInt +
+/// <UBI>`, and `<UBI> < 1` all resolve to `UnsignedBigInt` on both sides.  What
+/// is absent is an implicit path to *produce* a `UnsignedBigInt` from a signed
+/// literal: you still need explicit `.toUnsigned` to introduce the first UBI
+/// operand (there is no implicit signed→unsigned literal coercion).
 ///
 /// Source: SType.scala `numericTypeIndex`:
 ///   SByte:402, SShort:425, SInt:447, SLong:472, SBigInt:503, SUnsignedBigInt:540.

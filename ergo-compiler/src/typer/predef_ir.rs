@@ -6,11 +6,14 @@
 //!
 //! - [`predefined_env`] — the declaration-type map (`name -> SFunc`) that
 //!   `SigmaTyper` seeds as the initial `env` (`predefinedEnv`, SigmaTyper.scala:33-36,
-//!   `predefFuncRegistry.funcs.map { k -> f.declaration.tpe }`).  Only the
-//!   `globalFuncs` are reproduced: the `infixFuncs`/`unaryFuncs` carry operator
-//!   symbol names (`"+"`, `"=="`, `"||"`, …) that the parser lowers to dedicated
-//!   nodes and therefore **never** appear as `Ident`s in a bound tree — their env
-//!   entries are inert, so omitting them is behaviour-preserving.
+//!   `predefFuncRegistry.funcs.map { k -> f.declaration.tpe }`).  The `globalFuncs`
+//!   plus the two *word-named* `infixFuncs` `min`/`max` are reproduced.  The
+//!   *operator-symbol* `infixFuncs`/`unaryFuncs` (`"+"`, `"=="`, `"||"`, …) carry
+//!   names the parser lowers to dedicated nodes and therefore never appear as
+//!   `Ident`s in a bound tree — their env entries are inert, so omitting *those* is
+//!   behaviour-preserving.  `min`/`max` are the exception: they ARE valid
+//!   identifiers (bare `min`, `val x = min`, and the block duplicate-name check
+//!   `{ val min = 1; min }`), so they must be present (adversarial finding A2).
 //!
 //! - [`predef_ir_builder`] — the `PredefinedFuncApply.unapply` post-wrapper
 //!   (SigmaPredef.scala:745-753): given a typed callee `Ident(name, …)` and its
@@ -55,7 +58,7 @@
 
 use crate::stype::SType;
 use crate::typed::{ConstPayload, MethodRef, TypedExpr};
-use crate::typer::assign::TyperError;
+use crate::typer::assign::{stype_has_free_type_var, TyperError};
 use crate::typer::methods::owner_name_for_type;
 use crate::typer::TypeEnv;
 
@@ -110,6 +113,16 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
     let mut put = |name: &str, dom: Vec<SType>, range: SType| {
         env.insert(name.to_string(), func(dom, range));
     };
+
+    // word-named infixFuncs (SigmaPredef.scala:620-623): `min`/`max` carry
+    // declaration type `[T](T,T) => T`.  The 2-arg *application* form `min(a,b)` is
+    // desugared to `ArithOp` Min/Max at bind time (binder.rs), but the bare/value/
+    // shadow forms resolve through this env entry, and the block duplicate-name
+    // check reads it (adversarial finding A2).  NB: `SType::SFunc` has no `tpe_params`
+    // slot, so bare `min` currently prints `(T,T) => T` without the `[T]` prefix the
+    // oracle emits — a printed-shape gap deferred to wave B; the VERDICT is correct.
+    put("min", vec![t(), t()], t());
+    put("max", vec![t(), t()], t());
 
     // logical / threshold
     put("allOf", vec![coll(SType::SBoolean)], SType::SBoolean);
@@ -191,7 +204,12 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
     put("serialize", vec![t()], coll_byte());
     put("deserializeTo", vec![coll_byte()], t());
     put("fromBigEndianBytes", vec![coll_byte()], t());
-    put("PK", vec![SType::SString], sp());
+    // NB: `PK` is deliberately NOT in the env.  It is a standalone `PKFunc`
+    // (SigmaPredef.scala:156), NOT a member of `funcs`, consumed only by the
+    // binder's `PK("addr")` rewrite (binder.rs `bind_pk`).  A spurious env entry
+    // both fabricates a bare-`PK` value (`PK` accepts, oracle rejects) and wrongly
+    // fires the block duplicate-name check (`{ val PK = 1; PK }` rejects, oracle
+    // accepts) — adversarial finding A2.
 
     env
 }
@@ -539,6 +557,17 @@ fn global_deserialize(
     name: &str,
 ) -> Option<Result<TypedExpr, TyperError>> {
     let res_type = func_range(func)?.clone();
+    // A1 (accept-invalid fix): the bare `fromBigEndianBytes(a)` / `deserializeTo(a)`
+    // form (no explicit `[T]`) leaves the callee's range as an unresolved `STypeVar`.
+    // The reference typer REJECTS with IllegalArgumentException (the SMethod still
+    // carries unresolved tpeParams); we require a concrete result type.  The
+    // explicit-`[T]` control (`fromBigEndianBytes[Int](a)`) resolves `res_type` to
+    // a concrete type via §1.7/ApplyTypes and is unaffected.  Oracle-pinned.
+    if stype_has_free_type_var(&res_type) {
+        return Some(Err(typer_err(format!(
+            "'{name}' is type-parametric and requires an explicit type argument [T]"
+        ))));
+    }
     Some(Ok(method_call(
         global_node(),
         &SType::SGlobal,

@@ -357,6 +357,21 @@
 //! neither the binder nor the oracle exercises a default value whose type differs
 //! by type-argument but shares a typeCode.
 //! Source: `typer/assign.rs:855-858`.
+//!
+//! ### D-T12 — String-constant `+` GroupElement-constant fold (verdict divergence)
+//!
+//! `mcl_string` (`typer/assign.rs`) folds `StringConstant + <any Constant>` via the
+//! JVM `.toString`, matching Scala's `mkStringConcat` (the `@unchecked` `Constant`
+//! type args are erased at runtime).  Reproducible payloads fold byte-exactly
+//! (`Int`→decimal, `Bool`→`true`/`false`, `Unit`→`()`, `BigInt`→`CBigInt(n)`, …).
+//! A `GroupElement` / `SigmaProp` / `ProveDlog` / `Coll` RHS folds in Scala via a
+//! JVM-runtime `.toString` (`GroupElement(ECPoint(<hex>,...))`) whose form we cannot
+//! reproduce from our stored payload (rooted in D-T6).  Rather than fold WRONG bytes
+//! we keep the REJECT: a NAMED verdict divergence on `String + <GroupElement/SigmaProp
+//! const>` ONLY (reject-valid).  All other `String + const` folds are at full parity.
+//! This resolves the adversarial reject-valid finding (`"ab" + 1` etc.) while pinning
+//! the residual to the unreproducible GE-payload case, which M3's D-T6 alignment
+//! closes.  Source: `typer/assign.rs` `const_java_to_string` / `mcl_string`.
 
 pub mod ast;
 pub mod binder;

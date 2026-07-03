@@ -319,3 +319,40 @@ tc	fromBase64("abcde=")	REJECT 0:0 IllegalArgumentException
 # Shape deferred to M3 — not committed as test records (Apply survives unlowered in M2;
 # M3 decodes to ByteArrayConstant once ValueSerializer is wired in).
 # These are NOT in SWEEP_SKIP: they are simply absent from the seed (not yet captured).
+
+# ── § 18: M2 adversarial wave A — type-parametric methods require explicit [T] (A1) ──
+# A type-parametric SMethod reached WITHOUT an explicit `[T]` ApplyTypes is rejected by
+# the reference typer (IllegalArgumentException — non-reproducible class, verdict graded).
+# Boundary: bare `getVar(1)` keeps `Option[T]` and ACCEPTS on both sides (predef-IR path,
+# a free T nested inside SOption is tolerated); only a §1.8/§1.9 SGlobal/SBox method rejects.
+tc	Global.some(1)	REJECT 0:0 IllegalArgumentException
+tc	Global.none()	REJECT 0:0 IllegalArgumentException
+tc	SELF.getReg(4)	REJECT 0:0 IllegalArgumentException
+tce	fromBigEndianBytes(a)	REJECT 0:0 IllegalArgumentException
+tce	Global.fromBigEndianBytes(a)	REJECT 0:0 IllegalArgumentException
+tc	getVar(1)	OK (GetVar:Option[T] @1)
+#
+# ── § 19: M2 adversarial wave A — predef env (A2), serialize args (A3), string folds (A4) ──
+# A2: min/max ARE valid idents (in the env) → block duplicate-name check fires; PK is NOT a
+#     func ident (binder-only) → bare `PK` rejects, `val PK` does not duplicate.
+tc	{ val min = 1; min }	REJECT 1:7 TyperException
+tc	{ val max = 1; max }	REJECT 1:7 TyperException
+tc	PK	REJECT 1:1 TyperException
+tc	{ val PK = 1; PK }	OK (Block:Int [(ValNode:Int 'PK' (ConstantNode:Int @1))] (Ident:Int 'PK'))
+# A3: bare serialize(<operator-expr>) leaves an untyped MethodCallLike → reference printer
+#     throws RuntimeException (non-reproducible class, verdict graded).  Relations/if/Coll/
+#     constants stay typed → ACCEPT; the Select-form Global.serialize(a ++ b) is unaffected.
+tc	serialize(1 + 1)	REJECT 0:0 RuntimeException
+tc	serialize((1 + 1) == 2)	REJECT 0:0 RuntimeException
+tc	serialize(1)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConstantNode:Int @1)] {})
+tc	serialize(Coll(1, 2))	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2)] #Int)] {})
+tce	Global.serialize(a ++ b)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))] {})
+# A4: StringConstant + any-Constant folds via JVM toString (both operands Constant, @unchecked
+#     erased).  GroupElement/SigmaProp RHS toString is not reproducible → kept as reject (D-T6
+#     sub-deviation, see lib.rs ledger).
+tc	"ab" + 1	OK (ConstantNode:String 'ab1')
+tc	"ab" + 1L	OK (ConstantNode:String 'ab1')
+tc	"ab" + true	OK (ConstantNode:String 'abtrue')
+tc	"ab" + ()	OK (ConstantNode:String 'ab()')
+tc	"ab" + -1	OK (ConstantNode:String 'ab-1')
+tce	"ab" + n1	OK (ConstantNode:String 'abCBigInt(5)')
