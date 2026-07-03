@@ -450,6 +450,7 @@ fn postfix_type(c: &mut Cursor) -> Result<SType, ParseError> {
         Ok(SType::SFunc {
             dom,
             range: Box::new(r),
+            tpe_params: vec![],
         })
     } else {
         Ok(d)
@@ -2133,6 +2134,7 @@ fn apply_suffix(f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, ParseError> {
                                 tpe: SType::SFunc {
                                     dom: vec![SType::SSigmaProp],
                                     range: Box::new(SType::SBoolean),
+                                    tpe_params: vec![],
                                 },
                                 pos: f_pos,
                             };
@@ -2572,14 +2574,16 @@ mod tests {
             parse_type("(Int, Boolean) => Int", 3).unwrap(),
             SType::SFunc {
                 dom: vec![SType::SInt, SType::SBoolean],
-                range: Box::new(SType::SInt)
+                range: Box::new(SType::SInt),
+                tpe_params: vec![],
             }
         );
         assert_eq!(
             parse_type("Int => Int", 3).unwrap(),
             SType::SFunc {
                 dom: vec![SType::SInt],
-                range: Box::new(SType::SInt)
+                range: Box::new(SType::SInt),
+                tpe_params: vec![],
             }
         );
         // spec-derived: Types.scala:122 rep(0) — "()" is an empty tuple type
@@ -3581,7 +3585,8 @@ mod expr_tests {
                     name: "ZKProof".into(),
                     tpe: SType::SFunc {
                         dom: vec![SType::SSigmaProp],
-                        range: Box::new(SType::SBoolean)
+                        range: Box::new(SType::SBoolean),
+                        tpe_params: vec![],
                     },
                     pos: 0
                 },

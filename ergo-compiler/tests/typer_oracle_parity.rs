@@ -86,6 +86,13 @@ const V2_REJECT_SOURCES: &[&str] = &[
     "Global.none[Int]()",
 ];
 
+// V2-owner numeric sources (§21): ACCEPT at both versions but the printed MethodCall
+// owner differs — `%SNumericType.<m>` at tree_version < 3 (shared SNumericTypeMethods
+// container), `%Int`/`%Long` at V6.  The seed records the V2 owner; the v3 accept
+// sweep must skip them (they'd print the concrete owner at v3).  Both versions are
+// asserted by `v2_numeric_method_owner_is_snumerictype`.
+const V2_ACCEPT_SOURCES: &[&str] = &["1.toBits", "1L.toBits", "1L.toBytes"];
+
 // Sources with documented class deviations where the oracle class and Rust class
 // differ but verdict parity (REJECT) holds.  Class checking is skipped for these.
 //
@@ -217,6 +224,9 @@ fn seed_accept_records_byte_parity() {
         if SWEEP_SKIP.contains(&src) {
             continue; // verdict checked by `seed_accept_skip_set_accepts`
         }
+        if V2_ACCEPT_SOURCES.contains(&src) {
+            continue; // §21 records the v2 owner; asserted at v2/v3 by a dedicated test
+        }
         let got = typecheck_verb(verb, src, 3)
             .unwrap_or_else(|e| panic!("expected OK for {verb} {src:?}, got reject: {e:?}"));
         assert_eq!(got, sexpr, "byte-parity mismatch for {verb} {src:?}");
@@ -314,6 +324,54 @@ fn v2_gated_sources_reject_method_not_found() {
             err.class(),
             "MethodNotFound",
             "v2 gate class for {verb} {src:?}"
+        );
+    }
+}
+
+/// B4 (wave B): numeric `toBytes`/`toBits` print `%SNumericType.<m>` at tree_version < 3
+/// (shared `SNumericTypeMethods` container) and the concrete `%Int`/`%Long.<m>` at V6.
+/// The §21 seed records pin the v2 owner (byte-swept here); the same sources are pinned
+/// at v3 to the concrete owner.  Refutes the D-T10 "inert" claim for numerics.
+#[test]
+fn v2_numeric_method_owner_is_snumerictype() {
+    // v2: shared SNumericType container — byte-match the committed §21 seed records.
+    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let mut checked = 0usize;
+    for line in seed.lines() {
+        let Some((verb, src, expected)) = parse_seed_line(line) else {
+            continue;
+        };
+        if !V2_ACCEPT_SOURCES.contains(&src) {
+            continue;
+        }
+        let sexpr = expected
+            .strip_prefix("OK ")
+            .unwrap_or_else(|| panic!("§21 record for {src:?} must be OK"));
+        let got = typecheck_verb(verb, src, 2)
+            .unwrap_or_else(|e| panic!("v2 accept for {src:?} expected, got {e:?}"));
+        assert_eq!(got, sexpr, "v2 owner byte-parity for {src:?}");
+        assert!(
+            got.contains("%SNumericType."),
+            "v2 owner for {src:?}: {got}"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, V2_ACCEPT_SOURCES.len(), "swept all §21 v2 records");
+
+    // v3: the SAME sources print the concrete per-type owner (never SNumericType).
+    for (src, owner) in [
+        ("1.toBits", "%Int.toBits"),
+        ("1L.toBits", "%Long.toBits"),
+        ("1L.toBytes", "%Long.toBytes"),
+    ] {
+        let got = typecheck_verb("tc", src, 3).expect("v3 accept");
+        assert!(
+            got.contains(owner),
+            "v3 owner for {src:?}: expected {owner} in {got}"
+        );
+        assert!(
+            !got.contains("SNumericType"),
+            "v3 must not use SNumericType: {got}"
         );
     }
 }

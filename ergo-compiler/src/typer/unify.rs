@@ -12,15 +12,19 @@
 //! - `data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala:659-706`
 //!   (applyUpcast + arithOp / comparisonOp / equalityOp in TransformingSigmaBuilder)
 //!
-//! # tpe_params decision
+//! # tpe_params representation
 //!
-//! `SType::SFunc` (stype.rs) has no `tpe_params` field — it was kept lean for M1
-//! parser compat (blast radius: 12+ call sites in parse.rs/ast.rs).  Instead, the
-//! typer uses the `SFuncSpec` wrapper here for method signatures that carry type
-//! parameters.  `apply_subst` on a bare `SType::SFunc` recurses into dom/range and
-//! drops nothing (there are no tpe_params to drop); `apply_subst_func` on an
-//! `SFuncSpec` drops substituted tpe_params per PKG:74.  Task 3 uses `SFuncSpec`
-//! for method entries; M1 parser code is untouched.
+//! Two carriers coexist:
+//! - `SFuncSpec` (this module) carries a method descriptor's declared type parameters
+//!   during resolution/specialization; `apply_subst_func` drops substituted ones
+//!   (PKG:74).
+//! - `SType::SFunc.tpe_params` (stype.rs, added in the M2 wave-B shape-parity pass)
+//!   carries the polymorphic binder onto the *printed node type*, so an unapplied
+//!   polymorphic method/predef value renders its `[T]`/`[K,L,R,O]` prefix.  The parser
+//!   builds it empty (monomorphic function syntax); only `predefined_env` and the
+//!   bare-method Select path populate it.  `apply_subst` on a bare `SType::SFunc` now
+//!   recurses into dom/range and filters substituted tpe_params (same rule as
+//!   `apply_subst_func`), so a fully-applied function type collapses to empty params.
 
 use std::collections::BTreeMap;
 
@@ -171,9 +175,14 @@ pub fn unify_types(t1: &SType, t2: &SType) -> Option<TypeSubst> {
         (SType::STuple(e1), SType::STuple(e2)) if e1.len() == e2.len() => unify_type_lists(e1, e2),
         // Rule 7: SFunc vs SFunc, same dom length → unify dom++range.
         // package.scala:52-53
-        (SType::SFunc { dom: d1, range: r1 }, SType::SFunc { dom: d2, range: r2 })
-            if d1.len() == d2.len() =>
-        {
+        (
+            SType::SFunc {
+                dom: d1, range: r1, ..
+            },
+            SType::SFunc {
+                dom: d2, range: r2, ..
+            },
+        ) if d1.len() == d2.len() => {
             let mut list1: Vec<SType> = d1.clone();
             list1.push(*r1.clone());
             let mut list2: Vec<SType> = d2.clone();
@@ -247,10 +256,21 @@ pub fn apply_subst(t: &SType, subst: &TypeSubst) -> SType {
         SType::STuple(items) => {
             SType::STuple(items.iter().map(|i| apply_subst(i, subst)).collect())
         }
-        // SType::SFunc has no tpe_params (M1 compat); recurse into dom/range only.
-        SType::SFunc { dom, range } => SType::SFunc {
+        // SType::SFunc: recurse into dom/range and drop substituted tpe_params,
+        // keeping the unsubstituted ones (mirrors Scala applySubst, package.scala:73-75:
+        // `remainingVars = tparams.filterNot(p => subst.contains(p.ident))`).
+        SType::SFunc {
+            dom,
+            range,
+            tpe_params,
+        } => SType::SFunc {
             dom: dom.iter().map(|d| apply_subst(d, subst)).collect(),
             range: Box::new(apply_subst(range, subst)),
+            tpe_params: tpe_params
+                .iter()
+                .filter(|p| !subst.contains_key(*p))
+                .cloned()
+                .collect(),
         },
         SType::STypeApply { name, args } => SType::STypeApply {
             name: name.clone(),
@@ -796,6 +816,7 @@ mod tests {
         SType::SFunc {
             dom,
             range: Box::new(range),
+            tpe_params: vec![],
         }
     }
 

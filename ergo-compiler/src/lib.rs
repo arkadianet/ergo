@@ -340,11 +340,22 @@
 //! Scala's `MethodsContainer.contains` (`methods.scala:171-181`) is version-gated
 //! (types that gain method containers in V6 are absent at lower versions).  Our
 //! `container_exists` is version-independent — it returns `true` for all
-//! container types regardless of `tree_version`.  The deviation is inert in
-//! practice: the types that gain containers in V6 (`SUnsignedBigInt`, `SHeader`
-//! V6 additions) are unconstructable in pre-V6 trees, so the typer never reaches
-//! a method-lookup for them at `tree_version < 3`.
-//! Source: `typer/methods.rs:744-748`.
+//! container types regardless of `tree_version`.  For *container existence* the
+//! deviation is inert: the types that gain containers in V6 (`SUnsignedBigInt`,
+//! `SHeader` V6 additions) are unconstructable in pre-V6 trees, so the typer never
+//! reaches a method-lookup for them at `tree_version < 3`.
+//!
+//! A RELATED version-dependence is NOT inert and is handled explicitly (M2 wave B):
+//! the numeric `toBytes`/`toBits` methods live on the shared `SNumericTypeMethods`
+//! container (`objType.typeName = "SNumericType"`) at V5 and gain a per-type container
+//! (`Int`/`Long`/…) only at V6.  Since numeric types ARE constructable pre-V6, the
+//! printed `MethodCall` owner differs by version (`%SNumericType.toBytes` at
+//! `tree_version < 3` vs `%Int.toBytes` at V6).  `owner_name_for_method`
+//! (`typer/methods.rs`) selects the owner version-aware; the M2 typed-shape output is
+//! oracle-pinned at both v2 and v3 (golden seed §21 / §15).  M3 note: `objType` also
+//! feeds `MethodCall` wire serialization (method typeId), so the same container choice
+//! must hold at byte level.
+//! Source: `typer/methods.rs` (`container_exists`, `owner_name_for_method`).
 //!
 //! ### D-T11 — ByIndex default-value comparison: typeCode vs structural equality
 //!

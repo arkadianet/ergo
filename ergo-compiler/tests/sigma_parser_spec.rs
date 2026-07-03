@@ -1596,6 +1596,7 @@ fn zkproof() {
         tpe: SType::SFunc {
             dom: vec![SSigmaProp],
             range: Box::new(SBoolean),
+            tpe_params: vec![],
         },
         pos: 0,
     };
@@ -2867,6 +2868,7 @@ fn r7_unicode_arrow_in_type_is_an_infix_type_id_not_sfunc() {
         SType::SFunc {
             dom: vec![SInt],
             range: Box::new(SInt),
+            tpe_params: vec![],
         },
     );
 }

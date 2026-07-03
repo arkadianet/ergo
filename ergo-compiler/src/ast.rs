@@ -218,6 +218,7 @@ pub(crate) fn product_method_tpe(obj_tpe: &SType, field: &str, tree_version: u8)
         Some(res) => SType::SFunc {
             dom: vec![obj_tpe.clone()],
             range: Box::new(res),
+            tpe_params: vec![],
         },
         None => SType::NoType,
     }
@@ -499,6 +500,7 @@ impl Expr {
             } => SType::SFunc {
                 dom: args.iter().map(|(_, t)| t.clone()).collect(),
                 range: Box::new(or_no_type(given_res_type, || body.parse_tpe(tree_version))),
+                tpe_params: vec![],
             },
             Expr::Val(val_def) => {
                 or_no_type(&val_def.given_type, || val_def.body.parse_tpe(tree_version))
@@ -908,6 +910,7 @@ mod tests {
                 tpe: SType::SFunc {
                     dom: vec![SType::SSigmaProp],
                     range: Box::new(SType::SBoolean),
+                    tpe_params: vec![],
                 },
                 pos: 0,
             }),

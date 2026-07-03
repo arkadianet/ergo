@@ -43,9 +43,20 @@ pub enum SType {
     /// Tuple type (heterogeneous).
     STuple(Vec<SType>),
     /// Function type: domain → range.
+    ///
+    /// `tpe_params` carries the polymorphic type-parameter idents (`STypeParam.ident`,
+    /// SType.scala:78-89) so an *unapplied* polymorphic method/predef value prints its
+    /// `[T]`/`[K,L,R,O]` binder (SType.scala:644,653 `toTermString`).  It is EMPTY for
+    /// every monomorphic function type — lambdas, applied methods, and the parser's
+    /// function-type syntax all build `tpe_params: vec![]`; only the predef env
+    /// (`predef_ir::predefined_env`) and the bare-method Select path
+    /// (`typer::assign::assign_select`) populate it.  Method *descriptors* carry their
+    /// params in [`crate::typer::unify::SFuncSpec`]; this slot mirrors them onto the
+    /// printed node type.
     SFunc {
         dom: Vec<SType>,
         range: Box<SType>,
+        tpe_params: Vec<String>,
     },
     /// Compiler-IR-only type application (SType.scala:695-704).
     STypeApply {
@@ -128,7 +139,7 @@ pub fn is_predef_available(t: &SType, tree_version: u8) -> bool {
         | SType::SOption(_)
         | SType::STuple(_)
         | SType::SFunc { .. }
-        | SType::STypeApply { .. } => false,
+        | SType::STypeApply { .. } => false, // SFunc: never predef-available regardless of tpe_params
     }
 }
 

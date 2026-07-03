@@ -102,6 +102,7 @@ fn func(dom: Vec<SType>, range: SType) -> SType {
     SType::SFunc {
         dom,
         range: Box::new(range),
+        tpe_params: vec![],
     }
 }
 fn coll_byte() -> SType {

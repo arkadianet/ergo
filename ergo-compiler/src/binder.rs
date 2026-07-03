@@ -302,6 +302,7 @@ fn bind_expr(
                 tpe: SType::SFunc {
                     dom: args.iter().map(|(_, t)| t.clone()).collect(),
                     range: Box::new(range),
+                    tpe_params: vec![],
                 },
             })
         }
@@ -855,6 +856,7 @@ mod tests {
         let sfunc = SType::SFunc {
             dom: vec![SType::SSigmaProp],
             range: Box::new(SType::SBoolean),
+            tpe_params: vec![],
         };
         let e = Expr::Ident {
             name: "ZKProof".to_string(),
@@ -1026,6 +1028,7 @@ mod tests {
                     SType::SFunc {
                         dom: vec![SType::SInt],
                         range: Box::new(SType::NoType),
+                        tpe_params: vec![],
                     }
                 );
             }
@@ -1312,6 +1315,7 @@ mod tests {
                 tpe: SType::SFunc {
                     dom: vec![SType::SInt],
                     range: Box::new(SType::SByte),
+                    tpe_params: vec![],
                 },
             }
         );

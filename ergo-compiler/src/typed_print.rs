@@ -63,11 +63,29 @@ pub fn to_term_string(t: &SType) -> String {
             let parts: Vec<String> = vs.iter().map(to_term_string).collect();
             format!("({})", parts.join(","))
         }
-        SType::SFunc { dom, range } => {
+        SType::SFunc {
+            dom,
+            range,
+            tpe_params,
+        } => {
             // `(T1,T2) => R` — parens even for single-element domain.
             // Verified: `(Box) => Long`, `(Long) => Boolean` in golden seed.
+            // A polymorphic (unapplied) function type prepends its `[params]` binder,
+            // comma-joined, matching Scala `SFunc.toTermString` (SType.scala:644,653):
+            // e.g. `[T](T) => Coll[Byte]`, `[K,L,R,O](...) => ...`.  Empty for every
+            // monomorphic function type (no prefix).
             let dom_parts: Vec<String> = dom.iter().map(to_term_string).collect();
-            format!("({}) => {}", dom_parts.join(","), to_term_string(range))
+            let prefix = if tpe_params.is_empty() {
+                String::new()
+            } else {
+                format!("[{}]", tpe_params.join(","))
+            };
+            format!(
+                "{}({}) => {}",
+                prefix,
+                dom_parts.join(","),
+                to_term_string(range)
+            )
         }
         SType::STypeApply { name, args } => {
             let arg_parts: Vec<String> = args.iter().map(to_term_string).collect();
@@ -711,6 +729,7 @@ mod tests {
             to_term_string(&SType::SFunc {
                 dom: vec![SType::SBox],
                 range: Box::new(SType::SLong),
+                tpe_params: vec![],
             }),
             "(Box) => Long"
         );
@@ -718,6 +737,7 @@ mod tests {
             to_term_string(&SType::SFunc {
                 dom: vec![SType::SLong],
                 range: Box::new(SType::SBoolean),
+                tpe_params: vec![],
             }),
             "(Long) => Boolean"
         );
@@ -726,6 +746,39 @@ mod tests {
     #[test]
     fn to_term_string_stypevar() {
         assert_eq!(to_term_string(&SType::STypeVar("T".to_string())), "T");
+    }
+
+    /// B5: a polymorphic function type prepends its comma-joined `[params]` binder
+    /// (SType.scala:644,653); a monomorphic one (empty params) has no prefix.
+    #[test]
+    fn to_term_string_sfunc_polymorphic_prints_type_param_binder() {
+        // [T](T,T) => T  (min/max shape).
+        assert_eq!(
+            to_term_string(&SType::SFunc {
+                dom: vec![SType::STypeVar("T".into()), SType::STypeVar("T".into())],
+                range: Box::new(SType::STypeVar("T".into())),
+                tpe_params: vec!["T".into()],
+            }),
+            "[T](T,T) => T"
+        );
+        // Multi-param, comma-joined (no spaces): [K,L].
+        assert_eq!(
+            to_term_string(&SType::SFunc {
+                dom: vec![SType::STypeVar("K".into())],
+                range: Box::new(SType::STypeVar("L".into())),
+                tpe_params: vec!["K".into(), "L".into()],
+            }),
+            "[K,L](K) => L"
+        );
+        // Empty tpe_params → no prefix (monomorphic function types unchanged).
+        assert_eq!(
+            to_term_string(&SType::SFunc {
+                dom: vec![SType::SBox],
+                range: Box::new(SType::SLong),
+                tpe_params: vec![],
+            }),
+            "(Box) => Long"
+        );
     }
 
     #[test]
@@ -793,6 +846,7 @@ mod tests {
             tpe: SType::SFunc {
                 dom: vec![SType::SBox],
                 range: Box::new(SType::SLong),
+                tpe_params: vec![],
             },
         };
         let inputs = TypedExpr::Inputs {
@@ -936,6 +990,7 @@ mod tests {
             tpe: SType::SFunc {
                 dom: vec![SType::SLong],
                 range: Box::new(SType::SBoolean),
+                tpe_params: vec![],
             },
         };
         let e = TypedExpr::Exists {
@@ -1177,6 +1232,7 @@ mod tests {
                 tpe: SType::SFunc {
                     dom: vec![],
                     range: Box::new(SType::SLong),
+                    tpe_params: vec![],
                 },
             }),
             type_args: vec![SType::SLong, SType::SInt],

@@ -87,6 +87,7 @@ fn func(dom: Vec<SType>, range: SType) -> SType {
     SType::SFunc {
         dom,
         range: Box::new(range),
+        tpe_params: vec![],
     }
 }
 
@@ -98,9 +99,10 @@ fn func(dom: Vec<SType>, range: SType) -> SType {
 ///
 /// Mirrors `predefFuncRegistry.funcs.map { k -> f.declaration.tpe }` restricted to
 /// `globalFuncs` (see module docs for why infix/unary are elided).  Type
-/// parameters are represented positionally as [`SType::STypeVar`] inside the
-/// `SFunc` (our `SType::SFunc` has no `tpeParams` slot); [`crate::typer::assign`]
-/// recovers them for `ApplyTypes` by scanning the `SFunc` for free type vars.
+/// parameters appear positionally as [`SType::STypeVar`] inside the `SFunc` (so
+/// [`crate::typer::assign`] can recover them for `ApplyTypes` by scanning free type
+/// vars) AND are recorded on `SType::SFunc.tpe_params` for the polymorphic predefs
+/// (patch loop below) so a bare/unapplied Ident value prints its `[T]` binder.
 ///
 /// The registry is version-independent in Scala (all funcs registered regardless
 /// of `tree_version`); version gating happens later at method resolution.  The
@@ -118,9 +120,8 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
     // declaration type `[T](T,T) => T`.  The 2-arg *application* form `min(a,b)` is
     // desugared to `ArithOp` Min/Max at bind time (binder.rs), but the bare/value/
     // shadow forms resolve through this env entry, and the block duplicate-name
-    // check reads it (adversarial finding A2).  NB: `SType::SFunc` has no `tpe_params`
-    // slot, so bare `min` currently prints `(T,T) => T` without the `[T]` prefix the
-    // oracle emits — a printed-shape gap deferred to wave B; the VERDICT is correct.
+    // check reads it (adversarial finding A2).  The `[T]` binder is attached by the
+    // tpe_params patch below, so bare `min` prints `[T](T,T) => T` (wave-B shape fix).
     put("min", vec![t(), t()], t());
     put("max", vec![t(), t()], t());
 
@@ -211,6 +212,31 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
     // fires the block duplicate-name check (`{ val PK = 1; PK }` rejects, oracle
     // accepts) — adversarial finding A2.
 
+    // Attach declared type parameters to the polymorphic predefs (`STypeParam.ident`,
+    // SType.scala:78-89) so a bare/unapplied Ident value prints its `[T]`/`[K,L,R,O]`
+    // binder (oracle: `serialize` → `[T](T) => Coll[Byte]`, `min` → `[T](T,T) => T`,
+    // `outerJoin` → `[K,L,R,O](...) => ...`).  Monomorphic predefs keep empty params.
+    // Applied forms substitute these away, so the printed result type stays ground.
+    for (name, params) in [
+        ("min", &["T"][..]),
+        ("max", &["T"]),
+        ("getVar", &["T"]),
+        ("getVarFromInput", &["T"]),
+        ("executeFromVar", &["T"]),
+        ("executeFromSelfReg", &["T"]),
+        ("executeFromSelfRegWithDefault", &["T"]),
+        ("deserialize", &["T"]),
+        ("serialize", &["T"]),
+        ("deserializeTo", &["T"]),
+        ("fromBigEndianBytes", &["T"]),
+        ("substConstants", &["T"]),
+        ("outerJoin", &["K", "L", "R", "O"]),
+    ] {
+        if let Some(SType::SFunc { tpe_params, .. }) = env.get_mut(name) {
+            *tpe_params = params.iter().map(|s| (*s).to_string()).collect();
+        }
+    }
+
     env
 }
 
@@ -286,10 +312,22 @@ pub fn predef_ir_builder(
 ) -> Option<Result<TypedExpr, TyperError>> {
     match name {
         // ── logical / threshold ──────────────────────────────────────────────
-        "sigmaProp" => unary(args, SType::SBoolean, |v| TypedExpr::BoolToSigmaProp {
-            value: Box::new(v),
-            tpe: SType::SSigmaProp,
-        }),
+        // sigmaProp's Scala irBuilder is `case Seq(b: BoolValue @unchecked) =>
+        // mkBoolToSigmaProp(b)` (SigmaPredef.scala): the `@unchecked` erases the
+        // element type, so ANY single arg that reached here is wrapped directly in
+        // BoolToSigmaProp.  The Apply-time unify gate admits only a Boolean (rule-10)
+        // or a SigmaProp (rule-9 SBoolean→SSigmaProp), and a SigmaProp arg is placed
+        // unmodified as the value — no SigmaPropIsProven (oracle:
+        // `sigmaProp(sigmaProp(true))` → `BoolToSigmaProp(BoolToSigmaProp(true))`).
+        "sigmaProp" => {
+            if args.len() != 1 {
+                return None;
+            }
+            Some(Ok(TypedExpr::BoolToSigmaProp {
+                value: Box::new(args[0].clone()),
+                tpe: SType::SSigmaProp,
+            }))
+        }
         "allOf" => unary(args, coll(SType::SBoolean), |v| TypedExpr::AND {
             input: Box::new(v),
             tpe: SType::SBoolean,
@@ -298,10 +336,22 @@ pub fn predef_ir_builder(
             input: Box::new(v),
             tpe: SType::SBoolean,
         }),
-        "xorOf" => unary(args, coll(SType::SBoolean), |v| TypedExpr::XorOf {
-            input: Box::new(v),
-            tpe: SType::SBoolean,
-        }),
+        // xorOf's Scala irBuilder is `case Seq(col: Coll[SBoolean] @unchecked) =>
+        // mkXorOf(col)` (SigmaPredef.scala:72-77): `@unchecked` erases the element
+        // type, so ANY single `Coll[_]` fires XorOf.  A `Coll[SigmaProp]` reaches here
+        // (it unifies against the declared `Coll[Boolean]` param via rule-9) and lowers
+        // directly — xorOf is NOT in adaptSigmaPropToBoolean, so no isProven wrap.
+        // Boundary: `xorOf(Coll(1,2,3))` (Coll[Int]) fails the arg-type unify in
+        // assign_apply_generic before this builder runs → both REJECT.
+        "xorOf" => {
+            if args.len() != 1 || !matches!(crate::typed::node_tpe(&args[0]), SType::SColl(_)) {
+                return None;
+            }
+            Some(Ok(TypedExpr::XorOf {
+                input: Box::new(args[0].clone()),
+                tpe: SType::SBoolean,
+            }))
+        }
         "ZKProof" => unary(args, SType::SSigmaProp, |v| TypedExpr::ZKProofBlock {
             body: Box::new(v),
             tpe: SType::SBoolean,
@@ -783,9 +833,15 @@ mod tests {
     #[test]
     fn predefined_env_getvar_declaration_is_byte_to_option_t() {
         let env = predefined_env(3);
+        // getVar is polymorphic: its SFunc carries the `[T]` binder (wave-B shape fix)
+        // so a bare `getVar` prints `[T](Byte) => Option[T]`.
         assert_eq!(
             env.get("getVar"),
-            Some(&func(vec![SType::SByte], opt(tv("T"))))
+            Some(&SType::SFunc {
+                dom: vec![SType::SByte],
+                range: Box::new(opt(tv("T"))),
+                tpe_params: vec!["T".to_string()],
+            })
         );
     }
 
@@ -802,6 +858,59 @@ mod tests {
         let out = predef_ir_builder("sigmaProp", &f, &[b]).unwrap().unwrap();
         assert!(matches!(out, TypedExpr::BoolToSigmaProp { .. }));
         assert_eq!(crate::typed::node_tpe(&out), &SType::SSigmaProp);
+    }
+
+    /// B3: `sigmaProp(<SigmaProp arg>)` wraps the arg directly in BoolToSigmaProp
+    /// (the `@unchecked` irBuilder), producing the oracle's nested double-wrap — NOT a
+    /// SigmaPropIsProven coercion.
+    #[test]
+    fn sigma_prop_of_sigma_prop_arg_double_wraps() {
+        let f = ident("sigmaProp", vec![SType::SBoolean], SType::SSigmaProp);
+        let inner = TypedExpr::BoolToSigmaProp {
+            value: Box::new(TypedExpr::Constant {
+                value: ConstPayload::Bool(true),
+                tpe: SType::SBoolean,
+            }),
+            tpe: SType::SSigmaProp,
+        };
+        let out = predef_ir_builder("sigmaProp", &f, &[inner])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            print_typed(&out),
+            "(BoolToSigmaProp:SigmaProp (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)))"
+        );
+    }
+
+    /// B2: xorOf's `@unchecked` irBuilder fires for ANY single `Coll[_]` arg — a
+    /// `Coll[SigmaProp]` lowers to XorOf directly (no isProven wrap).  A non-Coll arg
+    /// falls through (None) so the enclosing arg-type check rejects.
+    #[test]
+    fn xor_of_lowers_any_coll_elem_type() {
+        let f = ident("xorOf", vec![coll(SType::SBoolean)], SType::SBoolean);
+        // Coll[SigmaProp] → XorOf (the un-adapted SigmaProp collection is the input).
+        let sp_coll = TypedExpr::ConcreteCollection {
+            items: vec![TypedExpr::BoolToSigmaProp {
+                value: Box::new(TypedExpr::Constant {
+                    value: ConstPayload::Bool(true),
+                    tpe: SType::SBoolean,
+                }),
+                tpe: SType::SSigmaProp,
+            }],
+            elem_type: SType::SSigmaProp,
+            tpe: coll(SType::SSigmaProp),
+        };
+        let out = predef_ir_builder("xorOf", &f, &[sp_coll]).unwrap().unwrap();
+        assert_eq!(
+            print_typed(&out),
+            "(XorOf:Boolean (ConcreteCollection:Coll[SigmaProp] [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true))] #SigmaProp))"
+        );
+        // Non-Coll arg → None (falls through; the assign layer surfaces the type error).
+        let non_coll = TypedExpr::Constant {
+            value: ConstPayload::Bool(true),
+            tpe: SType::SBoolean,
+        };
+        assert!(predef_ir_builder("xorOf", &f, &[non_coll]).is_none());
     }
 
     /// blake2b256 → CalcBlake2b256 (SigmaPredef.scala:263).

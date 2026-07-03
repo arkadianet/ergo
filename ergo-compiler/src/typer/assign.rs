@@ -49,7 +49,8 @@ use crate::typed::{
     BIT_SHIFT_LEFT, BIT_SHIFT_RIGHT, BIT_SHIFT_RIGHT_ZEROED, BIT_XOR,
 };
 use crate::typer::methods::{
-    container_exists, get_method, global_method, owner_name_for_type, SMethodDesc,
+    container_exists, get_method, global_method, owner_name_for_method, owner_name_for_type,
+    SMethodDesc,
 };
 use crate::typer::predef_ir::predef_ir_builder;
 use crate::typer::unify::{
@@ -684,10 +685,16 @@ fn assign_select(
         // property / nullary method -> tRange
         spec.range.clone()
     } else {
-        // function type: drop the receiver, keep remaining args (consumed by Apply)
+        // function type: drop the receiver, keep remaining args (consumed by Apply).
+        // Carry the method's remaining type parameters onto the printed function type
+        // so an *unapplied* polymorphic method value renders its `[T]`/`[OV]` binder
+        // (oracle: `Coll(1,2,3).map` → `[OV]((Int) => OV) => Coll[OV]`; `SELF.R4` →
+        // `[T]() => Option[T]`).  When the method is applied, the enclosing Apply
+        // consumes this Select and substitutes the params away.
         SType::SFunc {
             dom: spec.dom_tail().to_vec(),
             range: Box::new(spec.range.clone()),
+            tpe_params: spec.tpe_params.clone(),
         }
     };
     let t_res_is_func = matches!(t_res, SType::SFunc { .. });
@@ -700,7 +707,14 @@ fn assign_select(
         // seed shows box/context/avltree/header properties as `%Owner.name [] {}`).
         // Cast methods (toByte..) and SCollection.size have has_ir_builder=false
         // and take the Select branch below (they stay Select until GraphBuilding).
-        Ok(lower_method(&t_obj, &field, new_obj, vec![], t_res))
+        Ok(lower_method(
+            &t_obj,
+            &field,
+            new_obj,
+            vec![],
+            t_res,
+            ctx.tree_version,
+        ))
     } else {
         // Select survives: numeric cast methods (no irBuilder) and method-with-args
         // carriers (tRes.isFunc), consumed by an enclosing Apply (Task 6).
@@ -761,6 +775,7 @@ fn assign_lambda(
     let tpe = SType::SFunc {
         dom: args.iter().map(|(_, t)| t.clone()).collect(),
         range: Box::new(result_type.clone()),
+        tpe_params: vec![],
     };
     Ok(TypedExpr::Lambda {
         tpe_params,
@@ -1081,10 +1096,7 @@ fn assign_apply_select(
     };
     let new_sel = assign_type(env, sel, ctx)?;
     match node_tpe(&new_sel).clone() {
-        SType::SFunc {
-            dom: arg_types,
-            range: _,
-        } => {
+        SType::SFunc { dom: arg_types, .. } => {
             let new_obj = assign_type(env, obj, ctx)?;
             let new_arg_types: Vec<SType> = new_args.iter().map(|a| node_tpe(a).clone()).collect();
             match unify_type_lists(&arg_types, &new_arg_types) {
@@ -1125,7 +1137,14 @@ fn assign_apply_select(
                                     "For method {n} expected args: {concr_dom:?}; actual: {new_arg_types:?}"
                                 )));
                             }
-                            Ok(lower_method(&t_obj, &n, new_obj, new_args, concr_range.clone()))
+                            Ok(lower_method(
+                                &t_obj,
+                                &n,
+                                new_obj,
+                                new_args,
+                                concr_range.clone(),
+                                ctx.tree_version,
+                            ))
                         }
                         _ => {
                             // mkApply(mkSelect(newObj, n, Some(concrFunTpe)), newArgs).
@@ -1171,7 +1190,7 @@ fn assign_apply_generic(
     let new_f = assign_type(env, f, ctx)?;
     match node_tpe(&new_f).clone() {
         // Predefined function application (SigmaTyper.scala:233-259).
-        SType::SFunc { dom, range } => {
+        SType::SFunc { dom, range, .. } => {
             if args.len() != dom.len() {
                 return Err(TyperError::typer(
                     "Invalid argument type of application: invalid number of arguments".to_string(),
@@ -1314,9 +1333,9 @@ fn assign_apply_types(
 ) -> Result<TypedExpr, TyperError> {
     let new_input = assign_type(env, input, ctx)?;
     match node_tpe(&new_input).clone() {
-        SType::SFunc { dom, range } => {
+        SType::SFunc { dom, range, .. } => {
             // tpeParams recovered as the free type vars of the SFunc, in
-            // first-appearance order (our SType::SFunc has no tpeParams slot).
+            // first-appearance order (robust for parser-built empty-param SFuncs too).
             let tpe_params = free_type_vars(&dom, &range);
             if tpe_params.len() != type_args.len() {
                 return Err(TyperError::typer(format!(
@@ -1447,7 +1466,14 @@ fn mcl_collection(
                     // (:330-333).  lowerMethodCalls is always true in our typer.  The
                     // custom lowerings (map/filter/…) ignore the subst; a surviving
                     // MethodCall (MethodCallIrBuilder or no irBuilder) carries it.
-                    let lowered = lower_method(&recv, name, new_obj, new_args, concr.range.clone());
+                    let lowered = lower_method(
+                        &recv,
+                        name,
+                        new_obj,
+                        new_args,
+                        concr.range.clone(),
+                        ctx.tree_version,
+                    );
                     Ok(thread_method_subst(lowered, &subst))
                 }
                 // None: unification failed (:325-326).
@@ -1836,10 +1862,28 @@ fn lower_method(
     obj: TypedExpr,
     args: Vec<TypedExpr>,
     ret: SType,
+    tree_version: u8,
 ) -> TypedExpr {
     let b = Box::new;
     let mut it = args.clone().into_iter();
     match (recv, name) {
+        // ── SGlobal custom irBuilders (method-on-Global receiver form) ────────
+        // `Global.groupGenerator` → GroupGenerator, `Global.xor(a,b)` → Xor — the two
+        // SGlobal methods with dedicated-node irBuilders (methods.scala:595).  The
+        // predef-FUNCTION forms `groupGenerator`/`xor(a,b)` lower via
+        // `process_global_method`; this arm matches the receiver-method dispatch.  All
+        // other SGlobal methods (serialize/some/none/...) are MethodCallIrBuilder and
+        // fall through to the generic MethodCall below.
+        (SType::SGlobal, "groupGenerator") => TypedExpr::GroupGenerator { tpe: ret },
+        (SType::SGlobal, "xor") => {
+            let left = it.next().expect("Global.xor left arg");
+            let right = it.next().expect("Global.xor right arg");
+            TypedExpr::Xor {
+                left: b(left),
+                right: b(right),
+                tpe: ret,
+            }
+        }
         // ── SOption custom irBuilders ─────────────────────────────────────────
         (SType::SOption(_), "get") => TypedExpr::OptionGet {
             input: b(obj),
@@ -1923,7 +1967,9 @@ fn lower_method(
         },
         // ── everything else: MethodCall(obj, %Owner.name, args, {}) ──────────
         _ => {
-            let owner = owner_name_for_type(recv).unwrap_or("?");
+            // B4: numeric toBytes/toBits print `%SNumericType.<m>` at tree_version < 3
+            // (shared SNumericTypeMethods container), concrete `%Int.<m>` at V6.
+            let owner = owner_name_for_method(recv, name, tree_version);
             TypedExpr::MethodCall {
                 obj: b(obj),
                 method: MethodRef {
@@ -2102,17 +2148,19 @@ fn narrow_numeric_const_to(
 /// Destructure an `SType::SFunc` into `(dom, range)`; empty/NoType for non-funcs.
 fn func_parts(t: &SType) -> (Vec<SType>, SType) {
     match t {
-        SType::SFunc { dom, range } => (dom.clone(), (**range).clone()),
+        SType::SFunc { dom, range, .. } => (dom.clone(), (**range).clone()),
         _ => (vec![], SType::NoType),
     }
 }
 
-/// Convert an `SFuncSpec` to the `SType::SFunc` shape (tpeParams dropped — our
-/// `SType::SFunc` has no slot; the free type vars still live in dom/range).
+/// Convert an `SFuncSpec` to the `SType::SFunc` shape, carrying the (remaining)
+/// tpe_params onto the printed type.  On the explicit-`[T]` path the single tparam is
+/// already substituted (so this yields empty params — a monomorphic printed type).
 fn spec_to_stype(spec: &crate::typer::unify::SFuncSpec) -> SType {
     SType::SFunc {
         dom: spec.dom.clone(),
         range: Box::new(spec.range.clone()),
+        tpe_params: spec.tpe_params.clone(),
     }
 }
 
@@ -2353,7 +2401,7 @@ fn collect_type_vars(t: &SType, acc: &mut Vec<String>) {
                 collect_type_vars(i, acc);
             }
         }
-        SType::SFunc { dom, range } => {
+        SType::SFunc { dom, range, .. } => {
             for d in dom {
                 collect_type_vars(d, acc);
             }
@@ -2527,10 +2575,12 @@ fn bimap(
         let pat = SType::SFunc {
             dom: vec![t_arg.clone(), t_arg.clone()],
             range: Box::new(t_res.clone()),
+            tpe_params: vec![],
         };
         let act = SType::SFunc {
             dom: vec![lt.clone(), rt.clone()],
             range: Box::new(t_res.clone()),
+            tpe_params: vec![],
         };
         if unify_types(&pat, &act).is_none() {
             return Err(TyperError::invalid_binary(format!(
@@ -3095,6 +3145,7 @@ mod tests {
             SType::SFunc {
                 dom: vec![SType::SInt],
                 range: Box::new(SType::SInt),
+                tpe_params: vec![],
             },
         )]);
         let err = assign_type(&env, node, &ctx()).expect_err("fail");
@@ -3338,21 +3389,59 @@ mod tests {
     }
 
     /// A2: `min`/`max` are valid idents in `predefined_env` (word-named infixFuncs).
-    /// Bare `min` ACCEPTS as a polymorphic function value.  NOTE (wave B): our
-    /// `SType::SFunc` has no `tpe_params` slot, so it prints `(T,T) => T` WITHOUT the
-    /// oracle's leading `[T]` binder — a printed-shape gap deferred to wave B.  Here
-    /// we assert the VERDICT (accept) and the type modulo the `[T]` prefix.
+    /// Bare `min` ACCEPTS as a polymorphic function value.  Wave B: `SType::SFunc` now
+    /// carries `tpe_params`, so the bare form prints the oracle's leading `[T]` binder
+    /// (`[T](T,T) => T`).  Full byte assert (oracle-pinned, ORACLE_TREE_VERSION=3).
     #[test]
-    fn predef_env_min_max_bare_accepts_modulo_type_param_prefix() {
-        for src in ["min", "max"] {
-            let printed = type_tc(src);
-            assert!(
-                printed.contains(&format!("(T,T) => T '{src}')")),
-                "{src} bare accept (wave-B: missing [T] prefix): {printed}"
-            );
-        }
-        // value form: `{ val x = min; x }` accepts (the SFunc flows through the val).
-        assert!(type_tc("{ val x = min; x }").contains("(T,T) => T"));
+    fn predef_env_min_max_bare_accepts_with_type_param_prefix() {
+        assert_eq!(type_tc("min"), "(Ident:[T](T,T) => T 'min')");
+        assert_eq!(type_tc("max"), "(Ident:[T](T,T) => T 'max')");
+        // value form: `{ val x = min; x }` accepts (the SFunc flows through the val),
+        // and the block result prints the `[T]` binder too.
+        assert_eq!(
+            type_tc("{ val x = min; x }"),
+            "(Block:[T](T,T) => T [(ValNode:[T](T,T) => T 'x' (Ident:[T](T,T) => T 'min'))] (Ident:[T](T,T) => T 'x'))"
+        );
+    }
+
+    /// B1 (wave B): SGlobal methods with dedicated-node irBuilders lower on the
+    /// `Global.<m>` receiver form too — groupGenerator → GroupGenerator, xor → Xor.
+    /// Other SGlobal methods (serialize/…) stay MethodCall.
+    #[test]
+    fn global_receiver_method_lowers_to_dedicated_node() {
+        assert_eq!(
+            type_tc("Global.groupGenerator"),
+            "(GroupGenerator:GroupElement)"
+        );
+        assert_eq!(
+            type_tce("Global.xor(a, b)"),
+            "(Xor:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))"
+        );
+        // MethodCallIrBuilder SGlobal method still survives as a MethodCall.
+        assert!(type_tc("Global.serialize(1)").starts_with("(MethodCall:"));
+    }
+
+    /// B5 (wave B): an unapplied polymorphic method Select prints its `[T]`/`[OV]`
+    /// binder (carried on `SType::SFunc.tpe_params`).
+    #[test]
+    fn bare_polymorphic_method_select_prints_type_param_binder() {
+        assert_eq!(
+            type_tc("SELF.R4"),
+            "(Select:[T]() => Option[T] (Self:Box) 'R4')"
+        );
+        assert_eq!(
+            type_tc("SELF.getReg"),
+            "(Select:[T](Int) => Option[T] (Self:Box) 'getReg')"
+        );
+        assert_eq!(
+            type_tc("Coll(1, 2, 3).map"),
+            "(Select:[OV]((Int) => OV) => Coll[OV] (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) 'map')"
+        );
+        // Applied form collapses the binder away (monomorphic result).
+        assert_eq!(
+            type_tce("col1.map({(x: Long) => x})"),
+            "(MapCollection:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) (Lambda:(Long) => Long [] [x:#Long] #Long (Ident:Long 'x')))"
+        );
     }
 
     /// A2: because `min`/`max` are in the env, shadowing them in a block is a
@@ -3415,6 +3504,7 @@ mod tests {
                 tpe: SType::SFunc {
                     dom: vec![],
                     range: Box::new(SType::SLong),
+                    tpe_params: vec![],
                 },
             }),
             type_args: vec![SType::SLong],
@@ -3425,6 +3515,7 @@ mod tests {
             SType::SFunc {
                 dom: vec![],
                 range: Box::new(SType::SLong),
+                tpe_params: vec![],
             },
         )]);
         let err = assign_type(&env, node, &ctx()).expect_err("fail");

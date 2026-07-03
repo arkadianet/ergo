@@ -356,3 +356,38 @@ tc	"ab" + true	OK (ConstantNode:String 'abtrue')
 tc	"ab" + ()	OK (ConstantNode:String 'ab()')
 tc	"ab" + -1	OK (ConstantNode:String 'ab-1')
 tce	"ab" + n1	OK (ConstantNode:String 'abCBigInt(5)')
+#
+# ── § 20: M2 adversarial wave B — printed-typed-shape parity (v3) ─────────────────
+# All captured ORACLE_TREE_VERSION=3.  Swept at v3 by seed_accept_records_byte_parity.
+# B1: SGlobal methods with dedicated-node irBuilders lower on the `Global.<m>` receiver
+#     form too (not just the predef-function form): groupGenerator → GroupGenerator,
+#     xor → Xor.  All other SGlobal methods stay MethodCall.
+tc	Global.groupGenerator	OK (GroupGenerator:GroupElement)
+tce	Global.xor(a, b)	OK (Xor:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))
+# B2: xorOf's @unchecked irBuilder fires for ANY single Coll[_] arg; a Coll[SigmaProp]
+#     lowers to XorOf directly (no isProven wrap — xorOf is not adaptSigmaPropToBoolean).
+#     Boundary: Coll[Int] fails the arg-type unify first → both REJECT.
+tc	xorOf(Coll(sigmaProp(true)))	OK (XorOf:Boolean (ConcreteCollection:Coll[SigmaProp] [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true))] #SigmaProp))
+tc	xorOf(Coll(1, 2, 3))	REJECT 1:1 TyperException
+# B3: sigmaProp's @unchecked irBuilder wraps a SigmaProp arg directly in BoolToSigmaProp
+#     (no SigmaPropIsProven), matching the oracle's nested BoolToSigmaProp.
+tc	sigmaProp(sigmaProp(true))	OK (BoolToSigmaProp:SigmaProp (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)))
+# B5: unapplied polymorphic method/predef values print their [T]/[K,L,R,O] binder
+#     (SType::SFunc.tpe_params).
+tc	serialize	OK (Ident:[T](T) => Coll[Byte] 'serialize')
+tc	min	OK (Ident:[T](T,T) => T 'min')
+tc	outerJoin	OK (Ident:[K,L,R,O](Coll[(K,L)],Coll[(K,R)],(K,L) => O,(K,R) => O,(K,L,R) => O) => Coll[(K,O)] 'outerJoin')
+tc	Coll(1, 2, 3).map	OK (Select:[OV]((Int) => OV) => Coll[OV] (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) 'map')
+tc	SELF.R4	OK (Select:[T]() => Option[T] (Self:Box) 'R4')
+tc	SELF.getReg	OK (Select:[T](Int) => Option[T] (Self:Box) 'getReg')
+#
+# ── § 21: M2 adversarial wave B — v5 numeric MethodCall owner = SNumericType ──────
+# B4: at tree_version < 3 the numeric toBytes/toBits methods live on the shared
+#     SNumericTypeMethods container (objType.typeName = "SNumericType"); the per-type
+#     container (%Int/%Long/…) exists only at V6.  Captured ORACLE_TREE_VERSION=2.
+#     Sources are UNIQUE (not in § 15) and are run at v2 by the dedicated test
+#     `v2_numeric_method_owner_is_snumerictype`; excluded from the v3 accept sweep via
+#     V2_ACCEPT_SOURCES (they print the concrete owner %Int/%Long at v3 — see § 15).
+tc	1.toBits	OK (MethodCall:Coll[Boolean] (ConstantNode:Int @1) %SNumericType.toBits [] {})
+tc	1L.toBits	OK (MethodCall:Coll[Boolean] (ConstantNode:Long @1) %SNumericType.toBits [] {})
+tc	1L.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Long @1) %SNumericType.toBytes [] {})

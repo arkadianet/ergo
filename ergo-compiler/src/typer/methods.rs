@@ -101,6 +101,17 @@ fn sopt(t: SType) -> SType {
 fn stup(items: Vec<SType>) -> SType {
     SType::STuple(items)
 }
+// Monomorphic function-type shorthand (empty tpe_params).  Method *argument*
+// function types (e.g. `(IV) => OV` inside `map`'s dom) are always monomorphic in
+// the printed node; the method's own type parameters live on `SFuncSpec.tpe_params`.
+#[inline(always)]
+fn sfunc(dom: Vec<SType>, range: SType) -> SType {
+    SType::SFunc {
+        dom,
+        range: Box::new(range),
+        tpe_params: vec![],
+    }
+}
 
 // The macro expands to an SMethodDesc literal.
 // Variants encode the four (explicit_type_args, has_ir_builder, min_version)
@@ -318,14 +329,8 @@ fn option_methods() -> &'static Vec<SMethodDesc> {
         let t = tv("T");
         let r = tv("R");
         let this = sopt(t.clone());
-        let func_t_r = SType::SFunc {
-            dom: vec![t.clone()],
-            range: Box::new(r.clone()),
-        };
-        let func_t_bool = SType::SFunc {
-            dom: vec![t.clone()],
-            range: Box::new(SType::SBoolean),
-        };
+        let func_t_r = sfunc(vec![t.clone()], r.clone());
+        let func_t_bool = sfunc(vec![t.clone()], SType::SBoolean);
         vec![
             // id 1 absent
             // isDefined/get: Scala tpeParams=Nil (methods.scala:750/:758 — 2-arg SFunc;
@@ -354,22 +359,10 @@ fn collection_methods() -> &'static Vec<SMethodDesc> {
         let ov = tv("OV");
         let this = scoll(iv.clone());
         let this_ov = scoll(ov.clone());
-        let func_iv_ov = SType::SFunc {
-            dom: vec![iv.clone()],
-            range: Box::new(ov.clone()),
-        };
-        let func_iv_bool = SType::SFunc {
-            dom: vec![iv.clone()],
-            range: Box::new(SType::SBoolean),
-        };
-        let func_iv_coll_ov = SType::SFunc {
-            dom: vec![iv.clone()],
-            range: Box::new(scoll(ov.clone())),
-        };
-        let func_ov_iv_ov = SType::SFunc {
-            dom: vec![ov.clone(), iv.clone()],
-            range: Box::new(ov.clone()),
-        };
+        let func_iv_ov = sfunc(vec![iv.clone()], ov.clone());
+        let func_iv_bool = sfunc(vec![iv.clone()], SType::SBoolean);
+        let func_iv_coll_ov = sfunc(vec![iv.clone()], scoll(ov.clone()));
+        let func_ov_iv_ov = sfunc(vec![ov.clone(), iv.clone()], ov.clone());
         let zip_range = scoll(stup(vec![iv.clone(), ov.clone()]));
         vec![
             // id 1: NO withIRInfo → Select → SizeOf opcode 0xB1
@@ -825,6 +818,41 @@ pub fn owner_name_for_type(t: &SType) -> Option<&'static str> {
     }
 }
 
+/// True iff `t` is one of the concrete numeric types (SByte..SUnsignedBigInt).
+fn is_numeric_type(t: &SType) -> bool {
+    matches!(
+        t,
+        SType::SByte
+            | SType::SShort
+            | SType::SInt
+            | SType::SLong
+            | SType::SBigInt
+            | SType::SUnsignedBigInt
+    )
+}
+
+/// Owner name for a `MethodCall`'s `%Owner.name`, version-aware.
+///
+/// Differs from [`owner_name_for_type`] only for the numeric `toBytes`/`toBits`
+/// methods (the two `SNumericTypeMethods` entries that survive to a `MethodCall` at
+/// V5).  At `tree_version < 3` these live on the shared `SNumericTypeMethods`
+/// container, whose `objType.typeName` is `"SNumericType"`; the per-type container
+/// (objType = `Int`/`Long`/…) only exists from V6 (`tree_version >= 3`).
+/// Oracle-pinned: v2 `1.toBytes` → `%SNumericType.toBytes`; v3 → `%Int.toBytes`.
+///
+/// M3 note: `objType` also drives `MethodCall` wire serialization (method typeId).
+/// At V5 the selected descriptor is the shared `SNumericType` method, so the serialized
+/// method reference must match — the owner-name split here mirrors that container choice.
+///
+/// Every other receiver/method is version-independent; falls through to
+/// [`owner_name_for_type`].
+pub fn owner_name_for_method(recv: &SType, name: &str, tree_version: u8) -> &'static str {
+    if tree_version < 3 && matches!(name, "toBytes" | "toBits") && is_numeric_type(recv) {
+        return "SNumericType";
+    }
+    owner_name_for_type(recv).unwrap_or("?")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -893,6 +921,7 @@ mod tests {
             SType::SFunc {
                 dom: vec![SType::SInt],
                 range: Box::new(SType::SByte),
+                tpe_params: vec![],
             },
         ] {
             assert!(
@@ -925,6 +954,7 @@ mod tests {
         assert!(!container_exists(&SType::SFunc {
             dom: vec![SType::SInt],
             range: Box::new(SType::SInt),
+            tpe_params: vec![],
         }));
     }
 
@@ -1357,6 +1387,40 @@ mod tests {
             name,
             Some("STuple"),
             "STuple.typeName = getSimpleName = \"STuple\" (methods.scala:833)"
+        );
+    }
+
+    /// B4: numeric toBytes/toBits owner is version-dependent — `SNumericType` at V5
+    /// (shared container), concrete per-type at V6.  Everything else is version-independent.
+    #[test]
+    fn owner_name_for_method_numeric_tobytes_versioned() {
+        // v2 (V5): shared SNumericTypeMethods container.
+        for recv in [
+            SType::SByte,
+            SType::SShort,
+            SType::SInt,
+            SType::SLong,
+            SType::SBigInt,
+        ] {
+            assert_eq!(owner_name_for_method(&recv, "toBytes", 2), "SNumericType");
+            assert_eq!(owner_name_for_method(&recv, "toBits", 0), "SNumericType");
+        }
+        // v3 (V6): concrete per-type container.
+        assert_eq!(owner_name_for_method(&SType::SInt, "toBytes", 3), "Int");
+        assert_eq!(owner_name_for_method(&SType::SLong, "toBits", 3), "Long");
+        assert_eq!(
+            owner_name_for_method(&SType::SBigInt, "toBytes", 3),
+            "BigInt"
+        );
+        // Version-independent for non-numeric receivers and other methods.
+        assert_eq!(owner_name_for_method(&SType::SInt, "toByte", 2), "Int");
+        assert_eq!(
+            owner_name_for_method(&SType::SColl(Box::new(SType::SInt)), "map", 2),
+            "SCollection"
+        );
+        assert_eq!(
+            owner_name_for_method(&SType::SAvlTree, "digest", 2),
+            "AvlTree"
         );
     }
 
