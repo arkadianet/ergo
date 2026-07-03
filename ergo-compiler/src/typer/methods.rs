@@ -1327,12 +1327,23 @@ mod tests {
     /// methods.scala:701 is `SOption`, so its `getSimpleName` is `"SOption"`.
     #[test]
     fn owner_name_soption_oracle_grounded() {
-        // The oracle printed `%SOption.map` — owner substring is "SOption".
-        let name = owner_name_for_type(&SType::SOption(Box::new(SType::SInt)));
+        // Grounded in the committed oracle capture: parse the %Owner.name token
+        // out of the golden-seed Option.map record instead of hardcoding it.
+        let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
+        let line = seed
+            .lines()
+            .find(|l| l.contains("%") && l.contains(".map") && l.contains("Option["))
+            .expect("golden seed must contain the surviving Option.map MethodCall record");
+        // token looks like `%SOption.map`
+        let owner = line
+            .split('%')
+            .nth(1)
+            .and_then(|rest| rest.split('.').next())
+            .expect("seed line must carry a %Owner.name token");
         assert_eq!(
-            name,
-            Some("SOption"),
-            "owner must match oracle output %SOption.map (golden_seed §9)"
+            owner_name_for_type(&SType::SOption(Box::new(SType::SInt))),
+            Some(owner),
+            "owner_name_for_type(SOption) must match the oracle-captured owner in golden_seed.txt"
         );
     }
 
