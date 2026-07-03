@@ -12,7 +12,8 @@
 # [fresh] below are confirmed in fresh-JVM mode; batch may differ for reject cases.
 #
 # Sections: dossier samples | upcast/lambda/block/collection | reject probes |
-#           MethodCall survivors (E7) | v6-gate pair (v3 accept / v2 reject)
+#           MethodCall survivors (E7) | v6-gate pair (v3 accept / v2 reject) |
+#           ORACLE_TREE_VERSION=2 reject records | AvlTree probe (Task-3 handoff)
 #
 # ── § 1: dossier samples ─────────────────────────────────────────────────────────
 tc	sigmaProp(HEIGHT > 100)	OK (BoolToSigmaProp:SigmaProp (GT:Boolean (Height:Int) (ConstantNode:Int @100)))
@@ -31,13 +32,13 @@ tc	HEIGHT > 5	OK (GT:Boolean (Height:Int) (ConstantNode:Int @5))
 #
 # ── § 3: reject probes ────────────────────────────────────────────────────────────
 # class only; positions are advisory (batch-safe for standard rejects with no singleton contamination)
-tc	HEIGHT && true	REJECT 1:1 NonApplicableMethod
-tc	sigmaProp(HEIGHT)	REJECT 1:1 TyperException
-tc	zzz + 1	REJECT 1:1 TyperException
+tc	HEIGHT && true	REJECT 1:1 NonApplicableMethod [fresh]
+tc	sigmaProp(HEIGHT)	REJECT 1:1 TyperException [fresh]
+tc	zzz + 1	REJECT 1:1 TyperException [fresh]
 # R1 fresh-JVM position: 1:5 (the H in HEIGHT inside `if (HEIGHT) ...`).
-# Batch position after a prior HEIGHT-referencing source: 1:1 (stale singleton).
-# Use tc1.sh for correct position grading.
-tc	if (HEIGHT) 1 else 2	REJECT 1:5 TyperException
+# Batch position contaminated by prior HEIGHT-referencing source ({ val x = HEIGHT ... }
+# sets singleton sourceContext to 1:11); use tc1.sh for correct position grading.
+tc	if (HEIGHT) 1 else 2	REJECT 1:5 TyperException [fresh]
 #
 # ── § 4: MethodCall survivors (E7 validation) ────────────────────────────────────
 # These methods have no irBuilder in sigma-state 6.0.2, so they SURVIVE as MethodCall
@@ -58,9 +59,23 @@ tce	col1.updateMany(Coll(0), Coll(1L))	OK (MethodCall:Coll[Long] (ConstantNode:C
 #
 # ── § 5: v6-gate pair (ORACLE_TREE_VERSION=3 accept / v2 reject) ────────────────
 # fromBigEndianBytes is a v6-only method (gated on ergoTree >= 3 in methods.scala).
-# The SAME source accepts at v3 (already recorded in § 4 above) and rejects at v2:
-# Run with ORACLE_TREE_VERSION=2 to verify:
-#   tce  Global.fromBigEndianBytes[Long](a)  → REJECT 1:1 MethodNotFound  [v=2]
-#   tce  Global.deserializeTo[Long](a)        → REJECT 1:1 MethodNotFound  [v=2]
-#   tc   Global.none[Int]()                   → REJECT 1:1 MethodNotFound  [v=2]
-# Confirmed empirically. The Rust twin must gate these three methods on tree_version >= 3.
+# The SAME source accepts at v3 (already recorded in § 4 above) and rejects at v2;
+# committed records are in § 6 below.
+# The Rust twin must gate these three methods on tree_version >= 3.
+#
+# ── § 6: ORACLE_TREE_VERSION=2 reject records ────────────────────────────────────
+# Same sources as § 4 v6 entries, run with ORACLE_TREE_VERSION=2 env var.
+# All three methods are v6-gated (ergoTree >= 3); at V=2 the typer returns MethodNotFound.
+# Verified in a single fresh oracle run (no singleton-contamination risk for MethodNotFound).
+tce	Global.fromBigEndianBytes[Long](a)	REJECT 1:1 MethodNotFound
+tce	Global.deserializeTo[Long](a)	REJECT 1:1 MethodNotFound
+tc	Global.none[Int]()	REJECT 1:1 MethodNotFound
+#
+# ── § 7: AvlTree probe (Task-3 handoff) ─────────────────────────────────────────
+# No AvlTree literal exists in the demo env; avlTree(...) predef rejects at v3 (TyperException).
+# Approach: getVar[AvlTree](1).get to obtain an AvlTree value and chain method calls.
+# Result: AvlTree methods have no irBuilder → all survive as MethodCall (not lowered to IR).
+# Confirmed: digest (Coll[Byte]), keyLength (Int), enabledOperations (Byte) all survive.
+# Two representative records committed; enabledOperations behaves identically.
+tc	getVar[AvlTree](1).get.digest	OK (MethodCall:Coll[Byte] (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.digest [] {})
+tc	getVar[AvlTree](1).get.keyLength	OK (MethodCall:Int (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.keyLength [] {})
