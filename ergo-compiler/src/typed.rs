@@ -103,11 +103,12 @@ pub enum ConstPayload {
     /// `ergo_ser::address::decode_p2pk_address`.
     ///
     /// Rendering: M2 uses a hex-string placeholder; M3 must replace with the
-    /// Scala Ecp.toString decompressed form
-    /// `(CSigmaProp (ProveDlog (CGroupElement (Ecp @(x_hex,y_hex,1)))))`.
+    /// oracle-confirmed decompressed Ecp form (golden_seed.txt §10):
+    /// `(CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1))))`.
+    /// Note: NO CGroupElement wrapper inside ProveDlog (oracle-verified).
     ///
-    /// // deviation: on-curve validation deferred to M3 (see lib.rs deviation
-    /// // ledger).  `decode_p2pk_address` length-checks only.
+    /// deviation: on-curve validation deferred to M3 (see lib.rs deviation
+    /// ledger).  `decode_p2pk_address` length-checks only.
     ProveDlog([u8; 33]),
 }
 

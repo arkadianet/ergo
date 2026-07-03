@@ -106,14 +106,27 @@ tc	"ab" + "cd"	OK (ConstantNode:String 'abcd')
 # ORACLE_TREE_VERSION=3 (v6), empty env (`tc`).
 tc	getVar[Int](1).map({(x:Int)=>x})	OK (MethodCall:Option[Int] (GetVar:Option[Int] @1) %SOption.map [(Lambda:(Int) => Int [] [x:#Int] #Int (Ident:Int 'x'))] {})
 #
-# ── § 10: PK oracle capture (binder rule 9) — TODO ───────────────────────────────
-# NOT YET CAPTURED: the oracle JVM is not runnable in this session. When capturing:
-#   source: PK("<mainnet P2PK addr for the secp256k1 generator pubkey 0279be667e…>")
-#   expected shape: OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (CGroupElement (Ecp @(x,y,1))))))
-# The record pins the M3 ProveDlog rendering (curve-decompressed Ecp form). The M2
-# printer renders ConstPayload::ProveDlog as `(CSigmaProp (ProveDlog <M2:hex>))` —
-# a documented placeholder that MUST be replaced when this record lands (see
-# typed.rs ProveDlog + typed_print.rs deviation comments). Also capture the reject
-# probes: PK with a testnet address at mainnet, PK("garbage"), PK(1), PK() —
-# expected classes for the binder reject surface (BinderException lineage vs
-# scala.MatchError crash), cross-checking binder.rs BindError mapping.
+# ── § 10: PK oracle capture (binder rule 9) ──────────────────────────────────────
+# Captured 2026-07-04 with ORACLE_NETWORK=testnet (default) + ORACLE_TREE_VERSION=3.
+# Pubkey: secp256k1 generator G = 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+# Testnet P2PK address for G: 3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN
+#
+# Determinism: two independent oracle runs returned identical output (DETERMINISTIC).
+#
+# M3 deviation note: the oracle renders ProveDlog as (ProveDlog (Ecp @(x,y,1))),
+# NOT (ProveDlog (CGroupElement (Ecp @(x,y,1)))) — there is NO CGroupElement wrapper
+# inside ProveDlog. The M2 placeholder `(CSigmaProp (ProveDlog <M2:hex>))` MUST be
+# replaced at M3 with (CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1)))) exactly.
+# Fix the incorrect deviation comment in typed.rs:107 and typed_print.rs:191 at M3.
+#
+# Accept record — oracle ORACLE_NETWORK=testnet; testnet address is required:
+tc	PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))
+# Reject probes (oracle class + position; correspondence to our BindError variants):
+# PK("notanaddress") → REJECT 0:0 Exception   — Scala Try.get on bad decode →
+#   NoSuchElementException, no source position on the exception; our class =
+#   InvalidAddress (more specific than Scala's base Exception; verdict parity holds).
+# PK(1)             → REJECT 1:1 TyperException — Scala MatchError on non-String
+#   irBuilder arg wrapped at the typer level; our class = InvalidArguments
+#   (deviation: MatchError → InvalidArguments; verdict parity holds).
+tc	PK("notanaddress")	REJECT 0:0 Exception
+tc	PK(1)	REJECT 1:1 TyperException

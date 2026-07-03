@@ -187,8 +187,9 @@ fn render_payload(p: &ConstPayload) -> String {
         // SigmaProp: opaque in M2; store the full representation string.
         ConstPayload::SigmaProp(s) => s.clone(),
         // ProveDlog: M2 hex rendering of the 33-byte compressed key.
-        // deviation: M3 must replace with the decompressed Ecp form
-        // `(CSigmaProp (ProveDlog (CGroupElement (Ecp @(x_hex,y_hex,1)))))`.
+        // deviation: M3 must replace with the oracle-confirmed decompressed Ecp form
+        // (golden_seed.txt §10): `(CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1))))`.
+        // Note: NO CGroupElement wrapper inside ProveDlog (oracle-verified).
         ConstPayload::ProveDlog(bytes) => {
             let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
             format!("(CSigmaProp (ProveDlog <M2:{}>))", hex)

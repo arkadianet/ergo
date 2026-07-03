@@ -1368,6 +1368,10 @@ mod tests {
     }
 
     // Rule 9: malformed Base58 → InvalidAddress.
+    // Oracle probe `PK("notanaddress")` → REJECT 0:0 Exception (golden_seed.txt §10).
+    // Scala: Try.get on a bad decode throws NoSuchElementException with no source
+    // position; our class = InvalidAddress (more specific than Scala's base Exception;
+    // verdict parity holds).
     #[test]
     fn pk_malformed_address_errors_invalid_address() {
         let err = bind_err_env(&ScriptEnv::new(), "PK(\"notAnAddress\")");
@@ -1385,6 +1389,9 @@ mod tests {
     }
 
     // Rule 9: non-String-constant arg → reject (scala.MatchError parity).
+    // Oracle probe `PK(1)` → REJECT 1:1 TyperException (golden_seed.txt §10).
+    // Scala: MatchError on a non-String irBuilder arg is wrapped at the typer level
+    // as TyperException; our class = InvalidArguments (verdict parity holds).
     #[test]
     fn pk_non_string_arg_errors_invalid_arguments() {
         let err = bind_err_env(&ScriptEnv::new(), "PK(1)");
@@ -1459,6 +1466,30 @@ mod tests {
         assert_eq!(
             print_typed(&bind_src_env(&env, "n1")),
             "(ConstantNode:BigInt (CBigInt @5))"
+        );
+    }
+
+    // golden_seed.txt §10: PK with the secp256k1 generator G (testnet address).
+    // The oracle runs with ORACLE_NETWORK=testnet (default); the address string here
+    // is IDENTICAL to the `tc` record committed in §10.
+    // External byte anchor: `generator_pubkey()` hardcodes the secp256k1 G-point
+    // x-coordinate — the expected bytes are NEVER derived from the address under test.
+    #[test]
+    fn pk_provedlog_bytes_match_seed_section_10_g_point() {
+        // Same address as golden_seed.txt §10 (secp256k1 G, testnet P2PK).
+        let addr = "3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN";
+        let src = format!("PK(\"{addr}\")");
+        let ast = parse(&src, 3).expect("parse");
+        let bound = bind(&ScriptEnv::new(), &ast, NetworkPrefix::Testnet, 3)
+            .expect("bind must succeed for valid testnet G-point address");
+        let g = generator_pubkey();
+        assert_eq!(
+            bound,
+            TypedExpr::Constant {
+                value: ConstPayload::ProveDlog(g),
+                tpe: SType::SSigmaProp,
+            },
+            "ProveDlog payload must be the secp256k1 G-point bytes"
         );
     }
 
