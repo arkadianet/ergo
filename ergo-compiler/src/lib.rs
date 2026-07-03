@@ -136,6 +136,36 @@
 //!   garbage no real contract contains. oracle: `parse("{ } a }")` / `parse("{}/}")`
 //!   ACCEPT (sic), sigma-state 6.0.2; pinned by
 //!   `r6_stray_brace_block_absurdity_is_deliberately_rejected`.
+//!
+//! - **Lone `\r` in the inter-token gap rejected** (`token.rs`): a bare carriage
+//!   return not followed by `\n` (outside strings/comments) is refused with a
+//!   `ParseError::Lexical` at the `\r`. In fastparse it is neither `Basic.WSChars`
+//!   (space/tab only) nor `Basic.Newline` (`\r\n`|`\n` only): the implicit
+//!   `ScalaWhitespace` swallows it at `~` junctions, yet it is invisible to every
+//!   explicit `WS`/`WL`/`Newline`/`Semi`/`OneNLMax` combinator and a wall at raw
+//!   `~~` junctions. So it behaves like a SPACE at some junctions and like a
+//!   NEWLINE at others, with no token-stream signal that reproduces both. Full
+//!   Round-10 oracle matrix (ParserOracle sigma-state 6.0.2, `⇒` = U+21D2) —
+//!   ACCEPT cells: `\r1` · `1\r` · `a\rb` · `(x,y)\r=>x` · `{ val x = 1\r x }` ·
+//!   `{ val x = 1\rx }` · `f(\r)` · `f(1,\r2)` · `if (true) 1\relse 2` · `x.\ry` ·
+//!   `{1\r}`; REJECT cells: `1\r+2` (1:1) · `1\r2` (2:1) · `1 \r 2` (2:2) ·
+//!   `1\r\r2` (3:1) · `(x,y)\r⇒x` (1:1) · `{ val x = 1\r val y = 2; y }` (1:11).
+//!   (Contrast the LF twins — `a\nb` REJECT, `(x,y)\n⇒x` ACCEPT — confirming `\r`
+//!   is NOT a newline; and `1 +2` ACCEPT vs `1\r+2` REJECT — confirming it is NOT
+//!   a space either.) Reproducing every cell would need an infix-blocking-but-not-
+//!   newline gap token threaded through the whole expression parser plus
+//!   fastparse furthest-failure positions that even contradict `span::line_col`
+//!   (Scala `getLines`, where a lone `\r` is no line boundary). Bare-CR sources are
+//!   illegitimate and NO corpus contract holds a single `\r` byte, so we take the
+//!   reject-side-safe route: refuse the gap `\r`. This matches Scala on every
+//!   REJECT cell (verdict; the position is reported at the `\r`) and cannot cause a
+//!   wrong-bytes accept — a wrong-accept would emit a bogus tree/address downstream
+//!   (funds risk), whereas the residual is only a reject-side divergence on the
+//!   ACCEPT cells. UNTOUCHED: `\r\n` (one Newline) and a `\r` inside line-comment
+//!   content (`// c\r more` ACCEPT) or a string literal (`"a\rb"` ACCEPT), which the
+//!   comment/string lexers consume as content. Pinned by
+//!   `lone_cr_in_gap_is_lexical_error_at_the_cr` and
+//!   `crlf_is_still_one_newline_and_cr_in_comment_or_string_is_content`.
 
 pub mod ast;
 pub mod error;

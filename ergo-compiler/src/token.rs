@@ -507,16 +507,35 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consume inter-token whitespace, comments and newlines, pushing one
-    /// `Newline` token per `\n`/`\r\n`/lone-`\r` outside comments
-    /// (Basic.scala:33-34).
+    /// `Newline` token per `\n`/`\r\n` outside comments (Basic.scala:33-34).
     ///
     /// `after_comment` is true iff only spaces/tabs separate the newline from
     /// the end of the previous comment — `last_was_comment` stays set across
-    /// spaces/tabs and is cleared by a newline (Literals.scala:57-60). A lone
-    /// `\r` (not followed by `\n`) emits one `Newline` token, equivalent to
-    /// `\n` for newline-significance purposes. oracle: `1\r+2` REJECT (same
-    /// verdict as `1\n+2`); `\r1` / `1\r` / `{ val x = 1\r}` ACCEPT. UNTOUCHED:
-    /// `\r\n` (one Newline), `\r` inside line-comment content or string literals.
+    /// spaces/tabs and is cleared by a newline (Literals.scala:57-60).
+    ///
+    /// A lone `\r` (one not followed by `\n`) in the inter-token gap is a hard
+    /// `Lexical` error — see the Round-10 CR matrix below. In fastparse it is
+    /// neither `Basic.WSChars` (space/tab only) nor `Basic.Newline` (`\r\n`|`\n`
+    /// only); it is swallowed by the implicit `ScalaWhitespace` at `~` junctions
+    /// yet invisible to every explicit `WS`/`WL`/`Newline`/`Semi`/`OneNLMax`
+    /// combinator and a wall at raw `~~` junctions. That makes it behave like a
+    /// SPACE at some junctions and like a NEWLINE at others, e.g. (`⇒` = U+21D2):
+    ///   oracle: `\r1` ACCEPT · `1\r` ACCEPT · `(x,y)\r=>x` ACCEPT ·
+    ///           `{ val x = 1\r x }` ACCEPT · `f(\r)` ACCEPT · `a\rb` ACCEPT ·
+    ///           `1\r+2` REJECT 1:1 · `1\r2` REJECT 2:1 · `1 \r 2` REJECT 2:2 ·
+    ///           `(x,y)\r⇒x` REJECT 1:1 · `{ val x = 1\r val y = 2; y }` REJECT 1:11
+    /// (contrast the LF twins: `a\nb` REJECT, `(x,y)\n⇒x` ACCEPT — i.e. `\r` is
+    /// NOT a newline). Reproducing every cell would need an infix-blocking-but-
+    /// not-newline gap token threaded through the whole expr parser plus
+    /// fastparse furthest-failure positions that even contradict `span::line_col`
+    /// (which counts a lone `\r` as no line boundary, Scala `getLines`). Bare-CR
+    /// sources are illegitimate and no corpus contract holds one, so we take the
+    /// reject-side-safe route: refuse the gap `\r` outright. This matches Scala on
+    /// every REJECT cell and cannot cause a wrong-bytes accept; the residual is a
+    /// reject-side divergence on the ACCEPT cells above. See lib.rs ledger.
+    /// UNTOUCHED: `\r\n` (one Newline), and `\r` inside line-comment content
+    /// (`// c\r more` ACCEPT) or string literals (`"a\rb"` ACCEPT) — those are
+    /// consumed by the comment/string lexers, never reaching this gap.
     fn skip_gap(&mut self, tokens: &mut Vec<Token>) -> Result<bool, ParseError> {
         let mut last_was_comment = false;
         // `OneNLMax`'s `ConsumeComments` `~/`-cut reconstruction: once a newline has
@@ -554,18 +573,17 @@ impl<'a> Lexer<'a> {
                     seen_newline = true;
                 }
                 Some(b'\r') => {
-                    // lone \r: treated as a newline (same as \n).
-                    // oracle: `1\r+2` REJECT; `\r1`/`1\r` ACCEPT.
-                    let start = self.pos;
-                    self.pos += 1;
-                    tokens.push(self.tok(
-                        TokenKind::Newline {
-                            after_comment: last_was_comment,
-                        },
-                        start,
-                    ));
-                    last_was_comment = false;
-                    seen_newline = true;
+                    // lone \r (not before \n): reject-side-safe hard failure.
+                    // It is neither WSChars nor Basic.Newline in fastparse; its
+                    // true behavior is junction-dependent and cannot cause a
+                    // wrong-bytes accept, so we refuse it. See the CR matrix and
+                    // the ledger. oracle: `1\r+2`/`1\r2`/`(x,y)\r⇒x` REJECT (we
+                    // match); `\r1`/`1\r`/`a\rb` ACCEPT (documented reject-side
+                    // divergence).
+                    return Err(ParseError::Lexical {
+                        pos: self.pos as u32,
+                        msg: "lone carriage return (\\r) outside string/comment".into(),
+                    });
                 }
                 Some(b'/') if self.peek_byte_at(1) == Some(b'/') => {
                     self.consume_line_comment();
@@ -1185,9 +1203,13 @@ impl<'a> Lexer<'a> {
             Some(';') => {
                 // SymbolicKeywords `";" ~ !OpChar` (Identifiers.scala:55-56): valid
                 // only when not followed by an op-char, else the `~/` cut hard-fails.
-                if self
-                    .peek_byte_at(1)
-                    .map(|b| b as char)
+                // Decode the following CHAR, not the byte: `is_op_char` includes the
+                // multi-byte `⇒` (U+21D2), so a byte-level peek would miss it.
+                // oracle: `';⇒` REJECT 1:2; `';` / `';x` / `'; x` ACCEPT (`;`
+                // followed by EOF / an id-start / a space is a valid symbol keyword).
+                if self.src[self.pos + 1..]
+                    .chars()
+                    .next()
                     .is_some_and(is_op_char)
                 {
                     return Err(ParseError::Lexical {
@@ -1540,21 +1562,34 @@ mod tests {
         assert_eq!(kinds("⇒=")[0], TokenKind::OpId);
     }
     #[test]
-    fn lone_cr_emits_one_newline_rn_also_one() {
-        // oracle: lone \r is treated as a newline token (same as \n).
-        // `a\rb` → [Ident, Newline, Ident, Eof].
-        assert_eq!(
-            kinds("a\rb"),
-            vec![
-                TokenKind::Ident,
-                TokenKind::Newline {
-                    after_comment: false
-                },
-                TokenKind::Ident,
-                TokenKind::Eof
-            ]
-        );
-        // `\r\n` is still ONE Newline (Basic.scala:34) — the \r\n arm takes priority.
+    fn lone_cr_in_gap_is_lexical_error_at_the_cr() {
+        // Round-10 CR matrix (oracle: ParserOracle sigma-state 6.0.2). A lone \r
+        // in the inter-token gap is neither WSChars nor Basic.Newline; its true
+        // behavior is junction-dependent (space at some, newline at others) and
+        // cannot cause a wrong-bytes accept, so we take the reject-side-safe route
+        // and refuse it at the \r. This matches Scala on every REJECT cell and is
+        // a documented reject-side divergence on the ACCEPT cells (see ledger).
+        //   Scala-REJECT cells we now match: `1\r+2` `1\r2` `1 \r 2` `(x,y)\r⇒x`
+        //     `{ val x = 1\r val y = 2; y }`.
+        //   Scala-ACCEPT cells we now reject-side-diverge on: `\r1` `1\r` `a\rb`
+        //     `(x,y)\r=>x` `{ val x = 1\r x }` `f(\r)` `if (true) 1\relse 2`.
+        for (src, cr_pos) in [
+            ("a\rb", 1),
+            ("1\r+2", 1),
+            ("1\r2", 1),
+            ("\r1", 0),
+            ("1\r", 1),
+            ("(x,y)\r=>x", 5),
+        ] {
+            let e = lex_err(src);
+            assert!(matches!(e, ParseError::Lexical { .. }), "{src:?}");
+            assert_eq!(e.pos(), cr_pos, "{src:?}");
+        }
+    }
+    #[test]
+    fn crlf_is_still_one_newline_and_cr_in_comment_or_string_is_content() {
+        // \r\n is ONE Newline (Basic.scala:34) — the \r\n arm precedes the lone-\r
+        // arm, so it is unaffected by the reject-side-safe lone-\r rule.
         assert_eq!(
             kinds("a\r\nb"),
             vec![
@@ -1566,53 +1601,20 @@ mod tests {
                 TokenKind::Eof
             ]
         );
-    }
-    #[test]
-    fn lone_cr_emits_newline_token() {
-        // oracle: lone \r is treated as a newline (same significance as \n).
-        // `1\r+2` REJECT (same as `1\n+2`); `\r1` / `1\r` ACCEPT.
-        //
-        // Tokenizer: lone \r between tokens emits Newline { after_comment }.
-        // "a /*c*/ \r \nb": skip_gap sees space, /*c*/ (last_was_comment=true),
-        // space, lone \r → Newline { after_comment: true }, then space,
-        // \n → Newline { after_comment: false }.
-        let toks = tokenize("a /*c*/ \r \nb").unwrap();
-        let newlines: Vec<_> = toks
-            .iter()
-            .filter(|t| matches!(t.kind, TokenKind::Newline { .. }))
-            .collect();
-        assert_eq!(newlines.len(), 2, "lone \\r + \\n → two Newline tokens");
+        // UNTOUCHED: a lone \r inside a line comment (Literals.scala:84-85) or a
+        // string literal (Literals.scala:144-154, line 1024) is verbatim content,
+        // never reaching the gap. oracle: `// c\r more\n1` ACCEPT; `"a\rb"` ACCEPT.
         assert_eq!(
-            newlines[0].kind,
-            TokenKind::Newline {
-                after_comment: true // \r immediately follows the block comment
-            }
+            kinds("// c\r more\n1"),
+            vec![
+                TokenKind::Newline {
+                    after_comment: true
+                },
+                TokenKind::IntLit(1),
+                TokenKind::Eof
+            ]
         );
-        assert_eq!(
-            newlines[1].kind,
-            TokenKind::Newline {
-                after_comment: false // \r reset last_was_comment
-            }
-        );
-        // Boundary cases: lone \r at start/end of input is fine (same as \n).
-        // "oracle: \r1 ACCEPT; 1\r ACCEPT."
-        let t = tokenize("\r1").unwrap();
-        assert!(t
-            .iter()
-            .any(|t| matches!(t.kind, TokenKind::Newline { .. })));
-        let t = tokenize("1\r").unwrap();
-        assert!(t
-            .iter()
-            .any(|t| matches!(t.kind, TokenKind::Newline { .. })));
-        // \r\n regression: still ONE Newline token (not two).
-        let t = tokenize("a\r\nb").unwrap();
-        assert_eq!(
-            t.iter()
-                .filter(|t| matches!(t.kind, TokenKind::Newline { .. }))
-                .count(),
-            1,
-            "\\r\\n must produce exactly one Newline token"
-        );
+        assert_eq!(kinds("\"a\rb\"")[0], TokenKind::Str("a\rb".into()));
     }
 
     #[test]
