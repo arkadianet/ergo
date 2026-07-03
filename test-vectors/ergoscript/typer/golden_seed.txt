@@ -1,0 +1,66 @@
+# ErgoScript typer oracle golden seed
+#
+# Format: verb<TAB>source<TAB>expected-output
+#   verb     = tc (empty env) | tce (demo env: a,b:Coll[Byte]; col1,col2:Coll[Long];
+#              g1,g2:GroupElement; n1:BigInt; bb1,bb2:Byte)
+#   source   = raw UTF-8 ErgoScript; the Rust harness hex-encodes it when calling the oracle
+#   expected = oracle reply: OK <sexpr> | REJECT <line>:<col> <ExClass> | ERR <msg>
+#
+# All expected values captured from ORACLE_TREE_VERSION=3 (v6) oracle runs.
+# Reject positions: batch-mode oracle contaminates positions for singleton-referencing
+# sources (Risk R1); use tc1.sh for fresh-JVM position grading. Positions marked with
+# [fresh] below are confirmed in fresh-JVM mode; batch may differ for reject cases.
+#
+# Sections: dossier samples | upcast/lambda/block/collection | reject probes |
+#           MethodCall survivors (E7) | v6-gate pair (v3 accept / v2 reject)
+#
+# ── § 1: dossier samples ─────────────────────────────────────────────────────────
+tc	sigmaProp(HEIGHT > 100)	OK (BoolToSigmaProp:SigmaProp (GT:Boolean (Height:Int) (ConstantNode:Int @100)))
+tc	{ val x = HEIGHT; x > 5 }	OK (Block:Boolean [(ValNode:Int 'x' (Height:Int))] (GT:Boolean (Ident:Int 'x') (ConstantNode:Int @5)))
+tc	INPUTS.map({(b:Box)=>b.value})	OK (MapCollection:Coll[Long] (Inputs:Coll[Box]) (Lambda:(Box) => Long [] [b:#Box] #Long (Select:Long (Ident:Box 'b') 'value')))
+tce	a ++ b	OK (Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))
+tc	1L + 1	OK (ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-102)
+#
+# ── § 2: upcast / lambda / block / collection shapes ─────────────────────────────
+tc	1.toByte + 2.toByte	OK (ArithOp:Byte (Select:Byte (ConstantNode:Int @1) 'toByte') (Select:Byte (ConstantNode:Int @2) 'toByte') @-102)
+tc	true && (1 == 1)	OK (BinAnd:Boolean (ConstantNode:Boolean @true) (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))
+tc	HEIGHT>5 && HEIGHT<9	OK (BinAnd:Boolean (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (LT:Boolean (Height:Int) (ConstantNode:Int @9)))
+tc	Coll(1, 2, 3)	OK (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int)
+tce	col1.exists({(x:Long)=>x>1L})	OK (Exists:Boolean (ConstantNode:Coll[Long] <@1 @2>) (Lambda:(Long) => Boolean [] [x:#Long] #Boolean (GT:Boolean (Ident:Long 'x') (ConstantNode:Long @1))))
+tc	HEIGHT > 5	OK (GT:Boolean (Height:Int) (ConstantNode:Int @5))
+#
+# ── § 3: reject probes ────────────────────────────────────────────────────────────
+# class only; positions are advisory (batch-safe for standard rejects with no singleton contamination)
+tc	HEIGHT && true	REJECT 1:1 NonApplicableMethod
+tc	sigmaProp(HEIGHT)	REJECT 1:1 TyperException
+tc	zzz + 1	REJECT 1:1 TyperException
+# R1 fresh-JVM position: 1:5 (the H in HEIGHT inside `if (HEIGHT) ...`).
+# Batch position after a prior HEIGHT-referencing source: 1:1 (stale singleton).
+# Use tc1.sh for correct position grading.
+tc	if (HEIGHT) 1 else 2	REJECT 1:5 TyperException
+#
+# ── § 4: MethodCall survivors (E7 validation) ────────────────────────────────────
+# These methods have no irBuilder in sigma-state 6.0.2, so they SURVIVE as MethodCall
+# even with lowerMethodCalls=true. Verified deterministic across 3 runs (2 batch, 1 fresh-JVM).
+tc	Global.serialize(1)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConstantNode:Int @1)] {})
+tce	Global.some[Int](1)	OK (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.some [(ConstantNode:Int @1)] {#T->#Int})
+tc	Global.none[Int]()	OK (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int})
+tce	Global.fromBigEndianBytes[Long](a)	OK (MethodCall:Long (Global:SigmaDslBuilder) %SigmaDslBuilder.fromBigEndianBytes [(ConstantNode:Coll[Byte] <@1 @2>)] {#T->#Long})
+tce	Global.deserializeTo[Long](a)	OK (MethodCall:Long (Global:SigmaDslBuilder) %SigmaDslBuilder.deserializeTo [(ConstantNode:Coll[Byte] <@1 @2>)] {#T->#Long})
+tce	col1.zip(col2)	OK (MethodCall:Coll[(Long,Long)] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.zip [(ConstantNode:Coll[Long] <@3 @4>)] {})
+tce	g1.negate	OK (MethodCall:GroupElement (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) %GroupElement.negate [] {})
+tce	n1.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:BigInt (CBigInt @5)) %BigInt.toBytes [] {})
+tce	Coll(1,2,3).indexOf(1, 0)	OK (MethodCall:Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) %SCollection.indexOf [(ConstantNode:Int @1) (ConstantNode:Int @0)] {})
+tce	col1.flatMap({(x:Long)=>Coll(x)})	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.flatMap [(Lambda:(Long) => Coll[Long] [] [x:#Long] #Coll[Long] (ConcreteCollection:Coll[Long] [(Ident:Long 'x')] #Long))] {})
+tce	col1.patch(0, col2, 1)	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.patch [(ConstantNode:Int @0) (ConstantNode:Coll[Long] <@3 @4>) (ConstantNode:Int @1)] {})
+tce	col1.updated(0, 1L)	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.updated [(ConstantNode:Int @0) (ConstantNode:Long @1)] {})
+tce	col1.updateMany(Coll(0), Coll(1L))	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.updateMany [(ConcreteCollection:Coll[Int] [(ConstantNode:Int @0)] #Int) (ConcreteCollection:Coll[Long] [(ConstantNode:Long @1)] #Long)] {})
+#
+# ── § 5: v6-gate pair (ORACLE_TREE_VERSION=3 accept / v2 reject) ────────────────
+# fromBigEndianBytes is a v6-only method (gated on ergoTree >= 3 in methods.scala).
+# The SAME source accepts at v3 (already recorded in § 4 above) and rejects at v2:
+# Run with ORACLE_TREE_VERSION=2 to verify:
+#   tce  Global.fromBigEndianBytes[Long](a)  → REJECT 1:1 MethodNotFound  [v=2]
+#   tce  Global.deserializeTo[Long](a)        → REJECT 1:1 MethodNotFound  [v=2]
+#   tc   Global.none[Int]()                   → REJECT 1:1 MethodNotFound  [v=2]
+# Confirmed empirically. The Rust twin must gate these three methods on tree_version >= 3.
