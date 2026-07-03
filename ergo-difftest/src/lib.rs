@@ -17,6 +17,7 @@
 
 use std::panic::{self, AssertUnwindSafe};
 
+pub mod gen;
 pub mod generate;
 pub mod methodcall;
 pub mod oracle;
@@ -110,6 +111,81 @@ pub fn run_campaign(
         }
     }
     (stats, findings)
+}
+
+/// Run a STRUCTURED campaign: feed [`gen::gen_structured`] output through the
+/// SAME hermetic invariants as [`run_campaign`] (no-panic + parse→serialize
+/// fixed point), and record the per-surface adversarial-feature coverage union.
+///
+/// Unlike [`run_campaign`] (one shared input across every surface), a structured
+/// campaign generates bytes TARGETED at each surface's own grammar — so it also
+/// returns [`gen::Coverage`], which measures how much of each surface's declared
+/// adversarial vocabulary the run actually reached. `only` restricts to a single
+/// gen surface. `_corpus` is accepted for signature parity with [`run_campaign`];
+/// structured generation is self-contained and does not seed from it.
+pub fn run_structured_campaign(
+    seed: u64,
+    iters: u64,
+    only: Option<&str>,
+    _corpus: &[Vec<u8>],
+) -> (Stats, gen::Coverage, Vec<Finding>) {
+    // Hermetic surface registry, looked up by name so a `GenOutput` targeting
+    // "ergo_tree" runs through the "ergo_tree" invariant check.
+    let registry = surfaces::registry(None);
+
+    let gen_surfaces: Vec<&'static str> = match only {
+        Some(name) => gen::SURFACES.into_iter().filter(|s| *s == name).collect(),
+        None => gen::SURFACES.to_vec(),
+    };
+
+    let _silent = SilencePanics::install();
+    let mut stats = Stats::default();
+    let mut findings = Vec::new();
+    let mut touched: std::collections::BTreeMap<&'static str, gen::FeatureSet> =
+        std::collections::BTreeMap::new();
+
+    for iter in 0..iters {
+        for &surface in &gen_surfaces {
+            let output = gen::gen_structured_at(seed, iter, surface);
+            // Accumulate coverage even for a surface with no hermetic entry.
+            touched
+                .entry(output.surface)
+                .or_default()
+                .extend(&output.features);
+
+            let Some(s) = registry.iter().find(|s| s.name == output.surface) else {
+                continue;
+            };
+            stats.iters += 1;
+            match run_one(s, &output.bytes) {
+                Outcome::Accepted => stats.accepted += 1,
+                Outcome::Rejected => stats.rejected += 1,
+                Outcome::WriteRejected => stats.write_rejected += 1,
+                Outcome::Bug(detail) => {
+                    stats.bugs += 1;
+                    findings.push(Finding {
+                        surface: s.name,
+                        seed,
+                        iter,
+                        input_hex: to_hex(&output.bytes),
+                        detail,
+                    });
+                }
+            }
+        }
+    }
+
+    let coverage = gen::Coverage(
+        gen_surfaces
+            .iter()
+            .map(|&surface| gen::SurfaceCoverage {
+                surface,
+                touched: touched.get(surface).copied().unwrap_or_default(),
+                declared: gen::declared_vocabulary(surface),
+            })
+            .collect(),
+    );
+    (stats, coverage, findings)
 }
 
 /// Run every surface over a single explicit input (for `--repro` / triage).

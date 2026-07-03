@@ -23,6 +23,7 @@ fn main() -> ExitCode {
     let mut oracle_mode = false;
     let mut oracle_script: Option<String> = None;
     let mut methodcall_mode = false;
+    let mut structured_mode = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -50,6 +51,9 @@ fn main() -> ExitCode {
             }
             "--methodcall" => {
                 methodcall_mode = true;
+            }
+            "--structured" => {
+                structured_mode = true;
             }
             "--selftest" => {
                 return match ergo_difftest::selftest() {
@@ -82,7 +86,9 @@ fn main() -> ExitCode {
     // hermetic paths use the hermetic registry. Both `--repro` modes follow their
     // selected execution mode below, so oracle-only surfaces stay replayable.
     if let Some(s) = &only {
-        let known: Vec<&str> = if oracle_mode {
+        let known: Vec<&str> = if structured_mode && !oracle_mode {
+            ergo_difftest::gen::SURFACES.to_vec()
+        } else if oracle_mode {
             ergo_difftest::oracle::oracle_surfaces()
                 .iter()
                 .map(|spec| spec.name)
@@ -136,8 +142,15 @@ fn main() -> ExitCode {
         None => Vec::new(),
     };
 
+    if structured_mode {
+        if oracle_mode {
+            return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus, true);
+        }
+        return run_structured(seed, iters, only.as_deref());
+    }
+
     if oracle_mode {
-        return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus);
+        return run_oracle(seed, iters, oracle_script, only.as_deref(), &corpus, false);
     }
 
     println!(
@@ -258,15 +271,82 @@ fn run_methodcall(script: Option<String>) -> ExitCode {
     }
 }
 
+/// Hermetic STRUCTURED campaign: run [`ergo_difftest::run_structured_campaign`]
+/// and print the no-panic / fixed-point stats PLUS the per-surface adversarial-
+/// feature coverage union and ratio. The coverage report is the point of this
+/// mode — it proves each surface's generator reaches every declared bug surface.
+fn run_structured(seed: u64, iters: u64, only: Option<&str>) -> ExitCode {
+    use ergo_difftest::run_structured_campaign;
+
+    println!(
+        "difftest: STRUCTURED seed={seed} iters={iters} surface={}",
+        only.unwrap_or("ALL"),
+    );
+
+    let (stats, coverage, findings) = run_structured_campaign(seed, iters, only, &[]);
+
+    println!(
+        "runs={} accepted={} rejected={} write_rejected={} bugs={}",
+        stats.iters, stats.accepted, stats.rejected, stats.write_rejected, stats.bugs
+    );
+
+    println!("\ncoverage (touched / declared adversarial features per surface):");
+    for c in &coverage.0 {
+        let touched = c.touched.intersect(&c.declared);
+        println!(
+            "  {:<20} {:>2}/{:<2}  ratio={:.2}",
+            c.surface,
+            touched.len(),
+            c.declared.len(),
+            c.ratio(),
+        );
+        for f in c.declared.iter() {
+            let mark = if c.touched.contains(f) {
+                "+"
+            } else {
+                "MISSING"
+            };
+            let bug = f.bug_id().map(|b| format!(" [{b}]")).unwrap_or_default();
+            println!("      {mark:<7} {}{bug}", f.name());
+        }
+    }
+
+    let total_touched = coverage.total_touched();
+    let total_declared = coverage.total_declared();
+    println!(
+        "\nunion: {}/{} declared features reached across all surfaces",
+        total_touched.intersect(&total_declared).len(),
+        total_declared.len(),
+    );
+
+    if !findings.is_empty() {
+        println!("\n{} finding(s):", findings.len());
+        for f in &findings {
+            println!(
+                "  {} @ seed={} iter={}\n    {}\n    repro: difftest --repro {}",
+                f.surface, f.seed, f.iter, f.detail, f.input_hex
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    println!("\nno invariant violations");
+    ExitCode::SUCCESS
+}
+
 /// Differential campaign against the JVM reference oracle. Without `only` it
 /// diffs every oracle surface per input; with `only` it restricts to that one
-/// (already validated against the oracle surface set in `main`).
+/// (already validated against the oracle surface set in `main`). When
+/// `structured` is set, each surface is fed bytes from
+/// [`ergo_difftest::gen::gen_structured`] targeted at that surface (the `reduce`
+/// surface, which consumes ErgoTree bytes, is fed the `ergo_tree` generator);
+/// otherwise a single shared input is diffed across every surface.
 fn run_oracle(
     seed: u64,
     iters: u64,
     script: Option<String>,
     only: Option<&str>,
     corpus: &[Vec<u8>],
+    structured: bool,
 ) -> ExitCode {
     use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
     use ergo_difftest::rng::Rng;
@@ -294,9 +374,20 @@ fn run_oracle(
         std::collections::HashMap::new();
     let mut total = 0u64;
     let mut checked = 0u64;
-    'outer: for _ in 0..iters {
-        let input = ergo_difftest::generate::gen_input(&mut rng, corpus);
+    'outer: for iter in 0..iters {
+        // Non-structured: one shared input diffed across every surface.
+        // Structured: per-surface targeted bytes (generated inside the loop).
+        let shared_input = if structured {
+            Vec::new()
+        } else {
+            ergo_difftest::generate::gen_input(&mut rng, corpus)
+        };
         for spec in &surfaces {
+            let input: Vec<u8> = if structured {
+                structured_oracle_bytes(seed, iter, spec.name)
+            } else {
+                shared_input.clone()
+            };
             match diff(spec, &input, &mut oracle) {
                 Ok(None) => {}
                 Ok(Some(d)) => {
@@ -386,6 +477,19 @@ fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) ->
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Structured bytes for an ORACLE surface. Maps the oracle surface name onto a
+/// gen surface (the `reduce` surface consumes ErgoTree bytes, so it is fed the
+/// `ergo_tree` generator; an oracle surface with no matching gen surface also
+/// falls back to `ergo_tree`), then returns [`ergo_difftest::gen::gen_structured_at`].
+fn structured_oracle_bytes(seed: u64, iter: u64, oracle_surface: &str) -> Vec<u8> {
+    let gen_surface = if ergo_difftest::gen::SURFACES.contains(&oracle_surface) {
+        oracle_surface
+    } else {
+        "ergo_tree"
+    };
+    ergo_difftest::gen::gen_structured_at(seed, iter, gen_surface).bytes
 }
 
 /// Root-cause signature for deduping divergences: surface + kind + each side's
@@ -493,6 +597,8 @@ fn print_help() {
          \x20 --oracle         differential campaign vs the JVM reference (ergo_tree)\n\
          \x20 --oracle-script P  path to ErgoSerdeOracle.scala\n\
          \x20 --methodcall     verify the MethodCall typechecker registry vs the JVM oracle\n\
+         \x20 --structured     structure-aware generators + per-surface coverage report\n\
+         \x20                  (combine with --oracle to diff structured bytes vs the JVM)\n\
          \x20 --selftest       verify the harness's own bug-detection has teeth\n"
     );
 }
