@@ -8,8 +8,10 @@ repository.workspace = true
 publish    = false
 
 [dependencies]
-thiserror = { workspace = true }
+thiserror        = { workspace = true }
+ergo-ser         = { workspace = true }
+ergo-primitives  = { workspace = true }
 
 [dev-dependencies]
-ergo-ser   = { workspace = true }
 serde_json = { workspace = true }
+hex        = { workspace = true }

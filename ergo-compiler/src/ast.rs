@@ -213,7 +213,7 @@ fn or_no_type(given: &SType, fallback: impl FnOnce() -> SType) -> SType {
 /// - `SUnit`/`SAny`/`SFunc`/`STypeVar` are NOT `SProduct` (SType.scala:626/639/660/
 ///   287) → the `_ => NoType` arm. `SGroupElement`/`SBox`/`SAvlTree`/… are `SProduct`
 ///   but NOT parse-time reachable (only ever `NoType` `Ident`s), so no table is ported.
-fn product_method_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType {
+pub(crate) fn product_method_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType {
     match method_range(obj_tpe, field, tree_version) {
         Some(res) => SType::SFunc {
             dom: vec![obj_tpe.clone()],

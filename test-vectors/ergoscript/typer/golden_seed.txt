@@ -105,3 +105,15 @@ tc	"ab" + "cd"	OK (ConstantNode:String 'abcd')
 # Note: SOption.map has MethodCallIrBuilder → survives as MethodCall (has_ir_builder=true).
 # ORACLE_TREE_VERSION=3 (v6), empty env (`tc`).
 tc	getVar[Int](1).map({(x:Int)=>x})	OK (MethodCall:Option[Int] (GetVar:Option[Int] @1) %SOption.map [(Lambda:(Int) => Int [] [x:#Int] #Int (Ident:Int 'x'))] {})
+#
+# ── § 10: PK oracle capture (binder rule 9) — TODO ───────────────────────────────
+# NOT YET CAPTURED: the oracle JVM is not runnable in this session. When capturing:
+#   source: PK("<mainnet P2PK addr for the secp256k1 generator pubkey 0279be667e…>")
+#   expected shape: OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (CGroupElement (Ecp @(x,y,1))))))
+# The record pins the M3 ProveDlog rendering (curve-decompressed Ecp form). The M2
+# printer renders ConstPayload::ProveDlog as `(CSigmaProp (ProveDlog <M2:hex>))` —
+# a documented placeholder that MUST be replaced when this record lands (see
+# typed.rs ProveDlog + typed_print.rs deviation comments). Also capture the reject
+# probes: PK with a testnet address at mainnet, PK("garbage"), PK(1), PK() —
+# expected classes for the binder reject surface (BinderException lineage vs
+# scala.MatchError crash), cross-checking binder.rs BindError mapping.

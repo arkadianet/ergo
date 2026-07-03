@@ -173,6 +173,8 @@
 //!   `crlf_is_still_one_newline_and_cr_in_comment_or_string_is_content`.
 
 pub mod ast;
+pub mod binder;
+pub mod env;
 pub mod error;
 mod parse;
 pub mod span;
@@ -183,6 +185,8 @@ pub mod typed_print;
 pub mod typer;
 
 pub use ast::{ArithKind, BitKind, Expr, RelKind, ValDef};
+pub use binder::{bind, BindError};
+pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;
 pub use parse::{parse, parse_type};
 pub use stype::SType;

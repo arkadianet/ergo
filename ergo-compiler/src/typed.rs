@@ -97,6 +97,18 @@ pub enum ConstPayload {
     GroupElement(String),
     /// Opaque SigmaProp payload (M3 scope for full parity).
     SigmaProp(String),
+    /// `SigmaPropConstant(ProveDlog(pubkey))` produced by the binder's PK rule
+    /// (SigmaBinder.scala:105-106, SigmaPredef.scala:159-166).
+    /// Carries the 33-byte SEC1-compressed secp256k1 public key returned by
+    /// `ergo_ser::address::decode_p2pk_address`.
+    ///
+    /// Rendering: M2 uses a hex-string placeholder; M3 must replace with the
+    /// Scala Ecp.toString decompressed form
+    /// `(CSigmaProp (ProveDlog (CGroupElement (Ecp @(x_hex,y_hex,1)))))`.
+    ///
+    /// // deviation: on-curve validation deferred to M3 (see lib.rs deviation
+    /// // ledger).  `decode_p2pk_address` length-checks only.
+    ProveDlog([u8; 33]),
 }
 
 /// Typed ErgoScript AST node.
@@ -933,5 +945,6 @@ mod tests {
         let _ = ConstPayload::LongColl(vec![1, 2]);
         let _ = ConstPayload::GroupElement("(x,y,1)".into());
         let _ = ConstPayload::SigmaProp("...".into());
+        let _ = ConstPayload::ProveDlog([0x02u8; 33]);
     }
 }

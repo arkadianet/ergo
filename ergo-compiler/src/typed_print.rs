@@ -158,6 +158,7 @@ fn render_opt_node(opt: &Option<Box<TypedExpr>>) -> String {
 ///   ByteColl/LongColl   → `<@v1 @v2 …>` (N5 primitive-seq form)
 ///   GroupElement(s)     → `(CGroupElement (Ecp @s))` — wraps the Ecp string
 ///   SigmaProp(s)        → opaque string (M3 scope for full parity)
+///   ProveDlog(bytes)    → M2 hex rendering; M3 replace with decompressed Ecp form
 fn render_payload(p: &ConstPayload) -> String {
     match p {
         ConstPayload::Bool(b) => format!("@{}", b),
@@ -185,6 +186,13 @@ fn render_payload(p: &ConstPayload) -> String {
         }
         // SigmaProp: opaque in M2; store the full representation string.
         ConstPayload::SigmaProp(s) => s.clone(),
+        // ProveDlog: M2 hex rendering of the 33-byte compressed key.
+        // deviation: M3 must replace with the decompressed Ecp form
+        // `(CSigmaProp (ProveDlog (CGroupElement (Ecp @(x_hex,y_hex,1)))))`.
+        ConstPayload::ProveDlog(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("(CSigmaProp (ProveDlog <M2:{}>))", hex)
+        }
     }
 }
 
