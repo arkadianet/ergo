@@ -4,7 +4,7 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index)
-**Approx LOC:** 953 (single file, `src/lib.rs`; ~290 of which is the `#[cfg(test)]` oracle-parity block)
+**Approx LOC:** 1 093 (single file, `src/lib.rs`; ~362 of which is the `#[cfg(test)]` oracle-parity block)
 
 ## Start here
 - `ChainSpec` (`src/lib.rs:526`) — the aggregate that bundles every per-network parameter group; read its fields to see the whole surface.
@@ -28,6 +28,8 @@
 - `BootstrapParams` (struct) — seed `SocketAddr` peers + optional `(height, block_id)` script-validation checkpoint — `src/lib.rs:507`
 - `ChainSpec` (struct) — aggregate; note `reemission: Option<ReemissionParams>` is `None` on the post-PR-#2252 testnet — `src/lib.rs:526`
 - `ChainSpec::for_network` (fn) — the documented sole `Network` branch point at the crate boundary — `src/lib.rs:589`
+- `ChainSpec::emission_script_trees` (fn) — returns `Option<EmissionScriptTrees>` with the three emission-related `ErgoTree` byte vectors; `None` on testnet (no verified oracle yet) and on any spec failing the defensive identity gate (reemission NFT id + genesis digest + `MAINNET` network params must all match canonical values) — `src/lib.rs:613`
+- `EmissionScriptTrees` (struct) — serialized `ErgoTree` bytes for the three emission contracts: `emission` (genesis emission box proposition), `reemission` (EIP-27 re-emission box), and `pay_to_reemission` (EIP-27 pay-to-reemission); sourced from live-Scala `/emission/scripts` oracle capture and cross-checked by test — `src/lib.rs:646`
 
 ## Invariants & contracts
 - **Network-parameter authority.** This crate owns the canonical per-network constants (magic, address prefix, difficulty/voting/monetary/reemission schedules, genesis digest + header id, seed peers, checkpoint). Every value carries a Scala-conf source citation in its doc comment; the inline `oracle parity` tests assert byte/value equality against those references. When upstream Scala moves (mainnet `2cdbb8c`, testnet v6.0.3), re-extract `test-vectors/` and re-run these tests.

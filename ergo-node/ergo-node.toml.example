@@ -53,10 +53,11 @@ node_name = "my-ergo-node"
 # nipopow_bootstrap = false
 
 [peers]
-# Current defaults: target 60 outbound peers, max 80 total connections,
-# with up to 20 inbound slots reserved.
-target_outbound = 60
-max_connections = 80
+# Current defaults: target 96 outbound peers, 256 inbound budget
+# (independent `max_inbound` key), 384 total-connection ceiling.
+target_outbound = 96
+max_connections = 384
+# max_inbound = 256
 per_ip_limit = 1
 per_subnet_limit = 3
 

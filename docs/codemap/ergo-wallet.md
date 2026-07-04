@@ -10,7 +10,7 @@ and `gf2_192` — sigma-rust is never a runtime dependency.
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-sigma,
 ergo-validation, ergo-state, gf2_192
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~7,400 (incl. tests)
+**Approx LOC:** ~8,900 (src/**/*.rs)
 
 ## Start here
 - `src/lib.rs` — module tree + crate-root re-exports (`Mnemonic`,
@@ -47,6 +47,19 @@ ergo-validation, ergo-state, gf2_192
 - `src/state.rs` — `WalletState`: in-memory caches (tracked pubkeys, P2PK
   trees, visible addresses, change address) + redb rehydration. Read by
   the `ergo-state` apply hook through a reader trait.
+- `src/scan/` — `/scan/*` wallet subsystem (Scala scanning API).
+- `src/scan/mod.rs` — module root; re-exports `ScanRegister`,
+  `ScanningPredicate` (from `predicate`) and `Scan`, `ScanRegistry`,
+  `ScanRequest`, `WalletInteraction`, `MAX_SCAN_NAME_LENGTH`,
+  `MINING_SCAN_ID`, `PAYMENTS_SCAN_ID` (from `registry`).
+- `src/scan/predicate.rs` — `ScanningPredicate` tracking-rule language:
+  `Contains`, `Equals`, `ContainsAsset`, `And`, `Or` variants; Scala
+  `ScanningPredicateJsonCodecs` wire format; box-matcher (`matches`).
+- `src/scan/registry.rs` — `ScanRegistry` + `Scan`/`ScanRequest`/
+  `WalletInteraction`; Scala scanId allocation (ids 1-10 reserved,
+  user scans from 11; monotonic counter, ids never reused);
+  `MAX_SCAN_NAME_LENGTH = 255`, `MINING_SCAN_ID = 9`,
+  `PAYMENTS_SCAN_ID = 10`.
 - `src/tx_builder.rs` — `UnsignedTxBuilder` + `PaymentRequest`: payment
   requests → `UnsignedTransaction` (pure; no chain access).
 - `src/tx_context.rs` — `BlockchainStateContext`, `BlockchainParameters`,

@@ -22,7 +22,7 @@ ship in a release that also contains breaking changes.
 |---|---|
 | Latest released tag | Yes — security fixes land here |
 | Any older tag | No — upgrade to the latest tag |
-| `master` / unreleased | Best-effort; report against the commit hash |
+| `main` / unreleased | Best-effort; report against the commit hash |
 
 Releases are published at
 <https://github.com/arkadianet/ergo/releases>. Always state the

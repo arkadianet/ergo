@@ -11,18 +11,18 @@ same state root from a block's ADProofs instead of a box arena.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec, ergo-crypto, ergo-validation, ergo-sigma
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~28,900 (src incl. substantial inline tests; ~25 of 43 files carry `#[cfg(test)]` blocks)
+**Approx LOC:** ~33,000 (src incl. substantial inline tests; ~26 of 43 files carry `#[cfg(test)]` blocks)
 
 ## Start here
 - `lib.rs` (`src/lib.rs:1`) — module map + re-export surface. Names the
   three-trait backend dispatch (`StateBackend` = `ChainStateRead` +
   `HeaderSectionStore` + `BlockApply`) and the two concrete backends.
-- `StateStore` (`src/store/mod.rs:557`) — the Mode 1/2/3/6 store. Its
+- `StateStore` (`src/store/mod.rs:641`) — the Mode 1/2/3/6 store. Its
   inherent methods (`open`, `initialize_genesis`/`apply_genesis`,
   `apply_block`, `rollback_to`, `install_snapshot_state`, `reader_handle`)
   are the whole forward contract. The largest module in the crate.
 - `apply_block` → `apply_checked_transactions` → `apply_utxo_changes` →
-  `persist_apply` (`src/store/apply.rs:139`, `:197`, `:417`; `src/store/mod.rs:4206`)
+  `persist_apply` (`src/store/apply.rs:139`, `:208`, `:451`; `src/store/mod.rs:4271`)
   — the apply pipeline. `persist_apply` is the atomic-commit unit (one redb
   write txn for undo + AVL + chain_index + state_meta + voted_params + wallet).
 - `AvlTree` (`src/avl/tree.rs:61`) — the authenticated AVL+ tree; maintains the
@@ -75,16 +75,16 @@ same state root from a block's ADProofs instead of a box arena.
   `open_with_repair_logging`; every production write txn must route through here.
 
 ## Key types, traits & functions
-- `StateStore` (struct) — Mode 1/2/3/6 UTXO state store — `src/store/mod.rs:557`
+- `StateStore` (struct) — Mode 1/2/3/6 UTXO state store — `src/store/mod.rs:641`
 - `StateStore::apply_block` (fn) — apply a `CheckedBlock`, advancing the tip — `src/store/apply.rs:139`
 - `StateStore::rollback_to` (fn) — delta-based reorg rollback to a target height — `src/store/reorg.rs:41`
-- `StateStore::persist_apply` (fn) — the atomic one-txn commit unit — `src/store/mod.rs:4206`
-- `StateStore::install_snapshot_state` (fn) — Mode 2 UTXO-snapshot install — `src/store/mod.rs:1039`
+- `StateStore::persist_apply` (fn) — the atomic one-txn commit unit — `src/store/mod.rs:4271`
+- `StateStore::install_snapshot_state` (fn) — Mode 2 UTXO-snapshot install — `src/store/mod.rs:1091`
 - `compute_minimal_full_block_height` (fn) — Mode 3 prune low-water mark (Scala parity) — `src/store/apply.rs:53`
 - `AvlTree` (struct) — incremental authenticated AVL+ tree — `src/avl/tree.rs:61`
 - `AvlNode` (enum) — Leaf / Internal node, with cached labels — `src/avl/node.rs:18`
 - `leaf_label` / `internal_label` (fn) — consensus-critical label hashes — `src/avl/digest.rs:32`, `:52`
-- `NodeArena` (trait) — pluggable node storage (memory / cached-disk) — `src/avl/arena.rs:27`
+- `NodeArena` (trait) — pluggable node storage (memory / cached-disk) — `src/avl/arena.rs:25`
 - `UndoEntry` (struct) — per-block reverse delta (changelog + box-level) — `src/store/undo.rs:18`
 - `ChainState` / `ChainStateMeta` (struct) — in-memory vs persisted chain pointers — `src/chain.rs:358`, `:209`
 - `HeaderMeta` (struct) — persisted header row; `pow_validity` is the only persisted validity flag — `src/chain.rs:22`
@@ -95,7 +95,7 @@ same state root from a block's ADProofs instead of a box arena.
 - `StateBackendKind` (enum) — `Utxo` / `Digest` runtime dispatch — `src/backend.rs:246`
 - `DigestStateStore` (struct) — Mode 5 digest-verifier backend — `src/digest_store.rs:140`
 - `DigestProofVerifier` (struct) — ADProof-driven digest derivation — `src/digest_apply.rs:156`
-- `PersistPipeline` / `PersistResult` (struct/enum) — background commit batching — `src/persist.rs:288`, `:265`
+- `PersistPipeline` / `PersistResult` (struct/enum) — background commit batching — `src/persist.rs:284`, `:261`
 - `StateError` (enum) — crate-wide error; re-exported as `ergo_state::store::StateError` — `src/store/error.rs`
 - `begin_write_qr` (fn) — quick-repair write-txn helper (mandatory for all writes) — `src/redb_util.rs:33`
 
@@ -117,7 +117,7 @@ same state root from a block's ADProofs instead of a box arena.
 - **Invalidity policy.** `pow_validity` is the ONLY persisted validity flag,
   reserved for cryptographically definitive PoW failure. All other failures use
   session-scoped `ChainState::session_invalids`, cleared on restart
-  (`chain.rs:21`, `:372`).
+  (`chain.rs:17`, `:375`).
 - **AVL+ label hashing matches scorex-util / `ergo_avltree_rust`.** Leaf =
   `blake2b256(0x00 ‖ key ‖ value ‖ next_key)`, Internal =
   `blake2b256(0x01 ‖ balance ‖ left_label ‖ right_label)`, ADDigest =
@@ -134,12 +134,12 @@ same state root from a block's ADProofs instead of a box arena.
   `"digest"` (headers-only Mode 6, same schema), and `"digest-verifier"` (Mode 5,
   incompatible schema). A dir carrying both AVL arena rows and digest-verifier
   markers with no sentinel is a hard `DbCorruption` — never inferred
-  (`store/mod.rs:362`).
+  (`store/mod.rs:425`).
 - **Mode 3 prune monotonicity / rollback-window safety.** The prune
   low-water mark never walks backward (`compute_minimal_full_block_height`),
   and `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` is enforced at config
   load so the active rollback window can never fall into pruned territory
-  (`store/mod.rs:173`, `:555`).
+  (`store/mod.rs:173`, `:608`).
 - **Crash-repair contract.** Every write txn goes through `begin_write_qr`
   (quick_repair on); a single non-quick-repair commit defeats it for all prior
   commits, so the rule is mechanical: zero `db.begin_write()` outside this

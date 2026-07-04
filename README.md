@@ -15,7 +15,7 @@ Repository: <https://github.com/arkadianet/ergo>
   single-writer runtime model, data-flow paths, and the consensus / persistence
   / reorg contracts.
 - [`docs/codemap.md`](./docs/codemap.md) — per-crate **codebase map**: a layered
-  index, the dependency graph, and a landmark page for each of the 17 crates
+  index, the dependency graph, and a landmark page for each of the 18 crates
   (purpose, modules, key types, invariants, "start here").
 - [`docs/overview.md`](./docs/overview.md) — the handbook: repository layout and
   the full build / test / run / configure surface.
@@ -94,7 +94,8 @@ The workspace pins Rust 1.95.0 via [`rust-toolchain.toml`](./rust-toolchain.toml
 # Build the node + wallet binaries.
 cargo build --release -p ergo-node -p ergo-wallet
 
-# Run against the bundled default config (mainnet full archival; REST on 127.0.0.1:9099).
+# Run against the bundled default config (mainnet full archival; REST + operator
+# web UI on 127.0.0.1:9099).
 ./target/release/ergo-node --config ergo-node/ergo-node.toml
 
 # CLI help.
@@ -102,10 +103,14 @@ cargo build --release -p ergo-node -p ergo-wallet
 ```
 
 The first run performs a full Initial Block Download from genesis; subsequent
-runs resume from the persisted tip. For a ~20-minute clean-DB boot, enable Mode
-2 + NiPoPoW. The full build / test / run / configuration surface — profiles,
-feature-gated tests, the config reference, observability — is in
-[`docs/overview.md`](./docs/overview.md).
+runs resume from the persisted tip. The node also serves a dependency-free
+operator web dashboard at the REST bind address (`http://127.0.0.1:9099/` by
+default) — a single-page app with Overview (live charts + event feed),
+Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus a Swagger
+UI at `/swagger`; wallet actions require the API key. For a ~20-minute clean-DB
+boot, enable Mode 2 + NiPoPoW. The full build / test / run / configuration
+surface — profiles, feature-gated tests, the config reference, observability —
+is in [`docs/overview.md`](./docs/overview.md).
 
 ## Correctness
 
