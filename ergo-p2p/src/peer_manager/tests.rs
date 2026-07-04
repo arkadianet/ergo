@@ -150,8 +150,12 @@ fn gossip_interval_matches_scala_default() {
 }
 
 fn unique_addr(i: usize) -> SocketAddr {
-    let n = i as u8;
-    addr(1 + n, n, n, n, 9030)
+    // Distinct /16 subnet per index so per-IP (/32) and per-subnet (/16)
+    // caps never collide for indices up to ~65k. octet0 starts at 1 to
+    // stay off the 0.0.0.0/8 reserved block.
+    let hi = 1 + (i / 256) as u8;
+    let lo = (i % 256) as u8;
+    addr(hi, lo, 0, 1, 9030)
 }
 
 fn spec() -> PeerSpec {
@@ -640,28 +644,63 @@ fn s4_outbound_deficit_matches_missing_outbound_count() {
 }
 
 #[test]
-fn inbound_slot_limit_reserves_outbound() {
-    let mut mgr = PeerManager::new(1);
-    let now = Instant::now();
-    // Fill inbound to the max (DEFAULT_MAX_CONNECTIONS - DEFAULT_TARGET_OUTBOUND).
-    let max_inbound = DEFAULT_MAX_CONNECTIONS - DEFAULT_TARGET_OUTBOUND;
-    assert_eq!(max_inbound, 20);
-    for i in 0..max_inbound {
-        mgr.register_inbound(unique_addr(i), now).unwrap();
-    }
-    // Next inbound should fail — outbound slots are reserved
-    let result = mgr.register_inbound(addr(200, 200, 200, 200, 9030), now);
-    assert_eq!(result, Err(ConnectError::TooManyInbound));
-    // But outbound should still work
-    let result = mgr.register_outbound(addr(201, 201, 201, 201, 9030), now);
-    assert!(result.is_ok());
+fn default_limits_are_decoupled() {
+    // The inbound budget is an explicit field, NOT `max - target`.
+    assert_eq!(DEFAULT_MAX_CONNECTIONS, 384);
+    assert_eq!(DEFAULT_TARGET_OUTBOUND, 96);
+    assert_eq!(DEFAULT_MAX_INBOUND, 256);
+    let limits = PeerLimits::default();
+    assert_eq!(limits.max_inbound(), 256);
+    // Proof of decoupling: the old leftover formula would give 288.
+    assert_ne!(
+        limits.max_inbound(),
+        DEFAULT_MAX_CONNECTIONS - DEFAULT_TARGET_OUTBOUND,
+        "max_inbound must be its own budget, not max_connections - target_outbound",
+    );
 }
 
 #[test]
-fn custom_limits_drive_outbound_target_and_inbound_reserve() {
+fn full_outbound_does_not_reduce_inbound() {
+    // Decoupling invariant: filling the entire outbound target must not
+    // steal a single inbound slot. Small custom limits keep the numbers
+    // tractable and make max_inbound (12) distinct from the old leftover
+    // max - target (20 - 5 = 15).
+    let limits = PeerLimits {
+        max_connections: 20,
+        target_outbound: 5,
+        max_inbound: 12,
+        per_ip_limit: 1,
+        per_subnet_limit: 3,
+    };
+    let mut mgr = PeerManager::new_with_limits(1, limits);
+    let now = Instant::now();
+
+    // Fill outbound to target.
+    for i in 0..5 {
+        mgr.register_outbound(unique_addr(i), now).unwrap();
+    }
+    assert_eq!(mgr.outbound_deficit(), 0);
+
+    // Inbound still reaches its full explicit budget (12), unaffected by
+    // the full outbound set. 5 + 12 = 17 <= 20, so the total ceiling is
+    // not the limiter here — max_inbound is.
+    for i in 5..17 {
+        mgr.register_inbound(unique_addr(i), now).unwrap();
+    }
+    assert_eq!(
+        mgr.register_inbound(unique_addr(17), now),
+        Err(ConnectError::TooManyInbound),
+    );
+}
+
+#[test]
+fn custom_limits_decouple_inbound() {
+    // max_inbound (4) is deliberately NOT max_connections - target_outbound
+    // (12 - 7 = 5), proving the inbound cap is the explicit field.
     let limits = PeerLimits {
         max_connections: 12,
         target_outbound: 7,
+        max_inbound: 4,
         per_ip_limit: 1,
         per_subnet_limit: 3,
     };
@@ -671,18 +710,73 @@ fn custom_limits_drive_outbound_target_and_inbound_reserve() {
     assert_eq!(mgr.limits(), limits);
     assert_eq!(mgr.outbound_deficit(), 7);
 
-    for i in 0..5 {
+    // Inbound caps at the explicit 4, not the leftover 5.
+    for i in 0..4 {
         mgr.register_inbound(unique_addr(i), now).unwrap();
     }
     assert_eq!(
-        mgr.register_inbound(unique_addr(5), now),
+        mgr.register_inbound(unique_addr(4), now),
         Err(ConnectError::TooManyInbound),
     );
 
+    // Outbound still reaches its own target (4 + 7 = 11 <= 12).
     for i in 5..12 {
         mgr.register_outbound(unique_addr(i), now).unwrap();
     }
     assert_eq!(mgr.outbound_deficit(), 0);
+}
+
+#[test]
+fn max_connections_is_hard_ceiling_over_sum() {
+    // target_outbound + max_inbound (5 + 8 = 13) exceeds max_connections
+    // (10). The total ceiling must still cap the sum: once 10 peers are
+    // connected, the next register is rejected as TooManyConnections even
+    // though the inbound budget (8) is not yet full.
+    let limits = PeerLimits {
+        max_connections: 10,
+        target_outbound: 5,
+        max_inbound: 8,
+        per_ip_limit: 1,
+        per_subnet_limit: 3,
+    };
+    let mut mgr = PeerManager::new_with_limits(1, limits);
+    let now = Instant::now();
+
+    for i in 0..5 {
+        mgr.register_outbound(unique_addr(i), now).unwrap();
+    }
+    for i in 5..10 {
+        mgr.register_inbound(unique_addr(i), now).unwrap();
+    }
+    // 10 total = max_connections. Inbound count is only 5 (< 8), yet the
+    // total ceiling rejects first (check_can_connect runs before the
+    // inbound-cap check in register_inbound).
+    assert_eq!(
+        mgr.register_inbound(unique_addr(10), now),
+        Err(ConnectError::TooManyConnections),
+    );
+}
+
+#[test]
+fn max_inbound_zero_is_outbound_only() {
+    // max_inbound = 0 is a legal outbound-only posture: every inbound
+    // registration is rejected immediately, while outbound is unaffected.
+    let limits = PeerLimits {
+        max_connections: 8,
+        target_outbound: 8,
+        max_inbound: 0,
+        per_ip_limit: 1,
+        per_subnet_limit: 3,
+    };
+    let mut mgr = PeerManager::new_with_limits(1, limits);
+    let now = Instant::now();
+
+    assert_eq!(
+        mgr.register_inbound(unique_addr(0), now),
+        Err(ConnectError::TooManyInbound),
+    );
+    // Outbound still works.
+    mgr.register_outbound(unique_addr(1), now).unwrap();
 }
 
 #[test]

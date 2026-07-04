@@ -82,15 +82,29 @@ impl NodeConfig {
             return Err("no peers configured — use --peers or [peers] known in config file".into());
         }
 
+        let max_connections = toml_cfg
+            .peers
+            .max_connections
+            .unwrap_or(ergo_p2p::peer_manager::DEFAULT_MAX_CONNECTIONS);
+        // When target_outbound is omitted, clamp the (raised) default down
+        // to the operator's max_connections ceiling instead of hard-failing
+        // the load below. Without this, a plain binary upgrade would brick a
+        // config that pins a low max_connections (e.g. the old default 80)
+        // and leaves target_outbound unset: the raised default (96) would
+        // exceed that pin and trip the `target_outbound > max_connections`
+        // error. An EXPLICIT target_outbound above max_connections stays a
+        // hard error (a genuine operator contradiction).
+        let target_outbound = match toml_cfg.peers.target_outbound {
+            Some(explicit) => explicit,
+            None => ergo_p2p::peer_manager::DEFAULT_TARGET_OUTBOUND.min(max_connections),
+        };
         let peer_limits = ergo_p2p::peer_manager::PeerLimits {
-            max_connections: toml_cfg
+            max_connections,
+            target_outbound,
+            max_inbound: toml_cfg
                 .peers
-                .max_connections
-                .unwrap_or(ergo_p2p::peer_manager::DEFAULT_MAX_CONNECTIONS),
-            target_outbound: toml_cfg
-                .peers
-                .target_outbound
-                .unwrap_or(ergo_p2p::peer_manager::DEFAULT_TARGET_OUTBOUND),
+                .max_inbound
+                .unwrap_or(ergo_p2p::peer_manager::DEFAULT_MAX_INBOUND),
             per_ip_limit: toml_cfg
                 .peers
                 .per_ip_limit

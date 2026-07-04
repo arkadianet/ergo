@@ -13,8 +13,9 @@
 //!
 //! [peers]
 //! known = ["213.239.193.208:9030", "159.65.11.55:9030"]
-//! target_outbound = 60
-//! max_connections = 80
+//! target_outbound = 96
+//! max_inbound = 256
+//! max_connections = 384
 //! ```
 
 use ergo_chain_spec::ChainSpec;
