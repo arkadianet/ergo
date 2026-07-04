@@ -305,6 +305,11 @@ pub(super) struct TomlPeers {
     pub(super) known: Vec<String>,
     pub(super) max_connections: Option<usize>,
     pub(super) target_outbound: Option<usize>,
+    /// Maximum inbound connections accepted. Decoupled from
+    /// `target_outbound`, so a full outbound set never reduces inbound
+    /// capacity. `0` = outbound-only. Defaults to `DEFAULT_MAX_INBOUND`
+    /// (256) when omitted.
+    pub(super) max_inbound: Option<usize>,
     pub(super) per_ip_limit: Option<usize>,
     pub(super) per_subnet_limit: Option<usize>,
     /// `0.0.0.0:9030` to listen on the default mainnet port. Empty

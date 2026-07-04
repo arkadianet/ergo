@@ -99,11 +99,13 @@ fn peers_section_parses_connection_limits() {
         "[peers]\n\
          max_connections = 90\n\
          target_outbound = 60\n\
+         max_inbound = 128\n\
          per_ip_limit = 2\n\
          per_subnet_limit = 4\n",
     );
     assert_eq!(cfg.peers.max_connections, Some(90));
     assert_eq!(cfg.peers.target_outbound, Some(60));
+    assert_eq!(cfg.peers.max_inbound, Some(128));
     assert_eq!(cfg.peers.per_ip_limit, Some(2));
     assert_eq!(cfg.peers.per_subnet_limit, Some(4));
 }
@@ -124,7 +126,7 @@ fn load_default_download_window_is_p2p_default() {
 }
 
 #[test]
-fn load_default_peer_limits_target_sixty_outbound() {
+fn load_default_peer_limits_are_decoupled() {
     let toml = default_toml();
     let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
@@ -132,9 +134,9 @@ fn load_default_peer_limits_target_sixty_outbound() {
         cfg.peer_limits,
         ergo_p2p::peer_manager::PeerLimits::default(),
     );
-    assert_eq!(cfg.peer_limits.max_connections, 80);
-    assert_eq!(cfg.peer_limits.target_outbound, 60);
-    assert_eq!(cfg.peer_limits.max_inbound(), 20);
+    assert_eq!(cfg.peer_limits.max_connections, 384);
+    assert_eq!(cfg.peer_limits.target_outbound, 96);
+    assert_eq!(cfg.peer_limits.max_inbound(), 256);
 }
 
 #[test]
@@ -144,6 +146,7 @@ fn load_toml_peer_limit_override() {
          known = [\"127.0.0.1:9030\"]\n\
          max_connections = 100\n\
          target_outbound = 70\n\
+         max_inbound = 40\n\
          per_ip_limit = 2\n\
          per_subnet_limit = 5\n",
     );
@@ -154,10 +157,26 @@ fn load_toml_peer_limit_override() {
         ergo_p2p::peer_manager::PeerLimits {
             max_connections: 100,
             target_outbound: 70,
+            max_inbound: 40,
             per_ip_limit: 2,
             per_subnet_limit: 5,
         },
     );
+}
+
+#[test]
+fn load_without_max_inbound_uses_default() {
+    // A config predating the max_inbound key must still load, defaulting
+    // inbound to DEFAULT_MAX_INBOUND (256) — not the old leftover value.
+    let path = write_toml(
+        "[peers]\n\
+         known = [\"127.0.0.1:9030\"]\n\
+         max_connections = 100\n\
+         target_outbound = 70\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.peer_limits.max_inbound(), 256);
 }
 
 #[test]

@@ -91,6 +91,10 @@ impl NodeConfig {
                 .peers
                 .target_outbound
                 .unwrap_or(ergo_p2p::peer_manager::DEFAULT_TARGET_OUTBOUND),
+            max_inbound: toml_cfg
+                .peers
+                .max_inbound
+                .unwrap_or(ergo_p2p::peer_manager::DEFAULT_MAX_INBOUND),
             per_ip_limit: toml_cfg
                 .peers
                 .per_ip_limit
