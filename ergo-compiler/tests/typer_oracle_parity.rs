@@ -6,8 +6,10 @@
 //! - `OK` records (not in [`SWEEP_SKIP`]): assert `print_typed` byte-matches the
 //!   committed s-expression.
 //! - `REJECT` records: assert the compile fails + exception class matches.
-//! - `SWEEP_SKIP` records: assert the compile ACCEPTS (verdict check only —
-//!   M2 printer has known deviations for PK/demo-env GroupElement constants).
+//! - `SWEEP_SKIP` records: assert the compile ACCEPTS (verdict check only).
+//!   EMPTY since the M3 D-T4/D-T6 fix (the M2 printer deviations for
+//!   PK/demo-env GroupElement constants are closed); retained as the
+//!   mechanism for any future rendering-only exclusion.
 //! - [`VERDICT_DEVIATION_SOURCES`] records: excluded from the sweep entirely — a
 //!   genuine, already-documented verdict divergence (oracle ACCEPTs, our typer
 //!   deliberately REJECTs; e.g. D-T12's GroupElement-RHS string fold). Distinct
@@ -317,32 +319,20 @@ fn seed_reject_records_class_parity() {
     );
 }
 
-/// Sources in [`SWEEP_SKIP`] still typecheck successfully (verdict ACCEPT).
-/// We don't assert the printed form here (M2 rendering deviations are documented);
-/// we only assert that the compile does not fail.
+/// Every source in [`SWEEP_SKIP`] still typechecks successfully (verdict
+/// ACCEPT). Derived from the constant itself — the single source of truth —
+/// so it is vacuous while `SWEEP_SKIP` is empty and automatically covers any
+/// future rendering-only exclusion: a skipped record must never silently
+/// regress to a REJECT. (The 10 former D-T4/D-T6 entries no longer need this
+/// guard — un-skipped, they are asserted to ACCEPT *and* byte-match by
+/// `seed_accept_records_byte_parity`. A future entry needing a non-default
+/// network would need a `typecheck_with_network` variant here.)
 #[test]
 fn seed_accept_skip_set_accepts() {
-    // SWEEP_SKIP entries use the demo env (g1/g2/n1 references).
-    // The PK entry uses testnet network.
-    let sources = [
-        ("tce", "proveDlog(g1)"),
-        ("tce", "atLeast(1, Coll(proveDlog(g1)))"),
-        ("tce", "allOf(Coll(proveDlog(g1)))"),
-        ("tce", "g1.exp(n1)"),
-        ("tce", "g1.negate"),
-        ("tce", "g1.multiply(g2)"),
-        ("tce", "proveDHTuple(g1, g2, g1, g2)"),
-        ("tce", "g3"),
-        ("tce", "proveDlog(g3)"),
-    ];
-    for (verb, src) in sources {
+    for &(verb, src) in SWEEP_SKIP {
         typecheck_verb(verb, src, 3)
             .unwrap_or_else(|e| panic!("SWEEP_SKIP source {src:?} must accept, got {e:?}"));
     }
-    // PK testnet case (separate network call).
-    let pk_src = "PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")";
-    typecheck_with_network(&ScriptEnv::new(), pk_src, 3, NetworkPrefix::Testnet)
-        .unwrap_or_else(|e| panic!("PK SWEEP_SKIP source must accept, got {e:?}"));
 }
 
 /// V2-gate: the 3 sources in §6 REJECT at tree_version=2 with MethodNotFound.
