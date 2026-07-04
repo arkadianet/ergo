@@ -1384,11 +1384,18 @@ mod tests {
     fn big_int_cap_is_version_gated() {
         let f = ident("bigInt", vec![SType::SString], SType::SBigInt);
         let huge_2_pow_1000 = num_bigint::BigUint::from(2u32).pow(1000).to_string();
-        assert!(
-            predef_ir_builder("bigInt", &f, &[str_const(&huge_2_pow_1000)], 2)
-                .expect("isDefinedAt true")
-                .is_ok(),
-            "2^1000 must accept at tree_version 2 (no cap pre-v3)"
+        let v2 = predef_ir_builder("bigInt", &f, &[str_const(&huge_2_pow_1000)], 2)
+            .expect("isDefinedAt true")
+            .expect("2^1000 must accept at tree_version 2 (no cap pre-v3)");
+        // Oracle-pinned: the verbatim ORACLE_TREE_VERSION=2 reply captured in
+        // golden_seed.txt §24(f) (comment block — the accepts-at-v2/rejects-at-v3
+        // direction has no swept-record convention, so the byte assertion lives
+        // here instead of the sweep).
+        let oracle_v2_reply = "(ConstantNode:BigInt (CBigInt @10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376))";
+        assert_eq!(
+            crate::typed_print::print_typed(&v2),
+            oracle_v2_reply,
+            "v2 typed output must byte-match the §24(f) oracle capture"
         );
         let res = predef_ir_builder("bigInt", &f, &[str_const(&huge_2_pow_1000)], 3)
             .expect("isDefinedAt true");
