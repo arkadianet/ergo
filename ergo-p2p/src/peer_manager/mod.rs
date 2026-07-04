@@ -208,8 +208,10 @@ impl PeerManager {
     }
 
     /// Attempt to register a new inbound connection. Returns Err if limits prevent it.
-    /// Inbound connections are capped at max_connections - target_outbound to
-    /// reserve outbound slots (anti-eclipse).
+    /// Inbound is capped at its own `max_inbound` budget (decoupled from
+    /// `target_outbound`, so a full outbound set never reduces inbound
+    /// capacity). The `max_connections` total ceiling still applies on top
+    /// via `check_can_connect`.
     pub fn register_inbound(&mut self, addr: PeerId, now: Instant) -> Result<(), ConnectError> {
         self.check_can_connect(addr, now)?;
         let inbound_count = self.count_by_direction(Direction::Inbound);
