@@ -274,9 +274,15 @@ impl StateStore {
                 what: "prove_with_db: k must be >= 1",
             });
         }
-        if self.chain_state.best_header_height < k + m {
+        // `m`/`k` are attacker-controlled on the REST path: checked add,
+        // or a wrapped sum bypasses this guard (and the `- k + 1` anchor
+        // arithmetic below it) in release builds.
+        let needed_min = k.checked_add(m).ok_or(StateError::InvalidPrecondition {
+            what: "prove_with_db: k + m overflows u32",
+        })?;
+        if self.chain_state.best_header_height < needed_min {
             return Err(StateError::EarlyIBD {
-                needed_min: k + m,
+                needed_min,
                 observed: self.chain_state.best_header_height,
             });
         }

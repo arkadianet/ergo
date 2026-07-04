@@ -78,7 +78,7 @@ lookback/isBetterThan/genesis handling, prover walk vs NipopowProverWithDbAlgs,
 bootstrap state machine vs ErgoNodeViewSynchronizer. Findings → oracle-mapped fix
 waves → regression-confirm re-verify.
 
-### T6 — Final whole-branch review + docs
+### T6 — Final whole-branch review + docs ✅ DONE (docs sweep: served openapi.yaml de-staled + interlinksProof/BatchMerkleProof/continuous schemas, compatibility.md, CHANGELOG; review findings fixed: k+m checked-add on the attacker-controlled REST path, arbitrary_precision pinned locally in ergo-node)
 Most-capable-model review of the full branch; update deviation notes, CHANGELOG,
 memory, this plan's checkboxes.
 

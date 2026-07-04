@@ -39,7 +39,7 @@ hex             = { workspace = true }
 indexmap        = { workspace = true }
 num-bigint      = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
-serde_json      = { workspace = true }
+serde_json         = { workspace = true, features = ["arbitrary_precision"] } # v1 d = arbitrary-precision JSON number (api_bridge::compat relies on this; do not remove)
 tokio           = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 toml            = { workspace = true }
 tracing            = { workspace = true }
