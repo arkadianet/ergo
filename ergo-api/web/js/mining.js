@@ -130,8 +130,12 @@ function blockLink(b, label) {
 }
 
 async function refetchStats() {
-  const s = await api.minerStats(distWindow);
-  if (s) {
+  // Window-race guard: a toggle can overlap onSlow's per-tip fetch (that
+  // one runs outside this call), so commit a response only if the window
+  // it was requested for is still the selected one at arrival time.
+  const w = distWindow;
+  const s = await api.minerStats(w);
+  if (s && w === distWindow) {
     stats = s;
     render();
   }
@@ -167,13 +171,16 @@ export async function onSlow() {
     // Per-tip refetch: the fold, emission facts, the current epoch's
     // header timestamps (retarget estimate), and the block list.
     const epochLen = Math.max(2, (tipH % EPOCH) + 1);
+    const w = distWindow;
     const [s, em, ds, recent] = await Promise.all([
-      api.minerStats(distWindow),
+      api.minerStats(w),
       api.emissionAt(tipH),
       api.difficultyHistory(epochLen),
       api.recentBlocks(32),
     ]);
-    if (s) stats = s;
+    // Same window-race guard as refetchStats: don't let a stale-window
+    // response (dispatched before a toggle) overwrite the fresh one.
+    if (s && w === distWindow) stats = s;
     if (em) emission = em;
     if (ds?.points) diffPoints = ds.points;
     if (Array.isArray(recent)) recentRows = recent;
