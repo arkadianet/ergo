@@ -9,11 +9,18 @@
 //
 // Verbs (hex is Base16 of the UTF-8 source):
 //   tc  <hex>     typecheck with an EMPTY script env
-//   tce <hex>     typecheck with the DEMO env (free vars a,b,col1,col2,g1,g2,n1,bb1,bb2)
+//   tce <hex>     typecheck with the DEMO env (free vars a,b,col1,col2,g1,g2,g3,n1,bb1,bb2)
 //   tcs <hex>     typecheck with the SigmaTyperTest env (LangTests.scala:52-69):
 //                 x,y:Int; c1,c2:Boolean; height1,height2:Long; b1,b2:Byte;
 //                 arr1,arr2:Coll[Byte]; col1,col2:Coll[Long]; g1,g2:GroupElement;
 //                 p1,p2:SigmaProp; n1,n2:BigInt
+//   cc  <hex>     compile (source→ErgoTree) with an EMPTY script env, reply
+//                 `OK <tree_hex> <p2s_address> <p2sh_address>` (mirrors
+//                 ScriptApiRoute.compileSource: header is ALWAYS
+//                 defaultHeaderWithVersion(0), ORACLE_TREE_VERSION only gates
+//                 method visibility, not the header)
+//   cce <hex>     compile with the DEMO env (same free vars as tce)
+//   ccs <hex>     compile with the SigmaTyperTest env (same free vars as tcs)
 //
 // ── batch mode (from worktree root) ────────────────────────────────────────────
 //   python3 scripts/jvm_typer_oracle/gen_inputs.py | \
@@ -89,8 +96,11 @@ import sigma.VersionContext
 import sigma.ast._
 import sigma.ast.syntax.SValue
 import sigma.compiler.SigmaCompiler
+import sigma.compiler.ir.CompiletimeIRContext
 import sigma.exceptions.CompilerException
+import sigma.serialization.ErgoTreeSerializer
 import sigmastate.interpreter.Interpreter.ScriptEnv
+import org.ergoplatform.{ErgoAddressEncoder, Pay2SAddress, Pay2SHAddress}
 import org.ergoplatform.ErgoAddressEncoder.{MainnetNetworkPrefix, TestnetNetworkPrefix}
 
 object TyperOracle {
@@ -105,15 +115,26 @@ object TyperOracle {
     }
   private val compiler = new SigmaCompiler(NET)
 
+  // Route parity for the `cc`/`cce`/`ccs` verbs (mirrors ScriptApiRoute's
+  // implicit addressEncoder, which is built from the same NET prefix used to
+  // decode PK(...) addresses).
+  private val addressEncoder = new ErgoAddressEncoder(NET)
+
   // ----- demo env for `tce` (free typed variables bound to concrete VALUES) -----
   // The binder substitutes an Ident for the env value via SigmaBinder.scala:39-40
   // (`liftAny` → SigmaBuilder.scala:219 `case v: SValue => Nullable(v)`), so these
   // stand in as typed leaves in the typed tree.
-  // Types: a,b: Coll[Byte]; col1,col2: Coll[Long]; g1,g2: GroupElement;
+  // Types: a,b: Coll[Byte]; col1,col2: Coll[Long]; g1,g2,g3: GroupElement;
   //        n1: BigInt; bb1,bb2: Byte.
   private val demoEnv: ScriptEnv = {
-    val g  = sigma.crypto.CryptoConstants.dlogGroup.generator
+    val dlog = sigma.crypto.CryptoConstants.dlogGroup
+    val g  = dlog.generator
     val ge = sigma.data.CSigmaDslBuilder.GroupElement(g)
+    // g3 = g^7 (7 !== 1 mod group-order, so this is a fixed NON-generator point,
+    // computed the same way sigmaTyperEnv derives g2 = g^2 below via
+    // BcDlogGroup.exponentiate). D-T6's decompress needs a second, distinct point.
+    val g3ecp = dlog.exponentiate(g, java.math.BigInteger.valueOf(7))
+    val ge3   = sigma.data.CSigmaDslBuilder.GroupElement(g3ecp)
     Map[String, Any](
       "a"    -> ByteArrayConstant(Array[Byte](1, 2)),
       "b"    -> ByteArrayConstant(Array[Byte](3, 4)),
@@ -121,6 +142,7 @@ object TyperOracle {
       "col2" -> LongArrayConstant(Array[Long](3L, 4L)),
       "g1"   -> GroupElementConstant(ge),
       "g2"   -> GroupElementConstant(ge),
+      "g3"   -> GroupElementConstant(ge3),
       "n1"   -> BigIntConstant(BigInt(5).bigInteger),
       "bb1"  -> ByteConstant(1.toByte),
       "bb2"  -> ByteConstant(2.toByte)
@@ -246,6 +268,48 @@ object TyperOracle {
         }
     }
 
+  // ----- compile driver for `cc`/`cce`/`ccs` -----
+  //
+  // Mirrors ScriptApiRoute.compileSource (pinned checkout ergo/.../ScriptApiRoute.scala:56-67)
+  // EXACTLY: the emitted ErgoTree header is ALWAYS defaultHeaderWithVersion(0),
+  // regardless of ORACLE_TREE_VERSION — the route never forwards its treeVersion
+  // param into the header either; VersionContext.withVersions(V, V) only gates
+  // method visibility during typecheck/compile. Root SSigmaProp -> fromProposition
+  // directly; root SBoolean -> .toSigmaProp first; anything else -> REJECT (same
+  // catch-all as the `tc` path, so the reply grammar is identical).
+  private def compileVerb(env: ScriptEnv, hexStr: String): String =
+    Base16.decode(hexStr) match {
+      case scala.util.Failure(_) => "ERR not-hex"
+      case scala.util.Success(bytes) =>
+        val source = new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+        try
+          VersionContext.withVersions(V, V) {
+            val header = ErgoTree.defaultHeaderWithVersion(0.toByte)
+            val result = compiler.compile(env, source)(new CompiletimeIRContext)
+            val tree = result.buildTree match {
+              case s: Value[SSigmaProp.type @unchecked] if s.tpe == SSigmaProp =>
+                ErgoTree.fromProposition(header, s)
+              case b: Value[SBoolean.type @unchecked] if b.tpe == SBoolean =>
+                ErgoTree.fromProposition(header, b.toSigmaProp)
+              case other =>
+                throw new Exception(s"non-Bool/SigmaProp root: ${other.tpe}")
+            }
+            val treeBytes = ErgoTreeSerializer.DefaultSerializer.serializeErgoTree(tree)
+            val p2s  = Pay2SAddress(tree)(addressEncoder).toString
+            // P2SH must hash the constant-INLINED proposition, not the tree bytes.
+            val prop = tree.toProposition(replaceConstants = tree.isConstantSegregation)
+            val p2sh = Pay2SHAddress(prop)(addressEncoder).toString
+            "OK " + treeBytes.map("%02x".format(_)).mkString + " " + p2s + " " + p2sh
+          }
+        catch {
+          case e: CompilerException =>
+            val pos = e.source match { case Some(sc) => loc(sc); case None => "0:0" }
+            "REJECT " + pos + " " + e.getClass.getSimpleName
+          case e: Throwable =>
+            "REJECT 0:0 " + e.getClass.getSimpleName
+        }
+    }
+
   def main(args: Array[String]): Unit = {
     var line = StdIn.readLine()
     while (line != null) {
@@ -255,6 +319,9 @@ object TyperOracle {
           case Array("tc",  hex) => handle(Map.empty, hex)
           case Array("tce", hex) => handle(demoEnv, hex)
           case Array("tcs", hex) => handle(sigmaTyperEnv, hex)
+          case Array("cc",  hex) => compileVerb(Map.empty, hex)
+          case Array("cce", hex) => compileVerb(demoEnv, hex)
+          case Array("ccs", hex) => compileVerb(sigmaTyperEnv, hex)
           case _                 => "ERR bad-line"
         }
         println(out)
