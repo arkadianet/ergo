@@ -301,6 +301,10 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // BEFORE `enable_persist_pipeline` below — the pipeline worker
     // captures the value at spawn time.
     store.set_blocks_to_keep(config.blocks_to_keep);
+    // NiPoPoW prover reads the network's difficulty schedule (epoch
+    // lengths + use_last_epochs) — override the mainnet open-default
+    // so a testnet store proves with testnet epochs.
+    store.set_difficulty_params(config.chain_spec.difficulty.clone());
     // Post-open stamp: write the sentinel for fresh + legacy dirs.
     // The early gate above already refused any mismatch on existing
     // sentinels; this call is a no-op when one is already present.
@@ -1121,6 +1125,7 @@ async fn run_inner_with_backend(
                     snapshot_publisher.handle(),
                     scala_static,
                     store.reader_handle(),
+                    config.chain_spec.difficulty.clone(),
                 ));
                 let scala_compat: Arc<dyn ergo_api::NodeChainQuery> =
                     scala_compat_bridge_arc.clone();

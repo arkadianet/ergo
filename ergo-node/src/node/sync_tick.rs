@@ -451,13 +451,12 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
     if pending.is_empty() {
         return;
     }
-    // Mainnet constants: m=6, k=10 (ErgoHistoryUtils.scala:29-34).
     // header_id_opt = None lets Scala serve its pre-computed
     // anchored proof (HeadersProcessor.scala:179 takes the proof
     // at snapshot_height - LastHeadersInContext).
     let payload = message::serialize_get_nipopow_proof(&ergo_p2p::types::NipopowProofData {
-        m: 6,
-        k: 10,
+        m: ergo_p2p::types::P2P_NIPOPOW_PROOF_M,
+        k: ergo_p2p::types::P2P_NIPOPOW_PROOF_K,
         header_id_opt: None,
     });
     for peer in pending {

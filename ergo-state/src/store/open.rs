@@ -275,6 +275,7 @@ impl StateStore {
         };
 
         let mut store = Self {
+            difficulty_params: ergo_chain_spec::DifficultyParams::mainnet(),
             headers: crate::header_store::HeaderSectionTables::new(db.clone()),
             db,
             tree,

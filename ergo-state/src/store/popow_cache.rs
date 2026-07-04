@@ -430,7 +430,7 @@ impl StateStore {
         collected.insert(1, genesis_popow);
 
         // Difficulty headers needed for continuous-mode validation.
-        let chain_config = ergo_crypto::difficulty::DifficultyParams::mainnet();
+        let chain_config = self.difficulty_params.clone();
         let epoch_length = match (
             chain_config.eip37_activation_height,
             chain_config.eip37_epoch_length,
@@ -445,7 +445,11 @@ impl StateStore {
         // a typed error instead of being silently skipped — the
         // facade's None previously collapsed three distinct causes
         // into one indistinguishable absence.
-        for h in difficulty_headers_needed(suffix_head_height, epoch_length, 8) {
+        for h in difficulty_headers_needed(
+            suffix_head_height,
+            epoch_length,
+            chain_config.use_last_epochs,
+        ) {
             if h < suffix_head_height && h > 0 {
                 let id =
                     self.get_header_id_at_height(h)?

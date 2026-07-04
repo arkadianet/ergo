@@ -90,6 +90,15 @@ pub struct SnapshotsInfo {
     pub available_manifests: Vec<(i32, [u8; 32])>,
 }
 
+/// The only `(m, k)` parameters this node requests or serves over P2P —
+/// Scala `ErgoHistoryUtils.scala:29,34` (`P2PNipopowProofM = 6`,
+/// `P2PNipopowProofK = 10`). The serve side refuses other params
+/// (`ErgoNodeViewSynchronizer.scala:1046-1058` warns and drops);
+/// arbitrary params are a REST-only capability.
+pub const P2P_NIPOPOW_PROOF_M: i32 = 6;
+/// See [`P2P_NIPOPOW_PROOF_M`].
+pub const P2P_NIPOPOW_PROOF_K: i32 = 10;
+
 /// NiPoPoW proof request data (code 90). Carries the `(m, k)` security
 /// parameters and an optional anchor header id.
 #[derive(Debug, Clone)]
@@ -100,6 +109,19 @@ pub struct NipopowProofData {
     pub k: i32,
     /// Anchor header id. `None` means "from the requester's known tip".
     pub header_id_opt: Option<[u8; 32]>,
+}
+
+impl NipopowProofData {
+    /// Whether the P2P serve side may answer this request — Scala
+    /// `sendNipopowProof` (`ErgoNodeViewSynchronizer.scala:1047`):
+    /// `data.m == P2PNipopowProofM && data.k == P2PNipopowProofK &&
+    /// data.headerIdBytesOpt.isEmpty`. Anything else is warned and
+    /// dropped, never answered with the default cached proof.
+    pub fn p2p_servable(&self) -> bool {
+        self.m == P2P_NIPOPOW_PROOF_M
+            && self.k == P2P_NIPOPOW_PROOF_K
+            && self.header_id_opt.is_none()
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +151,42 @@ mod tests {
         // body section.
         assert!(ModifierTypeId::is_block_section(101));
         assert!(!ModifierTypeId::is_block_body_section(101));
+    }
+}
+
+#[cfg(test)]
+mod nipopow_guard_tests {
+    use super::*;
+
+    #[test]
+    fn default_unanchored_request_is_servable() {
+        assert!(NipopowProofData {
+            m: P2P_NIPOPOW_PROOF_M,
+            k: P2P_NIPOPOW_PROOF_K,
+            header_id_opt: None,
+        }
+        .p2p_servable());
+    }
+
+    #[test]
+    fn non_default_params_or_anchor_are_refused() {
+        // Scala sendNipopowProof warns + drops all three of these.
+        let cases = [
+            (3, P2P_NIPOPOW_PROOF_K, None),
+            (P2P_NIPOPOW_PROOF_M, 5, None),
+            (P2P_NIPOPOW_PROOF_M, P2P_NIPOPOW_PROOF_K, Some([0u8; 32])),
+        ];
+        for (m, k, header_id_opt) in cases {
+            assert!(
+                !NipopowProofData {
+                    m,
+                    k,
+                    header_id_opt
+                }
+                .p2p_servable(),
+                "(m={m}, k={k}, anchored={}) must be refused",
+                header_id_opt.is_some()
+            );
+        }
     }
 }

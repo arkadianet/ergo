@@ -31,6 +31,10 @@ pub struct ScalaCompatBridge {
     handle: SnapshotHandle,
     static_cfg: Arc<ScalaCompatStatic>,
     store_reader: ChainStoreReader,
+    /// Network difficulty schedule for the NiPoPoW on-demand prover
+    /// (`/nipopow/proof/*`). Wired from `chain_spec.difficulty` at
+    /// boot, mirroring `StateStore::set_difficulty_params`.
+    difficulty_params: ergo_chain_spec::DifficultyParams,
 }
 
 impl ScalaCompatBridge {
@@ -38,11 +42,13 @@ impl ScalaCompatBridge {
         handle: SnapshotHandle,
         static_cfg: ScalaCompatStatic,
         store_reader: ChainStoreReader,
+        difficulty_params: ergo_chain_spec::DifficultyParams,
     ) -> Self {
         Self {
             handle,
             static_cfg: Arc::new(static_cfg),
             store_reader,
+            difficulty_params,
         }
     }
 
@@ -304,7 +310,14 @@ impl NodeChainQuery for ScalaCompatBridge {
         );
         let proof = self
             .store_reader
-            .prove_nipopow(m, k, header_id_opt, meta.best_header_height, is_dense)
+            .prove_nipopow(
+                m,
+                k,
+                header_id_opt,
+                meta.best_header_height,
+                is_dense,
+                &self.difficulty_params,
+            )
             .map_err(|e| e.to_string())?;
         super::nipopow::encode_nipopow_proof(&proof).map_err(|e| e.to_string())
     }

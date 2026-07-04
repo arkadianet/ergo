@@ -688,6 +688,33 @@ pub(super) fn handle_message(
             // archive node returns its cached proof if one has been
             // built (by StateStore::compute_and_cache_popow_proof_dense
             // or a future apply-time snapshot-epoch hook).
+            // Scala parity (`ErgoNodeViewSynchronizer.scala:1046-1058`
+            // `sendNipopowProof`): serve ONLY the canonical
+            // `(P2P_NIPOPOW_PROOF_M, P2P_NIPOPOW_PROOF_K)` request with
+            // no anchor id — anything else warns and drops (previously
+            // we served the cached default proof to ANY request, a
+            // silent wrong-proof divergence). A malformed payload is
+            // peer misbehavior, as on the other request arms.
+            let data = match message::deserialize_get_nipopow_proof(payload) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(peer = %peer, error = %e, "bad GetNipopowProof payload");
+                    return vec![Action::Penalize {
+                        peer,
+                        penalty: Penalty::Misbehavior,
+                    }];
+                }
+            };
+            if !data.p2p_servable() {
+                warn!(
+                    peer = %peer,
+                    m = data.m,
+                    k = data.k,
+                    anchored = data.header_id_opt.is_some(),
+                    "GetNipopowProof: params can't be served (only default m/k, unanchored)"
+                );
+                return Vec::new();
+            }
             let is_sparse = matches!(
                 state.store.chain_state_meta().header_availability,
                 ergo_state::chain::HeaderAvailability::PoPowSparse { .. }
