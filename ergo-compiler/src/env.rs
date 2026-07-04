@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use ergo_crypto::group_element::{decompress_to_affine_hex, GroupElementError};
 use ergo_primitives::group_element::GroupElement;
 
 use crate::stype::SType;
@@ -107,13 +108,21 @@ impl ScriptEnv {
 ///
 /// Normative source: Platform.scala:16-65.
 ///
-/// # Deviations (M2)
+/// # Deviations (M3, D-T5)
 ///
-/// `GroupElement` renders the 33-byte key as a hex string in
-/// `ConstPayload::GroupElement`.  M3 must replace this with the Scala
-/// `Ecp.toString` decompressed form `(x_hex,y_hex,1)`.
-pub fn lift(v: &EnvValue) -> TypedExpr {
-    match v {
+/// Every `EnvValue` variant except `GroupElement` lifts unconditionally
+/// (matching the Scala doc above). `GroupElement` additionally on-curve-checks
+/// the 33-byte key and REJECTS an off-curve or identity (`0x00`-prefix) point
+/// (`GroupElementError`). Scala never reaches this case: an env `GroupElement`
+/// is always a JVM-constructed curve point (`decodePoint` — the only surface
+/// that could produce an off-curve/identity value — is NEVER constant-folded
+/// at typecheck time, golden_seed.txt §23(e)), so it has no oracle-observed
+/// reject class to mirror byte-for-byte. Rejecting here is a bounded,
+/// reject-side-safe deviation from Scala's implicit "cannot happen" invariant
+/// (the caller maps this to `BindError::InvalidArguments`, a REAL Scala class
+/// used elsewhere in the binder — not a fabricated one).
+pub fn lift(v: &EnvValue) -> Result<TypedExpr, GroupElementError> {
+    Ok(match v {
         // Platform.scala:37 — Boolean → TrueLeaf / FalseLeaf
         EnvValue::Bool(b) => TypedExpr::Constant {
             value: ConstPayload::Bool(*b),
@@ -155,13 +164,16 @@ pub fn lift(v: &EnvValue) -> TypedExpr {
             tpe: SType::SColl(Box::new(SType::SLong)),
         },
         // Platform.scala:39-41 — GroupElement → GroupElementConstant.
-        // deviation: M2 renders the 33-byte key as hex rather than the Scala
-        // Ecp.toString `(x_hex,y_hex,1)` form (requires curve decompression).
-        // M3: replace with proper decompressed rendering.
+        // D-T5: on-curve check (rejects off-curve AND identity — see the
+        // deviation note above) before storing the bytes-of-record.
         EnvValue::GroupElement(ge) => {
-            let hex: String = ge.as_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+            let bytes = *ge.as_bytes();
+            // Discard the decompressed coordinates here — only the on-curve
+            // verdict matters at lift time; the printer re-decompresses from
+            // the stored bytes on demand (typed_print.rs).
+            decompress_to_affine_hex(&bytes)?;
             TypedExpr::Constant {
-                value: ConstPayload::GroupElement(hex),
+                value: ConstPayload::GroupElement(bytes),
                 tpe: SType::SGroupElement,
             }
         }
@@ -170,7 +182,7 @@ pub fn lift(v: &EnvValue) -> TypedExpr {
             value: ConstPayload::SigmaProp(s.clone()),
             tpe: SType::SSigmaProp,
         },
-    }
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -199,7 +211,7 @@ mod tests {
     fn lift_bool_true_produces_bool_constant() {
         // Platform.scala:37 — Boolean → TrueLeaf
         let v = EnvValue::Bool(true);
-        let e = lift(&v);
+        let e = lift(&v).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -213,7 +225,7 @@ mod tests {
     fn lift_byte_produces_byte_constant() {
         // Platform.scala:27 — Byte (i8) → ByteConstant
         let v = EnvValue::Byte(-5i8);
-        let e = lift(&v);
+        let e = lift(&v).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -225,7 +237,7 @@ mod tests {
 
     #[test]
     fn lift_short_produces_short_constant() {
-        let e = lift(&EnvValue::Short(300i16));
+        let e = lift(&EnvValue::Short(300i16)).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -237,7 +249,7 @@ mod tests {
 
     #[test]
     fn lift_int_produces_int_constant() {
-        let e = lift(&EnvValue::Int(42));
+        let e = lift(&EnvValue::Int(42)).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -249,7 +261,7 @@ mod tests {
 
     #[test]
     fn lift_long_produces_long_constant() {
-        let e = lift(&EnvValue::Long(1_000_000i64));
+        let e = lift(&EnvValue::Long(1_000_000i64)).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -262,7 +274,7 @@ mod tests {
     #[test]
     fn lift_bigint_produces_bigint_constant() {
         // Platform.scala:35 — n1 in demo env is BigInt("5")
-        let e = lift(&EnvValue::BigInt("5".to_string()));
+        let e = lift(&EnvValue::BigInt("5".to_string())).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -277,7 +289,7 @@ mod tests {
     #[test]
     fn lift_byte_array_produces_bytecoll_constant() {
         // Platform.scala:51-52 — a in demo env is ByteArray([1, 2])
-        let e = lift(&EnvValue::ByteArray(vec![1i8, 2i8]));
+        let e = lift(&EnvValue::ByteArray(vec![1i8, 2i8])).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -293,7 +305,7 @@ mod tests {
     #[test]
     fn lift_long_array_produces_longcoll_constant() {
         // Platform.scala:55-56 — col1 in demo env is LongArray([1, 2])
-        let e = lift(&EnvValue::LongArray(vec![1i64, 2i64]));
+        let e = lift(&EnvValue::LongArray(vec![1i64, 2i64])).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -310,20 +322,24 @@ mod tests {
     fn lift_group_element_produces_groupelement_constant() {
         // Platform.scala:39-41 — g1 in demo env is the secp256k1 generator.
         let ge = generator_ge();
-        let e = lift(&EnvValue::GroupElement(ge));
-        // Type must be SGroupElement.
-        assert!(matches!(
+        let e = lift(&EnvValue::GroupElement(ge)).unwrap();
+        assert_eq!(
             e,
             TypedExpr::Constant {
-                value: ConstPayload::GroupElement(_),
+                value: ConstPayload::GroupElement(*ge.as_bytes()),
                 tpe: SType::SGroupElement,
             }
-        ));
+        );
+        // Printer must decompress to the oracle's affine form (golden_seed.txt L54).
+        assert_eq!(
+            print_typed(&e),
+            "(ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1))))"
+        );
     }
 
     #[test]
     fn lift_sigma_prop_produces_sigmaprop_constant() {
-        let e = lift(&EnvValue::SigmaProp("opaque".to_string()));
+        let e = lift(&EnvValue::SigmaProp("opaque".to_string())).unwrap();
         assert_eq!(
             e,
             TypedExpr::Constant {
@@ -371,5 +387,26 @@ mod tests {
     fn env_value_clone_and_eq() {
         let v = EnvValue::ByteArray(vec![1i8, 2i8, 3i8]);
         assert_eq!(v.clone(), v);
+    }
+
+    #[test]
+    fn lift_off_curve_group_element_rejects() {
+        // D-T5: x=5 has no valid y on secp256k1 (independently verified —
+        // see ergo-crypto::group_element::tests::off_curve_bytes).
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x02;
+        bytes[32] = 0x05;
+        let err = lift(&EnvValue::GroupElement(GroupElement::from_bytes(bytes))).unwrap_err();
+        assert_eq!(err, GroupElementError::NotOnCurve);
+    }
+
+    #[test]
+    fn lift_identity_group_element_rejects() {
+        // D-T5 identity policy: a 0x00-prefixed literal has no faithful Scala
+        // counterpart (env values are always JVM-constructed curve points) —
+        // rejected, not accepted as the group identity.
+        let bytes = [0u8; 33];
+        let err = lift(&EnvValue::GroupElement(GroupElement::from_bytes(bytes))).unwrap_err();
+        assert_eq!(err, GroupElementError::Identity);
     }
 }

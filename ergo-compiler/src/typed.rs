@@ -63,9 +63,9 @@ pub struct MethodRef {
 ///   Unit                    → (no value field — ConstantNode:Unit renders with no value)
 ///   ByteColl(v)             → `<@v1 @v2 …>` decimal signed bytes, space-sep
 ///   LongColl(v)             → `<@v1 @v2 …>` decimal longs, space-sep
-///   GroupElement(ecp_str)   → `(CGroupElement (Ecp @ecp_str))` where ecp_str is the
-///                             Ecp toString from Scala (e.g. "(x_hex,y_hex,1)").
-///                             M2 scope: caller must supply the correct JVM-format string.
+///   GroupElement(bytes)     → `(CGroupElement (Ecp @(x,y,1)))` — bytes is the 33-byte
+///                             SEC1-compressed point; the printer decompresses to the
+///                             affine (x_hex,y_hex) pair (M3, D-T6).
 ///   SigmaProp(inner_str)    → opaque rendering (M3 scope for full parity)
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstPayload {
@@ -92,9 +92,12 @@ pub enum ConstPayload {
     ByteColl(Vec<i8>),
     /// `<@v1 @v2 …>` — LongArrayConstant elements (values.scala:511).
     LongColl(Vec<i64>),
-    /// `(CGroupElement (Ecp @ecp_str))` — GroupElementConstant (values.scala:519).
-    /// ecp_str is the Scala Ecp.toString form, e.g. "(x,y,1)".
-    GroupElement(String),
+    /// `(CGroupElement (Ecp @(x,y,1)))` — GroupElementConstant (values.scala:519).
+    /// Carries the 33-byte SEC1-compressed secp256k1 point; bytes are the
+    /// source of truth (M3, D-T6). The printer decompresses on demand via
+    /// `ergo_crypto::group_element::decompress_to_affine_hex` to reproduce
+    /// the Scala `Ecp.toString` affine `(x_hex,y_hex,1)` form.
+    GroupElement([u8; 33]),
     /// Opaque SigmaProp payload (M3 scope for full parity).
     SigmaProp(String),
     /// `SigmaPropConstant(ProveDlog(pubkey))` produced by the binder's PK rule
@@ -944,7 +947,7 @@ mod tests {
         let _ = ConstPayload::Unit;
         let _ = ConstPayload::ByteColl(vec![1, 2]);
         let _ = ConstPayload::LongColl(vec![1, 2]);
-        let _ = ConstPayload::GroupElement("(x,y,1)".into());
+        let _ = ConstPayload::GroupElement([0x02u8; 33]);
         let _ = ConstPayload::SigmaProp("...".into());
         let _ = ConstPayload::ProveDlog([0x02u8; 33]);
     }

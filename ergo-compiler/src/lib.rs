@@ -217,11 +217,10 @@
 //!
 //! ## M3 handoff notes
 //!
-//! - **SWEEP_SKIP = M3 rendering worklist.** Sources listed in `SWEEP_SKIP` in
-//!   `tests/typer_oracle_parity.rs` accept typecheck but their `print_typed` output
-//!   deviates from the oracle due to M2 printer limitations (D-T4/D-T6). Fix at M3:
-//!   replace M2 hex placeholders with the decompressed `Ecp (x,y,1)` form in
-//!   `typed.rs` + `typed_print.rs`.
+//! - **SWEEP_SKIP rendering worklist — DONE (M3).** The D-T4/D-T6 fix emptied
+//!   `SWEEP_SKIP` in `tests/typer_oracle_parity.rs`; it remains as the mechanism
+//!   for any future rendering-only deviation (reject-side divergences live in
+//!   the separate `VERDICT_DEVIATION_SOURCES` list).
 //! - **`deserialize` deferred (D-T2):** `predef_ir_builder` returns `None` for
 //!   `deserialize` unconditionally. Scala constant-folds `deserialize(lit)` at typecheck
 //!   time; M3 completes with `ValueSerializer` integration.
@@ -276,26 +275,29 @@
 //! Oracle for valid input: `unsignedBigInt("5")` → `OK (ConstantNode:UnsignedBigInt
 //! (CUnsignedBigInt @5))` — M3 completes the canonical node.
 //!
-//! ### D-T4 — ProveDlog placeholder rendering
+//! ### D-T4 — ProveDlog placeholder rendering — CLOSED (M3)
 //!
-//! `proveDlog(g1)` lowers to `CreateProveDlog` correctly, but the inner
-//! `GroupElement` constant prints as a hex placeholder (`<0x...>`) instead of the
-//! oracle's decompressed `Ecp (x,y,1)` form. The node shape is correct; the printer
-//! deviation is bounded to GroupElement constants from the script environment.
-//! M3 replaces the hex placeholder with the full decompressed form.
+//! `typed_print.rs` now decompresses the stored 33-byte key and renders the
+//! oracle's `(CSigmaProp (ProveDlog (Ecp @(x,y,1))))` form (no `CGroupElement`
+//! wrapper — golden_seed §10/§23). All former `SWEEP_SKIP` records byte-match
+//! and are swept normally.
 //!
-//! ### D-T5 — GroupElement on-curve validation deferred
+//! ### D-T5 — GroupElement on-curve validation — CLOSED (M3, with a named residual)
 //!
-//! We accept an arbitrary hex string as a `GroupElement` literal in `env::lift`
-//! without checking it lies on the curve. Scala rejects off-curve points at
-//! `SigmaPredef.scala:proveDlog` / `decodePoint` evaluation. No real contract
-//! supplies an off-curve point literal. M3 adds the curve check.
+//! `env::lift` and `bind_pk` on-curve-check every GroupElement/pubkey via
+//! `ergo_crypto::group_element::decompress_to_affine_hex`, mirroring Scala's
+//! `GroupElementSerializer.parse` decode-time validation. Residual (bounded,
+//! reject-side-safe): identity (`0x00`-prefix) points are REJECTED alongside
+//! off-curve ones, though a JVM env could in principle bind an infinity `Ecp`
+//! — no oracle path constructs one at typecheck time (`decodePoint` is never
+//! constant-folded, golden_seed §23(e)), so there is no observable Scala
+//! verdict to mirror.
 //!
-//! ### D-T6 — GroupElement hex lift shape
+//! ### D-T6 — GroupElement hex lift shape — CLOSED (M3)
 //!
-//! `env::lift` stores a `GroupElement` as a raw hex string payload rather than
-//! the decompressed `(x,y,z)` affine form the oracle emits. This is the root
-//! cause of D-T4. M3 aligns the storage format.
+//! `ConstPayload::GroupElement` now stores the 33-byte SEC1-compressed key
+//! (bytes-of-record, matching `ProveDlog`); the printer decompresses on
+//! demand. Emit (M3 Task 7+) consumes the bytes directly.
 //!
 //! ### D-T7 — Typer error positions always 0 (E12)
 //!

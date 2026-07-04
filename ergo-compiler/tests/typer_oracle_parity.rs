@@ -38,8 +38,9 @@
 //!
 //! **SWEEP_SKIP — M3 rendering exclusions (single source of truth):**
 //! Sources that ACCEPT typecheck but whose `print_typed` output deviates from the
-//! oracle due to known M2 printer limitations.  Each entry is documented below.
-//! Fix at M3: replace M2 hex placeholders with the decompressed `Ecp (x,y,1)` form.
+//! oracle due to a known printer limitation.  Empty as of the D-T4/D-T5/D-T6 fix
+//! (GroupElement/ProveDlog now render the decompressed `Ecp (x,y,1)` form) — kept
+//! as the mechanism for any future rendering-only deviation.
 //!
 //! References:
 //! - `test-vectors/ergoscript/typer/golden_seed.txt` — committed oracle captures
@@ -59,31 +60,19 @@ use ergo_compiler::{
 // SWEEP_SKIP — single source of truth (M3-rendering exclusions).
 // =============================================================================
 //
-// Sources in this list are excluded from **byte-comparison** in the golden-seed
-// sweep.  They still typecheck (verdict ACCEPT is enforced by
-// `seed_accept_skip_set_accepts`).  Each entry cites the deviation it represents
-// and the M3 fix.
-const SWEEP_SKIP: &[&str] = &[
-    // D-T4 (lib.rs M2 deviation ledger): PK prints ProveDlog with an M2 hex
-    // placeholder instead of the oracle's `(CSigmaProp (ProveDlog (Ecp @(x,y,1))))`.
-    // Fix at M3: use the full decompressed form from `typed.rs` + `typed_print.rs`.
-    "PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")",
-    // D-T4 (same): env.rs `lift` renders the 33-byte GroupElement key as a hex
-    // placeholder (`<0x...>`), not the oracle's decompressed `Ecp (x,y,1)` form.
-    // Records whose output contains demo-env GE constants (g1/g2) are affected.
-    "proveDlog(g1)",
-    "atLeast(1, Coll(proveDlog(g1)))",
-    "allOf(Coll(proveDlog(g1)))",
-    "g1.exp(n1)",
-    "g1.negate",
-    "g1.multiply(g2)",
-    "proveDHTuple(g1, g2, g1, g2)",
-    // D-T6 (§23 M3 Task-2): g3 is the demo-env's non-generator point (g^7).
-    // Same M2 hex-placeholder deviation as g1/g2 above — `env.rs::lift` has not
-    // yet been flipped to the decompressed `Ecp (x,y,1)` form.
-    "g3",
-    "proveDlog(g3)",
-];
+// `(verb, src)` pairs excluded from **byte-comparison** in the golden-seed sweep
+// (`seed_accept_records_byte_parity`) but still asserted to typecheck-ACCEPT
+// (`seed_accept_skip_set_accepts`) — the single source of truth shared by both
+// (m2-deferred cleanup: previously two independently-hardcoded lists).
+//
+// Empty as of the D-T4/D-T5/D-T6 fix: `env::lift` on-curve-checks and stores
+// GroupElement bytes-of-record (D-T5/D-T6), and `typed_print.rs` decompresses
+// both the `GroupElement` and `ProveDlog` arms to the oracle's `Ecp (x,y,1)`
+// form (D-T4) — closing every M2 rendering deviation this list held: the PK
+// address record, the six g1/g2 method-arm records, and the g3 pair
+// (golden_seed.txt §23(c), M3 Task-2).  All 10 now byte-match and are swept
+// normally.  Kept as the mechanism for any future rendering-only deviation.
+const SWEEP_SKIP: &[(&str, &str)] = &[];
 
 // Sources with a genuine, already-documented VERDICT divergence (oracle ACCEPTs;
 // our typer deliberately REJECTs) — distinct from SWEEP_SKIP, whose entries all
@@ -262,7 +251,7 @@ fn seed_accept_records_byte_parity() {
         let Some(sexpr) = expected.strip_prefix("OK ") else {
             continue; // REJECT / ERR records handled elsewhere
         };
-        if SWEEP_SKIP.contains(&src) {
+        if SWEEP_SKIP.iter().any(|&(v, s)| v == verb && s == src) {
             continue; // verdict checked by `seed_accept_skip_set_accepts`
         }
         if V2_ACCEPT_SOURCES.contains(&src) {
@@ -511,7 +500,7 @@ fn seed_live_oracle_parity() {
             continue;
         };
         if let Some(sexpr) = expected.strip_prefix("OK ") {
-            if !SWEEP_SKIP.contains(&src) {
+            if !SWEEP_SKIP.iter().any(|&(v, s)| v == verb && s == src) {
                 ordered.push((verb.to_string(), src.to_string(), sexpr.to_string()));
             }
         }

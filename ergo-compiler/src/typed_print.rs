@@ -20,6 +20,8 @@
 //!        Option[SValue] as "None" or the unwrapped node; lambda args as
 //!        `[name:#Type …]`.
 
+use ergo_crypto::group_element::decompress_to_affine_hex;
+
 use crate::stype::SType;
 use crate::typed::{node_tpe, product_prefix, ConstPayload, STypeParam, TypedExpr};
 
@@ -174,9 +176,11 @@ fn render_opt_node(opt: &Option<Box<TypedExpr>>) -> String {
 ///   String(s)           → `'s'`
 ///   Unit                → `@()` (Scala BoxedUnit in productIterator context)
 ///   ByteColl/LongColl   → `<@v1 @v2 …>` (N5 primitive-seq form)
-///   GroupElement(s)     → `(CGroupElement (Ecp @s))` — wraps the Ecp string
+///   GroupElement(bytes) → `(CGroupElement (Ecp @(x,y,1)))` — decompresses the
+///                         33-byte SEC1-compressed point to affine hex (M3, D-T6).
 ///   SigmaProp(s)        → opaque string (M3 scope for full parity)
-///   ProveDlog(bytes)    → M2 hex rendering; M3 replace with decompressed Ecp form
+///   ProveDlog(bytes)    → `(ProveDlog (Ecp @(x,y,1)))` — NO CGroupElement
+///                         wrapper (oracle-verified, golden_seed.txt §10).
 fn render_payload(p: &ConstPayload) -> String {
     match p {
         ConstPayload::Bool(b) => format!("@{}", b),
@@ -199,18 +203,25 @@ fn render_payload(p: &ConstPayload) -> String {
             let parts: Vec<String> = vs.iter().map(|v| format!("@{}", v)).collect();
             format!("<{}>", parts.join(" "))
         }
-        ConstPayload::GroupElement(ecp_str) => {
-            format!("(CGroupElement (Ecp @{}))", ecp_str)
+        ConstPayload::GroupElement(bytes) => {
+            // D-T6: bytes are the source of truth; decompress on demand. An
+            // env-lifted GroupElement is on-curve-checked at `env::lift`
+            // (D-T5), so this cannot fail for a well-formed compile.
+            let (x, y) = decompress_to_affine_hex(bytes).expect(
+                "GroupElement constant bytes must be on-curve — checked at env::lift (D-T5)",
+            );
+            format!("(CGroupElement (Ecp @({x},{y},1)))")
         }
         // SigmaProp: opaque in M2; store the full representation string.
         ConstPayload::SigmaProp(s) => s.clone(),
-        // ProveDlog: M2 hex rendering of the 33-byte compressed key.
-        // deviation: M3 must replace with the oracle-confirmed decompressed Ecp form
-        // (golden_seed.txt §10): `(CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1))))`.
-        // Note: NO CGroupElement wrapper inside ProveDlog (oracle-verified).
+        // ProveDlog: decompressed Ecp form (golden_seed.txt §10), no
+        // CGroupElement wrapper (oracle-verified). Bytes are on-curve by
+        // construction: `bind_pk` curve-checks the decoded pubkey (D-T5),
+        // so decompression here cannot fail for a well-formed compile.
         ConstPayload::ProveDlog(bytes) => {
-            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            format!("(CSigmaProp (ProveDlog <M2:{}>))", hex)
+            let (x, y) = decompress_to_affine_hex(bytes)
+                .expect("ProveDlog constant bytes must be on-curve — checked at bind_pk (D-T5)");
+            format!("(CSigmaProp (ProveDlog (Ecp @({x},{y},1))))")
         }
     }
 }
@@ -1170,12 +1181,17 @@ mod tests {
 
     #[test]
     fn group_element_constant_renders_cecp_wrapper() {
-        let ecp = "(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)";
+        // secp256k1 generator G, SEC1-compressed; oracle x/y at golden_seed.txt L54/L126.
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x02;
+        let x = hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .expect("valid hex");
+        bytes[1..].copy_from_slice(&x);
         let e = TypedExpr::Constant {
-            value: ConstPayload::GroupElement(ecp.to_string()),
+            value: ConstPayload::GroupElement(bytes),
             tpe: SType::SGroupElement,
         };
-        let expected = format!("(ConstantNode:GroupElement (CGroupElement (Ecp @{})))", ecp);
+        let expected = "(ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1))))";
         assert_eq!(print_typed(&e), expected);
     }
 

@@ -649,6 +649,7 @@ dependencies = [
 name = "ergo-compiler"
 version = "0.5.0"
 dependencies = [
+ "ergo-crypto",
  "ergo-primitives",
  "ergo-ser",
  "hex",

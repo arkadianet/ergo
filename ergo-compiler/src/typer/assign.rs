@@ -3054,7 +3054,7 @@ mod tests {
     #[test]
     fn unmap_logical_not_on_group_element_errors_invalid_unary() {
         let ge = TypedExpr::Constant {
-            value: ConstPayload::GroupElement("(x,y,1)".to_string()),
+            value: ConstPayload::GroupElement([0x02u8; 33]),
             tpe: SType::SGroupElement,
         };
         let node = TypedExpr::LogicalNot {
@@ -3776,7 +3776,7 @@ mod tests {
     #[test]
     fn multiply_group_arm_types() {
         let ge = || TypedExpr::Constant {
-            value: ConstPayload::GroupElement("(x,y,1)".to_string()),
+            value: ConstPayload::GroupElement([0x02u8; 33]),
             tpe: SType::SGroupElement,
         };
         let node = TypedExpr::MultiplyGroup {

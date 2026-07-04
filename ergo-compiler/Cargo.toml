@@ -11,6 +11,7 @@ publish    = false
 thiserror        = { workspace = true }
 ergo-ser         = { workspace = true }
 ergo-primitives  = { workspace = true }
+ergo-crypto      = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

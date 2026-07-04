@@ -24,6 +24,10 @@
 //!   ([`pow::verify_pow_solution`], [`pow::verify_header_difficulty`]).
 //!   Both take an explicit [`difficulty::DifficultyParams`] so the same code
 //!   serves mainnet, testnet, and custom-network use.
+//! * [`group_element`] — secp256k1 point decompression (`[u8; 33]` SEC1
+//!   compressed → affine `(x, y)` hex) and on-curve validation. Used by
+//!   `ergo-compiler` (M3) to render `GroupElement`/`ProveDlog` typed-AST
+//!   constants in the Scala `Ecp.toString` `(x,y,1)` form.
 //!
 //! What is **not** here:
 //!
@@ -35,5 +39,6 @@
 
 pub mod autolykos;
 pub mod difficulty;
+pub mod group_element;
 pub mod merkle;
 pub mod pow;

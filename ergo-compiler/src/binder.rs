@@ -152,7 +152,7 @@ fn bind_expr(
         // SigmaBinder.scala:39-53. Fires ONLY for NoType idents; the ZKProof
         // callee (the one parser-typed Ident, SFunc) passes through untouched
         // even when the env contains its name.
-        Expr::Ident { name, tpe, .. } => {
+        Expr::Ident { name, tpe, pos } => {
             if *tpe != SType::NoType {
                 return Ok(TypedExpr::Ident {
                     name: name.clone(),
@@ -163,9 +163,14 @@ fn bind_expr(
             // liftAny always succeeds for EnvValue (every variant is liftable;
             // the Scala unliftable-value branch is unreachable here — SType env
             // entries are stripped by the compiler driver before binding,
-            // SigmaCompiler.scala:76).
+            // SigmaCompiler.scala:76). The one exception is D-T5: an off-curve
+            // or identity `GroupElement` literal — see `env::lift`'s doc for
+            // why this has no oracle-observed Scala counterpart to mirror.
             if let Some(v) = env.get(name) {
-                return Ok(lift(v));
+                return lift(v).map_err(|e| BindError::InvalidArguments {
+                    msg: format!("GroupElement literal {name:?}: {e}"),
+                    pos: *pos,
+                });
             }
             // 1b. Global name substitution (SigmaBinder.scala:42-51).
             Ok(match name.as_str() {
@@ -580,14 +585,21 @@ fn bind_pk(args: Vec<TypedExpr>, pos: Pos, network: NetworkPrefix) -> Result<Typ
         }] => {
             // decode_p2pk_address = Base58 + checksum + network-prefix +
             // P2PK-type checks (ergo-ser · src/address.rs:277).
-            // deviation: on-curve validation of the 33-byte key is deferred
-            // to M3 (E10 decision; Scala's GroupElementSerializer.parse
-            // validates the point at decode time).
             let pubkey =
                 decode_p2pk_address(s, network).map_err(|e| BindError::InvalidAddress {
                     msg: format!("PK(\"{s}\"): {e}"),
                     pos,
                 })?;
+            // D-T5: on-curve validation of the decoded key, mirroring Scala's
+            // GroupElementSerializer.parse which validates the point at decode
+            // time. Rejects off-curve AND identity keys — keeps the printer's
+            // decompress-on-demand invariant (typed_print.rs) panic-free.
+            ergo_crypto::group_element::decompress_to_affine_hex(&pubkey).map_err(|e| {
+                BindError::InvalidAddress {
+                    msg: format!("PK(\"{s}\"): pubkey is not a valid curve point: {e}"),
+                    pos,
+                }
+            })?;
             Ok(TypedExpr::Constant {
                 value: ConstPayload::ProveDlog(pubkey),
                 tpe: SType::SSigmaProp,
@@ -1422,6 +1434,22 @@ mod tests {
     fn pk_wrong_network_errors_invalid_address() {
         let addr = encode_p2pk_from_pubkey(NetworkPrefix::Testnet, &generator_pubkey())
             .expect("encode P2PK");
+        let err = bind_err_env(&ScriptEnv::new(), &format!("PK(\"{addr}\")"));
+        assert!(matches!(err, BindError::InvalidAddress { .. }), "{err:?}");
+    }
+
+    // D-T5: a well-formed P2PK address (valid Base58/checksum/prefix) whose
+    // 33-byte payload is NOT a curve point → InvalidAddress at bind time,
+    // mirroring Scala's GroupElementSerializer.parse decode-time validation.
+    // Off-curve bytes = 0x02-prefix, x=5 (no valid y on secp256k1 — same
+    // vector as ergo-crypto::group_element::tests::off_curve_bytes).
+    #[test]
+    fn pk_off_curve_pubkey_errors_invalid_address() {
+        let mut off_curve = [0u8; 33];
+        off_curve[0] = 0x02;
+        off_curve[32] = 0x05;
+        let addr =
+            encode_p2pk_from_pubkey(NetworkPrefix::Mainnet, &off_curve).expect("encode P2PK");
         let err = bind_err_env(&ScriptEnv::new(), &format!("PK(\"{addr}\")"));
         assert!(matches!(err, BindError::InvalidAddress { .. }), "{err:?}");
     }
