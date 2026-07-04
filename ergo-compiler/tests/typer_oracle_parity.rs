@@ -83,12 +83,15 @@ const SWEEP_SKIP: &[(&str, &str)] = &[];
 // `seed_accept_skip_set_accepts` DOES assert accepts).  Flips when the cited
 // deviation is fixed.
 //
-// - `"ab" + g1` (D-T12, lib.rs `mcl_string`/`const_java_to_string`): a GroupElement
-//   RHS folds in Scala via a JVM-runtime `.toString` we cannot reproduce byte-
-//   exactly (rooted in D-T6); rather than fold WRONG bytes we keep the REJECT.
-//   This is a NAMED, reviewed verdict divergence, not an oversight — see
-//   golden_seed.txt §23(d).
-const VERDICT_DEVIATION_SOURCES: &[&str] = &["\"ab\" + g1"];
+// Empty as of the D-T12 fix (M3 Task 4): `"ab" + g1` / `"x" + g3` (GroupElement
+// RHS) and `"x" + PK(...)` (ProveDlog RHS) now fold byte-exactly via
+// `const_java_to_string`'s `decompress_to_affine_hex`-derived truncated ECPoint
+// repr (`typer/assign.rs`) and are swept normally by
+// `seed_accept_records_byte_parity` below. Kept as the mechanism for any future
+// named verdict divergence (e.g. an opaque env-lifted SigmaProp or a
+// ByteColl/LongColl RHS, both still a NAMED reject — golden_seed.txt §23(d),
+// lib.rs D-T12 residual note — but neither has a golden-seed OK record to skip).
+const VERDICT_DEVIATION_SOURCES: &[&str] = &[];
 
 // V2-gated sources: appear TWICE in the seed — once in §4 (v3 → OK) and once in
 // §6 (v2 → REJECT MethodNotFound).  The batch reject-class sweep at v3 would

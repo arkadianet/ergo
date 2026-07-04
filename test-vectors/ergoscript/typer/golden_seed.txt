@@ -498,9 +498,35 @@ tce	proveDlog(g3)	OK (CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGro
 #     `.toString` (ECPoint's default, non-canonical, TRUNCATED "…" repr) and
 #     concatenates, producing a single folded `ConstantNode:String`. The payload
 #     string is the exact D-T12 target — commit it byte-for-byte; do not
-#     normalize the embedded `GroupElement(ECPoint(...))` text. VERDICT_DEVIATION_SOURCES, D-T12
-#     (Rust today types this as an ArithOp/string-concat REJECT, not a fold).
+#     normalize the embedded `GroupElement(ECPoint(...))` text.
+#     CLOSED at M3 Task 4: derivable byte-exactly from the stored `[u8; 33]` via
+#     `ergo_crypto::group_element::decompress_to_affine_hex` (Task 3), taking the
+#     first 6 lowercase hex chars of each of x/y — see `const_java_to_string`
+#     (typer/assign.rs).
 tce	"ab" + g1	OK (ConstantNode:String 'abGroupElement(ECPoint(79be66,483ada,...))')
+#     Second probe with the non-generator point g3 (x/y per (c) above) confirms
+#     the truncated repr is derivable from any decompressed affine (x,y), not
+#     special-cased to the generator: `GroupElement(ECPoint(<x[0:6]>,<y[0:6]>,...))`
+#     where x[0:6]/y[0:6] are the first 6 lowercase hex chars of the 64-char
+#     affine coordinates (Task 3's `decompress_to_affine_hex`). Live-captured
+#     2026-07-05 via `scripts/jvm_typer_oracle` `tce` on hex `227822202b206733`.
+tce	"x" + g3	OK (ConstantNode:String 'xGroupElement(ECPoint(5cbdf0,6aebca,...))')
+#     Third probe: a `ProveDlog`-payload RHS (SigmaProp Constant with REAL bytes,
+#     produced by `PK("<addr>")` — see §10 line 126, same generator pubkey as g1)
+#     folds via the identical JVM `.toString` scheme but through the
+#     `SigmaProp(ProveDlog(...))` wrapper rather than bare `GroupElement(...)`:
+#     `SigmaProp(ProveDlog(ECPoint(<x[0:6]>,<y[0:6]>,...)))`. Also CLOSED at M3
+#     Task 4 (`ConstPayload::ProveDlog` stores real bytes, on-curve-checked at
+#     `bind_pk`, D-T5) — same helper, `SigmaProp(ProveDlog(...))` format.
+#     Live-captured 2026-07-05 via `scripts/jvm_typer_oracle` `tc` on hex
+#     `227822202b20504b282233577758707373615a77634e7a61474d7633416778426454504a5142743567436d714273673344796b513339625964684a42734e2229`.
+#     Residual (still an unpinned-format REJECT, NOT covered here): an opaque
+#     env-lifted `ConstPayload::SigmaProp(String)` (e.g. `tcs` env's `p1`/`p2`)
+#     carries no real curve bytes in our representation — only a label — so the
+#     fold cannot be reproduced for that payload; `ByteColl`/`LongColl` RHS
+#     (Scala prints `Coll(<v1>,<v2>,...)`, oracle-probed but NOT pinned/wired)
+#     are likewise left as a REJECT residual. See lib.rs D-T12 for the ledger.
+tc	"x" + PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))')
 #
 # (e) Identity-point probe (informs Task 3's identity policy). `decodePoint` is a
 #     predef Global function call (SigmaPredef), NOT a free-var substitution — it

@@ -41,6 +41,8 @@
 //! `line:col` is advisory and captured from the JVM oracle (E5, golden_seed §3).
 //! Ledger: `lib.rs` § "Known M2 deviations" D-T7.
 
+use ergo_crypto::group_element::decompress_to_affine_hex;
+
 use crate::span::Pos;
 use crate::stype::SType;
 use crate::typed::{
@@ -1684,8 +1686,27 @@ fn mcl_boolean(
 
 /// The JVM `.toString` of a constant payload, for the `String + <const>` fold
 /// (A4).  `Some` for payloads whose Scala `.toString` we reproduce byte-exactly;
-/// `None` for GroupElement / SigmaProp / ProveDlog / Coll payloads whose runtime
-/// forms are not reproducible from our stored representation (see `mcl_string`).
+/// `None` for the residual payloads whose runtime forms are not reproducible
+/// from our stored representation (see `mcl_string`).
+///
+/// D-T12 (CLOSED for GroupElement/ProveDlog at M3 Task 4): Scala's `.toString`
+/// on an `ECPoint` (BouncyCastle's default, non-canonical repr) truncates each
+/// affine coordinate to its first 6 hex chars, e.g.
+/// `GroupElement(ECPoint(79be66,483ada,...))`. This IS byte-derivable from our
+/// stored `[u8; 33]` via `decompress_to_affine_hex` (Task 3) — oracle-pinned at
+/// both the generator and a non-generator point (golden_seed.txt §23(d)). A
+/// `ProveDlog` constant (real on-curve bytes, e.g. from `PK("<addr>")`) folds
+/// via the identical truncation scheme wrapped as `SigmaProp(ProveDlog(...))`
+/// (also oracle-pinned, §23(d)). Both are on-curve-checked before reaching a
+/// `Constant` node (`env::lift` D-T5 / `binder::bind_pk` D-T5), so decompression
+/// here cannot fail for a well-formed compile — mirrors the `.expect` invariant
+/// already used by `typed_print.rs`'s GroupElement/ProveDlog printer arms.
+///
+/// Residual (still unpinned, kept as reject): an opaque env-lifted
+/// `ConstPayload::SigmaProp(String)` carries no real curve bytes in our
+/// representation (only a label) — the fold cannot be reproduced. `ByteColl`/
+/// `LongColl` RHS (Scala prints `Coll(<v1>,<v2>,...)`, oracle-probed but not
+/// wired — see golden_seed.txt §23(d)) are likewise left unimplemented.
 fn const_java_to_string(p: &ConstPayload) -> Option<String> {
     match p {
         ConstPayload::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
@@ -1698,12 +1719,27 @@ fn const_java_to_string(p: &ConstPayload) -> Option<String> {
         ConstPayload::String(s) => Some(s.clone()),
         // UnitConstant → "()" (Scala BoxedUnit toString).
         ConstPayload::Unit => Some("()".to_string()),
-        // Non-reproducible runtime `.toString` forms — keep the reject.
-        ConstPayload::ByteColl(_)
-        | ConstPayload::LongColl(_)
-        | ConstPayload::GroupElement(_)
-        | ConstPayload::SigmaProp(_)
-        | ConstPayload::ProveDlog(_) => None,
+        ConstPayload::GroupElement(bytes) => {
+            let (x, y) = decompress_to_affine_hex(bytes).expect(
+                "GroupElement constant bytes must be on-curve — checked at env::lift (D-T5)",
+            );
+            Some(format!(
+                "GroupElement(ECPoint({},{},...))",
+                &x[..6],
+                &y[..6]
+            ))
+        }
+        ConstPayload::ProveDlog(bytes) => {
+            let (x, y) = decompress_to_affine_hex(bytes)
+                .expect("ProveDlog constant bytes must be on-curve — checked at bind_pk (D-T5)");
+            Some(format!(
+                "SigmaProp(ProveDlog(ECPoint({},{},...)))",
+                &x[..6],
+                &y[..6]
+            ))
+        }
+        // Non-reproducible runtime `.toString` forms — keep the reject (D-T12 residual).
+        ConstPayload::ByteColl(_) | ConstPayload::LongColl(_) | ConstPayload::SigmaProp(_) => None,
     }
 }
 
@@ -1741,12 +1777,14 @@ fn mcl_string(
                     tpe: SType::SString,
                 });
             }
-            // Reproducibility boundary (D-T6 sub-deviation): a GroupElement /
-            // SigmaProp / ProveDlog / Coll RHS folds in Scala via a JVM-runtime
-            // `.toString` (e.g. `GroupElement(ECPoint(<hex>,...))`) that we cannot
-            // reproduce byte-exactly from our stored payload.  We REJECT rather than
-            // fold wrong bytes — a NAMED verdict divergence on `String + GE-const`
-            // only (see the lib.rs deviation ledger).  Falls through to the Err.
+            // Reproducibility boundary (D-T12 residual, narrowed at M3 Task 4): a
+            // GroupElement / ProveDlog RHS now folds above via `decompress_to_affine_hex`
+            // (byte-derivable from the stored on-curve payload). An opaque
+            // env-lifted SigmaProp (no real curve bytes, only a label) or a
+            // ByteColl/LongColl RHS still folds in Scala via a JVM-runtime
+            // `.toString` we cannot reproduce byte-exactly — REJECT rather than
+            // fold wrong bytes (see the lib.rs deviation ledger).  Falls through
+            // to the Err.
         }
         // Non-constant RHS (Height/Select/EQ/ConcreteCollection/…), or a Constant
         // RHS with a non-reproducible payload → InvalidBinaryOperationParameters
@@ -2703,6 +2741,15 @@ mod tests {
             .expect("valid hex");
         bytes[1..].copy_from_slice(&x);
         let ge = GroupElement::from_bytes(bytes);
+        // g3 = g^7, a fixed NON-generator point (TyperOracle.scala demoEnv;
+        // golden_seed.txt §23(c), x cross-checked against the oracle's
+        // decompressed `Ecp @(x,y,1)` reply for `tce g3`).
+        let mut g3_bytes = [0u8; 33];
+        g3_bytes[0] = 0x02;
+        let g3_x = hex::decode("5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc")
+            .expect("valid hex");
+        g3_bytes[1..].copy_from_slice(&g3_x);
+        let g3 = GroupElement::from_bytes(g3_bytes);
         let mut env = ScriptEnv::new();
         env.insert("a", EnvValue::ByteArray(vec![1, 2]));
         env.insert("b", EnvValue::ByteArray(vec![3, 4]));
@@ -2710,6 +2757,7 @@ mod tests {
         env.insert("col2", EnvValue::LongArray(vec![3, 4]));
         env.insert("g1", EnvValue::GroupElement(ge));
         env.insert("g2", EnvValue::GroupElement(ge));
+        env.insert("g3", EnvValue::GroupElement(g3));
         env.insert("n1", EnvValue::BigInt("5".to_string()));
         env.insert("bb1", EnvValue::Byte(1));
         env.insert("bb2", EnvValue::Byte(2));
@@ -3435,14 +3483,46 @@ mod tests {
         );
     }
 
-    /// A4 sub-deviation (D-T6): a GroupElement-constant RHS folds in Scala via a
-    /// non-reproducible JVM `.toString` (`GroupElement(ECPoint(<hex>,...))`).  Rather
-    /// than fold wrong bytes we keep the REJECT — a NAMED verdict divergence on
-    /// `String + GE-const` only (documented in the lib.rs deviation ledger).
+    /// D-T12 (CLOSED, M3 Task 4): a GroupElement-constant RHS folds via the JVM
+    /// `.toString`'s truncated `GroupElement(ECPoint(<x[0:6]>,<y[0:6]>,...))` form,
+    /// byte-derivable from the stored `[u8; 33]` via `decompress_to_affine_hex`
+    /// (Task 3). Oracle-pinned at both the generator (g1, golden_seed.txt §23(d))
+    /// and a non-generator point (g3, same section) confirming the format
+    /// generalizes, not just the generator's coordinates.
     #[test]
-    fn mcl_string_const_plus_group_element_const_rejects_subdeviation() {
-        let err = type_res("\"ab\" + g1", &demo_script_env(), &tenv(&[]))
-            .expect_err("GE-const RHS kept as reject (D-T6)");
+    fn mcl_string_const_plus_group_element_const_folds() {
+        assert_eq!(
+            type_tce("\"ab\" + g1"),
+            "(ConstantNode:String 'abGroupElement(ECPoint(79be66,483ada,...))')"
+        );
+        assert_eq!(
+            type_tce("\"x\" + g3"),
+            "(ConstantNode:String 'xGroupElement(ECPoint(5cbdf0,6aebca,...))')"
+        );
+    }
+
+    /// D-T12 (CLOSED, M3 Task 4): a `ProveDlog`-constant RHS (real on-curve bytes,
+    /// e.g. from `PK("<addr>")`) folds via the same JVM `.toString` scheme but
+    /// through the `SigmaProp(ProveDlog(...))` wrapper. Oracle-pinned,
+    /// golden_seed.txt §23(d) (same generator pubkey as g1).
+    #[test]
+    fn mcl_string_const_plus_provedlog_const_folds() {
+        assert_eq!(
+            type_tc("\"x\" + PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")"),
+            "(ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))')"
+        );
+    }
+
+    /// D-T12 residual: an opaque env-lifted `ConstPayload::SigmaProp(String)` (no
+    /// real curve bytes in our representation — only a label) stays a NAMED
+    /// reject (documented in the lib.rs deviation ledger) — the still-open half
+    /// of D-T12, distinct from the now-closed GroupElement/ProveDlog arms above.
+    #[test]
+    fn mcl_string_const_plus_opaque_sigmaprop_const_rejects_residual() {
+        let mut script_env = ScriptEnv::new();
+        script_env.insert("p1", EnvValue::SigmaProp("p1".to_string()));
+        let err = type_res("\"ab\" + p1", &script_env, &tenv(&[]))
+            .expect_err("opaque SigmaProp RHS kept as reject (D-T12 residual)");
         assert_eq!(err.class_tag(), "InvalidBinaryOperationParameters");
     }
 

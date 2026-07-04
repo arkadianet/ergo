@@ -371,20 +371,34 @@
 //! by type-argument but shares a typeCode.
 //! Source: `typer/assign.rs:855-858`.
 //!
-//! ### D-T12 — String-constant `+` GroupElement-constant fold (verdict divergence)
+//! ### D-T12 — String-constant `+` GroupElement/ProveDlog-constant fold (CLOSED for those two payloads; residual below)
 //!
 //! `mcl_string` (`typer/assign.rs`) folds `StringConstant + <any Constant>` via the
 //! JVM `.toString`, matching Scala's `mkStringConcat` (the `@unchecked` `Constant`
 //! type args are erased at runtime).  Reproducible payloads fold byte-exactly
 //! (`Int`→decimal, `Bool`→`true`/`false`, `Unit`→`()`, `BigInt`→`CBigInt(n)`, …).
-//! A `GroupElement` / `SigmaProp` / `ProveDlog` / `Coll` RHS folds in Scala via a
-//! JVM-runtime `.toString` (`GroupElement(ECPoint(<hex>,...))`) whose form we cannot
-//! reproduce from our stored payload (rooted in D-T6).  Rather than fold WRONG bytes
-//! we keep the REJECT: a NAMED verdict divergence on `String + <GroupElement/SigmaProp
-//! const>` ONLY (reject-valid).  All other `String + const` folds are at full parity.
+//!
+//! **CLOSED at M3 Task 4** for `GroupElement` and `ProveDlog`: Scala's `.toString`
+//! on an `ECPoint` (BouncyCastle's default, non-canonical repr) truncates each affine
+//! coordinate to its first 6 hex chars — `GroupElement(ECPoint(79be66,483ada,...))`
+//! for a bare `GroupElement` constant, `SigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))`
+//! for a `ProveDlog` constant (e.g. from `PK("<addr>")`). Both ARE byte-derivable from
+//! our stored `[u8; 33]` via `ergo_crypto::group_element::decompress_to_affine_hex`
+//! (Task 3; the payload is on-curve-checked before reaching a `Constant` node —
+//! `env::lift` / `binder::bind_pk`, D-T5), oracle-pinned at the generator AND a
+//! non-generator point to confirm the truncation format generalizes
+//! (golden_seed.txt §23(d)).
+//!
+//! **Residual (still an unreproduced verdict divergence, REJECT kept):** an opaque
+//! env-lifted `ConstPayload::SigmaProp(String)` (no real curve bytes in our
+//! representation — just a label, e.g. `tcs` env's `p1`/`p2`) and a `ByteColl` /
+//! `LongColl` RHS (Scala prints `Coll(<v1>,<v2>,...)`, oracle-probed but not pinned
+//! or wired) still fold in Scala via a JVM-runtime `.toString` we cannot reproduce —
+//! rather than fold WRONG bytes we keep the REJECT (reject-valid; no golden-seed OK
+//! record exercises these, so they carry no `VERDICT_DEVIATION_SOURCES` entry).
 //! This resolves the adversarial reject-valid finding (`"ab" + 1` etc.) while pinning
-//! the residual to the unreproducible GE-payload case, which M3's D-T6 alignment
-//! closes.  Source: `typer/assign.rs` `const_java_to_string` / `mcl_string`.
+//! the remaining residual to payloads with no reproducible byte source.
+//! Source: `typer/assign.rs` `const_java_to_string` / `mcl_string`.
 
 pub mod ast;
 pub mod binder;
