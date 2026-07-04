@@ -33,7 +33,7 @@ carries that further by giving inbound its own budget too.
 ## Current state (as of `main`)
 
 `ergo-p2p/src/peer_manager/limits.rs`:
-```
+```text
 max_connections = 80   target_outbound = 60   per_ip = 1   per_subnet = 3
 max_inbound() = max_connections - target_outbound = 20   ← leftover, the bottleneck
 ```
@@ -63,7 +63,7 @@ stays as a **hard total ceiling** for resource safety (checked on every
 register_outbound/inbound). Result: a full outbound set never starves inbound, and
 inbound can be sized generously without stealing outbound slots.
 
-New defaults (all operator-configurable via `[network]` toml; existing keys keep
+New defaults (all operator-configurable via `[peers]` toml; existing keys keep
 working, new `max_inbound` key added):
 
 | knob | old | new | why |

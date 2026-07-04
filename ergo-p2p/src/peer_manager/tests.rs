@@ -758,6 +758,28 @@ fn max_connections_is_hard_ceiling_over_sum() {
 }
 
 #[test]
+fn max_inbound_zero_is_outbound_only() {
+    // max_inbound = 0 is a legal outbound-only posture: every inbound
+    // registration is rejected immediately, while outbound is unaffected.
+    let limits = PeerLimits {
+        max_connections: 8,
+        target_outbound: 8,
+        max_inbound: 0,
+        per_ip_limit: 1,
+        per_subnet_limit: 3,
+    };
+    let mut mgr = PeerManager::new_with_limits(1, limits);
+    let now = Instant::now();
+
+    assert_eq!(
+        mgr.register_inbound(unique_addr(0), now),
+        Err(ConnectError::TooManyInbound),
+    );
+    // Outbound still works.
+    mgr.register_outbound(unique_addr(1), now).unwrap();
+}
+
+#[test]
 fn ban_survives_disconnect() {
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();

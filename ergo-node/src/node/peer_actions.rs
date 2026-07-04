@@ -123,25 +123,38 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     // after churn; `getpeers_fanout` bounds how many peers we ask so a
     // node near capacity never spams GetPeers. A fully drained pool still
     // fans to everyone (the dead-seed recovery path that fixed a prod
-    // incident where dead seeds pinned peer count at 3–4).
-    let gossip_targets: Vec<_> = state
-        .peer_manager
-        .connected_peers()
-        .map(|p| p.addr)
-        .filter(|addr| state.registry.peers.contains_key(addr))
-        .collect();
-    let fanout = getpeers_fanout(addrs.len(), want, gossip_targets.len());
-    if fanout > 0 {
-        for addr in gossip_targets.iter().take(fanout) {
-            send_to_peer(state, addr, message::CODE_GET_PEERS, Vec::new());
+    // incident where dead seeds pinned peer count at 3–4). Guarded on the
+    // thin condition so a healthy pool skips the connected-peer scan and
+    // allocation entirely.
+    if addrs.len() < want {
+        let gossip_targets: Vec<_> = state
+            .peer_manager
+            .connected_peers()
+            .map(|p| p.addr)
+            .filter(|addr| state.registry.peers.contains_key(addr))
+            .collect();
+        let fanout = getpeers_fanout(addrs.len(), want, gossip_targets.len());
+        if fanout > 0 {
+            // Rotate the start offset so we don't keep hitting the same
+            // leading peers each cycle — spreads discovery load and pulls a
+            // more diverse address set over time. `fanout <= len`, so the
+            // wrapped window still yields distinct peers.
+            let start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as usize)
+                .unwrap_or(0)
+                % gossip_targets.len();
+            for addr in gossip_targets.iter().cycle().skip(start).take(fanout) {
+                send_to_peer(state, addr, message::CODE_GET_PEERS, Vec::new());
+            }
+            debug!(
+                deficit = deficit,
+                have = addrs.len(),
+                want = want,
+                fanned_to_peers = fanout,
+                "dial tick: candidate pool thin, fanned GetPeers",
+            );
         }
-        debug!(
-            deficit = deficit,
-            have = addrs.len(),
-            want = want,
-            fanned_to_peers = fanout,
-            "dial tick: candidate pool thin, fanned GetPeers",
-        );
     }
 
     for addr in addrs {
