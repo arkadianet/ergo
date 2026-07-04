@@ -32,17 +32,28 @@ pub const INTERLINKS_VECTOR_PREFIX: u8 = 0x01;
 /// * value = `[dup_count as u8, ...modifier_id_bytes]` (33 bytes)
 ///
 /// `idx` is the index in the original interlinks vector at which the
-/// unique entry was first observed; `dup_count` is the number of
-/// consecutive occurrences of the same id (interlinks vectors have
-/// runs of repeated ids — Scala packs them as a single key-value
-/// pair with the run length).
+/// entry was observed; `dup_count` is Scala's count of ALL occurrences
+/// of that id in the whole vector (== the run length for well-formed
+/// vectors, where each id forms one consecutive run; deliberately
+/// lossy on adversarial vectors — see the inline note + adversarial
+/// parity tests).
 pub fn pack_interlinks(links: &[ModifierId]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
     let mut idx: usize = 0;
     while idx < links.len() {
         let head = links[idx];
-        // Count consecutive duplicates from idx onwards.
-        let dup_qty = links[idx..].iter().take_while(|l| **l == head).count();
+        // Scala counts ALL occurrences of `head` anywhere in the vector
+        // (`links.count(_ == headLink)`, NipopowAlgos.scala:177) and then
+        // drops that many entries POSITIONALLY from the remainder — for a
+        // well-formed interlinks vector (each id in exactly one
+        // consecutive run) this equals the run length, but for an
+        // adversarial vector like [A,B,A] Scala emits two qty=2 entries
+        // and swallows B (oracle-pinned; see the unit tests). The
+        // consume-side `checkInterlinksProof` recomputes this packing on
+        // RECEIVED interlinks, so any divergence here is an
+        // accept/reject divergence against Scala on adversarial popow
+        // headers — parity beats sanity.
+        let dup_qty = links.iter().filter(|l| **l == head).count();
         let key = vec![INTERLINKS_VECTOR_PREFIX, idx as u8];
         let mut value = Vec::with_capacity(1 + 32);
         value.push(dup_qty as u8);
@@ -1006,5 +1017,47 @@ mod tests {
             !verify_batch_merkle_proof(&bmp, &merkle_tree_root(&full_refs)),
             "full-extension root must NOT verify — that was the old buggy contract"
         );
+    }
+}
+
+#[cfg(test)]
+mod pack_interlinks_scala_adversarial_parity {
+    use super::*;
+
+    fn mid(b: u8) -> ModifierId {
+        ModifierId::from_bytes([b; 32])
+    }
+
+    /// Oracle-pinned (scala-cli, ergo-core 6.0.2 `NipopowAlgos.packInterlinks`,
+    /// 2026-07-05): adversarial NON-consecutive duplicate vectors. Scala's
+    /// count-all + positional-drop semantics are lossy — `[A,B,A]` packs to
+    /// two qty=2 A-entries and B is swallowed. The verifier recomputes this
+    /// packing on received interlinks, so byte-parity here decides
+    /// accept/reject parity on adversarial popow headers.
+    #[test]
+    fn adversarial_vectors_match_scala_exactly() {
+        let a = mid(0xAA);
+        let b = mid(0xBB);
+        // [A,B,A] => (idx0, qty2, A), (idx2, qty2, A)
+        let p = pack_interlinks(&[a, b, a]);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].0, vec![INTERLINKS_VECTOR_PREFIX, 0]);
+        assert_eq!(p[0].1[0], 2);
+        assert_eq!(&p[0].1[1..], a.as_bytes());
+        assert_eq!(p[1].0, vec![INTERLINKS_VECTOR_PREFIX, 2]);
+        assert_eq!(p[1].1[0], 2);
+        assert_eq!(&p[1].1[1..], a.as_bytes());
+        // [A,A,B,A] => (idx0, qty3, A), (idx3, qty3, A)
+        let p = pack_interlinks(&[a, a, b, a]);
+        assert_eq!(p.len(), 2);
+        assert_eq!((p[0].0[1], p[0].1[0]), (0, 3));
+        assert_eq!((p[1].0[1], p[1].1[0]), (3, 3));
+        assert_eq!(&p[1].1[1..], a.as_bytes());
+        // [A,A,B] (well-formed) => (idx0, qty2, A), (idx2, qty1, B)
+        let p = pack_interlinks(&[a, a, b]);
+        assert_eq!(p.len(), 2);
+        assert_eq!((p[0].0[1], p[0].1[0]), (0, 2));
+        assert_eq!((p[1].0[1], p[1].1[0]), (2, 1));
+        assert_eq!(&p[1].1[1..], b.as_bytes());
     }
 }

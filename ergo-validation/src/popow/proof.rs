@@ -327,7 +327,13 @@ impl NipopowProofExt for NipopowProof {
                         .filter(|h| h.height > anchor_height)
                         .cloned()
                         .collect();
-                    best_arg(&this_div, self.m) > best_arg(&that_div, that.m)
+                    // Scala evaluates BOTH sides with `this.m`
+                    // (`bestArg(...)(m)` — the receiver's field; `that.m`
+                    // is never consulted, NipopowProof.scala:58). Using
+                    // the challenger's own m here was a faithful-port
+                    // slip — inert for P2P (both sides always m=6) but
+                    // wrong for mixed-m comparisons.
+                    best_arg(&this_div, self.m) > best_arg(&that_div, self.m)
                 }
                 None => false,
             }

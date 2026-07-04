@@ -61,14 +61,14 @@ actually runs: byte round-trip + full `is_valid` verification of a genuine Scala
 Commit the 4 REST JSON vectors (done — wire tests to them). Add an opt-in live
 differential test (env-gated) hitting :9053 + local.
 
-### T4 — Live end-to-end differential ⏸ BLOCKED on data decision (only mainnet archive = live prod node's dir; needs stop+copy or fresh sync)
+### T4 — Live end-to-end differential ✅ DONE (prod stop+reflink-copy, 55s downtime; dev node on 9073; FULLY GREEN after 3 findings fixed: e39fa40 boundary-block subtree, 1eb4c33 genesis wire form + unconditional EIP-37 epoch)
 Build + run the node with mainnet data; diff all 4 endpoints vs :9053: popowHeader
 ById/ByHeight across sampled heights (genesis-adjacent, interlink-transition heights,
 recent), `proof/{m}/{k}/{headerId}` PINNED to a fixed tip id for determinism (byte-exact
 JSON after key-order normalization), several (m,k) combos. Document any divergence;
 divergence = bug until adjudicated against Scala source.
 
-### T5 — Adversarial parity review of the WHOLE popow subsystem
+### T5 — Adversarial parity review of the WHOLE popow subsystem ✅ DONE (inline: scrypto 20-shape byte parity, max_level_of 132/132, pack_interlinks Scala-exact adversarial semantics oracle-pinned, is_better_than this.m fix, Risk-6 sentinel adjudicated inert)
 The pre-existing code never had its own adversarial oracle pass. In-house finder wave
 (the M2-proven pattern) over: BatchMerkleProof reduction vs scrypto (Risk 1: odd trees,
 all-leaf proofs, single-leaf, duplicate indices — scala-cli scrypto oracle),
