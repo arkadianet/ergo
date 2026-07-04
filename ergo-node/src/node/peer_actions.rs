@@ -16,22 +16,55 @@ use super::NodeState;
 
 /// Upper bound on concurrent dial attempts per dial cycle. Keeps the
 /// initial fill-up from bursting too many SYNs at once when a large
-/// batch of learned addresses lands. Matches the per-tick concurrency
-/// budget the Scala reference node uses for its 5s connection
-/// scheduler.
-const MAX_DIAL_ATTEMPTS_PER_CYCLE: usize = 24;
+/// batch of learned addresses lands. Sized a little above the Scala
+/// reference node's per-tick budget so the larger outbound target
+/// (`DEFAULT_TARGET_OUTBOUND = 96`) closes in a few 5s cycles without a
+/// thundering herd.
+const MAX_DIAL_ATTEMPTS_PER_CYCLE: usize = 32;
+
+/// Upper bound on how many connected peers we fan a `GetPeers` request
+/// to when the candidate pool is merely thin (non-empty but short of
+/// this cycle's demand). A fully drained pool fans to every connected
+/// peer instead — see [`getpeers_fanout`]. Kept small so a
+/// well-connected node stays a polite gossip citizen.
+const GOSSIP_FANOUT: usize = 3;
 
 /// Once outbound deficit drops to or below this many slots, switch to
 /// `DIAL_SLOW_PERIOD` between cycles. Above this threshold (cold start
 /// / IBD) we dial on every 5s tick. Picked so that we stay aggressive
-/// for the entire fill-up: at the default `target_outbound=75` we
-/// don't throttle until we have at least 67 outbound peers.
+/// for the entire fill-up: at the default `target_outbound = 96` we
+/// don't throttle until we have at least 88 outbound peers.
 const DIAL_FAST_THRESHOLD: usize = 8;
 
 /// Period between dial cycles once deficit ≤ `DIAL_FAST_THRESHOLD`.
 /// Matches the original 30s cadence — gentle to the network in steady
 /// state, where churn is rare.
 const DIAL_SLOW_PERIOD: Duration = Duration::from_secs(30);
+
+/// Decide how many connected peers to fan a `GetPeers` request to this
+/// dial cycle.
+///
+/// * `have` — dial candidates currently available.
+/// * `want` — candidates this cycle would like (already capped at
+///   `MAX_DIAL_ATTEMPTS_PER_CYCLE`).
+/// * `connected` — eligible connected peers we could ask.
+///
+/// Returns:
+/// * `0` when the pool is healthy (`have >= want`) — a node at capacity
+///   never spams GetPeers (the periodic single-peer gossip still runs).
+/// * `connected` when the pool is fully drained (`have == 0`) — the
+///   dead-seed recovery case: ask everyone, we have nothing to lose.
+/// * `min(connected, GOSSIP_FANOUT)` when the pool is thin — top it up
+///   from a bounded set without spamming.
+fn getpeers_fanout(have: usize, want: usize, connected: usize) -> usize {
+    if have >= want {
+        0
+    } else if have == 0 {
+        connected
+    } else {
+        connected.min(GOSSIP_FANOUT)
+    }
+}
 
 /// Sync-S4: drive outbound connections up toward the PeerManager's
 /// configured outbound target on each dial tick, rather than giving
@@ -82,28 +115,35 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     // immediately, but cap at the per-cycle budget.
     let want = (deficit + 1).min(MAX_DIAL_ATTEMPTS_PER_CYCLE);
     let addrs = state.peer_manager.addresses_to_connect(now, want);
-    if addrs.is_empty() {
-        // Deficit > 0 but we have no candidate addresses. Ask an
-        // existing peer for more via GetPeers; its response hits
-        // the CODE_PEERS handler which populates known_addresses.
-        let peers: Vec<_> = state
-            .peer_manager
-            .connected_peers()
-            .map(|p| p.addr)
-            .filter(|addr| state.registry.peers.contains_key(addr))
-            .collect();
-        for addr in &peers {
+
+    // Top up the candidate pool by asking connected peers for their peer
+    // lists whenever ours is thin relative to this cycle's demand — not
+    // only when it is fully drained. Firing on "thin" (not just "empty")
+    // closes the large-deficit / few-candidates gap on cold start and
+    // after churn; `getpeers_fanout` bounds how many peers we ask so a
+    // node near capacity never spams GetPeers. A fully drained pool still
+    // fans to everyone (the dead-seed recovery path that fixed a prod
+    // incident where dead seeds pinned peer count at 3–4).
+    let gossip_targets: Vec<_> = state
+        .peer_manager
+        .connected_peers()
+        .map(|p| p.addr)
+        .filter(|addr| state.registry.peers.contains_key(addr))
+        .collect();
+    let fanout = getpeers_fanout(addrs.len(), want, gossip_targets.len());
+    if fanout > 0 {
+        for addr in gossip_targets.iter().take(fanout) {
             send_to_peer(state, addr, message::CODE_GET_PEERS, Vec::new());
         }
-        if !peers.is_empty() {
-            debug!(
-                deficit = deficit,
-                fanned_to_peers = peers.len(),
-                "dial tick: no known candidates, fanned GetPeers",
-            );
-        }
-        return;
+        debug!(
+            deficit = deficit,
+            have = addrs.len(),
+            want = want,
+            fanned_to_peers = fanout,
+            "dial tick: candidate pool thin, fanned GetPeers",
+        );
     }
+
     for addr in addrs {
         match state.peer_manager.register_outbound(addr, now) {
             Ok(()) => {
@@ -296,4 +336,31 @@ pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
 
 pub(super) fn send_to_peer(state: &NodeState, peer: &PeerId, code: u8, payload: Vec<u8>) -> bool {
     state.registry.try_send(peer, code, payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{getpeers_fanout, GOSSIP_FANOUT};
+
+    #[test]
+    fn healthy_pool_asks_no_one() {
+        // have >= want → never gossip when the pool already covers demand.
+        assert_eq!(getpeers_fanout(32, 32, 100), 0);
+        assert_eq!(getpeers_fanout(40, 32, 100), 0);
+    }
+
+    #[test]
+    fn drained_pool_asks_everyone() {
+        // have == 0 → dead-seed recovery: fan to every connected peer.
+        assert_eq!(getpeers_fanout(0, 32, 5), 5);
+        assert_eq!(getpeers_fanout(0, 32, 0), 0);
+    }
+
+    #[test]
+    fn thin_pool_asks_bounded_set() {
+        // 0 < have < want → cap the fan-out at GOSSIP_FANOUT...
+        assert_eq!(getpeers_fanout(3, 32, 100), GOSSIP_FANOUT);
+        // ...but never more peers than are actually connected.
+        assert_eq!(getpeers_fanout(3, 32, 2), 2);
+    }
 }
