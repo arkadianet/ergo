@@ -23,11 +23,12 @@ import * as overview from './overview.js';
 import * as explorer from './explorer.js';
 import * as peers from './peers.js';
 import * as mempool from './mempool.js';
+import * as mining from './mining.js';
 import * as voting from './voting.js';
 import * as wallet from './wallet.js';
 
-const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'voting', 'wallet'];
-const renderers = { overview, explorer, peers, mempool, voting, wallet };
+const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting', 'wallet'];
+const renderers = { overview, explorer, peers, mempool, mining, voting, wallet };
 const mounted = new Set();
 let current = null;
 // Holds the section name whose onSlow() is in flight, so a 4 s tick can't

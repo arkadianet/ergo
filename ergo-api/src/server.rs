@@ -83,19 +83,19 @@ use crate::types::{
     ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
     ApiDifficultySeries, ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiHistoryMode, ApiHost,
     ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions,
-    ApiNativeSubmitError, ApiParamChange, ApiPeer, ApiRecentBlock, ApiSetVotesRequest, ApiStatus,
-    ApiSubmitError, ApiSubmitResponse, ApiSyncStatus, ApiTip, ApiTxSource, ApiVotableParam,
-    ApiVoteChangeEvent, ApiVoteTarget, ApiVotes, ApiVotesHistory, ApiWeightFunction, HealthStatus,
-    RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
+    ApiMinerStat, ApiMinerStats, ApiNativeSubmitError, ApiParamChange, ApiPeer, ApiRecentBlock,
+    ApiSetVotesRequest, ApiStatus, ApiSubmitError, ApiSubmitResponse, ApiSyncStatus, ApiTip,
+    ApiTxSource, ApiVotableParam, ApiVoteChangeEvent, ApiVoteTarget, ApiVotes, ApiVotesHistory,
+    ApiWeightFunction, HealthStatus, RawTransactionBytes, SubmitError, SubmitMode, SyncStateLabel,
 };
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
-    JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET,
-    NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
+    JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
+    JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
 };
 use ergo_indexer_types::IndexerQuery;
-use ergo_ser::address::NetworkPrefix;
+use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
 
 /// Bundle of router/server dependencies threaded through every entry
 /// point on this module.
@@ -567,6 +567,8 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
+        .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
+        .route("/js/mining.js", get(|| async { js(JS_MINING) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/api-docs/openapi.yaml", get(openapi_yaml))
@@ -944,6 +946,12 @@ pub fn router_with_mempool_and_wallet_and_security(
 
     let assembled: Router = match compat {
         Some(c) => {
+            // Native miner-stats rides the same chain-reader handle as the
+            // Scala-compat routes but also needs the address-prefix byte,
+            // so it mounts as its own mini router with a tuple state.
+            let miner_stats_routes: Router = Router::new()
+                .route("/api/v1/mining/minerStats", get(miner_stats_handler))
+                .with_state((c.clone(), network));
             // Route ordering note: axum 0.7 picks the most specific match
             // automatically, but registering literal-segment routes
             // (`/blocks`, `/blocks/at/...`, `/blocks/chainSlice`,
@@ -1092,7 +1100,7 @@ pub fn router_with_mempool_and_wallet_and_security(
                     get(crate::compat::handlers::pool_wait_time_handler),
                 )
                 .with_state(c);
-            let with_compat = operator.merge(scala);
+            let with_compat = operator.merge(scala).merge(miner_stats_routes);
             // Scala-compat write surface. The hex-body and JSON-body
             // variants share `NodeSubmit` state but dispatch through
             // different bridge methods (`submit_transaction` vs
@@ -1381,13 +1389,14 @@ async fn dashboard_css() -> Response {
         description = "Rust-native operator API for the Ergo node (`/api/v1/*`). \
 This document describes the production-superset route set: the conditional routes \
 (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, \
-`/api/v1/difficulty/history`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
+`/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
 submit / admin / chain-reader handles, so a given process may serve fewer routes than \
 appear here. Query `GET /api/v1/health` to confirm a running node's state."
     ),
     paths(
         info_handler,
         difficulty_history_handler,
+        miner_stats_handler,
         votes_history_handler,
         crate::blockchain::indexer_status_handler,
         identity_handler,
@@ -1461,6 +1470,8 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiFullBlockRef,
         ApiDifficultyPoint,
         ApiDifficultySeries,
+        ApiMinerStat,
+        ApiMinerStats,
         crate::types::ApiNodeEvent,
         crate::types::ApiNodeEvents,
         crate::types::ApiIndexerStatus,
@@ -1604,6 +1615,73 @@ async fn difficulty_history_handler(
         })
         .collect();
     Json(ApiDifficultySeries { points }).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/mining/minerStats",
+    tag = "chain",
+    params(
+        ("window" = Option<u32>, Query,
+         description = "Most-recent headers to fold, by miner pk. \
+Defaults to 720 (~one day at 120s blocks); clamped to [1, 16384]."),
+    ),
+    responses(
+        (status = 200,
+         description = "Blocks-per-miner over the recent chain, sorted by \
+count descending, each with the P2PK address derived from the miner pk. \
+Conditional: mounted only when the node is wired with a chain reader.",
+         body = ApiMinerStats, content_type = "application/json"),
+    ),
+)]
+async fn miner_stats_handler(
+    State((chain, network)): State<(Arc<dyn NodeChainQuery>, NetworkPrefix)>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let window = params
+        .get("window")
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .unwrap_or(720)
+        .clamp(1, 16_384);
+    let headers = chain.last_headers(window);
+    let blocks = headers.len() as u32;
+    let tip_height = headers.last().map(|h| h.height).unwrap_or(0);
+    // Fold by pk hex: (count, last_height). Headers arrive ascending, so
+    // a plain max keeps the latest height per miner.
+    let mut agg: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+    for h in &headers {
+        let e = agg.entry(h.pow_solutions.pk.clone()).or_insert((0, 0));
+        e.0 += 1;
+        if h.height > e.1 {
+            e.1 = h.height;
+        }
+    }
+    let mut miners: Vec<ApiMinerStat> = agg
+        .into_iter()
+        .map(|(pk, (count, last_height))| {
+            let address = hex::decode(&pk)
+                .ok()
+                .and_then(|b| encode_p2pk_from_pubkey(network, &b).ok());
+            ApiMinerStat {
+                pk,
+                address,
+                count,
+                last_height,
+            }
+        })
+        .collect();
+    miners.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then(b.last_height.cmp(&a.last_height))
+    });
+    Json(ApiMinerStats {
+        tip_height,
+        window,
+        blocks,
+        miners,
+    })
+    .into_response()
 }
 
 #[utoipa::path(

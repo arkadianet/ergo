@@ -170,6 +170,7 @@ fn make_state_with_backend(
         mining_enabled: false,
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
         recent_blocks_cache: None,
+        network: ergo_ser::address::NetworkPrefix::Mainnet,
         first_deliverer_ring: crate::node::first_deliverer::FirstDelivererRing::new(),
         event_feed: crate::node::event_feed::EventFeedRing::new(),
         event_feed_prev: crate::node::event_feed::FeedPrev::default(),

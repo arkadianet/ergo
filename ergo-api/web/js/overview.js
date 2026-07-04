@@ -6,6 +6,7 @@ import { sparkline } from './sparkline.js';
 import { lineChart, barChart } from './chart.js';
 import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
+import { minerNode, fetchOwnPk, ownPkHex } from './miners.js';
 
 const HISTORY_LEN = 60;
 const hist = { blockTimes: [], mempool: [], height: [], difficulty: [] };
@@ -65,6 +66,9 @@ function setText(sel, t) {
 
 export function mount(el) {
   root = el;
+  // One-shot own-pk probe (404s cache null on non-mining nodes) so the
+  // recent-blocks mini-list can badge self-mined rows from first paint.
+  fetchOwnPk();
   el.innerHTML = `
     <div class="ov-prompt banner banner--info" data-auth-prompt hidden></div>
     <div class="pg-head pg-head--flush ov-top">
@@ -257,6 +261,23 @@ export async function onSlow() {
     state.miningCandidate = null;
   }
 
+  // Mining-panel enrichment (mining nodes only): refetch the 720-block
+  // miner fold + emission facts once per full-block tip advance — a 4s
+  // cadence would hammer a 720-header fold for data that only changes
+  // per block (same discipline as refreshChartData).
+  if (miningOn) {
+    const mtip = tip?.best_full_block?.height ?? 0;
+    if (mtip && mtip !== state.minerStatsAt) {
+      state.minerStatsAt = mtip;
+      api.minerStats(720).then((s) => {
+        if (s) state.minerStats = s;
+      });
+      api.emissionAt(mtip).then((e) => {
+        if (e) state.emission = e;
+      });
+    }
+  }
+
   // history buffers
   if (state.status) {
     push(hist.height, state.status.best_full_block_height);
@@ -364,6 +385,18 @@ function kv(label, value, color) {
   if (color) v.style.color = color;
   r.append(l, v);
   return r;
+}
+
+// Footer link from the overview Mining panel into the full Mining section.
+function miningSectionFoot() {
+  const foot = document.createElement('div');
+  foot.className = 'ov-foot';
+  const a = document.createElement('a');
+  a.className = 'ex-link';
+  a.href = '#mining';
+  a.textContent = 'Mining section →';
+  foot.append(a);
+  return foot;
 }
 
 function renderBody() {
@@ -507,6 +540,9 @@ function renderBody() {
         h.append(a);
         const m = document.createElement('span');
         m.textContent = `${b.txs} tx · ${bytes(b.size_bytes)} · ${dur(Math.floor((Date.now() - b.ts_unix_ms) / 1000))}`;
+        if (b.miner_address) {
+          m.append(document.createTextNode(' · '), minerNode(b.miner_address, b.miner_pk, { head: 4, tail: 4 }));
+        }
         row.append(h, m);
         list.append(row);
       }
@@ -558,6 +594,26 @@ function renderBody() {
       r.append(l, v);
       body.append(r);
     }
+    if (state.emission) {
+      const base = Number(state.emission.minerReward) / 1e9;
+      const re = Number(state.emission.reemitted || 0) / 1e9;
+      body.append(kv('block reward', re ? `${base} + ${re} ERG` : `${base} ERG`, 'var(--tx2)'));
+    }
+    if (state.minerStats && ownPkHex()) {
+      const mine = state.minerStats.miners.find((mm) => mm.pk === ownPkHex());
+      body.append(
+        kv(`your blocks · last ${num(state.minerStats.blocks)}`, String(mine?.count || 0), 'var(--tx2)'),
+      );
+    }
+    body.append(miningSectionFoot());
+    duo.append(p);
+  } else if (state.identity && !state.identity.mining) {
+    // Non-mining node: a one-line stub instead of hiding the panel — the
+    // Mining section (network landscape) is still worth discovering. No
+    // mining fetches happen in this state (see the miningOn gates above).
+    const { panel: p, body } = panel('Mining');
+    body.append(kv('mining', 'disabled', 'var(--tx3)'));
+    body.append(miningSectionFoot());
     duo.append(p);
   }
 
