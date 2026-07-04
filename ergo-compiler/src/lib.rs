@@ -282,6 +282,15 @@
 //! wrapper — golden_seed §10/§23). All former `SWEEP_SKIP` records byte-match
 //! and are swept normally.
 //!
+//! **Correction (adversarial-review finding, fixed 2026-07-05):** `x`/`y` in
+//! that rendered form are the coordinate's UNPADDED `BigInteger.toString(16)`
+//! (same root as D-T12's `showPoint`, per the `TyperOracle.scala` `renderField`
+//! trace at golden_seed.txt §23(f)), NOT the fixed-width 64-char hex
+//! `decompress_to_affine_hex` returns. `typed_print.rs`'s GroupElement/
+//! ProveDlog arms now run `ergo_crypto::group_element::strip_leading_zero_hex`
+//! on each coordinate first — oracle-pinned on a leading-zero y-coordinate,
+//! golden_seed.txt §23(f).
+//!
 //! ### D-T5 — GroupElement on-curve validation — CLOSED (M3, with a named residual)
 //!
 //! `env::lift` and `bind_pk` on-curve-check every GroupElement/pubkey via
@@ -379,15 +388,30 @@
 //! (`Int`→decimal, `Bool`→`true`/`false`, `Unit`→`()`, `BigInt`→`CBigInt(n)`, …).
 //!
 //! **CLOSED at M3 Task 4** for `GroupElement` and `ProveDlog`: Scala's `.toString`
-//! on an `ECPoint` (BouncyCastle's default, non-canonical repr) truncates each affine
-//! coordinate to its first 6 hex chars — `GroupElement(ECPoint(79be66,483ada,...))`
-//! for a bare `GroupElement` constant, `SigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))`
-//! for a `ProveDlog` constant (e.g. from `PK("<addr>")`). Both ARE byte-derivable from
-//! our stored `[u8; 33]` via `ergo_crypto::group_element::decompress_to_affine_hex`
-//! (Task 3; the payload is on-curve-checked before reaching a `Constant` node —
-//! `env::lift` / `binder::bind_pk`, D-T5), oracle-pinned at the generator AND a
-//! non-generator point to confirm the truncation format generalizes
-//! (golden_seed.txt §23(d)).
+//! on an `ECPoint` (via `CryptoFacade.showPoint`, `Platform.scala:81-85`) truncates
+//! each affine coordinate's UNPADDED `BigInteger.toString(16)` hex to its first 6
+//! chars — `GroupElement(ECPoint(79be66,483ada,...))` for a bare `GroupElement`
+//! constant, `SigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))` for a `ProveDlog`
+//! constant (e.g. from `PK("<addr>")`). Both ARE byte-derivable from our stored
+//! `[u8; 33]` via `ergo_crypto::group_element::decompress_to_affine_hex` (Task 3)
+//! composed with `ergo_crypto::group_element::strip_leading_zero_hex` (the payload
+//! is on-curve-checked before reaching a `Constant` node — `env::lift` /
+//! `binder::bind_pk`, D-T5).
+//!
+//! **Correction (adversarial-review finding, fixed 2026-07-05):** the generator
+//! and non-generator (g3) probes originally cited here confirm only the
+//! truncate-to-6-chars SHAPE generalizes across distinct points — NEITHER has a
+//! leading-zero-nibble coordinate, so neither actually distinguishes padded
+//! 64-char hex (our prior, WRONG assumption — a straight `&decompress_to_affine_hex(..)[..6]`
+//! slice) from Java's unpadded `BigInteger.toString(16)` (the real semantics).
+//! A fourth probe — a `PK(...)` pubkey chosen specifically for a leading-zero
+//! y-coordinate (`0ab0902e...`) — pins this: the oracle folds `ab0902`
+//! (unpadded), NOT `0ab090` (padded-slice). Live-captured at golden_seed.txt
+//! §23(d) (fold) and independently re-confirmed at the plain, untruncated
+//! `Ecp @(x,y,1)` printer surface (§23(f)), which shares the same unpadded
+//! `BigInteger`-hex root (see §23(f)'s `TyperOracle.scala` `renderField`
+//! source citation) and required the identical fix in `typed_print.rs`
+//! (D-T4/D-T6, below).
 //!
 //! **Residual (still an unreproduced verdict divergence, REJECT kept):** an opaque
 //! env-lifted `ConstPayload::SigmaProp(String)` (no real curve bytes in our

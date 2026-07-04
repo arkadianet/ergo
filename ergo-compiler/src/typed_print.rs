@@ -20,7 +20,7 @@
 //!        Option[SValue] as "None" or the unwrapped node; lambda args as
 //!        `[name:#Type …]`.
 
-use ergo_crypto::group_element::decompress_to_affine_hex;
+use ergo_crypto::group_element::{decompress_to_affine_hex, strip_leading_zero_hex};
 
 use crate::stype::SType;
 use crate::typed::{node_tpe, product_prefix, ConstPayload, STypeParam, TypedExpr};
@@ -178,9 +178,14 @@ fn render_opt_node(opt: &Option<Box<TypedExpr>>) -> String {
 ///   ByteColl/LongColl   → `<@v1 @v2 …>` (N5 primitive-seq form)
 ///   GroupElement(bytes) → `(CGroupElement (Ecp @(x,y,1)))` — decompresses the
 ///                         33-byte SEC1-compressed point to affine hex (M3, D-T6).
+///                         x/y are UNPADDED (Java `BigInteger.toString(16)`
+///                         semantics via BouncyCastle's `ECPoint.toString`) —
+///                         oracle-pinned on a leading-zero coordinate,
+///                         golden_seed.txt §23(f); see `strip_leading_zero_hex`.
 ///   SigmaProp(s)        → opaque string (M3 scope for full parity)
 ///   ProveDlog(bytes)    → `(ProveDlog (Ecp @(x,y,1)))` — NO CGroupElement
-///                         wrapper (oracle-verified, golden_seed.txt §10).
+///                         wrapper (oracle-verified, golden_seed.txt §10),
+///                         same unpadded x/y semantics as GroupElement above.
 fn render_payload(p: &ConstPayload) -> String {
     match p {
         ConstPayload::Bool(b) => format!("@{}", b),
@@ -207,9 +212,15 @@ fn render_payload(p: &ConstPayload) -> String {
             // D-T6: bytes are the source of truth; decompress on demand. An
             // env-lifted GroupElement is on-curve-checked at `env::lift`
             // (D-T5), so this cannot fail for a well-formed compile.
+            // The oracle's `Ecp @(x,y,1)` prints UNPADDED BigInteger hex
+            // (BouncyCastle `ECPoint.toString`, not our fixed-width SEC1
+            // decompression) — strip the padding golden_seed.txt §23(f)
+            // pinned on a leading-zero y-coordinate.
             let (x, y) = decompress_to_affine_hex(bytes).expect(
                 "GroupElement constant bytes must be on-curve — checked at env::lift (D-T5)",
             );
+            let x = strip_leading_zero_hex(&x);
+            let y = strip_leading_zero_hex(&y);
             format!("(CGroupElement (Ecp @({x},{y},1)))")
         }
         // SigmaProp: opaque in M2; store the full representation string.
@@ -218,9 +229,12 @@ fn render_payload(p: &ConstPayload) -> String {
         // CGroupElement wrapper (oracle-verified). Bytes are on-curve by
         // construction: `bind_pk` curve-checks the decoded pubkey (D-T5),
         // so decompression here cannot fail for a well-formed compile.
+        // Same unpadded-hex correction as GroupElement above (§23(f)).
         ConstPayload::ProveDlog(bytes) => {
             let (x, y) = decompress_to_affine_hex(bytes)
                 .expect("ProveDlog constant bytes must be on-curve — checked at bind_pk (D-T5)");
+            let x = strip_leading_zero_hex(&x);
+            let y = strip_leading_zero_hex(&y);
             format!("(CSigmaProp (ProveDlog (Ecp @({x},{y},1))))")
         }
     }
@@ -1192,6 +1206,26 @@ mod tests {
             tpe: SType::SGroupElement,
         };
         let expected = "(ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1))))";
+        assert_eq!(print_typed(&e), expected);
+    }
+
+    /// D-T4/D-T6 leading-zero-y fix: `ECPoint.toString`'s `Ecp @(x,y,1)` prints
+    /// UNPADDED `BigInteger.toString(16)` hex, not our fixed-width 64-char
+    /// decompression — the y-coordinate below (`0ab0902e...`) loses its
+    /// leading zero. Oracle-pinned via `PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")`,
+    /// golden_seed.txt §23(f).
+    #[test]
+    fn provedlog_constant_leading_zero_y_renders_unpadded() {
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x03;
+        let x = hex::decode("f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8")
+            .expect("valid hex");
+        bytes[1..].copy_from_slice(&x);
+        let e = TypedExpr::Constant {
+            value: ConstPayload::ProveDlog(bytes),
+            tpe: SType::SSigmaProp,
+        };
+        let expected = "(ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))";
         assert_eq!(print_typed(&e), expected);
     }
 

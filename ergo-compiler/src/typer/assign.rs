@@ -41,7 +41,7 @@
 //! `line:col` is advisory and captured from the JVM oracle (E5, golden_seed §3).
 //! Ledger: `lib.rs` § "Known M2 deviations" D-T7.
 
-use ergo_crypto::group_element::decompress_to_affine_hex;
+use ergo_crypto::group_element::{decompress_to_affine_hex, strip_leading_zero_hex};
 
 use crate::span::Pos;
 use crate::stype::SType;
@@ -1690,17 +1690,24 @@ fn mcl_boolean(
 /// from our stored representation (see `mcl_string`).
 ///
 /// D-T12 (CLOSED for GroupElement/ProveDlog at M3 Task 4): Scala's `.toString`
-/// on an `ECPoint` (BouncyCastle's default, non-canonical repr) truncates each
-/// affine coordinate to its first 6 hex chars, e.g.
-/// `GroupElement(ECPoint(79be66,483ada,...))`. This IS byte-derivable from our
-/// stored `[u8; 33]` via `decompress_to_affine_hex` (Task 3) — oracle-pinned at
-/// both the generator and a non-generator point (golden_seed.txt §23(d)). A
-/// `ProveDlog` constant (real on-curve bytes, e.g. from `PK("<addr>")`) folds
-/// via the identical truncation scheme wrapped as `SigmaProp(ProveDlog(...))`
-/// (also oracle-pinned, §23(d)). Both are on-curve-checked before reaching a
-/// `Constant` node (`env::lift` D-T5 / `binder::bind_pk` D-T5), so decompression
-/// here cannot fail for a well-formed compile — mirrors the `.expect` invariant
-/// already used by `typed_print.rs`'s GroupElement/ProveDlog printer arms.
+/// on an `ECPoint` (BouncyCastle's default, non-canonical repr — actually
+/// `CryptoFacade.showPoint`, `Platform.scala:81-85`) truncates each affine
+/// coordinate's UNPADDED `BigInteger.toString(16)` hex to its first 6 chars,
+/// e.g. `GroupElement(ECPoint(79be66,483ada,...))`. This IS byte-derivable
+/// from our stored `[u8; 33]` via `decompress_to_affine_hex` (Task 3) —
+/// oracle-pinned at the generator, a non-generator point (golden_seed.txt
+/// §23(d)), and — the case that actually pins the UNPADDED-vs-padded
+/// question, since neither prior point has a leading-zero coordinate — a
+/// point whose y-coordinate has a leading zero nibble (§23(d) third probe,
+/// §23(f)); `strip_leading_zero_hex` reproduces the unpadded form before
+/// truncating. A `ProveDlog` constant (real on-curve bytes, e.g. from
+/// `PK("<addr>")`) folds via the identical scheme wrapped as
+/// `SigmaProp(ProveDlog(...))` (also oracle-pinned, §23(d)). Both are
+/// on-curve-checked before reaching a `Constant` node (`env::lift` D-T5 /
+/// `binder::bind_pk` D-T5), so decompression here cannot fail for a
+/// well-formed compile — mirrors the `.expect` invariant already used by
+/// `typed_print.rs`'s GroupElement/ProveDlog printer arms (which need the
+/// same unpadding for their full-length `Ecp @(x,y,1)` render, §23(f)).
 ///
 /// Residual (still unpinned, kept as reject): an opaque env-lifted
 /// `ConstPayload::SigmaProp(String)` carries no real curve bytes in our
@@ -1723,6 +1730,12 @@ fn const_java_to_string(p: &ConstPayload) -> Option<String> {
             let (x, y) = decompress_to_affine_hex(bytes).expect(
                 "GroupElement constant bytes must be on-curve — checked at env::lift (D-T5)",
             );
+            // Java's `substring(0, 6)` on the UNPADDED `BigInteger.toString(16)`
+            // (`showPoint`, Platform.scala:81-85) — never `<6` chars for an
+            // on-curve 256-bit coordinate (would throw
+            // StringIndexOutOfBoundsException in Java; unreachable here).
+            let x = strip_leading_zero_hex(&x);
+            let y = strip_leading_zero_hex(&y);
             Some(format!(
                 "GroupElement(ECPoint({},{},...))",
                 &x[..6],
@@ -1732,6 +1745,9 @@ fn const_java_to_string(p: &ConstPayload) -> Option<String> {
         ConstPayload::ProveDlog(bytes) => {
             let (x, y) = decompress_to_affine_hex(bytes)
                 .expect("ProveDlog constant bytes must be on-curve — checked at bind_pk (D-T5)");
+            // Same unpadded-then-truncate scheme as GroupElement above.
+            let x = strip_leading_zero_hex(&x);
+            let y = strip_leading_zero_hex(&y);
             Some(format!(
                 "SigmaProp(ProveDlog(ECPoint({},{},...)))",
                 &x[..6],
@@ -3486,9 +3502,12 @@ mod tests {
     /// D-T12 (CLOSED, M3 Task 4): a GroupElement-constant RHS folds via the JVM
     /// `.toString`'s truncated `GroupElement(ECPoint(<x[0:6]>,<y[0:6]>,...))` form,
     /// byte-derivable from the stored `[u8; 33]` via `decompress_to_affine_hex`
-    /// (Task 3). Oracle-pinned at both the generator (g1, golden_seed.txt §23(d))
-    /// and a non-generator point (g3, same section) confirming the format
-    /// generalizes, not just the generator's coordinates.
+    /// (Task 3) plus `strip_leading_zero_hex` (unpadded `BigInteger.toString(16)`
+    /// semantics). Oracle-pinned at the generator (g1, golden_seed.txt §23(d))
+    /// and a non-generator point (g3, same section) — NEITHER exercises a
+    /// leading-zero coordinate; the truncation format's UNPADDED-hex semantics
+    /// are pinned separately by the leading-zero `PK(...)` fold below
+    /// (§23(d) third probe) and the plain-render case (§23(f)).
     #[test]
     fn mcl_string_const_plus_group_element_const_folds() {
         assert_eq!(
@@ -3510,6 +3529,21 @@ mod tests {
         assert_eq!(
             type_tc("\"x\" + PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")"),
             "(ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))')"
+        );
+    }
+
+    /// D-T12 leading-zero-coordinate fix: the fold uses the coordinate's
+    /// UNPADDED `BigInteger.toString(16)` hex, NOT our fixed-width 64-char
+    /// decompression, before truncating to 6 chars. This pubkey's y-coordinate
+    /// (`0ab0902e...`) has a leading zero nibble — the padded-slice bug would
+    /// have produced `0ab090`; the oracle (and this fix) produce `ab0902`.
+    /// Oracle-pinned via `PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")`
+    /// (testnet), golden_seed.txt §23(d) fourth probe.
+    #[test]
+    fn mcl_string_const_plus_provedlog_const_leading_zero_y_folds_unpadded() {
+        assert_eq!(
+            type_tc("\"x\" + PK(\"3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg\")"),
+            "(ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(f28773,ab0902,...)))')"
         );
     }
 

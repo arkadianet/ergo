@@ -204,7 +204,11 @@ fn typecheck_verb(verb: &str, src: &str, tree_version: u8) -> Result<String, Com
         other => panic!("unknown seed verb {other:?}"),
     };
     // PK records use testnet addresses; everything else is network-independent.
-    let network = if src.contains("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN") {
+    // The second address (§23(d)/(f), leading-zero y-coordinate) is a distinct
+    // testnet PK added for the D-T12 leading-zero-hex fix.
+    let network = if src.contains("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")
+        || src.contains("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")
+    {
         NetworkPrefix::Testnet
     } else {
         NetworkPrefix::Mainnet

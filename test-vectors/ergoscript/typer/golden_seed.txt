@@ -429,11 +429,14 @@ tc	serialize(if (HEIGHT > 5) SELF.value else SELF.id)	OK (MethodCall:Coll[Byte] 
 #
 # ── § 23: M3 Task-2 — deferred typed-shape captures (postfix-ident, tuple ────────
 #           dynamic-index, D-T6 non-generator GroupElement, D-T12 string fold,
-#           identity-point probe) ────────────────────────────────────────────────
-# All captured live ORACLE_TREE_VERSION=3 (v6), ORACLE_NETWORK=testnet (default;
-# unused here — no PK/address literals in this batch), scala-cli batch mode
-# (2026-07-04). Every source below is an ACCEPT verdict; there were no REJECTs to
-# re-grade via tc1.sh in this batch.
+#           identity-point probe, D-T12/D-T4/D-T6 leading-zero-coordinate fix) ───
+# All captured live ORACLE_TREE_VERSION=3 (v6), scala-cli batch mode (2026-07-04
+# for (a)-(e); 2026-07-05 for the leading-zero PK records appended to (d) and
+# the new (f)). ORACLE_NETWORK=testnet is the default and is unused by (a)-(e)
+# (no PK/address literals in that batch) but IS required for the leading-zero
+# PK records (network recorded inline per record, matching the §10 convention).
+# Every source below is an ACCEPT verdict; there were no REJECTs to re-grade
+# via tc1.sh in this batch.
 #
 # (a) Postfix-ident zero-arg calls (m2-deferred-items.md:101-104, "confirm the
 #     Select arm fires correctly for zero-arg postfix calls"). Two DISTINCT
@@ -527,6 +530,22 @@ tce	"x" + g3	OK (ConstantNode:String 'xGroupElement(ECPoint(5cbdf0,6aebca,...))'
 #     (Scala prints `Coll(<v1>,<v2>,...)`, oracle-probed but NOT pinned/wired)
 #     are likewise left as a REJECT residual. See lib.rs D-T12 for the ledger.
 tc	"x" + PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))')
+#     ADVERSARIAL CORRECTION (critical-finding fix, 2026-07-05): none of the
+#     three probes above has a leading-zero-nibble coordinate (generator/g3/
+#     g1-pubkey x and y all start with a nonzero nibble), so they do NOT
+#     actually pin whether the truncation source is padded or unpadded hex —
+#     they only confirm the truncate-to-6-chars SHAPE. This fourth probe,
+#     chosen specifically for a leading-zero y-coordinate (`0ab0902e8d88...`),
+#     is what discriminates: the oracle folds `ab0902` — the first 6 chars of
+#     the UNPADDED `BigInteger.toString(16)` (`CryptoFacade.showPoint`'s
+#     `getRawXCoord.toString.substring(0,6)`, Platform.scala:81-85) — NOT
+#     `0ab090` (the padded-slice bug this fix closes). `const_java_to_string`
+#     (typer/assign.rs) now runs `strip_leading_zero_hex` (ergo-crypto) before
+#     truncating. Live-captured 2026-07-05 via `scripts/jvm_typer_oracle` `tc`
+#     on hex `227822202b20504b282233577a506d4d566f7972726a316d394e6b6d70576368576f695a7931774e337759736d6e38674531635a58636477636b374c42672229`
+#     (ORACLE_NETWORK=testnet). Verbatim reply:
+#     `OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(f28773,ab0902,...)))')`.
+tc	"x" + PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")	OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(f28773,ab0902,...)))')
 #
 # (e) Identity-point probe (informs Task 3's identity policy). `decodePoint` is a
 #     predef Global function call (SigmaPredef), NOT a free-var substitution — it
@@ -540,3 +559,40 @@ tc	"x" + PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (Constant
 #     Coll[Byte] constant, already fully supported) — PASSES the byte-parity
 #     sweep outright, no SWEEP_SKIP needed.
 tce	decodePoint(fromBase16("000000000000000000000000000000000000000000000000000000000000000000"))	OK (DecodePoint:GroupElement (ConstantNode:Coll[Byte] <@0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0>))
+#
+# (f) D-T4/D-T6 leading-zero-y — the PLAIN typed-tree `Ecp @(x,y,1)` RENDER
+#     (Task-3, `typed_print.rs`'s GroupElement/ProveDlog printer arms), never
+#     before probed with a leading-zero coordinate. Same pubkey as (d)'s
+#     fourth probe, WITHOUT the string-fold wrapper, to isolate the printer's
+#     own rendering from the fold's. ORACLE_NETWORK=testnet.
+#     Live-captured 2026-07-05 via `scripts/jvm_typer_oracle` `tc` on hex
+#     `504b282233577a506d4d566f7972726a316d394e6b6d70576368576f695a7931774e337759736d6e38674531635a58636477636b374c42672229`.
+#     Verbatim reply:
+#     `OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))`.
+#     RESULT: the x-coordinate is 64 hex chars (its top nibble is nonzero, `f2`,
+#     so padded/unpadded coincide) but the y-coordinate is only 63 hex chars —
+#     `ab0902e8...ed81`, NOT the 64-char zero-padded `0ab0902e...ed81` our
+#     `decompress_to_affine_hex` (ergo-crypto) returns. This CONFIRMS the plain
+#     `Ecp @(x,y,1)` printer render is ALSO unpadded `BigInteger.toString(16)`
+#     hex — the SAME source as `showPoint`'s truncated fold repr in (d), just
+#     not truncated to 6 chars.
+#     Renderer-source cross-check (scripts/jvm_typer_oracle/TyperOracle.scala,
+#     `renderNode`/`renderField`, lines 207-247): there is NO special-cased
+#     GroupElement/Ecp branch in `renderField`. A `GroupElementConstant`'s
+#     `CGroupElement` payload falls to the generic `case p: Product =>` arm
+#     (line 243: `s"(${p.productPrefix} $inner)"`), recursing into the
+#     wrapped `Ecp` (also a `Product` — `case class Ecp(value: ECPoint)`,
+#     `Platform.scala:125`), which recurses AGAIN into the raw BouncyCastle
+#     `ECPoint` value — NOT a Scala `Product`, so it falls through to the
+#     final catch-all `case other => "@" + other.toString` (line 247).
+#     `ECPoint.toString()` (BouncyCastle) composes `getRawXCoord`/
+#     `getRawYCoord` — each an `ECFieldElement` whose own `.toString()` is
+#     `toBigInteger().toString(16)`, i.e. UNPADDED — into the `(x,y,z)` triple
+#     the harness prints as `Ecp @(x,y,1)`. There is no separate
+#     zero-padding pretty-printer branch anywhere in this path; the printer
+#     and `showPoint` (`Platform.scala:81-85`) share the identical unpadded
+#     `BigInteger`-hex root, just at different truncation lengths (full vs. 6
+#     chars). `typed_print.rs`'s GroupElement/ProveDlog arms now run
+#     `strip_leading_zero_hex` on each coordinate before rendering (D-T4/D-T6
+#     fix, this commit).
+tc	PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")	OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))
