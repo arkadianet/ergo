@@ -596,3 +596,89 @@ tce	decodePoint(fromBase16("0000000000000000000000000000000000000000000000000000
 #     `strip_leading_zero_hex` on each coordinate before rendering (D-T4/D-T6
 #     fix, this commit).
 tc	PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")	OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))
+#
+# ── § 24: M3 Task-6 — D-T3 unsignedBigInt canonical constant + bigInt ───────────
+#           literal canonicalization ──────────────────────────────────────────
+# All captured live via `scripts/jvm_typer_oracle` (2026-07-05), batch mode,
+# ORACLE_TREE_VERSION=3 unless noted otherwise (v2 records below are grouped
+# together and explicitly marked, same convention as § 6).
+#
+# (a) Canonicalization: does the JVM strip leading zeros from the decimal
+#     literal? YES for both `bigInt` and `unsignedBigInt` — `new BigInteger(s)`
+#     parses then `.toString()`s the canonical value; the printer shows the
+#     canonical decimal, not the source text.
+tc	bigInt("0005")	OK (ConstantNode:BigInt (CBigInt @5))
+tc	unsignedBigInt("0005")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))
+#
+# (b) `unsignedBigInt("5")` — the flagship D-T3 record (previously only
+#     documented in lib.rs prose/§13, never committed as an actual OK record).
+#     A 128-bit value from the brief confirms no premature truncation below
+#     the real 256-bit cap.
+tc	unsignedBigInt("5")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))
+tc	unsignedBigInt("340282366920938463463374607431768211456")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @340282366920938463463374607431768211456))
+#
+# (c) Range caps (source: `CUnsignedBigInt.scala:14-22`, `CBigInt.scala:12-20`,
+#     pinned v6.0.2 worktree `core/shared/.../sigma/data/`). `UnsignedBigInt`
+#     caps at 256 bits UNCONDITIONALLY (`wrappedValue.bitLength() > 256` →
+#     `ArithmeticException`, no `VersionContext` check at all); `BigInt` caps
+#     at 255 bits ONLY at `tree_version >= 3`
+#     (`VersionContext.current.isV3OrLaterErgoTreeVersion && bitLength() > 255`).
+#     `ArithmeticException` is a Java-runtime class — non-reproducible per
+#     `is_reproducible_class`, so only the REJECT verdict is graded, not the
+#     class (same policy as every other Java-runtime reject in this file).
+tc	unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @115792089237316195423570985008687907853269984665640564039457584007913129639935))
+tc	unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639936")	REJECT 0:0 ArithmeticException
+tc	bigInt("57896044618658097711785492504343953926634992332820282019728792003956564819967")	OK (ConstantNode:BigInt (CBigInt @57896044618658097711785492504343953926634992332820282019728792003956564819967))
+tc	bigInt("57896044618658097711785492504343953926634992332820282019728792003956564819968")	REJECT 0:0 ArithmeticException
+#     Negative-boundary corollary of the same 255-bit signed two's-complement
+#     cap: `-2^255` has `bitLength() == 255` (2^255 is itself a power of two,
+#     so its two's-complement negation needs one fewer bit) and fits; one past
+#     it does not.
+tc	bigInt("-57896044618658097711785492504343953926634992332820282019728792003956564819968")	OK (ConstantNode:BigInt (CBigInt @-57896044618658097711785492504343953926634992332820282019728792003956564819968))
+tc	bigInt("-57896044618658097711785492504343953926634992332820282019728792003956564819969")	REJECT 0:0 ArithmeticException
+#
+# (d) D-T12 string-fold extension: `UnsignedBigIntConstant.value.toString` →
+#     `"CUnsignedBigInt(<decimal>)"` (Scala case-class default toString),
+#     matching `CBigInt(<decimal>)`'s existing fold (§8/§20).
+tc	"x" + unsignedBigInt("5")	OK (ConstantNode:String 'xCUnsignedBigInt(5)')
+#
+# (e) Version-gate investigation: is the `unsignedBigInt`/`bigInt` PREDEF
+#     itself gated on `tree_version >= 3`, the way `SUnsignedBigInt`'s bare
+#     type-annotation syntax is (`is_predef_available`, M1)? NO — the predef
+#     REGISTRY is version-independent in Scala (`predefFuncRegistry.funcs`
+#     registers unconditionally; already documented in `predef_ir.rs` module
+#     docs pre-Task-6) and neither irBuilder has a version check of its own.
+#     `unsignedBigInt("5")` (§b above), `bigInt("5")`, and full
+#     ArithOp/comparison on two `UnsignedBigInt` operands typecheck IDENTICALLY
+#     at v2 and v3 (re-verified below, ORACLE_TREE_VERSION=2). The ONLY place
+#     `tree_version` matters for `UnsignedBigInt` is (1) `bigInt`'s 255-bit cap
+#     (§c above) and (2) UBI METHOD calls, which are correctly gated by the
+#     EXISTING `min_version = 3` on every entry in `unsigned_bigint_methods()`
+#     (methods.rs) — unaffected by this task, re-verified below with a v2/v3
+#     pair (same convention as § 4/§ 6's MethodNotFound gate pair; the source
+#     is excluded from the default reject-class sweep via
+#     `V2_REJECT_SOURCES` in `typer_oracle_parity.rs`, since the § 4-style v3
+#     OK line below is what the default accept sweep grades).
+#     ORACLE_TREE_VERSION=2 for this whole group unless marked v3.
+tc	bigInt("5")	OK (ConstantNode:BigInt (CBigInt @5))
+tc	unsignedBigInt("5") + unsignedBigInt("3")	OK (ArithOp:UnsignedBigInt (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)) @-102)
+tc	unsignedBigInt("5") == unsignedBigInt("3")	OK (EQ:Boolean (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)))
+tc	unsignedBigInt("5") > unsignedBigInt("3")	OK (GT:Boolean (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)))
+#     v2: REJECT MethodNotFound (min_version=3 gate correctly fires).
+tc	unsignedBigInt("5").toBytes	REJECT 1:1 MethodNotFound
+#     v3 (contrast pair, same source, default sweep version): OK.
+tc	unsignedBigInt("5").toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) %UnsignedBigInt.toBytes [] {})
+#
+# (f) `bigInt`'s 255-bit cap is ABSENT (not merely unreached) pre-v3: a value
+#     enormously over any plausible accidental limit (2^1000, same literal as
+#     `big_int_cap_is_version_gated` in predef_ir.rs, computed there via
+#     `BigUint::from(2u32).pow(1000)` rather than inlined) still ACCEPTS at
+#     ORACLE_TREE_VERSION=2. Captured live but deliberately left as
+#     documentation ONLY (not a parsed record) — the v2/v3 pair is exercised
+#     by a Rust unit test directly, avoiding a second exclusion-list mechanism
+#     for the "accepts at v2, rejects at v3" direction (no existing golden-seed
+#     convention covers it; `V2_REJECT_SOURCES`/`V2_ACCEPT_SOURCES` are both
+#     the opposite or same-verdict shape). Verbatim v2 reply:
+#     `OK (ConstantNode:BigInt (CBigInt @10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376))`.
+#     The v3 REJECT for the SAME literal is a real parsed record, swept normally:
+tc	bigInt("10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376")	REJECT 0:0 ArithmeticException

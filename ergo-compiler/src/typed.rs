@@ -60,6 +60,8 @@ pub struct MethodRef {
 ///   Int(n)                  → `@n`
 ///   Long(n)                 → `@n`
 ///   BigInt(s)               → `(CBigInt @s)` where s is the decimal string
+///   UnsignedBigInt(s)       → `(CUnsignedBigInt @s)` where s is the canonical
+///                             decimal string (D-T3, M3 Task-6)
 ///   Unit                    → (no value field — ConstantNode:Unit renders with no value)
 ///   ByteColl(v)             → `<@v1 @v2 …>` decimal signed bytes, space-sep
 ///   LongColl(v)             → `<@v1 @v2 …>` decimal longs, space-sep
@@ -81,6 +83,16 @@ pub enum ConstPayload {
     Long(i64),
     /// `(CBigInt @n)` — BigIntConstant (values.scala:476); n is decimal.
     BigInt(String),
+    /// `(CUnsignedBigInt @n)` — UnsignedBigIntConstant (values.scala:503-515);
+    /// n is the CANONICAL decimal string (leading zeros stripped, e.g.
+    /// `unsignedBigInt("0005")` stores `"5"` — oracle-verified,
+    /// golden_seed.txt §24, D-T3, M3 Task-6). Parsed with `num_bigint::BigUint`
+    /// (rejects malformed input) and range-capped at 256 bits
+    /// (`CUnsignedBigInt.bitLength() > 256` throws `ArithmeticException`,
+    /// `CUnsignedBigInt.scala:20-22`) — UNCONDITIONALLY, no `tree_version` gate
+    /// (unlike `BigInt`'s 255-bit cap, which only applies at `tree_version >= 3`,
+    /// `CBigInt.scala:18-20`).
+    UnsignedBigInt(String),
     /// `'text'` — StringConstant. Renders with single quotes per N5.
     /// Verified: `"ab"+"cd"` → oracle `(ConstantNode:String 'abcd')`.
     String(String),
@@ -943,6 +955,7 @@ mod tests {
         let _ = ConstPayload::Int(42);
         let _ = ConstPayload::Long(1_000_000);
         let _ = ConstPayload::BigInt("5".into());
+        let _ = ConstPayload::UnsignedBigInt("5".into());
         let _ = ConstPayload::String("hello".into());
         let _ = ConstPayload::Unit;
         let _ = ConstPayload::ByteColl(vec![1, 2]);

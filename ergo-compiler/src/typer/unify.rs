@@ -346,6 +346,31 @@ pub fn msg_type_of(types: &[SType]) -> Option<SType> {
 /// under v3+; we always include SUnsignedBigInt here since version gating lives
 /// at method-table level, not at unification).
 /// Source: SType.scala:321-322 (v6.0.2 worktree).
+///
+/// **Re-verified at D-T3 (M3 Task-6):** before Task-6, `SUnsignedBigInt` had no
+/// constructible literal, so this version-independence was inert by
+/// construction. Task-6 makes `unsignedBigInt(s)` build a real
+/// `SUnsignedBigInt`-typed `Constant` — including at `tree_version < 3`
+/// (oracle: `unsignedBigInt("5")` is `OK` at v2 too, golden_seed.txt §24) —
+/// so this deviation is now genuinely reachable rather than merely inert.
+/// It remains CORRECT, not just inert: every call site that reaches unify's
+/// Rule 10 with a concrete `SUnsignedBigInt` on both sides is unaffected by
+/// gating this function, because (a) `bimap`/`bimap2` (arithmetic, comparison)
+/// always pass a `STypeVar` `tArg`, so Rule 2 binds it before Rule 10 is ever
+/// consulted (oracle: `unsignedBigInt("5") + unsignedBigInt("3")` and `... >
+/// ...` both `OK` at v2, golden_seed.txt §24); (b) `specialize_for`
+/// (`methods.rs`) is only reached after `get_method` already required
+/// `tree_version >= 3` (every `SUnsignedBigInt` method is registered with
+/// `min_version = 3`, `methods.rs` `unsigned_bigint_methods`), so a
+/// concrete-vs-concrete Rule 10 unification with `SUnsignedBigInt` never
+/// occurs below v3 in practice (oracle: `unsignedBigInt("5").toBytes` at v2 is
+/// `REJECT MethodNotFound`, golden_seed.txt §24 — matches unmodified); and (c)
+/// the `assign.rs` Select-receiver unify site treats a `None`/`Some(empty)`
+/// result identically (`_ => t_meth.clone()`), so it cannot observe the gate
+/// either way. Threading `tree_version` through `unify_types`/`is_prim_type`
+/// was therefore deliberately NOT done — it would touch 6+ call sites across
+/// `assign.rs`/`methods.rs` for a change with no observable behavioral
+/// difference, all confirmed against the live oracle.
 pub fn is_prim_type(t: &SType) -> bool {
     matches!(
         t,
@@ -615,6 +640,18 @@ pub fn const_upcast(
                 "No implicit upcast from SBigInt to {to:?}; use .toUnsigned explicitly"
             )));
         }
+        // UnsignedBigInt → UnsignedBigInt is the only reachable case (it is the
+        // ladder's top; `to_idx >= from_idx` forces `to == SUnsignedBigInt` too,
+        // D-T3 M3 Task-6 — this arm was unreachable before the dedicated payload
+        // existed, since no ConstPayload variant carried a UBI value).
+        ConstPayload::UnsignedBigInt(_) => {
+            if from == to {
+                return Ok(payload.clone());
+            }
+            return Err(BuildError::InvalidUpcast(format!(
+                "No implicit upcast from SUnsignedBigInt to {to:?}"
+            )));
+        }
         _ => {
             return Err(BuildError::InvalidUpcast(format!(
                 "non-numeric payload for const_upcast from {from:?}"
@@ -637,8 +674,9 @@ pub fn const_upcast(
                     "Cannot upcast negative value {val} to SUnsignedBigInt"
                 )));
             }
-            // Stored as BigInt(String) payload (no dedicated UBI payload in M2 scope).
-            Ok(ConstPayload::BigInt(val.to_string()))
+            // D-T3 (M3 Task-6): the dedicated payload now exists — was
+            // `ConstPayload::BigInt` as a placeholder pre-Task-6.
+            Ok(ConstPayload::UnsignedBigInt(val.to_string()))
         }
         _ => Err(BuildError::InvalidUpcast(format!(
             "{to:?} is not a valid numeric upcast target"
@@ -690,6 +728,13 @@ pub fn const_downcast(
         ConstPayload::BigInt(s) => s.parse::<i128>().map_err(|_| {
             BuildError::OutOfRange(format!(
                 "BigInt value '{s}' exceeds i128 range; cannot range-check for {to:?}"
+            ))
+        })?,
+        // D-T3 (M3 Task-6): same i128 extraction limitation as BigInt above —
+        // was unreachable before the dedicated payload existed.
+        ConstPayload::UnsignedBigInt(s) => s.parse::<i128>().map_err(|_| {
+            BuildError::OutOfRange(format!(
+                "UnsignedBigInt value '{s}' exceeds i128 range; cannot range-check for {to:?}"
             ))
         })?,
         _ => {
@@ -1509,6 +1554,47 @@ mod tests {
         assert_eq!(result, Ok(ConstPayload::BigInt("9999".into())));
     }
 
+    /// D-T3 (M3 Task-6): Byte/Short/Int/Long → UnsignedBigInt now produces the
+    /// DEDICATED `ConstPayload::UnsignedBigInt` (was a `ConstPayload::BigInt`
+    /// placeholder pre-Task-6).
+    #[test]
+    fn const_upcast_long_to_unsigned_bigint_produces_dedicated_payload() {
+        let result = const_upcast(
+            &ConstPayload::Long(9999),
+            &SType::SLong,
+            &SType::SUnsignedBigInt,
+            3,
+        );
+        assert_eq!(result, Ok(ConstPayload::UnsignedBigInt("9999".into())));
+    }
+
+    /// D-T3 (M3 Task-6): UnsignedBigInt → UnsignedBigInt identity — the only
+    /// reachable case for an `UnsignedBigInt` SOURCE payload (it is the
+    /// ladder's top; `to_idx >= from_idx` forces `to == SUnsignedBigInt`).
+    /// This arm was unreachable before the dedicated payload existed (no
+    /// `ConstPayload` variant carried a real UBI value pre-Task-6).
+    #[test]
+    fn const_upcast_unsigned_bigint_identity_requires_v3() {
+        assert!(matches!(
+            const_upcast(
+                &ConstPayload::UnsignedBigInt("5".into()),
+                &SType::SUnsignedBigInt,
+                &SType::SUnsignedBigInt,
+                2
+            ),
+            Err(BuildError::BigIntGated(_))
+        ));
+        assert_eq!(
+            const_upcast(
+                &ConstPayload::UnsignedBigInt("5".into()),
+                &SType::SUnsignedBigInt,
+                &SType::SUnsignedBigInt,
+                3
+            ),
+            Ok(ConstPayload::UnsignedBigInt("5".into()))
+        );
+    }
+
     // ----- error paths — const_upcast -----
 
     #[test]
@@ -1563,6 +1649,24 @@ mod tests {
         let payload = ConstPayload::BigInt("9999999".into());
         let result = const_downcast(&payload, &SType::SBigInt, &SType::SLong, 3);
         assert_eq!(result, Ok(ConstPayload::Long(9999999)));
+    }
+
+    /// D-T3 (M3 Task-6): UnsignedBigInt → UnsignedBigInt identity downcast —
+    /// exercises the `ConstPayload::UnsignedBigInt` extraction arm added
+    /// alongside the dedicated payload (was unreachable pre-Task-6, since no
+    /// `ConstPayload` variant carried a real UBI value and the extraction
+    /// match had no arm for it — would have hit the `non-numeric payload`
+    /// catch-all).
+    #[test]
+    fn const_downcast_unsigned_bigint_identity_v3_succeeds() {
+        let payload = ConstPayload::UnsignedBigInt("42".into());
+        let result = const_downcast(
+            &payload,
+            &SType::SUnsignedBigInt,
+            &SType::SUnsignedBigInt,
+            3,
+        );
+        assert_eq!(result, Ok(ConstPayload::UnsignedBigInt("42".into())));
     }
 
     // ----- error paths — const_downcast -----

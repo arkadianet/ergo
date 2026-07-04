@@ -1216,7 +1216,7 @@ fn assign_apply_generic(
             }
             // PredefinedFuncApply post-wrapper (SigmaTyper.scala:297-299).
             if let TypedExpr::Ident { name, .. } = &new_f {
-                if let Some(res) = predef_ir_builder(name, &new_f, &adapted) {
+                if let Some(res) = predef_ir_builder(name, &new_f, &adapted, ctx.tree_version) {
                     return res;
                 }
             }
@@ -1723,6 +1723,10 @@ fn const_java_to_string(p: &ConstPayload) -> Option<String> {
         ConstPayload::Long(v) => Some(v.to_string()),
         // BigIntConstant.value.toString → "CBigInt(<decimal>)" (oracle-pinned).
         ConstPayload::BigInt(s) => Some(format!("CBigInt({s})")),
+        // UnsignedBigIntConstant.value.toString → "CUnsignedBigInt(<decimal>)"
+        // (oracle-pinned: `"x" + unsignedBigInt("5")` → `'xCUnsignedBigInt(5)'`,
+        // golden_seed.txt §24, D-T3 M3 Task-6).
+        ConstPayload::UnsignedBigInt(s) => Some(format!("CUnsignedBigInt({s})")),
         ConstPayload::String(s) => Some(s.clone()),
         // UnitConstant → "()" (Scala BoxedUnit toString).
         ConstPayload::Unit => Some("()".to_string()),

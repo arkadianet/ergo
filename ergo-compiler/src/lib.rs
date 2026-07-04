@@ -230,6 +230,12 @@
 //!   `deserialize(lit)` at typecheck time; closing this requires an
 //!   opcode-IR→`TypedExpr` reverse mapping, deferred past emit (M3 plan Task 12
 //!   decision).
+//! - **unsignedBigInt canonical constant + bigInt canonicalization — DONE
+//!   (M3 Task-6, D-T3).** `ConstPayload::UnsignedBigInt(String)` added;
+//!   `bigInt`/`unsignedBigInt` canonicalize leading zeros and enforce the
+//!   Scala range caps (255 bits, `tree_version >= 3`-gated, for `BigInt`;
+//!   256 bits, unconditional, for `UnsignedBigInt`). See the consolidated
+//!   ledger entry below.
 //! - **Network-per-contract (M3 byte vectors):** The JVM oracle defaults to
 //!   `ORACLE_NETWORK=testnet`. When adding golden-seed records for `PK(...)`, run the
 //!   oracle with the matching network env var and record the network in the seed comment.
@@ -287,13 +293,46 @@
 //! sigma-state's own AST representation, not ours) — deferred past emit (see
 //! M3 plan Task 12 decision).
 //!
-//! ### D-T3 — unsignedBigInt deferred shape (non-negative literals)
+//! ### D-T3 — unsignedBigInt canonical constant + bigInt literal canonicalization — CLOSED (M3 Task-6)
 //!
-//! `unsignedBigInt(s)` for a valid non-negative decimal returns a deferred `Apply`
-//! node (M2 cannot build the `UnsignedBigInt` constant payload). Negative literals
-//! ARE rejected (oracle: `unsignedBigInt("-5")` → `REJECT 0:0 InvalidArguments`).
-//! Oracle for valid input: `unsignedBigInt("5")` → `OK (ConstantNode:UnsignedBigInt
-//! (CUnsignedBigInt @5))` — M3 completes the canonical node.
+//! `unsignedBigInt(s)` for a valid non-negative decimal now builds the dedicated
+//! `ConstPayload::UnsignedBigInt(String)` constant (`predef_ir.rs`
+//! `parse_unsigned_big_int`). Negative literals are still rejected (class
+//! deviation retained: oracle `InvalidArguments`, ours `TyperException` — see
+//! `CLASS_DEVIATION_SOURCES` in `tests/typer_oracle_parity.rs`). Oracle:
+//! `unsignedBigInt("5")` → `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt
+//! @5))` (golden_seed.txt §13/§24).
+//!
+//! **Canonicalization** (oracle-verified, golden_seed.txt §24(a)): both
+//! `bigInt` and `unsignedBigInt` strip leading zeros — `bigInt("0005")` /
+//! `unsignedBigInt("0005")` both print `@5`, not `@0005`. Parsed with
+//! `num_bigint::BigInt`/`BigUint` and stored via `.to_string()`.
+//!
+//! **Range caps** (§24(c)): `UnsignedBigInt` caps at 256 bits
+//! UNCONDITIONALLY (`CUnsignedBigInt.scala:20-22`, no `VersionContext` check);
+//! `BigInt` caps at 255 bits ONLY at `tree_version >= 3`
+//! (`CBigInt.scala:18-20`, `isV3OrLaterErgoTreeVersion`) — pre-v3 `bigInt(...)`
+//! has NO size limit at all (oracle: `bigInt(2^1000)` is `OK` at v2, `REJECT
+//! ArithmeticException` at v3). `predef_ir_builder` now threads `tree_version`
+//! (previously unused by the function) to implement this gate.
+//!
+//! **Version-gate investigation** (§24(e), informed the decision NOT to
+//! version-gate `unify::is_prim_type` for `SUnsignedBigInt` — see that
+//! function's doc comment for the full oracle-backed argument): the
+//! `unsignedBigInt`/`bigInt` PREDEF FUNCTIONS themselves are NOT version-gated
+//! (oracle: `unsignedBigInt("5")`, and full arithmetic/comparison on two such
+//! values, typecheck identically at v2 and v3). Only `bigInt`'s cap (above) and
+//! pre-existing UBI METHOD calls (`min_version = 3` on every
+//! `unsigned_bigint_methods()` entry, unaffected by this task) are
+//! version-sensitive.
+//!
+//! **`const_upcast`/`const_downcast` fix** (`unify.rs`): these previously used
+//! `ConstPayload::BigInt` as a placeholder for upcast results targeting
+//! `SUnsignedBigInt` (M2, "no dedicated UBI payload in M2 scope") — now
+//! produce/consume the real `ConstPayload::UnsignedBigInt`. The extraction
+//! matches in both functions gained an `UnsignedBigInt(_)` arm (previously
+//! absent, since no payload variant existed to trigger it — would have hit the
+//! `non-numeric payload` catch-all once the dedicated variant appeared).
 //!
 //! ### D-T4 — ProveDlog placeholder rendering — CLOSED (M3)
 //!

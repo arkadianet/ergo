@@ -97,10 +97,18 @@ const VERDICT_DEVIATION_SOURCES: &[&str] = &[];
 // §6 (v2 → REJECT MethodNotFound).  The batch reject-class sweep at v3 would
 // wrongly pass (since v3 accepts); the v2 test is handled separately in
 // `v2_gated_sources_reject_method_not_found`.
+//
+// `unsignedBigInt("5").toBytes` (§24(e), D-T3 M3 Task-6) is the same shape:
+// every `SUnsignedBigInt` method carries `min_version = 3`
+// (`methods.rs::unsigned_bigint_methods`), so the method call REJECTs
+// (MethodNotFound) at v2 and ACCEPTs at v3 — re-verifying that Task-6's new
+// dedicated `ConstPayload::UnsignedBigInt` payload didn't regress this
+// existing version gate.
 const V2_REJECT_SOURCES: &[&str] = &[
     "Global.fromBigEndianBytes[Long](a)",
     "Global.deserializeTo[Long](a)",
     "Global.none[Int]()",
+    "unsignedBigInt(\"5\").toBytes",
 ];
 
 // V2-owner numeric sources (§21): ACCEPT at both versions but the printed MethodCall
@@ -274,11 +282,13 @@ fn seed_accept_records_byte_parity() {
         assert_eq!(got, sexpr, "byte-parity mismatch for {verb} {src:?}");
         checked += 1;
     }
-    // Guard: §23 (M3 Task-2) adds 5 passing OK records (col1.size, arr1 size,
-    // the two tuple dynamic-index records, decodePoint identity-point probe);
-    // previous floor was 85.
+    // Guard: §24 (M3 Task-6, D-T3) adds 13 passing OK records (canonicalization
+    // x2, the flagship unsignedBigInt("5") + 128-bit probe, 4 cap-boundary
+    // accepts, the D-T12 string-fold extension, bigInt("5"), 3
+    // arith/comparison records, and the v3 unsignedBigInt("5").toBytes pair);
+    // previous floor was 90.
     assert!(
-        checked >= 90,
+        checked >= 103,
         "swept only {checked} accept records — seed may have shrunk"
     );
 }
@@ -319,9 +329,13 @@ fn seed_reject_records_class_parity() {
         }
         checked += 1;
     }
-    // 26 REJECT records − 3 V2_REJECT_SOURCES = 23 checked (plus future §N additions).
+    // §24 (M3 Task-6, D-T3) adds 4 checked REJECT records (unsignedBigInt over
+    // the 256-bit cap, bigInt over the 255-bit cap on both the positive and
+    // negative boundary, bigInt(2^1000) at v3) plus 1 skipped one
+    // (unsignedBigInt("5").toBytes at v2, now in V2_REJECT_SOURCES); previous
+    // floor was 20 (23 checked pre-Task-6).
     assert!(
-        checked >= 20,
+        checked >= 24,
         "swept only {checked} reject records — seed may have shrunk"
     );
 }
@@ -344,13 +358,18 @@ fn seed_accept_skip_set_accepts() {
 
 /// V2-gate: the 3 sources in §6 REJECT at tree_version=2 with MethodNotFound.
 /// (The same sources appear in §4 at v3 and ACCEPT; they are covered by the
-/// byte-parity sweep above.)
+/// byte-parity sweep above.) Plus `unsignedBigInt("5").toBytes` (§24(e),
+/// D-T3 M3 Task-6): the `SUnsignedBigInt` method container's `min_version = 3`
+/// gate, re-verified after Task-6 made `UnsignedBigInt` constants constructible
+/// pre-v3 (the gate itself is unaffected — this is the same MethodNotFound
+/// mechanism, just a fresh reachable case).
 #[test]
 fn v2_gated_sources_reject_method_not_found() {
     let cases = [
         ("tce", "Global.fromBigEndianBytes[Long](a)"),
         ("tce", "Global.deserializeTo[Long](a)"),
         ("tc", "Global.none[Int]()"),
+        ("tc", "unsignedBigInt(\"5\").toBytes"),
     ];
     for (verb, src) in cases {
         let err = assert_err(typecheck_verb(verb, src, 2), verb, src);

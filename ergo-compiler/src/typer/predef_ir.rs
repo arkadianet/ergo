@@ -30,8 +30,13 @@
 //! # Deferred irBuilders (documented deviations)
 //!
 //! `unsignedBigInt` validates the sign (negative → reject, matching Scala
-//! `InvalidArguments`), but for a valid non-negative literal it returns `None`
-//! so the `Apply` survives unlowered.  M3 constructs the `UBI` constant payload.
+//! `InvalidArguments` — class deviation, see `CLASS_DEVIATION_SOURCES`); a
+//! valid non-negative literal builds the canonical `ConstPayload::UnsignedBigInt`
+//! constant (D-T3 CLOSED, M3 Task-6; oracle: `unsignedBigInt("5")` →
+//! `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))`, golden_seed.txt
+//! §13/§24). Canonicalizes leading zeros (`"0005"` → `"5"`, oracle-verified) and
+//! caps at 256 bits (`bitLength() > 256` → reject, `CUnsignedBigInt.scala:20-22`)
+//! — UNCONDITIONALLY, unlike `bigInt`'s `tree_version >= 3`-gated 255-bit cap.
 //!
 //! `fromBase58` validates that every character is in the Bitcoin / Scorex Base58
 //! alphabet (`123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`).  An
@@ -318,6 +323,7 @@ pub fn predef_ir_builder(
     name: &str,
     func: &TypedExpr,
     args: &[TypedExpr],
+    tree_version: u8,
 ) -> Option<Result<TypedExpr, TyperError>> {
     match name {
         // ── logical / threshold ──────────────────────────────────────────────
@@ -506,16 +512,17 @@ pub fn predef_ir_builder(
         // ── compile-time constant decoders (oracle-verified) ─────────────────
         "bigInt" => {
             let s = string_const(args.first()?)?;
-            Some(parse_big_int(s))
+            Some(parse_big_int(s, tree_version))
         }
         "fromBase16" => {
             let s = string_const(args.first()?)?;
             Some(decode_base16(s))
         }
 
-        // ── deferred / validated (see module docs) ───────────────────────────
-        // unsignedBigInt: reject negative literals (Scala InvalidArguments);
-        // valid non-negative → Apply survives unlowered (M3 builds UBI payload).
+        // unsignedBigInt(s): reject negative literals (Scala InvalidArguments,
+        // class deviation — see `tests/typer_oracle_parity.rs`
+        // `CLASS_DEVIATION_SOURCES`); a valid non-negative literal builds the
+        // canonical `UnsignedBigInt` constant (D-T3 CLOSED, M3 Task-6).
         "unsignedBigInt" => {
             let s = string_const(args.first()?)?;
             if s.starts_with('-') {
@@ -523,7 +530,7 @@ pub fn predef_ir_builder(
                     "Negative unsigned big integer: \"{s}\""
                 ))))
             } else {
-                None
+                Some(parse_unsigned_big_int(s))
             }
         }
         // fromBase58: reject if any char is outside the Bitcoin/Scorex Base58
@@ -671,18 +678,80 @@ fn execute_from_self_reg(
     }))
 }
 
-/// `bigInt(s)` → `BigIntConstant(new BigInteger(s))`.  We validate `s` is a
-/// well-formed decimal integer and store it verbatim; Scala `BigInteger`
-/// canonicalization (leading-zero strip, sign folding) is deferred to M3 — the
-/// oracle-graded case is a canonical literal, so no normalization is required.
-fn parse_big_int(s: &str) -> Result<TypedExpr, TyperError> {
+/// `bigInt(s)` → `BigIntConstant(new BigInteger(s))` (SigmaPredef.scala:190-199).
+/// Parses with `num_bigint::BigInt` — rejects malformed input (mirrors Java
+/// `NumberFormatException`) — and stores the CANONICAL decimal string (leading
+/// zeros stripped: `bigInt("0005")` → `OK (ConstantNode:BigInt (CBigInt @5))`,
+/// oracle-verified, golden_seed.txt §24, D-T3 M3 Task-6).
+///
+/// Cap (`CBigInt.scala:14-20`): `wrappedValue.bitLength() > 255` throws
+/// `ArithmeticException`, but ONLY at `tree_version >= 3`
+/// (`VersionContext.current.isV3OrLaterErgoTreeVersion`) — pre-v3 `bigInt(...)`
+/// has NO size cap (oracle: `bigInt("<2^1000>")` → `OK` at v2, `REJECT
+/// ArithmeticException` at v3, golden_seed.txt §24).  255-bit signed range is
+/// `[-2^255, 2^255-1]` (two's-complement `bitLength`; oracle-verified at both
+/// boundaries, golden_seed.txt §24).
+fn parse_big_int(s: &str, tree_version: u8) -> Result<TypedExpr, TyperError> {
     if !is_decimal_integer(s) {
         return Err(typer_err(format!("For input string: \"{s}\"")));
     }
+    let v: num_bigint::BigInt = s
+        .parse()
+        .map_err(|_| typer_err(format!("For input string: \"{s}\"")))?;
+    if tree_version >= 3 && signed_bit_length(&v) > 255 {
+        return Err(typer_err(format!("Too big bigint value {v}")));
+    }
     Ok(TypedExpr::Constant {
-        value: ConstPayload::BigInt(s.to_string()),
+        value: ConstPayload::BigInt(v.to_string()),
         tpe: SType::SBigInt,
     })
+}
+
+/// `unsignedBigInt(s)` (non-negative branch) → `UnsignedBigIntConstant(new
+/// BigInteger(s))` (SigmaPredef.scala:201-215; the negative branch is handled by
+/// the caller before this is reached).  Parses with `num_bigint::BigUint` and
+/// stores the CANONICAL decimal string (leading zeros stripped:
+/// `unsignedBigInt("0005")` → `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt
+/// @5))`, oracle-verified, golden_seed.txt §24, D-T3 M3 Task-6).
+///
+/// Cap (`CUnsignedBigInt.scala:14-22`): `wrappedValue.bitLength() > 256` throws
+/// `ArithmeticException` — UNCONDITIONALLY, no `tree_version` gate (unlike
+/// `bigInt`'s cap; oracle-verified at v2, golden_seed.txt §24).  256-bit
+/// unsigned range is `[0, 2^256-1]` (oracle-verified at both boundaries,
+/// golden_seed.txt §24).
+fn parse_unsigned_big_int(s: &str) -> Result<TypedExpr, TyperError> {
+    if !is_decimal_integer(s) {
+        return Err(typer_err(format!("For input string: \"{s}\"")));
+    }
+    let v: num_bigint::BigUint = s
+        .parse()
+        .map_err(|_| typer_err(format!("For input string: \"{s}\"")))?;
+    if v.bits() > 256 {
+        return Err(typer_err(format!("Too big unsigned big int value {v}")));
+    }
+    Ok(TypedExpr::Constant {
+        value: ConstPayload::UnsignedBigInt(v.to_string()),
+        tpe: SType::SUnsignedBigInt,
+    })
+}
+
+/// Java `BigInteger.bitLength()` semantics for a signed value: the number of
+/// bits in the minimal two's-complement representation, excluding the sign bit.
+/// For `v >= 0` this is the magnitude's bit length. For `v < 0` it is the
+/// magnitude's bit length, UNLESS the magnitude is itself a power of two (i.e.
+/// `v` is exactly `-2^k`), in which case the two's-complement encoding of `v`
+/// needs one fewer bit (`-1` → bit length 0; `-2^255` → bit length 255,
+/// oracle-verified golden_seed.txt §24, matching `Long.MIN_VALUE ==
+/// -2^63`'s well-known `bitLength() == 63`).
+fn signed_bit_length(v: &num_bigint::BigInt) -> u64 {
+    use num_bigint::Sign;
+    let mag = v.magnitude();
+    let bits = mag.bits();
+    if v.sign() == Sign::Minus && bits > 0 && mag.trailing_zeros() == Some(bits - 1) {
+        bits - 1
+    } else {
+        bits
+    }
 }
 
 /// A non-empty decimal integer literal (optional leading `+`/`-`, then digits).
@@ -917,7 +986,9 @@ mod tests {
             value: ConstPayload::Bool(true),
             tpe: SType::SBoolean,
         };
-        let out = predef_ir_builder("sigmaProp", &f, &[b]).unwrap().unwrap();
+        let out = predef_ir_builder("sigmaProp", &f, &[b], 3)
+            .unwrap()
+            .unwrap();
         assert!(matches!(out, TypedExpr::BoolToSigmaProp { .. }));
         assert_eq!(crate::typed::node_tpe(&out), &SType::SSigmaProp);
     }
@@ -935,7 +1006,7 @@ mod tests {
             }),
             tpe: SType::SSigmaProp,
         };
-        let out = predef_ir_builder("sigmaProp", &f, &[inner])
+        let out = predef_ir_builder("sigmaProp", &f, &[inner], 3)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -962,7 +1033,9 @@ mod tests {
             elem_type: SType::SSigmaProp,
             tpe: coll(SType::SSigmaProp),
         };
-        let out = predef_ir_builder("xorOf", &f, &[sp_coll]).unwrap().unwrap();
+        let out = predef_ir_builder("xorOf", &f, &[sp_coll], 3)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             print_typed(&out),
             "(XorOf:Boolean (ConcreteCollection:Coll[SigmaProp] [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true))] #SigmaProp))"
@@ -972,14 +1045,14 @@ mod tests {
             value: ConstPayload::Bool(true),
             tpe: SType::SBoolean,
         };
-        assert!(predef_ir_builder("xorOf", &f, &[non_coll]).is_none());
+        assert!(predef_ir_builder("xorOf", &f, &[non_coll], 3).is_none());
     }
 
     /// blake2b256 → CalcBlake2b256 (SigmaPredef.scala:263).
     #[test]
     fn blake2b256_lowers_to_calc_blake() {
         let f = ident("blake2b256", vec![coll_byte()], coll_byte());
-        let out = predef_ir_builder("blake2b256", &f, &[bytecoll(vec![1, 2])])
+        let out = predef_ir_builder("blake2b256", &f, &[bytecoll(vec![1, 2])], 3)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -993,7 +1066,7 @@ mod tests {
     #[test]
     fn get_var_lowers_to_getvar_with_type_arg() {
         let f = ident("getVar", vec![SType::SByte], opt(SType::SInt));
-        let out = predef_ir_builder("getVar", &f, &[byte_const(1)])
+        let out = predef_ir_builder("getVar", &f, &[byte_const(1)], 3)
             .unwrap()
             .unwrap();
         assert_eq!(print_typed(&out), "(GetVar:Option[Int] @1)");
@@ -1007,14 +1080,14 @@ mod tests {
             name: "x".to_string(),
             tpe: SType::SByte,
         };
-        assert!(predef_ir_builder("getVar", &f, &[non_const]).is_none());
+        assert!(predef_ir_builder("getVar", &f, &[non_const], 3).is_none());
     }
 
     /// executeFromVar → DeserializeContext (SigmaPredef.scala:405-406).
     #[test]
     fn execute_from_var_lowers_to_deserialize_context() {
         let f = ident("executeFromVar", vec![SType::SByte], SType::SInt);
-        let out = predef_ir_builder("executeFromVar", &f, &[byte_const(1)])
+        let out = predef_ir_builder("executeFromVar", &f, &[byte_const(1)], 3)
             .unwrap()
             .unwrap();
         assert_eq!(print_typed(&out), "(DeserializeContext:Int @1)");
@@ -1028,7 +1101,7 @@ mod tests {
             value: ConstPayload::Int(99),
             tpe: SType::SInt,
         };
-        let res = predef_ir_builder("executeFromSelfReg", &f, &[id]).unwrap();
+        let res = predef_ir_builder("executeFromSelfReg", &f, &[id], 3).unwrap();
         assert!(res.is_err());
     }
 
@@ -1036,7 +1109,7 @@ mod tests {
     #[test]
     fn deserialize_to_lowers_to_global_method_call() {
         let f = ident("deserializeTo", vec![coll_byte()], SType::SLong);
-        let out = predef_ir_builder("deserializeTo", &f, &[bytecoll(vec![1, 2])])
+        let out = predef_ir_builder("deserializeTo", &f, &[bytecoll(vec![1, 2])], 3)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1049,7 +1122,7 @@ mod tests {
     #[test]
     fn big_int_parses_decimal_literal() {
         let f = ident("bigInt", vec![SType::SString], SType::SBigInt);
-        let out = predef_ir_builder("bigInt", &f, &[str_const("12345678901234567890")])
+        let out = predef_ir_builder("bigInt", &f, &[str_const("12345678901234567890")], 3)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1062,7 +1135,7 @@ mod tests {
     #[test]
     fn big_int_non_numeric_errors() {
         let f = ident("bigInt", vec![SType::SString], SType::SBigInt);
-        let res = predef_ir_builder("bigInt", &f, &[str_const("notanumber")]).unwrap();
+        let res = predef_ir_builder("bigInt", &f, &[str_const("notanumber")], 3).unwrap();
         assert!(res.is_err());
     }
 
@@ -1070,7 +1143,7 @@ mod tests {
     #[test]
     fn from_base16_decodes_hex_to_signed_bytes() {
         let f = ident("fromBase16", vec![SType::SString], coll_byte());
-        let out = predef_ir_builder("fromBase16", &f, &[str_const("deadbeef")])
+        let out = predef_ir_builder("fromBase16", &f, &[str_const("deadbeef")], 3)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1087,7 +1160,7 @@ mod tests {
     #[test]
     fn deserialize_falls_through() {
         let f = ident("deserialize", vec![SType::SString], SType::SInt);
-        assert!(predef_ir_builder("deserialize", &f, &[str_const("x")]).is_none());
+        assert!(predef_ir_builder("deserialize", &f, &[str_const("x")], 3).is_none());
     }
 
     // ----- fromBase58 / fromBase64 canonical decode (oracle §17, D-T2 closed) -----
@@ -1097,7 +1170,7 @@ mod tests {
     #[test]
     fn from_base58_empty_decodes_to_empty_byte_coll() {
         let f = ident("fromBase58", vec![SType::SString], coll_byte());
-        let out = predef_ir_builder("fromBase58", &f, &[str_const("")])
+        let out = predef_ir_builder("fromBase58", &f, &[str_const("")], 3)
             .expect("isDefinedAt true for valid Base58 (empty)")
             .expect("valid Base58 literal must decode");
         assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <>)");
@@ -1108,7 +1181,7 @@ mod tests {
     #[test]
     fn from_base64_empty_decodes_to_empty_byte_coll() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let out = predef_ir_builder("fromBase64", &f, &[str_const("")])
+        let out = predef_ir_builder("fromBase64", &f, &[str_const("")], 3)
             .expect("isDefinedAt true for valid Base64 (empty)")
             .expect("valid Base64 literal must decode");
         assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <>)");
@@ -1119,7 +1192,7 @@ mod tests {
     #[test]
     fn from_base64_ywjj_decodes_abc() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let out = predef_ir_builder("fromBase64", &f, &[str_const("YWJj")])
+        let out = predef_ir_builder("fromBase64", &f, &[str_const("YWJj")], 3)
             .expect("isDefinedAt true for valid Base64")
             .expect("valid Base64 literal must decode");
         assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <@97 @98 @99>)");
@@ -1132,7 +1205,7 @@ mod tests {
     #[test]
     fn from_base58_dollar_char_rejects() {
         let f = ident("fromBase58", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase58", &f, &[str_const("$reserveContractHash")])
+        let res = predef_ir_builder("fromBase58", &f, &[str_const("$reserveContractHash")], 3)
             .expect("isDefinedAt true for invalid Base58 char");
         assert!(res.is_err(), "invalid Base58 char must error");
     }
@@ -1141,7 +1214,7 @@ mod tests {
     #[test]
     fn from_base58_zero_digit_rejects() {
         let f = ident("fromBase58", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase58", &f, &[str_const("0")])
+        let res = predef_ir_builder("fromBase58", &f, &[str_const("0")], 3)
             .expect("isDefinedAt true for '0'");
         assert!(res.is_err(), "'0' not in Base58 alphabet");
     }
@@ -1151,7 +1224,7 @@ mod tests {
     #[test]
     fn from_base64_dollar_char_rejects() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase64", &f, &[str_const("$bankNFT")])
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("$bankNFT")], 3)
             .expect("isDefinedAt true for invalid Base64 char");
         assert!(res.is_err(), "invalid Base64 char must error");
     }
@@ -1160,7 +1233,7 @@ mod tests {
     #[test]
     fn from_base64_bang_char_rejects() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase64", &f, &[str_const("abc!")])
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("abc!")], 3)
             .expect("isDefinedAt true for '!'");
         assert!(res.is_err(), "'!' not in Base64 alphabet");
     }
@@ -1170,7 +1243,7 @@ mod tests {
     #[test]
     fn from_base64_underscore_rejects() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase64", &f, &[str_const("RWT_REPO_NFT")])
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("RWT_REPO_NFT")], 3)
             .expect("isDefinedAt true for '_'");
         assert!(res.is_err(), "'_' not in standard Base64 alphabet");
     }
@@ -1184,7 +1257,7 @@ mod tests {
     #[test]
     fn from_base64_padded_wrong_length_rejects() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase64", &f, &[str_const("a=")])
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("a=")], 3)
             .expect("isDefinedAt true for padded input");
         assert!(
             res.is_err(),
@@ -1198,7 +1271,7 @@ mod tests {
     #[test]
     fn from_base64_padded_length_six_rejects() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let res = predef_ir_builder("fromBase64", &f, &[str_const("abcde=")])
+        let res = predef_ir_builder("fromBase64", &f, &[str_const("abcde=")], 3)
             .expect("isDefinedAt true for padded input");
         assert!(
             res.is_err(),
@@ -1213,7 +1286,7 @@ mod tests {
     #[test]
     fn from_base64_unpadded_short_decodes_dropping_trailing_bits() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        let out = predef_ir_builder("fromBase64", &f, &[str_const("ab")])
+        let out = predef_ir_builder("fromBase64", &f, &[str_const("ab")], 3)
             .expect("isDefinedAt true for valid Base64 (unpadded, len 2)")
             .expect("\"ab\" is structurally valid base64; must decode");
         assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <@105>)");
@@ -1223,7 +1296,7 @@ mod tests {
     #[test]
     fn unknown_name_returns_none() {
         let f = ident("nope", vec![SType::SInt], SType::SInt);
-        assert!(predef_ir_builder("nope", &f, &[byte_const(1)]).is_none());
+        assert!(predef_ir_builder("nope", &f, &[byte_const(1)], 3).is_none());
     }
 
     // ----- unsignedBigInt validation (oracle §13) -----
@@ -1236,24 +1309,138 @@ mod tests {
             vec![SType::SString],
             SType::SUnsignedBigInt,
         );
-        let res = predef_ir_builder("unsignedBigInt", &f, &[str_const("-5")])
+        let res = predef_ir_builder("unsignedBigInt", &f, &[str_const("-5")], 3)
             .expect("isDefinedAt true for negative literal");
         assert!(res.is_err(), "negative unsignedBigInt must error");
     }
 
-    /// `unsignedBigInt("5")` → None (deferred, Apply survives); oracle §13 accepts
-    /// with `ConstantNode:UnsignedBigInt` — completed in M3.
+    /// `unsignedBigInt("5")` → `ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)`
+    /// (D-T3 CLOSED, M3 Task-6; oracle §13/§24).
     #[test]
-    fn unsigned_big_int_non_negative_deferred() {
+    fn unsigned_big_int_non_negative_builds_constant() {
         let f = ident(
             "unsignedBigInt",
             vec![SType::SString],
             SType::SUnsignedBigInt,
         );
-        // Non-negative → fall-through (None), Apply node survives.
-        assert!(
-            predef_ir_builder("unsignedBigInt", &f, &[str_const("5")]).is_none(),
-            "valid unsignedBigInt must fall through (deferred)"
+        let out = predef_ir_builder("unsignedBigInt", &f, &[str_const("5")], 3)
+            .expect("isDefinedAt true for non-negative literal")
+            .expect("valid unsignedBigInt literal must build a constant");
+        assert_eq!(
+            print_typed(&out),
+            "(ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))"
         );
+    }
+
+    /// `unsignedBigInt("0005")` canonicalizes leading zeros → `@5` (oracle-verified,
+    /// golden_seed.txt §24, D-T3).
+    #[test]
+    fn unsigned_big_int_canonicalizes_leading_zeros() {
+        let f = ident(
+            "unsignedBigInt",
+            vec![SType::SString],
+            SType::SUnsignedBigInt,
+        );
+        let out = predef_ir_builder("unsignedBigInt", &f, &[str_const("0005")], 3)
+            .expect("isDefinedAt true")
+            .expect("valid literal must build a constant");
+        assert_eq!(
+            print_typed(&out),
+            "(ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))"
+        );
+    }
+
+    /// `unsignedBigInt` caps at 256 bits UNCONDITIONALLY (no `tree_version` gate,
+    /// unlike `bigInt`'s 255-bit cap) — oracle §24: `2^256-1` accepts, `2^256`
+    /// rejects, at BOTH v2 and v3.
+    #[test]
+    fn unsigned_big_int_caps_at_256_bits_unconditionally() {
+        let f = ident(
+            "unsignedBigInt",
+            vec![SType::SString],
+            SType::SUnsignedBigInt,
+        );
+        let max_256 =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let over_256 =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+        for tree_version in [2u8, 3u8] {
+            let out = predef_ir_builder("unsignedBigInt", &f, &[str_const(max_256)], tree_version)
+                .expect("isDefinedAt true")
+                .expect("2^256-1 must fit");
+            assert_eq!(
+                print_typed(&out),
+                format!("(ConstantNode:UnsignedBigInt (CUnsignedBigInt @{max_256}))")
+            );
+            let res = predef_ir_builder("unsignedBigInt", &f, &[str_const(over_256)], tree_version)
+                .expect("isDefinedAt true");
+            assert!(res.is_err(), "2^256 must be rejected (256-bit cap)");
+        }
+    }
+
+    /// `bigInt` caps at 255 bits ONLY at `tree_version >= 3` — oracle §24:
+    /// `bigInt(2^1000)` accepts at v2, rejects (ArithmeticException) at v3.
+    #[test]
+    fn big_int_cap_is_version_gated() {
+        let f = ident("bigInt", vec![SType::SString], SType::SBigInt);
+        let huge_2_pow_1000 = num_bigint::BigUint::from(2u32).pow(1000).to_string();
+        assert!(
+            predef_ir_builder("bigInt", &f, &[str_const(&huge_2_pow_1000)], 2)
+                .expect("isDefinedAt true")
+                .is_ok(),
+            "2^1000 must accept at tree_version 2 (no cap pre-v3)"
+        );
+        let res = predef_ir_builder("bigInt", &f, &[str_const(&huge_2_pow_1000)], 3)
+            .expect("isDefinedAt true");
+        assert!(res.is_err(), "2^1000 must be rejected at v3 (255-bit cap)");
+    }
+
+    /// `bigInt("0005")` canonicalizes leading zeros → `@5` (oracle-verified,
+    /// golden_seed.txt §24, D-T3).
+    #[test]
+    fn big_int_canonicalizes_leading_zeros() {
+        let f = ident("bigInt", vec![SType::SString], SType::SBigInt);
+        let out = predef_ir_builder("bigInt", &f, &[str_const("0005")], 3)
+            .expect("isDefinedAt true")
+            .expect("valid literal must build a constant");
+        assert_eq!(print_typed(&out), "(ConstantNode:BigInt (CBigInt @5))");
+    }
+
+    /// `bigInt` at the 255-bit boundary: `2^255-1` accepts, `2^255` rejects,
+    /// `-2^255` accepts (two's-complement `bitLength` == 255, since 2^255 is a
+    /// power of two), `-(2^255+1)` rejects — oracle-verified, golden_seed.txt §24.
+    #[test]
+    fn big_int_255_bit_boundary() {
+        let f = ident("bigInt", vec![SType::SString], SType::SBigInt);
+        const MAX_POS: &str =
+            "57896044618658097711785492504343953926634992332820282019728792003956564819967"; // 2^255-1
+        const OVER_POS: &str =
+            "57896044618658097711785492504343953926634992332820282019728792003956564819968"; // 2^255
+        const OVER_POS_PLUS_ONE: &str =
+            "57896044618658097711785492504343953926634992332820282019728792003956564819969"; // 2^255+1
+
+        let out = predef_ir_builder("bigInt", &f, &[str_const(MAX_POS)], 3)
+            .expect("isDefinedAt true")
+            .expect("2^255-1 must fit");
+        assert_eq!(
+            print_typed(&out),
+            format!("(ConstantNode:BigInt (CBigInt @{MAX_POS}))")
+        );
+        let res =
+            predef_ir_builder("bigInt", &f, &[str_const(OVER_POS)], 3).expect("isDefinedAt true");
+        assert!(res.is_err(), "2^255 must be rejected");
+
+        let min_neg = format!("-{OVER_POS}"); // -2^255
+        let out = predef_ir_builder("bigInt", &f, &[str_const(&min_neg)], 3)
+            .expect("isDefinedAt true")
+            .expect("-2^255 must fit (bitLength 255, power-of-two special case)");
+        assert_eq!(
+            print_typed(&out),
+            format!("(ConstantNode:BigInt (CBigInt @-{OVER_POS}))")
+        );
+        let over_neg = format!("-{OVER_POS_PLUS_ONE}"); // -(2^255+1)
+        let res =
+            predef_ir_builder("bigInt", &f, &[str_const(&over_neg)], 3).expect("isDefinedAt true");
+        assert!(res.is_err(), "-(2^255+1) must be rejected");
     }
 }

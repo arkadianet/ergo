@@ -173,6 +173,8 @@ fn render_opt_node(opt: &Option<Box<TypedExpr>>) -> String {
 ///   Bool(b)             → `@true` / `@false`
 ///   numeric primitives  → `@n` (signed decimal)
 ///   BigInt(s)           → `(CBigInt @n)` — the CBigInt wrapper
+///   UnsignedBigInt(s)   → `(CUnsignedBigInt @n)` — the CUnsignedBigInt wrapper
+///                         (D-T3, M3 Task-6); n is the canonical decimal string.
 ///   String(s)           → `'s'`
 ///   Unit                → `@()` (Scala BoxedUnit in productIterator context)
 ///   ByteColl/LongColl   → `<@v1 @v2 …>` (N5 primitive-seq form)
@@ -194,6 +196,9 @@ fn render_payload(p: &ConstPayload) -> String {
         ConstPayload::Int(n) => format!("@{}", n),
         ConstPayload::Long(n) => format!("@{}", n),
         ConstPayload::BigInt(s) => format!("(CBigInt @{})", s),
+        // D-T3 (M3 Task-6): oracle `unsignedBigInt("5")` → `OK (ConstantNode:
+        // UnsignedBigInt (CUnsignedBigInt @5))` (golden_seed.txt §13/§24).
+        ConstPayload::UnsignedBigInt(s) => format!("(CUnsignedBigInt @{})", s),
         // String renders with single quotes per N5 `case s: String => "'" + s + "'"`.
         // Verified: `"ab"+"cd"` → oracle `(ConstantNode:String 'abcd')`.
         ConstPayload::String(s) => format!("'{}'", s),
