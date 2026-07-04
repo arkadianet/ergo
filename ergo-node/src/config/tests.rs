@@ -193,6 +193,26 @@ fn load_rejects_outbound_target_above_max_connections() {
 }
 
 #[test]
+fn load_defaulted_target_clamps_to_low_max_connections() {
+    // Back-compat: a config that pins a low max_connections (the old
+    // default 80) without setting target_outbound must still boot after
+    // the default rose to 96 — the omitted target clamps to the ceiling
+    // rather than hard-failing the load. An EXPLICIT target above max is
+    // still rejected (see load_rejects_outbound_target_above_max_connections).
+    let path = write_toml(
+        "[peers]\n\
+         known = [\"127.0.0.1:9030\"]\n\
+         max_connections = 80\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli)
+        .expect("config pinning max_connections=80 with target unset must still load");
+    assert_eq!(cfg.peer_limits.max_connections, 80);
+    // Clamped to min(DEFAULT_TARGET_OUTBOUND, max_connections) = min(96, 80).
+    assert_eq!(cfg.peer_limits.target_outbound, 80);
+}
+
+#[test]
 fn load_default_node_identity_uses_ergo_rust() {
     let toml = default_toml();
     let cli = minimal_cli(Some(&toml));
