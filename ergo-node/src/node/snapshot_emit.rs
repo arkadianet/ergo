@@ -9,6 +9,7 @@ use ergo_api::types::{
 use ergo_mempool::types::TxSource;
 use ergo_mempool::Mempool;
 use ergo_primitives::reader::VlqReader;
+use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
 use ergo_ser::block_transactions::read_block_transactions;
 use ergo_ser::header::{read_header, Header};
 use ergo_ser::modifier_id::ExpectedSections;
@@ -144,6 +145,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             &state.store,
             tip_id,
             tip_height,
+            state.network,
         ),
         // No committed full-block chain yet, or a transient read fault:
         // serve an empty tail this tick (best-effort; recovers next tick).
@@ -441,13 +443,14 @@ fn recent_blocks_for_tip(
     store: &StateBackendKind,
     tip_id: [u8; 32],
     tip_height: u32,
+    network: NetworkPrefix,
 ) -> Arc<Vec<ApiRecentBlock>> {
     if let Some(c) = cache {
         if c.tip_id == tip_id {
             return c.blocks.clone();
         }
     }
-    let blocks = Arc::new(build_recent_blocks(store, tip_id, tip_height));
+    let blocks = Arc::new(build_recent_blocks(store, tip_id, tip_height, network));
     // Contiguous-from-tip: `blocks[i]` must be height `tip_height - i`. This
     // implies the tip itself was emitted (i = 0) and that no ancestor inside
     // the window was skipped on a transient fault. An empty tail (tip block
@@ -554,6 +557,7 @@ fn build_recent_blocks(
     store: &StateBackendKind,
     tip_id: [u8; 32],
     tip_height: u32,
+    network: NetworkPrefix,
 ) -> Vec<ApiRecentBlock> {
     let mut out = Vec::new();
     if tip_height == 0 || store.as_utxo().is_none() {
@@ -586,7 +590,9 @@ fn build_recent_blocks(
             }
         };
         let parent = *header.parent_id.as_bytes();
-        if let Some(block) = try_recent_block(&sections, &id, height, &header, header_bytes.len()) {
+        if let Some(block) =
+            try_recent_block(&sections, &id, height, &header, header_bytes.len(), network)
+        {
             out.push(block);
         }
         // Step to the parent even when this block was skipped, so a single
@@ -622,6 +628,7 @@ fn try_recent_block(
     height: u32,
     header: &Header,
     header_len: usize,
+    network: NetworkPrefix,
 ) -> Option<ApiRecentBlock> {
     let expected = ExpectedSections::from_header(
         id,
@@ -689,6 +696,7 @@ fn try_recent_block(
             return None;
         }
     };
+    let (miner_pk, miner_address) = miner_fields(header.solution.pk().as_bytes(), network);
     Some(ApiRecentBlock {
         height,
         header_id: hex::encode(id),
@@ -700,7 +708,20 @@ fn try_recent_block(
         // tip-keyed recent-blocks cache (committed-state only). See
         // `merge_delivered_by` at the `publish_snapshot` call site.
         delivered_by: None,
+        miner_pk,
+        miner_address,
     })
+}
+
+/// Miner attribution facts from a header's Autolykos solution pk bytes:
+/// (hex pk, derived P2PK address). The address encodes with this node's
+/// network prefix; an encode failure (wrong length) degrades to `None`
+/// rather than omitting the block.
+fn miner_fields(pk_bytes: &[u8], network: NetworkPrefix) -> (Option<String>, Option<String>) {
+    (
+        Some(hex::encode(pk_bytes)),
+        encode_p2pk_from_pubkey(network, pk_bytes).ok(),
+    )
 }
 
 /// Reducer-independent inputs that drive [`select_bootstrap_phase`].
@@ -1098,7 +1119,7 @@ mod tests {
         store_block(&store, &h3, id3, &b3, true, Some(&ext), Some(&adp));
         let backend = StateBackendKind::Utxo(store);
 
-        let out = build_recent_blocks(&backend, id3, 3);
+        let out = build_recent_blocks(&backend, id3, 3, NetworkPrefix::Mainnet);
 
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].height, 3);
@@ -1138,7 +1159,7 @@ mod tests {
         store_block(&store, &hf, idf, &bf, true, Some(&ext), None);
         let backend = StateBackendKind::Utxo(store);
 
-        let out = build_recent_blocks(&backend, id3, 3);
+        let out = build_recent_blocks(&backend, id3, 3, NetworkPrefix::Mainnet);
 
         let ids: Vec<String> = out.iter().map(|b| b.header_id.clone()).collect();
         assert_eq!(
@@ -1168,7 +1189,7 @@ mod tests {
         }
         let backend = StateBackendKind::Utxo(store);
 
-        let out = build_recent_blocks(&backend, tip_id, total);
+        let out = build_recent_blocks(&backend, tip_id, total, NetworkPrefix::Mainnet);
 
         assert_eq!(out.len(), RECENT_BLOCKS_CAP);
         assert_eq!(out[0].height, total);
@@ -1183,7 +1204,7 @@ mod tests {
     fn recent_blocks_empty_when_no_full_block() {
         let (_tmp, store) = open_store();
         let backend = StateBackendKind::Utxo(store);
-        assert!(build_recent_blocks(&backend, [0u8; 32], 0).is_empty());
+        assert!(build_recent_blocks(&backend, [0u8; 32], 0, NetworkPrefix::Mainnet).is_empty());
     }
 
     /// Digest backends treat an absent adProofs section as a fault, not the
@@ -1204,7 +1225,7 @@ mod tests {
         )
         .unwrap();
         let backend = StateBackendKind::Digest(store);
-        assert!(build_recent_blocks(&backend, [7u8; 32], 5).is_empty());
+        assert!(build_recent_blocks(&backend, [7u8; 32], 5, NetworkPrefix::Mainnet).is_empty());
     }
 
     /// The tail tracks the *committed* full-block tip, not the highest header
@@ -1230,7 +1251,7 @@ mod tests {
         let reader = ChainStoreReader::new_from_db(backend.db_arc());
         assert_eq!(reader.committed_tip().unwrap(), Some((2, id2)));
 
-        let out = build_recent_blocks(&backend, id2, 2);
+        let out = build_recent_blocks(&backend, id2, 2, NetworkPrefix::Mainnet);
         let heights: Vec<u32> = out.iter().map(|b| b.height).collect();
         assert_eq!(
             heights,
@@ -1252,14 +1273,14 @@ mod tests {
         let backend = StateBackendKind::Utxo(store);
 
         let mut cache = None;
-        let first = recent_blocks_for_tip(&mut cache, &backend, id2, 2);
-        let second = recent_blocks_for_tip(&mut cache, &backend, id2, 2);
+        let first = recent_blocks_for_tip(&mut cache, &backend, id2, 2, NetworkPrefix::Mainnet);
+        let second = recent_blocks_for_tip(&mut cache, &backend, id2, 2, NetworkPrefix::Mainnet);
         assert!(
             Arc::ptr_eq(&first, &second),
             "unchanged tip must reuse the cached Arc"
         );
 
-        let third = recent_blocks_for_tip(&mut cache, &backend, id1, 1);
+        let third = recent_blocks_for_tip(&mut cache, &backend, id1, 1, NetworkPrefix::Mainnet);
         assert!(
             !Arc::ptr_eq(&first, &third),
             "tip change must rebuild the tail"
@@ -1288,7 +1309,7 @@ mod tests {
         let mut cache = None;
         // First tick: h2 omitted → gappy tail [3, 1]. Not contiguous from the
         // tip, so it must not be cached.
-        let gappy = recent_blocks_for_tip(&mut cache, &backend, id3, 3);
+        let gappy = recent_blocks_for_tip(&mut cache, &backend, id3, 3, NetworkPrefix::Mainnet);
         assert_eq!(
             gappy.iter().map(|b| b.height).collect::<Vec<_>>(),
             vec![3, 1]
@@ -1310,7 +1331,7 @@ mod tests {
 
         // Second tick, same tip id: recomputes (was never cached) and now
         // yields the full contiguous tail, which is cached.
-        let healed = recent_blocks_for_tip(&mut cache, &backend, id3, 3);
+        let healed = recent_blocks_for_tip(&mut cache, &backend, id3, 3, NetworkPrefix::Mainnet);
         assert_eq!(
             healed.iter().map(|b| b.height).collect::<Vec<_>>(),
             vec![3, 2, 1]
@@ -1335,7 +1356,7 @@ mod tests {
         store_block(&store, &h3, id3, &b3, true, Some(&ext), None);
         let backend = StateBackendKind::Utxo(store);
 
-        let out = build_recent_blocks(&backend, id3, 3);
+        let out = build_recent_blocks(&backend, id3, 3, NetworkPrefix::Mainnet);
 
         let heights: Vec<u32> = out.iter().map(|b| b.height).collect();
         assert_eq!(heights, vec![3, 1], "h2 omitted, walk continued to h1");
@@ -1372,7 +1393,7 @@ mod tests {
             .unwrap();
         let backend = StateBackendKind::Utxo(store);
 
-        let out = build_recent_blocks(&backend, id2, 2);
+        let out = build_recent_blocks(&backend, id2, 2, NetworkPrefix::Mainnet);
 
         let heights: Vec<u32> = out.iter().map(|b| b.height).collect();
         assert_eq!(
@@ -1532,7 +1553,35 @@ mod tests {
             txs: 0,
             size_bytes: 0,
             delivered_by: None,
+            miner_pk: None,
+            miner_address: None,
         }
+    }
+
+    // ----- miner attribution -----
+
+    #[test]
+    fn miner_fields_derives_pk_hex_and_mainnet_p2pk_address() {
+        // Live-verified vector: 2Miners' mining pk → its P2PK address
+        // (cross-checked against /utils/rawToAddress on mainnet 2026-07-05).
+        let pk = hex::decode("0274e729bb6615cbda94d9d176a2f1525068f12b330e38bbbf387232797dfd891f")
+            .unwrap();
+        let (pk_hex, addr) = miner_fields(&pk, NetworkPrefix::Mainnet);
+        assert_eq!(
+            pk_hex.as_deref(),
+            Some("0274e729bb6615cbda94d9d176a2f1525068f12b330e38bbbf387232797dfd891f")
+        );
+        assert_eq!(
+            addr.as_deref(),
+            Some("9fQYeMEXvSfmL2iUfsDDJ88SVtuPuvTZiB5aR19nKeCKSACVmgx")
+        );
+    }
+
+    #[test]
+    fn miner_fields_bad_pk_length_yields_pk_but_no_address() {
+        let (pk_hex, addr) = miner_fields(&[0u8; 5], NetworkPrefix::Mainnet);
+        assert_eq!(pk_hex.as_deref(), Some("0000000000"));
+        assert!(addr.is_none(), "address encoding must fail closed to None");
     }
 
     /// `delivered_by` is populated from the first-deliverer ring for a

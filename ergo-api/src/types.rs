@@ -56,8 +56,8 @@ fn default_block_interval_ms() -> u64 {
 /// declared / bind addr). Set at boot from `NodeConfig` + the hardcoded
 /// `Mode` peer-feature; doesn't change at runtime today.
 ///
-/// `mining` is reserved for the future mining crate — always `false`
-/// until candidate generation lands.
+/// `mining` mirrors the node's mining configuration (whether the
+/// `/mining/*` work-serving routes are wired).
 ///
 /// Backs `GET /api/v1/identity`; consumed by the operator dashboard's
 /// identity strip. Rust-native — Scala's `/info` has no equivalent.
@@ -679,6 +679,16 @@ pub struct ApiRecentBlock {
     /// Pure observability — never affects validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_by: Option<String>,
+    /// Miner public key from the header's Autolykos solution (33-byte
+    /// compressed secp256k1 point, hex) — present on both v1 and v2
+    /// solutions. Identifies who mined the block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miner_pk: Option<String>,
+    /// P2PK base58 address derived from `miner_pk` with this node's
+    /// network prefix — the conventional "miner" identity explorers
+    /// show. `None` only if address encoding failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miner_address: Option<String>,
 }
 
 /// Active mempool priority-weight function. Wire strings match
