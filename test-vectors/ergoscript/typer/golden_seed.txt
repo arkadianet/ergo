@@ -2,7 +2,9 @@
 #
 # Format: verb<TAB>source<TAB>expected-output
 #   verb     = tc (empty env) | tce (demo env: a,b:Coll[Byte]; col1,col2:Coll[Long];
-#              g1,g2:GroupElement; n1:BigInt; bb1,bb2:Byte)
+#              g1,g2,g3:GroupElement; n1:BigInt; bb1,bb2:Byte — g3 = g^7, a fixed
+#              NON-generator point, added post-M2 for D-T6 decompress captures) |
+#              tcs (SigmaTyperTest env, see LangTests.scala:52-69)
 #   source   = raw UTF-8 ErgoScript; the Rust harness hex-encodes it when calling the oracle
 #   expected = oracle reply: OK <sexpr> | REJECT <line>:<col> <ExClass> | ERR <msg>
 #
@@ -424,3 +426,91 @@ tc	serialize(SELF.id)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaD
 tc	serialize(OUTPUTS(0).value)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Long (Apply:Box (Outputs:Coll[Box]) [(ConstantNode:Int @0)]) 'value' None)] {})
 tc	serialize(Coll(1, 2).size)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Coll[IV]) => Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2)] #Int) 'size' None)] {})
 tc	serialize(if (HEIGHT > 5) SELF.value else SELF.id)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(If:(Box) => Long (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (Select:(Box) => Long (Self:Box) 'value' None) (Select:(Box) => Coll[Byte] (Self:Box) 'id' None))] {})
+#
+# ── § 23: M3 Task-2 — deferred typed-shape captures (postfix-ident, tuple ────────
+#           dynamic-index, D-T6 non-generator GroupElement, D-T12 string fold,
+#           identity-point probe) ────────────────────────────────────────────────
+# All captured live ORACLE_TREE_VERSION=3 (v6), ORACLE_NETWORK=testnet (default;
+# unused here — no PK/address literals in this batch), scala-cli batch mode
+# (2026-07-04). Every source below is an ACCEPT verdict; there were no REJECTs to
+# re-grade via tc1.sh in this batch.
+#
+# (a) Postfix-ident zero-arg calls (m2-deferred-items.md:101-104, "confirm the
+#     Select arm fires correctly for zero-arg postfix calls"). Two DISTINCT
+#     surfaces, both ACCEPT but with DIFFERENT shapes:
+#     - `col1.size` (dot, no parens) parses as a bare property Select
+#       (Exprs.scala ExprSuffix "." branch — no Apply wrapper) and the typer
+#       leaves zero-arg property access as a plain `Select`, matching the
+#       existing `INPUTS.size > 1` §12 record (Select, no MethodCall).
+#     - `arr1 size` (no dot — the grammar's dedicated PostFix rule, Exprs.scala:96-99)
+#       ALWAYS desugars to `mkMethodCallLike(obj, name, [])`, i.e. an explicit
+#       zero-arg Apply; since `size` has no custom irBuilder it survives as a
+#       generic `MethodCall` (%SCollection.size [] {#IV->#Byte}) — the same
+#       owner/typeSubst shape as every other no-irBuilder SCollection method in
+#       §12/§14. Captured under `tcs` (SigmaTyperTest env) for env diversity;
+#       Task 8 consumes both shapes for the postfix-ident binder/typer arm.
+#       NOTE: `col1` (not `arr1`) was the first choice, but tcs's `col1`/`col2`
+#       are a LangTests.scala idiosyncrasy — LangTests.scala:52-69 binds them
+#       directly to a raw `ConcreteCollection.fromItems(...)` AST node (bypassing
+#       Platform.liftToConstant entirely), unlike every other tcs free var
+#       (arr1/arr2/g1/g2/... are genuine folded Constants). Our `typer_test_env()`
+#       has no `EnvValue` variant for "pre-built ConcreteCollection passed
+#       through" — `arr1` (a genuine `ByteArrayConstant` on both the oracle and
+#       Rust side) avoids the gap; the `col1`/`col2`-as-ConcreteCollection fixture
+#       quirk is not otherwise exercised and is out of scope for Task 2.
+tce	col1.size	OK (Select:Int (ConstantNode:Coll[Long] <@1 @2>) 'size')
+tcs	arr1 size	OK (MethodCall:Int (ConstantNode:Coll[Byte] <@1 @2>) %SCollection.size [] {#IV->#Byte})
+#
+# (b) Tuple dynamic-index (SigmaTyper.scala:278-291, STuple branch). CONTRARY to
+#     the brief's REJECT expectation, the oracle ACCEPTS BOTH probes — flagged
+#     prominently for Task 8. Root cause: `STuple` extends `SCollection[SAny.type]`
+#     (SType.scala:822-825, `elemType = SAny`), so a non-constant tuple index
+#     falls through to the STuple `case Seq(index) => ... mkByIndex(new_f.asCollection[SAny.type], ...)`
+#     branch (asCollection is an unchecked asInstanceOf — the underlying node is
+#     still the Tuple value; only ByIndex's static `V` type param changes),
+#     producing `ByIndex:Any` (elemType SAny, printed "Any") — NOT a REJECT.
+#   - True dynamic index (`i` bound to `HEIGHT`, not a compile-time constant):
+#     genuinely exercises the STuple `Seq(index)` (non-Constant) arm → ByIndex:Any.
+tc	{ val i = HEIGHT; (1, 2)(i) }	OK (Block:Any [(ValNode:Int 'i' (Height:Int))] (ByIndex:Any (Tuple:(Int,Int) [(ConstantNode:Int @1) (ConstantNode:Int @2)]) (Ident:Int 'i') None))
+#   - `bb1` is a tce demo-env free var, substituted by the BINDER as a literal
+#     Constant (SigmaBinder.liftAny), NOT an Ident — so by typer time the index
+#     arg is `Constant(1, SByte)`, hitting the STuple `Seq(Constant(index, _))`
+#     STATIC arm instead (`fieldIndex = SByte.downcast(1) + 1 = 2`), producing a
+#     STATIC `SelectField` (selecting the tuple's 2nd item, the literal `1`) —
+#     this probe does NOT exercise the dynamic arm despite using a non-literal
+#     source token; it demonstrates the env-substitution collapse instead.
+tce	(col1(0), 1)(bb1)	OK (SelectField:Int (Tuple:(Long,Int) [(ByIndex:Long (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) None) (ConstantNode:Int @1)]) @2)
+#
+# (c) D-T6 — g3 (g^7, a fixed NON-generator point; env.rs `demoEnv` g3 added in
+#     8e4dc09, TyperOracle.scala only). The oracle folds the free-var reference
+#     directly to a decompressed-affine `Ecp @(x,y,z)` ConstantNode (SigmaBinder
+#     liftAny substitutes a Constant leaf for env values) — confirms x =
+#     5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc matches the
+#     independently-computed secp256k1 scalar-7 point (SEC1-compressed
+#     025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc, y even
+#     → 0x02 prefix). `env.rs::lift` renders this as an M2 hex placeholder, not
+#     the decompressed form — SWEEP_SKIP, D-T6 (fix at M3 alongside g1/g2).
+tce	g3	OK (ConstantNode:GroupElement (CGroupElement (Ecp @(5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc,6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da,1))))
+tce	proveDlog(g3)	OK (CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGroupElement (Ecp @(5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc,6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da,1)))))
+#
+# (d) D-T12 — `"ab" + g1` is a compile-time STRING FOLD: Scala's `+` on
+#     (String, GroupElement) stringifies the RHS via the JVM's runtime
+#     `.toString` (ECPoint's default, non-canonical, TRUNCATED "…" repr) and
+#     concatenates, producing a single folded `ConstantNode:String`. The payload
+#     string is the exact D-T12 target — commit it byte-for-byte; do not
+#     normalize the embedded `GroupElement(ECPoint(...))` text. SWEEP_SKIP, D-T12
+#     (Rust today types this as an ArithOp/string-concat REJECT, not a fold).
+tce	"ab" + g1	OK (ConstantNode:String 'abGroupElement(ECPoint(79be66,483ada,...))')
+#
+# (e) Identity-point probe (informs Task 3's identity policy). `decodePoint` is a
+#     predef Global function call (SigmaPredef), NOT a free-var substitution — it
+#     is NEVER constant-folded at typecheck time regardless of its argument being
+#     a literal; it always types as a `DecodePoint` transformer node wrapping the
+#     (untouched) `Coll[Byte]` argument. The typer performs NO on-curve/identity
+#     validation here — an all-zero 33-byte string (not a well-formed SEC1
+#     encoding: prefix byte 0x00 is neither 0x02 nor 0x03) still types ACCEPT;
+#     any identity/decompress rejection is a LATER-stage (interpreter/graph) concern,
+#     out of typer scope. No GroupElement constant is rendered (only a plain
+#     Coll[Byte] constant, already fully supported) — PASSES the byte-parity
+#     sweep outright, no SWEEP_SKIP needed.
+tce	decodePoint(fromBase16("000000000000000000000000000000000000000000000000000000000000000000"))	OK (DecodePoint:GroupElement (ConstantNode:Coll[Byte] <@0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0>))

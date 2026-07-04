@@ -8,6 +8,10 @@
 //! - `REJECT` records: assert the compile fails + exception class matches.
 //! - `SWEEP_SKIP` records: assert the compile ACCEPTS (verdict check only —
 //!   M2 printer has known deviations for PK/demo-env GroupElement constants).
+//! - [`VERDICT_DEVIATION_SOURCES`] records: excluded from the sweep entirely — a
+//!   genuine, already-documented verdict divergence (oracle ACCEPTs, our typer
+//!   deliberately REJECTs; e.g. D-T12's GroupElement-RHS string fold). Distinct
+//!   from `SWEEP_SKIP`, whose entries all ACCEPT.
 //! - v2-gate records (§6): run at `tree_version = 2`; assert REJECT MethodNotFound.
 //!
 //! This is the **single source of truth** for [`SWEEP_SKIP`]; the identical constant
@@ -74,7 +78,26 @@ const SWEEP_SKIP: &[&str] = &[
     "g1.negate",
     "g1.multiply(g2)",
     "proveDHTuple(g1, g2, g1, g2)",
+    // D-T6 (§23 M3 Task-2): g3 is the demo-env's non-generator point (g^7).
+    // Same M2 hex-placeholder deviation as g1/g2 above — `env.rs::lift` has not
+    // yet been flipped to the decompressed `Ecp (x,y,1)` form.
+    "g3",
+    "proveDlog(g3)",
 ];
+
+// Sources with a genuine, already-documented VERDICT divergence (oracle ACCEPTs;
+// our typer deliberately REJECTs) — distinct from SWEEP_SKIP, whose entries all
+// ACCEPT and only differ in *rendering*.  Excluded entirely from the accept-byte-
+// parity sweep below; never asserted to accept (unlike SWEEP_SKIP, which
+// `seed_accept_skip_set_accepts` DOES assert accepts).  Flips when the cited
+// deviation is fixed.
+//
+// - `"ab" + g1` (D-T12, lib.rs `mcl_string`/`const_java_to_string`): a GroupElement
+//   RHS folds in Scala via a JVM-runtime `.toString` we cannot reproduce byte-
+//   exactly (rooted in D-T6); rather than fold WRONG bytes we keep the REJECT.
+//   This is a NAMED, reviewed verdict divergence, not an oversight — see
+//   golden_seed.txt §23(d).
+const VERDICT_DEVIATION_SOURCES: &[&str] = &["\"ab\" + g1"];
 
 // V2-gated sources: appear TWICE in the seed — once in §4 (v3 → OK) and once in
 // §6 (v2 → REJECT MethodNotFound).  The batch reject-class sweep at v3 would
@@ -118,7 +141,24 @@ fn generator_ge() -> GroupElement {
     GroupElement::from_bytes(bytes)
 }
 
-/// Demo env (`tce`): `a,b:Coll[Byte]; col1,col2:Coll[Long]; g1,g2:GroupElement;
+/// A fixed NON-generator point, `g^7` — matches `TyperOracle.scala:demoEnv`'s
+/// `g3` (added 8e4dc09 for D-T6's decompress captures; scalar 7 chosen simply
+/// because 7 !== 1 mod the group order, so the point is provably distinct from
+/// the generator). Independently re-derived (secp256k1 scalar multiplication,
+/// SEC1-compressed) and cross-checked against the oracle's decompressed
+/// `Ecp @(x,y,1)` reply for `tce g3` (golden_seed.txt §23(c)): x =
+/// `5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc`, y even
+/// → `0x02` prefix.
+fn non_generator_ge() -> GroupElement {
+    let mut bytes = [0u8; 33];
+    bytes[0] = 0x02;
+    let x = hex::decode("5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc")
+        .expect("valid hex");
+    bytes[1..].copy_from_slice(&x);
+    GroupElement::from_bytes(bytes)
+}
+
+/// Demo env (`tce`): `a,b:Coll[Byte]; col1,col2:Coll[Long]; g1,g2,g3:GroupElement;
 /// n1:BigInt; bb1,bb2:Byte`.  Matches `TyperOracle.scala:demoEnv`.
 fn demo_env() -> ScriptEnv {
     let ge = generator_ge();
@@ -129,6 +169,7 @@ fn demo_env() -> ScriptEnv {
     env.insert("col2", EnvValue::LongArray(vec![3, 4]));
     env.insert("g1", EnvValue::GroupElement(ge));
     env.insert("g2", EnvValue::GroupElement(ge));
+    env.insert("g3", EnvValue::GroupElement(non_generator_ge()));
     env.insert("n1", EnvValue::BigInt("5".to_string()));
     env.insert("bb1", EnvValue::Byte(1));
     env.insert("bb2", EnvValue::Byte(2));
@@ -227,14 +268,19 @@ fn seed_accept_records_byte_parity() {
         if V2_ACCEPT_SOURCES.contains(&src) {
             continue; // §21 records the v2 owner; asserted at v2/v3 by a dedicated test
         }
+        if VERDICT_DEVIATION_SOURCES.contains(&src) {
+            continue; // oracle ACCEPTs, our typer deliberately REJECTs (D-T12) — not asserted here
+        }
         let got = typecheck_verb(verb, src, 3)
             .unwrap_or_else(|e| panic!("expected OK for {verb} {src:?}, got reject: {e:?}"));
         assert_eq!(got, sexpr, "byte-parity mismatch for {verb} {src:?}");
         checked += 1;
     }
-    // Guard: §16 adds 1 OK record (col1(0)+n1); previous floor was 80.
+    // Guard: §23 (M3 Task-2) adds 5 passing OK records (col1.size, arr1 size,
+    // the two tuple dynamic-index records, decodePoint identity-point probe);
+    // previous floor was 85.
     assert!(
-        checked >= 85,
+        checked >= 90,
         "swept only {checked} accept records — seed may have shrunk"
     );
 }
@@ -297,6 +343,8 @@ fn seed_accept_skip_set_accepts() {
         ("tce", "g1.negate"),
         ("tce", "g1.multiply(g2)"),
         ("tce", "proveDHTuple(g1, g2, g1, g2)"),
+        ("tce", "g3"),
+        ("tce", "proveDlog(g3)"),
     ];
     for (verb, src) in sources {
         typecheck_verb(verb, src, 3)
