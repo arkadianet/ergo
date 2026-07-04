@@ -142,9 +142,15 @@ Be aware of these before depending on the node.
   three testnet addresses (its conf retains the reemission settings even
   though activation is unreachable); this build returns 404 there pending
   a testnet oracle capture.
-- **NiPoPoW prover/verifier** — the algorithmic core, the serve-side walk,
-  and sub-chain / score checks have landed; full Scala-oracle byte parity
-  and adversarial-proof edge cases are still open.
+- **NiPoPoW** — complete: prover/verifier, P2P exchange + bootstrap, and
+  the four `/nipopow/*` REST routes. Byte/JSON parity is pinned against
+  genuine Scala-serializer fixtures, a live mainnet differential vs the
+  reference node (all endpoints, genesis/epoch-boundary/v1-era heights,
+  anchored proofs, error surfaces), scrypto batch-Merkle shape vectors,
+  and a 132-header `maxLevelOf` oracle sweep. One documented deviation:
+  the Scala node reports stale `header.size` metadata (+1) for some
+  historical headers, contradicting its own served bytes; this build
+  serves the true byte length.
 
 ### Out of scope by design
 

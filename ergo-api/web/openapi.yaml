@@ -28,15 +28,6 @@ info:
     `/script/addressToBytes/{address}` ARE mounted — they match the
     Scala wire shape; see **Everything else**.)
 
-    **Tracked / planned (the underlying logic exists; the REST
-    surface is not yet mounted):**
-
-    - `/nipopow/popowHeaderById/{headerId}`,
-      `/nipopow/popowHeaderByHeight/{height}`,
-      `/nipopow/proof/{minChainLength}/{suffixLength}`,
-      `/nipopow/proof/{minChainLength}/{suffixLength}/{headerId}`
-      — REST surface for the existing prover (§6.2 prover ✅,
-      §6.5 REST mount ❌)
 
     **Config-gated (not 404 — depend on operator settings):**
 
@@ -1925,6 +1916,7 @@ components:
       required:
         - header
         - interlinks
+        - interlinksProof
       properties:
         header:
           $ref: '#/components/schemas/BlockHeader'
@@ -1933,6 +1925,45 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ModifierId'
+        interlinksProof:
+          # Present in the live Scala node's JSON but omitted from its
+          # own openapi spec (a Scala doc bug); documented here because
+          # this build emits it too, field-pinned to live captures.
+          $ref: '#/components/schemas/BatchMerkleProof'
+
+    BatchMerkleProof:
+      description: >
+        Batch Merkle proof tying the interlinks vector to its
+        interlinks-only Merkle subtree. The odd-trailing empty sibling
+        serializes as an empty-string digest.
+      type: object
+      required:
+        - indices
+        - proofs
+      properties:
+        indices:
+          type: array
+          items:
+            type: object
+            required: [index, digest]
+            properties:
+              index:
+                type: integer
+              digest:
+                type: string
+                description: Base16 leaf digest
+        proofs:
+          type: array
+          items:
+            type: object
+            required: [digest, side]
+            properties:
+              digest:
+                type: string
+                description: Base16 sibling digest; empty string = empty sibling
+              side:
+                type: integer
+                description: 0 = left, 1 = right
 
     NipopowProof:
       type: object
@@ -1961,6 +1992,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BlockHeader'
+        continuous:
+          description: >
+            Always true on this REST surface (continuous-mode proofs
+            with embedded difficulty headers).
+          type: boolean
 
     BlockHeader:
       description: Header of a block.
