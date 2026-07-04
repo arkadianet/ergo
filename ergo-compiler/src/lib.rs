@@ -194,8 +194,9 @@
 //!   `TransformingSigmaBuilder`
 //! - **tc1.sh** — fresh-JVM mode for position grading (avoids singleton contamination;
 //!   see R1 in `dev-docs/m2-recon/m2-oracle.md`)
-//! - **Golden seed** (`test-vectors/ergoscript/typer/golden_seed.txt`) — 143 committed
-//!   records (counted 2026-07-04); swept by `typer_oracle_parity::seed_golden_sweep`
+//! - **Golden seed** (`test-vectors/ergoscript/typer/golden_seed.txt`) — every committed
+//!   record is swept in full by `typer_oracle_parity` (the seed file is the record count
+//!   of record; a hardcoded number here rots as sections are added)
 //! - **Corpus verdicts** (`test-vectors/ergoscript/typer/corpus_verdicts.json`) — 79-contract
 //!   JVM verdicts; swept by `typer_oracle_parity::corpus_typed_verdict_parity`
 //!
