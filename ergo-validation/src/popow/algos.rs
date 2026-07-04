@@ -127,13 +127,23 @@ pub fn build_popow_header(
         serialize_batch_merkle_proof, BatchMerkleProof, ProofEntry, Side,
     };
 
-    // Empty interlinks → no proof. Vacuous case
-    // (PoPowHeader.scala:58-60).
+    // Empty interlinks (genesis) → the EMPTY BatchMerkleProof, which
+    // Scala serializes as 8 zero bytes (two u32 counts), NOT as zero
+    // bytes: `proofForInterlinkVector` returns
+    // `BatchMerkleProof(Seq.empty, Seq.empty)` (NipopowAlgos.scala:
+    // 218-219) and `PoPowHeaderSerializer` embeds its serialized form.
+    // Emitting 0 bytes here made every proof containing genesis
+    // wire-divergent from Scala (their parser rejects a 0-byte proof
+    // blob), caught by the T4 live differential at h=1.
     if interlinks.is_empty() {
+        let empty = BatchMerkleProof {
+            indices: Vec::new(),
+            proofs: Vec::new(),
+        };
         return Ok(ergo_ser::popow_header::PoPowHeader {
             header,
             interlinks,
-            interlinks_proof: Vec::new(),
+            interlinks_proof: serialize_batch_merkle_proof(&empty),
         });
     }
 
@@ -927,7 +937,10 @@ mod tests {
         let g = header_from_hex(GENESIS_HEX);
         let p = build_popow_header(g.clone(), vec![], &[]).unwrap();
         assert!(p.interlinks.is_empty());
-        assert!(p.interlinks_proof.is_empty());
+        // Canonical empty-proof wire form = 8 zero bytes (Scala's
+        // serialized empty BatchMerkleProof), NOT 0 bytes — see the
+        // genesis wire-form fix in build_popow_header.
+        assert_eq!(p.interlinks_proof, vec![0u8; 8]);
     }
 
     #[test]

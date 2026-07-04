@@ -431,13 +431,15 @@ impl StateStore {
 
         // Difficulty headers needed for continuous-mode validation.
         let chain_config = self.difficulty_params.clone();
-        let epoch_length = match (
-            chain_config.eip37_activation_height,
-            chain_config.eip37_epoch_length,
-        ) {
-            (Some(activation), Some(epoch_len)) if suffix_head_height >= activation => epoch_len,
-            _ => chain_config.epoch_length,
-        };
+        // Scala parity (NipopowProverWithDbAlgs.scala:95): the
+        // difficulty-header schedule uses eip37EpochLength
+        // UNCONDITIONALLY (`getOrElse`, no activation-height gate) —
+        // even for pre-EIP-37 anchors. A height-gated selection here
+        // omitted the 128-multiple headers Scala's verifier requires
+        // for old anchors (T4 live differential, anchor h=1000).
+        let epoch_length = chain_config
+            .eip37_epoch_length
+            .unwrap_or(chain_config.epoch_length);
         // Difficulty-header enrichment for continuous proofs. Each
         // height is *required* (the proof validator at
         // `ergo-validation::popow::proof::has_valid_difficulty_headers`

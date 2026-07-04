@@ -212,7 +212,9 @@ fn popow_header_genesis_height_1_vacuous_empty_proof() {
     let header = load_header_bytes(genesis);
     let popow = build_popow_header(header, vec![], &[]).unwrap();
     assert!(popow.interlinks.is_empty());
-    assert!(popow.interlinks_proof.is_empty());
+    // Canonical empty-proof wire form = 8 zero bytes (Scala's
+    // serialized empty BatchMerkleProof), NOT 0 bytes.
+    assert_eq!(popow.interlinks_proof, vec![0u8; 8]);
 
     // Round-trip.
     let bytes = serialize_popow_header(&popow).unwrap();

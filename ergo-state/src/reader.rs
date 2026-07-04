@@ -616,13 +616,15 @@ impl ChainStoreReader {
 
         // Difficulty headers for continuous-mode validation (continuous=true always).
         let chain_config = params;
-        let epoch_length = match (
-            chain_config.eip37_activation_height,
-            chain_config.eip37_epoch_length,
-        ) {
-            (Some(activation), Some(epoch_len)) if suffix_head_height >= activation => epoch_len,
-            _ => chain_config.epoch_length,
-        };
+        // Scala parity (NipopowProverWithDbAlgs.scala:95): the
+        // difficulty-header schedule uses eip37EpochLength
+        // UNCONDITIONALLY (`getOrElse`, no activation-height gate) —
+        // even for pre-EIP-37 anchors. A height-gated selection here
+        // omitted the 128-multiple headers Scala's verifier requires
+        // for old anchors (T4 live differential, anchor h=1000).
+        let epoch_length = chain_config
+            .eip37_epoch_length
+            .unwrap_or(chain_config.epoch_length);
         for h in difficulty_headers_needed(
             suffix_head_height,
             epoch_length,
