@@ -30,7 +30,7 @@ NipopowApiRoute/NipopowProverWithDbAlgs). Rust control :9063 (404s today).
 
 ## Tasks
 
-### T1 — REST serve surface (the build)
+### T1 — REST serve surface (the build) ✅ DONE (a075fb0)
 4 GET routes matching `NipopowApiRoute.scala:55-90`: `/nipopow/popowHeaderById/{id}`,
 `/nipopow/popowHeaderByHeight/{h}`, `/nipopow/proof/{m}/{k}`,
 `/nipopow/proof/{m}/{k}/{headerId}`. JSON encoders for NipopowProof
@@ -45,7 +45,7 @@ guard, on-demand prove for non-default m/k (Scala REST computes on demand,
 `continuous=true` always). openapi golden regen. Tests: field-exact serde round-trips
 against the 4 committed vectors + route tests.
 
-### T2 — Config/hardcode gap closes
+### T2 — Config/hardcode gap closes ✅ DONE (8f3a367)
 (a) `use_last_epochs` into `DifficultyParams` (ergo-chain-spec), thread to
 `has_valid_connections` (proof.rs:401 hardcoded 8) + any other consumer; mainnet=8,
 testnet=8 per ChainSettings.scala. (b) `DifficultyParams::mainnet()` hardcode in
@@ -53,7 +53,7 @@ testnet=8 per ChainSettings.scala. (b) `DifficultyParams::mainnet()` hardcode in
 correctness). (c) Risk-5 fix: P2P serve handler (messaging.rs:718) serves the cached
 default proof for ANY requested m/k — Scala warns + drops on mismatch; match Scala.
 
-### T3 — Fixtures + oracle tests un-vacuoused
+### T3 — Fixtures + oracle tests un-vacuoused ✅ DONE (98549bf + 9e45c39; found+fixed 2 live /blocks JSON bugs: negative v1 d, d str-vs-number; size = documented Scala stale-metadata deviation)
 Commit a real Scala-produced proof binary (capture via the existing
 ERGO_CAPTURE_NIPOPOW_PROOF hook against :9053, or serialize from the REST vector —
 implementer picks, oracle-pins either way) so `ergo-ser/tests/nipopow_scala_oracle.rs`
@@ -61,7 +61,7 @@ actually runs: byte round-trip + full `is_valid` verification of a genuine Scala
 Commit the 4 REST JSON vectors (done — wire tests to them). Add an opt-in live
 differential test (env-gated) hitting :9053 + local.
 
-### T4 — Live end-to-end differential
+### T4 — Live end-to-end differential ⏸ BLOCKED on data decision (only mainnet archive = live prod node's dir; needs stop+copy or fresh sync)
 Build + run the node with mainnet data; diff all 4 endpoints vs :9053: popowHeader
 ById/ByHeight across sampled heights (genesis-adjacent, interlink-transition heights,
 recent), `proof/{m}/{k}/{headerId}` PINNED to a fixed tip id for determinism (byte-exact
