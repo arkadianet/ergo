@@ -32,7 +32,7 @@ pub mod routability;
 // `peer_manager::declared_to_socket`, …) keep working without
 // rewriting every importer.
 pub use limits::{
-    ConnectError, PeerLimits, DEFAULT_MAX_CONNECTIONS, DEFAULT_PER_IP_LIMIT,
+    ConnectError, PeerLimits, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_INBOUND, DEFAULT_PER_IP_LIMIT,
     DEFAULT_PER_SUBNET_LIMIT, DEFAULT_TARGET_OUTBOUND,
 };
 pub use routability::{declared_to_socket, is_routable_for_p2p};
