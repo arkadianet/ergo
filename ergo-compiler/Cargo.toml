@@ -12,6 +12,8 @@ thiserror        = { workspace = true }
 ergo-ser         = { workspace = true }
 ergo-primitives  = { workspace = true }
 ergo-crypto      = { workspace = true }
+bs58             = { workspace = true }
+base64           = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

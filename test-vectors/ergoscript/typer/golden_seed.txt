@@ -309,18 +309,18 @@ tc	fromBase64("RWT_REPO_NFT")	REJECT 0:0 IllegalArgumentException
 tc	fromBase64("a=")	REJECT 0:0 IllegalArgumentException
 tc	fromBase64("abcde=")	REJECT 0:0 IllegalArgumentException
 #
-# Accept probe — unpadded short string (oracle 2026-07-04, fresh-JVM, ORACLE_TREE_VERSION=3):
-#   fromBase64("ab") → OK (ConstantNode:Coll[Byte] <@105>)
-#   No padding → no length-mod-4 check; 2 data chars decode to 1 byte (0x69 = 105).
-#   Shape deferred to M3 — not committed as a test record (Apply survives unlowered).
-#
-# Accept probes (shape deferred — Apply survives in M2; M3 decodes to ByteArrayConstant):
-#   fromBase58("") → Oracle: OK (ConstantNode:Coll[Byte] <>)  [Scorex empty = BigInt(0) = emptyByteArray]
-#   fromBase64("") → Oracle: OK (ConstantNode:Coll[Byte] <>)  [Java decoder: empty input = empty output]
-#   fromBase64("YWJj") → Oracle: OK (ConstantNode:Coll[Byte] <@97 @98 @99>)  [= "abc"]
-# Shape deferred to M3 — not committed as test records (Apply survives unlowered in M2;
-# M3 decodes to ByteArrayConstant once ValueSerializer is wired in).
-# These are NOT in SWEEP_SKIP: they are simply absent from the seed (not yet captured).
+# Accept probes — canonical decode (oracle 2026-07-04, fresh-JVM, ORACLE_TREE_VERSION=3;
+# M3 Task-5 / D-T2 close: predef_ir_builder now folds a valid literal to a
+# ByteArrayConstant instead of leaving the Apply unlowered).
+#   fromBase58("") → Scorex empty = BigInt(0) = emptyByteArray.
+#   fromBase64("") → Java decoder: empty input = empty output.
+#   fromBase64("YWJj") → decodes "abc".
+#   fromBase64("ab") → unpadded, no length-mod-4 check; 2 data chars decode to 1
+#     byte (0x69 = 105), Java drops the 4 dangling low bits of the last quantum.
+tc	fromBase58("")	OK (ConstantNode:Coll[Byte] <>)
+tc	fromBase64("")	OK (ConstantNode:Coll[Byte] <>)
+tc	fromBase64("YWJj")	OK (ConstantNode:Coll[Byte] <@97 @98 @99>)
+tc	fromBase64("ab")	OK (ConstantNode:Coll[Byte] <@105>)
 
 # ── § 18: M2 adversarial wave A — type-parametric methods require explicit [T] (A1) ──
 # A type-parametric SMethod reached WITHOUT an explicit `[T]` ApplyTypes is rejected by

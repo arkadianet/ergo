@@ -38,23 +38,32 @@
 //! invalid character causes Scorex `Base58.decode(s).get` to throw `AssertionError`
 //! ("Wrong char in Base58 string") via `Predef.ensuring`; we map this to a
 //! `TyperError` (D-T2: verdict parity; error class differs, as documented in
-//! lib.rs).  A valid (or empty) input still returns `None` so the `Apply` survives
-//! unlowered.  M3 completes decoding.
+//! lib.rs).  A valid (or empty) literal decodes canonically to a
+//! `ByteArrayConstant` (`bs58::decode`, Bitcoin alphabet — byte-identical to
+//! Scorex's decoder; M3 Task-5 closes the deferred shape).
 //!
 //! `fromBase64` validates that every character is in the Java standard Base64
 //! alphabet (`A-Za-z0-9+/=`).  An invalid character causes
 //! `java.util.Base64.getDecoder().decode(s)` to throw `IllegalArgumentException`;
 //! we map to `TyperError` (D-T2: verdict parity; error class differs, as
-//! documented in lib.rs).  Valid / empty input returns `None` (Apply survives;
-//! M3 decodes to `ByteArrayConstant`).
+//! documented in lib.rs).  A valid literal decodes canonically to a
+//! `ByteArrayConstant` via the `JAVA_BASE64` engine (standard alphabet,
+//! optional padding, trailing bits in the last quantum silently dropped —
+//! matching `java.util.Base64.getDecoder()` exactly; M3 Task-5 closes the
+//! deferred shape).
 //!
 //! `deserialize` remains fully deferred — `None` unconditionally.  Scala
 //! constant-folds `deserialize(lit)` at type-check time and throws on invalid
 //! bytes (accept-invalid deviation; no real contract calls `deserialize(bad)`).
+//! Re-scoped (M3 Task-5): closing this requires an opcode-IR→`TypedExpr` reverse
+//! mapping (`ValueSerializer` decodes to sigma-state's own AST, not ours) —
+//! deferred past emit (M3 plan Task 12 decision).
 //! See lib.rs § "Known M2 deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
 //! typer).
+
+use base64::Engine as _;
 
 use crate::stype::SType;
 use crate::typed::{ConstPayload, MethodRef, TypedExpr};
@@ -519,24 +528,26 @@ pub fn predef_ir_builder(
         }
         // fromBase58: reject if any char is outside the Bitcoin/Scorex Base58
         // alphabet (Scorex `Base58.decode(s).get` → AssertionError on bad char via
-        // `Predef.ensuring`; we emit TyperError — D-T2, verdict parity).
-        // Valid / empty → None (Apply survives; M3 decodes to ByteArrayConstant).
+        // `Predef.ensuring`; we emit TyperError — D-T2, verdict parity). A valid
+        // (or empty) literal decodes canonically (D-T2 CLOSED, M3 Task-5).
         "fromBase58" => {
             let s = string_const(args.first()?)?;
-            s.chars()
-                .find(|&c| !is_base58_char(c))
-                .map(|bad| Err(typer_err(format!("Wrong char in Base58 string: '{bad}'"))))
+            match s.chars().find(|&c| !is_base58_char(c)) {
+                Some(bad) => Some(Err(typer_err(format!(
+                    "Wrong char in Base58 string: '{bad}'"
+                )))),
+                None => Some(decode_base58(s)),
+            }
         }
         // fromBase64: reject if any char is outside the Java standard Base64
         // alphabet (`java.util.Base64.getDecoder().decode(s)` → IllegalArgumentException;
-        // we emit TyperError — D-T2, verdict parity).
-        // Valid / empty → None (Apply survives; M3 decodes to ByteArrayConstant).
+        // we emit TyperError — D-T2, verdict parity). A valid literal decodes
+        // canonically (D-T2 CLOSED, M3 Task-5).
         "fromBase64" => {
             let s = string_const(args.first()?)?;
-            if let Err(msg) = validate_base64(s) {
-                Some(Err(typer_err(msg)))
-            } else {
-                None
+            match validate_base64(s) {
+                Err(msg) => Some(Err(typer_err(msg))),
+                Ok(()) => Some(decode_base64(s)),
             }
         }
         // deserialize: fully deferred (accept-invalid deviation; see module docs).
@@ -701,6 +712,39 @@ fn decode_base16(s: &str) -> Result<TypedExpr, TyperError> {
     })
 }
 
+/// `fromBase58(s)` → `ByteArrayConstant(Base58.decode(s).get)`.  Bitcoin/Scorex
+/// alphabet — `bs58::decode`'s default alphabet is byte-identical.  Bytes are
+/// re-cast as signed `i8` (matching `ByteColl`).  Caller (the `"fromBase58"`
+/// match arm) has already rejected any out-of-alphabet character via
+/// [`is_base58_char`], so decode failure here would indicate a `bs58` internal
+/// bug, not a user input error — mapped to `TyperError` defensively rather than
+/// via `expect`, to avoid a panic on any unforeseen edge case.
+fn decode_base58(s: &str) -> Result<TypedExpr, TyperError> {
+    let bytes = bs58::decode(s)
+        .into_vec()
+        .map_err(|e| typer_err(format!("invalid base58 string: {e}")))?;
+    Ok(TypedExpr::Constant {
+        value: ConstPayload::ByteColl(bytes.into_iter().map(|b| b as i8).collect()),
+        tpe: coll_byte(),
+    })
+}
+
+/// `fromBase64(s)` → `ByteArrayConstant(Base64.getDecoder().decode(s))` via the
+/// [`JAVA_BASE64`] engine (Java `getDecoder()` equivalence).  Bytes are re-cast
+/// as signed `i8` (matching `ByteColl`).  Caller (the `"fromBase64"` match arm)
+/// has already run [`validate_base64`], so decode failure here would indicate
+/// an engine-config mismatch, not a user input error — mapped to `TyperError`
+/// defensively rather than via `expect`.
+fn decode_base64(s: &str) -> Result<TypedExpr, TyperError> {
+    let bytes = JAVA_BASE64
+        .decode(s)
+        .map_err(|e| typer_err(format!("invalid base64 string: {e}")))?;
+    Ok(TypedExpr::Constant {
+        value: ConstPayload::ByteColl(bytes.into_iter().map(|b| b as i8).collect()),
+        tpe: coll_byte(),
+    })
+}
+
 fn hex_nibble(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -721,6 +765,24 @@ fn is_base58_char(c: char) -> bool {
         | 'a'..='k' | 'm'..='z'                // skip 'l'
     )
 }
+
+/// Java `Base64.getDecoder()`-equivalent decode engine: standard alphabet,
+/// decode-time padding is optional (`DecodePaddingMode::Indifferent` — the
+/// caller runs [`validate_base64`] first, which independently pins Java's
+/// stricter *structural* padding rule: a padded string's total length must be
+/// a multiple of 4), and non-zero trailing bits in the final quantum are
+/// silently dropped rather than rejected (`with_decode_allow_trailing_bits`;
+/// Java does NOT validate the low unused bits of the last symbol — e.g.
+/// `"ab"` → `0x69`, discarding the dangling `0b1011`, oracle-confirmed
+/// golden_seed.txt §17). Chosen empirically: `base64`'s default `STANDARD`
+/// engine (`DecodePaddingMode::RequireCanonical`) rejects unpadded input
+/// outright, which would wrongly reject `"ab"`/`"YWJj"`.
+static JAVA_BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+        .with_decode_allow_trailing_bits(true),
+);
 
 /// Validates a string against the Java standard Base64 alphabet
 /// (`java.util.Base64.getDecoder()` — `A-Za-z0-9+/` plus `=` padding).
@@ -1019,23 +1081,48 @@ mod tests {
 
     // ----- error paths / fall-through -----
 
-    /// Valid fromBase58/fromBase64 inputs fall through (None) so the Apply survives.
-    /// Deferred: M3 will decode and produce ByteArrayConstant.
+    /// `deserialize` is always deferred (accept-invalid deviation; re-scoped
+    /// M3 Task-5 — requires an opcode-IR→`TypedExpr` reverse mapping, deferred
+    /// past emit, see module docs / lib.rs D-T2).
     #[test]
-    fn valid_decoders_fall_through() {
-        // Valid base58 char 'x' → None (deferred)
+    fn deserialize_falls_through() {
+        let f = ident("deserialize", vec![SType::SString], SType::SInt);
+        assert!(predef_ir_builder("deserialize", &f, &[str_const("x")]).is_none());
+    }
+
+    // ----- fromBase58 / fromBase64 canonical decode (oracle §17, D-T2 closed) -----
+
+    /// `fromBase58("")` → empty `ByteArrayConstant` (Scorex empty = BigInt(0) =
+    /// emptyByteArray). Oracle §17: `OK (ConstantNode:Coll[Byte] <>)`.
+    #[test]
+    fn from_base58_empty_decodes_to_empty_byte_coll() {
         let f = ident("fromBase58", vec![SType::SString], coll_byte());
-        assert!(predef_ir_builder("fromBase58", &f, &[str_const("x")]).is_none());
-        // Valid base58 empty string → None (deferred; oracle §17 probe: ACCEPT)
-        assert!(predef_ir_builder("fromBase58", &f, &[str_const("")]).is_none());
-        // Valid base64 string → None (deferred; oracle §17 probe: ACCEPT)
-        let f2 = ident("fromBase64", vec![SType::SString], coll_byte());
-        assert!(predef_ir_builder("fromBase64", &f2, &[str_const("YWJj")]).is_none());
-        // Valid base64 empty string → None (deferred; oracle §17 probe: ACCEPT)
-        assert!(predef_ir_builder("fromBase64", &f2, &[str_const("")]).is_none());
-        // deserialize: always deferred (accept-invalid deviation, see module docs)
-        let f3 = ident("deserialize", vec![SType::SString], SType::SInt);
-        assert!(predef_ir_builder("deserialize", &f3, &[str_const("x")]).is_none());
+        let out = predef_ir_builder("fromBase58", &f, &[str_const("")])
+            .expect("isDefinedAt true for valid Base58 (empty)")
+            .expect("valid Base58 literal must decode");
+        assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <>)");
+    }
+
+    /// `fromBase64("")` → empty `ByteArrayConstant` (Java decoder: empty input
+    /// = empty output). Oracle §17: `OK (ConstantNode:Coll[Byte] <>)`.
+    #[test]
+    fn from_base64_empty_decodes_to_empty_byte_coll() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let out = predef_ir_builder("fromBase64", &f, &[str_const("")])
+            .expect("isDefinedAt true for valid Base64 (empty)")
+            .expect("valid Base64 literal must decode");
+        assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <>)");
+    }
+
+    /// `fromBase64("YWJj")` → decodes `"abc"`. Oracle §17:
+    /// `OK (ConstantNode:Coll[Byte] <@97 @98 @99>)`.
+    #[test]
+    fn from_base64_ywjj_decodes_abc() {
+        let f = ident("fromBase64", vec![SType::SString], coll_byte());
+        let out = predef_ir_builder("fromBase64", &f, &[str_const("YWJj")])
+            .expect("isDefinedAt true for valid Base64")
+            .expect("valid Base64 literal must decode");
+        assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <@97 @98 @99>)");
     }
 
     // ----- fromBase58 / fromBase64 validation (oracle §17) -----
@@ -1119,19 +1206,17 @@ mod tests {
         );
     }
 
-    /// `fromBase64("ab")` → None (valid, no padding, falls through).
-    /// Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    /// `fromBase64("ab")` → decodes to a single byte (unpadded, no length-mod-4
+    /// check; 2 data chars decode to 1 byte, Java drops the 4 dangling low bits
+    /// of the last quantum). Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
     ///   `fromBase64("ab")` → OK (ConstantNode:Coll[Byte] <@105>)
-    /// Unpadded inputs are not subject to the length-mod-4 check; "ab" is structurally
-    /// valid (2 data chars decode to 1 byte). Shape deferred to M3.
     #[test]
-    fn from_base64_unpadded_short_falls_through() {
+    fn from_base64_unpadded_short_decodes_dropping_trailing_bits() {
         let f = ident("fromBase64", vec![SType::SString], coll_byte());
-        // None = valid input, deferred; the Apply survives unlowered until M3.
-        assert!(
-            predef_ir_builder("fromBase64", &f, &[str_const("ab")]).is_none(),
-            "\"ab\" is valid base64 (unpadded, len 2); must fall through"
-        );
+        let out = predef_ir_builder("fromBase64", &f, &[str_const("ab")])
+            .expect("isDefinedAt true for valid Base64 (unpadded, len 2)")
+            .expect("\"ab\" is structurally valid base64; must decode");
+        assert_eq!(print_typed(&out), "(ConstantNode:Coll[Byte] <@105>)");
     }
 
     /// An unknown name has no irBuilder → None.

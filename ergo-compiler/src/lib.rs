@@ -221,9 +221,14 @@
 //!   `SWEEP_SKIP` in `tests/typer_oracle_parity.rs`; it remains as the mechanism
 //!   for any future rendering-only deviation (reject-side divergences live in
 //!   the separate `VERDICT_DEVIATION_SOURCES` list).
-//! - **`deserialize` deferred (D-T2):** `predef_ir_builder` returns `None` for
-//!   `deserialize` unconditionally. Scala constant-folds `deserialize(lit)` at typecheck
-//!   time; M3 completes with `ValueSerializer` integration.
+//! - **fromBase58/fromBase64 canonical decode — DONE (M3 Task-5, D-T2).** Valid
+//!   literals now fold to `ByteArrayConstant`; see the consolidated ledger entry
+//!   below for the engine-config rationale.
+//! - **`deserialize` deferred, re-scoped (D-T2):** `predef_ir_builder` returns
+//!   `None` for `deserialize` unconditionally. Scala constant-folds
+//!   `deserialize(lit)` at typecheck time; closing this requires an
+//!   opcode-IR→`TypedExpr` reverse mapping, deferred past emit (M3 plan Task 12
+//!   decision).
 //! - **Network-per-contract (M3 byte vectors):** The JVM oracle defaults to
 //!   `ORACLE_NETWORK=testnet`. When adding golden-seed records for `PK(...)`, run the
 //!   oracle with the matching network env var and record the network in the seed comment.
@@ -249,23 +254,37 @@
 //! matches, error class differs. Bounded to out-of-range literal ids which no
 //! real contract uses.
 //!
-//! ### D-T2 — fromBase58/fromBase64 validation (verdict parity); deserialize deferred
+//! ### D-T2 — fromBase58/fromBase64 canonical decode — CLOSED (M3 Task-5); deserialize re-scoped
 //!
-//! **`fromBase58` and `fromBase64`**: both character-class AND structural padding
-//! validation are implemented in `predef_ir_builder` and now match Scala's verdicts.
-//! Invalid characters cause a `TyperError`; for Base64, padded strings whose total
-//! length is not a multiple of 4 are also rejected (oracle-confirmed 2026-07-04:
-//! `fromBase64("a=")` and `fromBase64("abcde=")` REJECT; `fromBase64("ab")` ACCEPTS).
-//! Scala throws `AssertionError` (Base58) or `IllegalArgumentException` (Base64) —
-//! both non-reproducible oracle classes, so class parity is not asserted; verdict
-//! parity holds.  Canonical node build (decoding valid literals to `ByteArrayConstant`)
-//! is still M3.  A valid literal returns `None` so the `Apply` survives unlowered.
+//! **`fromBase58` / `fromBase64` — CLOSED.** Both character-class AND structural
+//! padding validation are implemented in `predef_ir_builder` and match Scala's
+//! verdicts. Invalid characters cause a `TyperError`; for Base64, padded strings
+//! whose total length is not a multiple of 4 are also rejected (oracle-confirmed
+//! 2026-07-04: `fromBase64("a=")` and `fromBase64("abcde=")` REJECT). A VALID
+//! literal now decodes canonically to `TypedExpr::Constant { value:
+//! ConstPayload::ByteColl(..), tpe: SColl(SByte) }` (`decode_base58` /
+//! `decode_base64`, `predef_ir.rs`): `fromBase58` via `bs58::decode` (Bitcoin
+//! alphabet, byte-identical to Scorex); `fromBase64` via a dedicated
+//! `JAVA_BASE64` engine (`base64` crate, standard alphabet,
+//! `DecodePaddingMode::Indifferent` + `decode_allow_trailing_bits(true)`) —
+//! chosen because the crate's default `STANDARD` engine requires canonical
+//! padding and would wrongly reject unpadded input (`fromBase64("ab")` →
+//! `OK (ConstantNode:Coll[Byte] <@105>)`, dropping the last quantum's dangling
+//! low bits exactly as `java.util.Base64.getDecoder()` does). Scala throws
+//! `AssertionError` (Base58) or `IllegalArgumentException` (Base64) on invalid
+//! input — both non-reproducible oracle classes, so class parity is not
+//! asserted; verdict parity holds. Golden-seed §17 (`golden_seed.txt`) commits
+//! byte-exact ACCEPT records for `fromBase58("")`, `fromBase64("")`,
+//! `fromBase64("YWJj")`, `fromBase64("ab")`.
 //!
-//! **`deserialize`**: remains fully deferred — `predef_ir_builder` returns `None`
-//! unconditionally.  Scala constant-folds `deserialize(lit)` at type-check time
-//! and throws on undeserializable bytes; we accept the `Apply` unlowered
-//! (accept-invalid deviation, bounded to malformed literals no real contract uses).
-//! M3 completes with `ValueSerializer` integration.
+//! **`deserialize` — remains deferred, re-scoped.** `predef_ir_builder` returns
+//! `None` unconditionally. Scala constant-folds `deserialize(lit)` at type-check
+//! time and throws on undeserializable bytes; we accept the `Apply` unlowered
+//! (accept-invalid deviation, bounded to malformed literals no real contract
+//! uses). Unlike `fromBase58`/`fromBase64`, closing this requires an
+//! opcode-IR→`TypedExpr` reverse mapping (`ValueSerializer` decodes to
+//! sigma-state's own AST representation, not ours) — deferred past emit (see
+//! M3 plan Task 12 decision).
 //!
 //! ### D-T3 — unsignedBigInt deferred shape (non-negative literals)
 //!
