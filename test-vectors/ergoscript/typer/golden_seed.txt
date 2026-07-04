@@ -498,7 +498,7 @@ tce	proveDlog(g3)	OK (CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGro
 #     `.toString` (ECPoint's default, non-canonical, TRUNCATED "…" repr) and
 #     concatenates, producing a single folded `ConstantNode:String`. The payload
 #     string is the exact D-T12 target — commit it byte-for-byte; do not
-#     normalize the embedded `GroupElement(ECPoint(...))` text. SWEEP_SKIP, D-T12
+#     normalize the embedded `GroupElement(ECPoint(...))` text. VERDICT_DEVIATION_SOURCES, D-T12
 #     (Rust today types this as an ArithOp/string-concat REJECT, not a fold).
 tce	"ab" + g1	OK (ConstantNode:String 'abGroupElement(ECPoint(79be66,483ada,...))')
 #
