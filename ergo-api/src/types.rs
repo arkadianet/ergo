@@ -891,6 +891,37 @@ pub struct ApiDifficultySeries {
     pub points: Vec<ApiDifficultyPoint>,
 }
 
+/// One miner's aggregate over the `minerStats` window.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiMinerStat {
+    /// Miner public key (33-byte compressed point, hex) from the folded
+    /// headers' Autolykos solutions.
+    pub pk: String,
+    /// P2PK address derived from `pk` with this node's network prefix.
+    /// Absent only when the stored pk bytes fail address encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Blocks this miner produced within the window.
+    pub count: u32,
+    /// Height of this miner's most recent block in the window.
+    pub last_height: u32,
+}
+
+/// Response of `GET /api/v1/mining/minerStats` — the network mining
+/// landscape over the last `window` headers of the canonical chain.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiMinerStats {
+    /// Best-header height at fold time (0 on an empty chain).
+    pub tip_height: u32,
+    /// Requested window after clamping to `[1, 16384]`.
+    pub window: u32,
+    /// Headers actually scanned — shorter than `window` near genesis.
+    pub blocks: u32,
+    /// Miners sorted by `count` descending, ties by `last_height`
+    /// descending.
+    pub miners: Vec<ApiMinerStat>,
+}
+
 /// One operator event for `GET /api/v1/events` — flat shape with optional
 /// per-kind fields so the feed renders without a type registry. `kind` is
 /// one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
