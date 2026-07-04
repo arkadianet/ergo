@@ -22,7 +22,7 @@
 
 ---
 
-### Task 1: Server — miner fields on `ApiRecentBlock` (+ `NodeState.network`)
+## Task 1: Server — miner fields on `ApiRecentBlock` (+ `NodeState.network`)
 
 **Files:**
 - Modify: `ergo-api/src/types.rs` (~line 682, end of ApiRecentBlock; also the stale doc comment ~line 59)
@@ -251,7 +251,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: Server — `GET /api/v1/mining/minerStats`
+## Task 2: Server — `GET /api/v1/mining/minerStats`
 
 **Files:**
 - Modify: `ergo-api/src/types.rs` (new DTOs, after `ApiDifficultySeries`)
@@ -510,7 +510,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 3: UI — `miners.js` module + api-client methods + static registration
+## Task 3: UI — `miners.js` module + api-client methods + static registration
 
 **Files:**
 - Create: `ergo-api/web/js/miners.js`
@@ -668,7 +668,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 4: UI — explorer block detail miner row + home table miner column
+## Task 4: UI — explorer block detail miner row + home table miner column
 
 **Files:**
 - Modify: `ergo-api/web/js/explorer.js` (imports ~line 23, renderHome ~line 439, renderBlock ~line 527)
@@ -752,7 +752,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: UI — overview: mini-list miner, mining panel enrichment, disabled stub
+## Task 5: UI — overview: mini-list miner, mining panel enrichment, disabled stub
 
 **Files:**
 - Modify: `ergo-api/web/js/overview.js` (imports; onSlow ~line 220; chain-tip list ~line 500; mining panel ~line 520)
@@ -862,7 +862,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: UI — dedicated Mining section
+## Task 6: UI — dedicated Mining section
 
 **Files:**
 - Create: `ergo-api/web/js/mining.js`
@@ -1282,7 +1282,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: Full workspace gate
+## Task 7: Full workspace gate
 
 - [ ] **Step 1: Run the complete gate (never `-p` subsets here)**
 
@@ -1306,7 +1306,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 8: Live verification against 9063 (devproxy + headless screenshots)
+## Task 8: Live verification against 9063 (devproxy + headless screenshots)
 
 The deployed 9063 binary does NOT have the new endpoint/fields, which lets us verify BOTH paths: graceful degradation (plain proxy) and the full feature (enriching proxy that computes the new payloads from 9063's real data — the same trick as #152's devproxy-events.py).
 
@@ -1524,7 +1524,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: Pre-PR review + PR
+## Task 9: Pre-PR review + PR
 
 - [ ] **Step 1: codex review (BEFORE the PR — SANTA conformance)**
 

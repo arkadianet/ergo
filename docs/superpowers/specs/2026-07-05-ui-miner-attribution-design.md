@@ -65,7 +65,7 @@ endpoints (`/blocks/*`, `/utils/*`) are not modified. No client-side crypto.
 ### S2 — `GET /api/v1/mining/minerStats?window=N`
 
 - Default window 720, clamped like difficulty-history. Response:
-  `{ tipHeight: u32, window: u32, blocks: u32, miners: [{ pk, address, count, lastHeight }] }`
+  `{ tip_height: u32, window: u32, blocks: u32, miners: [{ pk, address, count, last_height }] }`
   sorted by `count` desc (`blocks` = headers actually scanned, may be < window near genesis).
 - Implementation folds `chain.last_headers(window)` by `powSolutions.pk`; address derived
   once per unique pk. Read-only, ungated, mounted in the native `/api/v1` block with the
