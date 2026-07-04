@@ -853,6 +853,61 @@ pub fn owner_name_for_method(recv: &SType, name: &str, tree_version: u8) -> &'st
     owner_name_for_type(recv).unwrap_or("?")
 }
 
+/// Resolve a typed-AST `MethodRef { owner, name }` to its wire identity:
+/// the Scala `SMethod.objType.typeId` byte plus the full [`SMethodDesc`]
+/// (method id, explicit-type-arg flag, declared type-param order).
+///
+/// Keyed off the OWNER NAME the typer stored (produced by
+/// [`owner_name_for_method`]) rather than re-deriving the container from the
+/// receiver type — the owner-name choice is version-aware and wire-relevant
+/// (D-T10: at `tree_version < 3` numeric `toBytes`/`toBits` live on the shared
+/// `SNumericType` container), so keying off the string REUSES that decision
+/// instead of duplicating it.
+///
+/// Type-id bytes are the `SType.scala` `typeCode`/`typeId` constants also
+/// listed in this module's container map (SByte=2 … SGlobal=106).
+/// `SNumericType.typeId` is `106` — deliberately shadowed by `SGlobal.typeId`
+/// in the Scala registry (SType.scala:376-380, pinned v6.0.2 checkout); its
+/// method ids match the per-numeric tables, so the Byte table serves as the
+/// shared lookup. Emitting `(106, 6|7)` is only reachable from a
+/// `tree_version < 3` typed tree and mirrors what Scala's
+/// `MethodCallSerializer` writes for the same tree.
+///
+/// Returns `None` for an unknown owner or method name — the emit layer
+/// surfaces that as `UnsupportedNode` (a residual the Task-11 adversarial
+/// pass hunts).
+pub(crate) fn wire_method(owner: &str, name: &str) -> Option<(u8, &'static SMethodDesc)> {
+    let (type_id, table): (u8, &'static Vec<SMethodDesc>) = match owner {
+        "Byte" => (2, byte_methods()),
+        "Short" => (3, short_methods()),
+        "Int" => (4, int_methods()),
+        "Long" => (5, long_methods()),
+        "BigInt" => (6, bigint_methods()),
+        "GroupElement" => (7, group_element_methods()),
+        "SigmaProp" => (8, sigma_prop_methods()),
+        "UnsignedBigInt" => (9, unsigned_bigint_methods()),
+        "SCollection" => (12, collection_methods()),
+        "SOption" => (36, option_methods()),
+        "STuple" => (96, tuple_base_methods()),
+        "Box" => (99, box_methods()),
+        "AvlTree" => (100, avl_tree_methods()),
+        "Context" => (101, context_methods()),
+        "Header" => (104, header_methods()),
+        "PreHeader" => (105, pre_header_methods()),
+        "SigmaDslBuilder" => (106, global_methods()),
+        // Pre-v3 shared numeric container (see the doc comment above).
+        "SNumericType" => (106, byte_methods()),
+        _ => return None,
+    };
+    table.iter().find(|m| m.name == name).map(|m| (type_id, m))
+}
+
+/// `(type_id, method_id)` wire pair for a `MethodRef` — thin projection of
+/// [`wire_method`] for callers that need only the two id bytes.
+pub(crate) fn wire_ids(owner: &str, name: &str) -> Option<(u8, u8)> {
+    wire_method(owner, name).map(|(type_id, desc)| (type_id, desc.method_id))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1319,6 +1374,105 @@ mod tests {
                     is_v6_method(*type_id, m.method_id),
                     "type_id={type_id} method_id={} name={} not in ergo-ser is_v6_method",
                     m.method_id,
+                    m.name
+                );
+            }
+        }
+    }
+
+    // ----- happy path — wire_ids / wire_method resolution -----
+
+    #[test]
+    fn wire_ids_resolves_known_owner_name_pairs() {
+        // Spot checks across the container map, incl. the pre-v3 shared
+        // numeric container (SNumericType.typeId = 106, SType.scala:376-380).
+        for (owner, name, expected) in [
+            ("SCollection", "size", (12, 1)),
+            ("SCollection", "flatMap", (12, 15)),
+            ("STuple", "size", (96, 1)),
+            ("Box", "getReg", (99, 19)),
+            ("Box", "tokens", (99, 8)),
+            ("AvlTree", "digest", (100, 1)),
+            ("Context", "dataInputs", (101, 1)),
+            ("Context", "getVarFromInput", (101, 12)),
+            ("Header", "checkPow", (104, 16)),
+            ("PreHeader", "height", (105, 5)),
+            ("SigmaDslBuilder", "serialize", (106, 3)),
+            ("SigmaDslBuilder", "none", (106, 10)),
+            ("GroupElement", "getEncoded", (7, 2)),
+            ("SigmaProp", "propBytes", (8, 1)),
+            ("SOption", "map", (36, 7)),
+            ("BigInt", "toBytes", (6, 6)),
+            ("UnsignedBigInt", "toSigned", (9, 19)),
+            ("Int", "toBytes", (4, 6)),
+            ("SNumericType", "toBytes", (106, 6)),
+            ("SNumericType", "toBits", (106, 7)),
+        ] {
+            assert_eq!(
+                wire_ids(owner, name),
+                Some(expected),
+                "%{owner}.{name}: expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_ids_unknown_owner_or_method_returns_none() {
+        assert_eq!(wire_ids("NoSuchOwner", "size"), None);
+        assert_eq!(wire_ids("SCollection", "noSuchMethod"), None);
+        // Printer fallback owner from `owner_name_for_type(...).unwrap_or("?")`.
+        assert_eq!(wire_ids("?", "size"), None);
+    }
+
+    #[test]
+    fn wire_method_explicit_type_arg_set_matches_ergo_ser() {
+        // The six `hasExplicitTypeArgs = Seq(tT)` methods (ergo-ser
+        // method_explicit_type_args_count, opcode/types.rs:573-589) and ONLY
+        // those must carry `explicit_type_args` + exactly one type param.
+        use ergo_ser::opcode::method_explicit_type_args_count;
+        for (owner, name) in [
+            ("Box", "getReg"),
+            ("Context", "getVarFromInput"),
+            ("SigmaDslBuilder", "deserializeTo"),
+            ("SigmaDslBuilder", "fromBigEndianBytes"),
+            ("SigmaDslBuilder", "some"),
+            ("SigmaDslBuilder", "none"),
+        ] {
+            let (type_id, desc) = wire_method(owner, name).unwrap();
+            assert!(desc.explicit_type_args, "%{owner}.{name}");
+            assert_eq!(desc.stype.tpe_params.len(), 1, "%{owner}.{name}");
+            assert_eq!(
+                method_explicit_type_args_count(type_id, desc.method_id),
+                1,
+                "%{owner}.{name}"
+            );
+        }
+        // Every method in every container agrees with ergo-ser's per-pair count
+        // (1 for the six above, 0 everywhere else).
+        for (type_id, stype) in [
+            (2u8, SType::SByte),
+            (3, SType::SShort),
+            (4, SType::SInt),
+            (5, SType::SLong),
+            (6, SType::SBigInt),
+            (7, SType::SGroupElement),
+            (8, SType::SSigmaProp),
+            (9, SType::SUnsignedBigInt),
+            (12, SType::SColl(Box::new(SType::SAny))),
+            (36, SType::SOption(Box::new(SType::SAny))),
+            (96, SType::STuple(vec![SType::SInt, SType::SInt])),
+            (99, SType::SBox),
+            (100, SType::SAvlTree),
+            (101, SType::SContext),
+            (104, SType::SHeader),
+            (105, SType::SPreHeader),
+            (106, SType::SGlobal),
+        ] {
+            for m in container_static_methods(&stype).unwrap() {
+                assert_eq!(
+                    method_explicit_type_args_count(type_id, m.method_id),
+                    usize::from(m.explicit_type_args),
+                    "type_id={type_id} method {}",
                     m.name
                 );
             }

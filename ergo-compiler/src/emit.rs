@@ -1,11 +1,15 @@
-//! Typed ErgoScript AST → `ergo-ser` opcode IR (backend emission, part I).
+//! Typed ErgoScript AST → `ergo-ser` opcode IR (backend emission).
 //!
-//! M3 Task 7 scope: the type map ([`map_type`]), the constant map
+//! M3 Task 7 laid the type map ([`map_type`]), the constant map
 //! ([`map_const`]), and every FIXED-ARITY opcode arm of [`emit`] — context
 //! singletons, relations, arithmetic/bit/boolean operators, collection
 //! transformers, sigma combinators, crypto primitives, option/context access.
-//! Binding forms (`Block`/`ValNode`/`Ident`/`Lambda`/`Apply`/`Select`/
-//! `MethodCall`) are M3 Task 8 and return [`EmitError::UnsupportedNode`] here.
+//! M3 Task 8 adds the binding forms (`Block`/`ValNode`/`Ident`/`Lambda` →
+//! `BlockValue`/`ValDef`/`ValUse`/`FuncValue`), `MethodCall`/`PropertyCall`
+//! wire dispatch, the residual `Apply`/`Select` lowering catalog (numeric
+//! casts, box/sigma-prop/tuple properties, `FuncApply`), and defensive
+//! mixed-width `Upcast` normalization inside the binary arith/relation and
+//! `ByIndex` arms.
 //!
 //! Opcode bytes come from the `opcode_pattern` dispatch table
 //! (`ergo-ser/src/opcode/types.rs:276-436`), which is the crate's consensus
@@ -51,16 +55,20 @@
 //! `None: Option[T]` never becomes a `Payload::NoneValue` op node: dispatch
 //! byte `0xDF` is not parser-accepted (recon §1); a `None` literal must flow
 //! through the constant path (`SOption` type + `0x00` discriminant). No
-//! `ConstPayload` variant produces one at Task 7 (`Global.none[T]()` lowers
-//! to a MethodCall — Task 8).
+//! `ConstPayload` variant produces one; `Global.none[T]()` lowers to a
+//! `PropertyCall` (106, 10) with an explicit type arg.
+
+use std::collections::HashMap;
 
 use ergo_primitives::group_element::GroupElement;
-use ergo_ser::opcode::{Expr, IrNode, Payload};
+use ergo_ser::opcode::{method_explicit_type_args_count, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{CollValue, SigmaBoolean, SigmaValue};
 
 use crate::stype::SType;
-use crate::typed::{ConstPayload, TypedExpr};
+use crate::typed::{node_tpe, ConstPayload, TypedExpr};
+use crate::typer::methods::wire_method;
+use crate::typer::unify::numeric_index;
 
 /// Emission failure. Every variant is a COMPILER bug surface, not a user
 /// error: the typer guarantees the invariants these errors report (no
@@ -72,12 +80,16 @@ pub enum EmitError {
     /// The typer must eliminate both before emit (recon-ergoser-ir OQ2).
     #[error("unresolved compiler-internal type reached emit: {0}")]
     UnresolvedType(String),
-    /// A typed node with no Task-7 lowering: the Task-8 binding forms, or a
-    /// node `ergo-ser` cannot represent (see the module docs).
-    #[error("node not supported by emit at M3 Task 7: {0}")]
-    UnsupportedNode(&'static str),
+    /// A typed node with no opcode-IR lowering: a node `ergo-ser` cannot
+    /// represent (see the module docs), or a residual `Select`/`Apply`/
+    /// `MethodCall` outside the lowering catalog — the message names the
+    /// offending method/field/owner so the Task-11 adversarial pass can hunt
+    /// the gap.
+    #[error("node not supported by emit: {0}")]
+    UnsupportedNode(String),
     /// A structurally invalid shape that must never reach emit (pre-typed
-    /// nodes, payload/type mismatches, wire-arity violations).
+    /// nodes, payload/type mismatches, wire-arity violations, unbound
+    /// identifiers).
     #[error("invalid shape reached emit: {0}")]
     InvalidShape(&'static str),
 }
@@ -86,301 +98,805 @@ pub enum EmitError {
 ///
 /// Fixed-arity forms map 1:1 onto `Payload::Zero/One/Two/Three/Four` and the
 /// named-field payloads per the `opcode_pattern` table; constants map through
-/// [`map_const`]. Binding forms return [`EmitError::UnsupportedNode`] until
-/// Task 8.
+/// [`map_const`]; binding forms allocate ids through a fresh [`Scope`].
 pub fn emit(expr: &TypedExpr) -> Result<Expr, EmitError> {
-    use TypedExpr as T;
+    Scope::new().emit(expr)
+}
 
-    // Fixed-positional payload builders (recurse through `emit`).
-    let one =
-        |a: &TypedExpr| -> Result<Payload, EmitError> { Ok(Payload::One(Box::new(emit(a)?))) };
-    let two = |a: &TypedExpr, b: &TypedExpr| -> Result<Payload, EmitError> {
-        Ok(Payload::Two(Box::new(emit(a)?), Box::new(emit(b)?)))
-    };
-    let three = |a: &TypedExpr, b: &TypedExpr, c: &TypedExpr| -> Result<Payload, EmitError> {
+/// `Ok(Expr::Op { .. })` shorthand shared by every opcode arm.
+fn node(opcode: u8, payload: Payload) -> Result<Expr, EmitError> {
+    Ok(Expr::Op(IrNode { opcode, payload }))
+}
+
+/// Wrap an already-emitted IR expression in `Upcast` (0x7E) to `tpe`.
+fn upcast_ir(input: Expr, tpe: SigmaType) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0x7E,
+        payload: Payload::NumericCast {
+            input: Box::new(input),
+            tpe,
+        },
+    })
+}
+
+/// Binding scope for the emission walk.
+///
+/// `bindings` is a stack of frames (one per `Block`/`Lambda`); a name
+/// resolves innermost-first, so lambda args shadow enclosing `val`s exactly
+/// like the typer's `lambdaEnv = env ++ args` overwrite
+/// (SigmaTyper.scala:128). Each entry carries the binding's wire type for
+/// scope introspection; only the id goes on the wire (`ValUse` is untyped,
+/// `FuncValue` args are typed at the definition site).
+///
+/// # Id allocation (Scala TreeBuilding scheme, collision-free relaxation)
+///
+/// `next_id` is a single monotonic counter starting at 1. A `ValDef` takes
+/// the next id AFTER its rhs is emitted (Scala: `val rhs = buildValue(...,
+/// curId, ...); curId += 1; ValDef(curId, ...)` — TreeBuilding.scala:511-513);
+/// a lambda arg takes the enclosing scope's next id and body ValDefs continue
+/// past it (`varId = defId + 1`, body from `varId + 1` —
+/// TreeBuilding.scala:186-191, recon-scala-pipeline §6). Scala additionally
+/// REUSES ids across disjoint scopes (each `processAstGraph` restarts its
+/// `curId` from the enclosing `defId`) and skips ids for non-materialized
+/// graph nodes (CSE); the monotonic counter never reuses, which is the
+/// M3-sanctioned relaxation — the milestone gates on validity and
+/// collision-freedom only, exact id parity is M5 (ValDef sharing).
+struct Scope {
+    bindings: Vec<HashMap<String, (u32, SigmaType)>>,
+    next_id: u32,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Scope {
+            bindings: vec![HashMap::new()],
+            next_id: 1,
+        }
+    }
+
+    /// Resolve `name` innermost-frame-first to its binding id.
+    fn lookup(&self, name: &str) -> Option<u32> {
+        self.bindings
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).map(|(id, _)| *id))
+    }
+
+    /// Take the next binding id and record `name` in the innermost frame.
+    fn bind(&mut self, name: &str, tpe: SigmaType) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.bindings
+            .last_mut()
+            .expect("Scope always holds at least the root frame")
+            .insert(name.to_string(), (id, tpe));
+        id
+    }
+
+    // ── fixed-positional payload builders ────────────────────────────────
+
+    fn one(&mut self, a: &TypedExpr) -> Result<Payload, EmitError> {
+        Ok(Payload::One(Box::new(self.emit(a)?)))
+    }
+
+    fn two(&mut self, a: &TypedExpr, b: &TypedExpr) -> Result<Payload, EmitError> {
+        Ok(Payload::Two(
+            Box::new(self.emit(a)?),
+            Box::new(self.emit(b)?),
+        ))
+    }
+
+    fn three(&mut self, a: &TypedExpr, b: &TypedExpr, c: &TypedExpr) -> Result<Payload, EmitError> {
         Ok(Payload::Three(
-            Box::new(emit(a)?),
-            Box::new(emit(b)?),
-            Box::new(emit(c)?),
+            Box::new(self.emit(a)?),
+            Box::new(self.emit(b)?),
+            Box::new(self.emit(c)?),
         ))
-    };
-    let four = |a: &TypedExpr,
-                b: &TypedExpr,
-                c: &TypedExpr,
-                d: &TypedExpr|
-     -> Result<Payload, EmitError> {
+    }
+
+    fn four(
+        &mut self,
+        a: &TypedExpr,
+        b: &TypedExpr,
+        c: &TypedExpr,
+        d: &TypedExpr,
+    ) -> Result<Payload, EmitError> {
         Ok(Payload::Four(
-            Box::new(emit(a)?),
-            Box::new(emit(b)?),
-            Box::new(emit(c)?),
-            Box::new(emit(d)?),
+            Box::new(self.emit(a)?),
+            Box::new(self.emit(b)?),
+            Box::new(self.emit(c)?),
+            Box::new(self.emit(d)?),
         ))
-    };
-    let items_of =
-        |items: &[TypedExpr]| -> Result<Vec<Expr>, EmitError> { items.iter().map(emit).collect() };
-    let node = |opcode: u8, payload: Payload| Ok(Expr::Op(IrNode { opcode, payload }));
+    }
 
-    match expr {
-        // ── context singletons: leaf opcodes, Zero payload ────────────────
-        T::Height { .. } => node(0xA3, Payload::Zero),
-        T::Inputs { .. } => node(0xA4, Payload::Zero),
-        T::Outputs { .. } => node(0xA5, Payload::Zero),
-        T::Self_ { .. } => node(0xA7, Payload::Zero),
-        T::MinerPubkey { .. } => node(0xAC, Payload::Zero),
-        T::LastBlockUtxoRootHash { .. } => node(0xA6, Payload::Zero),
-        T::Context { .. } => node(0xFE, Payload::Zero),
-        T::Global { .. } => node(0xDD, Payload::Zero),
-        T::GroupGenerator { .. } => node(0x82, Payload::Zero),
+    fn items_of(&mut self, items: &[TypedExpr]) -> Result<Vec<Expr>, EmitError> {
+        items.iter().map(|it| self.emit(it)).collect()
+    }
 
-        // ── constants: always the constant path (incl. Booleans — see the
-        //    module docs; never the 0x7F/0x80 True/False opcodes) ──────────
-        T::Constant { value, tpe } => {
-            let (tpe, val) = map_const(value, tpe)?;
-            Ok(Expr::Const { tpe, val })
-        }
-
-        // ── relations (Relation2 pattern; the writer auto-compacts a
-        //    bool-constant pair to the 0x85 form) ───────────────────────────
-        T::GT { left, right, .. } => node(0x91, two(left, right)?),
-        T::GE { left, right, .. } => node(0x92, two(left, right)?),
-        T::LT { left, right, .. } => node(0x8F, two(left, right)?),
-        T::LE { left, right, .. } => node(0x90, two(left, right)?),
-        T::EQ { left, right, .. } => node(0x93, two(left, right)?),
-        T::NEQ { left, right, .. } => node(0x94, two(left, right)?),
-
-        // ── arithmetic / bitwise: the typer stores Scala's opcode byte
-        //    (typed.rs ARITH_*/BIT_* constants); passthrough as u8 ─────────
-        T::ArithOp {
-            left,
-            right,
-            opcode,
-            ..
-        }
-        | T::BitOp {
-            left,
-            right,
-            opcode,
-            ..
-        } => node(*opcode as u8, two(left, right)?),
-
-        // ── boolean binary (lazy) + unary ─────────────────────────────────
-        T::BinAnd { left, right, .. } => node(0xED, two(left, right)?),
-        T::BinOr { left, right, .. } => node(0xEC, two(left, right)?),
-        T::BinXor { left, right, .. } => node(0xF4, two(left, right)?),
-        T::LogicalNot { input, .. } => node(0xEF, one(input)?),
-        T::Negation { input, .. } => node(0xF0, one(input)?),
-        T::BitInversion { input, .. } => node(0xF1, one(input)?),
-
-        // ── control / structure ───────────────────────────────────────────
-        T::If {
-            condition,
-            true_branch,
-            false_branch,
-            ..
-        } => node(0x95, three(condition, true_branch, false_branch)?),
-        T::Tuple { items, .. } => {
-            // Scala STuple is 2..=255 items; the ergo-ser writer asserts
-            // (panics) past 255 (write.rs Tuple arm), so guard recoverably.
-            if !(2..=255).contains(&items.len()) {
-                return Err(EmitError::InvalidShape(
-                    "Tuple arity outside the Scala wire range 2..=255",
-                ));
+    /// `Two` payload with mixed-width normalization: when BOTH operands are
+    /// numeric and their ladder widths differ, the narrower side is wrapped
+    /// in `Upcast(_, wider)` — the `TransformingSigmaBuilder.applyUpcast`
+    /// rule (SigmaBuilder.scala:664-676, applied by `arithOp` :700-705 and
+    /// `comparisonOp`/`equalityOp` :679-697). The frontend already inserts
+    /// these `Upcast` nodes at typer time (unify.rs `apply_upcast`, mirroring
+    /// the same builder), so on frontend trees this is a no-op; it normalizes
+    /// hand-built trees defensively. Deliberately NOT applied to `BitOp`:
+    /// Scala's `mkBitOr`/`mkBitAnd`/`mkBitXor`/shift builders live on
+    /// `StdSigmaBuilder` with no `applyUpcast` override (SigmaBuilder.scala:
+    /// 629-645), so mixed BitOp operands stay mixed in the reference tree.
+    fn two_upcast(&mut self, l: &TypedExpr, r: &TypedExpr) -> Result<Payload, EmitError> {
+        let mut le = self.emit(l)?;
+        let mut re = self.emit(r)?;
+        if let (Some(li), Some(ri)) = (numeric_index(node_tpe(l)), numeric_index(node_tpe(r))) {
+            match li.cmp(&ri) {
+                std::cmp::Ordering::Less => le = upcast_ir(le, map_type(node_tpe(r))?),
+                std::cmp::Ordering::Greater => re = upcast_ir(re, map_type(node_tpe(l))?),
+                std::cmp::Ordering::Equal => {}
             }
-            node(
-                0x86,
-                Payload::Tuple {
-                    items: items_of(items)?,
-                },
-            )
         }
-        T::SelectField {
-            input, field_index, ..
-        } => node(
-            0x8C,
-            Payload::SelectField {
-                input: Box::new(emit(input)?),
-                // 1-based already (transformers.scala:291 fieldIndex).
-                field_idx: *field_index as u8,
+        Ok(Payload::Two(Box::new(le), Box::new(re)))
+    }
+
+    /// Emit a collection/tuple index expression, wrapping a narrower-than-Int
+    /// numeric index in `Upcast(_, SInt)` — `typedIndex.upcastTo(SInt)`,
+    /// SigmaTyper.scala:265-288. The frontend inserts this at typer time
+    /// (assign.rs `assign_collection_index`/`assign_tuple_index`), so this is
+    /// defensive normalization for hand-built trees. A WIDER index (Long+) is
+    /// left untouched: `upcastTo(SInt)` would be a downcast, which the Scala
+    /// typer rejects before this point.
+    fn emit_index(&mut self, index: &TypedExpr) -> Result<Expr, EmitError> {
+        let e = self.emit(index)?;
+        Ok(match numeric_index(node_tpe(index)) {
+            Some(i) if i < numeric_index(&SType::SInt).expect("SInt is numeric") => {
+                upcast_ir(e, SigmaType::SInt)
+            }
+            _ => e,
+        })
+    }
+
+    fn emit(&mut self, expr: &TypedExpr) -> Result<Expr, EmitError> {
+        use TypedExpr as T;
+
+        match expr {
+            // ── context singletons: leaf opcodes, Zero payload ────────────────
+            T::Height { .. } => node(0xA3, Payload::Zero),
+            T::Inputs { .. } => node(0xA4, Payload::Zero),
+            T::Outputs { .. } => node(0xA5, Payload::Zero),
+            T::Self_ { .. } => node(0xA7, Payload::Zero),
+            T::MinerPubkey { .. } => node(0xAC, Payload::Zero),
+            T::LastBlockUtxoRootHash { .. } => node(0xA6, Payload::Zero),
+            T::Context { .. } => node(0xFE, Payload::Zero),
+            T::Global { .. } => node(0xDD, Payload::Zero),
+            T::GroupGenerator { .. } => node(0x82, Payload::Zero),
+
+            // ── constants: always the constant path (incl. Booleans — see the
+            //    module docs; never the 0x7F/0x80 True/False opcodes) ──────────
+            T::Constant { value, tpe } => {
+                let (tpe, val) = map_const(value, tpe)?;
+                Ok(Expr::Const { tpe, val })
+            }
+
+            // ── relations (Relation2 pattern; the writer auto-compacts a
+            //    bool-constant pair to the 0x85 form). Mixed-width numeric
+            //    operands are Upcast-normalized (two_upcast docs) ──────────────
+            T::GT { left, right, .. } => node(0x91, self.two_upcast(left, right)?),
+            T::GE { left, right, .. } => node(0x92, self.two_upcast(left, right)?),
+            T::LT { left, right, .. } => node(0x8F, self.two_upcast(left, right)?),
+            T::LE { left, right, .. } => node(0x90, self.two_upcast(left, right)?),
+            T::EQ { left, right, .. } => node(0x93, self.two_upcast(left, right)?),
+            T::NEQ { left, right, .. } => node(0x94, self.two_upcast(left, right)?),
+
+            // ── arithmetic: the typer stores Scala's opcode byte (typed.rs
+            //    ARITH_* constants); passthrough as u8. Mixed widths are
+            //    Upcast-normalized (arithOp → applyUpcast,
+            //    SigmaBuilder.scala:700-705) ────────────────────────────────────
+            T::ArithOp {
+                left,
+                right,
+                opcode,
+                ..
+            } => node(*opcode as u8, self.two_upcast(left, right)?),
+
+            // ── bitwise: NO upcast normalization — Scala's mkBitOr/mkBitAnd/
+            //    mkBitXor and the shift builders are StdSigmaBuilder methods
+            //    with no applyUpcast (SigmaBuilder.scala:629-645), so mixed
+            //    BitOp operands stay mixed in the reference tree ───────────────
+            T::BitOp {
+                left,
+                right,
+                opcode,
+                ..
+            } => node(*opcode as u8, self.two(left, right)?),
+
+            // ── boolean binary (lazy) + unary ─────────────────────────────────
+            T::BinAnd { left, right, .. } => node(0xED, self.two(left, right)?),
+            T::BinOr { left, right, .. } => node(0xEC, self.two(left, right)?),
+            T::BinXor { left, right, .. } => node(0xF4, self.two(left, right)?),
+            T::LogicalNot { input, .. } => node(0xEF, self.one(input)?),
+            T::Negation { input, .. } => node(0xF0, self.one(input)?),
+            T::BitInversion { input, .. } => node(0xF1, self.one(input)?),
+
+            // ── control / structure ───────────────────────────────────────────
+            T::If {
+                condition,
+                true_branch,
+                false_branch,
+                ..
+            } => node(0x95, self.three(condition, true_branch, false_branch)?),
+            T::Tuple { items, .. } => {
+                // Scala STuple is 2..=255 items; the ergo-ser writer asserts
+                // (panics) past 255 (write.rs Tuple arm), so guard recoverably.
+                if !(2..=255).contains(&items.len()) {
+                    return Err(EmitError::InvalidShape(
+                        "Tuple arity outside the Scala wire range 2..=255",
+                    ));
+                }
+                node(
+                    0x86,
+                    Payload::Tuple {
+                        items: self.items_of(items)?,
+                    },
+                )
+            }
+            T::SelectField {
+                input, field_index, ..
+            } => node(
+                0x8C,
+                Payload::SelectField {
+                    input: Box::new(self.emit(input)?),
+                    // 1-based already (transformers.scala:291 fieldIndex).
+                    field_idx: *field_index as u8,
+                },
+            ),
+            T::ConcreteCollection {
+                items, elem_type, ..
+            } => node(
+                0x83,
+                Payload::ConcreteCollection {
+                    elem_type: map_type(elem_type)?,
+                    items: self.items_of(items)?,
+                },
+            ),
+
+            // ── numeric casts ─────────────────────────────────────────────────
+            T::Upcast { input, tpe } => node(
+                0x7E,
+                Payload::NumericCast {
+                    input: Box::new(self.emit(input)?),
+                    tpe: map_type(tpe)?,
+                },
+            ),
+            T::Downcast { input, tpe } => node(
+                0x7D,
+                Payload::NumericCast {
+                    input: Box::new(self.emit(input)?),
+                    tpe: map_type(tpe)?,
+                },
+            ),
+
+            // ── collection transformers ───────────────────────────────────────
+            T::MapCollection { input, mapper, .. } => node(0xAD, self.two(input, mapper)?),
+            T::Exists {
+                input, condition, ..
+            } => node(0xAE, self.two(input, condition)?),
+            T::ForAll {
+                input, condition, ..
+            } => node(0xAF, self.two(input, condition)?),
+            T::Fold {
+                input,
+                zero,
+                fold_op,
+                ..
+            } => node(0xB0, self.three(input, zero, fold_op)?),
+            T::Filter {
+                input, condition, ..
+            } => node(0xB5, self.two(input, condition)?),
+            T::Slice {
+                input, from, until, ..
+            } => node(0xB4, self.three(input, from, until)?),
+            T::Append { input, col2, .. } => node(0xB3, self.two(input, col2)?),
+            T::SizeOf { input, .. } => node(0xB1, self.one(input)?),
+            T::ByIndex {
+                input,
+                index,
+                default,
+                ..
+            } => node(
+                0xB2,
+                Payload::ByIndex {
+                    input: Box::new(self.emit(input)?),
+                    index: Box::new(self.emit_index(index)?),
+                    default: default
+                        .as_deref()
+                        .map(|d| self.emit(d).map(Box::new))
+                        .transpose()?,
+                },
+            ),
+
+            // ── collection-boolean gates: ONE arg (the collection expr) ───────
+            T::AND { input, .. } => node(0x96, self.one(input)?),
+            T::OR { input, .. } => node(0x97, self.one(input)?),
+            T::XorOf { input, .. } => node(0xFF, self.one(input)?),
+
+            // ── sigma combinators ─────────────────────────────────────────────
+            T::AtLeast { bound, input, .. } => node(0x98, self.two(bound, input)?),
+            T::SigmaAnd { items, .. } => node(
+                0xEA,
+                Payload::SigmaCollection {
+                    items: self.items_of(items)?,
+                },
+            ),
+            T::SigmaOr { items, .. } => node(
+                0xEB,
+                Payload::SigmaCollection {
+                    items: self.items_of(items)?,
+                },
+            ),
+
+            // ── sigma / boolean coercions ─────────────────────────────────────
+            T::BoolToSigmaProp { value, .. } => node(0xD1, self.one(value)?),
+            T::SigmaPropIsProven { input, .. } => node(0xCF, self.one(input)?),
+            T::SigmaPropBytes { input, .. } => node(0xD0, self.one(input)?),
+
+            // ── crypto primitives ─────────────────────────────────────────────
+            T::CreateProveDlog { value, .. } => node(0xCD, self.one(value)?),
+            T::CreateProveDHTuple { gv, hv, uv, vv, .. } => node(0xCE, self.four(gv, hv, uv, vv)?),
+            T::CalcBlake2b256 { input, .. } => node(0xCB, self.one(input)?),
+            T::CalcSha256 { input, .. } => node(0xCC, self.one(input)?),
+
+            // ── byte conversions ──────────────────────────────────────────────
+            T::ByteArrayToBigInt { input, .. } => node(0x7B, self.one(input)?),
+            T::ByteArrayToLong { input, .. } => node(0x7C, self.one(input)?),
+            T::LongToByteArray { input, .. } => node(0x7A, self.one(input)?),
+
+            // ── group ops ─────────────────────────────────────────────────────
+            T::DecodePoint { input, .. } => node(0xEE, self.one(input)?),
+            T::MultiplyGroup { left, right, .. } => node(0xA0, self.two(left, right)?),
+            T::Exponentiate { left, right, .. } => node(0x9F, self.two(left, right)?),
+            T::Xor { left, right, .. } => node(0x9B, self.two(left, right)?),
+
+            // ── option ops ────────────────────────────────────────────────────
+            T::OptionGet { input, .. } => node(0xE4, self.one(input)?),
+            T::OptionGetOrElse { input, default, .. } => node(0xE5, self.two(input, default)?),
+            T::OptionIsDefined { input, .. } => node(0xE6, self.one(input)?),
+
+            // ── context access ────────────────────────────────────────────────
+            T::GetVar { var_id, tpe } => {
+                // Node type is SOption(V) (transformers.scala:576); the wire
+                // carries the INNER V (Scala GetVarSerializer writes
+                // `tpe.elemType`; ergo-ser's parse arm reads one bare type).
+                let SType::SOption(inner) = tpe else {
+                    return Err(EmitError::InvalidShape("GetVar node type must be SOption"));
+                };
+                node(
+                    0xE3,
+                    Payload::GetVar {
+                        var_id: *var_id as u8,
+                        tpe: map_type(inner)?,
+                    },
+                )
+            }
+            T::DeserializeContext { id, tpe } => node(
+                0xD4,
+                Payload::DeserializeContext {
+                    id: *id as u8,
+                    tpe: map_type(tpe)?,
+                },
+            ),
+            T::DeserializeRegister { reg, tpe, default } => node(
+                0xD5,
+                Payload::DeserializeRegister {
+                    reg_id: *reg as u8,
+                    tpe: map_type(tpe)?,
+                    default: default
+                        .as_deref()
+                        .map(|d| self.emit(d).map(Box::new))
+                        .transpose()?,
+                },
+            ),
+
+            // ── misc fixed-arity ──────────────────────────────────────────────
+            T::SubstConstants {
+                script_bytes,
+                positions,
+                new_values,
+                ..
+            } => node(0x74, self.three(script_bytes, positions, new_values)?),
+            T::TreeLookup {
+                tree, key, proof, ..
+            } => node(0xB7, self.three(tree, key, proof)?),
+
+            // ── nodes ergo-ser cannot represent (module docs + lib.rs ledger) ─
+            T::CreateAvlTree { .. } => Err(EmitError::UnsupportedNode("CreateAvlTree".to_string())),
+            T::ZKProofBlock { .. } => Err(EmitError::UnsupportedNode("ZKProofBlock".to_string())),
+
+            // ── binding forms ─────────────────────────────────────────────────
+            T::Block {
+                bindings, result, ..
+            } => self.emit_block(bindings, result),
+            // A ValNode can only appear inside Block.bindings (grammar: a bare
+            // top-level `val x = 1` is a PARSE reject — golden_seed §25,
+            // oracle `REJECT 1:1 ParserException`); reaching one here is a
+            // pipeline bug.
+            T::ValNode { .. } => Err(EmitError::InvalidShape(
+                "ValNode outside Block.bindings must not reach emit",
+            )),
+            T::Ident { name, .. } => match self.lookup(name) {
+                Some(id) => node(0x72, Payload::ValUse { id }),
+                // The binder substitutes env values as Constants and the typer
+                // only emits Ident for in-scope val/lambda-arg names, so an
+                // unbound Ident is a pipeline bug.
+                None => Err(EmitError::InvalidShape(
+                    "Ident not bound to any enclosing ValDef or lambda arg",
+                )),
             },
-        ),
-        T::ConcreteCollection {
-            items, elem_type, ..
-        } => node(
-            0x83,
-            Payload::ConcreteCollection {
-                elem_type: map_type(elem_type)?,
-                items: items_of(items)?,
-            },
-        ),
+            T::Lambda {
+                tpe_params,
+                args,
+                body,
+                ..
+            } => self.emit_lambda(tpe_params, args, body.as_deref()),
+            T::Apply { func, args, .. } => self.emit_apply(func, args),
+            T::Select {
+                obj,
+                field,
+                res_type,
+                tpe,
+            } => self.emit_select(obj, field, res_type.as_ref(), tpe),
+            T::MethodCall {
+                obj,
+                method,
+                args,
+                type_subst,
+                ..
+            } => self.emit_method_call(obj, method, args, type_subst),
 
-        // ── numeric casts ─────────────────────────────────────────────────
-        T::Upcast { input, tpe } => node(
-            0x7E,
-            Payload::NumericCast {
-                input: Box::new(emit(input)?),
-                tpe: map_type(tpe)?,
-            },
-        ),
-        T::Downcast { input, tpe } => node(
-            0x7D,
-            Payload::NumericCast {
-                input: Box::new(emit(input)?),
-                tpe: map_type(tpe)?,
-            },
-        ),
+            // ── pre-typed nodes: must never reach emit ────────────────────────
+            T::ApplyTypes { .. } => Err(EmitError::InvalidShape(
+                "ApplyTypes is pre-typed-only and must not reach emit",
+            )),
+            T::MethodCallLike { .. } => Err(EmitError::InvalidShape(
+                "MethodCallLike is pre-typed-only and must not reach emit",
+            )),
+        }
+    }
 
-        // ── collection transformers ───────────────────────────────────────
-        T::MapCollection { input, mapper, .. } => node(0xAD, two(input, mapper)?),
-        T::Exists {
-            input, condition, ..
-        } => node(0xAE, two(input, condition)?),
-        T::ForAll {
-            input, condition, ..
-        } => node(0xAF, two(input, condition)?),
-        T::Fold {
-            input,
-            zero,
-            fold_op,
-            ..
-        } => node(0xB0, three(input, zero, fold_op)?),
-        T::Filter {
-            input, condition, ..
-        } => node(0xB5, two(input, condition)?),
-        T::Slice {
-            input, from, until, ..
-        } => node(0xB4, three(input, from, until)?),
-        T::Append { input, col2, .. } => node(0xB3, two(input, col2)?),
-        T::SizeOf { input, .. } => node(0xB1, one(input)?),
-        T::ByIndex {
-            input,
-            index,
-            default,
-            ..
-        } => node(
-            0xB2,
-            Payload::ByIndex {
-                input: Box::new(emit(input)?),
-                index: Box::new(emit(index)?),
-                default: default
-                    .as_deref()
-                    .map(|d| emit(d).map(Box::new))
-                    .transpose()?,
-            },
-        ),
-
-        // ── collection-boolean gates: ONE arg (the collection expr) ───────
-        T::AND { input, .. } => node(0x96, one(input)?),
-        T::OR { input, .. } => node(0x97, one(input)?),
-        T::XorOf { input, .. } => node(0xFF, one(input)?),
-
-        // ── sigma combinators ─────────────────────────────────────────────
-        T::AtLeast { bound, input, .. } => node(0x98, two(bound, input)?),
-        T::SigmaAnd { items, .. } => node(
-            0xEA,
-            Payload::SigmaCollection {
-                items: items_of(items)?,
-            },
-        ),
-        T::SigmaOr { items, .. } => node(
-            0xEB,
-            Payload::SigmaCollection {
-                items: items_of(items)?,
-            },
-        ),
-
-        // ── sigma / boolean coercions ─────────────────────────────────────
-        T::BoolToSigmaProp { value, .. } => node(0xD1, one(value)?),
-        T::SigmaPropIsProven { input, .. } => node(0xCF, one(input)?),
-        T::SigmaPropBytes { input, .. } => node(0xD0, one(input)?),
-
-        // ── crypto primitives ─────────────────────────────────────────────
-        T::CreateProveDlog { value, .. } => node(0xCD, one(value)?),
-        T::CreateProveDHTuple { gv, hv, uv, vv, .. } => node(0xCE, four(gv, hv, uv, vv)?),
-        T::CalcBlake2b256 { input, .. } => node(0xCB, one(input)?),
-        T::CalcSha256 { input, .. } => node(0xCC, one(input)?),
-
-        // ── byte conversions ──────────────────────────────────────────────
-        T::ByteArrayToBigInt { input, .. } => node(0x7B, one(input)?),
-        T::ByteArrayToLong { input, .. } => node(0x7C, one(input)?),
-        T::LongToByteArray { input, .. } => node(0x7A, one(input)?),
-
-        // ── group ops ─────────────────────────────────────────────────────
-        T::DecodePoint { input, .. } => node(0xEE, one(input)?),
-        T::MultiplyGroup { left, right, .. } => node(0xA0, two(left, right)?),
-        T::Exponentiate { left, right, .. } => node(0x9F, two(left, right)?),
-        T::Xor { left, right, .. } => node(0x9B, two(left, right)?),
-
-        // ── option ops ────────────────────────────────────────────────────
-        T::OptionGet { input, .. } => node(0xE4, one(input)?),
-        T::OptionGetOrElse { input, default, .. } => node(0xE5, two(input, default)?),
-        T::OptionIsDefined { input, .. } => node(0xE6, one(input)?),
-
-        // ── context access ────────────────────────────────────────────────
-        T::GetVar { var_id, tpe } => {
-            // Node type is SOption(V) (transformers.scala:576); the wire
-            // carries the INNER V (Scala GetVarSerializer writes
-            // `tpe.elemType`; ergo-ser's parse arm reads one bare type).
-            let SType::SOption(inner) = tpe else {
-                return Err(EmitError::InvalidShape("GetVar node type must be SOption"));
+    /// `Block(bindings, result)` → `BlockValue(ValDef*, result)` @ 0xD8.
+    ///
+    /// Each source `val` materializes one `ValDef` (0xD6) — M3 does no CSE, so
+    /// the mapping is 1:1, unlike Scala's shared-node materialization
+    /// (TreeBuilding.scala:498-516). Ordering matches Scala: the rhs is
+    /// emitted BEFORE the ValDef id is taken (`val rhs = buildValue(...,
+    /// curId, ...); curId += 1` — :511-513), so a lambda inside the rhs takes
+    /// the lower id. The name binds only AFTER its rhs (no self-reference,
+    /// mirroring the typer's sequential env build, SigmaTyper.scala:56-63).
+    /// An empty-bindings Block collapses to the bare result — Scala only
+    /// wraps `BlockValue` when `valdefs.nonEmpty` (TreeBuilding.scala:520-529).
+    fn emit_block(
+        &mut self,
+        bindings: &[TypedExpr],
+        result: &TypedExpr,
+    ) -> Result<Expr, EmitError> {
+        self.bindings.push(HashMap::new());
+        let mut items = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let TypedExpr::ValNode {
+                name, body, tpe, ..
+            } = binding
+            else {
+                return Err(EmitError::InvalidShape("Block binding is not a ValNode"));
             };
+            let rhs = self.emit(body)?;
+            let id = self.bind(name, map_type(tpe)?);
+            items.push(Expr::Op(IrNode {
+                opcode: 0xD6,
+                // tpe is never on the ValDef wire: Scala's reader always has a
+                // constantStore, so the type branch is dead and ergo-ser's
+                // parse arm pins `tpe: None` (parse.rs ValDef arm).
+                payload: Payload::ValDef {
+                    id,
+                    tpe: None,
+                    rhs: Box::new(rhs),
+                },
+            }));
+        }
+        let result = self.emit(result)?;
+        self.bindings.pop();
+        if items.is_empty() {
+            Ok(result)
+        } else {
             node(
-                0xE3,
-                Payload::GetVar {
-                    var_id: *var_id as u8,
-                    tpe: map_type(inner)?,
+                0xD8,
+                Payload::BlockValue {
+                    items,
+                    result: Box::new(result),
                 },
             )
         }
-        T::DeserializeContext { id, tpe } => node(
-            0xD4,
-            Payload::DeserializeContext {
-                id: *id as u8,
-                tpe: map_type(tpe)?,
+    }
+
+    /// `Lambda(args, body)` → `FuncValue(Vector((argId, argType)), body)` @
+    /// 0xD9. Args MUST carry types — they define the function signature and
+    /// the ergo-ser writer panics on a type-less arg (write.rs FuncValue arm,
+    /// recon-ergoser-ir §1).
+    fn emit_lambda(
+        &mut self,
+        tpe_params: &[crate::typed::STypeParam],
+        args: &[(String, SType)],
+        body: Option<&TypedExpr>,
+    ) -> Result<Expr, EmitError> {
+        // The binder enforces `!(tpeParams.nonEmpty && body.nonEmpty)` and the
+        // wire FuncValue has no type-param block: both shapes are pipeline bugs.
+        if !tpe_params.is_empty() {
+            return Err(EmitError::InvalidShape(
+                "Lambda with type parameters cannot be serialized as FuncValue",
+            ));
+        }
+        let Some(body) = body else {
+            return Err(EmitError::InvalidShape(
+                "Lambda with no body cannot be serialized as FuncValue",
+            ));
+        };
+        self.bindings.push(HashMap::new());
+        let mut wire_args = Vec::with_capacity(args.len());
+        for (name, tpe) in args {
+            let wire_tpe = map_type(tpe)?;
+            let id = self.bind(name, wire_tpe.clone());
+            wire_args.push((id, Some(wire_tpe)));
+        }
+        let body = self.emit(body)?;
+        self.bindings.pop();
+        node(
+            0xD9,
+            Payload::FuncValue {
+                args: wire_args,
+                body: Box::new(body),
             },
-        ),
-        T::DeserializeRegister { reg, tpe, default } => node(
-            0xD5,
-            Payload::DeserializeRegister {
-                reg_id: *reg as u8,
-                tpe: map_type(tpe)?,
-                default: default
-                    .as_deref()
-                    .map(|d| emit(d).map(Box::new))
-                    .transpose()?,
+        )
+    }
+
+    /// Residual `Apply` lowering.
+    ///
+    /// - function-typed callee (val-bound lambda `ValUse`, inline `Lambda`)
+    ///   → `FuncApply` @ 0xDA (TreeBuilding `Def(Apply(...)) => mkApply`,
+    ///   TreeBuilding.scala:192-194);
+    /// - collection-typed callee → `ByIndex` with the index Upcast-ed to
+    ///   `SInt` when narrower (SigmaTyper.scala:261-277; the frontend lowers
+    ///   `coll(i)` at typer time, so this arm is defensive normalization);
+    /// - anything else → [`EmitError::UnsupportedNode`] naming the callee.
+    fn emit_apply(&mut self, func: &TypedExpr, args: &[TypedExpr]) -> Result<Expr, EmitError> {
+        match node_tpe(func) {
+            SType::SFunc { .. } => {
+                let func = self.emit(func)?;
+                let args = self.items_of(args)?;
+                node(
+                    0xDA,
+                    Payload::FuncApply {
+                        func: Box::new(func),
+                        args,
+                    },
+                )
+            }
+            SType::SColl(_) => {
+                let [index] = args else {
+                    return Err(EmitError::InvalidShape(
+                        "collection Apply expects exactly one index argument",
+                    ));
+                };
+                let input = self.emit(func)?;
+                let index = self.emit_index(index)?;
+                node(
+                    0xB2,
+                    Payload::ByIndex {
+                        input: Box::new(input),
+                        index: Box::new(index),
+                        default: None,
+                    },
+                )
+            }
+            other => Err(EmitError::UnsupportedNode(format!(
+                "Apply on a callee of type {other:?}"
+            ))),
+        }
+    }
+
+    /// Residual `Select` lowering — the no-irBuilder methods the typer leaves
+    /// as `Select` (methods.rs `v5s` entries), lowered exactly where Scala's
+    /// GraphBuilding lowers them:
+    ///
+    /// - numeric casts `toByte`..`toBigInt` → same-type unwrap / `Downcast` /
+    ///   `Upcast` by ladder order (GraphBuilding.scala:555-563);
+    /// - `.size` on a collection-like receiver → `SizeOf` (:520-525);
+    /// - `SigmaProp.isProven`/`.propBytes` → dedicated nodes (:527-533);
+    /// - Box properties → the `Extract*` family (:541-549) and
+    ///   `R0`..`R9[T]` → `ExtractRegisterAs` (:536-539) with the INNER type
+    ///   on the wire (`putType(obj.tpe.elemType)`,
+    ///   ExtractRegisterAsSerializer.scala serialize);
+    /// - tuple `_i` → `SelectField` (:551-553);
+    /// - anything else → [`EmitError::UnsupportedNode`] naming the field.
+    fn emit_select(
+        &mut self,
+        obj: &TypedExpr,
+        field: &str,
+        res_type: Option<&SType>,
+        tpe: &SType,
+    ) -> Result<Expr, EmitError> {
+        let obj_tpe = node_tpe(obj);
+
+        // Numeric casts (GraphBuilding.scala:555-563): the match requires a
+        // numeric receiver and a numeric result (resType when the typer set
+        // one, else the node type — §1.5 sets both identically for casts).
+        if matches!(
+            field,
+            "toByte" | "toShort" | "toInt" | "toLong" | "toBigInt"
+        ) {
+            let target = res_type.unwrap_or(tpe);
+            if let (Some(src), Some(dst)) = (numeric_index(obj_tpe), numeric_index(target)) {
+                let input = self.emit(obj)?;
+                return match src.cmp(&dst) {
+                    // Same type: `eval(numValue)` — the cast disappears.
+                    std::cmp::Ordering::Equal => Ok(input),
+                    // `(numValue.tpe max tRes) == numValue.tpe` → Downcast.
+                    std::cmp::Ordering::Greater => node(
+                        0x7D,
+                        Payload::NumericCast {
+                            input: Box::new(input),
+                            tpe: map_type(target)?,
+                        },
+                    ),
+                    std::cmp::Ordering::Less => node(
+                        0x7E,
+                        Payload::NumericCast {
+                            input: Box::new(input),
+                            tpe: map_type(target)?,
+                        },
+                    ),
+                };
+            }
+        }
+
+        // `col.size` → SizeOf (GraphBuilding.scala:520-525; STuple extends
+        // SCollection[SAny], SType.scala:822-825, so tuples are
+        // collection-like).
+        if field == "size" && matches!(obj_tpe, SType::SColl(_) | SType::STuple(_)) {
+            return node(0xB1, self.one(obj)?);
+        }
+
+        if matches!(obj_tpe, SType::SSigmaProp) {
+            match field {
+                "isProven" => return node(0xCF, self.one(obj)?),
+                "propBytes" => return node(0xD0, self.one(obj)?),
+                _ => {}
+            }
+        }
+
+        if matches!(obj_tpe, SType::SBox) {
+            match field {
+                "value" => return node(0xC1, self.one(obj)?),
+                "propositionBytes" => return node(0xC2, self.one(obj)?),
+                "bytes" => return node(0xC3, self.one(obj)?),
+                "bytesWithoutRef" => return node(0xC4, self.one(obj)?),
+                "id" => return node(0xC5, self.one(obj)?),
+                "creationInfo" => return node(0xC7, self.one(obj)?),
+                _ => {}
+            }
+            // `box.R$i[T]` with a resolved Option result → ExtractRegisterAs.
+            // A bare `SELF.R4` (no `[T]`) keeps its polymorphic SFunc type and
+            // falls through to the UnsupportedNode below, matching Scala's
+            // graph-build error for an unresolved register read.
+            if let Some(reg_digit) = field.strip_prefix('R') {
+                if let (Ok(reg_id), Some(SType::SOption(inner))) =
+                    (reg_digit.parse::<u8>(), res_type)
+                {
+                    if reg_id <= 9 {
+                        return node(
+                            0xC6,
+                            Payload::ExtractRegisterAs {
+                                input: Box::new(self.emit(obj)?),
+                                reg_id,
+                                tpe: map_type(inner)?,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Tuple component `_i` → SelectField, 1-based (GraphBuilding.scala:
+        // 551-553 `fn.substring(1).toByte`).
+        if let SType::STuple(items) = obj_tpe {
+            if let Some(idx_str) = field.strip_prefix('_') {
+                if let Ok(idx) = idx_str.parse::<u8>() {
+                    if idx == 0 || usize::from(idx) > items.len() {
+                        return Err(EmitError::InvalidShape(
+                            "tuple field index outside the tuple arity",
+                        ));
+                    }
+                    return node(
+                        0x8C,
+                        Payload::SelectField {
+                            input: Box::new(self.emit(obj)?),
+                            field_idx: idx,
+                        },
+                    );
+                }
+            }
+        }
+
+        Err(EmitError::UnsupportedNode(format!(
+            "Select '{field}' on a receiver of type {obj_tpe:?}"
+        )))
+    }
+
+    /// `MethodCall`/`PropertyCall` wire dispatch.
+    ///
+    /// `(type_id, method_id)` resolve through the SAME tables the typer used
+    /// (`methods::wire_method`, keyed on the version-aware owner name —
+    /// D-T10). Opcode selection is Scala's `MethodCall.companion`:
+    /// `if (args.isEmpty) PropertyCall else MethodCall` (values.scala:1322) —
+    /// 0xDB writes no arg block, 0xDC writes count + args. The v6 explicit
+    /// type-args block (both opcodes) carries the `type_subst` bindings in
+    /// the method's DECLARED type-param order, cross-checked against
+    /// ergo-ser's per-pair count ([`method_explicit_type_args_count`],
+    /// opcode/types.rs:573-589).
+    fn emit_method_call(
+        &mut self,
+        obj: &TypedExpr,
+        method: &crate::typed::MethodRef,
+        args: &[TypedExpr],
+        type_subst: &[(String, SType)],
+    ) -> Result<Expr, EmitError> {
+        let Some((type_id, desc)) = wire_method(&method.owner, &method.name) else {
+            return Err(EmitError::UnsupportedNode(format!(
+                "MethodCall %{}.{} has no wire (typeId, methodId)",
+                method.owner, method.name
+            )));
+        };
+        // The thin id projection must stay in lockstep with the full lookup
+        // (same table; pins the invariant for direct `wire_ids` consumers).
+        debug_assert_eq!(
+            crate::typer::methods::wire_ids(&method.owner, &method.name),
+            Some((type_id, desc.method_id)),
+        );
+        // PropertyCall discipline: an empty arg list is only valid when the
+        // method table declares the method nullary (receiver-only dom) — a
+        // zero-arg call of an args-taking method would serialize as a
+        // PropertyCall that Scala deserializes to a different (arg-less)
+        // invocation.
+        if args.is_empty() && desc.stype.dom.len() != 1 {
+            return Err(EmitError::InvalidShape(
+                "zero-arg MethodCall of a method whose table entry declares value args",
+            ));
+        }
+        let obj = self.emit(obj)?;
+        let args = self.items_of(args)?;
+        let mut type_args = Vec::new();
+        if desc.explicit_type_args {
+            for param in &desc.stype.tpe_params {
+                let Some((_, bound)) = type_subst.iter().find(|(name, _)| name == param) else {
+                    return Err(EmitError::InvalidShape(
+                        "MethodCall missing a type_subst binding for an explicit type param",
+                    ));
+                };
+                type_args.push(map_type(bound)?);
+            }
+        }
+        if type_args.len() != method_explicit_type_args_count(type_id, desc.method_id) {
+            return Err(EmitError::InvalidShape(
+                "MethodCall explicit-type-arg count disagrees with the ergo-ser wire table",
+            ));
+        }
+        let opcode = if args.is_empty() { 0xDB } else { 0xDC };
+        node(
+            opcode,
+            Payload::MethodCall {
+                type_id,
+                method_id: desc.method_id,
+                obj: Box::new(obj),
+                args,
+                type_args,
             },
-        ),
-
-        // ── misc fixed-arity ──────────────────────────────────────────────
-        T::SubstConstants {
-            script_bytes,
-            positions,
-            new_values,
-            ..
-        } => node(0x74, three(script_bytes, positions, new_values)?),
-        T::TreeLookup {
-            tree, key, proof, ..
-        } => node(0xB7, three(tree, key, proof)?),
-
-        // ── nodes ergo-ser cannot represent (module docs + lib.rs ledger) ─
-        T::CreateAvlTree { .. } => Err(EmitError::UnsupportedNode("CreateAvlTree")),
-        T::ZKProofBlock { .. } => Err(EmitError::UnsupportedNode("ZKProofBlock")),
-
-        // ── binding forms: M3 Task 8 ──────────────────────────────────────
-        T::Block { .. } => Err(EmitError::UnsupportedNode("Block")),
-        T::ValNode { .. } => Err(EmitError::UnsupportedNode("ValNode")),
-        T::Ident { .. } => Err(EmitError::UnsupportedNode("Ident")),
-        T::Lambda { .. } => Err(EmitError::UnsupportedNode("Lambda")),
-        T::Apply { .. } => Err(EmitError::UnsupportedNode("Apply")),
-        T::Select { .. } => Err(EmitError::UnsupportedNode("Select")),
-        T::MethodCall { .. } => Err(EmitError::UnsupportedNode("MethodCall")),
-
-        // ── pre-typed nodes: must never reach emit ────────────────────────
-        T::ApplyTypes { .. } => Err(EmitError::InvalidShape(
-            "ApplyTypes is pre-typed-only and must not reach emit",
-        )),
-        T::MethodCallLike { .. } => Err(EmitError::InvalidShape(
-            "MethodCallLike is pre-typed-only and must not reach emit",
-        )),
+        )
     }
 }
 
@@ -503,7 +1019,7 @@ pub(crate) fn map_const(p: &ConstPayload, t: &SType) -> Result<(SigmaType, Sigma
         // serialize (module docs + lib.rs ledger entry).
         ConstPayload::SigmaProp(_) => {
             return Err(EmitError::UnsupportedNode(
-                "opaque SigmaProp constant payload",
+                "opaque SigmaProp constant payload".to_string(),
             ))
         }
     };
@@ -838,6 +1354,66 @@ mod tests {
         assert_eq!(sb, SigmaBoolean::TrivialProp(false));
     }
 
+    #[test]
+    fn emitted_block_val_binding_reduces_across_100() {
+        // BlockValue/ValDef/ValUse evaluate correctly under the in-repo
+        // interpreter — the binding actually carries HEIGHT to the guard.
+        use ergo_sigma::evaluator::{reduce_expr, ReductionContext};
+        let ir = emit_tc("sigmaProp({ val x = HEIGHT; x > 100 })");
+        for (height, expected) in [(200u32, true), (50, false)] {
+            let ctx = ReductionContext::minimal(height, 0);
+            let sb = reduce_expr(&ir, &ctx, &[]).expect("reduce");
+            assert_eq!(sb, SigmaBoolean::TrivialProp(expected), "height {height}");
+        }
+    }
+
+    #[test]
+    fn emitted_val_bound_lambda_funcapply_reduces_true() {
+        // FuncValue + FuncApply semantics: f(2) == 3 for f = x + 1.
+        use ergo_sigma::evaluator::{reduce_expr, ReductionContext};
+        let ir = emit_tc("sigmaProp({ val f = {(x: Int) => x + 1}; f(2) == 3 })");
+        let ctx = ReductionContext::minimal(1, 0);
+        let sb = reduce_expr(&ir, &ctx, &[]).expect("reduce");
+        assert_eq!(sb, SigmaBoolean::TrivialProp(true));
+    }
+
+    #[test]
+    fn emitted_coll_map_lambda_reduces_true() {
+        // MapCollection over an emitted FuncValue: Coll(1,2).map(+1)(0) == 2.
+        use ergo_sigma::evaluator::{reduce_expr, ReductionContext};
+        let ir = emit_tc("sigmaProp(Coll(1, 2).map({(x: Int) => x + 1})(0) == 2)");
+        let ctx = ReductionContext::minimal(1, 0);
+        let sb = reduce_expr(&ir, &ctx, &[]).expect("reduce");
+        assert_eq!(sb, SigmaBoolean::TrivialProp(true));
+    }
+
+    #[test]
+    fn emitted_get_var_composite_reduces_with_extension() {
+        // `getVar[Int](1).get > 0`: GetVar inner-type wire + OptionGet +
+        // relation, end-to-end against a context extension.
+        use ergo_sigma::evaluator::{reduce_expr, ReductionContext};
+        let ir = emit_tc("sigmaProp(getVar[Int](1).get > 0)");
+        let mut ctx = ReductionContext::minimal(1, 0);
+        ctx.extension
+            .insert(1, (SigmaType::SInt, SigmaValue::Int(5)));
+        let sb = reduce_expr(&ir, &ctx, &[]).expect("reduce");
+        assert_eq!(sb, SigmaBoolean::TrivialProp(true));
+        // Var absent → OptionGet on None → the script FAILS, like Scala.
+        let empty_ctx = ReductionContext::minimal(1, 0);
+        assert!(reduce_expr(&ir, &empty_ctx, &[]).is_err());
+    }
+
+    #[test]
+    fn emitted_mixed_width_arith_reduces_true() {
+        // The typer-inserted Upcast (mirrored by emit's normalization)
+        // evaluates: (1 + 2L) == 3L.
+        use ergo_sigma::evaluator::{reduce_expr, ReductionContext};
+        let ir = emit_tc("sigmaProp((1 + 2L) == 3L)");
+        let ctx = ReductionContext::minimal(1, 0);
+        let sb = reduce_expr(&ir, &ctx, &[]).expect("reduce");
+        assert_eq!(sb, SigmaBoolean::TrivialProp(true));
+    }
+
     // ----- round-trips -----
 
     #[test]
@@ -975,15 +1551,10 @@ mod tests {
     #[test]
     fn tuple_and_select_field_emit_and_roundtrip() {
         rt_op("(1, 2L)", 0x86);
-        // `(1, 2L)._2` survives as `Select` in the M3 typed AST (same Select
-        // survival as `.size`); SelectField is reachable only hand-built
-        // until Task 8 lowers Selects.
-        let node = TypedExpr::SelectField {
-            input: Box::new(tc("(1, 2L)")),
-            field_index: 2,
-            tpe: SType::SLong,
-        };
-        let ir = rt_node(&node, 0x8C);
+        // `(1, 2L)._2` survives as `Select '_2'` in the typed AST; the Task-8
+        // Select arm lowers it to SelectField (GraphBuilding.scala:551-553).
+        let ir = emit_tc("(1, 2L)._2");
+        assert_eq!(root_opcode(&ir), 0x8C);
         match &ir {
             Expr::Op(IrNode {
                 payload: Payload::SelectField { field_idx, .. },
@@ -991,6 +1562,29 @@ mod tests {
             }) => assert_eq!(*field_idx, 2, "1-based field index"),
             other => panic!("expected SelectField, got {other:?}"),
         }
+        wire_roundtrip(&ir);
+        // Hand-built SelectField node (typer static tuple-index arm shape,
+        // golden_seed §23(b) static record) still round-trips.
+        let node = TypedExpr::SelectField {
+            input: Box::new(tc("(1, 2L)")),
+            field_index: 2,
+            tpe: SType::SLong,
+        };
+        rt_node(&node, 0x8C);
+    }
+
+    #[test]
+    fn tuple_select_field_first_component_emits_index_one() {
+        let ir = emit_tc("(1, 2L)._1");
+        assert_eq!(root_opcode(&ir), 0x8C);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::SelectField { field_idx, .. },
+                ..
+            }) => assert_eq!(*field_idx, 1),
+            other => panic!("expected SelectField, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
     }
 
     #[test]
@@ -1034,8 +1628,8 @@ mod tests {
 
     #[test]
     fn downcast_hand_built_emits_numeric_cast_and_roundtrips() {
-        // No M3 frontend path constructs Downcast (numeric casts stay
-        // `Select` until Task 8 — assign.rs §1.24 note); hand-built.
+        // Direct Downcast node (the frontend route is the `Select` cast arm,
+        // covered by `select_numeric_casts_*` below).
         let node = TypedExpr::Downcast {
             input: Box::new(long_c(1)),
             tpe: SType::SInt,
@@ -1048,6 +1642,43 @@ mod tests {
             }) => assert_eq!(tpe, &SigmaType::SInt),
             other => panic!("expected NumericCast, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn select_numeric_casts_emit_numeric_cast_by_ladder_order() {
+        // GraphBuilding.scala:555-563: narrower target → Downcast, wider →
+        // Upcast, chained casts compose.
+        let ir = emit_tc("1.toByte");
+        assert_eq!(root_opcode(&ir), 0x7D, "Int→Byte is a Downcast");
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::NumericCast { tpe, .. },
+                ..
+            }) => assert_eq!(tpe, &SigmaType::SByte),
+            other => panic!("expected NumericCast, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+        rt_op("1.toLong", 0x7E);
+        rt_op("1.toBigInt", 0x7E);
+        rt_op("1.toByte.toShort", 0x7E); // Upcast over the inner Downcast
+    }
+
+    #[test]
+    fn select_numeric_cast_same_type_unwraps_to_input() {
+        // GraphBuilding.scala:558-559 `if (numValue.tpe == tRes)
+        // eval(numValue)` — a same-type cast disappears from the tree.
+        let ir = emit_tc("1.toInt");
+        assert!(
+            matches!(
+                &ir,
+                Expr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(1),
+                }
+            ),
+            "same-type cast must unwrap to the bare input, got {ir:?}"
+        );
+        wire_roundtrip(&ir);
     }
 
     #[test]
@@ -1070,9 +1701,8 @@ mod tests {
 
     #[test]
     fn size_of_hand_built_emits_one_payload() {
-        // `INPUTS.size` survives as `Select` in the typed AST (golden seed
-        // §"INPUTS.size Select survival") — SizeOf itself is reachable only
-        // hand-built until Task 8 lowers Selects.
+        // Direct SizeOf node; the frontend `Select 'size'` route is covered
+        // by `select_size_emits_size_of` below.
         let node = TypedExpr::SizeOf {
             input: Box::new(TypedExpr::Inputs {
                 tpe: scoll(SType::SBox),
@@ -1083,11 +1713,60 @@ mod tests {
     }
 
     #[test]
+    fn select_size_emits_size_of() {
+        // `col1.size` survives as `Select 'size'` (golden_seed §23(a) dot
+        // form); the Select arm lowers it to SizeOf
+        // (GraphBuilding.scala:520-525). Also holds for INPUTS and tuples
+        // (STuple is collection-like, SType.scala:822-825).
+        rt_op("col1.size", 0xB1);
+        rt_op("(1, 2L).size", 0xB1);
+        let ir = emit_tc("INPUTS.size > 1");
+        assert_eq!(root_opcode(&ir), 0x91);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::Two(left, _),
+                ..
+            }) => assert_eq!(root_opcode(left), 0xB1, "SizeOf child"),
+            other => panic!("expected Two payload, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn postfix_size_emits_property_call() {
+        // `col1 size` (no dot, the grammar's PostFix rule) desugars to a
+        // zero-arg MethodCall `%SCollection.size [] {}` (golden_seed §23(a)
+        // postfix form) → PropertyCall 0xDB with wire ids (12, 1) and no
+        // explicit type args.
+        let ir = emit_tc("col1 size");
+        assert_eq!(root_opcode(&ir), 0xDB);
+        match &ir {
+            Expr::Op(IrNode {
+                payload:
+                    Payload::MethodCall {
+                        type_id,
+                        method_id,
+                        args,
+                        type_args,
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!((*type_id, *method_id), (12, 1));
+                assert!(args.is_empty(), "PropertyCall carries no args");
+                assert!(type_args.is_empty(), "size has no explicit type args");
+            }
+            other => panic!("expected MethodCall payload, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
     fn higher_order_ops_emit_fixed_arity_payloads() {
-        // map/exists/forAll/filter/fold take a lambda the M3 frontend types
-        // as `Lambda` (Task 8 → FuncValue). The fixed-arity opcode mapping is
-        // pinned with constant stand-ins in the function position; the wire
-        // pattern (Two/Three positional children) is child-shape-agnostic.
+        // Fixed-arity opcode mapping pinned with constant stand-ins in the
+        // function position (the wire pattern is child-shape-agnostic); the
+        // real-lambda frontend route is `higher_order_ops_with_frontend_
+        // lambdas_emit_func_values` below.
         let input = byte_coll_c(vec![1, 2]);
         let f = long_c(7);
         let mk = |node: TypedExpr, byte: u8| {
@@ -1188,8 +1867,11 @@ mod tests {
     #[test]
     fn sigma_coercions_emit_and_roundtrip() {
         rt_op("sigmaProp(HEIGHT > 100)", 0xD1);
-        // SigmaPropBytes / SigmaPropIsProven have no non-Select frontend
-        // route at M3 (`.propBytes`/`.isProven` stay Select until Task 8).
+        // `.propBytes` / `.isProven` survive as `Select` and the Select arm
+        // lowers them (GraphBuilding.scala:527-533).
+        rt_op("proveDlog(g1).propBytes", 0xD0);
+        rt_op("proveDlog(g1).isProven", 0xCF);
+        // Hand-built dedicated nodes still round-trip.
         rt_node(
             &TypedExpr::SigmaPropBytes {
                 input: Box::new(tc("proveDlog(g1)")),
@@ -1310,18 +1992,588 @@ mod tests {
         rt_node(&node, 0xB7);
     }
 
-    // ----- error paths -----
+    #[test]
+    fn block_val_emits_blockvalue_valdef_valuse_and_roundtrips() {
+        // `{ val x = HEIGHT; x > 100 }` → BlockValue(ValDef(1, Height),
+        // GT(ValUse(1), 100)); ValDef ids start at 1 in source order and the
+        // wire ValDef carries NO type (ergo-ser parse pins tpe: None).
+        let ir = emit_tc("{ val x = HEIGHT; x > 100 }");
+        assert_eq!(root_opcode(&ir), 0xD8);
+        let Expr::Op(IrNode {
+            payload: Payload::BlockValue { items, result },
+            ..
+        }) = &ir
+        else {
+            panic!("expected BlockValue, got {ir:?}");
+        };
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            Expr::Op(IrNode {
+                opcode: 0xD6,
+                payload: Payload::ValDef { id, tpe, rhs },
+            }) => {
+                assert_eq!(*id, 1);
+                assert_eq!(*tpe, None, "ValDef type never on the wire");
+                assert_eq!(root_opcode(rhs), 0xA3, "rhs is Height");
+            }
+            other => panic!("expected ValDef, got {other:?}"),
+        }
+        match result.as_ref() {
+            Expr::Op(IrNode {
+                opcode: 0x91,
+                payload: Payload::Two(left, _),
+            }) => assert_eq!(
+                left.as_ref(),
+                &Expr::Op(IrNode {
+                    opcode: 0x72,
+                    payload: Payload::ValUse { id: 1 },
+                }),
+                "block result references the val through ValUse(1)"
+            ),
+            other => panic!("expected GT result, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
 
     #[test]
-    fn task8_block_form_returns_unsupported_node() {
-        // Scope discipline: Block/ValNode (and the other binding forms) are
-        // Task 8; at Task 7 they must error, not mis-emit.
-        let err = emit(&tc("{ val x = 1; x }")).unwrap_err();
-        assert!(
-            matches!(err, EmitError::UnsupportedNode(_)),
-            "expected UnsupportedNode, got {err:?}"
+    fn lambda_emits_funcvalue_with_typed_arg_and_roundtrips() {
+        // `OUTPUTS.map({ (o: Box) => o.value })` → MapCollection(Outputs,
+        // FuncValue([(1, SBox)], ExtractAmount(ValUse(1)))). FuncValue args
+        // MUST carry types — the ergo-ser writer panics otherwise
+        // (write.rs FuncValue arm).
+        let ir = emit_tc("OUTPUTS.map({ (o: Box) => o.value })");
+        assert_eq!(root_opcode(&ir), 0xAD);
+        let Expr::Op(IrNode {
+            payload: Payload::Two(_, mapper),
+            ..
+        }) = &ir
+        else {
+            panic!("expected Two payload, got {ir:?}");
+        };
+        let Expr::Op(IrNode {
+            opcode: 0xD9,
+            payload: Payload::FuncValue { args, body },
+        }) = mapper.as_ref()
+        else {
+            panic!("expected FuncValue mapper, got {mapper:?}");
+        };
+        assert_eq!(args, &vec![(1u32, Some(SigmaType::SBox))]);
+        assert_eq!(
+            body.as_ref(),
+            &Expr::Op(IrNode {
+                opcode: 0xC1, // ExtractAmount — Select 'value' lowering
+                payload: Payload::One(Box::new(Expr::Op(IrNode {
+                    opcode: 0x72,
+                    payload: Payload::ValUse { id: 1 },
+                }))),
+            })
         );
+        wire_roundtrip(&ir);
     }
+
+    #[test]
+    fn higher_order_ops_with_frontend_lambdas_emit_func_values() {
+        for (src, opcode) in [
+            ("col1.map({(x: Long) => x})", 0xAD),
+            ("col1.exists({(x: Long) => x > 1L})", 0xAE),
+            ("col1.forall({(x: Long) => x > 1L})", 0xAF),
+            ("col1.filter({(x: Long) => x > 1L})", 0xB5),
+        ] {
+            let ir = emit_tc(src);
+            assert_eq!(root_opcode(&ir), opcode, "{src}");
+            match &ir {
+                Expr::Op(IrNode {
+                    payload: Payload::Two(_, f),
+                    ..
+                }) => assert_eq!(root_opcode(f), 0xD9, "{src}: FuncValue lambda"),
+                other => panic!("{src}: expected Two payload, got {other:?}"),
+            }
+            wire_roundtrip(&ir);
+        }
+        // fold's op is a TWO-arg lambda → FuncValue with two typed arg slots.
+        let ir = emit_tc("col1.fold(0L, {(acc: Long, x: Long) => acc + x})");
+        assert_eq!(root_opcode(&ir), 0xB0);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::Three(_, _, op),
+                ..
+            }) => match op.as_ref() {
+                Expr::Op(IrNode {
+                    opcode: 0xD9,
+                    payload: Payload::FuncValue { args, .. },
+                }) => assert_eq!(
+                    args,
+                    &vec![
+                        (1u32, Some(SigmaType::SLong)),
+                        (2u32, Some(SigmaType::SLong))
+                    ]
+                ),
+                other => panic!("expected two-arg FuncValue, got {other:?}"),
+            },
+            other => panic!("expected Three payload, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn nested_scopes_allocate_collision_free_ids() {
+        // Outer val takes id 1; the lambda arg continues from the same
+        // monotonic counter (id 2) — never-reuse relaxation of the Scala
+        // scheme (TreeBuilding.scala:186-191, see the Scope docs).
+        let ir = emit_tc("{ val w = 1L; col1.map({(x: Long) => x + w}) }");
+        assert_eq!(root_opcode(&ir), 0xD8);
+        let Expr::Op(IrNode {
+            payload: Payload::BlockValue { items, result },
+            ..
+        }) = &ir
+        else {
+            panic!("expected BlockValue, got {ir:?}");
+        };
+        match &items[0] {
+            Expr::Op(IrNode {
+                payload: Payload::ValDef { id, .. },
+                ..
+            }) => assert_eq!(*id, 1),
+            other => panic!("expected ValDef, got {other:?}"),
+        }
+        let Expr::Op(IrNode {
+            payload: Payload::Two(_, f),
+            ..
+        }) = result.as_ref()
+        else {
+            panic!("expected MapCollection result, got {result:?}");
+        };
+        let Expr::Op(IrNode {
+            payload: Payload::FuncValue { args, body },
+            ..
+        }) = f.as_ref()
+        else {
+            panic!("expected FuncValue, got {f:?}");
+        };
+        assert_eq!(args, &vec![(2u32, Some(SigmaType::SLong))]);
+        // Lambda body `x + a`: ValUse(2) for the arg, ValUse(1) for the
+        // enclosing val — the arg SHADOWS nothing here, both resolve.
+        assert_eq!(
+            body.as_ref(),
+            &Expr::Op(IrNode {
+                opcode: 0x9A,
+                payload: Payload::Two(
+                    Box::new(Expr::Op(IrNode {
+                        opcode: 0x72,
+                        payload: Payload::ValUse { id: 2 },
+                    })),
+                    Box::new(Expr::Op(IrNode {
+                        opcode: 0x72,
+                        payload: Payload::ValUse { id: 1 },
+                    })),
+                ),
+            })
+        );
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn lambda_arg_shadows_enclosing_val() {
+        // The inner `x` must resolve to the lambda arg (id 2), not the
+        // enclosing val (id 1) — innermost-frame-first lookup, mirroring the
+        // typer's `lambdaEnv = env ++ args` overwrite (SigmaTyper.scala:128).
+        let ir = emit_tc("{ val x = 5L; col1.map({(x: Long) => x}) }");
+        let Expr::Op(IrNode {
+            payload: Payload::BlockValue { result, .. },
+            ..
+        }) = &ir
+        else {
+            panic!("expected BlockValue, got {ir:?}");
+        };
+        let Expr::Op(IrNode {
+            payload: Payload::Two(_, f),
+            ..
+        }) = result.as_ref()
+        else {
+            panic!("expected MapCollection result, got {result:?}");
+        };
+        let Expr::Op(IrNode {
+            payload: Payload::FuncValue { body, .. },
+            ..
+        }) = f.as_ref()
+        else {
+            panic!("expected FuncValue, got {f:?}");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 2 },
+            }),
+            "inner x resolves to the lambda arg"
+        );
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn apply_of_val_bound_lambda_emits_funcapply_and_roundtrips() {
+        // `f(2)` where f is a val-bound lambda → FuncApply(ValUse, [2]).
+        let ir = emit_tc("{ val f = {(x: Int) => x + 1}; f(2) }");
+        assert_eq!(root_opcode(&ir), 0xD8);
+        let Expr::Op(IrNode {
+            payload: Payload::BlockValue { result, .. },
+            ..
+        }) = &ir
+        else {
+            panic!("expected BlockValue, got {ir:?}");
+        };
+        match result.as_ref() {
+            Expr::Op(IrNode {
+                opcode: 0xDA,
+                payload: Payload::FuncApply { func, args },
+            }) => {
+                assert_eq!(
+                    func.as_ref(),
+                    &Expr::Op(IrNode {
+                        opcode: 0x72,
+                        payload: Payload::ValUse { id: 2 },
+                    }),
+                    "callee is the val's ValUse (lambda arg took id 1 — \
+                     rhs is emitted before the ValDef id is taken, \
+                     TreeBuilding.scala:511-513 ordering)"
+                );
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected FuncApply result, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn outputs_and_coll_index_emit_byindex_and_roundtrip() {
+        // Apply-on-Coll is lowered to ByIndex at typer time
+        // (SigmaTyper.scala:261-277 port); emit passes it through 0xB2.
+        rt_op("OUTPUTS(0)", 0xB2);
+        rt_op("col1(0)", 0xB2);
+    }
+
+    #[test]
+    fn byte_index_from_frontend_carries_single_typer_upcast() {
+        // golden_seed §"{ val i = 1.toByte; Coll(1, 2, 3)(i) }": the TYPER
+        // already wraps the Byte index in Upcast(SInt); emit_index must not
+        // double-wrap (the emitted index node's type is already SInt).
+        let ir = emit_tc("{ val i = 1.toByte; Coll(1, 2, 3)(i) }");
+        let Expr::Op(IrNode {
+            payload: Payload::BlockValue { result, .. },
+            ..
+        }) = &ir
+        else {
+            panic!("expected BlockValue, got {ir:?}");
+        };
+        match result.as_ref() {
+            Expr::Op(IrNode {
+                opcode: 0xB2,
+                payload: Payload::ByIndex { index, .. },
+            }) => match index.as_ref() {
+                Expr::Op(IrNode {
+                    opcode: 0x7E,
+                    payload: Payload::NumericCast { input, tpe },
+                }) => {
+                    assert_eq!(tpe, &SigmaType::SInt);
+                    assert_eq!(
+                        root_opcode(input),
+                        0x72,
+                        "exactly ONE Upcast layer over the ValUse"
+                    );
+                }
+                other => panic!("expected a single Upcast, got {other:?}"),
+            },
+            other => panic!("expected ByIndex result, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn tuple_dynamic_index_emits_byindex_per_committed_record() {
+        // golden_seed §23(b): a non-constant tuple index typechecks to
+        // ByIndex:Any over the Tuple value (STuple extends SCollection[SAny]).
+        let ir = emit_tc("{ val i = HEIGHT; (1, 2)(i) }");
+        assert_eq!(root_opcode(&ir), 0xD8);
+        let Expr::Op(IrNode {
+            payload: Payload::BlockValue { result, .. },
+            ..
+        }) = &ir
+        else {
+            panic!("expected BlockValue, got {ir:?}");
+        };
+        match result.as_ref() {
+            Expr::Op(IrNode {
+                opcode: 0xB2,
+                payload: Payload::ByIndex { input, index, .. },
+            }) => {
+                assert_eq!(root_opcode(input), 0x86, "Tuple input");
+                assert_eq!(root_opcode(index), 0x72, "ValUse index (Int, no cast)");
+            }
+            other => panic!("expected ByIndex result, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn select_box_properties_emit_extract_opcodes() {
+        // GraphBuilding.scala:541-549 property → Extract* mapping.
+        for (src, opcode) in [
+            ("SELF.value", 0xC1),
+            ("SELF.propositionBytes", 0xC2),
+            ("SELF.bytes", 0xC3),
+            ("SELF.bytesWithoutRef", 0xC4),
+            ("SELF.id", 0xC5),
+            ("SELF.creationInfo", 0xC7),
+        ] {
+            rt_op(src, opcode);
+        }
+    }
+
+    #[test]
+    fn select_register_emits_extract_register_as_with_inner_type() {
+        // `SELF.R4[Long]` → ExtractRegisterAs(reg 4) with the INNER type on
+        // the wire (Scala serializer writes `obj.tpe.elemType`,
+        // ExtractRegisterAsSerializer.scala serialize).
+        let ir = emit_tc("SELF.R4[Long]");
+        assert_eq!(root_opcode(&ir), 0xC6);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::ExtractRegisterAs { reg_id, tpe, .. },
+                ..
+            }) => {
+                assert_eq!(*reg_id, 4);
+                assert_eq!(tpe, &SigmaType::SLong, "inner type, not SOption");
+            }
+            other => panic!("expected ExtractRegisterAs, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+        // Composite: `.get` over the register read → OptionGet root.
+        rt_op("SELF.R4[Long].get", 0xE4);
+        // R0 and R9 bound registers.
+        for (src, reg) in [("SELF.R0[Long]", 0u8), ("SELF.R9[Int]", 9u8)] {
+            let ir = emit_tc(src);
+            match &ir {
+                Expr::Op(IrNode {
+                    payload: Payload::ExtractRegisterAs { reg_id, .. },
+                    ..
+                }) => assert_eq!(*reg_id, reg, "{src}"),
+                other => panic!("{src}: expected ExtractRegisterAs, got {other:?}"),
+            }
+            wire_roundtrip(&ir);
+        }
+    }
+
+    #[test]
+    fn method_call_get_reg_emits_explicit_type_arg() {
+        // `SELF.getReg[Int](4)` → MethodCall 0xDC (99, 19) with one value
+        // arg and the explicit `[T]` type block (ergo-ser
+        // method_explicit_type_args_count(99, 19) == 1).
+        let ir = emit_tc("SELF.getReg[Int](4)");
+        assert_eq!(root_opcode(&ir), 0xDC);
+        match &ir {
+            Expr::Op(IrNode {
+                payload:
+                    Payload::MethodCall {
+                        type_id,
+                        method_id,
+                        args,
+                        type_args,
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!((*type_id, *method_id), (99, 19));
+                assert_eq!(args.len(), 1);
+                assert_eq!(type_args, &vec![SigmaType::SInt]);
+            }
+            other => panic!("expected MethodCall payload, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+        // Composite: OptionGet over the MethodCall.
+        rt_op("SELF.getReg[Int](4).get", 0xE4);
+    }
+
+    #[test]
+    fn property_call_none_emits_type_arg_without_args() {
+        // `Global.none[Int]()` → PropertyCall 0xDB (106, 10): zero value
+        // args but STILL one explicit type arg on the wire (the ergo-ser
+        // PropertyCall arm reads the same type block).
+        let ir = emit_tc("Global.none[Int]()");
+        assert_eq!(root_opcode(&ir), 0xDB);
+        match &ir {
+            Expr::Op(IrNode {
+                payload:
+                    Payload::MethodCall {
+                        type_id,
+                        method_id,
+                        args,
+                        type_args,
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!((*type_id, *method_id), (106, 10));
+                assert!(args.is_empty());
+                assert_eq!(type_args, &vec![SigmaType::SInt]);
+            }
+            other => panic!("expected MethodCall payload, got {other:?}"),
+        }
+        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn residual_method_calls_emit_wire_ids_and_roundtrip() {
+        // Property/method calls the M2 lowering leaves as MethodCall:
+        // context/avltree/group-element properties and Global v6 methods.
+        for (src, opcode, ids) in [
+            ("CONTEXT.dataInputs", 0xDB, (101u8, 1u8)),
+            ("CONTEXT.preHeader", 0xDB, (101, 3)),
+            ("LastBlockUtxoRootHash.digest", 0xDB, (100, 1)),
+            ("g1.getEncoded", 0xDB, (7, 2)),
+            ("1.toBytes", 0xDB, (4, 6)), // v3: concrete %Int.toBytes
+            ("Global.serialize(HEIGHT)", 0xDC, (106, 3)),
+        ] {
+            let ir = emit_tc(src);
+            assert_eq!(root_opcode(&ir), opcode, "{src}");
+            match &ir {
+                Expr::Op(IrNode {
+                    payload:
+                        Payload::MethodCall {
+                            type_id, method_id, ..
+                        },
+                    ..
+                }) => assert_eq!((*type_id, *method_id), ids, "{src}"),
+                other => panic!("{src}: expected MethodCall payload, got {other:?}"),
+            }
+            wire_roundtrip(&ir);
+        }
+        // Chained: PreHeader property over a Context property.
+        rt_op("CONTEXT.preHeader.height", 0xDB);
+    }
+
+    #[test]
+    fn hand_built_mixed_relation_gets_upcast_inserted() {
+        // Frontend trees carry typer-inserted Upcasts already; a hand-built
+        // mixed GT exercises emit's own normalization
+        // (comparisonOp → applyUpcast, SigmaBuilder.scala:688-697).
+        let node = TypedExpr::GT {
+            left: Box::new(int_c(1)),
+            right: Box::new(long_c(2)),
+            tpe: SType::SBoolean,
+        };
+        let ir = rt_node(&node, 0x91);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::Two(left, right),
+                ..
+            }) => {
+                assert_eq!(root_opcode(left), 0x7E, "narrower Int side upcast");
+                assert!(matches!(right.as_ref(), Expr::Const { .. }));
+            }
+            other => panic!("expected Two payload, got {other:?}"),
+        }
+        // Mirror case: narrower side on the right.
+        let node = TypedExpr::ArithOp {
+            left: Box::new(long_c(2)),
+            right: Box::new(int_c(1)),
+            opcode: crate::typed::ARITH_PLUS,
+            tpe: SType::SLong,
+        };
+        let ir = rt_node(&node, 0x9A);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::Two(left, right),
+                ..
+            }) => {
+                assert!(matches!(left.as_ref(), Expr::Const { .. }));
+                assert_eq!(root_opcode(right), 0x7E, "narrower Int side upcast");
+            }
+            other => panic!("expected Two payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_built_mixed_bit_op_stays_mixed() {
+        // Scala's mkBitOr/mkBitAnd/mkBitXor are StdSigmaBuilder methods with
+        // NO applyUpcast (SigmaBuilder.scala:629-645): mixed BitOp operands
+        // stay mixed on the wire — emit must NOT normalize them.
+        use crate::typed::BIT_OR;
+        let node = TypedExpr::BitOp {
+            left: Box::new(int_c(1)),
+            right: Box::new(long_c(2)),
+            opcode: BIT_OR,
+            tpe: SType::SLong,
+        };
+        let ir = rt_node(&node, 0xF2);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::Two(left, right),
+                ..
+            }) => {
+                assert!(
+                    matches!(
+                        left.as_ref(),
+                        Expr::Const {
+                            tpe: SigmaType::SInt,
+                            ..
+                        }
+                    ),
+                    "left operand unwrapped"
+                );
+                assert!(
+                    matches!(
+                        right.as_ref(),
+                        Expr::Const {
+                            tpe: SigmaType::SLong,
+                            ..
+                        }
+                    ),
+                    "right operand unwrapped"
+                );
+            }
+            other => panic!("expected Two payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_built_byte_index_gets_upcast_to_int() {
+        // Defensive emit_index normalization (SigmaTyper.scala:265-288
+        // `typedIndex.upcastTo(SInt)`) for a hand-built narrow index.
+        let node = TypedExpr::ByIndex {
+            input: Box::new(byte_coll_c(vec![1, 2])),
+            index: Box::new(TypedExpr::Constant {
+                value: ConstPayload::Byte(1),
+                tpe: SType::SByte,
+            }),
+            default: None,
+            tpe: SType::SByte,
+        };
+        let ir = rt_node(&node, 0xB2);
+        match &ir {
+            Expr::Op(IrNode {
+                payload: Payload::ByIndex { index, .. },
+                ..
+            }) => match index.as_ref() {
+                Expr::Op(IrNode {
+                    opcode: 0x7E,
+                    payload: Payload::NumericCast { tpe, .. },
+                }) => assert_eq!(tpe, &SigmaType::SInt),
+                other => panic!("expected Upcast index, got {other:?}"),
+            },
+            other => panic!("expected ByIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_width_arith_relation_frontend_roundtrips() {
+        // `(1 + 2L) == 3L`: the typer inserts the Upcast; emit's
+        // normalization is a no-op on the already-normalized tree.
+        let ir = emit_tc("(1 + 2L) == 3L");
+        assert_eq!(root_opcode(&ir), 0x93);
+        wire_roundtrip(&ir);
+    }
+
+    // ----- error paths -----
 
     #[test]
     fn create_avl_tree_returns_unsupported_node() {
@@ -1340,7 +2592,7 @@ mod tests {
         };
         assert_eq!(
             emit(&node).unwrap_err(),
-            EmitError::UnsupportedNode("CreateAvlTree")
+            EmitError::UnsupportedNode("CreateAvlTree".to_string())
         );
     }
 
@@ -1352,7 +2604,7 @@ mod tests {
         };
         assert_eq!(
             emit(&node).unwrap_err(),
-            EmitError::UnsupportedNode("ZKProofBlock")
+            EmitError::UnsupportedNode("ZKProofBlock".to_string())
         );
     }
 
@@ -1442,7 +2694,204 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn lambda_without_body_returns_invalid_shape() {
+        // `body: None` only occurs in pre-typed trees (binder invariant); a
+        // FuncValue cannot be serialized without a body.
+        let node = TypedExpr::Lambda {
+            tpe_params: vec![],
+            args: vec![("x".to_string(), SType::SInt)],
+            given_res_type: SType::SInt,
+            body: None,
+            tpe: SType::SFunc {
+                dom: vec![SType::SInt],
+                range: Box::new(SType::SInt),
+                tpe_params: vec![],
+            },
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn lambda_with_type_params_returns_invalid_shape() {
+        // The wire FuncValue has no type-param block; the binder enforces
+        // `!(tpeParams.nonEmpty && body.nonEmpty)` upstream.
+        let node = TypedExpr::Lambda {
+            tpe_params: vec![crate::typed::STypeParam {
+                ident: "T".to_string(),
+            }],
+            args: vec![("x".to_string(), SType::SInt)],
+            given_res_type: SType::SInt,
+            body: Some(Box::new(int_c(1))),
+            tpe: SType::SFunc {
+                dom: vec![SType::SInt],
+                range: Box::new(SType::SInt),
+                tpe_params: vec![],
+            },
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn unbound_ident_returns_invalid_shape() {
+        let node = TypedExpr::Ident {
+            name: "ghost".to_string(),
+            tpe: SType::SInt,
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn val_node_outside_block_returns_invalid_shape() {
+        // A bare top-level `val` is a PARSE reject (golden_seed §25), so a
+        // root ValNode can only be hand-built — a pipeline bug surface.
+        let node = TypedExpr::ValNode {
+            name: "x".to_string(),
+            given_type: SType::SInt,
+            body: Box::new(int_c(1)),
+            tpe: SType::SInt,
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn block_with_non_val_binding_returns_invalid_shape() {
+        let node = TypedExpr::Block {
+            bindings: vec![int_c(1)],
+            result: Box::new(int_c(2)),
+            tpe: SType::SInt,
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn residual_select_returns_unsupported_node_naming_the_field() {
+        // Outside the lowering catalog → UnsupportedNode carrying the field
+        // name (the Task-11 adversarial pass greps for these).
+        let node = TypedExpr::Select {
+            obj: Box::new(tc("SELF")),
+            field: "getRegV5".to_string(),
+            res_type: None,
+            tpe: SType::SInt,
+        };
+        match emit(&node).unwrap_err() {
+            EmitError::UnsupportedNode(msg) => {
+                assert!(msg.contains("getRegV5"), "message names the field: {msg}")
+            }
+            other => panic!("expected UnsupportedNode, got {other:?}"),
+        }
+        // Bare `SELF.R4` (function-typed, no `[T]`) is also residual: the
+        // register arm requires a resolved Option res_type.
+        let bare_reg = tc("SELF.R4");
+        match emit(&bare_reg).unwrap_err() {
+            EmitError::UnsupportedNode(msg) => {
+                assert!(msg.contains("R4"), "message names the field: {msg}")
+            }
+            other => panic!("expected UnsupportedNode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn method_call_with_unknown_owner_returns_unsupported_node() {
+        use crate::typed::MethodRef;
+        let node = TypedExpr::MethodCall {
+            obj: Box::new(int_c(1)),
+            method: MethodRef {
+                owner: "?".to_string(),
+                name: "mystery".to_string(),
+            },
+            args: vec![],
+            type_subst: vec![],
+            tpe: SType::SInt,
+        };
+        match emit(&node).unwrap_err() {
+            EmitError::UnsupportedNode(msg) => assert!(
+                msg.contains("?.mystery"),
+                "message names owner.method: {msg}"
+            ),
+            other => panic!("expected UnsupportedNode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn method_call_missing_explicit_type_binding_returns_invalid_shape() {
+        // getReg (99,19) requires a `{T -> _}` binding for its wire type arg.
+        use crate::typed::MethodRef;
+        let node = TypedExpr::MethodCall {
+            obj: Box::new(tc("SELF")),
+            method: MethodRef {
+                owner: "Box".to_string(),
+                name: "getReg".to_string(),
+            },
+            args: vec![int_c(4)],
+            type_subst: vec![],
+            tpe: SType::SOption(Box::new(SType::SInt)),
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn zero_arg_method_call_of_args_method_returns_invalid_shape() {
+        // %SCollection.slice with an empty arg list would serialize as a
+        // PropertyCall that deserializes to a different invocation.
+        use crate::typed::MethodRef;
+        let node = TypedExpr::MethodCall {
+            obj: Box::new(tc("col1")),
+            method: MethodRef {
+                owner: "SCollection".to_string(),
+                name: "slice".to_string(),
+            },
+            args: vec![],
+            type_subst: vec![],
+            tpe: scoll(SType::SLong),
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::InvalidShape(_)
+        ));
+    }
+
+    #[test]
+    fn apply_on_non_callable_returns_unsupported_node() {
+        let node = TypedExpr::Apply {
+            func: Box::new(int_c(1)),
+            args: vec![int_c(2)],
+            tpe: SType::SInt,
+        };
+        assert!(matches!(
+            emit(&node).unwrap_err(),
+            EmitError::UnsupportedNode(_)
+        ));
+    }
+
     // ----- oracle parity -----
+
+    #[test]
+    fn standalone_top_level_val_rejects_matching_oracle() {
+        // golden_seed §25 (live capture 2026-07-05): `tc val x = 1` →
+        // `REJECT 1:1 ParserException`. Emit never sees a ValNode root from
+        // the frontend because the parse already rejects.
+        let err = typecheck(&demo_env(), "val x = 1", 3).unwrap_err();
+        assert_eq!(err.class(), "ParserException");
+    }
 
     #[test]
     fn sigma_prop_true_emits_boolean_via_constant_path() {

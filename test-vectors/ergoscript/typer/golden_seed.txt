@@ -682,3 +682,13 @@ tc	unsignedBigInt("5").toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:UnsignedB
 #     `OK (ConstantNode:BigInt (CBigInt @10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376))`.
 #     The v3 REJECT for the SAME literal is a real parsed record, swept normally:
 tc	bigInt("10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376")	REJECT 0:0 ArithmeticException
+#
+# ── § 25: M3 Task-8 — standalone top-level `val` probe (binder m2-deferred) ──
+# Captured live 2026-07-05 via scripts/jvm_typer_oracle (`tc` verb, source hex
+# 76616c2078203d2031, ORACLE_TREE_VERSION=3). A bare top-level `val x = 1`
+# (no enclosing block, no result expression) is a PARSE-level reject in the
+# reference grammar — a ValNode can never be a typed-tree ROOT, so emit's
+# ValNode-outside-Block arm is a compiler-bug surface, not a user-error path.
+# Verdict mirrored by the Rust frontend (parse error → class ParserException);
+# no binder change needed (task-8 brief step 1 probe).
+tc	val x = 1	REJECT 1:1 ParserException
