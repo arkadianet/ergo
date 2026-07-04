@@ -91,7 +91,8 @@ use crate::types::{
 use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
-    JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING, JS_WALLET,
+    JS_MINERS, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE, JS_VOTING,
+    JS_WALLET,
     NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
 };
 use ergo_indexer_types::IndexerQuery;
@@ -567,6 +568,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
+        .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/api-docs/openapi.yaml", get(openapi_yaml))

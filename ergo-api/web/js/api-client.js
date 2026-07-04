@@ -98,6 +98,12 @@ export const api = {
   // candidate is cheap on repeat calls (same-tip template cache node-side).
   miningCandidate: () => getJson('/mining/candidate'),
   miningRewardAddress: () => getJson('/mining/rewardAddress'),
+  miningRewardPublicKey: () => getJson('/mining/rewardPublicKey'),
+  // Network mining landscape: last-`window` headers folded by miner pk,
+  // addresses derived server-side. Rides the chain reader (404 = old node).
+  minerStats: (window = 720) => getJson(`/api/v1/mining/minerStats?window=${window}`),
+  // Emission schedule facts at a height ({minerReward, reemitted, …} nanoERG).
+  emissionAt: (height) => getJson(`/emission/at/${height}`),
   difficultyHistory: (b = 60) => getJson(`/api/v1/difficulty/history?blocks=${b}`),
   // Mempool wait-time histogram: bins+1 buckets of {nTxns, totalFee}.
   poolHistogram: (bins = 10, maxtimeMs = 3_600_000) =>
