@@ -660,6 +660,7 @@ dependencies = [
  "ergo-crypto",
  "ergo-primitives",
  "ergo-ser",
+ "ergo-sigma",
  "hex",
  "num-bigint",
  "serde_json",

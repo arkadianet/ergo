@@ -482,9 +482,38 @@
 //! This resolves the adversarial reject-valid finding (`"ab" + 1` etc.) while pinning
 //! the remaining residual to payloads with no reproducible byte source.
 //! Source: `typer/assign.rs` `const_java_to_string` / `mcl_string`.
+//!
+//! # Known M3 deviations (emit layer)
+//!
+//! ### D-E1 — `CreateAvlTree` not emittable (ergo-ser 0xB6 parity divergence)
+//!
+//! Scala 6.0.2 registers `CreateAvlTreeSerializer` (four value args) at opcode
+//! `0xB6` (`ValueSerializer.scala:54`; `trees.scala:88` `opCode =
+//! OpCodes.AvlTreeCode`), but ergo-ser's `opcode_pattern` parses `0xB6` as
+//! `Zero` ("AvlTreeCode (deprecated)") — an emitted node would not re-parse.
+//! Per the M3 ground rule (resolve toward ergo-ser), `emit` returns
+//! `EmitError::UnsupportedNode("CreateAvlTree")`; `avlTree(...)` scripts
+//! typecheck but do not compile to bytes. NOTE for the ergo-ser owners: this
+//! looks like a genuine ergo-ser↔Scala accept-set divergence (a Scala tree
+//! containing `CreateAvlTree` would mis-parse), flagged in the Task-7 report.
+//!
+//! ### D-E2 — `ZKProofBlock` not emittable (matches Scala)
+//!
+//! `ZKProof { .. }` has no serializer registration in Scala's
+//! `ValueSerializer` and no byte in ergo-ser's `opcode_pattern`; the Scala
+//! compiler cannot serialize it either (it is erased by the prover-side
+//! `ZKProving` transform). `emit` returns `UnsupportedNode("ZKProofBlock")`.
+//!
+//! ### D-E3 — opaque env `SigmaProp` constant not emittable
+//!
+//! `ConstPayload::SigmaProp(String)` is an env-injected opaque label (e.g. the
+//! SigmaTyperTest env's `p1`/`p2`) with no curve bytes to serialize; only
+//! reachable from a hand-built env, no oracle vector exists. `emit` returns
+//! `UnsupportedNode`; real keys flow through `ConstPayload::ProveDlog([u8;33])`.
 
 pub mod ast;
 pub mod binder;
+pub mod emit;
 pub mod env;
 pub mod error;
 mod parse;
@@ -498,6 +527,7 @@ pub mod typer;
 
 pub use ast::{ArithKind, BitKind, Expr, RelKind, ValDef};
 pub use binder::{bind, BindError};
+pub use emit::{emit, EmitError};
 pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;
 pub use parse::{parse, parse_type};
