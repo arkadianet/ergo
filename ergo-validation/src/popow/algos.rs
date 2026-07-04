@@ -100,13 +100,16 @@ pub fn kv_to_leaf(key: &[u8], value: &[u8]) -> Vec<u8> {
 }
 
 /// Build a [`PoPowHeader`] from a header, its interlinks vector,
-/// and the FULL set of extension fields (kv pairs).
+/// and the FULL set of extension fields (kv pairs — used only to
+/// check the packed interlinks are really present in this block).
 ///
-/// The interlinks_proof is a `BatchMerkleProof` proving that the
-/// packed interlinks key-value entries sit at specific positions
-/// in the merkle tree built from all extension fields. The
-/// verifier (`check_popow_header_interlinks_proof`) reconstructs
-/// the tree and validates against the proof.
+/// The interlinks_proof is a `BatchMerkleProof` over the
+/// INTERLINKS-ONLY subtree (Scala `interlinksMerkleTree`); the
+/// verifier (`check_popow_header_interlinks_proof`) recomputes that
+/// same tree from the interlinks vector and validates the proof
+/// against its root — NOT against the full extension root. See the
+/// inline note below for the epoch-boundary bug this distinction
+/// caught.
 ///
 /// Returns `Err` if the interlinks vector cannot be located in
 /// `extension_fields` (caller bug — the prover must have read both
@@ -134,37 +137,38 @@ pub fn build_popow_header(
         });
     }
 
-    // Pack the interlinks into the same kv pairs we expect in the
-    // extension. Locate each packed entry's index in
-    // `extension_fields` so the merkle proof can be built over the
-    // full tree but prove specifically the interlinks subset.
+    // Pack the interlinks into the extension kv form and require each
+    // packed entry to exist in the block's actual extension (Scala's
+    // `batchProofFor` similarly yields nothing when a key's leaf isn't
+    // found — `ExtensionCandidate.scala:48-54`).
     let packed = pack_interlinks(&interlinks);
-    let mut interlinks_indices: Vec<u32> = Vec::with_capacity(packed.len());
     for (key, value) in &packed {
-        let found = extension_fields
-            .iter()
-            .position(|(k, v)| k == key && v == value);
-        match found {
-            Some(idx) => interlinks_indices.push(idx as u32),
-            None => {
-                return Err(format!(
-                    "interlinks key {} not found in extension_fields — header + extension may be from different blocks",
-                    hex::encode(key)
-                ));
-            }
+        if !extension_fields.iter().any(|(k, v)| k == key && v == value) {
+            return Err(format!(
+                "interlinks key {} not found in extension_fields — header + extension may be from different blocks",
+                hex::encode(key)
+            ));
         }
     }
 
-    // Build the merkle tree over the full extension and emit a
-    // batch proof for the interlinks indices.
-    let leaves: Vec<Vec<u8>> = extension_fields
-        .iter()
-        .map(|(k, v)| kv_to_leaf(k, v))
-        .collect();
+    // Build the proof over the INTERLINKS-ONLY subtree — NOT the full
+    // extension tree. Scala's `ExtensionCandidate.batchProofFor` proves
+    // indices within `interlinksMerkleTree` (the tree over interlink
+    // fields alone, `ExtensionCandidate.scala:48-54`), and the verifier
+    // (`PoPowHeader.checkInterlinksProof`, `PoPowHeader.scala:57-65`)
+    // recomputes exactly `merkleTree(packInterlinks(interlinks))` as
+    // the expected root. The two trees coincide for interlinks-only
+    // extensions (every non-epoch-boundary block), which is how a
+    // full-extension-tree construction here survived until a real
+    // epoch-boundary block (mixed params + interlink fields; found
+    // live at mainnet h=1821696 = 1779*1024) produced proofs Scala's
+    // verifier — and our own — reject.
+    let leaves: Vec<Vec<u8>> = packed.iter().map(|(k, v)| kv_to_leaf(k, v)).collect();
     let leaf_refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
+    let interlinks_indices: Vec<u32> = (0..packed.len() as u32).collect();
     let (idx_with_hashes, raw_proofs) = merkle_proof_by_indices(&leaf_refs, &interlinks_indices)
         .ok_or_else(|| {
-            "merkle_proof_by_indices returned None (likely empty extension)".to_string()
+            "merkle_proof_by_indices returned None (likely empty interlinks)".to_string()
         })?;
 
     let proof_entries: Vec<ProofEntry> = raw_proofs
@@ -928,12 +932,17 @@ mod tests {
 
     #[test]
     fn build_popow_header_with_interlinks_produces_verifiable_proof() {
-        // Synthesize a PoPowHeader from a header + interlinks +
-        // extension fields. Verify via the consume-side validator:
-        // pack(interlinks) leaves should appear at known positions
-        // in extension, and the produced batch merkle proof should
-        // verify against the extension's merkle root.
+        // Synthesize a PoPowHeader from a header + interlinks + a
+        // MIXED extension (interlink fields + unrelated fields — the
+        // epoch-boundary shape that exposed the live construction bug
+        // at mainnet h=1821696). The Scala contract
+        // (`PoPowHeader.checkInterlinksProof`, PoPowHeader.scala:57-65)
+        // verifies the proof against the INTERLINKS-ONLY tree root
+        // recomputed from the interlinks vector — NOT against the full
+        // extension root. This test previously pinned the
+        // full-extension-root behavior, i.e. it pinned the bug.
         use super::super::merkle::verify_batch_merkle_proof;
+        use super::super::proof::check_popow_header_interlinks_proof;
         use ergo_crypto::merkle::merkle_tree_root;
         use ergo_ser::batch_merkle_proof::deserialize_batch_merkle_proof;
 
@@ -942,29 +951,47 @@ mod tests {
             ModifierId::from_bytes([0x11; 32]),
             ModifierId::from_bytes([0x22; 32]),
         ];
-        // The extension contains the packed interlinks PLUS some
-        // unrelated fields (system parameters, voting tallies, etc.
-        // in real blocks). Simulate by adding two "padding" fields.
         let packed_interlinks = pack_interlinks(&interlinks);
-        let mut extension_fields: Vec<(Vec<u8>, Vec<u8>)> = packed_interlinks.clone();
-        extension_fields.push((vec![0x02, 0x00], vec![0xAB, 0xCD])); // some other field
-        extension_fields.push((vec![0x02, 0x01], vec![0xEF])); // another other field
+        // Unrelated fields FIRST — mirrors real epoch-boundary blocks,
+        // where protocol-parameter fields (key prefix 0x00) precede the
+        // interlink fields, shifting their full-tree positions.
+        let mut extension_fields: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (vec![0x00, 0x01], vec![0xAB, 0xCD]),
+            (vec![0x00, 0x04], vec![0xEF]),
+        ];
+        extension_fields.extend(packed_interlinks.clone());
 
         let popow = build_popow_header(h2.clone(), interlinks.clone(), &extension_fields).unwrap();
         assert!(!popow.interlinks_proof.is_empty());
 
-        // Round-trip: parse the produced bytes back and verify
-        // against the extension's merkle root.
+        // The consume-side validator (Scala parity: interlinks-only
+        // tree) must accept the constructed proof.
+        assert!(
+            check_popow_header_interlinks_proof(&popow),
+            "constructed proof must verify against the interlinks-only tree root"
+        );
+
+        // And explicitly: the proof reduces to the interlinks-only
+        // root, NOT the full-extension root (they differ here because
+        // of the non-interlink fields).
         let bmp = deserialize_batch_merkle_proof(&popow.interlinks_proof).unwrap();
-        let leaves: Vec<Vec<u8>> = extension_fields
+        let interlink_leaves: Vec<Vec<u8>> = packed_interlinks
             .iter()
             .map(|(k, v)| kv_to_leaf(k, v))
             .collect();
-        let leaf_refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
-        let root = merkle_tree_root(&leaf_refs);
+        let interlink_refs: Vec<&[u8]> = interlink_leaves.iter().map(|l| l.as_slice()).collect();
+        assert!(verify_batch_merkle_proof(
+            &bmp,
+            &merkle_tree_root(&interlink_refs)
+        ));
+        let full_leaves: Vec<Vec<u8>> = extension_fields
+            .iter()
+            .map(|(k, v)| kv_to_leaf(k, v))
+            .collect();
+        let full_refs: Vec<&[u8]> = full_leaves.iter().map(|l| l.as_slice()).collect();
         assert!(
-            verify_batch_merkle_proof(&bmp, &root),
-            "constructed batch merkle proof must verify against extension root"
+            !verify_batch_merkle_proof(&bmp, &merkle_tree_root(&full_refs)),
+            "full-extension root must NOT verify — that was the old buggy contract"
         );
     }
 }
