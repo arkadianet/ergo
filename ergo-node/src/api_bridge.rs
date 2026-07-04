@@ -41,6 +41,7 @@ mod block_reassembly;
 mod compat;
 mod emission;
 mod error;
+mod nipopow;
 
 use block_reassembly::{
     assemble_full_block, build_proof_for_tx, load_and_encode_block_transactions,

@@ -62,6 +62,10 @@ use crate::compat::handlers::{
     header_ids_paged_handler as scala_header_ids_paged_handler, info_handler as scala_info_handler,
     last_headers_handler as scala_last_headers_handler,
     modifier_by_id_handler as scala_modifier_by_id_handler,
+    nipopow_header_by_height_handler as scala_nipopow_header_by_height_handler,
+    nipopow_header_by_id_handler as scala_nipopow_header_by_id_handler,
+    nipopow_proof_at_handler as scala_nipopow_proof_at_handler,
+    nipopow_proof_handler as scala_nipopow_proof_handler,
     peers_all_handler as scala_peers_all_handler,
     peers_connected_handler as scala_peers_connected_handler,
     pool_contains_handler as scala_pool_contains_handler,
@@ -989,6 +993,23 @@ pub fn router_with_mempool_and_wallet_and_security(
                 .route(
                     "/blocks/:header_id/proofFor/:tx_id",
                     get(scala_proof_for_tx_handler),
+                )
+                // NiPoPoW serve surface (`NipopowApiRoute.scala:55-90`).
+                // All literal-prefixed, no capture collisions. The
+                // 3-segment proof route registers after the 2-segment
+                // one; axum disambiguates by arity.
+                .route(
+                    "/nipopow/popowHeaderById/:header_id",
+                    get(scala_nipopow_header_by_id_handler),
+                )
+                .route(
+                    "/nipopow/popowHeaderByHeight/:height",
+                    get(scala_nipopow_header_by_height_handler),
+                )
+                .route("/nipopow/proof/:m/:k", get(scala_nipopow_proof_handler))
+                .route(
+                    "/nipopow/proof/:m/:k/:header_id",
+                    get(scala_nipopow_proof_at_handler),
                 )
                 // Route ordering: the literal `/utxo/genesis` segment
                 // must register before the `:box_id` capture so axum

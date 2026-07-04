@@ -246,3 +246,64 @@ pub enum ScalaBlockSection {
     Extension(ScalaExtension),
     AdProofs(ScalaAdProofs),
 }
+
+/// One proved leaf of a `BatchMerkleProof` — `(leaf index, leaf digest)`.
+/// Scala `PoPowHeader.scala:84-88` (`batchMerkleProofEncoder` `indices`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScalaBatchProofIndex {
+    pub index: u32,
+    /// Base16 leaf digest (always 32 bytes on the wire, never empty).
+    pub digest: String,
+}
+
+/// One sibling entry of a `BatchMerkleProof` path.
+/// Scala `PoPowHeader.scala:89-93` (`batchMerkleProofEncoder` `proofs`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScalaBatchProofElement {
+    /// Base16 sibling digest. Scala's odd-trailing empty sibling
+    /// (`EmptyByteArray`) serializes as the EMPTY STRING here — not as
+    /// 32 zero bytes (that form is wire-only). Pinned by the captured
+    /// mainnet fixture `popowHeaderByHeight_1000.json`.
+    pub digest: String,
+    /// 0 = sibling hashes on the left, 1 = right.
+    pub side: u8,
+}
+
+/// `BatchMerkleProof` JSON shape (`PoPowHeader.scala:81-96`). Note the
+/// Scala node's own `openapi.yaml` omits this object from its
+/// `PopowHeader` schema — a Scala documentation bug; the live JSON
+/// always includes it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScalaBatchMerkleProof {
+    pub indices: Vec<ScalaBatchProofIndex>,
+    pub proofs: Vec<ScalaBatchProofElement>,
+}
+
+/// `PoPowHeader.jsonEncoder` shape (`PoPowHeader.scala:121-128`):
+/// a full header DTO + the interlinks vector + the batch Merkle proof
+/// tying those interlinks to the header's extension digest.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScalaPopowHeader {
+    pub header: ScalaHeader,
+    /// Base16 header ids, genesis first (KMZ17 reverse-level order).
+    pub interlinks: Vec<String>,
+    #[serde(rename = "interlinksProof")]
+    pub interlinks_proof: ScalaBatchMerkleProof,
+}
+
+/// `NipopowProof.nipopowProofEncoder` shape (`NipopowProof.scala:164-173`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScalaNipopowProof {
+    pub m: u32,
+    pub k: u32,
+    pub prefix: Vec<ScalaPopowHeader>,
+    #[serde(rename = "suffixHead")]
+    pub suffix_head: ScalaPopowHeader,
+    /// Plain headers (no interlinks) — mirrors the wire asymmetry where
+    /// only prefix + suffixHead carry `PoPowHeader` blobs.
+    #[serde(rename = "suffixTail")]
+    pub suffix_tail: Vec<ScalaHeader>,
+    /// Always `true` on the REST surface (`NipopowApiRoute.scala:69-90`
+    /// passes `continuous = true` unconditionally).
+    pub continuous: bool,
+}

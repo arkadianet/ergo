@@ -11,6 +11,7 @@ use crate::compat::types::{
     ScalaInfo, ScalaMerkleProof, ScalaOutput, ScalaPeer, ScalaPeersStatus, ScalaSyncInfoEntry,
     ScalaTrackInfo, ScalaTransaction,
 };
+use ergo_rest_json::types::{ScalaNipopowProof, ScalaPopowHeader};
 
 pub trait NodeChainQuery: Send + Sync {
     /// `/info` — node identity, tip pointers, peer/mempool counts,
@@ -90,6 +91,41 @@ pub trait NodeChainQuery: Send + Sync {
     /// subset of the surface need not opt in; production bridges override.
     fn header_by_id(&self, _header_id_hex: &str) -> Option<ScalaHeader> {
         None
+    }
+
+    /// `GET /nipopow/popowHeaderById/{headerId}` — header + interlinks +
+    /// interlinks batch Merkle proof (`NipopowApiRoute.scala:55-57`).
+    /// `header_id_hex` is pre-validated 64-char hex (the handler rejects
+    /// malformed ids with Scala's `Wrong modifierId format` 400 before
+    /// this is called). `None` = unknown id OR the header's extension
+    /// section is unavailable → 404 (Scala behaves identically: the
+    /// popow header cannot be assembled without the extension).
+    fn nipopow_header_by_id(&self, _header_id_hex: &str) -> Option<ScalaPopowHeader> {
+        None
+    }
+
+    /// `GET /nipopow/popowHeaderByHeight/{height}` — as above, keyed by
+    /// canonical-chain height (`NipopowApiRoute.scala:62-64`). `None`
+    /// (→ 404) for height 0, heights past the tip, or a missing
+    /// extension. Oracle-pinned: Scala 404s with `detail: null` here.
+    fn nipopow_header_at_height(&self, _height: u32) -> Option<ScalaPopowHeader> {
+        None
+    }
+
+    /// `GET /nipopow/proof/{m}/{k}[/{headerId}]` — construct a NiPoPoW
+    /// proof on demand (`NipopowApiRoute.scala:69-90`, always
+    /// `continuous = true`). `Err(detail)` maps to Scala's blanket
+    /// 400-on-prover-failure (`onComplete Failure → ApiError.BadRequest`),
+    /// with `detail` carried into the error envelope. Bridges must
+    /// enforce Scala's `require(k >= 1)` ("requirement failed: 0 < 1")
+    /// and reject proving while the store lacks a dense header chain.
+    fn nipopow_proof(
+        &self,
+        _m: u32,
+        _k: u32,
+        _header_id_hex: Option<&str>,
+    ) -> Result<ScalaNipopowProof, String> {
+        Err("nipopow proving unavailable on this bridge".to_string())
     }
 
     /// `/blocks/{header_id}/transactions` — block-transactions section

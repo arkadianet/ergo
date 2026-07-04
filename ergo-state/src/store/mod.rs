@@ -24,7 +24,7 @@ use crate::chain::{ChainState, ChainStateMeta, HeaderAvailability, HeaderMeta, H
 /// because `prove_with_db` needs them for continuous-mode proof
 /// construction; lives at module scope so it doesn't bloat the
 /// `StateStore` impl block.
-fn difficulty_headers_needed(
+pub(crate) fn difficulty_headers_needed(
     suffix_head_height: u32,
     epoch_length: u32,
     use_last_epochs: u32,

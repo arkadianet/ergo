@@ -18,9 +18,9 @@ use redb::Database;
 use crate::avl::node::NULL_NODE;
 use crate::chain::{ChainStateMeta, HeaderMeta};
 use crate::store::{
-    read_height_index_ids, CommittedSnapshot, StateError, AVL_NODES, BLOCK_SECTIONS,
-    CHAIN_STATE_META, HEADERS, HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META,
-    MODIFIER_TYPE_INDEX, STATE_META,
+    difficulty_headers_needed, read_height_index_ids, CommittedSnapshot, PopowByIdLookup,
+    PopowMissingAt, StateError, AVL_NODES, BLOCK_SECTIONS, CHAIN_STATE_META, HEADERS,
+    HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META, MODIFIER_TYPE_INDEX, STATE_META,
 };
 
 /// Lock-free read handle over the chain state. Cloning is cheap — the
@@ -66,6 +66,31 @@ impl ChainStoreReader {
     /// always go through `StateStore::reader()`.
     pub(crate) fn new(db: Arc<Database>) -> Self {
         Self { db }
+    }
+
+    /// Read the committed [`ChainStateMeta`] row — `None` before the
+    /// first chain-state commit (fresh store). One consistent read:
+    /// callers that need both the best-header height and the
+    /// [`crate::chain::HeaderAvailability`] mode (e.g. the NiPoPoW REST
+    /// serve path) should take both from a single call rather than
+    /// mixing sources read at different times.
+    pub fn chain_state_meta(&self) -> Result<Option<ChainStateMeta>, StateError> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(CHAIN_STATE_META) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = match table.get("chain_state")? {
+            Some(g) => g.value().to_vec(),
+            None => return Ok(None),
+        };
+        let meta = ChainStateMeta::deserialize(&bytes).map_err(|e| StateError::DbCorruption {
+            table: "chain_state_meta",
+            key: hex::encode(b"chain_state"),
+            reason: format!("decode: {e}"),
+        })?;
+        Ok(Some(meta))
     }
 
     /// Public constructor for callers that already hold an `Arc<Database>`
@@ -271,6 +296,378 @@ impl ChainStoreReader {
                 }),
             None => Ok(None),
         }
+    }
+
+    // ---- NiPoPoW serve helpers ----
+
+    /// Build a [`ergo_ser::popow_header::PoPowHeader`] for the given
+    /// `header_id` — inner result type mirrors
+    /// [`crate::store::PopowByIdLookup`] so the caller can distinguish
+    /// not-found from corrupt-store.
+    ///
+    /// Mirrors `StateStore::popow_header_by_id_strict`. All reads go
+    /// through `get_header` / `get_block_section` on `&self`; no write
+    /// access is needed.
+    fn popow_header_by_id_inner(
+        &self,
+        header_id: &[u8; 32],
+    ) -> Result<PopowByIdLookup, StateError> {
+        use ergo_primitives::reader::VlqReader;
+        use ergo_ser::extension::read_extension;
+        use ergo_ser::header::read_header;
+        use ergo_validation::popow::algos::{build_popow_header, unpack_interlinks};
+
+        let header_bytes = match self.get_header(header_id)? {
+            Some(b) => b,
+            None => return Ok(PopowByIdLookup::HeaderMissing),
+        };
+        let header = {
+            let mut r = VlqReader::new(&header_bytes);
+            read_header(&mut r).map_err(|e| StateError::DbCorruption {
+                table: "headers",
+                key: hex::encode(header_id),
+                reason: format!("popow_header_by_id_inner: header decode: {e}"),
+            })?
+        };
+        let extension_id = ergo_ser::modifier_id::compute_section_id(
+            ergo_ser::modifier_id::TYPE_EXTENSION,
+            header_id,
+            header.extension_root.as_bytes(),
+        );
+        let ext_bytes = match self.get_block_section(&extension_id)? {
+            Some(b) => b,
+            None => return Ok(PopowByIdLookup::ExtensionMissing),
+        };
+        let extension = {
+            let mut r = VlqReader::new(&ext_bytes);
+            read_extension(&mut r).map_err(|e| StateError::DbCorruption {
+                table: "block_sections",
+                key: hex::encode(extension_id),
+                reason: format!("popow_header_by_id_inner: extension decode: {e}"),
+            })?
+        };
+        let extension_fields: Vec<(Vec<u8>, Vec<u8>)> = extension
+            .fields
+            .iter()
+            .map(|f| (f.key.to_vec(), f.value.clone()))
+            .collect();
+        let interlinks =
+            unpack_interlinks(&extension_fields).map_err(|e| StateError::DbCorruption {
+                table: "block_sections",
+                key: hex::encode(extension_id),
+                reason: format!("popow_header_by_id_inner: unpack_interlinks: {e}"),
+            })?;
+        let popow = build_popow_header(header, interlinks, &extension_fields).map_err(|e| {
+            StateError::DbCorruption {
+                table: "block_sections",
+                key: hex::encode(extension_id),
+                reason: format!("popow_header_by_id_inner: build_popow_header: {e}"),
+            }
+        })?;
+        Ok(PopowByIdLookup::Found(Box::new(popow)))
+    }
+
+    /// Assemble a `PoPowHeader` for `header_id`. Returns `Ok(None)` when
+    /// the header or its extension is absent locally.
+    pub fn popow_header_by_id(
+        &self,
+        header_id: &[u8; 32],
+    ) -> Result<Option<ergo_ser::popow_header::PoPowHeader>, StateError> {
+        match self.popow_header_by_id_inner(header_id)? {
+            PopowByIdLookup::Found(p) => Ok(Some(*p)),
+            PopowByIdLookup::HeaderMissing | PopowByIdLookup::ExtensionMissing => Ok(None),
+        }
+    }
+
+    /// Assemble a `PoPowHeader` at canonical chain height `h`. Returns
+    /// `Ok(None)` when no header exists at that height or its extension
+    /// is missing.
+    pub fn popow_header_at_height(
+        &self,
+        h: u32,
+    ) -> Result<Option<ergo_ser::popow_header::PoPowHeader>, StateError> {
+        let header_id = match self.get_header_id_at_height(h)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        self.popow_header_by_id(&header_id)
+    }
+
+    /// Walk backwards through interlinks at `level` collecting headers
+    /// until height < `anchoring_height`. Mirrors
+    /// `StateStore::collect_level`.
+    fn collect_level_reader(
+        &self,
+        start_prev_header_id: &ergo_primitives::digest::ModifierId,
+        level: usize,
+        anchoring_height: u32,
+    ) -> Result<Vec<ergo_ser::popow_header::PoPowHeader>, StateError> {
+        let mut acc: Vec<ergo_ser::popow_header::PoPowHeader> = Vec::new();
+        let mut current_id = *start_prev_header_id.as_bytes();
+        loop {
+            let prev = match self.popow_header_by_id_inner(&current_id)? {
+                PopowByIdLookup::Found(p) => *p,
+                PopowByIdLookup::HeaderMissing => {
+                    return Err(StateError::DbCorruption {
+                        table: "headers",
+                        key: hex::encode(current_id),
+                        reason: "collect_level_reader: interlink target header missing".to_string(),
+                    });
+                }
+                PopowByIdLookup::ExtensionMissing => {
+                    return Err(StateError::PopowDataMissing {
+                        what: "collect_level_reader: interlink target extension absent",
+                        at: PopowMissingAt::HeaderId(current_id),
+                    });
+                }
+            };
+            if prev.header.height < anchoring_height {
+                break;
+            }
+            let prev_links = &prev.interlinks;
+            let next_prev_id_opt: Option<[u8; 32]> = if prev_links.len() > 1 {
+                let tail = &prev_links[1..];
+                if level < tail.len() {
+                    let idx = tail.len() - 1 - level;
+                    Some(*tail[idx].as_bytes())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            acc.insert(0, prev);
+            match next_prev_id_opt {
+                Some(id) => current_id = id,
+                None => break,
+            }
+        }
+        Ok(acc)
+    }
+
+    /// Walk interlinks to build the proof prefix. Mirrors
+    /// `StateStore::prove_prefix_via_interlinks_walk`.
+    fn prove_prefix_reader(
+        &self,
+        suffix_head: &ergo_ser::popow_header::PoPowHeader,
+        m: u32,
+        collected: &mut std::collections::BTreeMap<u32, ergo_ser::popow_header::PoPowHeader>,
+    ) -> Result<(), StateError> {
+        let links: Vec<(ergo_primitives::digest::ModifierId, usize)> =
+            if suffix_head.interlinks.len() > 1 {
+                suffix_head
+                    .interlinks
+                    .iter()
+                    .skip(1)
+                    .rev()
+                    .cloned()
+                    .enumerate()
+                    .map(|(idx, link)| (link, idx))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        let mut anchoring_height: u32 = 1;
+        for (prev_id, level) in links.iter().rev() {
+            let level_headers = self.collect_level_reader(prev_id, *level, anchoring_height)?;
+            for ph in &level_headers {
+                collected.insert(ph.header.height, ph.clone());
+            }
+            if (m as usize) < level_headers.len() {
+                anchoring_height = level_headers[level_headers.len() - m as usize]
+                    .header
+                    .height;
+            }
+        }
+        Ok(())
+    }
+
+    /// Construct a NiPoPoW proof from the store via the interlinks-walk
+    /// strategy. Mirrors `StateStore::prove_with_db`.
+    ///
+    /// `best_header_height` and `is_dense` come from the node snapshot
+    /// (the caller holds these from the last published tip state). This
+    /// avoids needing a direct reference to `StateStore`.
+    ///
+    /// - `is_dense = false` → returns `StateError::InvalidPrecondition`.
+    /// - Caller-supplied `header_id_opt` not found in HEADERS →
+    ///   returns `StateError::ProveWithDbAnchorNotFound` (no expensive
+    ///   chain-index scan on the error path, unlike `StateStore`'s full
+    ///   disambiguation).
+    pub fn prove_nipopow(
+        &self,
+        m: u32,
+        k: u32,
+        header_id_opt: Option<[u8; 32]>,
+        best_header_height: u32,
+        is_dense: bool,
+    ) -> Result<ergo_ser::popow_proof::NipopowProof, StateError> {
+        use ergo_primitives::reader::VlqReader;
+        use ergo_ser::header::read_header;
+        use ergo_validation::popow::algos::PoPowParams;
+
+        if !is_dense {
+            return Err(StateError::InvalidPrecondition {
+                what: "prove_nipopow: store is not in Dense mode",
+            });
+        }
+        if k < 1 {
+            return Err(StateError::InvalidPrecondition {
+                what: "prove_nipopow: k must be >= 1",
+            });
+        }
+        if best_header_height < k + m {
+            return Err(StateError::EarlyIBD {
+                needed_min: k + m,
+                observed: best_header_height,
+            });
+        }
+
+        let (suffix_head_id, caller_supplied) = match header_id_opt {
+            Some(id) => (id, true),
+            None => (
+                self.get_header_id_at_height(best_header_height - k + 1)?
+                    .ok_or(StateError::InternalInvariantAt {
+                        what: "prove_nipopow: suffix-head missing from HEADER_CHAIN_INDEX",
+                        height: best_header_height - k + 1,
+                    })?,
+                false,
+            ),
+        };
+
+        let suffix_head = match self.popow_header_by_id_inner(&suffix_head_id)? {
+            PopowByIdLookup::Found(p) => *p,
+            PopowByIdLookup::HeaderMissing => {
+                if caller_supplied {
+                    return Err(StateError::ProveWithDbAnchorNotFound {
+                        header_id: hex::encode(suffix_head_id),
+                    });
+                }
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(suffix_head_id),
+                    reason: "prove_nipopow: suffix_head id from HEADER_CHAIN_INDEX \
+                             but missing from HEADERS"
+                        .to_string(),
+                });
+            }
+            PopowByIdLookup::ExtensionMissing => {
+                return Err(StateError::PopowDataMissing {
+                    what: "prove_nipopow: suffix_head extension absent",
+                    at: PopowMissingAt::HeaderId(suffix_head_id),
+                });
+            }
+        };
+
+        let suffix_head_height = suffix_head.header.height;
+        let mut suffix_tail: Vec<ergo_ser::header::Header> = Vec::with_capacity((k - 1) as usize);
+        for h in (suffix_head_height + 1)..(suffix_head_height + k) {
+            let header_id =
+                self.get_header_id_at_height(h)?
+                    .ok_or(StateError::InternalInvariantAt {
+                        what: "prove_nipopow: suffix_tail missing from HEADER_CHAIN_INDEX",
+                        height: h,
+                    })?;
+            let header_bytes =
+                self.get_header(&header_id)?
+                    .ok_or_else(|| StateError::DbCorruption {
+                        table: "headers",
+                        key: hex::encode(header_id),
+                        reason: format!("prove_nipopow: suffix_tail header missing at h={h}"),
+                    })?;
+            let mut r = VlqReader::new(&header_bytes);
+            let header = read_header(&mut r).map_err(|e| StateError::DbCorruption {
+                table: "headers",
+                key: hex::encode(header_id),
+                reason: format!("prove_nipopow: suffix_tail header decode at h={h}: {e}"),
+            })?;
+            suffix_tail.push(header);
+        }
+
+        let mut collected: std::collections::BTreeMap<u32, ergo_ser::popow_header::PoPowHeader> =
+            std::collections::BTreeMap::new();
+
+        let genesis_id =
+            self.get_header_id_at_height(1)?
+                .ok_or(StateError::InternalInvariantAt {
+                    what: "prove_nipopow: HEADER_CHAIN_INDEX has no row at h=1",
+                    height: 1,
+                })?;
+        let genesis_popow = match self.popow_header_by_id_inner(&genesis_id)? {
+            PopowByIdLookup::Found(p) => *p,
+            PopowByIdLookup::HeaderMissing => {
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(genesis_id),
+                    reason: "prove_nipopow: genesis id in HEADER_CHAIN_INDEX but missing HEADERS"
+                        .to_string(),
+                });
+            }
+            PopowByIdLookup::ExtensionMissing => {
+                return Err(StateError::PopowDataMissing {
+                    what: "prove_nipopow: genesis extension absent",
+                    at: PopowMissingAt::Height(1),
+                });
+            }
+        };
+        collected.insert(1, genesis_popow);
+
+        // Difficulty headers for continuous-mode validation (continuous=true always).
+        let chain_config = ergo_crypto::difficulty::DifficultyParams::mainnet();
+        let epoch_length = match (
+            chain_config.eip37_activation_height,
+            chain_config.eip37_epoch_length,
+        ) {
+            (Some(activation), Some(epoch_len)) if suffix_head_height >= activation => epoch_len,
+            _ => chain_config.epoch_length,
+        };
+        for h in difficulty_headers_needed(suffix_head_height, epoch_length, 8) {
+            if h < suffix_head_height && h > 0 {
+                let id =
+                    self.get_header_id_at_height(h)?
+                        .ok_or(StateError::InternalInvariantAt {
+                            what: "prove_nipopow: difficulty-header HEADER_CHAIN_INDEX miss",
+                            height: h,
+                        })?;
+                let ph = match self.popow_header_by_id_inner(&id)? {
+                    PopowByIdLookup::Found(p) => *p,
+                    PopowByIdLookup::HeaderMissing => {
+                        return Err(StateError::DbCorruption {
+                            table: "headers",
+                            key: hex::encode(id),
+                            reason: format!(
+                                "prove_nipopow: difficulty-header missing from HEADERS (h={h})"
+                            ),
+                        });
+                    }
+                    PopowByIdLookup::ExtensionMissing => {
+                        return Err(StateError::PopowDataMissing {
+                            what: "prove_nipopow: difficulty-header extension absent",
+                            at: PopowMissingAt::Height(h),
+                        });
+                    }
+                };
+                collected.insert(h, ph);
+            }
+        }
+
+        self.prove_prefix_reader(&suffix_head, m, &mut collected)?;
+
+        let prefix: Vec<ergo_ser::popow_header::PoPowHeader> = collected.into_values().collect();
+        let _params = PoPowParams {
+            m,
+            k,
+            continuous: true,
+        };
+        Ok(ergo_ser::popow_proof::NipopowProof {
+            m,
+            k,
+            prefix,
+            suffix_head,
+            suffix_tail,
+            continuous: true,
+        })
     }
 
     /// Lookup a box by box_id from the committed UTXO set, walking the
