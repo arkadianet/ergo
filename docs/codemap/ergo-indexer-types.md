@@ -4,32 +4,34 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index) — ergo-api, ergo-indexer
-**Approx LOC:** ~468 (src, incl. tests)
+**Approx LOC:** ~510 (src, incl. tests)
 
 ## Start here
-- `IndexerQuery` (trait) — `src/query.rs:31` — the entire confirmed-only reader contract; the 25-method surface the API mounts routes against. Read this first.
+- `IndexerQuery` (trait) — `src/query.rs:31` — the entire confirmed-only reader contract; the 28-method surface the API mounts routes against. Read this first.
 - `src/lib.rs` — module tree, re-exports, and the `Digest32` ID aliases (`BoxId`, `TxId`, `TokenId`, `HeaderId`, `TreeHash`, `TemplateHash`).
 - `IndexedErgoBox` / `IndexedErgoTransaction` (structs) — `src/types.rs:33,66` — the two persisted in-memory record types every box/tx DTO aliases to.
 - `IndexerStatus` (enum) — `src/status.rs:7` — the `Syncing`/`CaughtUp`/`Halted` gate the router middleware checks before any read.
 
 ## Modules
 - `src/lib.rs` — crate root: declares the 4 modules, re-exports the public surface, defines the six `pub type X = Digest32` ID aliases.
-- `src/query.rs` — the `IndexerQuery` trait, paging primitives (`Page`, `SortDir`), and the DTO surface (`IndexedBoxDto`/`IndexedTxDto` aliases plus `BalanceDto`, `IndexedTokenDto`, `StorageRentEligibleDto`, `IndexedBlockDto`).
+- `src/query.rs` — the `IndexerQuery` trait, paging primitives (`Page`, `SortDir`), and the DTO surface (`IndexerHealthDto`, `IndexedBoxDto`/`IndexedTxDto` aliases plus `BalanceDto`, `IndexedTokenDto`, `StorageRentEligibleDto`, `IndexedBlockDto`).
 - `src/types.rs` — the parsed/structured in-memory record types (`IndexedErgoBox`, `IndexedErgoTransaction`) held while applying and surfaced to readers. The wire format lives in `ergo-indexer::ser`, not here.
 - `src/status.rs` — `IndexerStatus` (never persisted) and `IndexerHaltReason` (kebab-case serde enum) with its `as_kebab_case()` / `detail()` formatters for the `503` envelopes.
 - `src/protocol_genesis.rs` — `const`-evaluated mainnet protocol-genesis box-ID whitelist + `is_protocol_genesis_box`; lets the apply path absorb the first spend of the 3 pre-block-1 boxes instead of halting `InputMissing`.
 
 ## Key types, traits & functions
 - `IndexerQuery` (trait) — confirmed-only reader; `Send + Sync + 'static`, infallible (router gates on `status() == CaughtUp`) — `src/query.rs:31`
-- `IndexerQuery::indexed_height` / `status` / `is_caught_up` — height + gate primitives; `is_caught_up` is a default-impl convenience over `status()` — `src/query.rs:32,33,40`
-- Storage-rent trait methods (`storage_rent_eligible_paged`, `storage_rent_eligible_total`, `storage_rent_in_creation_range`, `storage_rent_total_in_creation_range`) — have default impls returning empty/0 so fixtures/stubs inherit them; production `IndexerHandle` overrides — `src/query.rs:96,111,127,142`
+- `IndexerQuery::indexed_height` / `status` / `is_caught_up` — height + gate primitives; `is_caught_up` is a default-impl convenience over `status()` — `src/query.rs:32,33,53`
+- `IndexerQuery::health` (defaulted) — returns `IndexerHealthDto`; always-200, never status-gated; production `IndexerHandle` overrides with best-effort store reads; stubs inherit the healthy-empty default — `src/query.rs:44`
+- Storage-rent trait methods (`storage_rent_eligible_paged`, `storage_rent_eligible_total`, `storage_rent_in_creation_range`, `storage_rent_total_in_creation_range`) — have default impls returning empty/0 so fixtures/stubs inherit them; production `IndexerHandle` overrides — `src/query.rs:109,124,140,155`
 - `Page` (struct) / `SortDir` (enum) — `(offset, limit)` paging + sort direction; `MaxItems` is enforced at the API layer, not validated here — `src/query.rs:9,17`
 - `IndexedErgoBox` (struct) + `is_spent()` — one redb row per `BoxId`; `global_index` always non-negative on the box record (spent-flag is segment-side sign); spend triple set/unset together — `src/types.rs:33,49`
 - `IndexedErgoTransaction` (struct) — one redb row per `TxId`; `input_nums`/`output_nums` are global indices for `byIndex`; `numConfirmations` deliberately omitted (rebuilt on read) — `src/types.rs:66`
-- `BalanceDto` (struct) — ERG nanos + order-preserving `tokens` vec; mirrors Scala `BalanceInfo` first-touch insertion order — `src/query.rs:187`
-- `IndexedTokenDto` (struct) — mint metadata; `emission_amount` is `i64` to match Scala signed `Long` JSON (persisted as `u64`) — `src/query.rs:207`
-- `StorageRentEligibleDto` (struct) — one `unspent_by_creation_height` row carrying rent-computation fields — `src/query.rs:172`
-- `IndexedBlockDto` (struct) — unit-struct placeholder; block reassembly not yet wired — `src/query.rs:218`
+- `IndexerHealthDto` (struct) — live health snapshot returned by `health()`; fields mirror the durable `INDEXER_META` repair markers (`repair_pending`, `repair_next_gi`, `repair_skipped`, `drift_skips`) plus running totals (`global_boxes`, `global_txs`); `Default` is the healthy-empty snapshot — `src/query.rs:190`
+- `BalanceDto` (struct) — ERG nanos + order-preserving `tokens` vec; mirrors Scala `BalanceInfo` first-touch insertion order — `src/query.rs:225`
+- `IndexedTokenDto` (struct) — mint metadata; `emission_amount` is `i64` to match Scala signed `Long` JSON (persisted as `u64`) — `src/query.rs:245`
+- `StorageRentEligibleDto` (struct) — one `unspent_by_creation_height` row carrying rent-computation fields — `src/query.rs:210`
+- `IndexedBlockDto` (struct) — unit-struct placeholder; block reassembly not yet wired — `src/query.rs:256`
 - `IndexerStatus` (enum) — `Syncing` / `CaughtUp` / `Halted(IndexerHaltReason)`; never persisted — `src/status.rs:7`
 - `IndexerHaltReason` (enum) + `as_kebab_case()` / `detail()` — 5 fatal classifications feeding the `503 indexer-halted` envelope — `src/status.rs:20,41,54`
 - `PROTOCOL_GENESIS_BOX_IDS_MAINNET` (const) + `is_protocol_genesis_box(&[u8;32]) -> bool` — emission/no-premine/foundation box-ID whitelist for apply-path absorption — `src/protocol_genesis.rs:24,36`
@@ -44,6 +46,6 @@
 - `numConfirmations` is transient (rebuilt on read as `bestFullBlockHeight - height`) and deliberately not modeled — the API formatter computes it from the indexer's `indexed_height()` (`src/types.rs:61-64`).
 - `IndexerStatus` is never persisted: persisting `CaughtUp` could let a stale positive open routes before the indexer confirms the canonical tip (`src/status.rs:3-5`).
 - `IndexerHaltReason::as_kebab_case()` is a pinned wire string: the literal `<reason>` in the `503 indexer-halted` envelope `detail`; it tracks the serde `rename_all = "kebab-case"` derivation but is surfaced as `&'static str` so middleware skips `serde_json` quote-stripping (`src/status.rs:33-49`).
-- `BalanceDto.tokens` ordering is consensus-observable parity: order-preserving first-touch insertion to diff byte-for-byte against Scala `BalanceInfo.tokens` (`src/query.rs:182-189`).
-- `IndexedTokenDto.emission_amount` is `i64` to match Scala's signed `Long` JSON shape even though the persisted record is `u64`; the projection casts via `as i64` (loss-free for realistic emissions) (`src/query.rs:200-205`).
+- `BalanceDto.tokens` ordering is consensus-observable parity: order-preserving first-touch insertion to diff byte-for-byte against Scala `BalanceInfo.tokens` (`src/query.rs:225-228`).
+- `IndexedTokenDto.emission_amount` is `i64` to match Scala's signed `Long` JSON shape even though the persisted record is `u64`; the projection casts via `as i64` (loss-free for realistic emissions) (`src/query.rs:245-248`).
 - `PROTOCOL_GENESIS_BOX_IDS_MAINNET` is a closed 3-ID whitelist matching `test-vectors/mainnet/genesis_boxes.json`; only these IDs' first spends are absorbed silently, every other unknown input keeps `InputMissing` terminal (`src/protocol_genesis.rs:9-20`).

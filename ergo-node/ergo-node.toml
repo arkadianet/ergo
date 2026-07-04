@@ -17,8 +17,10 @@ node_name  = "ergo-rust-node"
 # every transaction, and sync from genesis.
 
 [peers]
-target_outbound = 60
-max_connections = 80
+target_outbound = 96
+max_connections = 384
+# max_inbound defaults to 256 — an independent inbound budget, so a full
+# outbound set never reduces inbound capacity.
 # The bundled mainnet seed peers are merged in automatically; add your own here.
 
 [api]

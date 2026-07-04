@@ -4,18 +4,19 @@
 
 **Depends on (workspace):** ergo-indexer-types, ergo-ser, ergo-primitives, ergo-rest-json (plus dev-only: ergo-indexer)
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~10,300
+**Approx LOC:** ~12,300
 
 ## Start here
 - `src/lib.rs` — the module tree + re-export list; the crate's public face in 40 lines.
 - `src/traits.rs` — the load-bearing seam: `NodeReadState`, `NodeSubmit`, `NodeAdmin`, `MempoolView`, `ChainParamsView`. Read this to understand the whole boundary.
-- `router_with_mempool_and_wallet_and_security` (`src/server.rs:477`) — the single function that assembles every route; the canonical map of what is mounted and under what condition.
+- `router_with_mempool_and_wallet_and_security` (`src/server.rs:527`) — the single function that assembles every route; the canonical map of what is mounted and under what condition.
 - `src/compat/traits.rs` — `NodeChainQuery`, the live id-keyed read trait the Scala-compat surface needs (block/utxo/tx/peers/pool by id).
 - `src/types.rs` (module doc) — the wire DTO contract, especially the id-encoding rules (lowercase hex, 64 hex chars for ids, 66 for `state_root_avl`).
 
 ## Modules
 - `src/lib.rs` — crate root: module tree + the curated re-export set.
 - `src/traits.rs` — node-implemented reader/submit/admin/mempool/chain-params traits + `Noop*` test impls; `PoolTxDetail` type alias.
+- `src/emission.rs` — Scala-compat `/emission/at/{height}` schedule view + `/emission/scripts` static P2S addresses; `EmissionSchedule` trait + `EmissionScriptsJson` type; public (no auth, mirrors Scala `EmissionApiRoute`).
 - `src/server.rs` — axum router assembly, all native `/api/v1/*` handlers, asset serving, the bind/serve entry points, graceful-shutdown contract, conditional route mounting, the `TraceLayer` request-id span, and the submit-error mapping helpers (`map_submit_error`, `submit_via_node`).
 - `src/auth.rs` — `api_key`-header middleware (`require_api_key`), `ApiSecurity` (Blake2b-256 hex, constant-time compare), Scala-parity 403 envelope.
 - `src/mining.rs` — `/mining/*` sub-router + `NodeMining` trait + `MiningApiError`→HTTP mapping; `mining_router`, `NoopNodeMining`.
@@ -29,26 +30,26 @@
   - `compat/blocks.rs` — `POST /blocks` (sendMinedBlock) handler.
   - `compat/transactions.rs` — `POST /transactions[/bytes][/check[Bytes]]` submit/check handlers.
 - `src/blockchain.rs` + `src/blockchain/*` — the optional `/blockchain/*` extra-index parity surface. `blockchain.rs` holds `BlockchainState`, `enforce_status_gate` middleware, `indexed_height_handler`, the error envelopes, and paging/sort parsing (`resolve_page`, `parse_sort_direction`, `MAX_ITEMS = 16384`). Submodules: `balance`, `blocks`, `boxes`, `byaddress`, `byergotree`, `bytemplate`, `range`, `storage_rent`, `tokens`, `transactions`, `unspent_byaddress`.
-- `src/wallet/` — `/wallet/*` API. `mod.rs` defines `WalletAdmin` trait + `router_with_security`; submodules `lifecycle` (status/init/restore/unlock/lock/check), `state_mut` (rescan/updateChangeAddress), `reads`, `sending`, `multi_sig`, `admin_advanced`, `lock_guard`, `types` (camelCase DTOs).
+- `src/wallet/` — `/wallet/*` API. `mod.rs` defines `WalletAdmin` trait + `router_with_security`; submodules `lifecycle` (status/init/restore/unlock/lock/check), `state_mut` (rescan/updateChangeAddress), `reads`, `sending`, `multi_sig`, `admin_advanced`, `lock_guard`, `types` (camelCase DTOs), `scan` (scan-registry endpoints `/scan/register`, `/scan/deregister`, `/scan/listAll`; auth-gated), `native/` (native `/api/v1/wallet/*` surface: factual DTOs, EIP-27-aware balance; `mod.rs` + `dto.rs` + `error.rs`).
 
 ## Key types, traits & functions
-- `NodeReadState` (trait) — sync snapshot reads: info/status/tip/sync/peers/mempool/health/identity/host/recent_blocks — `src/traits.rs:21`
-- `NodeSubmit` (trait) — async submit boundary: `submit_transaction` (bytes), `submit_transaction_json` (Scala DTO), `submit_full_block`; returns hex modifier id — `src/traits.rs:64`
-- `MempoolView` (trait) — sync pool overlay for the extra-index: `is_spent_by_pool`/`pool_spending_tx`/`pool_outputs`/`pool_tx_detail` — `src/traits.rs:168`
-- `NodeAdmin` (trait) — single `request_shutdown` backing `POST /node/shutdown` — `src/traits.rs:142`
-- `ChainParamsView` (trait) — voted-param arithmetic for storage-rent (`storage_fee_factor_for_validation_at`, `compute_storage_fee`) without a direct `ergo-validation` dep — `src/traits.rs:227`
-- `PoolTxDetail` (type) — `(Arc<[u8]>, Arc<HashMap<BoxId, ErgoBox>>)` coherent single-snapshot tx-bytes + outputs pair — `src/traits.rs:204`
+- `NodeReadState` (trait) — sync snapshot reads: info/status/tip/sync/peers/mempool/health/identity/host/recent_blocks/events/votes — `src/traits.rs:32`
+- `NodeSubmit` (trait) — async submit boundary: `submit_transaction` (bytes), `submit_transaction_json` (Scala DTO), `submit_full_block`; returns hex modifier id — `src/traits.rs:89`
+- `MempoolView` (trait) — sync pool overlay for the extra-index: `is_spent_by_pool`/`pool_spending_tx`/`pool_outputs`/`pool_tx_detail` — `src/traits.rs:247`
+- `NodeAdmin` (trait) — single `request_shutdown` backing `POST /node/shutdown` — `src/traits.rs:167`
+- `ChainParamsView` (trait) — voted-param arithmetic for storage-rent (`storage_fee_factor_for_validation_at`, `compute_storage_fee`) without a direct `ergo-validation` dep — `src/traits.rs:306`
+- `PoolTxDetail` (type) — `(Arc<[u8]>, Arc<HashMap<BoxId, ErgoBox>>)` coherent single-snapshot tx-bytes + outputs pair — `src/traits.rs:283`
 - `NodeChainQuery` (trait) — live id-keyed Scala-compat reads (block/header/utxo/tx/peers/pool by id) — `src/compat/traits.rs:15`
 - `NodeMining` (trait) — async external-miner surface: `candidate` (longpoll), `submit_solution`, `reward_address`, `reward_pubkey` — `src/mining.rs:35`
 - `MiningApiError` (enum) — categorized mining errors with the HTTP-status mapping (`InvalidPow`→400, `Unavailable`→503, `Timeout`→504, …) — `src/mining.rs:68`
-- `WalletAdmin` (trait) — async wallet lifecycle/reads/sending boundary — `src/wallet/mod.rs:35`
-- `ApiSecurity` (struct) + `require_api_key` (fn) — `api_key`-header auth: `hash_key` (Blake2b-256 hex), constant-time compare, Scala-parity 403 — `src/auth.rs:43`, `src/auth.rs:105`
-- `ServerCtx` (struct) — the dependency bundle threaded through every entry point; `Option` fields decide which route families mount — `src/server.rs:105`
-- `router_with_mempool_and_wallet_and_security` (fn) — the full router builder (mempool overlay + `WalletAdmin` + explicit `Option<ApiSecurity>` gate) — `src/server.rs:477`
-- `bind` / `serve_on` / `serve` / `serve_on_with_mempool_and_wallet_and_security` (fns) — listener + axum lifecycle, graceful-shutdown contract — `src/server.rs:138,163,274,226`
+- `WalletAdmin` (trait) — async wallet lifecycle/reads/sending boundary — `src/wallet/mod.rs:38`
+- `ApiSecurity` (struct) + `require_api_key` (fn) — `api_key`-header auth: `hash_key` (Blake2b-256 hex), constant-time compare, Scala-parity 403 — `src/auth.rs:54`, `src/auth.rs:116`
+- `ServerCtx` (struct) — the dependency bundle threaded through every entry point; `Option` fields decide which route families mount — `src/server.rs:110`
+- `router_with_mempool_and_wallet_and_security` (fn) — the full router builder (mempool overlay + `WalletAdmin` + explicit `Option<ApiSecurity>` gate) — `src/server.rs:527`
+- `bind` / `serve_on` / `serve` / `serve_on_with_mempool_and_wallet_and_security` / `router_with_wallet` (fns) — listener + axum lifecycle, graceful-shutdown contract — `src/server.rs:153,178,291,243,474`
 - `mining_router` (fn) — builds the `/mining/*` sub-router merged in when mining is enabled — `src/mining.rs:169`
-- `BlockchainState` (struct) + `enforce_status_gate` (fn) — extra-index router state + the `503 indexer-syncing/-halted` gate — `src/blockchain.rs:105`, `src/blockchain.rs:203`
-- `ApiInfo` / `ApiIdentity` / `ApiStatus` / `ApiSubmitError` / `ApiNativeSubmitError` / `SubmitMode` (types) — native `/api/v1/*` wire DTOs — `src/types.rs`
+- `BlockchainState` (struct) + `enforce_status_gate` (fn) — extra-index router state + the `503 indexer-syncing/-halted` gate — `src/blockchain.rs:105`, `src/blockchain.rs:258`
+- `ApiInfo` / `ApiIdentity` / `ApiStatus` / `ApiSubmitError` / `ApiNativeSubmitError` / `SubmitMode` / `ApiNodeEvents` / `ApiMinerStats` / `ApiMinerStat` (types) — native `/api/v1/*` wire DTOs — `src/types.rs`
 - `ScalaInfo` / `Parameters` (types) — Scala `/info` body — `src/compat/types.rs`
 
 ## Invariants & contracts

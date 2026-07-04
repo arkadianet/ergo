@@ -8,7 +8,7 @@ no AVL+ state, no wire codecs — those live elsewhere.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec
 **Depended on by:** (see codemap index) — ergo-sigma, ergo-validation, ergo-state, ergo-sync, ergo-mining, ergo-node
-**Approx LOC:** ~1,950 (src) + ~1,150 (tests)
+**Approx LOC:** ~1,950 (src) + ~1,400 (tests)
 
 ## Start here
 - `src/pow.rs` — the public façade; `verify_pow_solution` and `verify_header_difficulty` are the two header-verification entry points the rest of the node calls.

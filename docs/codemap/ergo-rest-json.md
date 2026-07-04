@@ -3,13 +3,13 @@
 **Purpose:** The shared JSON ↔ canonical-wire-bytes layer for Scala-compatible Ergo REST. Hosts the JSON DTOs that mirror the Scala node's encoders (`Header.jsonEncoder`, `BlockTransactions.jsonEncoder`, `Extension.jsonEncoder`, `JsonCodecs`, etc.), the `/mining/*` wire DTOs, and the canonicalizing *decoders* that turn parsed JSON back into the exact wire bytes the indexer / validator / persistence layer expect. The decoders are the harder half: they must reproduce Scala's canonical bytes byte-for-byte so content-addressed IDs (tx_id, box_id, section_id) verify.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
-**Depended on by:** (see codemap index) — ergo-api, ergo-node, ergo-validation (tests only)
-**Approx LOC:** ~1448 (src, incl. tests)
+**Depended on by:** (see codemap index) — ergo-api, ergo-node, ergo-difftest, ergo-validation (tests only)
+**Approx LOC:** ~1441 (src, incl. tests)
 
 ## Start here
 - `src/lib.rs` — module tree + the flat re-export surface. Note the re-exports cover `decode::*` and `types::*` only; the `mining` DTOs are reached via the `mining` module path (`ergo_rest_json::mining::WorkMessageJson`).
-- `DecodeMode` (enum) — `src/decode.rs:445` — the central contract: `Submit` (wallet→node, strict + canonicalize) vs `Preserve` (on-chain bytes, verbatim). Every decoder branches on this; read it before any decoder.
-- `decode_scala_transaction` / `decode_scala_full_block` — `src/decode.rs:51,840` — the two top-level entry points (JSON tx-submit, and `POST /blocks` full-block ingest).
+- `DecodeMode` (enum) — `src/decode.rs:444` — the central contract: `Submit` (wallet→node, strict + canonicalize) vs `Preserve` (on-chain bytes, verbatim). Every decoder branches on this; read it before any decoder.
+- `decode_scala_transaction` / `decode_scala_full_block` — `src/decode.rs:49,833` — the two top-level entry points (JSON tx-submit, and `POST /blocks` full-block ingest).
 - `ScalaFullBlock` / `ScalaHeader` — `src/types.rs:23,42` — the read-side DTO shapes; field order mirrors Scala emission so captured-fixture diffs read cleanly.
 - `WorkMessageJson` — `src/mining.rs:37` — the `/mining/candidate` wire shape; Scala `WorkMessage` fields plus this node's `template_seq`/`clean_jobs` pool extensions.
 
@@ -20,18 +20,18 @@
 - `src/mining.rs` — `/mining/*` JSON DTOs (`WorkMessageJson`, `AutolykosSolutionJson`, `RewardAddressResponse`, `RewardPublicKeyResponse`) plus decimal-BigInt serde helpers. Lives here (not `ergo-mining`) so `ergo-api` can mount `/mining/*` without the storage/sync/mempool transitives.
 
 ## Key types, traits & functions
-- `DecodeMode` (enum: `Submit` | `Preserve`) — strictness/canonicalization switch threaded through every decoder — `src/decode.rs:445`
-- `DecodeError` (type = `(&'static str, String)`) — reason+detail tuple; reason is `DESERIALIZE` (`"deserialize"`) or `NON_CANONICAL` (`"non_canonical"`) — `src/decode.rs:37,38,49`
-- `decode_scala_transaction(_with_mode)` (fn) — `ScalaTransactionInput` → canonical tx wire bytes — `src/decode.rs:51,58`
-- `build_transaction_from_input` (fn, private) — single source of truth for the input/data-input/output loops, shared by the standalone-tx and block-section paths so mode-propagation can't drift — `src/decode.rs:78`
-- `decode_input_with_mode` (fn) — `Submit` re-serializes the spending-proof context-extension (canonicalizes); `Preserve` keeps `extension_bytes` verbatim via `SpendingProof::from_trusted_raw_parts` — `src/decode.rs:133`
-- `decode_context_extension_with_mode` (fn) — decimal-keyed JSON map → `ContextExtension`; `IndexMap` order preserved for ≤4 entries (Scala `Map1`-`Map4` insertion order), re-sorted by Scala-HAMT key for ≥5 — `src/decode.rs:246`
-- `decode_registers_with_mode` (fn) — `additionalRegisters` map → `AdditionalRegisters` + canonical bytes; rejects gaps and out-of-range register names (R4..R9); `Preserve` returns input hex verbatim — `src/decode.rs:361`
-- `decode_ergo_tree_canonicalize_with_mode` (fn) — ergoTree hex → `(ErgoTree, bytes)`; ALWAYS returns the input bytes (writer is lossy for some opcodes); `Submit` rejects soft-fork versions + non-roundtripping placeholder patterns — `src/decode.rs:474`
-- `decode_scala_header` (fn) — `ScalaHeader` → `(wire bytes, ModifierId)`; maps stateRoot(33B), votes(3B), nBits(u64→u32 with overflow reject), and v1/v2 PoW solution — `src/decode.rs:572`
-- `decode_scala_full_block` (fn) → `DecodedFullBlock` — drives `POST /blocks`; cross-checks each section's `headerId` against the computed header id before decoding — `src/decode.rs:840`
-- `DecodedFullBlock` (struct) — header bytes + id + per-section canonical bytes (`ad_proofs_bytes` optional for digest-mode blocks) — `src/decode.rs:813`
-- `decode_block_transactions_with_mode` / `decode_extension` / `decode_ad_proofs` (fns) — per-section decoders to canonical wire — `src/decode.rs:731,780,906`
+- `DecodeMode` (enum: `Submit` | `Preserve`) — strictness/canonicalization switch threaded through every decoder — `src/decode.rs:444`
+- `DecodeError` (type = `(&'static str, String)`) — reason+detail tuple; reason is `DESERIALIZE` (`"deserialize"`) or `NON_CANONICAL` (`"non_canonical"`) — `src/decode.rs:35,36,47`
+- `decode_scala_transaction(_with_mode)` (fn) — `ScalaTransactionInput` → canonical tx wire bytes — `src/decode.rs:49,56`
+- `build_transaction_from_input` (fn, private) — single source of truth for the input/data-input/output loops, shared by the standalone-tx and block-section paths so mode-propagation can't drift — `src/decode.rs:76`
+- `decode_input_with_mode` (fn) — `Submit` re-serializes the spending-proof context-extension (canonicalizes); `Preserve` keeps `extension_bytes` verbatim via `SpendingProof::from_trusted_raw_parts` — `src/decode.rs:131`
+- `decode_context_extension_with_mode` (fn) — decimal-keyed JSON map → `ContextExtension`; `IndexMap` order preserved for ≤4 entries (Scala `Map1`-`Map4` insertion order), re-sorted by Scala-HAMT key for ≥5 — `src/decode.rs:244`
+- `decode_registers_with_mode` (fn) — `additionalRegisters` map → `AdditionalRegisters` + canonical bytes; rejects gaps and out-of-range register names (R4..R9); `Preserve` returns input hex verbatim — `src/decode.rs:359`
+- `decode_ergo_tree_canonicalize_with_mode` (fn) — ergoTree hex → `(ErgoTree, bytes)`; ALWAYS returns the input bytes (writer is lossy for some opcodes); `Submit` rejects soft-fork versions + non-roundtripping placeholder patterns — `src/decode.rs:472`
+- `decode_scala_header` (fn) — `ScalaHeader` → `(wire bytes, ModifierId)`; maps stateRoot(33B), votes(3B), nBits(u64→u32 with overflow reject), and v1/v2 PoW solution — `src/decode.rs:565`
+- `decode_scala_full_block` (fn) → `DecodedFullBlock` — drives `POST /blocks`; cross-checks each section's `headerId` against the computed header id before decoding — `src/decode.rs:833`
+- `DecodedFullBlock` (struct) — header bytes + id + per-section canonical bytes (`ad_proofs_bytes` optional for digest-mode blocks) — `src/decode.rs:807`
+- `decode_block_transactions_with_mode` / `decode_extension` / `decode_ad_proofs` (fns) — per-section decoders to canonical wire — `src/decode.rs:724,773,899`
 - `ScalaFullBlock`, `ScalaHeader`, `ScalaPowSolutions`, `ScalaBlockTransactions`, `ScalaTransaction`, `ScalaInput`, `ScalaSpendingProof`, `ScalaOutput`, `ScalaExtension`, `ScalaAdProofs`, `ScalaBlockSection` (read-side DTOs) — `src/types.rs:23,42,79,89,103,113,121,150,218,227,243`
 - `ScalaTransactionInput`, `ScalaOutputInput` (submit-side DTOs) — read only the consensus-bearing fields; derived `id`/`size`/`boxId` are accepted-and-ignored — `src/types.rs:188,204`
 - `WorkMessageJson` / `AutolykosSolutionJson` / `RewardAddressResponse` / `RewardPublicKeyResponse` (mining DTOs) — `src/mining.rs:37,91,118,126`

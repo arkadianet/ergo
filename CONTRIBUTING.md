@@ -82,6 +82,21 @@ cargo test --no-run -p ergo-mempool    --features diagnostics
 cargo test --no-run -p ergo-ser        --features diagnostics
 ```
 
+### Differential testing
+
+CI runs the `ergo-difftest` structured campaign on every push and pull request:
+
+```bash
+cargo run --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
+```
+
+This checks wire-decoder invariants across all `ergo-ser` surfaces (no panics,
+encode–decode fixed point) and enforces that every generator produces adversarial
+inputs at the expected rate (≥ 80 % of the declared vocabulary). An invariant
+violation or a generator falling below the coverage threshold fails CI. The
+harness unit tests (`tests/smoke.rs`, `tests/selftest.rs`) are exercised by
+the standard `cargo test --workspace` run above and do not need a Scala oracle.
+
 ### Test profiles
 
 Defined in the workspace [`Cargo.toml`](./Cargo.toml):

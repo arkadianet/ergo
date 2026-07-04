@@ -34,10 +34,13 @@ These are the standing constraints the codebase is built around:
 
 ## Crate layering
 
-The workspace is 17 crates forming a strict, acyclic dependency DAG enforced by
-`cargo`. Each crate adds one capability to the layer below it. The table below
-is a summary; the [codebase map](docs/codemap.md) has the full per-crate detail
-and the dependency graph.
+The node's runtime is 17 crates forming a strict, acyclic dependency DAG
+enforced by `cargo`. Each crate adds one capability to the layer below it. A
+separate 18th workspace crate, `ergo-difftest`, is a dev/test-only
+differential-fuzz harness (`publish = false`): it depends on the consensus
+crates but nothing depends on it, so it sits outside this runtime DAG. The table
+below is a summary; the [codebase map](docs/codemap.md) has the full per-crate
+detail and the dependency graph.
 
 | Layer | Crates | Role |
 |---|---|---|
@@ -90,7 +93,9 @@ Three background workers hang off the loop so slow work never gates it:
 Reads never touch the writer. The API task serves owned DTOs from a
 `NodeSnapshot` held in an `ArcSwap`, rebuilt once per sync tick — so an HTTP
 handler runs on every request without coordinating with the loop and without
-holding a lock across an `await`.
+holding a lock across an `await`. The snapshot also projects a bounded operator
+event-feed ring (a loop-side FIFO diffed each tick as the snapshot is emitted),
+served at `/api/v1/events`.
 
 ## Data-flow paths
 

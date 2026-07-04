@@ -14,7 +14,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 
 ```text
 .
-├── Cargo.toml                         workspace manifest (17 members, resolver v2)
+├── Cargo.toml                         workspace manifest (18 members, resolver v2)
 ├── rust-toolchain.toml                pinned toolchain (1.95.0, rustfmt + clippy)
 ├── deny.toml                          cargo-deny policy
 ├── ARCHITECTURE.md                    cross-crate architecture spec
@@ -22,12 +22,12 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 ├── CONTRIBUTING.md                    contribution guide, test conventions, audit tooling
 ├── SECURITY.md                        scope + disclosure process
 ├── CODE_OF_CONDUCT.md                 community expectations
-├── ergo-{primitives,ser,…}/           17 workspace crates (see docs/codemap.md)
+├── ergo-{primitives,ser,…}/           18 workspace crates (see docs/codemap.md)
 ├── ergo-node/ergo-node.toml           default config (full archival + extra index)
 ├── ergo-node/ergo-node.toml.example   operator template
 ├── docs/
 │   ├── overview.md                    this handbook
-│   ├── codemap.md + codemap/          per-crate codebase map (index + 17 pages)
+│   ├── codemap.md + codemap/          per-crate codebase map (index + 18 pages)
 │   ├── configuration.md               every config field, by type
 │   ├── operating.md                   running, modes, observability
 │   ├── compatibility.md               consensus-compatibility + versioning policy
@@ -49,7 +49,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 
 ## Crates and architecture
 
-The workspace is 17 crates in a strict, acyclic dependency DAG. Rather than
+The workspace is 18 crates in a strict, acyclic dependency DAG. Rather than
 duplicate per-crate descriptions here (which drift), see:
 
 - [`codemap.md`](./codemap.md) — the layered crate table, the dependency graph,
@@ -83,8 +83,11 @@ project:
   `cargo fmt --check`, `cargo check`, `cargo clippy --all-targets --all-features
   -- -D warnings`, and `cargo test --all` on Linux, macOS, and Windows. A
   `cost-trace` feature-gated run exercises the `ergo-sigma` instrumentation
-  surface; a `diagnostics`-feature compile-only run keeps the gated triage
-  harness valid.
+  surface; a `diagnostics`-feature compile-only run covers `ergo-validation`,
+  `ergo-mempool`, and `ergo-ser` (keeps the gated triage harness buildable without
+  external state); a `difftest` structured campaign runs 50 000 iterations of the
+  `ergo-difftest` differential harness with an 80 % generator-coverage gate
+  (hermetic — no JVM oracle required).
 - **Generated API spec, snapshot-tested.** The Rust-native `/api/v1/*` surface
   is OpenAPI-documented from the handler annotations (served at
   `/api-docs/openapi-native.yaml`, browsable at `/swagger/native`); a snapshot
@@ -100,6 +103,14 @@ project:
   from a running Scala node, so drift introduced by a Scala upgrade is detectable
   by re-running them and diffing. (This requires a self-hosted, fully synced
   Scala node, so it is a manual/local step rather than hosted CI.)
+- **`ergo-difftest` differential / fuzz harness.** The 18th workspace crate
+  (`ergo-difftest`) is a pure-testing crate: it runs structure-aware generators
+  over every wire decoder in `ergo-ser`, checking no-panic, parse→serialize
+  fixed-point, and (locally, with a JVM oracle) Rust-vs-Scala byte-exact parity.
+  It is excluded from the consensus binary and ships no production code. The
+  `fuzz/` sub-crate inside it adds cargo-fuzz targets for each decoder surface;
+  committing a seed to `fuzz/corpus/<target>/` makes it auto-load on the next
+  `cargo fuzz run`.
 - **`sigma-rust` as dev oracle, never as runtime logic.** The reference Rust
   sigma implementation cross-checks our interpreter in tests; it is never linked
   into the consensus path.
@@ -160,6 +171,8 @@ cargo test -p ergo-sigma --features cost-trace --test traced_untraced_parity
 
 # Diagnostics-feature triage tests are compile-only in CI (need external state).
 cargo test --no-run -p ergo-validation --features diagnostics
+cargo test --no-run -p ergo-mempool --features diagnostics
+cargo test --no-run -p ergo-ser --features diagnostics
 ```
 
 Test conventions (full detail in [`../CONTRIBUTING.md`](../CONTRIBUTING.md)):
@@ -246,8 +259,10 @@ p2p_nipopows      = 2           # quorum threshold (matches Scala mainnet)
 
 [peers]
 known           = ["213.239.193.208:9030", "159.65.11.55:9030"]
-target_outbound = 60
-max_connections = 80
+target_outbound = 96
+max_connections = 384
+# max_inbound = 256               # independent inbound budget; a full outbound set
+                                  # never reduces inbound capacity (default 256)
 
 [mining]
 enabled = false                 # external-miner candidate API (GET /mining/candidate,
@@ -272,8 +287,8 @@ default_level = "info"
 [logging.file]
 dir       = "."
 prefix    = "ergo-node"
-rotation  = "never"
-max_files = 1
+rotation  = "daily"
+max_files = 14
 ```
 
 For a fast clean-DB boot, combine Mode 2 with the NiPoPoW bootstrap:
