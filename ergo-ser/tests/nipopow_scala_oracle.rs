@@ -91,3 +91,50 @@ fn captured_scala_proof_roundtrips_byte_identical() {
         proof.continuous,
     );
 }
+
+/// COMMITTED Scala-serializer fixtures — no longer vacuous in CI.
+///
+/// Provenance: mainnet NipopowProof JSON captured live from the Scala
+/// reference node (:9053, 2026-07-05) under
+/// `test-vectors/mainnet/nipopow/`, decoded with Scala's own
+/// `nipopowProofDecoder` and re-emitted through Scala's
+/// `NipopowProofSerializer` (6.0.2) via
+/// `scripts/jvm_nipopow_oracle/NipopowCapture.scala` — i.e. these are
+/// genuine Scala-wire bytes for real mainnet chain data, with a Scala
+/// self-round-trip check at capture time.
+#[test]
+fn committed_scala_proof_fixtures_roundtrip_byte_identical() {
+    for name in [
+        "../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin",
+        "../test-vectors/mainnet/nipopow/proof_m6_k10_at_h1000.scala.bin",
+    ] {
+        let proof_bytes = std::fs::read(name).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&proof_bytes)
+            .unwrap_or_else(|e| panic!("{name}: Scala proof must deserialize: {e}"));
+        let re_bytes = ergo_ser::popow_proof::serialize_nipopow_proof(&proof)
+            .unwrap_or_else(|e| panic!("{name}: re-serialize: {e}"));
+        assert_eq!(
+            re_bytes, proof_bytes,
+            "{name}: re-serialized bytes must equal the Scala wire form"
+        );
+        for (i, ph) in proof
+            .prefix
+            .iter()
+            .chain(std::iter::once(&proof.suffix_head))
+            .enumerate()
+        {
+            if !ph.interlinks_proof.is_empty() {
+                ergo_ser::batch_merkle_proof::deserialize_batch_merkle_proof(&ph.interlinks_proof)
+                    .unwrap_or_else(|e| panic!("{name}: popow_header[{i}] batch proof: {e}"));
+            }
+        }
+        eprintln!(
+            "[scala-oracle] {name}: {} bytes, m={} k={} prefix={} suffix_tail={}",
+            proof_bytes.len(),
+            proof.m,
+            proof.k,
+            proof.prefix.len(),
+            proof.suffix_tail.len()
+        );
+    }
+}

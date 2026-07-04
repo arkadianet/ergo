@@ -1433,3 +1433,116 @@ fn host_disk_for_tempdir_returns_some_pair() {
     );
     assert!(total > 0, "disk_total_bytes on a real volume must be > 0");
 }
+
+/// End-to-end JSON-encoder parity on REAL mainnet data, no node needed:
+/// genuine Scala-serializer proof bytes (see
+/// `scripts/jvm_nipopow_oracle/NipopowCapture.scala`) are decoded with
+/// our wire reader and pushed through the `/nipopow/*` JSON encoders;
+/// the result must equal the JSON the Scala node actually served for
+/// the same proof (the REST capture the .bin was derived from). This
+/// pins `encode_nipopow_proof`/`encode_popow_header` — including
+/// per-header id/size recomputation and the empty-sibling digest
+/// rendering — against the live oracle, value-for-value.
+///
+/// ONE documented exclusion: `header.size`. For headers in roughly the
+/// h≈1.60-1.70M era (plus a handful of v1-era ones) the live Scala
+/// node reports a size ONE BYTE LARGER than the header's actual wire
+/// length — stale `sizeOpt` metadata in their storage; the value
+/// contradicts the byte length of the very header bytes they serve
+/// (verified live 2026-07-05: Scala /blocks h=1645005 says size=221
+/// while both nodes' stored bytes for that id are 220 — two different
+/// lengths cannot hash to the same header id). We serve the true byte
+/// length, so `size` is normalized before comparison and asserted
+/// against the canonical serialized length instead. Everything else —
+/// including v1 `d` as an arbitrary-precision JSON NUMBER of the
+/// unsigned magnitude — is compared exactly.
+#[test]
+fn nipopow_json_encoders_match_live_scala_response() {
+    for (bin, json) in [
+        (
+            "../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin",
+            "../test-vectors/mainnet/nipopow/proof_m6_k10.json",
+        ),
+        (
+            "../test-vectors/mainnet/nipopow/proof_m6_k10_at_h1000.scala.bin",
+            "../test-vectors/mainnet/nipopow/proof_m6_k10_at_h1000.json",
+        ),
+    ] {
+        let bytes = std::fs::read(bin).unwrap_or_else(|e| panic!("read {bin}: {e}"));
+        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&bytes)
+            .unwrap_or_else(|e| panic!("{bin}: deserialize: {e}"));
+        let dto = super::nipopow::encode_nipopow_proof(&proof)
+            .unwrap_or_else(|e| panic!("{bin}: encode: {e}"));
+        let mut ours = serde_json::to_value(&dto).expect("DTO serializes");
+        let mut scala: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(json).unwrap_or_else(|e| panic!("read {json}: {e}")),
+        )
+        .expect("fixture JSON parses");
+        normalize_header_sizes(&mut ours, &mut scala);
+        if scala != ours {
+            let dump = std::env::temp_dir().join("nipopow_json_diff");
+            std::fs::create_dir_all(&dump).ok();
+            std::fs::write(
+                dump.join("ours.json"),
+                serde_json::to_string_pretty(&ours).unwrap(),
+            )
+            .ok();
+            std::fs::write(
+                dump.join("scala.json"),
+                serde_json::to_string_pretty(&scala).unwrap(),
+            )
+            .ok();
+            panic!(
+                "{bin}: our JSON encoding diverges from the live Scala response; \
+                 dumps at {}",
+                dump.display()
+            );
+        }
+    }
+}
+
+/// See `nipopow_json_encoders_match_live_scala_response`: collect and
+/// zero the `size` field on every embedded header, returning the
+/// original values in traversal order so the caller can assert the
+/// documented tolerance (Scala's stale metadata is only ever the true
+/// length or true length + 1; anything else is a real regression).
+fn collect_and_zero_header_sizes(v: &mut serde_json::Value) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut zero_one = |h: &mut serde_json::Value| {
+        let id = h["id"].as_str().unwrap().to_string();
+        let size = h["size"].as_u64().unwrap();
+        h["size"] = 0u64.into();
+        out.push((id, size));
+    };
+    let obj = v.as_object_mut().unwrap();
+    for key in ["prefix", "suffixHead", "suffixTail"] {
+        match obj.get_mut(key) {
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if item.get("header").is_some() {
+                        zero_one(item.get_mut("header").unwrap());
+                    } else {
+                        zero_one(item);
+                    }
+                }
+            }
+            Some(single) => zero_one(single.get_mut("header").unwrap()),
+            None => {}
+        }
+    }
+    out
+}
+
+fn normalize_header_sizes(ours: &mut serde_json::Value, scala: &mut serde_json::Value) {
+    let ours_sizes = collect_and_zero_header_sizes(ours);
+    let scala_sizes = collect_and_zero_header_sizes(scala);
+    assert_eq!(ours_sizes.len(), scala_sizes.len(), "header count");
+    for ((oid, our_size), (sid, scala_size)) in ours_sizes.into_iter().zip(scala_sizes) {
+        assert_eq!(oid, sid, "header order must agree");
+        assert!(
+            scala_size == our_size || scala_size == our_size + 1,
+            "header {oid}: size {our_size} vs scala {scala_size} — outside the \
+             documented stale-metadata tolerance"
+        );
+    }
+}
