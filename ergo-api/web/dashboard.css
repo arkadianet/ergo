@@ -1165,3 +1165,64 @@
     flex-basis: 100%;
   }
 }
+
+/* ---- Mining section ---- */
+.mn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.mn-grid > .panel {
+  min-width: 0;
+}
+.mn-full {
+  grid-column: 1 / -1;
+}
+@media (max-width: 900px) {
+  .mn-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.mn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+.mn-row__label {
+  flex: 0 0 180px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mn-row__count {
+  flex: 0 0 110px;
+  text-align: right;
+  color: var(--tx2);
+}
+.mn-bar {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+  overflow: hidden;
+}
+.mn-bar__fill {
+  height: 100%;
+  background: var(--accent);
+}
+.mn-win {
+  display: inline-flex;
+  gap: 4px;
+}
+.mn-win .btn {
+  padding: 2px 10px;
+}
+.mn-win .btn[aria-pressed='true'] {
+  color: var(--accent);
+}
+.mn-cell .pill {
+  margin-left: 4px;
+}
