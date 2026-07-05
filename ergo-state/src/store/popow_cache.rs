@@ -274,9 +274,15 @@ impl StateStore {
                 what: "prove_with_db: k must be >= 1",
             });
         }
-        if self.chain_state.best_header_height < k + m {
+        // `m`/`k` are attacker-controlled on the REST path: checked add,
+        // or a wrapped sum bypasses this guard (and the `- k + 1` anchor
+        // arithmetic below it) in release builds.
+        let needed_min = k.checked_add(m).ok_or(StateError::InvalidPrecondition {
+            what: "prove_with_db: k + m overflows u32",
+        })?;
+        if self.chain_state.best_header_height < needed_min {
             return Err(StateError::EarlyIBD {
-                needed_min: k + m,
+                needed_min,
                 observed: self.chain_state.best_header_height,
             });
         }
@@ -430,14 +436,16 @@ impl StateStore {
         collected.insert(1, genesis_popow);
 
         // Difficulty headers needed for continuous-mode validation.
-        let chain_config = ergo_crypto::difficulty::DifficultyParams::mainnet();
-        let epoch_length = match (
-            chain_config.eip37_activation_height,
-            chain_config.eip37_epoch_length,
-        ) {
-            (Some(activation), Some(epoch_len)) if suffix_head_height >= activation => epoch_len,
-            _ => chain_config.epoch_length,
-        };
+        let chain_config = self.difficulty_params.clone();
+        // Scala parity (NipopowProverWithDbAlgs.scala:95): the
+        // difficulty-header schedule uses eip37EpochLength
+        // UNCONDITIONALLY (`getOrElse`, no activation-height gate) —
+        // even for pre-EIP-37 anchors. A height-gated selection here
+        // omitted the 128-multiple headers Scala's verifier requires
+        // for old anchors (T4 live differential, anchor h=1000).
+        let epoch_length = chain_config
+            .eip37_epoch_length
+            .unwrap_or(chain_config.epoch_length);
         // Difficulty-header enrichment for continuous proofs. Each
         // height is *required* (the proof validator at
         // `ergo-validation::popow::proof::has_valid_difficulty_headers`
@@ -445,7 +453,11 @@ impl StateStore {
         // a typed error instead of being silently skipped — the
         // facade's None previously collapsed three distinct causes
         // into one indistinguishable absence.
-        for h in difficulty_headers_needed(suffix_head_height, epoch_length, 8) {
+        for h in difficulty_headers_needed(
+            suffix_head_height,
+            epoch_length,
+            chain_config.use_last_epochs,
+        ) {
             if h < suffix_head_height && h > 0 {
                 let id =
                     self.get_header_id_at_height(h)?

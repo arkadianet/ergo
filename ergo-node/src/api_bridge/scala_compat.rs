@@ -31,6 +31,10 @@ pub struct ScalaCompatBridge {
     handle: SnapshotHandle,
     static_cfg: Arc<ScalaCompatStatic>,
     store_reader: ChainStoreReader,
+    /// Network difficulty schedule for the NiPoPoW on-demand prover
+    /// (`/nipopow/proof/*`). Wired from `chain_spec.difficulty` at
+    /// boot, mirroring `StateStore::set_difficulty_params`.
+    difficulty_params: ergo_chain_spec::DifficultyParams,
 }
 
 impl ScalaCompatBridge {
@@ -38,11 +42,13 @@ impl ScalaCompatBridge {
         handle: SnapshotHandle,
         static_cfg: ScalaCompatStatic,
         store_reader: ChainStoreReader,
+        difficulty_params: ergo_chain_spec::DifficultyParams,
     ) -> Self {
         Self {
             handle,
             static_cfg: Arc::new(static_cfg),
             store_reader,
+            difficulty_params,
         }
     }
 
@@ -231,6 +237,89 @@ impl NodeChainQuery for ScalaCompatBridge {
                 None
             }
         }
+    }
+
+    fn nipopow_header_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Option<ergo_rest_json::types::ScalaPopowHeader> {
+        let header_id = parse_header_id(header_id_hex)?;
+        let ph = match self.store_reader.popow_header_by_id(&header_id) {
+            Ok(Some(ph)) => ph,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(handler = "nipopow_header_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
+                return None;
+            }
+        };
+        match super::nipopow::encode_popow_header(&ph) {
+            Ok(dto) => Some(dto),
+            Err(e) => {
+                warn!(handler = "nipopow_header_by_id", header_id = %header_id_hex, error = %e, "popow header encode failed");
+                None
+            }
+        }
+    }
+
+    fn nipopow_header_at_height(
+        &self,
+        height: u32,
+    ) -> Option<ergo_rest_json::types::ScalaPopowHeader> {
+        let ph = match self.store_reader.popow_header_at_height(height) {
+            Ok(Some(ph)) => ph,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!(handler = "nipopow_header_at_height", height, error = %e, "scala-compat handler failed");
+                return None;
+            }
+        };
+        match super::nipopow::encode_popow_header(&ph) {
+            Ok(dto) => Some(dto),
+            Err(e) => {
+                warn!(handler = "nipopow_header_at_height", height, error = %e, "popow header encode failed");
+                None
+            }
+        }
+    }
+
+    fn nipopow_proof(
+        &self,
+        m: u32,
+        k: u32,
+        header_id_hex: Option<&str>,
+    ) -> Result<ergo_rest_json::types::ScalaNipopowProof, String> {
+        // Handler pre-validates hex; belt-and-braces here because the
+        // trait is also reachable from tests/other bridges.
+        let header_id_opt = match header_id_hex {
+            Some(hex_str) => Some(
+                parse_header_id(hex_str).ok_or_else(|| "Wrong modifierId format".to_string())?,
+            ),
+            None => None,
+        };
+        // One consistent meta read supplies BOTH the best-header height
+        // and the availability mode — mixing the snapshot's height with
+        // the store's mode could tear across a bootstrap transition.
+        let meta = self
+            .store_reader
+            .chain_state_meta()
+            .map_err(|e| format!("chain state unavailable: {e}"))?
+            .ok_or_else(|| "chain state unavailable: store is empty".to_string())?;
+        let is_dense = !matches!(
+            meta.header_availability,
+            ergo_state::chain::HeaderAvailability::PoPowSparse { .. }
+        );
+        let proof = self
+            .store_reader
+            .prove_nipopow(
+                m,
+                k,
+                header_id_opt,
+                meta.best_header_height,
+                is_dense,
+                &self.difficulty_params,
+            )
+            .map_err(|e| e.to_string())?;
+        super::nipopow::encode_nipopow_proof(&proof).map_err(|e| e.to_string())
     }
 
     fn proof_for_tx(&self, header_id_hex: &str, tx_id_hex: &str) -> Option<ScalaMerkleProof> {

@@ -16,6 +16,33 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- NiPoPoW REST serve surface: `GET /nipopow/popowHeaderById/{id}`,
+  `/nipopow/popowHeaderByHeight/{h}`, `/nipopow/proof/{m}/{k}` and
+  `/nipopow/proof/{m}/{k}/{headerId}`, JSON- and error-parity-pinned
+  against the Scala reference node (live captures + probes).
+
+### Fixed
+
+- NiPoPoW proof construction: interlink batch proofs are now built over
+  the interlinks-only Merkle subtree (Scala contract); previously any
+  proof containing an epoch-boundary block (`h % 1024 == 0`) was
+  invalid to downstream verifiers. Genesis popow headers now embed the
+  8-byte empty batch proof (Scala wire form) instead of zero bytes, and
+  the difficulty-header schedule uses the EIP-37 epoch length
+  unconditionally, matching Scala for proofs anchored below the
+  activation height.
+- `/blocks` JSON: Autolykos v1 `d` values decoded as unsigned (high-bit
+  magnitudes previously rendered negative) and emitted as
+  arbitrary-precision JSON numbers matching Scala, not strings.
+- NiPoPoW P2P serve guard: `GetNipopowProof` requests with non-default
+  `(m, k)` or an anchor id are now warned and dropped (Scala parity)
+  instead of being answered with the cached default proof.
+- `pack_interlinks` and `isBetterThan` now match Scala's exact
+  semantics on adversarial interlink vectors and mixed-`m` proof
+  comparisons respectively.
+
 ## [0.5.0] - 2026-07-01
 
 A self-repair release for the derived secondary index, a native wallet

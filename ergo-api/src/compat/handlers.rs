@@ -75,6 +75,103 @@ pub async fn proof_for_tx_handler(
     }
 }
 
+/// 64 hex chars, either case — mirrors Scala's `modifierId` path
+/// directive (Base16-decodable, 32 bytes). Failing this check maps to
+/// Scala's `Wrong modifierId format` 400 on the `/nipopow/*` routes.
+fn well_formed_modifier_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `GET /nipopow/popowHeaderById/{headerId}` (`NipopowApiRoute.scala:55-57`).
+/// Oracle-probed: malformed id → 400 "Wrong modifierId format"; unknown
+/// id → 404 with `detail: null`.
+pub async fn nipopow_header_by_id_handler(
+    State(q): State<Arc<dyn NodeChainQuery>>,
+    Path(header_id): Path<String>,
+) -> Response {
+    if !well_formed_modifier_id(&header_id) {
+        return bad_request("Wrong modifierId format");
+    }
+    match q.nipopow_header_by_id(&header_id) {
+        Some(ph) => Json(ph).into_response(),
+        None => not_found_null(),
+    }
+}
+
+/// `GET /nipopow/popowHeaderByHeight/{height}` (`NipopowApiRoute.scala:62-64`).
+/// Height 0 and past-tip heights 404 with `detail: null` (oracle-probed).
+/// Non-numeric / negative heights are rejected by axum's path parser
+/// with a plain 400 — same accepted deviation as `/blocks/at/{height}`.
+pub async fn nipopow_header_by_height_handler(
+    State(q): State<Arc<dyn NodeChainQuery>>,
+    Path(height): Path<u32>,
+) -> Response {
+    match q.nipopow_header_at_height(height) {
+        Some(ph) => Json(ph).into_response(),
+        None => not_found_null(),
+    }
+}
+
+/// `GET /nipopow/proof/{m}/{k}` (`NipopowApiRoute.scala:69-76`).
+pub async fn nipopow_proof_handler(
+    State(q): State<Arc<dyn NodeChainQuery>>,
+    Path((m, k)): Path<(u32, u32)>,
+) -> Response {
+    nipopow_proof_response(q, m, k, None)
+}
+
+/// `GET /nipopow/proof/{m}/{k}/{headerId}` (`NipopowApiRoute.scala:81-90`).
+pub async fn nipopow_proof_at_handler(
+    State(q): State<Arc<dyn NodeChainQuery>>,
+    Path((m, k, header_id)): Path<(u32, u32, String)>,
+) -> Response {
+    if !well_formed_modifier_id(&header_id) {
+        return bad_request("Wrong modifierId format");
+    }
+    nipopow_proof_response(q, m, k, Some(&header_id))
+}
+
+// Defensive upper bound on `/nipopow/proof/{m}/{k}` params — same pattern
+// as MAX_HEADERS on /blocks/headerIds (banner-flagged in openapi). Scala
+// serves this route with NO cap, and `m` is the cost amplifier: measured
+// against :9053, each unit of `m` adds ~50 KB and ~12 ms (m=100 -> 7 MB /
+// 1.7 s; m=1000 -> 51 MB / 12 s), while `k` adds ~1.3 KB/unit. Real NiPoPoW
+// params are m~6-30, k~10-50, so these leave an order-of-magnitude margin
+// and reject only amplification. Diverges from Scala (which 200s) above
+// the cap — an accepted defensive deviation on a non-consensus serve path.
+const MAX_NIPOPOW_M: u32 = 100;
+const MAX_NIPOPOW_K: u32 = 100;
+
+/// Shared `/nipopow/proof/*` tail. Scala funnels every prover failure
+/// into 400 (`onComplete Failure → ApiError.BadRequest`); status codes
+/// are oracle-matched, but failure `detail` strings are JVM internals
+/// ("None.get", "2") — ours carry meaningful messages instead, an
+/// accepted deviation. The `k >= 1` requirement message is matched
+/// verbatim ("requirement failed: 0 < 1", oracle-probed).
+fn nipopow_proof_response(
+    q: Arc<dyn NodeChainQuery>,
+    m: u32,
+    k: u32,
+    header_id_hex: Option<&str>,
+) -> Response {
+    if k < 1 {
+        return bad_request("requirement failed: 0 < 1");
+    }
+    if m < 1 {
+        // Scala fails later inside bestArg with a bare "2"; same status.
+        return bad_request("requirement failed: m must be >= 1");
+    }
+    if m > MAX_NIPOPOW_M || k > MAX_NIPOPOW_K {
+        return bad_request(&format!(
+            "nipopow proof params exceed cap: m={m} (max {MAX_NIPOPOW_M}), k={k} (max {MAX_NIPOPOW_K})"
+        ));
+    }
+    match q.nipopow_proof(m, k, header_id_hex) {
+        Ok(proof) => Json(proof).into_response(),
+        Err(detail) => bad_request(&detail),
+    }
+}
+
 /// `GET /blocks/modifier/{modifierId}` — generic-by-id lookup. Returns
 /// 404 for unknown ids (V3 verification: `ApiResponse.scala:30-31`).
 /// Body shape on hit is the variant's bare object — see `ScalaBlockSection`.
@@ -217,6 +314,23 @@ fn not_found(detail: &str) -> Response {
             "error": 404,
             "reason": "not-found",
             "detail": detail
+        })),
+    )
+        .into_response()
+}
+
+/// 404 with `detail: null` — the exact envelope the Scala node emits on
+/// the `/nipopow/*` routes (oracle-probed 2026-07-05: unknown id and
+/// out-of-range height both return `{"error":404,"reason":"not-found",
+/// "detail":null}`), unlike the `/blocks/*` routes where we surface a
+/// brief message string.
+fn not_found_null() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": 404,
+            "reason": "not-found",
+            "detail": serde_json::Value::Null
         })),
     )
         .into_response()

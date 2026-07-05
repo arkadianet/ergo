@@ -24,7 +24,7 @@ use crate::chain::{ChainState, ChainStateMeta, HeaderAvailability, HeaderMeta, H
 /// because `prove_with_db` needs them for continuous-mode proof
 /// construction; lives at module scope so it doesn't bloat the
 /// `StateStore` impl block.
-fn difficulty_headers_needed(
+pub(crate) fn difficulty_headers_needed(
     suffix_head_height: u32,
     epoch_length: u32,
     use_last_epochs: u32,
@@ -691,6 +691,14 @@ pub struct StateStore {
     /// `block_proc::process_block`, and the soft-fork tally
     /// thresholds drive `compute_next_params`.
     voting_settings: ergo_chain_spec::VotingParams,
+    /// Difficulty schedule for this network. Consumed by the NiPoPoW
+    /// prover (`prove_with_db`) for continuous-mode difficulty-header
+    /// selection and epoch-length resolution. Defaults to mainnet at
+    /// `open`; boot overrides via [`Self::set_difficulty_params`] from
+    /// `chain_spec.difficulty` (same wiring shape as
+    /// `set_blocks_to_keep`), so a testnet store proves with testnet
+    /// epochs instead of silently assuming mainnet.
+    difficulty_params: ergo_chain_spec::DifficultyParams,
     /// Mode 3 retention window: `-1` = archive (no pruning, default),
     /// `0` = canonical Mode 6 headers-only (never prunes blocks
     /// because no full-block apply happens), `> 0` = suffix-window
@@ -1728,6 +1736,18 @@ impl StateStore {
     /// reorg-resolver can never need a pruned block.
     pub fn set_blocks_to_keep(&mut self, blocks_to_keep: i32) {
         self.blocks_to_keep = blocks_to_keep;
+    }
+
+    /// Override the difficulty schedule captured at `open` (mainnet
+    /// default). Boot calls this with `chain_spec.difficulty` BEFORE
+    /// any prove path runs, mirroring `set_blocks_to_keep`.
+    pub fn set_difficulty_params(&mut self, params: ergo_chain_spec::DifficultyParams) {
+        self.difficulty_params = params;
+    }
+
+    /// The difficulty schedule the NiPoPoW prover uses.
+    pub fn difficulty_params(&self) -> &ergo_chain_spec::DifficultyParams {
+        &self.difficulty_params
     }
 
     /// Read the current `blocks_to_keep` setting. Returns `-1`

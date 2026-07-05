@@ -56,6 +56,7 @@ tracker; this section is the distilled picture.
 | Reorg / storage integrity | Delta-based rollback; undo-log persisted atomically alongside AVL mutations, chain index, and state-meta in a single redb write transaction per applied block; reorg abort rebuilds in-memory state from committed DB state. |
 | Crypto primitives | Blake2b-256 (consensus digest), SHA-256 (wire checksum), Merkle membership and batch proofs, secp256k1 group operations — all via established crates (`k256`, `blake2`, `sha2`, `gf2_192`), no rolled-own primitives. |
 | REST surface | A Scala-compatible REST surface (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/script/*`, `/emission/*`, the extra-index `/blockchain/*` (indexer-gated), `/mining/*` (mining-gated), `/wallet/*`) alongside a node-native `/api/v1/*` operator API. The native surface: unconditionally mounted `info`, `identity`, `host`, `status`, `votes` (GET), `tip`, `sync`, `peers`, `mempool/summary`, `mempool/transactions[/:tx_id]`, `blocks/recent`, `events`, `health`; submit-gated `mempool/submit` and `mempool/check`; chain-reader-gated `difficulty/history`, `votes/history`, `mining/minerStats`; indexer-gated `indexer/status` and `transactions/:tx_id/detail`; admin-gated `node/shutdown` and `votes` (POST); and the api-key-gated native wallet sub-surface (`wallet/status`, `wallet/balance`, `wallet/addresses`, `wallet/boxes[/:box_id]`, `wallet/transactions[/:tx_id]`, `wallet/rewards/retrieve`, and key-lifecycle routes). JSON DTOs and canonicalizing decoders are anchored by a byte-parity oracle against the Scala JSON shapes. |
+| NiPoPoW | Prover/verifier, P2P exchange + bootstrap, and the four `/nipopow/*` REST routes. Byte/JSON parity pinned against genuine Scala-serializer fixtures, a live mainnet differential vs the reference node (all endpoints, genesis/epoch-boundary/v1-era heights, anchored proofs, error surfaces), scrypto batch-Merkle shape vectors, and a 132-header `maxLevelOf` oracle sweep. One documented deviation: the Scala node reports stale `header.size` metadata (+1) for some historical headers, contradicting its own served bytes; this build serves the true byte length. |
 
 **Milestone.** Mainnet sync to tip was reached on 2026-04-26 at height
 1,771,976, with state-digest parity at every height. Continued sync against
@@ -159,10 +160,6 @@ Be aware of these before depending on the node.
   three testnet addresses (its conf retains the reemission settings even
   though activation is unreachable); this build returns 404 there pending
   a testnet oracle capture.
-- **NiPoPoW prover/verifier** — the algorithmic core, the serve-side walk,
-  and sub-chain / score checks have landed; full Scala-oracle byte parity
-  and adversarial-proof edge cases are still open.
-
 ### Out of scope by design
 
 These are deliberate non-goals, not gaps.

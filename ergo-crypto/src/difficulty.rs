@@ -420,6 +420,7 @@ mod tests {
             }),
             initial_difficulty: vec![0x01],
             desired_interval_ms: 120_000,
+            use_last_epochs: 8,
         };
         assert!(
             is_recalculation_height(8, &cfg),
@@ -538,5 +539,22 @@ mod tests {
             Err(DifficultyError::MissingEpochHeaders) => {}
             other => panic!("expected MissingEpochHeaders, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod use_last_epochs_agreement {
+    use super::*;
+
+    /// The interpolator's module constant and the chain-spec field must
+    /// agree — the popow paths consume `DifficultyParams.use_last_epochs`
+    /// while the consensus difficulty math (this module) keeps its
+    /// private const because no supported network varies it. If a chain
+    /// ever ships a different value, this test forces the interpolator
+    /// to grow config plumbing rather than silently diverging.
+    #[test]
+    fn chain_spec_field_matches_interpolator_constant() {
+        assert_eq!(DifficultyParams::mainnet().use_last_epochs, USE_LAST_EPOCHS);
+        assert_eq!(DifficultyParams::testnet().use_last_epochs, USE_LAST_EPOCHS);
     }
 }

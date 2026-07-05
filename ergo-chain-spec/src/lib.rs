@@ -147,6 +147,16 @@ pub struct DifficultyParams {
     /// Target block interval, milliseconds. Mainnet 120_000 (2 min);
     /// testnet 45_000. Used inside the difficulty interpolator.
     pub desired_interval_ms: u64,
+    /// Number of past epochs the difficulty interpolator regresses
+    /// over — Scala `chain.useLastEpochs` (`application.conf:225`,
+    /// value 8; neither mainnet.conf nor testnet.conf overrides it).
+    /// Also sets the NiPoPoW continuous-proof difficulty-header
+    /// window (`NipopowProof.hasValidConnections` looks back
+    /// `useLastEpochs + 1` headers). The consensus difficulty
+    /// interpolator in `ergo-crypto` keeps its own module constant
+    /// (both must agree — pinned by a test there); this field is
+    /// what the popow paths consume.
+    pub use_last_epochs: u32,
 }
 
 /// Network-specific v1 → v2 hard-fork descriptor. Carried as
@@ -184,6 +194,7 @@ impl DifficultyParams {
             }),
             initial_difficulty: vec![0x01, 0x17, 0x65, 0x00, 0x00, 0x00],
             desired_interval_ms: 120_000,
+            use_last_epochs: 8,
         }
     }
 
@@ -201,6 +212,7 @@ impl DifficultyParams {
             v2_activation: None,
             initial_difficulty: vec![0x01],
             desired_interval_ms: 45_000,
+            use_last_epochs: 8,
         }
     }
 

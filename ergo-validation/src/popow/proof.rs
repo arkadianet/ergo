@@ -327,7 +327,13 @@ impl NipopowProofExt for NipopowProof {
                         .filter(|h| h.height > anchor_height)
                         .cloned()
                         .collect();
-                    best_arg(&this_div, self.m) > best_arg(&that_div, that.m)
+                    // Scala evaluates BOTH sides with `this.m`
+                    // (`bestArg(...)(m)` — the receiver's field; `that.m`
+                    // is never consulted, NipopowProof.scala:58). Using
+                    // the challenger's own m here was a faithful-port
+                    // slip — inert for P2P (both sides always m=6) but
+                    // wrong for mixed-m comparisons.
+                    best_arg(&this_div, self.m) > best_arg(&that_div, self.m)
                 }
                 None => false,
             }
@@ -398,14 +404,12 @@ pub fn check_popow_header_interlinks_proof(p: &ergo_ser::popow_header::PoPowHead
     verify_batch_merkle_proof(&proof, &root)
 }
 
-fn use_last_epochs_for_config(_chain_config: &DifficultyParams) -> u32 {
-    // `useLastEpochs` is a chain-settings constant (mainnet = 8,
-    // testnet = 8 by default). DifficultyParams in ergo-crypto does
-    // not currently expose this field; the difficulty math uses a
-    // module-private constant. Reading the constant here would create
-    // a dependency cycle. We mirror the mainnet value; when a chain
-    // ships with a different value, wire this through `DifficultyParams`.
-    8
+fn use_last_epochs_for_config(chain_config: &DifficultyParams) -> u32 {
+    // Scala `chainSettings.useLastEpochs` (`NipopowProof.scala:129`
+    // uses `useLastEpochs + 1` as the connection look-back window).
+    // Wired through `DifficultyParams` so a custom chain with a
+    // non-default value validates with the right window.
+    chain_config.use_last_epochs
 }
 
 fn epoch_length_for_height(height: u32, chain_config: &DifficultyParams) -> u32 {

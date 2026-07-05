@@ -32,17 +32,28 @@ pub const INTERLINKS_VECTOR_PREFIX: u8 = 0x01;
 /// * value = `[dup_count as u8, ...modifier_id_bytes]` (33 bytes)
 ///
 /// `idx` is the index in the original interlinks vector at which the
-/// unique entry was first observed; `dup_count` is the number of
-/// consecutive occurrences of the same id (interlinks vectors have
-/// runs of repeated ids — Scala packs them as a single key-value
-/// pair with the run length).
+/// entry was observed; `dup_count` is Scala's count of ALL occurrences
+/// of that id in the whole vector (== the run length for well-formed
+/// vectors, where each id forms one consecutive run; deliberately
+/// lossy on adversarial vectors — see the inline note + adversarial
+/// parity tests).
 pub fn pack_interlinks(links: &[ModifierId]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = Vec::new();
     let mut idx: usize = 0;
     while idx < links.len() {
         let head = links[idx];
-        // Count consecutive duplicates from idx onwards.
-        let dup_qty = links[idx..].iter().take_while(|l| **l == head).count();
+        // Scala counts ALL occurrences of `head` anywhere in the vector
+        // (`links.count(_ == headLink)`, NipopowAlgos.scala:177) and then
+        // drops that many entries POSITIONALLY from the remainder — for a
+        // well-formed interlinks vector (each id in exactly one
+        // consecutive run) this equals the run length, but for an
+        // adversarial vector like [A,B,A] Scala emits two qty=2 entries
+        // and swallows B (oracle-pinned; see the unit tests). The
+        // consume-side `checkInterlinksProof` recomputes this packing on
+        // RECEIVED interlinks, so any divergence here is an
+        // accept/reject divergence against Scala on adversarial popow
+        // headers — parity beats sanity.
+        let dup_qty = links.iter().filter(|l| **l == head).count();
         let key = vec![INTERLINKS_VECTOR_PREFIX, idx as u8];
         let mut value = Vec::with_capacity(1 + 32);
         value.push(dup_qty as u8);
@@ -100,13 +111,16 @@ pub fn kv_to_leaf(key: &[u8], value: &[u8]) -> Vec<u8> {
 }
 
 /// Build a [`PoPowHeader`] from a header, its interlinks vector,
-/// and the FULL set of extension fields (kv pairs).
+/// and the FULL set of extension fields (kv pairs — used only to
+/// check the packed interlinks are really present in this block).
 ///
-/// The interlinks_proof is a `BatchMerkleProof` proving that the
-/// packed interlinks key-value entries sit at specific positions
-/// in the merkle tree built from all extension fields. The
-/// verifier (`check_popow_header_interlinks_proof`) reconstructs
-/// the tree and validates against the proof.
+/// The interlinks_proof is a `BatchMerkleProof` over the
+/// INTERLINKS-ONLY subtree (Scala `interlinksMerkleTree`); the
+/// verifier (`check_popow_header_interlinks_proof`) recomputes that
+/// same tree from the interlinks vector and validates the proof
+/// against its root — NOT against the full extension root. See the
+/// inline note below for the epoch-boundary bug this distinction
+/// caught.
 ///
 /// Returns `Err` if the interlinks vector cannot be located in
 /// `extension_fields` (caller bug — the prover must have read both
@@ -124,47 +138,68 @@ pub fn build_popow_header(
         serialize_batch_merkle_proof, BatchMerkleProof, ProofEntry, Side,
     };
 
-    // Empty interlinks → no proof. Vacuous case
-    // (PoPowHeader.scala:58-60).
+    // Empty interlinks (genesis) → the EMPTY BatchMerkleProof, which
+    // Scala serializes as 8 zero bytes (two u32 counts), NOT as zero
+    // bytes: `proofForInterlinkVector` returns
+    // `BatchMerkleProof(Seq.empty, Seq.empty)` (NipopowAlgos.scala:
+    // 218-219) and `PoPowHeaderSerializer` embeds its serialized form.
+    // Emitting 0 bytes here made every proof containing genesis
+    // wire-divergent from Scala (their parser rejects a 0-byte proof
+    // blob), caught by the T4 live differential at h=1.
     if interlinks.is_empty() {
+        // Only genesis legitimately carries no interlinks. A non-genesis
+        // header with an empty vector is corrupt or forged — the empty
+        // BatchMerkleProof verifies vacuously, so without this guard the
+        // malformed PoPowHeader would be served as valid. `is_genesis`
+        // (zero parent_id) is the codebase's own genesis predicate.
+        if !is_genesis(&header) {
+            return Err("build_popow_header: empty interlinks vector for a \
+                 non-genesis header"
+                .to_string());
+        }
+        let empty = BatchMerkleProof {
+            indices: Vec::new(),
+            proofs: Vec::new(),
+        };
         return Ok(ergo_ser::popow_header::PoPowHeader {
             header,
             interlinks,
-            interlinks_proof: Vec::new(),
+            interlinks_proof: serialize_batch_merkle_proof(&empty),
         });
     }
 
-    // Pack the interlinks into the same kv pairs we expect in the
-    // extension. Locate each packed entry's index in
-    // `extension_fields` so the merkle proof can be built over the
-    // full tree but prove specifically the interlinks subset.
+    // Pack the interlinks into the extension kv form and require each
+    // packed entry to exist in the block's actual extension (Scala's
+    // `batchProofFor` similarly yields nothing when a key's leaf isn't
+    // found — `ExtensionCandidate.scala:48-54`).
     let packed = pack_interlinks(&interlinks);
-    let mut interlinks_indices: Vec<u32> = Vec::with_capacity(packed.len());
     for (key, value) in &packed {
-        let found = extension_fields
-            .iter()
-            .position(|(k, v)| k == key && v == value);
-        match found {
-            Some(idx) => interlinks_indices.push(idx as u32),
-            None => {
-                return Err(format!(
-                    "interlinks key {} not found in extension_fields — header + extension may be from different blocks",
-                    hex::encode(key)
-                ));
-            }
+        if !extension_fields.iter().any(|(k, v)| k == key && v == value) {
+            return Err(format!(
+                "interlinks key {} not found in extension_fields — header + extension may be from different blocks",
+                hex::encode(key)
+            ));
         }
     }
 
-    // Build the merkle tree over the full extension and emit a
-    // batch proof for the interlinks indices.
-    let leaves: Vec<Vec<u8>> = extension_fields
-        .iter()
-        .map(|(k, v)| kv_to_leaf(k, v))
-        .collect();
+    // Build the proof over the INTERLINKS-ONLY subtree — NOT the full
+    // extension tree. Scala's `ExtensionCandidate.batchProofFor` proves
+    // indices within `interlinksMerkleTree` (the tree over interlink
+    // fields alone, `ExtensionCandidate.scala:48-54`), and the verifier
+    // (`PoPowHeader.checkInterlinksProof`, `PoPowHeader.scala:57-65`)
+    // recomputes exactly `merkleTree(packInterlinks(interlinks))` as
+    // the expected root. The two trees coincide for interlinks-only
+    // extensions (every non-epoch-boundary block), which is how a
+    // full-extension-tree construction here survived until a real
+    // epoch-boundary block (mixed params + interlink fields; found
+    // live at mainnet h=1821696 = 1779*1024) produced proofs Scala's
+    // verifier — and our own — reject.
+    let leaves: Vec<Vec<u8>> = packed.iter().map(|(k, v)| kv_to_leaf(k, v)).collect();
     let leaf_refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
+    let interlinks_indices: Vec<u32> = (0..packed.len() as u32).collect();
     let (idx_with_hashes, raw_proofs) = merkle_proof_by_indices(&leaf_refs, &interlinks_indices)
         .ok_or_else(|| {
-            "merkle_proof_by_indices returned None (likely empty extension)".to_string()
+            "merkle_proof_by_indices returned None (likely empty interlinks)".to_string()
         })?;
 
     let proof_entries: Vec<ProofEntry> = raw_proofs
@@ -923,17 +958,25 @@ mod tests {
         let g = header_from_hex(GENESIS_HEX);
         let p = build_popow_header(g.clone(), vec![], &[]).unwrap();
         assert!(p.interlinks.is_empty());
-        assert!(p.interlinks_proof.is_empty());
+        // Canonical empty-proof wire form = 8 zero bytes (Scala's
+        // serialized empty BatchMerkleProof), NOT 0 bytes — see the
+        // genesis wire-form fix in build_popow_header.
+        assert_eq!(p.interlinks_proof, vec![0u8; 8]);
     }
 
     #[test]
     fn build_popow_header_with_interlinks_produces_verifiable_proof() {
-        // Synthesize a PoPowHeader from a header + interlinks +
-        // extension fields. Verify via the consume-side validator:
-        // pack(interlinks) leaves should appear at known positions
-        // in extension, and the produced batch merkle proof should
-        // verify against the extension's merkle root.
+        // Synthesize a PoPowHeader from a header + interlinks + a
+        // MIXED extension (interlink fields + unrelated fields — the
+        // epoch-boundary shape that exposed the live construction bug
+        // at mainnet h=1821696). The Scala contract
+        // (`PoPowHeader.checkInterlinksProof`, PoPowHeader.scala:57-65)
+        // verifies the proof against the INTERLINKS-ONLY tree root
+        // recomputed from the interlinks vector — NOT against the full
+        // extension root. This test previously pinned the
+        // full-extension-root behavior, i.e. it pinned the bug.
         use super::super::merkle::verify_batch_merkle_proof;
+        use super::super::proof::check_popow_header_interlinks_proof;
         use ergo_crypto::merkle::merkle_tree_root;
         use ergo_ser::batch_merkle_proof::deserialize_batch_merkle_proof;
 
@@ -942,29 +985,89 @@ mod tests {
             ModifierId::from_bytes([0x11; 32]),
             ModifierId::from_bytes([0x22; 32]),
         ];
-        // The extension contains the packed interlinks PLUS some
-        // unrelated fields (system parameters, voting tallies, etc.
-        // in real blocks). Simulate by adding two "padding" fields.
         let packed_interlinks = pack_interlinks(&interlinks);
-        let mut extension_fields: Vec<(Vec<u8>, Vec<u8>)> = packed_interlinks.clone();
-        extension_fields.push((vec![0x02, 0x00], vec![0xAB, 0xCD])); // some other field
-        extension_fields.push((vec![0x02, 0x01], vec![0xEF])); // another other field
+        // Unrelated fields FIRST — mirrors real epoch-boundary blocks,
+        // where protocol-parameter fields (key prefix 0x00) precede the
+        // interlink fields, shifting their full-tree positions.
+        let mut extension_fields: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (vec![0x00, 0x01], vec![0xAB, 0xCD]),
+            (vec![0x00, 0x04], vec![0xEF]),
+        ];
+        extension_fields.extend(packed_interlinks.clone());
 
         let popow = build_popow_header(h2.clone(), interlinks.clone(), &extension_fields).unwrap();
         assert!(!popow.interlinks_proof.is_empty());
 
-        // Round-trip: parse the produced bytes back and verify
-        // against the extension's merkle root.
+        // The consume-side validator (Scala parity: interlinks-only
+        // tree) must accept the constructed proof.
+        assert!(
+            check_popow_header_interlinks_proof(&popow),
+            "constructed proof must verify against the interlinks-only tree root"
+        );
+
+        // And explicitly: the proof reduces to the interlinks-only
+        // root, NOT the full-extension root (they differ here because
+        // of the non-interlink fields).
         let bmp = deserialize_batch_merkle_proof(&popow.interlinks_proof).unwrap();
-        let leaves: Vec<Vec<u8>> = extension_fields
+        let interlink_leaves: Vec<Vec<u8>> = packed_interlinks
             .iter()
             .map(|(k, v)| kv_to_leaf(k, v))
             .collect();
-        let leaf_refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
-        let root = merkle_tree_root(&leaf_refs);
+        let interlink_refs: Vec<&[u8]> = interlink_leaves.iter().map(|l| l.as_slice()).collect();
+        assert!(verify_batch_merkle_proof(
+            &bmp,
+            &merkle_tree_root(&interlink_refs)
+        ));
+        let full_leaves: Vec<Vec<u8>> = extension_fields
+            .iter()
+            .map(|(k, v)| kv_to_leaf(k, v))
+            .collect();
+        let full_refs: Vec<&[u8]> = full_leaves.iter().map(|l| l.as_slice()).collect();
         assert!(
-            verify_batch_merkle_proof(&bmp, &root),
-            "constructed batch merkle proof must verify against extension root"
+            !verify_batch_merkle_proof(&bmp, &merkle_tree_root(&full_refs)),
+            "full-extension root must NOT verify — that was the old buggy contract"
         );
+    }
+}
+
+#[cfg(test)]
+mod pack_interlinks_scala_adversarial_parity {
+    use super::*;
+
+    fn mid(b: u8) -> ModifierId {
+        ModifierId::from_bytes([b; 32])
+    }
+
+    /// Oracle-pinned (scala-cli, ergo-core 6.0.2 `NipopowAlgos.packInterlinks`,
+    /// 2026-07-05): adversarial NON-consecutive duplicate vectors. Scala's
+    /// count-all + positional-drop semantics are lossy — `[A,B,A]` packs to
+    /// two qty=2 A-entries and B is swallowed. The verifier recomputes this
+    /// packing on received interlinks, so byte-parity here decides
+    /// accept/reject parity on adversarial popow headers.
+    #[test]
+    fn adversarial_vectors_match_scala_exactly() {
+        let a = mid(0xAA);
+        let b = mid(0xBB);
+        // [A,B,A] => (idx0, qty2, A), (idx2, qty2, A)
+        let p = pack_interlinks(&[a, b, a]);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].0, vec![INTERLINKS_VECTOR_PREFIX, 0]);
+        assert_eq!(p[0].1[0], 2);
+        assert_eq!(&p[0].1[1..], a.as_bytes());
+        assert_eq!(p[1].0, vec![INTERLINKS_VECTOR_PREFIX, 2]);
+        assert_eq!(p[1].1[0], 2);
+        assert_eq!(&p[1].1[1..], a.as_bytes());
+        // [A,A,B,A] => (idx0, qty3, A), (idx3, qty3, A)
+        let p = pack_interlinks(&[a, a, b, a]);
+        assert_eq!(p.len(), 2);
+        assert_eq!((p[0].0[1], p[0].1[0]), (0, 3));
+        assert_eq!((p[1].0[1], p[1].1[0]), (3, 3));
+        assert_eq!(&p[1].1[1..], a.as_bytes());
+        // [A,A,B] (well-formed) => (idx0, qty2, A), (idx2, qty1, B)
+        let p = pack_interlinks(&[a, a, b]);
+        assert_eq!(p.len(), 2);
+        assert_eq!((p[0].0[1], p[0].1[0]), (0, 2));
+        assert_eq!((p[1].0[1], p[1].1[0]), (2, 1));
+        assert_eq!(&p[1].1[1..], b.as_bytes());
     }
 }

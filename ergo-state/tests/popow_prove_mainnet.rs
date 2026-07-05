@@ -161,3 +161,61 @@ fn prove_with_db_against_live_mainnet_archive() {
 
     eprintln!("[mainnet] PASS: prove_with_db produces a valid Scala-parity proof");
 }
+
+/// The REST serve path (`ChainStoreReader::prove_nipopow`) is a second
+/// DB-backed implementation of the same interlinks walk as
+/// `StateStore::prove_with_db` (it exists because REST handlers hold
+/// only the lock-free reader). Two implementations of one algorithm
+/// can drift — this pins them byte-identical on a real mainnet chain,
+/// the same equivalence discipline as Scala's `PoPowAlgosWithDBSpec`
+/// (in-memory prover == DB prover).
+#[test]
+fn reader_prover_matches_store_prover_byte_exact() {
+    let data_dir = match locate_data_dir() {
+        Some(p) => p,
+        None => {
+            eprintln!("[skipped] no mainnet archival data_dir available.");
+            return;
+        }
+    };
+    let db_path = data_dir.join("state.redb");
+    let store = ergo_state::store::StateStore::open(&db_path).expect("open state.redb");
+    let cs = store.chain_state();
+    if !matches!(
+        cs.header_availability,
+        ergo_state::chain::HeaderAvailability::Dense
+    ) || cs.best_header_height < 100
+        || store
+            .popow_header_at_height(1)
+            .expect("index read")
+            .is_none()
+    {
+        eprintln!("[skipped] data_dir can't serve proofs (sparse/short/no-genesis-extension)");
+        return;
+    }
+
+    let params = ergo_chain_spec::DifficultyParams::mainnet();
+    let reader = store.reader_handle();
+
+    for (m, k) in [(6u32, 10u32), (3, 5), (10, 20)] {
+        let via_store = store
+            .prove_with_db(m, k, None)
+            .expect("store prover succeeds");
+        let via_reader = reader
+            .prove_nipopow(m, k, None, cs.best_header_height, true, &params)
+            .expect("reader prover succeeds");
+        let store_bytes =
+            ergo_ser::popow_proof::serialize_nipopow_proof(&via_store).expect("serialize store");
+        let reader_bytes =
+            ergo_ser::popow_proof::serialize_nipopow_proof(&via_reader).expect("serialize reader");
+        assert_eq!(
+            store_bytes, reader_bytes,
+            "prover divergence at (m={m}, k={k}): store and reader walks must be byte-identical"
+        );
+        eprintln!(
+            "[equivalence] (m={m}, k={k}): {} bytes, prefix.len={}",
+            store_bytes.len(),
+            via_store.prefix.len()
+        );
+    }
+}

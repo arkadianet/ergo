@@ -104,9 +104,23 @@ pub(super) fn encode_pow_solutions(
             hex::encode(pk.as_bytes()),
             hex::encode(w.as_bytes()),
             hex::encode(nonce),
-            // V1 d is a big-endian unsigned magnitude; Scala renders the
-            // `BigInt` as a decimal string so JS clients keep precision.
-            serde_json::Value::String(num_bigint::BigInt::from_signed_bytes_be(d).to_string()),
+            // V1 d is a big-endian UNSIGNED magnitude (Scala serializes
+            // it via `BigIntegers.asUnsignedByteArray`, no sign byte) and
+            // Scala's JSON renders it as a bare NUMBER literal (circe
+            // BigInt encoder), not a string. Both halves were wrong here
+            // until the NiPoPoW oracle capture exposed them on real v1
+            // headers: `from_signed_bytes_be` flipped high-bit magnitudes
+            // negative (live repro: h=28662 served d = -652…), and the
+            // string form diverged from Scala's number. Requires
+            // serde_json `arbitrary_precision` (enabled via
+            // ergo-rest-json) — v1 d values are ~2^190.
+            {
+                let dec = num_bigint::BigUint::from_bytes_be(d).to_string();
+                let n: serde_json::Number = dec
+                    .parse()
+                    .expect("decimal digit string always parses as an arbitrary-precision number");
+                serde_json::Value::Number(n)
+            },
         ),
         AutolykosSolution::V2 { pk, nonce } => (
             hex::encode(pk.as_bytes()),
