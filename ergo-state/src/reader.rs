@@ -404,6 +404,11 @@ impl ChainStoreReader {
     ) -> Result<Vec<ergo_ser::popow_header::PoPowHeader>, StateError> {
         let mut acc: Vec<ergo_ser::popow_header::PoPowHeader> = Vec::new();
         let mut current_id = *start_prev_header_id.as_bytes();
+        // Interlinks strictly decrease in height by construction. A walk
+        // that does not is DB corruption (a self-referential or
+        // non-older interlink target) that would otherwise spin this
+        // serve loop forever; fail closed instead.
+        let mut last_height = u32::MAX;
         loop {
             let prev = match self.popow_header_by_id_inner(&current_id)? {
                 PopowByIdLookup::Found(p) => *p,
@@ -421,6 +426,16 @@ impl ChainStoreReader {
                     });
                 }
             };
+            if prev.header.height >= last_height {
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: "collect_level_reader: interlink walk did not \
+                             strictly decrease in height"
+                        .to_string(),
+                });
+            }
+            last_height = prev.header.height;
             if prev.header.height < anchoring_height {
                 break;
             }
@@ -516,6 +531,17 @@ impl ChainStoreReader {
         if k < 1 {
             return Err(StateError::InvalidPrecondition {
                 what: "prove_nipopow: k must be >= 1",
+            });
+        }
+        // `m` is request-controlled on the REST path. The handler guards
+        // `m < 1`, but `prove_nipopow` is a `pub` API: enforce m >= 1 here
+        // too, else `prove_prefix_reader` indexes
+        // `level_headers[level_headers.len() - m as usize]` with m == 0 →
+        // out-of-bounds panic. Interlinks strictly decrease in height, so
+        // a non-positive m can never select a valid anchor.
+        if m < 1 {
+            return Err(StateError::InvalidPrecondition {
+                what: "prove_nipopow: m must be >= 1",
             });
         }
         // `m`/`k` are attacker-controlled on the REST path: checked add,

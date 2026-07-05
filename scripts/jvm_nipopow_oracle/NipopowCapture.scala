@@ -35,6 +35,12 @@ import org.ergoplatform.settings.{ChainSettings, ModifierIdReader, PowSchemeRead
 
 object NipopowCapture extends PowSchemeReaders with ModifierIdReader with SettingsReaders {
   def main(args: Array[String]): Unit = {
+    if (args.length < 3) {
+      Console.err.println(
+        "usage: NipopowCapture <resourcesDir> <proofJson> <outBin>"
+      )
+      sys.exit(1)
+    }
     val resourcesDir = args(0)
     val jsonPath = args(1)
     val outPath = args(2)

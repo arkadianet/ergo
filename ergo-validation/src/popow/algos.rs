@@ -147,6 +147,16 @@ pub fn build_popow_header(
     // wire-divergent from Scala (their parser rejects a 0-byte proof
     // blob), caught by the T4 live differential at h=1.
     if interlinks.is_empty() {
+        // Only genesis legitimately carries no interlinks. A non-genesis
+        // header with an empty vector is corrupt or forged — the empty
+        // BatchMerkleProof verifies vacuously, so without this guard the
+        // malformed PoPowHeader would be served as valid. `is_genesis`
+        // (zero parent_id) is the codebase's own genesis predicate.
+        if !is_genesis(&header) {
+            return Err("build_popow_header: empty interlinks vector for a \
+                 non-genesis header"
+                .to_string());
+        }
         let empty = BatchMerkleProof {
             indices: Vec::new(),
             proofs: Vec::new(),
