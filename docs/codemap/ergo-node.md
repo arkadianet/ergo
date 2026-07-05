@@ -11,14 +11,14 @@ backed by a lock-free snapshot.
 ergo-crypto, ergo-validation, ergo-wallet, ergo-state, ergo-p2p, ergo-sync,
 ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 **Depended on by:** (see codemap index — top of the stack; nothing depends on it)
-**Approx LOC:** ~28,100 (src only, excluding tests)
+**Approx LOC:** ~33,000 (src only, excluding tests)
 
 ## Start here
-- `node::boot::run_inner` (`src/node/boot.rs:153`) — the whole bring-up
+- `node::boot::run_inner` (`src/node/boot.rs:185`) — the whole bring-up
   sequence: store/genesis/AVL, handshake + peer manager, sync executor +
   coordinator, indexer, wallet boot, API bind, mining wire-up, action-loop
   spawn. Returns the live `RunHandle`. `run` (`:65`) wraps it with signals.
-- `node::action_loop::action_loop` (`src/node/action_loop.rs:37`) — the
+- `node::action_loop::action_loop` (`src/node/action_loop.rs:41`) — the
   single-writer event loop: four timers (dial/sync/mempool/memory) + inbound
   event coalescing + API submit drain + mining dispatch + clean shutdown.
 - `node::state::NodeState` (`src/node/state.rs:73`) — the runtime god-struct
@@ -46,6 +46,13 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   heartbeat, snapshot publish; drives popow/utxo bootstrap state machines.
 - `src/node/events.rs` — peer-event dispatcher; coalesces header-modifier
   batches; handles `LocalFullBlock` (mined-block apply pipeline).
+- `src/node/event_feed.rs` — operator event-feed ring: bounded FIFO of
+  `FeedEvent` entries (block applied, sync-state transitions, peer-count
+  changes, indexer status) derived by diffing successive snapshot
+  observations; served lock-free via `GET /api/v1/events`.
+- `src/node/first_deliverer.rs` — bounded `header_id → FirstDeliverer`
+  ring; records the first peer to deliver each validated header for miner
+  attribution (served via mining UI and `GET /api/v1/mining/minerStats`).
 - `src/node/messaging.rs` — inbound per-frame `message::CODE_*` dispatcher
   (throttle → deserialize → coordinator/executor/mempool routing).
 - `src/node/admission.rs` — peer + API tx admission through `Mempool::process`;
@@ -66,7 +73,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `src/node/tip_context.rs` / `sync_helpers.rs` / `util.rs` / `memory_sampler.rs`
   — admission tip context, anchor sync-info helpers, misc, mem sampling.
 - `src/api_bridge.rs` (+ `scala_compat.rs`, `block_reassembly.rs`, `compat.rs`,
-  `error.rs`) — implements `ergo-api`'s `NodeReadState`/`NodeSubmit`/
+  `error.rs`, `emission.rs`) — implements `ergo-api`'s `NodeReadState`/`NodeSubmit`/
   `MempoolView`/`NodeAdmin` against the snapshot + submission channels; hosts
   the load-bearing Scala-vs-Rust JSON byte-parity oracle tests.
 - `src/mining_bridge.rs` — `NodeMining` impl: `MiningRequest` channel bridge,
@@ -90,25 +97,25 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `NodeState` (struct) — action-loop god-struct (store, sync, peers, mempool,
   snapshot, wallet hook, bootstrap state machines) — `src/node/state.rs:73`
 - `run` / `run_inner` (async fn) — production entry / handle-returning entry —
-  `src/node/boot.rs:65` / `:153`
-- `action_loop` (async fn) — the single-writer select loop — `src/node/action_loop.rs:37`
+  `src/node/boot.rs:65` / `:185`
+- `action_loop` (async fn) — the single-writer select loop — `src/node/action_loop.rs:41`
 - `NodeSnapshot` (struct) + `SnapshotPublisher` (struct) + `SnapshotHandle`
-  (type alias) — per-tick read projection — `src/snapshot.rs:44` / `:252` / `:248`
+  (type alias) — per-tick read projection — `src/snapshot.rs:44` / `:280` / `:276`
 - `SnapshotReadState` / `SnapshotMempoolView` / `ShutdownAdmin` / `SubmitBridge`
-  — the `ergo-api` trait impls + submission channel — `src/api_bridge.rs:55/301/116/390`
+  — the `ergo-api` trait impls + submission channel — `src/api_bridge.rs:58/469/125/558`
 - `MiningRequest` (enum) + `MINING_TIMEOUT`/`LONGPOLL_TIMEOUT` — mining bridge —
   `src/mining_bridge.rs:62`
 - `PeerEvent` (enum) — peer-task → action-loop messages incl. `LocalFullBlock` —
-  `src/peer_loop.rs:20`
+  `src/peer_loop.rs:21`
 - `MempoolNotifier` (struct) + `DiffSource` (trait) + `PollOutcome` (enum) —
   `src/notifier.rs:60/24/39`
 - `WalletCommand` (enum) + `NodeWalletAdmin` (struct) + `run_wallet_writer`
-  (async fn) + `WalletStateHook` (struct) — wallet single-writer — `src/node/wallet_bridge.rs:62/190/778/740`
+  (async fn) + `WalletStateHook` (struct) — wallet single-writer — `src/node/wallet_bridge.rs:75/322/1245/1101`
 - `NodeConfig` / `StateType` (struct/enum) + `NodeConfig::load` — `src/config/resolved.rs` / `src/config/load.rs`
 - `NodeMode` (enum) + `classify_node_mode` / `validate_runtime_mode_support` —
-  mode taxonomy + activation gate — `src/node/identity.rs:98/238/582`
+  mode taxonomy + activation gate — `src/node/identity.rs:100/240/584`
 - `is_canonical_mode_5_combo` / `is_canonical_mode_6_combo` /
-  `mempool_force_off_for_mode` — single-source mode predicates — `src/config/mod.rs:79/51/108`
+  `mempool_force_off_for_mode` — single-source mode predicates — `src/config/mod.rs:80/52/109`
 
 ## Invariants & contracts
 - **Single-writer state.** All `StateStore` mutation and mempool mutation
@@ -120,25 +127,25 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   the undo_log + AVL + chain_index + state_meta atomic commit; `RunHandle::Drop`
   is best-effort only and does NOT guarantee durable close — embedders must
   `shutdown().await` before reopening a `data_dir` (`src/node/handle.rs`,
-  `src/node/action_loop.rs:294`).
+  `src/node/action_loop.rs:325`).
 - **Reorg-detecting mempool reconcile.** `MempoolNotifier` tracks
   `(height, header_id)` not just height, so equal-height reorgs are detected;
   consensus commit touches no channels (`src/notifier.rs`).
 - **Epoch-boundary revalidation.** On a tip change whose active voted params or
   validation settings differ from last-seen, every active mempool tx is demoted
   into the revalidation queue and re-admitted under the new rules
-  (`src/node/action_loop.rs:334`).
+  (`src/node/action_loop.rs:370`).
 - **Anti-DoS recording survives a dropped reply.** A submission's mempool
   admission outcome is recorded even if the API handler already timed out and
-  dropped its oneshot (`src/node/action_loop.rs:180`).
+  dropped its oneshot (`src/node/action_loop.rs:202`).
 - **Mode-support gating is enforced twice.** `NodeConfig::load` (TOML path) and
   `validate_runtime_mode_support` (programmatic-construction backstop) share the
   `is_canonical_mode_*` predicates so the two gates cannot drift; the mining /
   indexer / mempool subsystems force-off on `state_type == Digest`
-  (`src/config/load.rs`, `src/node/identity.rs:582`, `src/config/mod.rs`).
+  (`src/config/load.rs`, `src/node/identity.rs:584`, `src/config/mod.rs`).
 - **PoW verified at the API boundary.** `submit_full_block` verifies the
   Autolykos solution in the axum task so an invalid-PoW block never wakes the
-  action loop (`src/api_bridge.rs:438`).
+  action loop (`src/api_bridge.rs:606`).
 - **Lock-free reads.** The API never blocks the action loop: reads load an
   `Arc<ArcSwap<NodeSnapshot>>` rebuilt once per sync tick; snapshot construction
   is bounded and the recent-blocks tail is cached by full-block tip id

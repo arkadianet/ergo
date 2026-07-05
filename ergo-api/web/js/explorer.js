@@ -21,6 +21,7 @@
 import { api, getJson } from './api-client.js';
 import { makeTable, copyBtn } from './table.js';
 import { erg, num, bytes, dur, truncMiddle } from './format.js';
+import { minerNode, pkToAddress, fetchOwnPk, poolLabel } from './miners.js';
 
 let root = null;
 let body = null;
@@ -442,7 +443,8 @@ async function renderHome(mySeq) {
   // when the home table is already painted to avoid flashing "loading…" over
   // it on banner-driven re-routes.
   if (!homeHost?.isConnected) loading();
-  const recent = await api.recentBlocks(32);
+  // Own-pk probe rides along so the first paint can badge self-mined rows.
+  const [recent] = await Promise.all([api.recentBlocks(32), fetchOwnPk()]);
   if (mySeq !== seq) return;
   body.replaceChildren();
   homeBannerSlot = el('div');
@@ -464,6 +466,13 @@ async function renderHome(mySeq) {
       { key: 'age', label: 'Age', width: 80, align: 'right', render: (b) => dur(Math.max(0, Math.floor((Date.now() - b.ts_unix_ms) / 1000))), sort: (b) => -b.ts_unix_ms },
       { key: 'txs', label: 'Txs', width: 60, align: 'right', sort: (b) => b.txs },
       { key: 'size', label: 'Size', width: 80, align: 'right', render: (b) => bytes(b.size_bytes), sort: (b) => b.size_bytes },
+      {
+        key: 'miner',
+        label: 'Miner',
+        width: 130,
+        render: (b) => minerNode(b.miner_address, b.miner_pk),
+        sort: (b) => poolLabel(b.miner_address) || b.miner_address || '',
+      },
       { key: 'id', label: 'Block ID', render: (b) => hashNode(b.header_id, `block/${b.header_id}`), sort: (b) => b.header_id },
     ],
     { rowKey: (b) => b.header_id, initialSort: { key: 'height', dir: -1 } },
@@ -524,6 +533,24 @@ async function renderBlock(id, mySeq) {
   // difficulty is a decimal string that can exceed 2^53 — show verbatim.
   kvRow(grid, 'difficulty', h.difficulty);
   kvRow(grid, 'votes', h.votes || '—');
+  // Resolved miner identity: pk → P2PK address via the server (cached),
+  // pool label when known, "you" pill on own blocks. Renders the raw pk
+  // as a placeholder and upgrades in place when the lookup lands; a
+  // failed lookup just leaves the pk — same info as the row below.
+  const minerVal = el('span');
+  const minerPk = h.powSolutions?.pk;
+  if (minerPk) {
+    minerVal.textContent = truncMiddle(minerPk, 10, 8);
+    fetchOwnPk().then(() =>
+      pkToAddress(minerPk).then((addr) => {
+        if (mySeq !== seq || !addr) return;
+        minerVal.replaceChildren(minerNode(addr, minerPk, { head: 12, tail: 10 }));
+      }),
+    );
+  } else {
+    minerVal.textContent = '—';
+  }
+  kvRow(grid, 'miner', minerVal);
   kvRow(grid, 'miner pk', h.powSolutions?.pk ? hashNode(h.powSolutions.pk) : '—');
   kvRow(grid, 'state root', h.stateRoot ? hashNode(h.stateRoot) : '—');
   pb.append(grid);

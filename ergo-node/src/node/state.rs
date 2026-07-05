@@ -309,6 +309,10 @@ pub(crate) struct NodeState {
     /// when `best_full_block_id` differs from the cached tip and otherwise
     /// re-publishes the cached `Arc`. `None` before the first publish.
     pub(super) recent_blocks_cache: Option<crate::snapshot::RecentBlocksCache>,
+    /// Address-prefix network byte (mainnet/testnet), used at
+    /// snapshot-assembly time to derive `ApiRecentBlock.miner_address`
+    /// from the header's Autolykos solution pk.
+    pub(super) network: ergo_ser::address::NetworkPrefix,
     /// First-block-deliverer ring: `header_id → (first peer, instant)`.
     /// Records the FIRST peer that delivered each recently-validated
     /// header (its `Modifier` carried the header bytes we accepted), so

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ergo Rust Node — Native API
-  description: 'Rust-native operator API for the Ergo node (`/api/v1/*`). This document describes the production-superset route set: the conditional routes (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching submit / admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
+  description: 'Rust-native operator API for the Ergo node (`/api/v1/*`). This document describes the production-superset route set: the conditional routes (`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching submit / admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
@@ -245,6 +245,27 @@ paths:
                 $ref: '#/components/schemas/ApiMempoolTransaction'
         '404':
           description: No such transaction in the pool
+  /api/v1/mining/minerStats:
+    get:
+      tags:
+      - chain
+      operationId: miner_stats_handler
+      parameters:
+      - name: window
+        in: query
+        description: Most-recent headers to fold, by miner pk. Defaults to 720 (~one day at 120s blocks); clamped to [1, 16384].
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: 'Blocks-per-miner over the recent chain, sorted by count descending, each with the P2PK address derived from the miner pk. Conditional: mounted only when the node is wired with a chain reader.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiMinerStats'
   /api/v1/node/shutdown:
     post:
       tags:
@@ -1610,8 +1631,8 @@ components:
         declared / bind addr). Set at boot from `NodeConfig` + the hardcoded
         `Mode` peer-feature; doesn't change at runtime today.
 
-        `mining` is reserved for the future mining crate — always `false`
-        until candidate generation lands.
+        `mining` mirrors the node's mining configuration (whether the
+        `/mining/*` work-serving routes are wired).
 
         Backs `GET /api/v1/identity`; consumed by the operator dashboard's
         identity strip. Rust-native — Scala's `/info` has no equivalent.
@@ -1926,6 +1947,69 @@ components:
             Active priority-weight function for the running node — one of
             `"cost"`, `"size"`, `"min"`. Clients dividing `priority_weight`
             by 1024 and the matching denominator recover raw fee-per-resource.
+    ApiMinerStat:
+      type: object
+      description: One miner's aggregate over the `minerStats` window.
+      required:
+      - pk
+      - count
+      - last_height
+      properties:
+        address:
+          type:
+          - string
+          - 'null'
+          description: |-
+            P2PK address derived from `pk` with this node's network prefix.
+            Absent only when the stored pk bytes fail address encoding.
+        count:
+          type: integer
+          format: int32
+          description: Blocks this miner produced within the window.
+          minimum: 0
+        last_height:
+          type: integer
+          format: int32
+          description: Height of this miner's most recent block in the window.
+          minimum: 0
+        pk:
+          type: string
+          description: |-
+            Miner public key (33-byte compressed point, hex) from the folded
+            headers' Autolykos solutions.
+    ApiMinerStats:
+      type: object
+      description: |-
+        Response of `GET /api/v1/mining/minerStats` — the network mining
+        landscape over the last `window` headers of the canonical chain.
+      required:
+      - tip_height
+      - window
+      - blocks
+      - miners
+      properties:
+        blocks:
+          type: integer
+          format: int32
+          description: Headers actually scanned — shorter than `window` near genesis.
+          minimum: 0
+        miners:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiMinerStat'
+          description: |-
+            Miners sorted by `count` descending, ties by `last_height`
+            descending.
+        tip_height:
+          type: integer
+          format: int32
+          description: Best-header height at fold time (0 on an empty chain).
+          minimum: 0
+        window:
+          type: integer
+          format: int32
+          description: Requested window after clamping to `[1, 16384]`.
+          minimum: 0
     ApiNativeSubmitError:
       type: object
       description: |-
@@ -2199,6 +2283,22 @@ components:
           type: integer
           format: int32
           minimum: 0
+        miner_address:
+          type:
+          - string
+          - 'null'
+          description: |-
+            P2PK base58 address derived from `miner_pk` with this node's
+            network prefix — the conventional "miner" identity explorers
+            show. `None` only if address encoding failed.
+        miner_pk:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Miner public key from the header's Autolykos solution (33-byte
+            compressed secp256k1 point, hex) — present on both v1 and v2
+            solutions. Identifies who mined the block.
         size_bytes:
           type: integer
           format: int64

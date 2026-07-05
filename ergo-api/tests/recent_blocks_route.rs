@@ -131,6 +131,8 @@ fn block(height: u32) -> ApiRecentBlock {
         txs: height,
         size_bytes: 1000 + height as u64,
         delivered_by: None,
+        miner_pk: Some(format!("02{height:064x}")),
+        miner_address: Some(format!("9addr{height}")),
     }
 }
 
@@ -202,6 +204,31 @@ async fn recent_blocks_respects_n_and_clamps() {
     let (status_abc, abc) = get("/api/v1/blocks/recent?n=abc", vec![block(101), block(100)]).await;
     assert_eq!(status_abc, StatusCode::OK);
     assert_eq!(abc.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn recent_blocks_serializes_miner_fields_and_omits_when_absent() {
+    // Present: both keys appear with the stub's values.
+    let (status, v) = get("/api/v1/blocks/recent?n=1", vec![block(7)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v[0]["miner_pk"], format!("02{:064x}", 7));
+    assert_eq!(v[0]["miner_address"], "9addr7");
+
+    // Absent: a block built without miner facts must OMIT the keys entirely
+    // (old-node / faulted-read compatibility), not serialize null.
+    let mut b = block(9);
+    b.miner_pk = None;
+    b.miner_address = None;
+    let (status, v) = get("/api/v1/blocks/recent?n=1", vec![b]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        v[0].get("miner_pk").is_none(),
+        "miner_pk must be omitted when None"
+    );
+    assert!(
+        v[0].get("miner_address").is_none(),
+        "miner_address must be omitted when None"
+    );
 }
 
 #[tokio::test]

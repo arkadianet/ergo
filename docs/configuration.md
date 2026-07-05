@@ -84,8 +84,9 @@ the fast clean-database boot path.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `known` | array of strings | `[]` | Known peer socket addresses (`host:port`). The CLI flag `--peers a,b,c` replaces this list entirely (it is not merged). The network's seed peers are then appended as fallbacks and deduplicated. Unparseable entries are dropped silently. If the final peer list is empty, the node refuses to start. |
-| `max_connections` | usize | `80` | Total connection cap. Must be at least 1. |
-| `target_outbound` | usize | `60` | Outbound-connection target. Must be at least 1 and no greater than `max_connections`. The inbound cap is `max_connections - target_outbound` (20 at the defaults). |
+| `max_connections` | usize | `384` | Hard ceiling on total concurrent connections (inbound + outbound combined). Must be at least 1. |
+| `target_outbound` | usize | `96` | Outbound-connection target. Must be at least 1 and no greater than `max_connections`. When omitted, the default is clamped down to `max_connections` if that value is smaller, so a config that pins a low `max_connections` is not broken by a binary upgrade that raises the default. An explicit value above `max_connections` is a hard error. |
+| `max_inbound` | usize | `256` | Maximum inbound connections accepted. Decoupled from `target_outbound`: a full outbound set never reduces inbound capacity. `0` = outbound-only. The hard ceiling `max_connections` still applies on top of this budget. |
 | `per_ip_limit` | usize | `1` | Maximum connections per peer IP. Must be at least 1. |
 | `per_subnet_limit` | usize | `3` | Maximum connections per /16 subnet. Must be at least 1. |
 | `bind_addr` | string | none | Inbound TCP listen address. Absent or empty string = outbound-only (no inbound listener). Parsed as a socket address at load; a malformed value is rejected. |
@@ -183,6 +184,7 @@ of `disabled` — whenever the node has no UTXO box state, i.e. under
 | `max_tx_size_bytes` | usize | `98304` (96 KiB) | Maximum single-transaction size. Must be at least 1. |
 | `max_tx_cost` | u64 | `4900000` | Maximum single-transaction cost (matches the Scala mainnet override). Must be at least 1. |
 | `ibd_gate_block_lag` | u32 | `10` | Block-lag threshold that gates mempool admission while the node is still catching up during initial sync. |
+| `rebroadcast_count` | usize | `3` | Number of surviving unconfirmed transactions re-advertised per tip-change recheck (Scala `MempoolAuditor` `rebroadcastCount`). Re-broadcast rotates oldest-`last_checked_at` first. `0` disables re-broadcast. |
 
 ## `[indexer]`
 
@@ -212,6 +214,8 @@ either way.
 | `block_candidate_generation_interval_ms` | u64 | `1000` | Debounce window (ms) for same-parent mempool-refresh rebuilds. When the mempool changes but the tip has not, the node coalesces the burst and regenerates the candidate at most once per window. Lower = fresher candidates but faster churn of the retained template ring. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
 | `candidate_base_cache` | bool | `false` | Caches the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds (enriched refresh, mempool-driven rebuilds) are near-instant. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
+| `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection so any conflicting fee-bearing claim on the same box is excluded. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
+| `max_storage_rent_claims` | u32 | `4096` | Safety ceiling on the number of storage-rent boxes swept into one block's self-claim. The block's cost and size budgets are the real binding limit (typically ~3,700 boxes by cost on mainnet); this cap prevents unbounded iteration. Lower it to leave more room for fee-paying user transactions. Only meaningful when `claim_storage_rent = true`. |
 
 ## `[voting]`
 

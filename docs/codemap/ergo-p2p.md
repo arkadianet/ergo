@@ -4,7 +4,7 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~9,500 total across `src` (~5,300 production; the rest is inline `#[cfg(test)]` modules plus the standalone `src/peer_manager/tests.rs`)
+**Approx LOC:** ~10,100 total across `src` (~5,500 production; the rest is inline `#[cfg(test)]` modules plus the standalone `src/peer_manager/tests.rs`)
 
 ## Start here
 - The crate doc comment + module list in `src/lib.rs:1-51` — the authoritative module map and the layer's charter (sits on `ergo_primitives` + `ergo_ser`, driven by the sync coordinator).
@@ -20,7 +20,7 @@
 - `src/handshake.rs` — `Handshake`/`PeerSpec`/`Version`/`PeerFeature` (Mode/SessionId/LocalAddress/RestApiUrl/Unknown) codecs; `MAX_HANDSHAKE_SIZE`; `HandshakeError`. Reused by `message::serialize_peers`.
 - `src/peer.rs` — per-peer state machine + penalty/scoring model: `PeerInfo`, `PeerScore`, `ConnectionState`, `Penalty`, `SyncVersion`, version floor, byte counters.
 - `src/peer_manager/mod.rs` — `PeerManager`: dial/accept registration, handshake completion + self-connect detection, ban table, peer selection (download/gossip/capability-filtered), `known_addresses` dial pool with backoff, address-book write-through.
-- `src/peer_manager/limits.rs` — `PeerLimits` (max/target-outbound/per-IP/per-/16) + `ConnectError`.
+- `src/peer_manager/limits.rs` — `PeerLimits` (max_connections/target-outbound/max-inbound/per-IP/per-/16) + `ConnectError`.
 - `src/peer_manager/routability.rs` — `is_routable_for_p2p` (RFC1918/loopback/link-local/CGNAT/ULA filter) + `declared_to_socket` IPv4/IPv6 parse.
 - `src/peer_manager/tests.rs` — standalone integration-style test module for the manager.
 - `src/address_book/mod.rs` — `AddressBook`: `peers.redb` persistence of peer rows + per-IP bans, load-time staleness/expiry pruning, `MAX_PEERS` eviction, quick-repair open.
@@ -41,25 +41,25 @@
 - `Handshake` / `PeerSpec` / `DeclaredAddress` (structs) — handshake wire shape; `serialize_peer_spec_to`/`deserialize_peer_spec_from` shared with `Peers` — `src/handshake.rs:394` / `:276` / `:285`
 - `Version` (struct) — 3-byte protocol version with named milestones (`EIP37_FORK`, `NIPOPOW`, `CURRENT` = 6.0.2) and `Ord` — `src/handshake.rs:16`
 - `PeerFeature` (enum) — LocalAddress(2)/SessionId(3)/RestApiUrl(4)/Mode(16)/Unknown; unknown features round-trip verbatim — `src/handshake.rs:74`
-- `PeerInfo` (struct) — per-peer record: state/score/direction/spec/sync_version + shared atomic byte counters — `src/peer.rs:233`
-- `PeerScore` (struct) / `Penalty` (enum) / `PenaltyOutcome` (enum) — time-decaying score, ban escalation, Scala-parity penalty values (NonDelivery 2 / Misbehavior 10 / Spam 25 / Permanent 1e9) — `src/peer.rs:111` / `:76` / `:402`
+- `PeerInfo` (struct) — per-peer record: state/score/direction/spec/sync_version + shared atomic byte counters — `src/peer.rs:253`
+- `PeerScore` (struct) / `Penalty` (enum) / `PenaltyOutcome` (enum) — time-decaying score, ban escalation, Scala-parity penalty values (NonDelivery 2 / Misbehavior 10 / Spam 25 / Permanent 1e9) — `src/peer.rs:131` / `:96` / `:450`
 - `PeerManager` (struct) — connection lifecycle + selection + discovery + ban hub; ~40 public methods — `src/peer_manager/mod.rs:149`
-- `PeerLimits` (struct) / `ConnectError` (enum) — anti-eclipse caps (80/60/1/3 defaults) and dial/accept rejection reasons — `src/peer_manager/limits.rs:17` / `:45`
+- `PeerLimits` (struct) / `ConnectError` (enum) — anti-eclipse caps (384 max_connections / 96 target-outbound / 256 max-inbound / 1 per-IP / 3 per-/16 defaults) and dial/accept rejection reasons — `src/peer_manager/limits.rs:18` / `:58`
 - `is_routable_for_p2p` (fn) / `declared_to_socket` (fn) — dial/gossip routability gate; safe IPv4/IPv6 declared-address parse — `src/peer_manager/routability.rs:26` / `:78`
 - `AddressBook` (struct) — redb peer/ban persistence; `open`/`load_all`/`upsert_handshaked`/`record_ban`/… — `src/address_book/mod.rs:200`
 - `distribute` (fn) / `Bucket` (type) / `BucketConfig` (struct) — pure per-round modifier-ID partitioner across sorted peers — `src/partition.rs:91` / `:41` / `:59`
-- `ThroughputLimiter` (struct) / `LimiterVerdict` (enum) — per-peer rate limiter; `check_and_record` only records on `Ok` — `src/throttle.rs:89` / `:38`
+- `ThroughputLimiter` (struct) / `LimiterVerdict` (enum) — per-peer rate limiter; `check_and_record` only records on `Ok` — `src/throttle.rs:89` / `:39`
 - `AssemblyTracker` (struct) — section-arrival aggregator; `section_received` signals completion exactly once (incomplete→complete transition) — `src/assembly.rs:28`
-- `DeliveryTracker` (struct) / `DeliveryAction` (enum) / `ModifierStatus` (enum) — in-flight request bookkeeping; `on_received` → Accept/Ignore/RejectSpam — `src/delivery.rs:96` / `:55` / `:42`
-- `SyncState` (struct) / `compare_sync_info` (fn) / `PeerChainStatus` (enum) — download-window + per-peer SyncInfo cadence; height-based status classifier — `src/sync.rs:63` / `:328` / `:21`
-- `ModifierTypeId` (enum) / `InvData` / `ModifiersData` / `SnapshotsInfo` / `NipopowProofData` — shared protocol payload types — `src/types.rs:8` / `:52` / `:62` / `:73` / `:81`
+- `DeliveryTracker` (struct) / `DeliveryAction` (enum) / `ModifierStatus` (enum) — in-flight request bookkeeping; `on_received` → Accept/Ignore/RejectSpam — `src/delivery.rs:121` / `:76` / `:63`
+- `SyncState` (struct) / `compare_sync_info` (fn) / `PeerChainStatus` (enum) — download-window + per-peer SyncInfo cadence; height-based status classifier — `src/sync.rs:63` / `:338` / `:21`
+- `ModifierTypeId` (enum) / `InvData` / `ModifiersData` / `SnapshotsInfo` / `NipopowProofData` — shared protocol payload types — `src/types.rs:8` / `:67` / `:77` / `:88` / `:96`
 
 ## Invariants & contracts
 - **Wire-frame format parity.** `magic[4]||code[1]||len[4 BE i32]` is 9 bytes for an empty payload, else `+ checksum[4] || payload`; checksum is the first 4 bytes of `blake2b256(payload)`. Framing is raw big-endian, NOT VLQ. `wire_len` is pinned to the codec by `wire_len_matches_serialize_frame` so byte accounting can't drift (`src/framing.rs`).
 - **Payload codec ↔ Scala parity.** Message payloads use VLQ/zigzag (`ergo_primitives` reader/writer). Size caps, count limits (Inv ≤ 400, SyncInfo V1 ≤ 1001, V2 ≤ 50 headers), and mandatory NiPoPoW `pad_length` truncation-errors mirror the Scala `*Spec.scala` sources; the `MAX_MODIFIER_WITH_RESERVE` accounting in deserialize must match the serializer's per-entry `id+4+len` (regression-pinned in `message.rs` tests).
 - **DoS-bound allocation.** Decoders never pre-reserve from an attacker-controlled VLQ count: `Vec::with_capacity` is bounded by `remaining / MIN_*_ENTRY_BYTES`, and oversized declared frame lengths are rejected at `Connection::read_message` before buffering the payload (`MAX_PAYLOAD_SIZE` 8 MiB).
 - **Peer scoring / ban parity.** Penalty scores and the 500-point ban threshold match Scala `PenaltyType`; `Permanent` bypasses the 2-minute safe interval and routes straight to a (capped 1-year) ban; the peer version floor is EIP-37 (4.0.100) and a below-floor handshake is permanently banned. Score decays 10 points / 10 minutes.
-- **Anti-eclipse connection limits.** Defaults: 80 total, 60 target-outbound, 1 per IP, 3 per /16 subnet. Self-connection is detected via the SessionId feature's `session_id`. Gossip-learned addresses pass the routability filter; operator `Seed` addresses bypass it and survive dial-pool eviction.
+- **Anti-eclipse connection limits.** Defaults: 384 max_connections, 96 target_outbound, 256 max_inbound, 1 per IP, 3 per /16 subnet. Self-connection is detected via the SessionId feature's `session_id`. Gossip-learned addresses pass the routability filter; operator `Seed` addresses bypass it and survive dial-pool eviction.
 - **Persistence isolation + atomicity.** The address book is a separate `peers.redb` (no coupling to the consensus state DB) and can be wiped without touching the chain. Every production write goes through `begin_write_qr` (quick-repair on) so a crash never leaves the DB needing full repair; bans and peers are both persisted (a deliberate divergence from Scala, which holds bans in-memory). Best-effort: write failures are logged, in-memory state stays authoritative.
 - **Delivery / assembly idempotency.** `AssemblyTracker::section_received` returns the header id only on the first incomplete→complete transition; `DeliveryTracker` accepts a section only from the current owner or a registered late-acceptable peer, treats duplicates as Ignore and truly-unsolicited modifiers as RejectSpam, and bounds the received-set at 10,000 entries (FIFO).
 - **Partition determinism.** `distribute` assigns each modifier ID to at most one bucket per call, preserves input ID order within a bucket, emits types in ascending order, rotates the first assignee by `round`, and never panics on empty peers (no modulo-by-zero). Overflow beyond `peers.len() * max_per_bucket` is deferred to the caller's next round, not dropped.

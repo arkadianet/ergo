@@ -55,7 +55,7 @@ tracker; this section is the distilled picture.
 | Validation | Header validation (PoW, difficulty, timestamp, parent linkage, genesis, extension digest, voted-parameter epoch transitions), full-block validation (tx root, AD proofs, extension k/v, per-tx structural and semantic checks, cost-budget enforcement, post-apply state-digest match), transaction validation (signatures, cost accounting, token preservation, data inputs, storage rent), and the voted-parameters / soft-fork voting mechanism. Rejection-parity tests confirm rejects, not just accepts. |
 | Reorg / storage integrity | Delta-based rollback; undo-log persisted atomically alongside AVL mutations, chain index, and state-meta in a single redb write transaction per applied block; reorg abort rebuilds in-memory state from committed DB state. |
 | Crypto primitives | Blake2b-256 (consensus digest), SHA-256 (wire checksum), Merkle membership and batch proofs, secp256k1 group operations — all via established crates (`k256`, `blake2`, `sha2`, `gf2_192`), no rolled-own primitives. |
-| REST surface | A Scala-compatible REST surface (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, the extra-index `/blockchain/*`, `/mining/*`, `/wallet/*`) alongside a node-native `/api/v1/*` operator API. JSON DTOs and canonicalizing decoders are anchored by a byte-parity oracle against the Scala JSON shapes. |
+| REST surface | A Scala-compatible REST surface (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/script/*`, `/emission/*`, the extra-index `/blockchain/*` (indexer-gated), `/mining/*` (mining-gated), `/wallet/*`) alongside a node-native `/api/v1/*` operator API. The native surface: unconditionally mounted `info`, `identity`, `host`, `status`, `votes` (GET), `tip`, `sync`, `peers`, `mempool/summary`, `mempool/transactions[/:tx_id]`, `blocks/recent`, `events`, `health`; submit-gated `mempool/submit` and `mempool/check`; chain-reader-gated `difficulty/history`, `votes/history`, `mining/minerStats`; indexer-gated `indexer/status` and `transactions/:tx_id/detail`; admin-gated `node/shutdown` and `votes` (POST); and the api-key-gated native wallet sub-surface (`wallet/status`, `wallet/balance`, `wallet/addresses`, `wallet/boxes[/:box_id]`, `wallet/transactions[/:tx_id]`, `wallet/rewards/retrieve`, and key-lifecycle routes). JSON DTOs and canonicalizing decoders are anchored by a byte-parity oracle against the Scala JSON shapes. |
 | NiPoPoW | Prover/verifier, P2P exchange + bootstrap, and the four `/nipopow/*` REST routes. Byte/JSON parity pinned against genuine Scala-serializer fixtures, a live mainnet differential vs the reference node (all endpoints, genesis/epoch-boundary/v1-era heights, anchored proofs, error surfaces), scrypto batch-Merkle shape vectors, and a 132-header `maxLevelOf` oracle sweep. One documented deviation: the Scala node reports stale `header.size` metadata (+1) for some historical headers, contradicting its own served bytes; this build serves the true byte length. |
 
 **Milestone.** Mainnet sync to tip was reached on 2026-04-26 at height
@@ -76,7 +76,7 @@ exact figure depends on peer and hardware conditions.
 
 ## How parity is checked
 
-Three independent oracles, ranked by signal strength, with a strict rule
+Four independent oracles, ranked by signal strength, with a strict rule
 about which one counts for consensus:
 
 - **Mainnet bytes — strongest.** Real headers, blocks, and a captured
@@ -99,12 +99,29 @@ about which one counts for consensus:
   **never** linked into the consensus path. Findings against `sigma-rust`
   itself should be reported upstream, not against this node (see
   [`SECURITY.md`](../SECURITY.md) scope).
+- **`ergo-difftest` — continuous structure-aware differential fuzzing.** A
+  dedicated workspace crate drives structure-aware generators over every
+  consensus wire-format surface (ErgoTree, box, transaction, header, sigma
+  expressions, constants, AVL frames), checking two oracle-free invariants on
+  every generated or corpus-mutated input: no decode panics, and
+  `decode → encode` reaches a byte-stable fixed point. A JVM-oracle
+  differential layer, run locally against `ergo-core` / a live Scala node,
+  translates generator outputs into accept/reject fixtures — this is the layer
+  that catches real accept-vs-reject divergences. A `cargo-fuzz` / libFuzzer
+  layer (nightly Rust, ASan-instrumented) adds coverage-guided byte mutation
+  over the same surfaces.
 
 CI runs `cargo fmt --check`, `cargo check`, `cargo clippy --all-targets
 --all-features -- -D warnings`, and `cargo test` across Linux, macOS, and
-Windows on every push and pull request, plus the supply-chain auditors
-`cargo-audit`, `cargo-deny`, and `cargo-machete`. See
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Windows on every push and pull request; a `difftest` job runs the
+`ergo-difftest` structured campaign (50,000 iterations, 80 % vocabulary
+coverage gate) on Linux on every push; a nightly scheduled workflow runs
+longer structured and corpus-mutation campaigns (2,000,000 iterations each)
+plus bounded `cargo-fuzz` / libFuzzer / ASan passes on nightly Rust across
+six surfaces; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
+and `cargo-machete`. See
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and
+[`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml).
 
 ## Known limitations
 

@@ -292,6 +292,15 @@ Exposed gauges:
 | `ergo_node_mempool_revalidation_pending` | Demoted txs pending revalidation |
 | `ergo_node_snapshot_age_ms` | Age of the read snapshot (how stale the read view is) |
 
+Exposed counters (reset to zero on node restart):
+
+| Metric | Tracks |
+|---|---|
+| `ergo_node_block_apply_errors_total` | Block-apply rejections since node start |
+| `ergo_node_mempool_tx_requested_total` | Unconfirmed-tx ids requested from peers since node start |
+| `ergo_node_mempool_peer_tx_admitted_total` | Peer-sourced txs admitted to the mempool since node start |
+| `ergo_node_mempool_peer_tx_rejected_total` | Peer-sourced txs rejected by admission since node start |
+
 **Health.** `GET /api/v1/health` returns `200` when the node is healthy
 (synced and connected) and `503` when it is stalled or disconnected, with a
 JSON body either way. This is the endpoint to poll for liveness/readiness
@@ -303,12 +312,18 @@ the process exits).
 same data the metrics project. During IBD, watch `best_header_height` and
 `best_full_block_height` climb and the gap between them close.
 
-**Web UIs.** The node serves a browser operator dashboard at `/`, the wallet
-UI at `/wallet/ui`, a Swagger UI for the Scala-compatible REST surface at
-`/swagger`, and a native Swagger UI for the operator `/api/v1/*` surface at
+**Web UIs.** The node serves a single-page operator dashboard at `/` with
+seven sections — Overview, Explorer, Peers, Mempool, Mining, Voting, and
+Wallet — a Swagger UI for the Scala-compatible REST surface at `/swagger`,
+and a native Swagger UI for the operator `/api/v1/*` surface at
 `/swagger/native`. These pages are public; the dashboard reads the public
-`/api/v1/*` endpoints, and the wallet UI authenticates each `/wallet/*` call
-with the operator `api_key`.
+`/api/v1/*` endpoints, and the Wallet section authenticates each `/wallet/*`
+call with the operator `api_key` that you enter in the browser. The legacy
+`/wallet/ui` path permanently redirects to `/#wallet`. Notable endpoints
+the dashboard surfaces and operators can poll directly:
+`GET /api/v1/events` (the bounded node event ring, up to 512 buffered
+entries), `GET /api/v1/indexer/status` (indexer self-repair progress), and
+`GET /api/v1/mining/minerStats` (per-miner block attribution).
 
 **Logs.** The node logs via `tracing` to stderr by default, plus an optional
 rolling file appender when `[logging.file]` is configured. `[logging] format`
@@ -360,9 +375,9 @@ regardless of `public_bind` — including transaction submission
   limiting on the public surface. Expose only what you intend to, and keep
   `/metrics` and the submission routes off the open internet unless you have
   fronted them.
-- The wallet UI at `/wallet/ui` is intentionally public (it carries no
-  secrets and authenticates each `/wallet/*` call with the key you paste in),
-  but the `/wallet/*` API it drives remains `api_key`-gated.
+- The dashboard at `/` is intentionally public (it carries no secrets; the
+  Wallet section authenticates each `/wallet/*` call with the key you enter in
+  the browser), but the `/wallet/*` API it drives remains `api_key`-gated.
 
 ## Graceful shutdown
 
@@ -420,8 +435,12 @@ curl -s http://127.0.0.1:9099/api/v1/sync | jq .
 
 If the connected peer count is `0`, the node is not dialing — check
 `[peers] known` and that outbound connections are allowed by your firewall.
-If peers are connected but the gap is not shrinking, peers may be stale or on
-a fork; inspect `GET /api/v1/peers` to see what heights they advertise.
+The built-in peer ceilings are `target_outbound = 96` (outbound goal),
+`max_inbound = 256` (inbound cap), and `max_connections = 384` (hard total);
+tune them under `[peers]` if your host cannot sustain that many file
+descriptors. If peers are connected but the gap is not shrinking, peers may
+be stale or on a fork; inspect `GET /api/v1/peers` to see what heights they
+advertise.
 
 **Headers ahead of full blocks.** During IBD the node downloads headers
 first, then full blocks; the gap closes naturally as full blocks catch up.

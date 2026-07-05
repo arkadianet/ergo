@@ -1495,6 +1495,7 @@ async fn run_inner_with_backend(
         mining_enabled: mining_handle.is_some(),
         api_weight_function,
         recent_blocks_cache: None,
+        network: config.chain_spec.network_params.address_prefix,
         first_deliverer_ring: crate::node::first_deliverer::FirstDelivererRing::new(),
         event_feed: crate::node::event_feed::EventFeedRing::new(),
         event_feed_prev: crate::node::event_feed::FeedPrev::default(),
