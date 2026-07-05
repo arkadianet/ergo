@@ -353,6 +353,23 @@ async fn proof_m_zero_is_400() {
 }
 
 #[tokio::test]
+async fn proof_m_over_cap_is_400() {
+    // Scala 200s here (no cap); we diverge defensively — see
+    // MAX_NIPOPOW_M. The guard fires before the prover runs, so this
+    // pins the REST-edge ceiling independent of chain state.
+    let (status, body) = json_get(build_app(), "/nipopow/proof/101/10").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], 400);
+}
+
+#[tokio::test]
+async fn proof_k_over_cap_is_400() {
+    let (status, body) = json_get(build_app(), "/nipopow/proof/6/101").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], 400);
+}
+
+#[tokio::test]
 async fn proof_unknown_anchor_is_400() {
     let (status, body) = json_get(build_app(), &format!("/nipopow/proof/6/10/{UNKNOWN_ID}")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

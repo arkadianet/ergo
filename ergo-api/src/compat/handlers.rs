@@ -131,6 +131,17 @@ pub async fn nipopow_proof_at_handler(
     nipopow_proof_response(q, m, k, Some(&header_id))
 }
 
+// Defensive upper bound on `/nipopow/proof/{m}/{k}` params — same pattern
+// as MAX_HEADERS on /blocks/headerIds (banner-flagged in openapi). Scala
+// serves this route with NO cap, and `m` is the cost amplifier: measured
+// against :9053, each unit of `m` adds ~50 KB and ~12 ms (m=100 -> 7 MB /
+// 1.7 s; m=1000 -> 51 MB / 12 s), while `k` adds ~1.3 KB/unit. Real NiPoPoW
+// params are m~6-30, k~10-50, so these leave an order-of-magnitude margin
+// and reject only amplification. Diverges from Scala (which 200s) above
+// the cap — an accepted defensive deviation on a non-consensus serve path.
+const MAX_NIPOPOW_M: u32 = 100;
+const MAX_NIPOPOW_K: u32 = 100;
+
 /// Shared `/nipopow/proof/*` tail. Scala funnels every prover failure
 /// into 400 (`onComplete Failure → ApiError.BadRequest`); status codes
 /// are oracle-matched, but failure `detail` strings are JVM internals
@@ -149,6 +160,11 @@ fn nipopow_proof_response(
     if m < 1 {
         // Scala fails later inside bestArg with a bare "2"; same status.
         return bad_request("requirement failed: m must be >= 1");
+    }
+    if m > MAX_NIPOPOW_M || k > MAX_NIPOPOW_K {
+        return bad_request(&format!(
+            "nipopow proof params exceed cap: m={m} (max {MAX_NIPOPOW_M}), k={k} (max {MAX_NIPOPOW_K})"
+        ));
     }
     match q.nipopow_proof(m, k, header_id_hex) {
         Ok(proof) => Json(proof).into_response(),
