@@ -684,27 +684,39 @@ fn decode_scala_pow_solution(
         w_arr.copy_from_slice(&w_bytes);
         let w = GroupElement::from_bytes(w_arr);
 
-        // `d` for v1 is a Scala `BigInt`, JSON-encoded as a
-        // decimal string. The wire form is signed two's-complement
-        // big-endian bytes — the production encoder
+        // `d` for v1 is a Scala `BigInt`, JSON-encoded by circe as a
+        // bare JSON NUMBER (not a string) — the UNSIGNED magnitude of
+        // the PoW distance. The wire bytes are Scala's
+        // `BigIntegers.asUnsignedByteArray`, so the production encoder
         // (`ergo-node::api_bridge::compat::encode_pow_solutions`)
-        // round-trips via `BigInt::from_signed_bytes_be(d)`. We
-        // mirror that exactly: parse the decimal as signed `BigInt`,
-        // then call `to_signed_bytes_be()`. This preserves the
-        // leading `0x00` disambiguator that positive values with
-        // the high bit set require; an unsigned-magnitude encoding
-        // would silently drop that byte.
-        let d_str = pow.d.as_str().ok_or((
-            DESERIALIZE,
-            "powSolutions.d must be a decimal string for v1 header".to_string(),
-        ))?;
-        let d_big = d_str.parse::<num_bigint::BigInt>().map_err(|_| {
+        // round-trips via `BigUint::from_bytes_be(d)` and emits the
+        // decimal as a number. Mirror that here: accept a number (the
+        // real Scala form) or, leniently, a decimal string, parse as an
+        // UNSIGNED magnitude, and re-emit via `to_bytes_be()`. A
+        // high-bit value therefore stays positive — a signed
+        // two's-complement decode would flip it negative (live repro
+        // h=28662: Scala serves d = +5624…573; the old signed path
+        // served -652…) and would invent a spurious `0x00` sign
+        // disambiguator that real Scala data never carries.
+        let d_dec = match &pow.d {
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            other => {
+                return Err((
+                    DESERIALIZE,
+                    format!(
+                        "powSolutions.d must be a number or decimal string for v1 header, got {other:?}"
+                    ),
+                ));
+            }
+        };
+        let d_big = num_bigint::BigUint::parse_bytes(d_dec.as_bytes(), 10).ok_or_else(|| {
             (
                 DESERIALIZE,
-                format!("powSolutions.d {d_str:?} is not a valid decimal BigInt"),
+                format!("powSolutions.d {d_dec:?} is not a valid unsigned decimal"),
             )
         })?;
-        let d = d_big.to_signed_bytes_be();
+        let d = d_big.to_bytes_be();
 
         Ok(ergo_ser::autolykos::AutolykosSolution::V1 { pk, w, nonce, d })
     } else {

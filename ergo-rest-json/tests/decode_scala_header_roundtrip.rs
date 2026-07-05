@@ -53,10 +53,17 @@ fn header_to_scala(h: &ergo_ser::header::Header, id: &str) -> ScalaHeader {
             pk: hex::encode(pk.as_bytes()),
             w: hex::encode(w.as_bytes()),
             n: hex::encode(nonce),
-            // v1 d: decimal-stringified BigInt (SIGNED two's-complement
-            // big-endian wire form, matching the production encoder at
-            // ergo-node::api_bridge::compat::encode_pow_solutions).
-            d: JsonValue::String(num_bigint::BigInt::from_signed_bytes_be(d).to_string()),
+            // v1 d: Scala renders it as a bare JSON NUMBER (circe BigInt)
+            // — the UNSIGNED magnitude of the PoW distance. Mirrors the
+            // production encoder at
+            // ergo-node::api_bridge::compat::encode_pow_solutions,
+            // which round-trips via `BigUint::from_bytes_be(d)`.
+            d: JsonValue::Number(
+                num_bigint::BigUint::from_bytes_be(d)
+                    .to_string()
+                    .parse()
+                    .expect("unsigned decimal parses as arbitrary-precision Number"),
+            ),
         },
         ergo_ser::autolykos::AutolykosSolution::V2 { pk, nonce } => ScalaPowSolutions {
             pk: hex::encode(pk.as_bytes()),
@@ -177,22 +184,19 @@ fn decode_scala_header_rejects_oversized_n_bits() {
     assert!(err.1.contains("nBits"), "unexpected detail: {}", err.1);
 }
 
-/// Codex §12(a) regression pin: the signed two's-complement
-/// `BigInt::from_signed_bytes_be(d).to_string()` ↔ `parse →
-/// to_signed_bytes_be()` round-trip must be lossless across all
-/// mainnet v1 `d` values, including the case where the high bit
-/// of the leading byte is set (the case the prior unsigned
-/// `BigUint::to_bytes_be()` got wrong by dropping the leading
-/// `0x00` disambiguator).
-///
-/// Loops the first ten v1 mainnet headers; for each, encodes via
-/// the production `BigInt::from_signed_bytes_be(d).to_string()`,
-/// then parses back via our decoder's
-/// `parse::<BigInt>().to_signed_bytes_be()`, and asserts byte
-/// equality. Logs whether the high-bit case actually got
-/// exercised by the fixture corpus.
+/// Regression pin: v1 `d` round-trips byte-identically through the
+/// production-shaped encoder (`header_to_scala`, which emits the bare
+/// JSON NUMBER Scala serves) and our decoder, across all mainnet v1
+/// fixtures. Scala encodes `d` as the UNSIGNED magnitude of the PoW
+/// distance (circe BigInt -> bare number; wire bytes are
+/// `BigIntegers.asUnsignedByteArray`), so a high-bit value stays
+/// POSITIVE. A signed two's-complement decode would flip it negative
+/// (live repro h=28662: Scala serves +5624...573; the old signed path
+/// served -652...) and invent a spurious `0x00` disambiguator; both
+/// diverge from Scala and mutate the header bytes. This pin would
+/// catch either. Logs whether a high-bit case was exercised.
 #[test]
-fn decode_scala_header_v1_d_signed_bigint_roundtrip_is_lossless() {
+fn decode_scala_header_v1_d_roundtrips_as_unsigned_number() {
     use ergo_ser::autolykos::AutolykosSolution;
     let headers = load_headers("headers_1_10.json");
     let mut tested_high_bit = false;
@@ -200,40 +204,52 @@ fn decode_scala_header_v1_d_signed_bigint_roundtrip_is_lossless() {
         let raw = hex::decode(&hv.bytes).unwrap();
         let mut r = VlqReader::new(&raw);
         let parsed = ergo_ser::header::read_header(&mut r).unwrap();
-        if let AutolykosSolution::V1 { d, .. } = &parsed.solution {
-            let signed_str = num_bigint::BigInt::from_signed_bytes_be(d).to_string();
-            let round_d = signed_str
-                .parse::<num_bigint::BigInt>()
-                .unwrap()
-                .to_signed_bytes_be();
-            assert_eq!(
-                round_d, *d,
-                "h={}: signed BigInt round-trip failed",
+        let original_d = match &parsed.solution {
+            AutolykosSolution::V1 { d, .. } => d.clone(),
+            _ => continue,
+        };
+
+        let scala = header_to_scala(&parsed, &hv.id);
+        let dec = match &scala.pow_solutions.d {
+            JsonValue::Number(n) => n.to_string(),
+            other => panic!(
+                "h={}: v1 d encoded as {other:?}, expected Number",
+                hv.height
+            ),
+        };
+        assert!(
+            !dec.starts_with('-'),
+            "h={}: v1 d encoded as negative {dec:?}; expected unsigned magnitude",
+            hv.height,
+        );
+
+        let (decoded_bytes, _id) =
+            decode_scala_header(&scala).expect("v1 header round-trip must decode");
+        let mut r2 = VlqReader::new(&decoded_bytes);
+        let reparsed = ergo_ser::header::read_header(&mut r2).unwrap();
+        match reparsed.solution {
+            AutolykosSolution::V1 { d, .. } => assert_eq!(
+                d, original_d,
+                "h={}: v1 d mutated across the JSON round-trip",
                 hv.height,
-            );
-            if d.first().map(|b| b & 0x80 != 0).unwrap_or(false) {
-                tested_high_bit = true;
-            }
+            ),
+            _ => panic!("h={}: expected v1 after decode", hv.height),
+        }
+
+        if original_d.first().map(|b| b & 0x80 != 0).unwrap_or(false) {
+            tested_high_bit = true;
         }
     }
-    eprintln!(
-        "[§12(a) d-signed-bigint round-trip pin] high-bit case observed in fixtures: {tested_high_bit}",
-    );
+    eprintln!("[v1 d round-trip pin] high-bit case observed in fixtures: {tested_high_bit}",);
 }
 
-/// Codex §12(a) follow-up: bind the high-bit-disambiguator invariant
-/// explicitly with a synthetic `d`, so the regression pin holds even
-/// if the fixture corpus ever drifts away from values whose leading
-/// byte has the high bit set.
-///
-/// Builds a real v1 mainnet header, swaps its `d` for `[0x00, 0x80, ..]`
-/// (a positive value whose magnitude's leading byte requires the
-/// `0x00` two's-complement disambiguator), runs the
-/// `header_to_scala` → `decode_scala_header` → `read_header` chain,
-/// and asserts the final `d` bytes are byte-identical to the
-/// synthetic input. The prior unsigned `BigUint::to_bytes_be()` path
-/// would have dropped the leading `0x00`, mutating the header bytes
-/// and the header_id.
+/// Bind the high-bit invariant explicitly with a synthetic `d`, so the
+/// pin holds regardless of fixture drift: a v1 `d` whose magnitude's
+/// leading byte has the high bit set (the form real mainnet `d` takes
+/// once difficulty rises, e.g. h=28662) must serialize as a POSITIVE
+/// JSON number and round-trip byte-identically. The old signed
+/// two's-complement decode flipped such values negative and invented a
+/// spurious `0x00` disambiguator; both diverge from Scala.
 #[test]
 fn decode_scala_header_v1_synthetic_high_bit_d_end_to_end_roundtrips() {
     use ergo_ser::autolykos::AutolykosSolution;
@@ -244,7 +260,9 @@ fn decode_scala_header_v1_synthetic_high_bit_d_end_to_end_roundtrips() {
     let parsed = ergo_ser::header::read_header(&mut r).unwrap();
     assert_eq!(parsed.version, 1);
 
-    let synthetic_d: Vec<u8> = vec![0x00, 0x80, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    // Canonical high-bit magnitude: leading byte >= 0x80, NO leading
+    // 0x00 (real Scala `asUnsignedByteArray` carries no sign byte).
+    let synthetic_d: Vec<u8> = vec![0x80, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
     let mut mutated = parsed.clone();
     mutated.solution = match parsed.solution {
         AutolykosSolution::V1 { pk, w, nonce, .. } => AutolykosSolution::V1 {
@@ -257,22 +275,32 @@ fn decode_scala_header_v1_synthetic_high_bit_d_end_to_end_roundtrips() {
     };
 
     let scala = header_to_scala(&mutated, &hv.id);
+    match &scala.pow_solutions.d {
+        JsonValue::Number(n) => assert!(
+            !n.to_string().starts_with('-'),
+            "high-bit d encoded negative; expected positive unsigned magnitude",
+        ),
+        other => panic!("v1 d encoded as {other:?}, expected Number"),
+    }
     let (decoded_bytes, _id) = decode_scala_header(&scala).unwrap();
     let mut r2 = VlqReader::new(&decoded_bytes);
     let reparsed = ergo_ser::header::read_header(&mut r2).unwrap();
     match reparsed.solution {
         AutolykosSolution::V1 { d, .. } => {
-            assert_eq!(
-                d, synthetic_d,
-                "high-bit d disambiguator dropped during JSON round-trip",
-            );
+            assert_eq!(d, synthetic_d, "high-bit d mutated during JSON round-trip",);
         }
         _ => panic!("expected v1 solution after decode"),
     }
 }
 
+/// Scala encodes v1 `d` as a bare JSON NUMBER. Confirm the decoder
+/// accepts that form (it previously rejected anything but a string)
+/// and reconstructs the correct UNSIGNED magnitude bytes. The value
+/// below is the live Scala response for mainnet h=28662 -- the case
+/// that exposed the old signed path serving a negative number.
 #[test]
-fn decode_scala_header_rejects_v1_with_non_string_d() {
+fn decode_scala_header_accepts_v1_numeric_d() {
+    use ergo_ser::autolykos::AutolykosSolution;
     let headers = load_headers("headers_1_10.json");
     let hv = &headers[0];
     let raw = hex::decode(&hv.bytes).unwrap();
@@ -280,13 +308,29 @@ fn decode_scala_header_rejects_v1_with_non_string_d() {
     let parsed = ergo_ser::header::read_header(&mut r).unwrap();
     assert_eq!(parsed.version, 1);
 
-    let mut scala = header_to_scala(&parsed, &hv.id);
-    scala.pow_solutions.d = JsonValue::Number(42u32.into());
+    // Live Scala value for h=28662: a positive bare number whose
+    // magnitude's first byte is 0x80 (high bit) -- exactly the form
+    // the old signed decoder mishandled.
+    const H28662_SCALA_D: &str = "5624587765342653314291518590252587439323333907522825303573";
+    let expected_d = num_bigint::BigUint::parse_bytes(H28662_SCALA_D.as_bytes(), 10)
+        .unwrap()
+        .to_bytes_be();
 
-    let err = decode_scala_header(&scala).unwrap_err();
-    assert!(
-        err.1.contains("powSolutions.d"),
-        "unexpected detail: {}",
-        err.1
+    let mut scala = header_to_scala(&parsed, &hv.id);
+    scala.pow_solutions.d = JsonValue::Number(
+        H28662_SCALA_D
+            .parse::<serde_json::Number>()
+            .expect("arbitrary_precision holds big numbers"),
     );
+
+    let (decoded_bytes, _id) = decode_scala_header(&scala).unwrap();
+    let mut r2 = VlqReader::new(&decoded_bytes);
+    let reparsed = ergo_ser::header::read_header(&mut r2).unwrap();
+    match reparsed.solution {
+        AutolykosSolution::V1 { d, .. } => assert_eq!(
+            d, expected_d,
+            "numeric v1 d did not reconstruct the unsigned magnitude",
+        ),
+        _ => panic!("expected v1 solution after decode"),
+    }
 }

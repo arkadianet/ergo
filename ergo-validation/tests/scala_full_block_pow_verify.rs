@@ -59,7 +59,16 @@ fn v1_header_to_scala(h: &ergo_ser::header::Header, id: &str) -> ScalaHeader {
             pk: hex::encode(pk.as_bytes()),
             w: hex::encode(w.as_bytes()),
             n: hex::encode(nonce),
-            d: JsonValue::String(num_bigint::BigInt::from_signed_bytes_be(d).to_string()),
+            // v1 d: Scala renders it as a bare JSON NUMBER (circe BigInt),
+            // the UNSIGNED magnitude of the PoW distance — mirrors the
+            // production encoder (BigUint::from_bytes_be), which the
+            // decoder in ergo-rest-json reads back as unsigned.
+            d: JsonValue::Number(
+                num_bigint::BigUint::from_bytes_be(d)
+                    .to_string()
+                    .parse()
+                    .expect("unsigned decimal parses as arbitrary-precision Number"),
+            ),
         },
         ergo_ser::autolykos::AutolykosSolution::V2 { .. } => {
             panic!("v1_header_to_scala called on v2 header — use block_836113.json fixture")
