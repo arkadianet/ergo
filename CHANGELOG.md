@@ -16,12 +16,20 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-05
+
+A release centered on making the operator web UI first-class and on landing the NiPoPoW REST serve surface, plus a continuous fuzz-differential harness and higher peer-connectivity ceilings. As always for this node: re-verify its verdicts against the Scala reference node before relying on it for funds.
+
 ### Added
 
 - NiPoPoW REST serve surface: `GET /nipopow/popowHeaderById/{id}`,
   `/nipopow/popowHeaderByHeight/{h}`, `/nipopow/proof/{m}/{k}` and
   `/nipopow/proof/{m}/{k}/{headerId}`, JSON- and error-parity-pinned
   against the Scala reference node (live captures + probes).
+
+- **Operator web UI — first-class.** Explorer omnibox + block/tx/box/address/token deep-link views (#149); visual refresh — Inter typography, iconography, elevation (#150); node-health surface with the indexer self-repair status endpoint + real charts (#151); operator event feed — bounded node ring + `/api/v1/events` + live panel (#152); mining panel, wallet pre-auth explainer, focus a11y, theme audit (#153); dedicated table expand toggles + EIP-4 decimal token amounts (#154); miner attribution on block surfaces + dedicated Mining section (#157).
+- **Continuous fuzz-differential harness (#155).** Rust node vs the Scala reference / ergo-core 6.0.2 with a scala-cli oracle, a `:9053` archival source, and a 25-entry known-bug acceptance gate.
+- **Peer connectivity (#156).** `max_inbound` decoupled from the outbound leftover into its own `PeerLimits` field; defaults raised (out 96 / in 256 / cap 384); `[peers] max_inbound` TOML key; dial budget 24->32; thin-pool GetPeers fanout.
 
 ### Fixed
 
