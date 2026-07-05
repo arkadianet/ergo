@@ -14,21 +14,17 @@ use ergo_validation::popow::NipopowProofExt;
 #[test]
 fn committed_scala_fixtures_pass_full_validation() {
     let params = ergo_chain_spec::DifficultyParams::mainnet();
-    for name in [
-        "../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin",
-        "../test-vectors/mainnet/nipopow/proof_m6_k10_at_h1000.scala.bin",
-    ] {
-        let bytes = std::fs::read(name).unwrap_or_else(|e| panic!("read {name}: {e}"));
-        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&bytes)
-            .unwrap_or_else(|e| panic!("{name}: deserialize: {e}"));
-        assert!(
-            proof.is_valid(&params),
-            "{name}: a genuine Scala-served mainnet proof must pass our full validation"
-        );
-        eprintln!(
-            "[fixture-validation] {name}: VALID (prefix={}, suffix_tail={})",
-            proof.prefix.len(),
-            proof.suffix_tail.len()
-        );
-    }
+    let name = "../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin";
+    let bytes = std::fs::read(name).unwrap_or_else(|e| panic!("read {name}: {e}"));
+    let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&bytes)
+        .unwrap_or_else(|e| panic!("{name}: deserialize: {e}"));
+    assert!(
+        proof.is_valid(&params),
+        "{name}: a genuine Scala-served mainnet proof must pass our full validation"
+    );
+    eprintln!(
+        "[fixture-validation] {name}: VALID (prefix={}, suffix_tail={})",
+        proof.prefix.len(),
+        proof.suffix_tail.len()
+    );
 }

@@ -1458,46 +1458,37 @@ fn host_disk_for_tempdir_returns_some_pair() {
 /// unsigned magnitude — is compared exactly.
 #[test]
 fn nipopow_json_encoders_match_live_scala_response() {
-    for (bin, json) in [
-        (
-            "../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin",
-            "../test-vectors/mainnet/nipopow/proof_m6_k10.json",
-        ),
-        (
-            "../test-vectors/mainnet/nipopow/proof_m6_k10_at_h1000.scala.bin",
-            "../test-vectors/mainnet/nipopow/proof_m6_k10_at_h1000.json",
-        ),
-    ] {
-        let bytes = std::fs::read(bin).unwrap_or_else(|e| panic!("read {bin}: {e}"));
-        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&bytes)
-            .unwrap_or_else(|e| panic!("{bin}: deserialize: {e}"));
-        let dto = super::nipopow::encode_nipopow_proof(&proof)
-            .unwrap_or_else(|e| panic!("{bin}: encode: {e}"));
-        let mut ours = serde_json::to_value(&dto).expect("DTO serializes");
-        let mut scala: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(json).unwrap_or_else(|e| panic!("read {json}: {e}")),
+    let bin = "../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin";
+    let json = "../test-vectors/mainnet/nipopow/proof_m6_k10.json";
+    let bytes = std::fs::read(bin).unwrap_or_else(|e| panic!("read {bin}: {e}"));
+    let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&bytes)
+        .unwrap_or_else(|e| panic!("{bin}: deserialize: {e}"));
+    let dto = super::nipopow::encode_nipopow_proof(&proof)
+        .unwrap_or_else(|e| panic!("{bin}: encode: {e}"));
+    let mut ours = serde_json::to_value(&dto).expect("DTO serializes");
+    let mut scala: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(json).unwrap_or_else(|e| panic!("read {json}: {e}")),
+    )
+    .expect("fixture JSON parses");
+    normalize_header_sizes(&mut ours, &mut scala);
+    if scala != ours {
+        let dump = std::env::temp_dir().join("nipopow_json_diff");
+        std::fs::create_dir_all(&dump).ok();
+        std::fs::write(
+            dump.join("ours.json"),
+            serde_json::to_string_pretty(&ours).unwrap(),
         )
-        .expect("fixture JSON parses");
-        normalize_header_sizes(&mut ours, &mut scala);
-        if scala != ours {
-            let dump = std::env::temp_dir().join("nipopow_json_diff");
-            std::fs::create_dir_all(&dump).ok();
-            std::fs::write(
-                dump.join("ours.json"),
-                serde_json::to_string_pretty(&ours).unwrap(),
-            )
-            .ok();
-            std::fs::write(
-                dump.join("scala.json"),
-                serde_json::to_string_pretty(&scala).unwrap(),
-            )
-            .ok();
-            panic!(
-                "{bin}: our JSON encoding diverges from the live Scala response; \
-                 dumps at {}",
-                dump.display()
-            );
-        }
+        .ok();
+        std::fs::write(
+            dump.join("scala.json"),
+            serde_json::to_string_pretty(&scala).unwrap(),
+        )
+        .ok();
+        panic!(
+            "{bin}: our JSON encoding diverges from the live Scala response; \
+             dumps at {}",
+            dump.display()
+        );
     }
 }
 

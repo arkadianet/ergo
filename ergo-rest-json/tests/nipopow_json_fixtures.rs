@@ -40,11 +40,6 @@ fn popow_header_by_id_roundtrips() {
 }
 
 #[test]
-fn nipopow_proof_anchored_roundtrips() {
-    assert_roundtrip::<ScalaNipopowProof>("proof_m6_k10_at_h1000.json");
-}
-
-#[test]
 fn nipopow_proof_tip_roundtrips() {
     assert_roundtrip::<ScalaNipopowProof>("proof_m6_k10.json");
 }

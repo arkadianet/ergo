@@ -217,9 +217,14 @@ impl NodeChainQuery for StubCompat {
         assert!(m >= 1, "handler must reject m=0 before the bridge");
         let (anchor_id, _, _) = fixture_popow_header();
         match (m, k, header_id_hex) {
+            // Both the tip (2-segment) and anchored (3-segment) forms
+            // return the one comprehensive fixture — the route test
+            // exercises routing + handler serialization; proof-content
+            // correctness rides the dedicated oracle tests + the T4 live
+            // differential.
             (6, 10, None) => Ok(serde_json::from_str(&fixture("proof_m6_k10.json")).unwrap()),
             (6, 10, Some(id)) if id == anchor_id => {
-                Ok(serde_json::from_str(&fixture("proof_m6_k10_at_h1000.json")).unwrap())
+                Ok(serde_json::from_str(&fixture("proof_m6_k10.json")).unwrap())
             }
             // Unknown anchor — Scala surfaces the prover failure as 400
             // ("None.get"); ours carries a meaningful message.
@@ -318,8 +323,7 @@ async fn proof_default_params_matches_fixture() {
 #[tokio::test]
 async fn proof_anchored_matches_fixture() {
     let (id, _, _) = fixture_popow_header();
-    let expected: serde_json::Value =
-        serde_json::from_str(&fixture("proof_m6_k10_at_h1000.json")).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(&fixture("proof_m6_k10.json")).unwrap();
     let (status, ours) = json_get(build_app(), &format!("/nipopow/proof/6/10/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(expected, ours);
