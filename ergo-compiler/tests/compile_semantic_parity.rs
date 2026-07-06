@@ -11,11 +11,14 @@
 //! compile verb of the JVM oracle (`tc`→`cc`, `tce`→`cce`, `tcs`→`ccs`;
 //! `scripts/jvm_typer_oracle/TyperOracle.scala`, sigma-state 6.0.2,
 //! `ORACLE_TREE_VERSION=3`, `ORACLE_NETWORK=testnet`), plus the 79-contract
-//! real-world corpus (`test-vectors/ergoscript/corpus/`) under `cc`. Oracle
-//! REJECTs for golden-seed sources are recorded verbatim (a typecheck-accept
-//! may compile-reject — that verdict is signal, cf. golden_seed §22); corpus
-//! compile-REJECTs are counted in the JSON `_source` note and excluded, per
-//! the task brief. No oracle field is ever hand-edited.
+//! real-world corpus (`test-vectors/ergoscript/corpus/`) under `cc`, plus
+//! the compile-only probe list (`compile_probes.txt`, Task-11 wave-1
+//! GraphBuilding gate vectors, per-line `ORACLE_TREE_VERSION`). Oracle
+//! REJECTs for golden-seed/probe sources are recorded verbatim (a
+//! typecheck-accept may compile-reject — that verdict is signal, cf.
+//! golden_seed §22); corpus compile-REJECTs are counted in the JSON
+//! `_source` note and excluded, per the task brief. No oracle field is ever
+//! hand-edited.
 //!
 //! **The gate** ([`compile_seed_semantic_parity`], always-on, committed JSON
 //! only):
@@ -579,16 +582,26 @@ fn corpus_files() -> BTreeMap<String, String> {
     out
 }
 
-/// One capture request: compile verb, source, corpus provenance.
+/// One capture request: compile verb, source, oracle tree version, corpus
+/// provenance.
 struct Request {
-    verb: &'static str,
+    verb: String,
     source: String,
+    /// `ORACLE_TREE_VERSION` for this request (3 for seed/corpus sources;
+    /// per-line for `compile_probes.txt` — the wave-1 SNumericType vectors
+    /// are v2-only).
+    tree_version: u8,
     corpus_path: Option<String>,
+    /// `true` for `compile_probes.txt` sources (counted separately in the
+    /// `_source` note; probe REJECTs are kept like seed REJECTs).
+    probe: bool,
 }
 
 /// The full request list: every unique typecheck-ACCEPT golden-seed source
 /// through its matching compile verb (seed order), then the whole 79-contract
-/// corpus under `cc` (path order).
+/// corpus under `cc` (path order), then the compile-only probe list
+/// (`compile_probes.txt`, the Task-11 wave-1 GraphBuilding gate vectors —
+/// provenance notes in that file).
 fn capture_requests() -> Vec<Request> {
     let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
     let mut seen = std::collections::BTreeSet::new();
@@ -606,20 +619,46 @@ fn capture_requests() -> Vec<Request> {
             "tcs" => "ccs",
             other => panic!("unknown seed verb {other:?}"),
         };
-        if seen.insert((cverb, src.to_string())) {
+        if seen.insert((cverb.to_string(), src.to_string(), 3u8)) {
             requests.push(Request {
-                verb: cverb,
+                verb: cverb.to_string(),
                 source: src.to_string(),
+                tree_version: 3,
                 corpus_path: None,
+                probe: false,
             });
         }
     }
     for (rel, src) in corpus_files() {
         requests.push(Request {
-            verb: "cc",
+            verb: "cc".to_string(),
             source: src,
+            tree_version: 3,
             corpus_path: Some(rel),
+            probe: false,
         });
+    }
+    let probes = include_str!("../../test-vectors/ergoscript/compile/compile_probes.txt");
+    for line in probes.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        let [verb, version, src] = parts[..] else {
+            panic!("malformed compile_probes.txt line: {line:?}");
+        };
+        let tree_version: u8 = version
+            .parse()
+            .unwrap_or_else(|_| panic!("bad tree_version in compile_probes.txt line: {line:?}"));
+        if seen.insert((verb.to_string(), src.to_string(), tree_version)) {
+            requests.push(Request {
+                verb: verb.to_string(),
+                source: src.to_string(),
+                tree_version,
+                corpus_path: None,
+                probe: true,
+            });
+        }
     }
     requests
 }
@@ -637,14 +676,40 @@ enum Reply {
     },
 }
 
-/// Run the whole batch through ONE oracle process (the `corpus_smoke.rs`
-/// spawn pattern — batch stdin, EOF-close, grammar filter, `child.wait()` —
-/// with one adaptation: the stdin feed runs on its OWN thread while this
-/// thread drains stdout. Compile replies carry full tree hexes, so writing
-/// the whole request batch before reading deadlocks once both 64 KiB pipe
-/// buffers fill (the parse oracle's one-word verdicts never hit this).
-/// Retries up to 3× on a reply-count mismatch; panics on an `ERR` reply.
+/// Run the whole request list through the oracle, ONE process per distinct
+/// `tree_version` (`ORACLE_TREE_VERSION` is a process-level pin); replies
+/// come back in the original request order.
 fn run_oracle_batch(requests: &[Request]) -> Vec<Reply> {
+    let versions: std::collections::BTreeSet<u8> =
+        requests.iter().map(|r| r.tree_version).collect();
+    let mut replies: Vec<Option<Reply>> = requests.iter().map(|_| None).collect();
+    for version in versions {
+        let idx: Vec<usize> = (0..requests.len())
+            .filter(|&i| requests[i].tree_version == version)
+            .collect();
+        let subset: Vec<&Request> = idx.iter().map(|&i| &requests[i]).collect();
+        for (i, reply) in idx
+            .into_iter()
+            .zip(run_oracle_batch_version(&subset, version))
+        {
+            replies[i] = Some(reply);
+        }
+    }
+    replies
+        .into_iter()
+        .map(|r| r.expect("every request answered by its version batch"))
+        .collect()
+}
+
+/// Run one same-version batch through ONE oracle process (the
+/// `corpus_smoke.rs` spawn pattern — batch stdin, EOF-close, grammar filter,
+/// `child.wait()` — with one adaptation: the stdin feed runs on its OWN
+/// thread while this thread drains stdout. Compile replies carry full tree
+/// hexes, so writing the whole request batch before reading deadlocks once
+/// both 64 KiB pipe buffers fill (the parse oracle's one-word verdicts never
+/// hit this). Retries up to 3× on a reply-count mismatch; panics on an `ERR`
+/// reply.
+fn run_oracle_batch_version(requests: &[&Request], tree_version: u8) -> Vec<Reply> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
@@ -669,7 +734,7 @@ fn run_oracle_batch(requests: &[Request]) -> Vec<Reply> {
         let mut child = Command::new("scala-cli")
             .arg("run")
             .arg(&oracle_path)
-            .env("ORACLE_TREE_VERSION", "3")
+            .env("ORACLE_TREE_VERSION", tree_version.to_string())
             .env("ORACLE_NETWORK", "testnet")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -738,6 +803,7 @@ fn compile_seed_live_recapture() {
 
     let mut vectors: Vec<serde_json::Value> = Vec::new();
     let (mut seed_accepts, mut seed_rejects) = (0usize, 0usize);
+    let (mut probe_accepts, mut probe_rejects) = (0usize, 0usize);
     let (mut corpus_fed, mut corpus_kept, mut corpus_rejected) = (0usize, 0usize, 0usize);
     for (req, reply) in requests.iter().zip(&replies) {
         let is_corpus = req.corpus_path.is_some();
@@ -748,7 +814,7 @@ fn compile_seed_live_recapture() {
             "verb": req.verb,
             "source": req.source,
             "network": "testnet",
-            "tree_version": 3,
+            "tree_version": req.tree_version,
         });
         let obj = record.as_object_mut().expect("record object");
         match reply {
@@ -764,6 +830,8 @@ fn compile_seed_live_recapture() {
                 obj.insert("reject_class".into(), serde_json::Value::Null);
                 if is_corpus {
                     corpus_kept += 1;
+                } else if req.probe {
+                    probe_accepts += 1;
                 } else {
                     seed_accepts += 1;
                 }
@@ -775,7 +843,11 @@ fn compile_seed_live_recapture() {
                     corpus_rejected += 1;
                     continue;
                 }
-                seed_rejects += 1;
+                if req.probe {
+                    probe_rejects += 1;
+                } else {
+                    seed_rejects += 1;
+                }
                 obj.insert("oracle".into(), "REJECT".into());
                 obj.insert("tree_hex".into(), serde_json::Value::Null);
                 obj.insert("p2s_address".into(), serde_json::Value::Null);
@@ -803,17 +875,23 @@ fn compile_seed_live_recapture() {
     let fresh = serde_json::json!({
         "_source": format!(
             "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, \
-             ORACLE_TREE_VERSION=3 ORACLE_NETWORK=testnet; golden_seed.txt \
+             ORACLE_TREE_VERSION per-record (one oracle spawn per version) \
+             ORACLE_NETWORK=testnet; golden_seed.txt \
              typecheck-ACCEPT sources: {} vectors ({} compile-ACCEPT, {} \
              compile-REJECT recorded verbatim); corpus: {} sources fed under \
              cc, {} compile-ACCEPT kept, {} compile-REJECT excluded (counted \
-             here per the Task-10 brief)",
+             here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 \
+             GraphBuilding gate): {} vectors ({} compile-ACCEPT, {} \
+             compile-REJECT recorded verbatim)",
             seed_accepts + seed_rejects,
             seed_accepts,
             seed_rejects,
             corpus_fed,
             corpus_kept,
             corpus_rejected,
+            probe_accepts + probe_rejects,
+            probe_accepts,
+            probe_rejects,
         ),
         "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); \
                     settings pinned per-record",

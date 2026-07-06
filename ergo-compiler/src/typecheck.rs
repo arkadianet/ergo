@@ -48,8 +48,11 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 ///   oracle: `cc HEIGHT` → `REJECT 0:0 Exception`).
 /// - [`CompileError::Emit`] — emit-phase failure ([`EmitError`]); a compiler
 ///   bug surface or an `ergo-ser`-unrepresentable node (lib.rs D-E1..D-E3),
-///   not a user error. No dedicated Scala exception class exists — the route
-///   collapses every non-`CompilerException` throwable into its catch-all.
+///   not a user error — EXCEPT [`EmitError::GraphBuildingReject`], the
+///   USER-reachable GraphBuilding verdict-parity gate (lib.rs D-C5), which
+///   carries the oracle's exception class. The other variants have no
+///   dedicated Scala exception class — the route collapses every
+///   non-`CompilerException` throwable into its catch-all.
 /// - [`CompileError::Serializer`] — the assembled tree contains constant DATA
 ///   the v0 wire header cannot carry (e.g. an `UnsignedBigInt` constant);
 ///   mirrors Scala's `SerializerException` (mechanism citations in `tree.rs`).
@@ -128,10 +131,17 @@ impl CompileError {
                 BindError::InvalidAddress { .. } => "InvalidAddress",
             },
             CompileError::Type(e) => e.class_tag(),
+            // GraphBuilding-parity rejects carry the ORACLE's exception class
+            // verbatim (`GraphBuildingException`, `ArithmeticException`,
+            // `MatchError`, `ArrayIndexOutOfBoundsException`, … — lib.rs
+            // D-C5); the verdict is the gated fact, the class makes the
+            // grading exact instead of advisory.
+            CompileError::Emit(EmitError::GraphBuildingReject { class, .. }) => class,
             // `Root` mirrors the route's bare `new Exception(...)`
             // (ScriptApiRoute.scala:64-65; oracle `cc HEIGHT` → `REJECT 0:0
-            // Exception`). `Emit`/`Write` have no Scala analog (compiler-bug
-            // surfaces); they grade as the same generic catch-all class.
+            // Exception`). The remaining `Emit` variants and `Write` have no
+            // Scala analog (compiler-bug surfaces); they grade as the same
+            // generic catch-all class.
             CompileError::Root { .. } | CompileError::Emit(_) | CompileError::Write(_) => {
                 "Exception"
             }

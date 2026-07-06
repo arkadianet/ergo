@@ -29,9 +29,11 @@
 //!
 //! # Deferred irBuilders (documented deviations)
 //!
-//! `unsignedBigInt` validates the sign (negative → reject, matching Scala
-//! `InvalidArguments` — class deviation, see `CLASS_DEVIATION_SOURCES`); a
-//! valid non-negative literal builds the canonical `ConstPayload::UnsignedBigInt`
+//! `unsignedBigInt` parses FIRST, then validates the SIGN of the parsed value
+//! (negative → reject, matching Scala `InvalidArguments` — class deviation,
+//! see `CLASS_DEVIATION_SOURCES`; `"-0"`/`"-0000"` have `signum() == 0` and
+//! ACCEPT as `@0`, golden_seed.txt §24(g)); a valid non-negative literal
+//! builds the canonical `ConstPayload::UnsignedBigInt`
 //! constant (D-T3 CLOSED, M3 Task-6; oracle: `unsignedBigInt("5")` →
 //! `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))`, golden_seed.txt
 //! §13/§24). Canonicalizes leading zeros (`"0005"` → `"5"`, oracle-verified) and
@@ -522,16 +524,12 @@ pub fn predef_ir_builder(
         // unsignedBigInt(s): reject negative literals (Scala InvalidArguments,
         // class deviation — see `tests/typer_oracle_parity.rs`
         // `CLASS_DEVIATION_SOURCES`); a valid non-negative literal builds the
-        // canonical `UnsignedBigInt` constant (D-T3 CLOSED, M3 Task-6).
+        // canonical `UnsignedBigInt` constant (D-T3 CLOSED, M3 Task-6). The
+        // sign check lives INSIDE `parse_unsigned_big_int` — Scala parses
+        // FIRST and rejects only `signum() < 0`, so `"-0"` ACCEPTs (§24(g)).
         "unsignedBigInt" => {
             let s = string_const(args.first()?)?;
-            if s.starts_with('-') {
-                Some(Err(typer_err(format!(
-                    "Negative unsigned big integer: \"{s}\""
-                ))))
-            } else {
-                Some(parse_unsigned_big_int(s))
-            }
+            Some(parse_unsigned_big_int(s))
         }
         // fromBase58: reject if any char is outside the Bitcoin/Scorex Base58
         // alphabet (Scorex `Base58.decode(s).get` → AssertionError on bad char via
@@ -707,12 +705,18 @@ fn parse_big_int(s: &str, tree_version: u8) -> Result<TypedExpr, TyperError> {
     })
 }
 
-/// `unsignedBigInt(s)` (non-negative branch) → `UnsignedBigIntConstant(new
-/// BigInteger(s))` (SigmaPredef.scala:201-215; the negative branch is handled by
-/// the caller before this is reached).  Parses with `num_bigint::BigUint` and
-/// stores the CANONICAL decimal string (leading zeros stripped:
-/// `unsignedBigInt("0005")` → `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt
-/// @5))`, oracle-verified, golden_seed.txt §24, D-T3 M3 Task-6).
+/// `unsignedBigInt(s)` → `UnsignedBigIntConstant(new BigInteger(s))`
+/// (SigmaPredef.scala:201-215).  Parses FIRST with `num_bigint::BigInt`,
+/// then rejects on the SIGN — Scala's `UnsignedBigIntFunc` constructs
+/// `new BigInteger(s)` and rejects only `signum() < 0`, and
+/// `BigInteger("-0").signum() == 0`, so `"-0"`/`"-0000"` ACCEPT as `@0`
+/// (oracle: `tc unsignedBigInt("-0")` → `OK (ConstantNode:UnsignedBigInt
+/// (CUnsignedBigInt @0))`, golden_seed.txt §24(g), captured 2026-07-07 ×3
+/// runs; num-bigint normalizes `-0` to `Sign::NoSign`, so `Sign::Minus`
+/// reproduces `signum() < 0` exactly).  Stores the CANONICAL decimal string
+/// (leading zeros / `-0` sign stripped: `unsignedBigInt("0005")` →
+/// `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))`, oracle-verified,
+/// golden_seed.txt §24, D-T3 M3 Task-6).
 ///
 /// Cap (`CUnsignedBigInt.scala:14-22`): `wrappedValue.bitLength() > 256` throws
 /// `ArithmeticException` — UNCONDITIONALLY, no `tree_version` gate (unlike
@@ -723,9 +727,13 @@ fn parse_unsigned_big_int(s: &str) -> Result<TypedExpr, TyperError> {
     if !is_decimal_integer(s) {
         return Err(typer_err(format!("For input string: \"{s}\"")));
     }
-    let v: num_bigint::BigUint = s
+    let v: num_bigint::BigInt = s
         .parse()
         .map_err(|_| typer_err(format!("For input string: \"{s}\"")))?;
+    if v.sign() == num_bigint::Sign::Minus {
+        return Err(typer_err(format!("Negative unsigned big integer: \"{s}\"")));
+    }
+    let v = v.magnitude();
     if v.bits() > 256 {
         return Err(typer_err(format!("Too big unsigned big int value {v}")));
     }
@@ -1330,6 +1338,30 @@ mod tests {
             print_typed(&out),
             "(ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))"
         );
+    }
+
+    /// `unsignedBigInt("-0")` / `("-0000")` ACCEPT as `@0` — Scala parses
+    /// FIRST and rejects only `signum() < 0`, and `BigInteger("-0").signum()
+    /// == 0` (oracle: `tc unsignedBigInt("-0")` → `OK
+    /// (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))`, golden_seed.txt
+    /// §24(g), captured 2026-07-07 ×3 runs).
+    #[test]
+    fn unsigned_big_int_negative_zero_accepts_as_zero() {
+        let f = ident(
+            "unsignedBigInt",
+            vec![SType::SString],
+            SType::SUnsignedBigInt,
+        );
+        for lit in ["-0", "-0000"] {
+            let out = predef_ir_builder("unsignedBigInt", &f, &[str_const(lit)], 3)
+                .expect("isDefinedAt true")
+                .unwrap_or_else(|e| panic!("{lit}: signum-0 literal must accept: {e:?}"));
+            assert_eq!(
+                print_typed(&out),
+                "(ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))",
+                "{lit}"
+            );
+        }
     }
 
     /// `unsignedBigInt("0005")` canonicalizes leading zeros → `@5` (oracle-verified,

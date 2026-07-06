@@ -14,7 +14,7 @@ use ergo_ser::opcode::{write_expr, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{CollValue, SigmaValue};
 
-use crate::emit::emit;
+use crate::emit::{emit, EmitError};
 use crate::env::ScriptEnv;
 use crate::stype::SType;
 use crate::typecheck::{typecheck_with_network, CompileError};
@@ -182,6 +182,258 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
     }
 }
 
+/// GraphBuilding verdict-parity gate over the emitted body — lambda and
+/// application shapes the FULL Scala compiler rejects (lib.rs D-C5, wave 1;
+/// adversarial-findings-bindings.md F1/F2 + fresh boundary captures
+/// 2026-07-07, every probe 3 identical oracle runs).
+///
+/// Oracle-pinned rules:
+/// - **Zero-arg `FuncValue` rejects ANYWHERE** — even as the rhs of an
+///   unused val (`cc { val unused = {() => 1}; sigmaProp(true) }` → `REJECT
+///   1:17 GraphBuildingException`): the definition itself crashes Scala's
+///   graph construction, before any dead-code elimination.
+/// - **`FuncApply` with arg count != 1 rejects** (`f(1, 2)` → `REJECT 1:50`,
+///   `f()`, aliased `g(1, 2)`, inline `{(x, y) => x + y}(1, 2)` — all
+///   `GraphBuildingException`): Scala lowers only 1-arg applications. The
+///   multi-arg lambda DEFINITION is fine (the IR tuples it), so an unused
+///   val-bound multi-arg lambda (`{ val unused = {(x: Int, y: Int) => x +
+///   y}; sigmaProp(true) }` → OK), an un-applied alias (`val g = f` with no
+///   call → OK) and every HOF-callback use — direct `fold(0L, {(a, b) =>
+///   ...})` AND val-bound `fold(0L, f)` (fresh capture: `cc { val f = {(a:
+///   Long, b: Long) => a + b}; sigmaProp(Coll(1L, 2L).fold(0L, f) == 3L) }`
+///   → OK, the D-C4 both-accept class, e.g. corpus
+///   `crystalpool/swap-tokens.es`) — stay ACCEPTED: the gate keys on the
+///   APPLICATION node, not on the `FuncValue`.
+/// - **A lambda with a FUNCTION-typed parameter rejects** (`{(f: Int => Int)
+///   => f(10)}` and the param-unused body variant → `REJECT 0:0
+///   MatchError`) UNLESS the lambda is the rhs of a ValDef whose id has zero
+///   `ValUse` occurrences (fresh capture: `cc { val unused = {(f: Int =>
+///   Int) => 1}; sigmaProp(true) }` → OK — the unused val is dead-code
+///   eliminated before the lowering that dies). Residual asymmetry vs the
+///   zero-arg rule is oracle-pinned, not a modeling choice. A `FuncValue`
+///   with an `SFunc` param NESTED inside an unused val's rhs (not directly
+///   the rhs) is still rejected — un-probed exotic corner, reject-side
+///   bounded (D-C5).
+fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
+    use std::collections::HashSet;
+
+    // Pass 1: every ValUse id occurring anywhere in the body.
+    let mut used: HashSet<u32> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        if let Expr::Op(IrNode { payload, .. }) = e {
+            if let Payload::ValUse { id } = payload {
+                used.insert(*id);
+            }
+            push_children(payload, &mut stack);
+        }
+    }
+
+    // Pass 2: walk with a one-hop exemption flag for a FuncValue that is the
+    // rhs of an UNUSED ValDef (Scala prunes it before the SFunc-param
+    // lowering; the zero-arg rule is NOT exempted — see the fn docs).
+    let mut stack: Vec<(&Expr, bool)> = vec![(root, false)];
+    while let Some((e, pruned_rhs)) = stack.pop() {
+        let Expr::Op(IrNode { payload, .. }) = e else {
+            continue;
+        };
+        match payload {
+            Payload::FuncValue { args, body } => {
+                if args.is_empty() {
+                    return Some(EmitError::GraphBuildingReject {
+                        class: "GraphBuildingException",
+                        what: "zero-arg lambda: Scala's graph construction rejects a \
+                               FuncValue definition with no arguments (even unused)"
+                            .into(),
+                    });
+                }
+                if !pruned_rhs
+                    && args
+                        .iter()
+                        .any(|(_, t)| matches!(t, Some(SigmaType::SFunc { .. })))
+                {
+                    return Some(EmitError::GraphBuildingReject {
+                        class: "MatchError",
+                        what: "lambda with a function-typed parameter: Scala's \
+                               GraphBuilding cannot lower a higher-order user lambda"
+                            .into(),
+                    });
+                }
+                stack.push((body, false));
+            }
+            Payload::FuncApply { func, args } => {
+                if args.len() != 1 {
+                    return Some(EmitError::GraphBuildingReject {
+                        class: "GraphBuildingException",
+                        what: format!(
+                            "{}-arg lambda application: Scala's GraphBuilding lowers \
+                             only 1-arg applications",
+                            args.len(),
+                        ),
+                    });
+                }
+                stack.push((func.as_ref(), false));
+                stack.push((&args[0], false));
+            }
+            Payload::ValDef { id, rhs, .. } => {
+                let exempt = !used.contains(id)
+                    && matches!(
+                        rhs.as_ref(),
+                        Expr::Op(IrNode {
+                            payload: Payload::FuncValue { .. },
+                            ..
+                        })
+                    );
+                stack.push((rhs.as_ref(), exempt));
+            }
+            other => {
+                let mut children = Vec::new();
+                push_children(other, &mut children);
+                stack.extend(children.into_iter().map(|c| (c, false)));
+            }
+        }
+    }
+    None
+}
+
+/// Numeric widths participating in the compile-time constant fold (the
+/// signed ladder only — BigInt arithmetic is NOT compile-folded by Scala,
+/// oracle control `cc sigmaProp(bigInt(2^254) + bigInt(2^254) > 0)` → OK).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoldWidth {
+    Byte,
+    Short,
+    Int,
+    Long,
+}
+
+fn fold_width(t: &SigmaType) -> Option<FoldWidth> {
+    match t {
+        SigmaType::SByte => Some(FoldWidth::Byte),
+        SigmaType::SShort => Some(FoldWidth::Short),
+        SigmaType::SInt => Some(FoldWidth::Int),
+        SigmaType::SLong => Some(FoldWidth::Long),
+        _ => None,
+    }
+}
+
+fn in_fold_range(w: FoldWidth, v: i64) -> bool {
+    match w {
+        FoldWidth::Byte => i8::try_from(v).is_ok(),
+        FoldWidth::Short => i16::try_from(v).is_ok(),
+        FoldWidth::Int => i32::try_from(v).is_ok(),
+        FoldWidth::Long => true,
+    }
+}
+
+/// Compile-time constant-fold overflow CHECK (lib.rs D-C5; the emitted tree
+/// stays UNFOLDED — this walk never rewrites, it only mirrors the verdict).
+///
+/// Scala's GraphBuilding evaluates constant-operand `Byte`/`Short`/`Int`/
+/// `Long` arithmetic with EXACT semantics at compile time; the
+/// `ArithmeticException` aborts compilation (oracle: `cc sigmaProp(
+/// (2147483647 + 1) < 0)` → `REJECT 0:0 ArithmeticException` — the whole
+/// N-2/F-2 family, adversarial-findings-{numerics,constants}.md). Probed
+/// fold boundary, honored exactly:
+/// - folded: `+`/`-`/`*` over same-width constant operands (operands may
+///   themselves be folded arith or folded casts-of-literals — `cc
+///   sigmaProp((127.toByte + 1.toByte) < 0.toByte)` REJECTs); `Downcast`/
+///   `Upcast` of a DIRECT constant (`300.toByte` REJECTs; mixed-width `cc
+///   sigmaProp((9223372036854775807L + 1) < 0L)` REJECTs via the folded
+///   `Upcast(1)`); the fold runs EVERYWHERE — unused-val rhs (`cc { val
+///   unused = 2147483647 + 1; sigmaProp(true) }` REJECTs) and lambda bodies
+///   (`cc sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)`
+///   REJECTs) included (all fresh captures 2026-07-07, 3 identical runs);
+/// - NOT folded: division/modulo (`cc sigmaProp(1 / 0 == 0)` → OK), BigInt
+///   arithmetic, `min`/`max`, `Negation` (Scala negates WRAPPING, never
+///   throws — probe 65), and casts of NON-direct-constant subexpressions
+///   (`ccs sigmaProp((x * 100).toByte > 0.toByte)` → OK: Scala folds
+///   `x * 100` to 1000 but leaves the Downcast unfolded; a cast-of-cast
+///   chain is likewise treated as unfolded — un-probed, accept-side
+///   bounded).
+///
+/// Returns the folded `(width, value)` for constant subtrees (`Ok(None)` for
+/// non-constant ones) so parent arith arms can chain; an overflow anywhere
+/// is `Err` (class `ArithmeticException`, matching the oracle).
+fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> {
+    let overflow = |what: String| EmitError::GraphBuildingReject {
+        class: "ArithmeticException",
+        what,
+    };
+    match e {
+        Expr::Const { val, .. } => Ok(match val {
+            SigmaValue::Byte(v) => Some((FoldWidth::Byte, i64::from(*v))),
+            SigmaValue::Short(v) => Some((FoldWidth::Short, i64::from(*v))),
+            SigmaValue::Int(v) => Some((FoldWidth::Int, i64::from(*v))),
+            SigmaValue::Long(v) => Some((FoldWidth::Long, *v)),
+            _ => None,
+        }),
+        Expr::Unparsed(_) => Ok(None),
+        Expr::Op(IrNode { opcode, payload }) => match (opcode, payload) {
+            // ArithOp +/-/* (wire bytes: Plus 0x9A, Minus 0x99, Multiply
+            // 0x9C). Division 0x9D / modulo 0x9E / min 0xA1 / max 0xA2 fall
+            // to the recurse-only arm below (not compile-folded).
+            (0x9A | 0x99 | 0x9C, Payload::Two(l, r)) => {
+                let lf = fold_overflow_check(l)?;
+                let rf = fold_overflow_check(r)?;
+                let (Some((wl, a)), Some((wr, b))) = (lf, rf) else {
+                    return Ok(None);
+                };
+                if wl != wr {
+                    // Post-typer operands share a width; a mismatch means a
+                    // hand-built tree — stay conservative, no fold.
+                    return Ok(None);
+                }
+                // i64 math is exact for Byte/Short/Int operands (|v| <= 2^31,
+                // so even products fit i64); Long uses checked ops.
+                let (sym, v) = match opcode {
+                    0x9A => ("+", a.checked_add(b)),
+                    0x99 => ("-", a.checked_sub(b)),
+                    _ => ("*", a.checked_mul(b)),
+                };
+                match v.filter(|v| in_fold_range(wl, *v)) {
+                    Some(v) => Ok(Some((wl, v))),
+                    None => Err(overflow(format!(
+                        "compile-time constant fold overflows {wl:?}: {a} {sym} {b}"
+                    ))),
+                }
+            }
+            // Downcast (0x7D) / Upcast (0x7E) of a DIRECT constant fold to
+            // the target width; the downcast is range-checked exactly
+            // (`300.toByte` rejects). Casts of non-direct-constant inputs
+            // stay unfolded (the `(x * 100).toByte` control), but their
+            // subtree is still checked.
+            (0x7D | 0x7E, Payload::NumericCast { input, tpe }) => {
+                let f = fold_overflow_check(input)?;
+                let direct_const = matches!(input.as_ref(), Expr::Const { .. });
+                match (direct_const, f, fold_width(tpe)) {
+                    (true, Some((_, v)), Some(w)) => {
+                        if *opcode == 0x7D && !in_fold_range(w, v) {
+                            Err(overflow(format!(
+                                "compile-time constant downcast out of {w:?} range: {v}"
+                            )))
+                        } else {
+                            Ok(Some((w, v)))
+                        }
+                    }
+                    _ => Ok(None),
+                }
+            }
+            // Everything else: not foldable itself, but every child subtree
+            // is still checked (folds run everywhere in Scala's graph
+            // construction — see the fn docs).
+            (_, payload) => {
+                let mut children = Vec::new();
+                push_children(payload, &mut children);
+                for c in children {
+                    fold_overflow_check(c)?;
+                }
+                Ok(None)
+            }
+        },
+    }
+}
+
 /// Compile ErgoScript `source` end-to-end: typecheck, lower to opcode IR,
 /// assemble the ErgoTree, serialize, and derive the P2S/P2SH addresses.
 ///
@@ -228,11 +480,12 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
 /// The Task-10 corpus run (`tests/compile_semantic_parity.rs`,
 /// `test-vectors/ergoscript/compile/compile_seed.json`) adjudicated every
 /// verdict divergence against the full Scala compiler:
-/// - Postfix method-call residuals (e.g. `arr1 size`): the residual
-///   `MethodCall` shapes that survive our typer all have non-`Boolean`/
-///   `SigmaProp` roots in the corpus, so the route's root dispatch already
-///   rejects them exactly where Scala's GraphBuilding throws — verdict
-///   parity holds with NO extra pre-reject.
+/// - Postfix method-call residuals (e.g. `arr1 size`): the UNWRAPPED corpus
+///   forms have non-`Boolean`/`SigmaProp` roots, so the route's root
+///   dispatch rejects them (class advisory); the WRAPPED forms
+///   (`sigmaProp((arr1 size) > 0)`) are rejected by the Task-11 wave-1
+///   `%SCollection.size` gate in `emit_method_call` (lib.rs D-C5, exact
+///   `GraphBuildingException` class).
 /// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala
 ///   GraphBuilding `AssertionError`; see the `XorOf` arm).
 /// - v6-only constant data under the v0 header (`unsignedBigInt(..)`
@@ -243,6 +496,12 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
 ///   contexts: STILL OPEN — lib.rs D-C3 (compile output carries wire
 ///   opcode `0xCF`, which no evaluator accepts; the Scala IR folds or
 ///   sigma-reconstructs it away).
+/// - Task-11 wave 1 added the GraphBuilding reject-gate family (lib.rs
+///   D-C5): bit ops, zero-arg/non-1-arg lambda applications, SFunc-typed
+///   lambda params, postfix `size`, out-of-range `getReg` literals,
+///   pre-v3 SNumericType methods, and the constant-fold overflow check
+///   ([`graph_building_lambda_reject`] / [`fold_overflow_check`] below +
+///   the emit-arm gates).
 ///
 /// # Examples
 ///
@@ -276,6 +535,17 @@ pub fn compile(
             })
         }
     };
+
+    // GraphBuilding verdict-parity gates (lib.rs D-C5): reject the emitted
+    // shapes Scala's full compiler rejects — lambda/application rules first,
+    // then the constant-fold overflow check; both precede the serializer
+    // gate below because GraphBuilding runs before serialization in Scala
+    // (the relative order of the two walks is deterministic but advisory —
+    // the oracle grades the verdict, classes are exact per family).
+    if let Some(e) = graph_building_lambda_reject(&root) {
+        return Err(CompileError::Emit(e));
+    }
+    fold_overflow_check(&root).map_err(CompileError::Emit)?;
 
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
@@ -507,6 +777,158 @@ mod tests {
             assert_eq!(err.class(), "SerializerException", "{src}");
             assert_eq!(err.pos(), 0, "{src}");
         }
+    }
+
+    // ----- error paths: GraphBuilding parity gates (lib.rs D-C5, wave 1) -----
+    // Every oracle fact below: captured 2026-07-07, 3 identical runs,
+    // committed as compile_seed.json vectors (except the ACCEPT boundaries
+    // whose trees are unevaluable on our side — the D-C4 class — which are
+    // pinned here verdict-only).
+
+    #[test]
+    fn compile_bit_op_wrapped_in_sigmaprop_rejects_graph_building_class() {
+        // Oracle: `cc sigmaProp((1 | 2) == 3)` → `REJECT 1:12
+        // GraphBuildingException` (all of |,&,^,<<,>>,>>>,~ — the emit
+        // BitOp/BitInversion arms; width matrix pinned in emit.rs tests).
+        for src in ["sigmaProp((1 | 2) == 3)", "sigmaProp((~1) == -2)"] {
+            let err = ct(src).expect_err(src);
+            assert_eq!(err.class(), "GraphBuildingException", "{src}");
+        }
+        // Boolean ^ is BinXor, not a BitOp — still compiles.
+        ct("sigmaProp((HEIGHT > 1) ^ (HEIGHT < 5))").expect("BinXor untouched");
+    }
+
+    #[test]
+    fn compile_zero_arg_lambda_rejects_even_unused() {
+        // Oracle: `cc { val f = {() => 1}; sigmaProp(f() == 1) }` → `REJECT
+        // 1:12 GraphBuildingException`; the UNUSED variant rejects too
+        // (`REJECT 1:17`) — the definition itself crashes Scala's graph
+        // construction, before dead-code elimination.
+        for src in [
+            "{ val f = {() => 1}; sigmaProp(f() == 1) }",
+            "{ val unused = {() => 1}; sigmaProp(true) }",
+        ] {
+            let err = ct(src).expect_err(src);
+            assert_eq!(err.class(), "GraphBuildingException", "{src}");
+        }
+    }
+
+    #[test]
+    fn compile_multi_arg_application_rejects_definitions_and_hof_slots_accept() {
+        // Rejects: every non-1-arg APPLICATION (direct, aliased, inline) —
+        // oracle `REJECT GraphBuildingException` on all four.
+        for src in [
+            "{ val f = {(x: Int, y: Int) => x + y}; sigmaProp(f(1, 2) == 3) }",
+            "{ val f = {(x: Int, y: Int, z: Int) => x + y + z}; sigmaProp(f(1, 2, 3) == 6) }",
+            "{ val f = {(x: Int, y: Int) => x + y}; val g = f; sigmaProp(g(1, 2) == 3) }",
+            "sigmaProp({(x: Int, y: Int) => x + y}(1, 2) == 3)",
+        ] {
+            let err = ct(src).expect_err(src);
+            assert_eq!(err.class(), "GraphBuildingException", "{src}");
+        }
+        // Accepts (oracle OK): the multi-arg DEFINITION is fine — unused
+        // val, un-applied alias, and both fold-callback forms (direct and
+        // val-bound = the D-C4 both-accept class; our trees for these stay
+        // unevaluable multi-arg FuncValues, ledger D-C4/D-C5).
+        for src in [
+            "{ val unused = {(x: Int, y: Int) => x + y}; sigmaProp(true) }",
+            "{ val f = {(x: Int, y: Int) => x + y}; val g = f; sigmaProp(true) }",
+            "{ val f = {(a: Long, b: Long) => a + b}; sigmaProp(Coll(1L, 2L).fold(0L, f) == 3L) }",
+            "sigmaProp(Coll(1L, 2L).fold(0L, {(a: Long, b: Long) => a + b}) == 3L)",
+        ] {
+            ct(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn compile_function_typed_lambda_param_rejects_match_error_class() {
+        // Oracle: `REJECT 0:0 MatchError` — even when the parameter is never
+        // applied in the body; the exemption is an UNUSED val binding
+        // (pruned before the lowering that dies — fresh boundary capture).
+        for src in [
+            "{ val h = {(f: Int => Int) => f(10)}; sigmaProp(h({(x: Int) => x + 1}) == 11) }",
+            "{ val h = {(f: Int => Int) => 1}; sigmaProp(h({(x: Int) => x}) == 1) }",
+        ] {
+            let err = ct(src).expect_err(src);
+            assert_eq!(err.class(), "MatchError", "{src}");
+        }
+        // Oracle OK: unused val-bound SFunc-param lambda (pruned)...
+        ct("{ val unused = {(f: Int => Int) => 1}; sigmaProp(true) }")
+            .expect("unused SFunc-param lambda is pruned by Scala — must accept");
+        // ...and a lambda RETURNING a lambda (curried) is not a
+        // function-typed PARAMETER — accepted on both sides.
+        ct("{ val f = {(x: Int) => {(y: Int) => x + y}}; sigmaProp(f(1)(2) == 3) }")
+            .expect("curried lambda accepts");
+    }
+
+    #[test]
+    fn compile_postfix_size_and_get_reg_range_reject_with_oracle_classes() {
+        // Postfix residual `size` (emit gate; oracle `cc sigmaProp((OUTPUTS
+        // size) >= 0)` → `REJECT 1:12 GraphBuildingException`).
+        let err = ct("sigmaProp((OUTPUTS size) >= 0)").expect_err("postfix size");
+        assert_eq!(err.class(), "GraphBuildingException");
+        // getReg out-of-range literal (emit gate; oracle `REJECT 0:0
+        // ArrayIndexOutOfBoundsException`); v6 method → tree_version 3.
+        let err = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(SELF.getReg[Int](100).isDefined)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect_err("out-of-range getReg");
+        assert_eq!(err.class(), "ArrayIndexOutOfBoundsException");
+        assert_eq!(err.pos(), 0);
+    }
+
+    #[test]
+    fn compile_constant_fold_overflow_rejects_arithmetic_exception_class() {
+        // Oracle: `REJECT 0:0 ArithmeticException` on the whole family
+        // (compile-time exact fold of constant +,-,* and casts-of-literals;
+        // the fold runs in unused-val rhs and lambda bodies too).
+        for src in [
+            "sigmaProp(300.toByte < 0.toByte)",
+            "sigmaProp(2147483647.toShort > 0.toShort)",
+            "sigmaProp((2147483647 + 1) < 0)",
+            "sigmaProp((9223372036854775807L + 1L) < 0L)",
+            "sigmaProp((9223372036854775807L + 1) < 0L)", // folded Upcast(1) feeds the +
+            "sigmaProp(9223372036854775807L * 2L > 0L)",
+            "sigmaProp((127.toByte + 1.toByte) < 0.toByte)",
+            "sigmaProp(-2147483647 - 2 < 0)",
+            "{ val unused = 2147483647 + 1; sigmaProp(true) }",
+            "sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)",
+        ] {
+            let err = ct(src).expect_err(src);
+            assert_eq!(err.class(), "ArithmeticException", "{src}");
+            assert_eq!(err.pos(), 0, "{src}");
+        }
+    }
+
+    #[test]
+    fn compile_fold_boundary_controls_still_accept() {
+        // Oracle ACCEPT controls pinning what Scala does NOT compile-fold:
+        // division (`1 / 0` compiles!), in-range folds, non-constant
+        // operands, exactly-representable boundaries.
+        for src in [
+            "sigmaProp(1 / 0 == 0)",
+            "sigmaProp((2147483647 + 0) < 0)",
+            "sigmaProp((2147483646 + 1) < 0)",
+            "sigmaProp((-9223372036854775807L - 1L) < 0L)", // exactly Long.MIN
+            "sigmaProp((HEIGHT + 2147483647) > 0)",
+        ] {
+            ct(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        }
+        // A cast of a NON-direct-constant subexpression is not folded even
+        // when the subtree folds (oracle: `ccs sigmaProp((x * 100).toByte >
+        // 0.toByte)` → OK, residual Downcast; x is the env constant 10).
+        let mut env = ScriptEnv::new();
+        env.insert("x", EnvValue::Int(10));
+        compile(
+            &env,
+            "sigmaProp((x * 100).toByte > 0.toByte)",
+            0,
+            NetworkPrefix::Testnet,
+        )
+        .expect("cast of folded-but-not-direct constant stays unfolded — must accept");
     }
 
     #[test]

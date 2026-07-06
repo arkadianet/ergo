@@ -683,6 +683,18 @@ tc	unsignedBigInt("5").toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:UnsignedB
 #     The v3 REJECT for the SAME literal is a real parsed record, swept normally:
 tc	bigInt("10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376")	REJECT 0:0 ArithmeticException
 #
+# (g) Negative ZERO (M3 Task-11 adversarial finding, constants F-1): Scala's
+#     `UnsignedBigIntFunc` constructs `new BigInteger(s)` FIRST and rejects
+#     only `signum() < 0` — and `BigInteger("-0").signum() == 0`, so
+#     `"-0"`/`"-0000"` ACCEPT as the canonical `@0` (the minus sign and the
+#     leading zeros both normalize away). Captured live 2026-07-07 (`tc`
+#     verb, ORACLE_TREE_VERSION=3, 3 identical runs). Rust mirrors by parsing
+#     with `num_bigint::BigInt` first and rejecting only `Sign::Minus`
+#     (`predef_ir.rs::parse_unsigned_big_int`; num-bigint normalizes `-0` to
+#     `NoSign`).
+tc	unsignedBigInt("-0")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))
+tc	unsignedBigInt("-0000")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))
+#
 # ── § 25: M3 Task-8 — standalone top-level `val` probe (binder m2-deferred) ──
 # Captured live 2026-07-05 via scripts/jvm_typer_oracle (`tc` verb, source hex
 # 76616c2078203d2031, ORACLE_TREE_VERSION=3). A bare top-level `val x = 1`

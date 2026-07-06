@@ -2,8 +2,10 @@
 //!
 //! M3 Task 7 laid the type map ([`map_type`]), the constant map
 //! ([`map_const`]), and every FIXED-ARITY opcode arm of [`emit`] — context
-//! singletons, relations, arithmetic/bit/boolean operators, collection
+//! singletons, relations, arithmetic/boolean operators, collection
 //! transformers, sigma combinators, crypto primitives, option/context access.
+//! (Bit operators later became Task-11 wave-1 GraphBuilding-parity REJECTS —
+//! lib.rs D-C5; Scala's full compiler cannot lower them.)
 //! M3 Task 8 adds the binding forms (`Block`/`ValNode`/`Ident`/`Lambda` →
 //! `BlockValue`/`ValDef`/`ValUse`/`FuncValue`), `MethodCall`/`PropertyCall`
 //! wire dispatch, the residual `Apply`/`Select` lowering catalog (numeric
@@ -70,10 +72,12 @@ use crate::typed::{node_tpe, ConstPayload, TypedExpr};
 use crate::typer::methods::wire_method;
 use crate::typer::unify::numeric_index;
 
-/// Emission failure. Every variant is a COMPILER bug surface, not a user
-/// error: the typer guarantees the invariants these errors report (no
-/// `NoType` in output, no pre-typed nodes, payloads matching node types), so
-/// the variants are typed and spanless.
+/// Emission failure. `UnresolvedType`/`UnsupportedNode`/`InvalidShape` are
+/// COMPILER bug surfaces, not user errors: the typer guarantees the
+/// invariants those errors report (no `NoType` in output, no pre-typed
+/// nodes, payloads matching node types), so the variants are typed and
+/// spanless. `GraphBuildingReject` is the exception — a USER-reachable
+/// verdict-parity gate (see its docs).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EmitError {
     /// A compiler-internal type (`NoType`, `STypeApply`) reached `map_type`.
@@ -92,6 +96,21 @@ pub enum EmitError {
     /// identifiers).
     #[error("invalid shape reached emit: {0}")]
     InvalidShape(&'static str),
+    /// A construct the TYPER accepts (M2 parity holds on both sides) but the
+    /// FULL Scala compiler REJECTS at its GraphBuilding/IR stage — no
+    /// lowering exists for the node, or compile-time constant evaluation
+    /// throws. Mirroring the verdict keeps `compile()` from handing out tree
+    /// bytes + addresses the reference compiler can never produce (several
+    /// such trees are unspendable — the funds-stranding surface the
+    /// oracle-parity bar exists for). `class` is the ORACLE's exception
+    /// class, verbatim, for reject-class parity grading (lib.rs D-C5).
+    #[error("rejected for Scala GraphBuilding parity ({class}): {what}")]
+    GraphBuildingReject {
+        /// The Scala exception class the oracle reports for this reject.
+        class: &'static str,
+        /// What was rejected (names the operator/method/constant family).
+        what: String,
+    },
 }
 
 /// Lower a typed expression to the `ergo-ser` opcode IR.
@@ -106,6 +125,23 @@ pub fn emit(expr: &TypedExpr) -> Result<Expr, EmitError> {
 /// `Ok(Expr::Op { .. })` shorthand shared by every opcode arm.
 fn node(opcode: u8, payload: Payload) -> Result<Expr, EmitError> {
     Ok(Expr::Op(IrNode { opcode, payload }))
+}
+
+/// Surface symbol of a `TypedExpr::BitOp` opcode byte (typed.rs `BIT_*`
+/// constants) — for the GraphBuilding-reject message only.
+fn bit_op_symbol(opcode: i8) -> &'static str {
+    use crate::typed::{
+        BIT_AND, BIT_OR, BIT_SHIFT_LEFT, BIT_SHIFT_RIGHT, BIT_SHIFT_RIGHT_ZEROED, BIT_XOR,
+    };
+    match opcode {
+        BIT_OR => "|",
+        BIT_AND => "&",
+        BIT_XOR => "^",
+        BIT_SHIFT_LEFT => "<<",
+        BIT_SHIFT_RIGHT => ">>",
+        BIT_SHIFT_RIGHT_ZEROED => ">>>",
+        _ => "?",
+    }
 }
 
 /// Wrap an already-emitted IR expression in `Upcast` (0x7E) to `tpe`.
@@ -220,10 +256,8 @@ impl Scope {
     /// `comparisonOp`/`equalityOp` :679-697). The frontend already inserts
     /// these `Upcast` nodes at typer time (unify.rs `apply_upcast`, mirroring
     /// the same builder), so on frontend trees this is a no-op; it normalizes
-    /// hand-built trees defensively. Deliberately NOT applied to `BitOp`:
-    /// Scala's `mkBitOr`/`mkBitAnd`/`mkBitXor`/shift builders live on
-    /// `StdSigmaBuilder` with no `applyUpcast` override (SigmaBuilder.scala:
-    /// 629-645), so mixed BitOp operands stay mixed in the reference tree.
+    /// hand-built trees defensively. (`BitOp` never reaches a payload builder
+    /// — its emit arm rejects for GraphBuilding verdict parity.)
     fn two_upcast(&mut self, l: &TypedExpr, r: &TypedExpr) -> Result<Payload, EmitError> {
         let mut le = self.emit(l)?;
         let mut re = self.emit(r)?;
@@ -297,16 +331,23 @@ impl Scope {
                 ..
             } => node(*opcode as u8, self.two_upcast(left, right)?),
 
-            // ── bitwise: NO upcast normalization — Scala's mkBitOr/mkBitAnd/
-            //    mkBitXor and the shift builders are StdSigmaBuilder methods
-            //    with no applyUpcast (SigmaBuilder.scala:629-645), so mixed
-            //    BitOp operands stay mixed in the reference tree ───────────────
-            T::BitOp {
-                left,
-                right,
-                opcode,
-                ..
-            } => node(*opcode as u8, self.two(left, right)?),
+            // ── bitwise: REJECTED for full-compiler verdict parity — Scala
+            //    6.0.2 GraphBuilding has NO lowering arm for `BitOp`, so the
+            //    reference compiler rejects EVERY `|`/`&`/`^`(numeric)/`<<`/
+            //    `>>`/`>>>` expression at every width (oracle:
+            //    `cc sigmaProp((1 | 2) == 3)` → `REJECT 1:12
+            //    GraphBuildingException`, 19-probe family, compile_seed.json;
+            //    the TYPER accepts on both sides — golden_seed `1 | 2L`/`5 <<
+            //    1` records stay valid). Opcodes 0xF2-0xF8 are therefore
+            //    unreachable from `compile()`, exactly as from Scala's.
+            //    Boolean `^` is a DIFFERENT node (`BinXor`, accepted below).
+            T::BitOp { opcode, .. } => Err(EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: format!(
+                    "bit operator '{}' has no GraphBuilding lowering in Scala 6.0.2",
+                    bit_op_symbol(*opcode),
+                ),
+            }),
 
             // ── boolean binary (lazy) + unary ─────────────────────────────────
             T::BinAnd { left, right, .. } => node(0xED, self.two(left, right)?),
@@ -314,7 +355,14 @@ impl Scope {
             T::BinXor { left, right, .. } => node(0xF4, self.two(left, right)?),
             T::LogicalNot { input, .. } => node(0xEF, self.one(input)?),
             T::Negation { input, .. } => node(0xF0, self.one(input)?),
-            T::BitInversion { input, .. } => node(0xF1, self.one(input)?),
+            // Same GraphBuilding gap as `BitOp`: no lowering for
+            // `BitInversion` — Scala compile-rejects every `~x` (oracle:
+            // `cc sigmaProp((~1) == -2)` → `REJECT 1:13
+            // GraphBuildingException`); opcode 0xF1 never leaves compile().
+            T::BitInversion { .. } => Err(EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: "bit inversion '~' has no GraphBuilding lowering in Scala 6.0.2".into(),
+            }),
 
             // ── control / structure ───────────────────────────────────────────
             T::If {
@@ -868,6 +916,75 @@ impl Scope {
         args: &[TypedExpr],
         type_subst: &[(String, SType)],
     ) -> Result<Expr, EmitError> {
+        // GraphBuilding reject gates (lib.rs D-C5) — residual MethodCalls the
+        // typer accepts (M2 parity) but the FULL Scala compiler rejects:
+        //
+        // (a) Shared-SNumericType-container methods (`toBytes`/`toBits`,
+        //     D-T10): the owner name "SNumericType" is only ever produced at
+        //     `tree_version < 3` (`owner_name_for_method`), where Scala's
+        //     GraphBuilding rejects the v6-only method under v5 activation
+        //     (oracle, ORACLE_TREE_VERSION=2: `ccs sigmaProp(x.toBytes.size
+        //     == 4)` → `REJECT 1:13 GraphBuildingException`, 2026-07-07 ×3
+        //     runs). At v3 the owner resolves per-type (`Int`/…) and the
+        //     residual MethodCall is emitted unchanged (Err/Err reduce parity
+        //     for non-constant receivers; the constant-receiver FOLD is a
+        //     Wave-2 item — adversarial-findings-methodcalls.md F6).
+        if method.owner == "SNumericType" {
+            return Err(EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: format!(
+                    "v6-only numeric method '{}' on the shared SNumericType container \
+                     (tree_version < 3): Scala GraphBuilding rejects it under v5 activation",
+                    method.name,
+                ),
+            });
+        }
+        // (b) Postfix residual `size`: a space-form nullary call (`arr1
+        //     size`) survives BOTH typers as `MethodCall %SCollection.size`,
+        //     but Scala's GraphBuilding has no arm for the wire pair (12,1)
+        //     — only the Select path lowers `size` to `SizeOf` — and NO
+        //     evaluator accepts the pair (oracle: `ccs sigmaProp((arr1 size)
+        //     > 0)` → `REJECT 1:12 GraphBuildingException`; `size` is the
+        //     sole nullary custom-irBuilder Coll method, the other postfix
+        //     families reject in parity upstream —
+        //     adversarial-findings-methodcalls.md F1).
+        if method.owner == "SCollection" && method.name == "size" {
+            return Err(EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: "residual MethodCall %SCollection.size (postfix `size`): Scala \
+                       GraphBuilding only lowers the Select path (SizeOf); wire pair \
+                       (12,1) is unevaluable on both sides"
+                    .into(),
+            });
+        }
+        // (c) `Box.getReg[T](<literal>)` with an out-of-range register index:
+        //     Scala lowers a CONST-index getReg to `ExtractRegisterAs` and
+        //     bounds-checks `ErgoBox.registers(i)` at compile time (oracle:
+        //     `cc sigmaProp(SELF.getReg[Int](-1).isDefined)` → `REJECT 0:0
+        //     ArrayIndexOutOfBoundsException`; same for 10 and 100). Only a
+        //     LITERAL Int argument is gated — a dynamic index stays a
+        //     MethodCall in Scala too (Err/Err parity). The IN-RANGE literal
+        //     lowering to ExtractRegisterAs is a Wave-2 item
+        //     (adversarial-findings-methodcalls.md F2/F4): in-range behavior
+        //     is deliberately unchanged here.
+        if method.owner == "Box" && method.name == "getReg" {
+            if let Some(TypedExpr::Constant {
+                value: crate::typed::ConstPayload::Int(i),
+                ..
+            }) = args.first()
+            {
+                if !(0..=9).contains(i) {
+                    return Err(EmitError::GraphBuildingReject {
+                        class: "ArrayIndexOutOfBoundsException",
+                        what: format!(
+                            "getReg register index {i} outside 0..=9: Scala lowers the \
+                             const-index form to ExtractRegisterAs and bounds-checks it \
+                             at compile time"
+                        ),
+                    });
+                }
+            }
+        }
         let Some((type_id, desc)) = wire_method(&method.owner, &method.name) else {
             return Err(EmitError::UnsupportedNode(format!(
                 "MethodCall %{}.{} has no wire (typeId, methodId)",
@@ -1529,26 +1646,42 @@ mod tests {
     }
 
     #[test]
-    fn bit_ops_emit_scala_opcode_bytes_and_roundtrip() {
-        rt_op("1 | 2", 0xF2);
-        rt_op("1 & 2", 0xF3);
-        rt_op("1 ^ 2", 0xF5);
-        // Shift operators have no ErgoScript surface syntax reachable at M3;
-        // the opcode passthrough (`opcode as u8`) is pinned hand-built.
-        use crate::typed::{BIT_SHIFT_LEFT, BIT_SHIFT_RIGHT, BIT_SHIFT_RIGHT_ZEROED};
-        for (op, byte) in [
-            (BIT_SHIFT_RIGHT, 0xF6),
-            (BIT_SHIFT_LEFT, 0xF7),
-            (BIT_SHIFT_RIGHT_ZEROED, 0xF8),
-        ] {
-            let node = TypedExpr::BitOp {
-                left: Box::new(int_c(1)),
-                right: Box::new(int_c(2)),
-                opcode: op,
-                tpe: SType::SInt,
-            };
-            rt_node(&node, byte);
+    fn bit_ops_reject_graph_building_parity() {
+        // Scala 6.0.2 GraphBuilding has NO BitOp lowering — the full
+        // compiler rejects every bit operator at every width, shifts
+        // included (surface `5 << 1` parses and typechecks fine on both
+        // sides; oracle `cc sigmaProp((5 << 1) == 10)` → `REJECT 1:12
+        // GraphBuildingException`, compile_seed.json). Opcodes 0xF2-0xF8
+        // are unreachable from emit.
+        for src in ["1 | 2", "1 & 2", "1 ^ 2", "5 << 1", "5 >> 1", "5 >>> 1"] {
+            let err = emit(&tc(src)).expect_err(src);
+            assert!(
+                matches!(
+                    &err,
+                    EmitError::GraphBuildingReject { class, .. }
+                        if *class == "GraphBuildingException"
+                ),
+                "{src}: {err:?}"
+            );
         }
+        // Hand-built BitOp (any opcode byte) rejects the same way.
+        let node = TypedExpr::BitOp {
+            left: Box::new(int_c(1)),
+            right: Box::new(int_c(2)),
+            opcode: crate::typed::BIT_SHIFT_LEFT,
+            tpe: SType::SInt,
+        };
+        assert!(matches!(
+            emit(&node),
+            Err(EmitError::GraphBuildingReject { .. })
+        ));
+    }
+
+    #[test]
+    fn bool_xor_still_emits_binxor_nearest_accept_boundary() {
+        // `^` over BOOLEANS is a different node (BinXor, 0xF4) with a real
+        // GraphBuilding lowering — the bit-op gate must not touch it.
+        rt_op("(HEIGHT > 1) ^ (HEIGHT < 5)", 0xF4);
     }
 
     #[test]
@@ -1562,7 +1695,21 @@ mod tests {
     fn unary_ops_emit_one_payload_and_roundtrip() {
         rt_op("!(HEIGHT > 1)", 0xEF);
         rt_op("-HEIGHT", 0xF0);
-        rt_op("~HEIGHT", 0xF1);
+    }
+
+    #[test]
+    fn bit_inversion_rejects_graph_building_parity() {
+        // Same GraphBuilding gap as BitOp (oracle: `cc sigmaProp((~1) ==
+        // -2)` → `REJECT 1:13 GraphBuildingException`); 0xF1 never emits.
+        let err = emit(&tc("~HEIGHT")).expect_err("~ must reject");
+        assert!(
+            matches!(
+                &err,
+                EmitError::GraphBuildingReject { class, .. }
+                    if *class == "GraphBuildingException"
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1755,32 +1902,97 @@ mod tests {
     }
 
     #[test]
-    fn postfix_size_emits_property_call() {
+    fn postfix_size_residual_method_call_rejects_graph_building_parity() {
         // `col1 size` (no dot, the grammar's PostFix rule) desugars to a
-        // zero-arg MethodCall `%SCollection.size [] {}` (golden_seed §23(a)
-        // postfix form) → PropertyCall 0xDB with wire ids (12, 1) and no
-        // explicit type args.
-        let ir = emit_tc("col1 size");
+        // zero-arg MethodCall `%SCollection.size [] {}` (golden_seed §23(a))
+        // on BOTH typers, but Scala's GraphBuilding has no arm for the wire
+        // pair (12,1) — only the Select path lowers `size` (SizeOf) — and
+        // rejects (oracle: `ccs sigmaProp((arr1 size) > 0)` → `REJECT 1:12
+        // GraphBuildingException`, compile_seed.json). Emit mirrors the
+        // verdict.
+        let err = emit(&tc("col1 size")).expect_err("postfix size must reject");
+        assert!(
+            matches!(
+                &err,
+                EmitError::GraphBuildingReject { class, .. }
+                    if *class == "GraphBuildingException"
+            ),
+            "{err:?}"
+        );
+        // Nearest-accept boundary: the DOT form lowers via the Select path
+        // to SizeOf (0xB1) — untouched by the gate.
+        rt_op("col1.size", 0xB1);
+    }
+
+    #[test]
+    fn snumeric_container_method_call_rejects_graph_building_parity() {
+        // tree_version < 3 resolves `1.toBytes` to the shared SNumericType
+        // container (D-T10); Scala's GraphBuilding rejects the v6-only
+        // method under v5 activation (oracle, ORACLE_TREE_VERSION=2:
+        // `cc sigmaProp(1.toBytes.size == 1)` → `REJECT 1:11
+        // GraphBuildingException`, compile_seed.json). The TYPER stays
+        // permissive on both sides (M2 parity, golden_seed §21) — the gate
+        // is emit's.
+        let typed = typecheck(&demo_env(), "1.toBytes", 2).expect("v2 typer accepts (M2 parity)");
+        let err = emit(&typed).expect_err("SNumericType residual must reject");
+        assert!(
+            matches!(
+                &err,
+                EmitError::GraphBuildingReject { class, .. }
+                    if *class == "GraphBuildingException"
+            ),
+            "{err:?}"
+        );
+        // Nearest-accept boundary: at v3 the owner resolves per-type (Int)
+        // and the residual MethodCall emits with wire pair (4, 6).
+        let ir = emit_tc("1.toBytes");
         assert_eq!(root_opcode(&ir), 0xDB);
         match &ir {
             Expr::Op(IrNode {
                 payload:
                     Payload::MethodCall {
-                        type_id,
-                        method_id,
-                        args,
-                        type_args,
-                        ..
+                        type_id, method_id, ..
                     },
                 ..
-            }) => {
-                assert_eq!((*type_id, *method_id), (12, 1));
-                assert!(args.is_empty(), "PropertyCall carries no args");
-                assert!(type_args.is_empty(), "size has no explicit type args");
-            }
+            }) => assert_eq!((*type_id, *method_id), (4, 6)),
             other => panic!("expected MethodCall payload, got {other:?}"),
         }
-        wire_roundtrip(&ir);
+    }
+
+    #[test]
+    fn get_reg_out_of_range_literal_rejects_graph_building_parity() {
+        // Scala bounds-checks a CONST-index getReg at compile time while
+        // lowering it to ExtractRegisterAs (oracle: `cc sigmaProp(
+        // SELF.getReg[Int](-1).isDefined)` → `REJECT 0:0
+        // ArrayIndexOutOfBoundsException`; same for 10 and 100,
+        // compile_seed.json).
+        for src in [
+            "SELF.getReg[Int](-1)",
+            "SELF.getReg[Int](10)",
+            "SELF.getReg[Int](100)",
+        ] {
+            let err = emit(&tc(src)).expect_err(src);
+            assert!(
+                matches!(
+                    &err,
+                    EmitError::GraphBuildingReject { class, .. }
+                        if *class == "ArrayIndexOutOfBoundsException"
+                ),
+                "{src}: {err:?}"
+            );
+        }
+        // Nearest-accept boundaries: in-range literals (0..=9) keep the
+        // Wave-1 behavior (residual MethodCall — the ExtractRegisterAs
+        // lowering is Wave 2), and a DYNAMIC index is untouched (Scala
+        // keeps the MethodCall there too — Err/Err reduce parity).
+        for src in [
+            "SELF.getReg[Int](0)",
+            "SELF.getReg[Int](9)",
+            "SELF.getReg[Int](HEIGHT)",
+        ] {
+            let ir = emit(&tc(src)).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert_eq!(root_opcode(&ir), 0xDC, "{src}");
+        }
     }
 
     #[test]
@@ -2515,10 +2727,11 @@ mod tests {
     }
 
     #[test]
-    fn hand_built_mixed_bit_op_stays_mixed() {
-        // Scala's mkBitOr/mkBitAnd/mkBitXor are StdSigmaBuilder methods with
-        // NO applyUpcast (SigmaBuilder.scala:629-645): mixed BitOp operands
-        // stay mixed on the wire — emit must NOT normalize them.
+    fn hand_built_mixed_bit_op_rejects_like_frontend_ones() {
+        // Mixed-width bit ops reject the same as same-width ones — Scala's
+        // GraphBuilding has no BitOp arm at ANY width (oracle: `cc
+        // sigmaProp((1 | 2L) == 3L)` → `REJECT 1:12 GraphBuildingException`,
+        // compile_seed.json).
         use crate::typed::BIT_OR;
         let node = TypedExpr::BitOp {
             left: Box::new(int_c(1)),
@@ -2526,35 +2739,10 @@ mod tests {
             opcode: BIT_OR,
             tpe: SType::SLong,
         };
-        let ir = rt_node(&node, 0xF2);
-        match &ir {
-            Expr::Op(IrNode {
-                payload: Payload::Two(left, right),
-                ..
-            }) => {
-                assert!(
-                    matches!(
-                        left.as_ref(),
-                        Expr::Const {
-                            tpe: SigmaType::SInt,
-                            ..
-                        }
-                    ),
-                    "left operand unwrapped"
-                );
-                assert!(
-                    matches!(
-                        right.as_ref(),
-                        Expr::Const {
-                            tpe: SigmaType::SLong,
-                            ..
-                        }
-                    ),
-                    "right operand unwrapped"
-                );
-            }
-            other => panic!("expected Two payload, got {other:?}"),
-        }
+        assert!(matches!(
+            emit(&node),
+            Err(EmitError::GraphBuildingReject { .. })
+        ));
     }
 
     #[test]

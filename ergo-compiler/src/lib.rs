@@ -579,6 +579,80 @@
 //! FuncValue applies on the oracle side). M4/M5 lowering scope; no
 //! `SEMANTIC_SKIP` entry is needed while the Err/Err rule covers them, but
 //! any richer gate context will surface this first.
+//!
+//! ### D-C5 — GraphBuilding reject-gate parity (Task-11 adversarial wave 1)
+//!
+//! Our pipeline has no analogue of Scala's GraphBuilding/IR stage, so before
+//! this gate EVERY typed tree emit could serialize was accepted — including
+//! whole families the full Scala compiler REJECTS (accept-invalid; several
+//! emitted unspendable addresses). Wave 1 closes the reject direction with
+//! `EmitError::GraphBuildingReject { class, what }` (class = the oracle's
+//! exception class, graded exactly, not advisory): every rule below is
+//! oracle-pinned (captures 2026-07-07, 3 identical runs each; committed as
+//! `compile_probes.txt` → `compile_seed.json` vectors; findings reports
+//! `dev-docs/ergoscript-compiler-m3-recon/adversarial-findings-*.md`).
+//!
+//! Six gated classes:
+//! 1. **Bit ops** (`emit.rs` BitOp/BitInversion arms;
+//!    `GraphBuildingException`): Scala 6.0.2 has NO lowering for
+//!    `|`,`&`,`^`(numeric),`<<`,`>>`,`>>>`,`~` at any width — opcodes
+//!    0xF1-0xF8 are unreachable from both compilers. The TYPER accepts on
+//!    both sides (golden-seed bit-op records stay valid); boolean `^`
+//!    (BinXor) is untouched.
+//! 2. **Zero-arg lambdas + non-1-arg applications** (`tree.rs`
+//!    `graph_building_lambda_reject`; `GraphBuildingException`): a zero-arg
+//!    `FuncValue` rejects ANYWHERE (even the rhs of an unused val); a
+//!    `FuncApply` with != 1 args rejects (direct/aliased/inline). The
+//!    multi-arg DEFINITION stays accepted — unused vals, un-applied aliases
+//!    and fold-callback uses (direct AND val-bound, e.g.
+//!    `crystalpool/swap-tokens.es`) are the D-C4 both-accept class.
+//! 3. **Function-typed lambda parameters** (same walk; `MatchError`): any
+//!    lambda with an `SFunc`-typed param rejects unless it is the rhs of an
+//!    UNUSED val (oracle: pruned → ACCEPT). Residual (reject-side bounded,
+//!    un-probed): an SFunc-param lambda NESTED inside an unused val's rhs is
+//!    rejected here but might be pruned by Scala.
+//! 4. **Postfix residual `size`** (`emit.rs` `emit_method_call`;
+//!    `GraphBuildingException`): `MethodCall %SCollection.size` (wire pair
+//!    (12,1), the space-form `arr1 size`) has no GraphBuilding arm and no
+//!    evaluator accepts it. Bounded to `size` — the sole nullary
+//!    custom-irBuilder Coll method; other postfix families reject upstream
+//!    in parity.
+//! 5. **`Box.getReg[T](<literal>)` out of 0..=9** (`emit_method_call`;
+//!    `ArrayIndexOutOfBoundsException`): Scala bounds-checks the const index
+//!    while lowering to `ExtractRegisterAs`. Dynamic indices untouched
+//!    (MethodCall on both sides, Err/Err parity). The IN-RANGE literal
+//!    lowering to `ExtractRegisterAs` is Wave 2
+//!    (adversarial-findings-methodcalls.md F4) — until it lands, in-range
+//!    `getReg[T](lit)` stays a both-accept unevaluable residual on our side.
+//! 6. **Shared-SNumericType-container methods at `tree_version < 3`**
+//!    (`emit_method_call`; `GraphBuildingException`): `toBytes`/`toBits`
+//!    resolve to the `"SNumericType"` owner only pre-v3 (D-T10), where Scala
+//!    rejects the v6 method under v5 activation. At v3 the per-type residual
+//!    MethodCall is unchanged.
+//!
+//! Plus the **constant-fold overflow CHECK** (`tree.rs`
+//! `fold_overflow_check`; `ArithmeticException`): a bounded exact re-fold of
+//! Scala's compile-time constant evaluation — `+`,`-`,`*` over same-width
+//! `Byte`/`Short`/`Int`/`Long` constant operands and `Downcast`/`Upcast` of
+//! DIRECT constants; overflow rejects. The emitted tree stays UNFOLDED
+//! (semantics unchanged). Probed fold boundary honored: division/modulo NOT
+//! folded (`1/0` compiles), BigInt arith NOT folded, `min`/`max` and
+//! `Negation` NOT folded (residual: a fold chained THROUGH min/max or a
+//! wrapping-folded Negation is un-modeled — accept-side bounded), casts of
+//! non-direct-constant subexpressions NOT folded (`(x*100).toByte` compiles;
+//! cast-of-cast chains treated the same, un-probed). The fold check runs
+//! everywhere — unused-val rhs and lambda bodies included (both
+//! oracle-pinned REJECT).
+//!
+//! Wave-2 items deliberately NOT fixed here (accept-direction or lowering
+//! work; see the findings reports): getReg in-range literal →
+//! `ExtractRegisterAs` lowering (F4), `slice[T]` explicit-type-arg residual
+//! (F5), v6 numeric constant-receiver folds at v3 (F6),
+//! `Coll[UnsignedBigInt]().size` fold / v0 TYPE-code gate (constants F-3),
+//! and the whole P2SH-address divergence family (fold/CSE/upcast/ident
+//! lowerings — numerics N-3, bindings F3, methodcalls class 4; D-C1's "P2SH
+//! unaffected" sentence holds only for the segregation axis and is falsified
+//! by IR-transformed trees).
 
 pub mod ast;
 pub mod binder;

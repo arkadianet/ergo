@@ -1,0 +1,68 @@
+# Compile-only probe sources — M3 Task-11 wave-1 GraphBuilding reject-gate
+# vectors (lib.rs D-C5). Unlike golden_seed.txt records these carry no typer
+# s-expression: they exist solely to feed the compile oracle, so the
+# compile_seed.json recapture (`compile_seed_live_recapture`) replays them
+# through the SAME cc/cce/ccs verbs and records the verdict verbatim — no
+# oracle field is ever hand-written.
+#
+# Format: verb<TAB>tree_version<TAB>source. The recapture spawns one oracle
+# process per distinct tree_version (ORACLE_TREE_VERSION), ORACLE_NETWORK=
+# testnet throughout.
+#
+# Selection rule: REJECT probes (the wave-1 gates are all reject-direction)
+# plus the ACCEPT fold-boundary controls whose reductions AGREE on both
+# sides. ACCEPT boundaries whose trees are unevaluable on OUR side (the
+# D-C4 multi-arg-FuncValue class: unused/fold-slot lambdas) are deliberately
+# NOT committed — the semantic gate would flag them mixed Ok/Err; they are
+# pinned verdict-only in tree.rs unit tests instead.
+#
+# ── fix 1: bit ops — Scala GraphBuilding has no BitOp/BitInversion lowering ──
+cc	3	sigmaProp((1 | 2) == 3)
+cc	3	sigmaProp((1 & 2) == 0)
+cc	3	sigmaProp((5 ^ 3) == 6)
+cc	3	sigmaProp((5 << 1) == 10)
+cc	3	sigmaProp((5 >> 1) == 2)
+cc	3	sigmaProp((5 >>> 1) == 2)
+cc	3	sigmaProp((~1) == -2)
+cc	3	sigmaProp((1 | 2L) == 3L)
+ccs	3	sigmaProp((b1 | b2) == 3.toByte)
+# ── fix 2: zero-arg lambdas + non-1-arg applications ──
+cc	3	{ val f = {(x: Int, y: Int) => x + y}; sigmaProp(f(1, 2) == 3) }
+cc	3	{ val f = {(x: Int, y: Int, z: Int) => x + y + z}; sigmaProp(f(1, 2, 3) == 6) }
+cc	3	{ val f = {(x: Int, y: Int) => x + y}; val g = f; sigmaProp(g(1, 2) == 3) }
+cc	3	{ val f = {() => 1}; sigmaProp(f() == 1) }
+cc	3	{ val unused = {() => 1}; sigmaProp(true) }
+cc	3	sigmaProp({(x: Int, y: Int) => x + y}(1, 2) == 3)
+# ── fix 3: function-typed lambda parameters ──
+cc	3	{ val h = {(f: Int => Int) => f(10)}; sigmaProp(h({(x: Int) => x + 1}) == 11) }
+cc	3	{ val h = {(f: Int => Int) => 1}; sigmaProp(h({(x: Int) => x}) == 1) }
+# ── fix 4: postfix residual `size` MethodCall (wire pair (12,1)) ──
+ccs	3	sigmaProp((arr1 size) > 0)
+ccs	3	sigmaProp((arr1 size) == (arr2 size))
+cc	3	sigmaProp((OUTPUTS size) >= 0)
+cc	3	sigmaProp((INPUTS size) > 0)
+# ── fix 5: getReg out-of-range literal index ──
+cc	3	sigmaProp(SELF.getReg[Int](-1).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](10).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](100).isDefined)
+# ── fix 6: v6-only numeric methods on the shared SNumericType container (v2) ──
+ccs	2	sigmaProp(x.toBytes.size == 4)
+ccs	2	sigmaProp(x.toBits.size == 32)
+cc	2	sigmaProp(1.toBytes.size == 1)
+# ── fix 7: compile-time constant-fold overflow ──
+cc	3	sigmaProp(300.toByte < 0.toByte)
+cc	3	sigmaProp(2147483647.toShort > 0.toShort)
+cc	3	sigmaProp((2147483647 + 1) < 0)
+cc	3	sigmaProp((9223372036854775807L + 1L) < 0L)
+cc	3	sigmaProp((9223372036854775807L + 1) < 0L)
+cc	3	sigmaProp(9223372036854775807L * 2L > 0L)
+cc	3	sigmaProp((127.toByte + 1.toByte) < 0.toByte)
+ccs	3	sigmaProp((127.toByte + b1) < 0.toByte)
+cc	3	sigmaProp(-2147483647 - 2 < 0)
+cc	3	{ val unused = 2147483647 + 1; sigmaProp(true) }
+cc	3	sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)
+# ── fix 7 fold-boundary ACCEPT controls (reductions agree on both sides) ──
+cc	3	sigmaProp((2147483647 + 0) < 0)
+cc	3	sigmaProp((2147483646 + 1) < 0)
+cc	3	sigmaProp((-9223372036854775807L - 1L) < 0L)
+cc	3	sigmaProp((HEIGHT + 2147483647) > 0)
