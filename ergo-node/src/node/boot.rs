@@ -337,6 +337,41 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         "current chain state",
     );
 
+    // Operator escape hatch: `ERGO_BAN_HEADERS` (comma-separated hex-32
+    // header ids) pre-marks headers session-invalid so `header_proc`
+    // refuses them on arrival. Session-scoped (in-memory, gone on
+    // restart without the env) and opt-in — exists for incident
+    // recovery where a peer keeps gossiping the tip of a known-invalid
+    // branch that this node must not adopt (e.g. testnet 431,367,
+    // block `66bfa980…`: header is PoW-valid, body fails script
+    // verification, and the serving peer's own best-header pointer
+    // never rewound). Malformed entries are rejected at boot so a
+    // typo'd ban list fails loudly instead of silently not banning.
+    if let Ok(list) = std::env::var("ERGO_BAN_HEADERS") {
+        for tok in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let bytes = hex::decode(tok).map_err(|e| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("ERGO_BAN_HEADERS entry {tok:?} is not hex: {e}"),
+                )) as NodeError
+            })?;
+            let id: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "ERGO_BAN_HEADERS entry {tok:?} is {} bytes, expected 32",
+                        bytes.len()
+                    ),
+                )) as NodeError
+            })?;
+            store.mark_session_invalid(id);
+            warn!(
+                header_id = tok,
+                "ERGO_BAN_HEADERS: header banned for this session"
+            );
+        }
+    }
+
     // 2. Initialize genesis if needed (use genesis_committed flag, not height)
     if !store.genesis_committed() {
         info!("initializing genesis state");
