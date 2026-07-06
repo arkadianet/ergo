@@ -92,7 +92,7 @@ pub(crate) struct NodeState {
     pub(super) mempool: Mempool,
     pub(super) mempool_notifier: MempoolNotifier,
     // ---- throughput limiter ----
-    // Per-peer sliding-window cap (100 msg/sec, 2 MB/sec over 10s).
+    // Per-peer sliding-window cap (1000 msg/sec, 2 MB/sec over 10s).
     // Consulted on every inbound frame; over-limit frames drop and
     // emit a Misbehavior penalty.
     pub(super) throttle: ThroughputLimiter,

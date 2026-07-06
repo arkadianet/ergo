@@ -22,11 +22,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_p2p::framing::{deserialize_frame, serialize_frame, MessageFrame};
 use ergo_p2p::handshake::{
-    deserialize_handshake_with_consumed, serialize_handshake, DeclaredAddress, Handshake, PeerSpec,
-    Version,
+    deserialize_handshake_with_consumed, serialize_handshake, DeclaredAddress, Handshake,
+    HandshakeError, PeerSpec, Version,
 };
 use ergo_p2p::message;
 use ergo_p2p::types::InvData;
+use ergo_primitives::reader::ReadError;
 
 fn hex32(s: &str) -> [u8; 32] {
     let v = hex::decode(s.trim()).expect("hex");
@@ -45,9 +46,27 @@ fn code_name(c: u8) -> &'static str {
         55 => "Inv",
         65 => "SyncInfo",
         75 => "Handshake",
+        76 => "GetSnapshotsInfo",
         77 => "SnapshotsInfo",
+        78 => "GetManifest",
+        79 => "Manifest",
+        80 => "GetUtxoChunk",
+        81 => "UtxoChunk",
+        90 => "GetNipopowProof",
+        91 => "NipopowProof",
         _ => "?",
     }
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: p2p_probe <host:port> <testnet|mainnet> <mode> [args...] [--secs N]\n\
+         modes:\n\
+         \x20 req <type_id> <hex_id>...     one RequestModifier(type_id) for the given ids\n\
+         \x20 header_n <hex_id> <n>         one RequestModifier(type=101) repeating <hex_id> n times\n\
+         \x20 burst <type_id> <hex_id> <n>  n separate 1-id RequestModifier frames back-to-back"
+    );
+    std::process::exit(2);
 }
 
 fn main() {
@@ -60,6 +79,9 @@ fn main() {
         raw.drain(pos..pos + 2);
     }
 
+    if raw.len() < 3 {
+        usage();
+    }
     let addr = raw[0].clone();
     let net = raw[1].clone();
     // Authoritative magic from ergo-chain-spec (what the live node frames
@@ -82,6 +104,9 @@ fn main() {
     // Each entry is a full RequestModifier payload (one frame).
     let frames: Vec<Vec<u8>> = match mode.as_str() {
         "req" => {
+            if margs.len() < 2 {
+                usage();
+            }
             let type_id: u8 = margs[0].parse().expect("type_id");
             let ids: Vec<[u8; 32]> = margs[1..].iter().map(|s| hex32(s)).collect();
             match message::serialize_inv(&InvData { type_id, ids }) {
@@ -93,6 +118,9 @@ fn main() {
             }
         }
         "header_n" => {
+            if margs.len() < 2 {
+                usage();
+            }
             let id = hex32(&margs[0]);
             let n: usize = margs[1].parse().unwrap();
             let ids = vec![id; n];
@@ -105,6 +133,9 @@ fn main() {
             }
         }
         "burst" => {
+            if margs.len() < 3 {
+                usage();
+            }
             let type_id: u8 = margs[0].parse().expect("type_id");
             let id = hex32(&margs[1]);
             let n: usize = margs[2].parse().unwrap();
@@ -118,7 +149,7 @@ fn main() {
                 })
                 .collect()
         }
-        _ => panic!("unknown mode {mode}"),
+        _ => usage(),
     };
     eprintln!(
         "[probe] mode={mode} → {} RequestModifier frame(s), first payload {} bytes",
@@ -191,7 +222,10 @@ fn main() {
                 leftover = buf[consumed..].to_vec();
                 break;
             }
-            Err(_) if buf.len() < 8096 => continue,
+            // Only a short-buffer read is retryable — more bytes may
+            // still be in flight. Any other parse error is a real
+            // protocol failure and retrying would just mask it.
+            Err(HandshakeError::Read(ReadError::UnexpectedEnd { .. })) => continue,
             Err(e) => {
                 eprintln!("[probe] handshake parse err: {e}");
                 return;
@@ -260,20 +294,27 @@ fn main() {
                     if frame.code == message::CODE_MODIFIER {
                         modifier_bytes_total += plen;
                         modifier_frames += 1;
-                        if let Ok(m) = message::deserialize_modifiers(&frame.payload) {
-                            total_entries += m.modifiers.len();
-                            let sample: Vec<String> = m
-                                .modifiers
-                                .iter()
-                                .take(6)
-                                .map(|(id, b)| format!("{}:{}B", &hex::encode(id)[..8], b.len()))
-                                .collect();
-                            eprintln!(
-                                "        Modifiers type_id={} entries={} sample={:?}",
-                                m.type_id,
-                                m.modifiers.len(),
-                                sample
-                            );
+                        match message::deserialize_modifiers(&frame.payload) {
+                            Ok(m) => {
+                                total_entries += m.modifiers.len();
+                                let sample: Vec<String> = m
+                                    .modifiers
+                                    .iter()
+                                    .take(6)
+                                    .map(|(id, b)| {
+                                        format!("{}:{}B", &hex::encode(id)[..8], b.len())
+                                    })
+                                    .collect();
+                                eprintln!(
+                                    "        Modifiers type_id={} entries={} sample={:?}",
+                                    m.type_id,
+                                    m.modifiers.len(),
+                                    sample
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("        Modifiers DECODE FAILED ({plen}B payload): {e}");
+                            }
                         }
                     }
                     buf.drain(..consumed);
