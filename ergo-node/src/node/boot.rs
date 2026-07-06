@@ -625,6 +625,20 @@ async fn run_inner_with_backend(
             .block_timing
             .header_freshness_threshold_ms(),
     );
+    // Operator escape hatch (sibling of ERGO_BAN_HEADERS): force the
+    // headers-chain-synced latch at boot so block downloads start even
+    // when every header on the target chain is stale. Needed when a
+    // halted network is re-driven from a checkpoint: nobody has mined
+    // for days, so the freshness edge in `check_headers_synced` can
+    // never fire, and the caught-up-to-peers fallback needs peers that
+    // agree with our tip — unavailable while peers sit on an abandoned
+    // branch (testnet 431,366 recovery). Session-scoped and opt-in;
+    // blocks are still fully validated — this only affects WHEN
+    // download begins, never WHAT is accepted.
+    if std::env::var_os("ERGO_ASSUME_HEADERS_SYNCED").is_some() {
+        coordinator.sync_state_mut().mark_headers_chain_synced();
+        warn!("ERGO_ASSUME_HEADERS_SYNCED: headers-chain-synced latch forced for this session");
+    }
     // Mode 2 / Mode 4 boot gate: when configured for UTXO
     // bootstrap AND the install has never run on this store,
     // suppress the section-download pipeline (same gates as
