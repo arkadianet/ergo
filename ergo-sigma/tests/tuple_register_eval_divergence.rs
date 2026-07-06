@@ -62,6 +62,14 @@ const R8_TUPLE_NODE_ENTRY: &[u8] = &[0x86, 0x02, 0x04, 0xcc, 0xe3, 0x34, 0x04, 0
 /// Scala deserializes to a real `Tuple2` and ACCEPTS.
 const PAIR_CONSTANT_ENTRY: &[u8] = &[0x58, 0xcc, 0xe3, 0x34, 0x54];
 
+/// A `0x86` `CreateTuple` register of ARITY 3 — `(Int, Int, Int) = (1, 2, 3)`,
+/// each item a `Constant` (`0x04` SInt typecode + zig-zag VLQ). Scala's
+/// `SType.isValueOfType` handles ONLY the 2-tuple case for `STuple` and
+/// `sys.error`s on any other arity (SType.scala:200-202), so reading this at its
+/// `(Int,Int,Int)` type is a rejection regardless of the runtime value — the
+/// arity-3+ gap CodeRabbit flagged on PR #161.
+const TUPLE3_NODE_ENTRY: &[u8] = &[0x86, 0x03, 0x04, 0x02, 0x04, 0x04, 0x04, 0x06];
+
 fn register_block(entry: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(1 + entry.len());
     v.push(0x01); // one register (R4)
@@ -91,8 +99,33 @@ fn self_box_with_r4(entry: &[u8]) -> EvalBox {
     b
 }
 
+/// Like [`self_box_with_r4`] but without the `(Int, Int)`-pair value assertions,
+/// for registers of other shapes (e.g. the arity-3 tuple node).
+fn self_box_with_r4_raw(entry: &[u8]) -> EvalBox {
+    let block = register_block(entry);
+    let regs = read_registers(&mut VlqReader::new(&block)).expect("register block parses");
+    let r4 = regs.get(RegisterId::R4).expect("R4 present").clone();
+    let mut b = EvalBox::simple(431_358, vec![0x00]);
+    b.registers[0] = Some(r4);
+    b.register_bytes = block;
+    b
+}
+
 fn op(opcode: u8, payload: Payload) -> Expr {
     Expr::Op(IrNode { opcode, payload })
+}
+
+/// `SELF.R4[(Int, Int, Int)].get` — the arity-3 analogue of [`get_r4_pair`].
+fn get_r4_triple() -> Expr {
+    let extract = op(
+        0xC6,
+        Payload::ExtractRegisterAs {
+            input: Box::new(op(0xA7, Payload::Zero)), // Self
+            reg_id: 4,
+            tpe: SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SInt, SigmaType::SInt]),
+        },
+    );
+    op(0xE4, Payload::One(Box::new(extract)))
 }
 
 /// `SELF.R4[(Int, Int)]` — `ExtractRegisterAs(Self, R4, (Int,Int))`.
@@ -191,6 +224,41 @@ fn tuple_node_register_select_field_rejects() {
         res.is_err(),
         "SelectField over a 0x86 CreateTuple register read as (Int,Int) must \
          REJECT (Scala SelectField typeError), got {res:?}",
+    );
+}
+
+/// CodeRabbit PR #161 finding: an arity-3+ `0x86` CreateTuple register read at
+/// its `STuple` type must ALSO reject, not just pairs. Scala's
+/// `SType.isValueOfType` `sys.error`s on any non-2 tuple arity
+/// (SType.scala:200-202), which inside `verifyInput` is a rejection whatever the
+/// runtime value class. The register lowers to a `Value::CollGeneric`, and the
+/// ValDef `checkType` must reject on the inferred `STuple(3)` regardless.
+#[test]
+fn tuple3_node_register_bound_at_triple_type_rejects() {
+    let self_box = self_box_with_r4_raw(TUPLE3_NODE_ENTRY);
+    // { val x = SELF.R4[(Int,Int,Int)].get; BoolToSigmaProp(x._1 >= 0) }
+    let block = op(
+        0xD8,
+        Payload::BlockValue {
+            items: vec![op(
+                0xD6,
+                Payload::ValDef {
+                    id: 10,
+                    tpe: None,
+                    rhs: Box::new(get_r4_triple()),
+                },
+            )],
+            result: Box::new(use_first_field_ge_zero(op(
+                0x72,
+                Payload::ValUse { id: 10 },
+            ))),
+        },
+    );
+    let res = reduce_with_self(&block, &self_box);
+    assert!(
+        res.is_err(),
+        "an arity-3 0x86 CreateTuple register read at (Int,Int,Int) must REJECT \
+         (Scala SType.isValueOfType sys.errors on non-pair tuple arity), got {res:?}",
     );
 }
 

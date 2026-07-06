@@ -78,17 +78,30 @@ pub(in crate::evaluator) fn eval_val_use(
 /// it); inference over the immediate `rhs` (empty binding env — the poison's
 /// producing `rhs` is a self-contained register read) is enough to catch it at
 /// its own binding, and any earlier re-binding was already checked. When the
-/// type cannot be inferred, or it is not an arity-2 `STuple`, the value is
-/// accepted unchanged.
+/// type cannot be inferred, or it is not an `STuple`, the value is accepted
+/// unchanged.
 fn check_valdef_pair_type(
     rhs: &Expr,
     constants: &[(SigmaType, SigmaValue)],
     val: &Value,
 ) -> Result<(), EvalError> {
-    // A `Value::Tuple` always satisfies `isValueOfType` for an `STuple`, so only
-    // a non-tuple binding can fail — gate the type inference on that cheap shape
-    // test to keep the common path off the inference walk.
-    if matches!(val, Value::Tuple(_)) {
+    // Scala runs `Value.checkType(vd, v)` on every ValDef binding
+    // (values.scala:998) and `SType.isValueOfType` handles ONLY the
+    // pair case for tuples: `STuple(2)` requires a `Tuple2` runtime
+    // value, and any other tuple arity hits
+    // `sys.error("Unsupported tuple type …")` — which inside
+    // `verifyInput` is also a rejection, unconditionally, whatever
+    // the runtime value class (SType.scala:200-202). Mirror both:
+    //
+    //   - a two-element `Value::Tuple` satisfies `STuple(2)` — the
+    //     only tuple shape Scala accepts — so it short-circuits
+    //     before the inference walk;
+    //   - inferred `STuple(2)` with any other value class rejects
+    //     (the poisoned 0x86-register Coll);
+    //   - inferred `STuple(n != 2)` rejects regardless of the value,
+    //     matching the `sys.error` (a 0x86 register of arity 3+ read
+    //     at its tuple type lands here — CodeRabbit PR #161 finding).
+    if matches!(val, Value::Tuple(items) if items.len() == 2) {
         return Ok(());
     }
     if let Some(SigmaType::STuple(elems)) =
@@ -102,6 +115,11 @@ fn check_valdef_pair_type(
                     .to_string(),
             });
         }
+        return Err(EvalError::TypeError {
+            expected: "pair — Scala SType.isValueOfType supports only 2-tuples and \
+                       sys.errors on any other STuple arity (SType.scala:200-202)",
+            got: format!("STuple arity {} binding", elems.len()),
+        });
     }
     Ok(())
 }
