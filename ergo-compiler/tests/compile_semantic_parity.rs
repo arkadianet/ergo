@@ -32,9 +32,25 @@
 //!   context-bound scripts that read registers/OUTPUTS the dummy context
 //!   lacks); mixed `Ok`/`Err` is a FAIL.
 //! - byte telemetry (non-gating): counts `tree_bytes == tree_hex`; equality
-//!   is ASSERTED only for the bare-constant class (root = `Const SigmaProp`
-//!   on both sides — the one class where Scala also takes the
+//!   is ASSERTED for the bare-constant class, keyed on the ORACLE tree's
+//!   root (`Const SigmaProp` — the one class where Scala also takes the
 //!   `withoutSegregation` branch, generalizing Task 9's single PK pin).
+//!   An oracle-bare vector where OUR root is not bare fails loudly unless
+//!   listed in `ORACLE_BARE_FOLD_EXCLUSIONS` (D-C2), so a PK-class
+//!   regression cannot silently demote itself out of the byte gate
+//!   (Task-11 finding H-3).
+//! - address gate (Task-11 findings H-1/H-2): the oracle's committed
+//!   `p2sh_address` must be reproducible from its OWN tree via placeholder
+//!   substitution + `encode_p2sh` (pins the substitution helper on every
+//!   vector); wherever our proposition bytes equal the oracle's
+//!   constant-inlined proposition, our P2SH address MUST equal the
+//!   oracle's (P2SH is segregation-invariant — D-C1's true scope); the
+//!   byte-diverging remainder is the D-C7 "no IR optimization pass" family
+//!   (lib.rs ledger), counted and pinned to
+//!   `EXPECTED_DC7_P2SH_MISMATCHES`. P2S must match exactly where the tree
+//!   bytes match (bare-const class) and differs everywhere else by D-C1
+//!   construction (we never segregate; Scala always does for non-bare
+//!   roots) — counted as telemetry.
 //!
 //! **Live recapture** ([`compile_seed_live_recapture`], `#[ignore]`): spawns
 //! the oracle once (batch stdin, EOF-close, grammar grep-filter — the
@@ -53,8 +69,9 @@ use std::path::{Path, PathBuf};
 use ergo_compiler::{compile, EnvValue, GroupElement, NetworkPrefix, ScriptEnv};
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
+use ergo_ser::address::encode_p2sh;
 use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
-use ergo_ser::opcode::Expr;
+use ergo_ser::opcode::{write_expr, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{write_sigma_boolean, AvlTreeData, SigmaValue};
 use ergo_sigma::evaluator::{reduce_expr, EvalBox, ReductionContext, SECP256K1_GENERATOR};
@@ -98,6 +115,47 @@ const SEMANTIC_SKIP: &[(&str, &str)] = &[
         "D-C3: isProven residual in BinXor (mirrored operands)",
     ),
 ];
+
+// =============================================================================
+// Address-parity constants (Task-11 wave 3: findings H-1/H-2/H-3).
+// =============================================================================
+
+// Sources where the ORACLE tree root is a bare `SigmaPropConstant` but OURS
+// deliberately is not: Scala's GraphBuilding folds `proveDlog(<GroupElement
+// const>)` into the bare constant (lib.rs D-C2 — one instance of the D-C7
+// family); we emit the unfolded `CreateProveDlog` node. These are the ONLY
+// tolerated oracle-bare/ours-not asymmetries — any other vector where the
+// oracle root is bare and ours is not is a PK-class regression and fails
+// loudly (finding H-3: the old gate keyed the byte check on OUR OWN output
+// class, so such a regression could silently demote a vector to
+// semantic-only parity). D-C3's `allOf(Coll(proveDlog(g1)))` is also
+// oracle-bare but sits in SEMANTIC_SKIP above, so it never reaches this
+// classification. Every entry must fire — a stale entry fails the sweep.
+const ORACLE_BARE_FOLD_EXCLUSIONS: &[(&str, &str)] = &[
+    (
+        "proveDlog(g1)",
+        "D-C2: Scala folds CreateProveDlog(const) to a bare SigmaPropConstant; ours stays 0xCD",
+    ),
+    (
+        "proveDlog(g3)",
+        "D-C2: same fold over the non-generator point",
+    ),
+];
+
+/// Committed count of ACCEPT vectors whose P2SH address differs from the
+/// oracle's — the D-C7 "no IR optimization pass" family (lib.rs ledger):
+/// P2SH hashes the constant-inlined proposition, so it diverges exactly
+/// where Scala's GraphBuilding transforms the tree shape (const folds, val
+/// inlining/pruning, CSE/ValDef sharing, single-element anyOf/atLeast
+/// unwrapping, explicit-cast folds, bare-ident PropertyCall lowerings,
+/// per-element env-collection lifts). The count INCLUDES the D-C2 and
+/// D-C6-residual instances of the family (e.g. the two `proveDlog(const)`
+/// fold vectors) — every P2SH divergence shares the one root cause. This
+/// number DECREASES as the M4/M5 lowerings land — update it deliberately
+/// with the lowering that moves it, never silently (a change in either
+/// direction without a matching code change is a regression or an unaudited
+/// behavior shift).
+const EXPECTED_DC7_P2SH_MISMATCHES: usize = 39;
 
 // =============================================================================
 // Environment builders (mirror TyperOracle.scala demo/sigmaTyperTest envs;
@@ -197,6 +255,10 @@ struct Vector {
     /// `"ACCEPT"` or `"REJECT"` — the oracle's compile verdict.
     oracle: String,
     tree_hex: Option<String>,
+    /// Oracle `Pay2SAddress` over its (segregated) tree bytes — ACCEPT only.
+    p2s_address: Option<String>,
+    /// Oracle `Pay2SHAddress` over its constant-inlined proposition — ACCEPT only.
+    p2sh_address: Option<String>,
     reject_class: Option<String>,
     /// Corpus-relative `.es` path for corpus-sourced vectors (provenance).
     corpus_path: Option<String>,
@@ -224,6 +286,8 @@ fn load_vectors() -> (serde_json::Value, Vec<Vector>) {
             tree_version: v["tree_version"].as_u64().expect("tree_version") as u8,
             oracle: str_field(v, "oracle").expect("oracle"),
             tree_hex: str_field(v, "tree_hex"),
+            p2s_address: str_field(v, "p2s_address"),
+            p2sh_address: str_field(v, "p2sh_address"),
             reject_class: str_field(v, "reject_class"),
             corpus_path: str_field(v, "corpus_path"),
         })
@@ -341,7 +405,9 @@ fn err_head(s: &str) -> String {
 
 /// `true` when the tree is the bare-constant `SigmaProp` class — the ONE
 /// byte-gated class at M3 (Scala's `fromProposition` also takes the
-/// `withoutSegregation` branch for a bare `SigmaPropConstant`).
+/// `withoutSegregation` branch for a bare `SigmaPropConstant`). The gate
+/// keys this classification on the ORACLE tree (finding H-3): our own
+/// output's class must FOLLOW the oracle's, never define the gate's scope.
 fn is_bare_sigma_const(tree: &ErgoTree) -> bool {
     !tree.constant_segregation
         && matches!(
@@ -351,6 +417,152 @@ fn is_bare_sigma_const(tree: &ErgoTree) -> bool {
                 val: SigmaValue::SigmaProp(_),
             }
         )
+}
+
+/// Replace every `ConstPlaceholder { index }` in `expr` with the matching
+/// `Const` from the segregated constants table — the substitution step of
+/// Scala's `Pay2SHAddress.apply(script: ErgoTree)`
+/// (`script.toProposition(replaceConstants = true)`,
+/// `ErgoAddress.scala:201-204` → `substConstants`). ergo-ser exposes no
+/// public substitution helper (the node never re-inlines placeholders on the
+/// consensus path), so this walk derives the oracle's constant-inlined
+/// proposition for the address gate. Pinned against the oracle for EVERY
+/// ACCEPT vector: `encode_p2sh` over the walk's output must reproduce the
+/// committed `p2sh_address`.
+fn inline_placeholders(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Expr {
+    fn boxed(e: &Expr, c: &[(SigmaType, SigmaValue)]) -> Box<Expr> {
+        Box::new(inline_placeholders(e, c))
+    }
+    fn many(es: &[Expr], c: &[(SigmaType, SigmaValue)]) -> Vec<Expr> {
+        es.iter().map(|e| inline_placeholders(e, c)).collect()
+    }
+    let c = constants;
+    let node = match expr {
+        Expr::Const { .. } | Expr::Unparsed(_) => return expr.clone(),
+        Expr::Op(node) => node,
+    };
+    let payload = match &node.payload {
+        Payload::ConstPlaceholder { index } => {
+            let (tpe, val) = c.get(*index as usize).unwrap_or_else(|| {
+                panic!(
+                    "ConstPlaceholder index {index} out of range ({} constants)",
+                    c.len()
+                )
+            });
+            return Expr::Const {
+                tpe: tpe.clone(),
+                val: val.clone(),
+            };
+        }
+        Payload::Zero => Payload::Zero,
+        Payload::One(a) => Payload::One(boxed(a, c)),
+        Payload::Two(a, b) => Payload::Two(boxed(a, c), boxed(b, c)),
+        Payload::Three(a, b, d) => Payload::Three(boxed(a, c), boxed(b, c), boxed(d, c)),
+        Payload::Four(a, b, d, e) => {
+            Payload::Four(boxed(a, c), boxed(b, c), boxed(d, c), boxed(e, c))
+        }
+        p @ (Payload::ValUse { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::DeserializeContext { .. }
+        | Payload::NoneValue { .. }) => p.clone(),
+        Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
+            id: *id,
+            tpe: tpe.clone(),
+            rhs: boxed(rhs, c),
+        },
+        Payload::FunDef {
+            id,
+            tpe,
+            tpe_args,
+            rhs,
+        } => Payload::FunDef {
+            id: *id,
+            tpe: tpe.clone(),
+            tpe_args: tpe_args.clone(),
+            rhs: boxed(rhs, c),
+        },
+        Payload::BlockValue { items, result } => Payload::BlockValue {
+            items: many(items, c),
+            result: boxed(result, c),
+        },
+        Payload::FuncValue { args, body } => Payload::FuncValue {
+            args: args.clone(),
+            body: boxed(body, c),
+        },
+        Payload::MethodCall {
+            type_id,
+            method_id,
+            obj,
+            args,
+            type_args,
+        } => Payload::MethodCall {
+            type_id: *type_id,
+            method_id: *method_id,
+            obj: boxed(obj, c),
+            args: many(args, c),
+            type_args: type_args.clone(),
+        },
+        Payload::ConcreteCollection { elem_type, items } => Payload::ConcreteCollection {
+            elem_type: elem_type.clone(),
+            items: many(items, c),
+        },
+        Payload::Tuple { items } => Payload::Tuple {
+            items: many(items, c),
+        },
+        Payload::SigmaCollection { items } => Payload::SigmaCollection {
+            items: many(items, c),
+        },
+        Payload::SelectField { input, field_idx } => Payload::SelectField {
+            input: boxed(input, c),
+            field_idx: *field_idx,
+        },
+        Payload::ExtractRegisterAs { input, reg_id, tpe } => Payload::ExtractRegisterAs {
+            input: boxed(input, c),
+            reg_id: *reg_id,
+            tpe: tpe.clone(),
+        },
+        Payload::DeserializeRegister {
+            reg_id,
+            tpe,
+            default,
+        } => Payload::DeserializeRegister {
+            reg_id: *reg_id,
+            tpe: tpe.clone(),
+            default: default.as_deref().map(|d| boxed(d, c)),
+        },
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => Payload::ByIndex {
+            input: boxed(input, c),
+            index: boxed(index, c),
+            default: default.as_deref().map(|d| boxed(d, c)),
+        },
+        Payload::NumericCast { input, tpe } => Payload::NumericCast {
+            input: boxed(input, c),
+            tpe: tpe.clone(),
+        },
+        Payload::FuncApply { func, args } => Payload::FuncApply {
+            func: boxed(func, c),
+            args: many(args, c),
+        },
+    };
+    Expr::Op(IrNode {
+        opcode: node.opcode,
+        payload,
+    })
+}
+
+/// Serialize a body to PROPOSITION bytes (root expression only, no tree
+/// header/constants wrapper) — the `Pay2SHAddress` hash input, matching
+/// `compile()`'s own `write_expr(.., false)` call (tree.rs).
+fn proposition_bytes(body: &Expr) -> Vec<u8> {
+    let mut w = VlqWriter::new();
+    write_expr(&mut w, body, false).expect("proposition serialization");
+    w.result()
 }
 
 // =============================================================================
@@ -378,6 +590,13 @@ fn compile_seed_semantic_parity() {
     let mut bare_total = 0usize;
     let mut bare_match = 0usize;
     let mut skipped = 0usize;
+    // Address-parity counters (wave 3, findings H-1/H-2).
+    let mut p2s_match = 0usize;
+    let mut p2s_dc1_mismatch = 0usize;
+    let mut p2sh_match = 0usize;
+    let mut p2sh_dc7_mismatch = 0usize;
+    let mut fired_bare_exclusions: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::new();
 
     for v in &vectors {
         let label = v
@@ -438,16 +657,110 @@ fn compile_seed_semantic_parity() {
         if ours.tree_bytes == oracle_bytes {
             byte_match += 1;
         }
-        if is_bare_sigma_const(&ours.ergo_tree) && is_bare_sigma_const(&oracle_tree) {
-            bare_total += 1;
-            if ours.tree_bytes == oracle_bytes {
-                bare_match += 1;
+
+        // Bare-constant byte gate, keyed on the ORACLE tree's class (finding
+        // H-3: the old gate required BOTH sides bare, so a regression that
+        // stopped emitting a bare `SigmaPropConstant` for a PK-class vector
+        // silently demoted it to semantic-only parity). An oracle-bare vector
+        // must be bare AND byte-identical on our side, unless it is a known
+        // D-C2 fold asymmetry listed in `ORACLE_BARE_FOLD_EXCLUSIONS`.
+        if is_bare_sigma_const(&oracle_tree) {
+            if let Some(&(src, reason)) = ORACLE_BARE_FOLD_EXCLUSIONS
+                .iter()
+                .find(|(s, _)| *s == v.source)
+            {
+                eprintln!("bare-fold exclusion {label}: {reason}");
+                fired_bare_exclusions.insert(src);
             } else {
+                bare_total += 1;
+                if !is_bare_sigma_const(&ours.ergo_tree) {
+                    divergences.push(format!(
+                        "{label}: oracle root is a bare SigmaPropConstant but ours is not \
+                         (PK-class regression; ours={})",
+                        hex::encode(&ours.tree_bytes),
+                    ));
+                } else if ours.tree_bytes == oracle_bytes {
+                    bare_match += 1;
+                } else {
+                    divergences.push(format!(
+                        "{label}: bare-const SigmaProp class must be byte-identical: \
+                         ours={} oracle={}",
+                        hex::encode(&ours.tree_bytes),
+                        hex::encode(&oracle_bytes),
+                    ));
+                }
+            }
+        }
+
+        // Address-parity gate (finding H-2: every vector records both
+        // addresses but the gate never compared either).
+        let oracle_p2s = v
+            .p2s_address
+            .as_deref()
+            .expect("ACCEPT vector has p2s_address");
+        let oracle_p2sh = v
+            .p2sh_address
+            .as_deref()
+            .expect("ACCEPT vector has p2sh_address");
+        // The oracle's constant-inlined proposition (Pay2SHAddress substitutes
+        // placeholders before hashing) — and the helper's per-vector pin: our
+        // substitution + encode_p2sh over the ORACLE's own tree must reproduce
+        // the ORACLE's committed P2SH exactly.
+        let oracle_prop = proposition_bytes(&inline_placeholders(
+            &oracle_tree.body,
+            &oracle_tree.constants,
+        ));
+        let recomputed_p2sh = encode_p2sh(network_of(v), &oracle_prop);
+        if recomputed_p2sh != oracle_p2sh {
+            divergences.push(format!(
+                "{label}: encode_p2sh over the inlined ORACLE proposition ({}) gives {} \
+                 but the oracle committed {} — substitution helper or encode_p2sh is wrong",
+                hex::encode(&oracle_prop),
+                recomputed_p2sh,
+                oracle_p2sh,
+            ));
+        }
+        // P2SH: hard assert wherever the proposition BYTES agree (pins
+        // encode_p2sh and the D-C1 claim's true scope — P2SH is
+        // segregation-invariant); byte-diverging propositions are the D-C7
+        // family, counted against `EXPECTED_DC7_P2SH_MISMATCHES` below.
+        let ours_prop = proposition_bytes(&ours.ergo_tree.body);
+        if ours_prop == oracle_prop && ours.p2sh_address != oracle_p2sh {
+            divergences.push(format!(
+                "{label}: byte-equal propositions must give equal P2SH: ours={} oracle={}",
+                ours.p2sh_address, oracle_p2sh,
+            ));
+        }
+        if ours.p2sh_address == oracle_p2sh {
+            p2sh_match += 1;
+        } else {
+            p2sh_dc7_mismatch += 1;
+            // Triage telemetry for the counted D-C7 class (visible with
+            // --nocapture): which vector, and both proposition byte strings
+            // so the diverging IR transform is identifiable at a glance.
+            eprintln!(
+                "p2sh-divergence (D-C7) {label}: ours_prop={} oracle_prop={}",
+                hex::encode(&ours_prop),
+                hex::encode(&oracle_prop)
+            );
+        }
+        // P2S: byte-equal trees (the bare-const class gated above) must agree;
+        // everything else diverges by construction — Scala segregates every
+        // non-bare root (header 0x10) while we emit header 0x00 (D-C1).
+        if ours.p2s_address == oracle_p2s {
+            p2s_match += 1;
+            if ours.tree_bytes != oracle_bytes {
                 divergences.push(format!(
-                    "{label}: bare-const SigmaProp class must be byte-identical: \
-                     ours={} oracle={}",
-                    hex::encode(&ours.tree_bytes),
-                    hex::encode(&oracle_bytes),
+                    "{label}: P2S addresses agree but tree bytes differ — impossible \
+                     (P2S embeds the tree bytes verbatim)"
+                ));
+            }
+        } else {
+            p2s_dc1_mismatch += 1;
+            if ours.tree_bytes == oracle_bytes {
+                divergences.push(format!(
+                    "{label}: byte-equal trees must give equal P2S: ours={} oracle={}",
+                    ours.p2s_address, oracle_p2s,
                 ));
             }
         }
@@ -491,6 +804,10 @@ fn compile_seed_semantic_parity() {
     println!(
         "byte-parity telemetry: {byte_match}/{accept_total} (bare-const {bare_match}/{bare_total})"
     );
+    println!("p2sh-parity: {p2sh_match}/{accept_total} (D-C7 mismatches: {p2sh_dc7_mismatch})");
+    println!(
+        "p2s-parity: {p2s_match}/{accept_total} (D-C1 segregation mismatches: {p2s_dc1_mismatch})"
+    );
     if !err_pairs.is_empty() {
         println!("Err/Err parity class pairs (ours, oracle-tree) x count [first vector]:");
         for ((a, b), (n, first)) in &err_pairs {
@@ -516,6 +833,25 @@ fn compile_seed_semantic_parity() {
     );
     // The bare-constant class must actually be exercised (PK vectors).
     assert!(bare_total >= 1, "no bare-const SigmaProp vector swept");
+    // Every listed bare-fold exclusion must fire — a stale entry would widen
+    // the H-3 gate's blind spot without anyone noticing.
+    for (src, _) in ORACLE_BARE_FOLD_EXCLUSIONS {
+        assert!(
+            fired_bare_exclusions.contains(src),
+            "ORACLE_BARE_FOLD_EXCLUSIONS entry {src:?} matched no oracle-bare ACCEPT \
+             vector — remove or re-derive it"
+        );
+    }
+    // The D-C7 P2SH-mismatch class is a COUNTED, audited deviation — it moves
+    // only when an M4/M5 lowering (or a regression) changes which propositions
+    // we emit IR-identically to Scala. Never bump this constant to make a red
+    // run green without triaging what moved (in EITHER direction).
+    assert_eq!(
+        p2sh_dc7_mismatch, EXPECTED_DC7_P2SH_MISMATCHES,
+        "P2SH mismatch count moved ({p2sh_dc7_mismatch} vs expected \
+         {EXPECTED_DC7_P2SH_MISMATCHES}) — a lowering landed or a regression \
+         un-matched a vector; triage before updating EXPECTED_DC7_P2SH_MISMATCHES"
+    );
     // Err/Err composition pin: D-C4 proved a masked shape divergence can hide
     // as Err/Err parity. Any pair class OUTSIDE this audited set is a NEW,
     // un-triaged masking candidate — fail loudly instead of letting it ride
@@ -539,6 +875,57 @@ fn compile_seed_semantic_parity() {
             pair.0,
             pair.1,
         );
+    }
+}
+
+/// Placeholder-substitution round-trip (wave 3): a segregated oracle tree's
+/// constant-inlined proposition must byte-match OUR `compile()`'s
+/// proposition for vectors Scala's IR left shape-identical — one
+/// real-constant substitution (`sigmaProp(HEIGHT > 100)`: body `d191a37300`
+/// inlines placeholder 0 to `04c801`) and one wave-2 lowered vector
+/// (`SELF.getReg[Int](5)` → `ExtractRegisterAs`, a zero-constant segregated
+/// header where substitution is the identity).
+#[test]
+fn inline_placeholders_reproduces_our_proposition_for_shape_identical_vectors() {
+    let (_, vectors) = load_vectors();
+    for (src, expected_prop_hex) in [
+        ("sigmaProp(HEIGHT > 100)", Some("d191a304c801")),
+        ("sigmaProp(SELF.getReg[Int](5).isDefined)", None),
+    ] {
+        let v = vectors
+            .iter()
+            .find(|v| v.source == src && v.oracle == "ACCEPT")
+            .unwrap_or_else(|| panic!("vector {src:?} missing from compile_seed.json"));
+        let oracle_bytes = hex::decode(v.tree_hex.as_deref().expect("tree_hex")).expect("hex");
+        let mut r = VlqReader::new(&oracle_bytes);
+        let oracle_tree = read_ergo_tree(&mut r).expect("oracle tree parses");
+        assert!(
+            oracle_tree.constant_segregation,
+            "{src}: oracle tree is segregated"
+        );
+        let inlined = inline_placeholders(&oracle_tree.body, &oracle_tree.constants);
+        let oracle_prop = proposition_bytes(&inlined);
+        if let Some(expected) = expected_prop_hex {
+            assert_eq!(hex::encode(&oracle_prop), expected, "{src}: inlined prop");
+        }
+        let ours = compile(
+            &env_for_verb(&v.verb),
+            &v.source,
+            v.tree_version,
+            network_of(v),
+        )
+        .expect("our compile accepts");
+        assert_eq!(
+            hex::encode(&oracle_prop),
+            hex::encode(proposition_bytes(&ours.ergo_tree.body)),
+            "{src}: inlined oracle proposition != ours"
+        );
+        // Both roads to the same P2SH: encode_p2sh over the inlined oracle
+        // prop, and our compile()'s own address, must equal the committed
+        // oracle field.
+        let committed = v.p2sh_address.as_deref().expect("p2sh_address");
+        assert_eq!(encode_p2sh(network_of(v), &oracle_prop), committed);
+        assert_eq!(ours.p2sh_address, committed, "{src}: P2SH address");
     }
 }
 

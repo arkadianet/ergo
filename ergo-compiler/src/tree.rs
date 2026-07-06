@@ -1175,7 +1175,10 @@ mod tests {
         // The P2SH address, however, hashes the constant-INLINED proposition
         // (`d191a304c801`) — exactly our non-segregated body bytes — so it
         // must MATCH the oracle capture byte-for-byte. This is a genuine
-        // cross-representation parity gate on our proposition bytes.
+        // cross-representation parity gate on our proposition bytes — for
+        // this SHAPE-IDENTICAL vector only: wherever Scala's IR reshapes the
+        // proposition, the P2SH diverges too (lib.rs D-C7; counted by the
+        // wave-3 address gate in tests/compile_semantic_parity.rs).
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
     }
 

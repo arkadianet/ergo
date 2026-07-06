@@ -504,12 +504,19 @@
 //! compiler cannot serialize it either (it is erased by the prover-side
 //! `ZKProving` transform). `emit` returns `UnsupportedNode("ZKProofBlock")`.
 //!
-//! ### D-E3 — opaque env `SigmaProp` constant not emittable
+//! ### D-E3 — opaque env `SigmaProp` constant not emittable (reject-side)
 //!
 //! `ConstPayload::SigmaProp(String)` is an env-injected opaque label (e.g. the
 //! SigmaTyperTest env's `p1`/`p2`) with no curve bytes to serialize; only
-//! reachable from a hand-built env, no oracle vector exists. `emit` returns
-//! `UnsupportedNode`; real keys flow through `ConstPayload::ProveDlog([u8;33])`.
+//! reachable from a hand-built env. `emit` returns `UnsupportedNode`; real
+//! keys flow through `ConstPayload::ProveDlog([u8;33])`. Correction (Task-11
+//! wave 3; this entry previously claimed "no oracle vector exists"): the
+//! `ccs` verb mirrors the SigmaTyperTest env, whose JVM-side `p1`/`p2` are
+//! REAL `ProveDlog`s — `ccs sigmaProp(p1.propBytes.size > 0)` compile-ACCEPTs
+//! on the oracle while we reject (methodcalls report, excluded section). A
+//! reject-side divergence bounded to the opaque-label env representation;
+//! not committable as an ACCEPT vector because our representation carries no
+//! curve bytes whose output could be compared.
 //!
 //! # Known M3 deviations (tree/compile layer)
 //!
@@ -522,11 +529,16 @@
 //! the tree bytes and the P2S address DIFFER from Scala (oracle:
 //! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` vs our
 //! `00d191a304c801`) while remaining valid, parseable, semantically equal
-//! trees. The P2SH address is UNAFFECTED — it hashes the constant-inlined
-//! proposition, which is byte-identical to our body (oracle-pinned in
-//! `tree.rs` and `ergo-ser/src/address.rs` tests). The bare-constant class
-//! (e.g. `PK(...)`) takes the same withoutSegregation branch on both sides and
-//! is byte- and address-exact. The segregation transform is the M4 flip point.
+//! trees. The P2SH address is SEGREGATION-invariant — it hashes the
+//! constant-inlined proposition, so the D-C1 axis alone never moves it
+//! (oracle-pinned in `tree.rs` and `ergo-ser/src/address.rs` tests) — but it
+//! is NOT IR-transform-invariant: wherever Scala's GraphBuilding reshapes
+//! the proposition itself, the P2SH diverges too. That family is D-C7 below
+//! (Task-11 finding H-1 falsified this entry's earlier "P2SH is UNAFFECTED"
+//! wording, which held only for shape-identical trees). The bare-constant
+//! class (e.g. `PK(...)`) takes the same withoutSegregation branch on both
+//! sides and is byte- and address-exact. The segregation transform is the
+//! M4 flip point.
 //!
 //! ### D-C2 — no `CreateProveDlog(Const)` → `SigmaPropConstant` fold
 //!
@@ -535,7 +547,8 @@
 //! `cce proveDlog(g1)` replies with the SAME tree/addresses as the equivalent
 //! `PK(...)`, task-1-report Concern 1); we emit the unfolded
 //! `CreateProveDlog(Const)` node (`0xCD`) — same header `0x00`, different body
-//! bytes, different addresses. The constant fold is an M4/M5 lowering rule.
+//! bytes, different addresses. The constant fold is an M4/M5 lowering rule —
+//! one instance of the general D-C7 no-IR-pass family below.
 //!
 //! ### D-C3 — residual `SigmaPropIsProven` (0xCF): compile output unevaluable
 //!
@@ -578,7 +591,10 @@
 //! only because the dummy reduction context makes BOTH sides err before the
 //! FuncValue applies on the oracle side). M4/M5 lowering scope; no
 //! `SEMANTIC_SKIP` entry is needed while the Err/Err rule covers them, but
-//! any richer gate context will surface this first.
+//! any richer gate context will surface this first. Wave 1 NARROWED the
+//! class: a direct/aliased/inline `FuncApply` with != 1 args now rejects in
+//! oracle parity (D-C5 class 2), so D-C4 covers only the un-applied
+//! definitions and fold-callback uses that both compilers accept.
 //!
 //! ### D-C5 — GraphBuilding reject-gate parity (Task-11 adversarial wave 1)
 //!
@@ -645,11 +661,11 @@
 //! Wave-2 items (getReg in-range literal lowering F4, `slice[T]`
 //! explicit-type-arg residual F5, v6 numeric constant-receiver folds F6,
 //! `Coll[UnsignedBigInt]().size` fold / self-readability, constants F-3)
-//! landed as D-C6 below. Still open from the Task-11 findings: the whole
+//! landed as D-C6 below. The remaining Task-11 finding — the whole
 //! P2SH-address divergence family (fold/CSE/upcast/ident lowerings —
-//! numerics N-3, bindings F3, methodcalls class 4; D-C1's "P2SH unaffected"
-//! sentence holds only for the segregation axis and is falsified by
-//! IR-transformed trees).
+//! numerics N-3, bindings F3, methodcalls class 4, harness H-1) — is
+//! ledgered as D-C7 below, counted and gated by the wave-3 address gate in
+//! `tests/compile_semantic_parity.rs`.
 //!
 //! ### D-C6 — evaluability lowerings + folds (Task-11 adversarial wave 2)
 //!
@@ -727,6 +743,58 @@
 //!    ours would not be. Neither family is committable as a vector; both are
 //!    pinned in `tree.rs`
 //!    (`compile_self_unreadable_emission_rejects_serializer_class`).
+//!
+//! ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (Task-11 adversarial wave 3)
+//!
+//! Our emit is 1:1 with the typed AST; Scala's compiler runs the
+//! GraphBuilding/IR stage between typing and serialization, which
+//! restructures the proposition wherever any of its rules fires
+//! (adversarial reports: harness H-1, numerics N-3, bindings F3,
+//! methodcalls class 4 — five consolidated root causes plus folds):
+//!
+//! - **constant folding** — including env constants (`ccs` binds `x`/`b1`/
+//!   `n1`/… as constants, so closed-over comparisons fold to
+//!   `sigmaProp(true)`), whole-expression folds (`arr1.size > 0` →
+//!   `sigmaProp(true)`), non-overflowing arithmetic
+//!   (`sigmaProp((2147483647 + 0) < 0)` folds — the OVERFLOW check is the
+//!   D-C5 gate), and `== false` → `LogicalNot`;
+//! - **explicit constant-cast shape differences** — Scala folds `0.toByte`
+//!   argument casts we keep as `Downcast` nodes (methodcalls (a)), while
+//!   our typer folds some literal upcast chains Scala keeps
+//!   (`1.toByte.toLong.toBigInt`, numerics N-3 probe 34); either direction
+//!   moves the bytes;
+//! - **`val` inlining and unused-`val` pruning** (`{ val x = HEIGHT; x > 5 }`
+//!   → bare `GT(HEIGHT, 5)`);
+//! - **CSE/ValDef sharing** of repeated subterms (`proveDHTuple(g1, g2, g1,
+//!   g2)` with one distinct point → a shared constant `ValDef` + four
+//!   `ValUse`s; the M5 ValDef-sharing roadmap item);
+//! - **single-element `anyOf`/`atLeast` unwrapping** (`anyOf(Coll(HEIGHT >
+//!   5))` → the bare comparison);
+//! - **`proveDlog(const)` → `SigmaPropConstant`** (= D-C2, one instance of
+//!   this family);
+//! - **bare-ident context/global singletons lowered to `PropertyCall`s**
+//!   (bare `LastBlockUtxoRootHash` → `PropertyCall` over `Context`; bare
+//!   `Global.groupGenerator` → `PropertyCall` over `Global`; the dot-forms
+//!   match);
+//! - **env collections lifted per-element** (env `Coll[Long]` → a
+//!   `ConcreteCollection` of element constants on the Scala side; ours
+//!   lifts one `Coll` constant; env `Coll[Byte]` lifts as a constant on
+//!   BOTH sides).
+//!
+//! Consequence: PROPOSITION bytes — and therefore the P2SH address, which
+//! hashes them — diverge from Scala wherever ANY such rule fires, not just
+//! on the D-C1 segregation axis (whose "P2SH is UNAFFECTED" sentence wave 3
+//! corrected). Semantic parity is unaffected: the Task-10/11 gate reduces
+//! every ACCEPT pair to the same SigmaBoolean under the dummy context, and
+//! the Task-11 probe batteries verified sem=EQ on every mismatching probe
+//! (the untransformed control group P2SH-matches exactly, pinning
+//! `encode_p2sh` itself as correct). The class is COUNTED, not open-ended:
+//! the wave-3 address gate (`tests/compile_semantic_parity.rs`) pins the
+//! corpus at `EXPECTED_DC7_P2SH_MISMATCHES` (39 of the 75 swept ACCEPT
+//! vectors; the other 36 P2SH-match and are hard-asserted equal wherever
+//! the proposition bytes agree). The M4 segregation transform plus the M5
+//! lowering/ValDef-sharing work close the family; each landed lowering
+//! moves the counted constant DOWN, deliberately.
 
 pub mod ast;
 pub mod binder;
