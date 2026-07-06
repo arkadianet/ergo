@@ -51,8 +51,7 @@ use crate::typed::{
     BIT_SHIFT_LEFT, BIT_SHIFT_RIGHT, BIT_SHIFT_RIGHT_ZEROED, BIT_XOR,
 };
 use crate::typer::methods::{
-    container_exists, get_method, global_method, owner_name_for_method, owner_name_for_type,
-    SMethodDesc,
+    container_exists, get_method, global_method, owner_name_for_method, SMethodDesc,
 };
 use crate::typer::predef_ir::predef_ir_builder;
 use crate::typer::unify::{
@@ -1043,22 +1042,30 @@ fn assign_apply_explicit_method(
         )));
     }
     if method.has_ir_builder {
-        // Every §1.7-reachable method (some/none/getReg/deserializeTo/
-        // fromBigEndianBytes/getVarFromInput) uses a MethodCallIrBuilder that lifts
-        // to a MethodCall carrying the {T->rangeTpe} substitution (seed §4).
-        let owner = owner_name_for_type(&t_obj).ok_or_else(|| {
-            TyperError::typer(format!("No MethodCall owner name for type {t_obj:?}"))
-        })?;
-        Ok(TypedExpr::MethodCall {
-            obj: Box::new(new_obj),
-            method: MethodRef {
-                owner: owner.to_string(),
-                name: field,
-            },
-            args: new_args,
-            type_subst: vec![(tparam.clone(), range_tpe)],
-            tpe: concr.range,
-        })
+        // Scala routes through the method's OWN irBuilder —
+        // `irBuilder.lift(builder, newObj, method, newArgs, subst)
+        //  .getOrElse(mkMethodCall(newObj, method, newArgs, subst))`
+        // (SigmaTyper.scala:167-171): a custom-irBuilder method
+        // (slice/filter/map/getOrElse/fold/…) lowers to its dedicated node
+        // exactly as on the no-type-arg §1.8 path, while a MethodCallIrBuilder
+        // method (getReg/some/none/deserializeTo/fromBigEndianBytes/
+        // getVarFromInput) survives as a MethodCall carrying the {T->rangeTpe}
+        // substitution (seed §4). Before Task-11 wave 2 this branch built the
+        // MethodCall UNCONDITIONALLY, leaving e.g. `arr1.slice[Byte](0, 1)` a
+        // residual `MethodCall (12,7)` no evaluator accepts while Scala emits
+        // `Slice` (adversarial-findings-methodcalls.md F5; oracle 2026-07-07
+        // ×3: the annotated and un-annotated forms reply byte-identically,
+        // `…d193b1b47300…`). `lower_method` is the same catalog Scala's
+        // irBuilders implement, so routing through it IS the §1.7 rule.
+        let lowered = lower_method(
+            &t_obj,
+            &field,
+            new_obj,
+            new_args,
+            concr.range.clone(),
+            ctx.tree_version,
+        );
+        Ok(thread_method_subst(lowered, &subst))
     } else {
         // mkApply(mkSelect(newObj, n, Some(concrFunTpe)), newArgs).
         let concr_ty = spec_to_stype(&concr);

@@ -84,10 +84,13 @@ pub(crate) fn build_tree(root: Expr) -> ErgoTree {
 /// (`:39`) and `SOption` (`:78`) data on `isV3OrLaterErgoTreeVersion` — under
 /// the compile route's pinned `treeVersion = 0` both fall through to the
 /// `:86` `SerializerException` catch-all. Collections/tuples recurse per
-/// ELEMENT: an EMPTY `Coll[UnsignedBigInt]` constant serializes fine on both
+/// ELEMENT: an EMPTY `Coll[UnsignedBigInt]` constant WRITES fine on both
 /// sides — only element DATA hits the gated arm; the TYPE-code write is
 /// ungated (`TypeSerializer.serialize`, `case p: SEmbeddable =>
-/// w.put(p.typeCode)`). `SHeader` data is likewise v3-gated
+/// w.put(p.typeCode)`) — but the version-gated READ side refuses such bytes,
+/// which is what the post-write self-check in [`compile`] catches (lib.rs
+/// D-C6 item 5; the `.size` fold usually keeps the type code off the wire
+/// entirely, D-C6 item 4). `SHeader` data is likewise v3-gated
 /// (`DataSerializer.scala`), included for completeness though unreachable
 /// from ErgoScript source.
 fn v0_unserializable_data(tpe: &SigmaType, val: &SigmaValue) -> Option<&'static str> {
@@ -179,6 +182,156 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
             stack.push(func);
             stack.extend(args.iter());
         }
+    }
+}
+
+/// Rewrite pass: `SizeOf(<ConcreteCollection literal>)` → `IntConstant(n)`
+/// (Task-11 wave 2, adversarial-findings-constants.md F-3; lib.rs D-C6).
+///
+/// Scala's GraphBuilding folds `.size` of a collection LITERAL to the element
+/// count regardless of element constancy (oracle 2026-07-07 ×3:
+/// `cc sigmaProp(Coll(HEIGHT).size == 1)` and `cc sigmaProp(Coll(1, 2).size
+/// == 2)` both fold — replies are the fully-folded `10010101d17300`; `cc
+/// sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)` folds the
+/// `.size` to `Int 0` even though the surrounding expression cannot fold —
+/// reply `10010400d1937e730005c1a7`). The fold is what keeps Scala's WIRE
+/// clean for `Coll[UnsignedBigInt]()`: without it our emitted bytes carry
+/// v3-only TYPE code 9 (the ConcreteCollection elem type) under the v0
+/// header — bytes our own `read_ergo_tree` refuses (a stranded-funds P2S).
+///
+/// Runs AFTER the GraphBuilding gates so the discarded elements are still
+/// verdict-checked (`Coll(2147483647 + 1).size` must keep rejecting with
+/// Scala's ArithmeticException), and BEFORE serialization/addresses. The walk
+/// is bottom-up, so nested literals fold inside-out. Residual (lib.rs D-C6):
+/// a VAL-BOUND collection literal (`{ val u = Coll[UnsignedBigInt](); …
+/// u.size … }`) is `SizeOf(ValUse)` here — Scala inlines the val and still
+/// folds (same oracle reply as the inline form); we don't, and the v3-type
+/// residue is then caught by the post-write self-check in [`compile`].
+fn fold_literal_coll_sizes(e: Expr) -> Expr {
+    /// Map every child expression of `payload` through the fold — the
+    /// exhaustive by-value twin of [`push_children`] (a new child-carrying
+    /// variant fails to compile here until it is mapped).
+    fn fold_payload(p: Payload) -> Payload {
+        let f = |b: Box<Expr>| Box::new(fold_literal_coll_sizes(*b));
+        let fv = |items: Vec<Expr>| -> Vec<Expr> {
+            items.into_iter().map(fold_literal_coll_sizes).collect()
+        };
+        match p {
+            Payload::Zero
+            | Payload::ValUse { .. }
+            | Payload::ConstPlaceholder { .. }
+            | Payload::TaggedVar { .. }
+            | Payload::BoolCollection { .. }
+            | Payload::GetVar { .. }
+            | Payload::DeserializeContext { .. }
+            | Payload::NoneValue { .. } => p,
+            Payload::One(a) => Payload::One(f(a)),
+            Payload::NumericCast { input, tpe } => Payload::NumericCast {
+                input: f(input),
+                tpe,
+            },
+            Payload::Two(a, b) => Payload::Two(f(a), f(b)),
+            Payload::Three(a, b, c) => Payload::Three(f(a), f(b), f(c)),
+            Payload::Four(a, b, c, d) => Payload::Four(f(a), f(b), f(c), f(d)),
+            Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
+                id,
+                tpe,
+                rhs: f(rhs),
+            },
+            Payload::FunDef {
+                id,
+                tpe,
+                tpe_args,
+                rhs,
+            } => Payload::FunDef {
+                id,
+                tpe,
+                tpe_args,
+                rhs: f(rhs),
+            },
+            Payload::BlockValue { items, result } => Payload::BlockValue {
+                items: fv(items),
+                result: f(result),
+            },
+            Payload::FuncValue { args, body } => Payload::FuncValue {
+                args,
+                body: f(body),
+            },
+            Payload::MethodCall {
+                type_id,
+                method_id,
+                obj,
+                args,
+                type_args,
+            } => Payload::MethodCall {
+                type_id,
+                method_id,
+                obj: f(obj),
+                args: fv(args),
+                type_args,
+            },
+            Payload::ConcreteCollection { elem_type, items } => Payload::ConcreteCollection {
+                elem_type,
+                items: fv(items),
+            },
+            Payload::Tuple { items } => Payload::Tuple { items: fv(items) },
+            Payload::SigmaCollection { items } => Payload::SigmaCollection { items: fv(items) },
+            Payload::SelectField { input, field_idx } => Payload::SelectField {
+                input: f(input),
+                field_idx,
+            },
+            Payload::ExtractRegisterAs { input, reg_id, tpe } => Payload::ExtractRegisterAs {
+                input: f(input),
+                reg_id,
+                tpe,
+            },
+            Payload::DeserializeRegister {
+                reg_id,
+                tpe,
+                default,
+            } => Payload::DeserializeRegister {
+                reg_id,
+                tpe,
+                default: default.map(f),
+            },
+            Payload::ByIndex {
+                input,
+                index,
+                default,
+            } => Payload::ByIndex {
+                input: f(input),
+                index: f(index),
+                default: default.map(f),
+            },
+            Payload::FuncApply { func, args } => Payload::FuncApply {
+                func: f(func),
+                args: fv(args),
+            },
+        }
+    }
+
+    match e {
+        Expr::Op(IrNode { opcode, payload }) => {
+            let payload = fold_payload(payload);
+            // SizeOf (0xB1) over a ConcreteCollection (0x83) literal.
+            if opcode == 0xB1 {
+                if let Payload::One(inner) = &payload {
+                    if let Expr::Op(IrNode {
+                        opcode: 0x83,
+                        payload: Payload::ConcreteCollection { items, .. },
+                    }) = inner.as_ref()
+                    {
+                        return Expr::Const {
+                            tpe: SigmaType::SInt,
+                            // A source literal's arity is far below i32::MAX.
+                            val: SigmaValue::Int(items.len() as i32),
+                        };
+                    }
+                }
+            }
+            Expr::Op(IrNode { opcode, payload })
+        }
+        other => other,
     }
 }
 
@@ -547,6 +700,13 @@ pub fn compile(
     }
     fold_overflow_check(&root).map_err(CompileError::Emit)?;
 
+    // Wave-2 lowering rewrite (lib.rs D-C6): fold `SizeOf(<coll literal>)` to
+    // the element count, as Scala's GraphBuilding does. AFTER the gates above
+    // — the discarded literal elements must still be verdict-checked — and
+    // BEFORE the v0 data gate/serialization, so a `Coll[UnsignedBigInt]()`
+    // under `.size` never puts its v3-only elem-type code on the wire.
+    let root = fold_literal_coll_sizes(root);
+
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
     // `VersionContext.withVersions(_, treeVersion = ergoTree.version)`
@@ -570,6 +730,40 @@ pub fn compile(
     let mut w = VlqWriter::new();
     write_ergo_tree(&mut w, &ergo_tree)?;
     let tree_bytes = w.result();
+
+    // Post-write self-check (Task-11 wave 2; lib.rs D-C6): the bytes we are
+    // about to derive ADDRESSES from must round-trip through our own
+    // version-gated reader. A failure means compile() would hand out a P2S
+    // address whose script no deserializer accepts — funds sent there are
+    // stranded (the F-3 class, adversarial-findings-constants.md). This is a
+    // DELIBERATE reject-side divergence for two oracle-probed families the
+    // ledger documents: (1) `getVar[UnsignedBigInt](1)`-style v3-only TYPE
+    // codes under the v0 header, which Scala also emits and ALSO cannot
+    // re-read (Note A — the oracle's ACCEPT verdict is itself poisoned:
+    // both products are unusable); (2) missing-fold residuals like a
+    // val-bound `Coll[UnsignedBigInt]()` under `.size`, where Scala's
+    // inline+fold keeps its wire clean and ours would not be. Reject-side
+    // safe per the crate bar: a wrong-reject surfaces a user error, a
+    // wrong-accept strands funds.
+    {
+        use ergo_primitives::reader::VlqReader;
+        use ergo_ser::ergo_tree::read_ergo_tree;
+        let mut r = VlqReader::new(&tree_bytes);
+        let reread = read_ergo_tree(&mut r);
+        if let Err(e) = reread {
+            return Err(CompileError::Serializer {
+                what: format!(
+                    "emitted tree is not self-readable ({e:?}): refusing to derive an \
+                     address for a script no deserializer accepts"
+                ),
+            });
+        }
+        if !r.is_empty() {
+            return Err(CompileError::Serializer {
+                what: "emitted tree has trailing bytes after re-read".to_string(),
+            });
+        }
+    }
 
     // Proposition bytes for P2SH: root expression only, no header/constants.
     // Non-segregated at M3, so no constant-inlining step (see the fn docs).
@@ -983,6 +1177,219 @@ mod tests {
         // must MATCH the oracle capture byte-for-byte. This is a genuine
         // cross-representation parity gate on our proposition bytes.
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
+    }
+
+    // ----- oracle parity: Task-11 wave-2 lowerings/folds (lib.rs D-C6) -----
+    // Every oracle fact below: TyperOracle cc/ccs verbs, sigma-state 6.0.2,
+    // ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet, captured 2026-07-07,
+    // 3 identical runs (committed as compile_seed.json wave-2 vectors).
+    // Our trees stay non-segregated (D-C1), so the ORACLE-comparable byte
+    // surface is the P2SH address — it hashes the constant-inlined
+    // PROPOSITION, which must be node-for-node identical after the fixes.
+
+    #[test]
+    fn compile_get_reg_literal_lowers_to_r5_bytes_and_oracle_p2sh() {
+        // Oracle: `cc sigmaProp(SELF.getReg[Int](5).isDefined)` and
+        // `cc sigmaProp(SELF.R5[Int].isDefined)` reply IDENTICALLY:
+        // `1000d1e6c6a70504 2b6DJR5QoSgM31MUQ6 qzYN3szTjLnSbqXUA55vyCopdNpu88qJuPzmoks`.
+        let get_reg = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(SELF.getReg[Int](5).isDefined)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        let r5 = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(SELF.R5[Int].isDefined)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(get_reg.tree_bytes, r5.tree_bytes);
+        assert_eq!(hex::encode(&get_reg.tree_bytes), "00d1e6c6a70504");
+        assert_eq!(
+            get_reg.p2sh_address,
+            "qzYN3szTjLnSbqXUA55vyCopdNpu88qJuPzmoks"
+        );
+        // Dynamic index keeps the MethodCall on BOTH sides (oracle:
+        // `1000d1e6dc6313a701a304 … q1RuFk3PeKdvEbAb6dUZqVxYDZ5i8QdWg4DkK4Z`).
+        let dynamic = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(SELF.getReg[Int](HEIGHT).isDefined)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(hex::encode(&dynamic.tree_bytes), "00d1e6dc6313a701a304");
+        assert_eq!(
+            dynamic.p2sh_address,
+            "q1RuFk3PeKdvEbAb6dUZqVxYDZ5i8QdWg4DkK4Z"
+        );
+    }
+
+    #[test]
+    fn compile_val_bound_get_reg_index_stays_residual_method_call() {
+        // D-C6 residual, pinned verdict-only (NOT a committed vector): Scala
+        // const-propagates the val and still lowers (oracle: `cc { val i =
+        // 4; sigmaProp(SELF.getReg[Int](i).isDefined) }` → `1000d1e6c6a70404`,
+        // the val eliminated entirely); our typed AST keeps the ValUse, so
+        // the MethodCall survives — BOTH sides accept, but our tree is
+        // unevaluable under the v0 header (the oracle's evaluates), which is
+        // why the semantic gate cannot carry this vector.
+        let r = compile(
+            &ScriptEnv::new(),
+            "{ val i = 4; sigmaProp(SELF.getReg[Int](i).isDefined) }",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("both-accept residual must still compile");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "00d801d6010408d1e6dc6313a701720104"
+        );
+    }
+
+    #[test]
+    fn compile_slice_explicit_type_arg_matches_unannotated_and_oracle_p2sh() {
+        // Oracle: the annotated and un-annotated forms reply IDENTICALLY
+        // (`ccs sigmaProp(arr1.slice[Byte](0, 1).size == 1)` =
+        //  `ccs sigmaProp(arr1.slice(0, 1).size == 1)` →
+        // `10040e020102040004020402d193b1b47300730173027303 …
+        //  rgwBvuzJFRePZZ1FJp4qddZq8KXpjkdA5a8hfbJ`).
+        let mut env = ScriptEnv::new();
+        env.insert("arr1", EnvValue::ByteArray(vec![1, 2]));
+        let annotated = compile(
+            &env,
+            "sigmaProp(arr1.slice[Byte](0, 1).size == 1)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        let plain = compile(
+            &env,
+            "sigmaProp(arr1.slice(0, 1).size == 1)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(annotated.tree_bytes, plain.tree_bytes);
+        assert_eq!(
+            hex::encode(&annotated.tree_bytes),
+            "00d193b1b40e020102040004020402"
+        );
+        assert_eq!(
+            annotated.p2sh_address,
+            "rgwBvuzJFRePZZ1FJp4qddZq8KXpjkdA5a8hfbJ"
+        );
+    }
+
+    #[test]
+    fn compile_numeric_const_fold_matches_oracle_p2sh() {
+        // Oracle: `ccs sigmaProp(x.toBytes.size == 4)` →
+        // `10020e040000000a0408d193b173007301 … qApjfu2kT7Lr8bYG7c4UMKgYJSPD32SkbBDAQMD`
+        // (x = 10; the folded big-endian Coll[Byte] constant), and
+        // `ccs sigmaProp(x.toBits.size == 32)` →
+        // `10020d20000000500440d193b173007301 … qse65TyiDnutjxRzCP1mnCttRKWZqPrhnsvG7cg`.
+        let mut env = ScriptEnv::new();
+        env.insert("x", EnvValue::Int(10));
+        let bytes = compile(
+            &env,
+            "sigmaProp(x.toBytes.size == 4)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(hex::encode(&bytes.tree_bytes), "00d193b10e040000000a0408");
+        assert_eq!(
+            bytes.p2sh_address,
+            "qApjfu2kT7Lr8bYG7c4UMKgYJSPD32SkbBDAQMD"
+        );
+        let bits = compile(
+            &env,
+            "sigmaProp(x.toBits.size == 32)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(hex::encode(&bits.tree_bytes), "00d193b10d20000000500440");
+        assert_eq!(bits.p2sh_address, "qse65TyiDnutjxRzCP1mnCttRKWZqPrhnsvG7cg");
+    }
+
+    #[test]
+    fn compile_sizeof_coll_literal_folds_to_clean_v0_bytes() {
+        // F-3 (adversarial-findings-constants.md): before wave 2 the empty
+        // `Coll[UnsignedBigInt]()` literal put v3-only TYPE code 9 on the v0
+        // wire — bytes our own read_ergo_tree refuses (a stranded-funds
+        // P2S). The SizeOf fold keeps it off the wire, matching Scala's
+        // GraphBuilding fold (oracle: `.size == 0` → the fully-folded
+        // `10010101d17300`; `.size.toLong == SELF.value` →
+        // `10010400d1937e730005c1a7 … pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9`
+        // — the `.size` folds to Int 0 even when the surrounding expression
+        // cannot fold).
+        let r = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(Coll[UnsignedBigInt]().size == 0)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "00d19304000400");
+        assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
+        let r = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "00d1937e040005c1a7");
+        assert_eq!(r.p2sh_address, "pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9");
+        // The fold covers NON-constant elements too (oracle: `cc sigmaProp(
+        // Coll(HEIGHT).size == 1)` folds — reply `10010101d17300`).
+        let r = ct("sigmaProp(Coll(HEIGHT).size == 1)").expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "00d19304020402");
+        // Discarded elements are still verdict-checked: the constant-fold
+        // overflow gate runs BEFORE the rewrite (oracle rejects this too).
+        let err = ct("sigmaProp(Coll(2147483647 + 1).size == 1)").expect_err("overflow");
+        assert_eq!(err.class(), "ArithmeticException");
+    }
+
+    #[test]
+    fn compile_self_unreadable_emission_rejects_serializer_class() {
+        // Post-write self-check (D-C6): compile() re-reads its own bytes and
+        // REFUSES to hand out an address for a script no deserializer
+        // accepts. Two oracle-probed families flip verdict DELIBERATELY
+        // (documented reject-side divergences, NOT committed vectors):
+        //
+        // (1) Note A: `cc sigmaProp(getVar[UnsignedBigInt](1).isDefined)` —
+        //     oracle ACCEPTs `1000d1e6e30109`, bytes NEITHER side's
+        //     version-gated reader re-parses (type code 9 under the v0
+        //     header). The oracle's ACCEPT is itself poisoned: funds sent to
+        //     its address are stranded on BOTH implementations.
+        let err = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect_err("self-unreadable emission must reject");
+        assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
+        assert_eq!(err.class(), "SerializerException");
+        //
+        // (2) Missing-fold residual: a VAL-BOUND `Coll[UnsignedBigInt]()`
+        //     under `.size` — Scala inlines the val and folds (oracle reply
+        //     identical to the inline form, `10010400d1937e730005c1a7`); our
+        //     `SizeOf(ValUse)` keeps the poisoned literal on the wire, so
+        //     the self-check rejects rather than strand funds.
+        let err = compile(
+            &ScriptEnv::new(),
+            "{ val u = Coll[UnsignedBigInt](); sigmaProp(u.size.toLong == SELF.value) }",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect_err("val-bound poisoned literal must reject");
+        assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
     }
 
     #[test]

@@ -925,10 +925,10 @@ impl Scope {
         //     GraphBuilding rejects the v6-only method under v5 activation
         //     (oracle, ORACLE_TREE_VERSION=2: `ccs sigmaProp(x.toBytes.size
         //     == 4)` → `REJECT 1:13 GraphBuildingException`, 2026-07-07 ×3
-        //     runs). At v3 the owner resolves per-type (`Int`/…) and the
-        //     residual MethodCall is emitted unchanged (Err/Err reduce parity
-        //     for non-constant receivers; the constant-receiver FOLD is a
-        //     Wave-2 item — adversarial-findings-methodcalls.md F6).
+        //     runs). At v3 the owner resolves per-type (`Int`/…): a CONSTANT
+        //     receiver folds at gate (d) below (wave 2, lib.rs D-C6), a
+        //     non-constant one keeps the residual MethodCall (Err/Err reduce
+        //     parity).
         if method.owner == "SNumericType" {
             return Err(EmitError::GraphBuildingReject {
                 class: "GraphBuildingException",
@@ -957,16 +957,25 @@ impl Scope {
                     .into(),
             });
         }
-        // (c) `Box.getReg[T](<literal>)` with an out-of-range register index:
-        //     Scala lowers a CONST-index getReg to `ExtractRegisterAs` and
-        //     bounds-checks `ErgoBox.registers(i)` at compile time (oracle:
-        //     `cc sigmaProp(SELF.getReg[Int](-1).isDefined)` → `REJECT 0:0
-        //     ArrayIndexOutOfBoundsException`; same for 10 and 100). Only a
-        //     LITERAL Int argument is gated — a dynamic index stays a
-        //     MethodCall in Scala too (Err/Err parity). The IN-RANGE literal
-        //     lowering to ExtractRegisterAs is a Wave-2 item
-        //     (adversarial-findings-methodcalls.md F2/F4): in-range behavior
-        //     is deliberately unchanged here.
+        // (c) `Box.getReg[T](<literal>)`: Scala lowers a CONST-index getReg
+        //     to `ExtractRegisterAs` at GraphBuilding, bounds-checking
+        //     `ErgoBox.registers(i)` at compile time (oracle: `cc sigmaProp(
+        //     SELF.getReg[Int](-1).isDefined)` → `REJECT 0:0
+        //     ArrayIndexOutOfBoundsException`; same for 10 and 100). Out of
+        //     range → the wave-1 reject gate; IN RANGE → the wave-2 lowering
+        //     (adversarial-findings-methodcalls.md F4): `SELF.getReg[Int](5)`
+        //     must emit the SAME bytes as `SELF.R5[Int]` (oracle 2026-07-07
+        //     ×3: both reply `1000d1e6c6a70504` — body `…c6a70504`,
+        //     ExtractRegisterAs). The wire carries the INNER elem type T
+        //     (mirrors the Select `R0`..`R9` arm; ExtractRegisterAsSerializer
+        //     writes `tpe.elemType`). Only a LITERAL Int argument lowers — a
+        //     dynamic index stays a MethodCall in Scala too (oracle:
+        //     `getReg[Int](HEIGHT)` keeps wire pair (99,19) on both sides;
+        //     Err/Err reduce parity). Residual (lib.rs D-C6): Scala
+        //     const-propagates a val-bound index (`{ val i = 4; …getReg[Int]
+        //     (i) }` → `ExtractRegisterAs` reg 4, oracle ×3) — our typed AST
+        //     keeps the ValUse, so that form stays a both-accept unevaluable
+        //     MethodCall here.
         if method.owner == "Box" && method.name == "getReg" {
             if let Some(TypedExpr::Constant {
                 value: crate::typed::ConstPayload::Int(i),
@@ -983,6 +992,101 @@ impl Scope {
                         ),
                     });
                 }
+                let Some((_, inner)) = type_subst.first() else {
+                    return Err(EmitError::InvalidShape(
+                        "getReg MethodCall missing its explicit T type_subst binding",
+                    ));
+                };
+                return node(
+                    0xC6,
+                    Payload::ExtractRegisterAs {
+                        input: Box::new(self.emit(obj)?),
+                        reg_id: *i as u8,
+                        tpe: map_type(inner)?,
+                    },
+                );
+            }
+        }
+        // (d) v6 numeric methods over CONSTANT receivers fold at compile time
+        //     — Scala's GraphBuilding partially evaluates them, emitting the
+        //     folded constant (wave 2, adversarial-findings-methodcalls.md
+        //     F6). Oracle-probed fold set ONLY (2026-07-07 ×3 runs each):
+        //     `toBytes`/`toBits` on Byte/Short/Int/Long constants (`ccs
+        //     sigmaProp(x.toBytes.size == 4)` → const `0e04 0000000a`,
+        //     big-endian; `x.toBits` → const `0d20 00000050`, Coll[Boolean]
+        //     MSB-first; `7.toByte.toBytes` → `0e01 07` — a single explicit
+        //     cast of a literal folds too) and `bitwiseAnd`/`bitwiseOr`/
+        //     `bitwiseXor` over two constants (all three fold: the x/y
+        //     probes each reply the fully-folded `10010101d17300`). Probed
+        //     NON-folds, deliberately left as residual MethodCalls:
+        //     `HEIGHT.toBytes` (non-constant receiver — oracle keeps wire
+        //     pair (4,6)), `n1.toBytes` (BigInt receiver — keeps (6,6)),
+        //     `x.shiftLeft(1)` (keeps (4,12)); all Err/Err reduce parity.
+        //     The owner name is per-type ("Byte"/"Short"/"Int"/"Long") only
+        //     at `tree_version >= 3` — pre-v3 the SNumericType gate (a)
+        //     already rejected. Out-of-range cast receivers
+        //     (`300.toByte.toBytes`) do NOT fold here ([`const_numeric_i64`]
+        //     returns `None`): the residual Downcast reaches tree.rs's
+        //     `fold_overflow_check`, which rejects with the oracle's
+        //     ArithmeticException. Residual (lib.rs D-C6): deeper constant
+        //     receivers Scala's full partial evaluation also folds —
+        //     arithmetic results (`(1 + 2).toBytes`) and multi-cast chains —
+        //     stay residual MethodCalls here.
+        if let Some(width_bytes) = match method.owner.as_str() {
+            "Byte" => Some(1usize),
+            "Short" => Some(2),
+            "Int" => Some(4),
+            "Long" => Some(8),
+            _ => None,
+        } {
+            match method.name.as_str() {
+                "toBytes" => {
+                    if let Some(v) = const_numeric_i64(obj) {
+                        let bytes: Vec<u8> = v.to_be_bytes()[8 - width_bytes..].to_vec();
+                        return Ok(Expr::Const {
+                            tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+                            val: SigmaValue::Coll(CollValue::Bytes(bytes)),
+                        });
+                    }
+                }
+                "toBits" => {
+                    if let Some(v) = const_numeric_i64(obj) {
+                        let n_bits = width_bytes * 8;
+                        // Collection index 0 = the MOST significant bit
+                        // (oracle: `7.toByte.toBits` → `0d08 e0` =
+                        // [f,f,f,f,f,t,t,t] — bit (n-1-i) of the value at
+                        // index i).
+                        let bits: Vec<bool> = (0..n_bits)
+                            .map(|i| (v >> (n_bits - 1 - i)) & 1 == 1)
+                            .collect();
+                        return Ok(Expr::Const {
+                            tpe: SigmaType::SColl(Box::new(SigmaType::SBoolean)),
+                            val: SigmaValue::Coll(CollValue::BoolBits(bits)),
+                        });
+                    }
+                }
+                "bitwiseAnd" | "bitwiseOr" | "bitwiseXor" => {
+                    if let (Some(a), Some(b)) = (
+                        const_numeric_i64(obj),
+                        args.first().and_then(const_numeric_i64),
+                    ) {
+                        // Bitwise ops on two same-width sign-extended values
+                        // stay in range — no overflow path exists.
+                        let v = match method.name.as_str() {
+                            "bitwiseAnd" => a & b,
+                            "bitwiseOr" => a | b,
+                            _ => a ^ b,
+                        };
+                        let (tpe, val) = match method.owner.as_str() {
+                            "Byte" => (SigmaType::SByte, SigmaValue::Byte(v as i8)),
+                            "Short" => (SigmaType::SShort, SigmaValue::Short(v as i16)),
+                            "Int" => (SigmaType::SInt, SigmaValue::Int(v as i32)),
+                            _ => (SigmaType::SLong, SigmaValue::Long(v)),
+                        };
+                        return Ok(Expr::Const { tpe, val });
+                    }
+                }
+                _ => {}
             }
         }
         let Some((type_id, desc)) = wire_method(&method.owner, &method.name) else {
@@ -1036,6 +1140,45 @@ impl Scope {
                 type_args,
             },
         )
+    }
+}
+
+/// Constant value of a v6-numeric-method receiver/argument for the wave-2
+/// compile-time fold (emit_method_call gate (d), lib.rs D-C6): a DIRECT
+/// Byte/Short/Int/Long constant, or a single explicit numeric cast of one
+/// (`7.toByte` — a typed `Select` the typer leaves unfolded, class-4(a)).
+/// The cast case is range-checked: an out-of-range cast (`300.toByte`)
+/// returns `None`, so the residual `Downcast` reaches
+/// `tree.rs::fold_overflow_check`, which rejects with the oracle's
+/// `ArithmeticException` (oracle: `cc sigmaProp(300.toByte.toBytes.size ==
+/// 1)` → `REJECT 0:0 ArithmeticException`, 2026-07-07 ×3).
+fn const_numeric_i64(e: &TypedExpr) -> Option<i64> {
+    fn direct(e: &TypedExpr) -> Option<i64> {
+        match e {
+            TypedExpr::Constant { value, .. } => match value {
+                ConstPayload::Byte(v) => Some(i64::from(*v)),
+                ConstPayload::Short(v) => Some(i64::from(*v)),
+                ConstPayload::Int(v) => Some(i64::from(*v)),
+                ConstPayload::Long(v) => Some(*v),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    match e {
+        TypedExpr::Constant { .. } => direct(e),
+        TypedExpr::Select { obj, field, .. } => {
+            let v = direct(obj)?;
+            let in_range = match field.as_str() {
+                "toByte" => i8::try_from(v).is_ok(),
+                "toShort" => i16::try_from(v).is_ok(),
+                "toInt" => i32::try_from(v).is_ok(),
+                "toLong" => true,
+                _ => return None,
+            };
+            in_range.then_some(v)
+        }
+        _ => None,
     }
 }
 
@@ -1943,9 +2086,13 @@ mod tests {
             ),
             "{err:?}"
         );
-        // Nearest-accept boundary: at v3 the owner resolves per-type (Int)
-        // and the residual MethodCall emits with wire pair (4, 6).
-        let ir = emit_tc("1.toBytes");
+        // Nearest-accept boundary: at v3 the owner resolves per-type (Int).
+        // A NON-constant receiver keeps the residual MethodCall with wire
+        // pair (4, 6) (oracle: `ccs sigmaProp(HEIGHT.toBytes.size == 4)`
+        // keeps the pair too — Err/Err reduce parity, compile_seed.json); a
+        // CONSTANT receiver now FOLDS at v3 (wave 2 — see
+        // `numeric_const_receiver_methods_fold_to_oracle_bytes`).
+        let ir = emit_tc("HEIGHT.toBytes");
         assert_eq!(root_opcode(&ir), 0xDB);
         match &ir {
             Expr::Op(IrNode {
@@ -1981,18 +2128,79 @@ mod tests {
                 "{src}: {err:?}"
             );
         }
-        // Nearest-accept boundaries: in-range literals (0..=9) keep the
-        // Wave-1 behavior (residual MethodCall — the ExtractRegisterAs
-        // lowering is Wave 2), and a DYNAMIC index is untouched (Scala
-        // keeps the MethodCall there too — Err/Err reduce parity).
-        for src in [
-            "SELF.getReg[Int](0)",
-            "SELF.getReg[Int](9)",
-            "SELF.getReg[Int](HEIGHT)",
-        ] {
+        // Nearest-accept boundaries: in-range literals (0..=9) lower to
+        // ExtractRegisterAs (wave 2 — byte pins in
+        // `get_reg_in_range_literal_lowers_to_extract_register_as`), and a
+        // DYNAMIC index is untouched (Scala keeps the MethodCall there too —
+        // Err/Err reduce parity).
+        for src in ["SELF.getReg[Int](0)", "SELF.getReg[Int](9)"] {
             let ir = emit(&tc(src)).unwrap_or_else(|e| panic!("{src}: {e:?}"));
-            assert_eq!(root_opcode(&ir), 0xDC, "{src}");
+            assert_eq!(root_opcode(&ir), 0xC6, "{src}");
         }
+        let ir = emit(&tc("SELF.getReg[Int](HEIGHT)")).expect("dynamic index");
+        assert_eq!(root_opcode(&ir), 0xDC);
+    }
+
+    #[test]
+    fn numeric_const_receiver_methods_fold_to_oracle_bytes() {
+        // Wave 2 (adversarial-findings-methodcalls.md F6): Scala's
+        // GraphBuilding partially evaluates v6 numeric methods over CONSTANT
+        // receivers at v3; emit folds the same probed set. Every expected
+        // hex below is the CONSTANT segment of a fresh oracle capture
+        // (2026-07-07, 3 identical runs):
+        //   ccs `x.toBytes` (x=10)        → `0e04 0000000a` (big-endian)
+        //   ccs `x.toBits`                → `0d20 00000050` (Coll[Boolean],
+        //       index 0 = the most significant bit; bit-packed on the wire)
+        //   cc `7.toByte.toBytes`         → `0e01 07` (cast-of-literal folds)
+        //   cc `7.toByte.toBits`          → `0d08 e0`
+        //   cc `5.toShort.toBytes`        → `0e02 0005`
+        //   ccs `height1.toBytes` (=100L) → `0e08 0000000000000064`
+        //   ccs `b1.toBytes` (=1)         → `0e01 01`
+        // bitwiseAnd/Or/Xor over two constants fold too (the x/y probes each
+        // reply the FULLY-folded `10010101d17300`; the folded values are
+        // pinned here at the constant level).
+        for (src, expect_hex) in [
+            ("10.toBytes", "0e040000000a"),
+            ("10.toBits", "0d2000000050"),
+            ("7.toByte.toBytes", "0e0107"),
+            ("7.toByte.toBits", "0d08e0"),
+            ("5.toShort.toBytes", "0e020005"),
+            ("100L.toBytes", "0e080000000000000064"),
+            ("1.toByte.toBytes", "0e0101"),
+            ("10.bitwiseAnd(11)", "0414"), // Int 10 & 11 = 10 (zigzag 0x14)
+            ("10.bitwiseOr(11)", "0416"),  // Int 10 | 11 = 11 (zigzag 0x16)
+            ("10.bitwiseXor(11)", "0402"), // Int 10 ^ 11 = 1 (zigzag 0x02)
+            ("1.toByte.bitwiseAnd(2.toByte)", "0200"), // Byte 1 & 2 = 0
+        ] {
+            let ir = emit_tc(src);
+            assert!(
+                matches!(&ir, Expr::Const { .. }),
+                "{src}: expected a folded constant, got {ir:?}"
+            );
+            assert_eq!(hex::encode(wire_roundtrip(&ir)), expect_hex, "{src}");
+        }
+        // Probed NON-folds stay residual MethodCalls: BigInt receiver
+        // (oracle keeps wire pair (6, 6)) and shiftLeft (keeps (4, 12)).
+        rt_op("n1.toBytes", 0xDB);
+        rt_op("10.shiftLeft(1)", 0xDC);
+    }
+
+    #[test]
+    fn get_reg_in_range_literal_lowers_to_extract_register_as() {
+        // Wave 2 (adversarial-findings-methodcalls.md F4): Scala lowers a
+        // CONST-index `getReg[T]` to ExtractRegisterAs at GraphBuilding —
+        // `cc sigmaProp(SELF.getReg[Int](5).isDefined)` and `cc sigmaProp(
+        // SELF.R5[Int].isDefined)` reply IDENTICALLY (`1000d1e6c6a70504`,
+        // oracle 2026-07-07 ×3; body `…c6 a7 05 04` = ExtractRegisterAs(
+        // SELF, reg 5, Int) — the wire carries the INNER elem type).
+        let get_reg = emit_tc("SELF.getReg[Int](5)");
+        let r5 = emit_tc("SELF.R5[Int]");
+        assert_eq!(get_reg, r5, "getReg literal must lower like the R5 path");
+        assert_eq!(hex::encode(wire_roundtrip(&get_reg)), "c6a70504");
+        // Long variant over another register, with the getOrElse chain the
+        // oracle probed (`…e5c6a70405…`).
+        let ir = emit_tc("SELF.getReg[Long](4).getOrElse(7L)");
+        assert_eq!(hex::encode(wire_roundtrip(&ir)), "e5c6a70405050e");
     }
 
     #[test]
@@ -2599,10 +2807,13 @@ mod tests {
 
     #[test]
     fn method_call_get_reg_emits_explicit_type_arg() {
-        // `SELF.getReg[Int](4)` → MethodCall 0xDC (99, 19) with one value
-        // arg and the explicit `[T]` type block (ergo-ser
-        // method_explicit_type_args_count(99, 19) == 1).
-        let ir = emit_tc("SELF.getReg[Int](4)");
+        // `SELF.getReg[Int](HEIGHT)` (DYNAMIC index — a literal index lowers
+        // to ExtractRegisterAs since wave 2) → MethodCall 0xDC (99, 19) with
+        // one value arg and the explicit `[T]` type block (ergo-ser
+        // method_explicit_type_args_count(99, 19) == 1). Oracle keeps the
+        // MethodCall for the dynamic form too (`cc sigmaProp(SELF.getReg[
+        // Int](HEIGHT).isDefined)` → body `…dc6313a701a304`, 2026-07-07 ×3).
+        let ir = emit_tc("SELF.getReg[Int](HEIGHT)");
         assert_eq!(root_opcode(&ir), 0xDC);
         match &ir {
             Expr::Op(IrNode {
@@ -2622,9 +2833,9 @@ mod tests {
             }
             other => panic!("expected MethodCall payload, got {other:?}"),
         }
-        wire_roundtrip(&ir);
+        assert_eq!(hex::encode(wire_roundtrip(&ir)), "dc6313a701a304");
         // Composite: OptionGet over the MethodCall.
-        rt_op("SELF.getReg[Int](4).get", 0xE4);
+        rt_op("SELF.getReg[Int](HEIGHT).get", 0xE4);
     }
 
     #[test]
@@ -2664,7 +2875,9 @@ mod tests {
             ("CONTEXT.preHeader", 0xDB, (101, 3)),
             ("LastBlockUtxoRootHash.digest", 0xDB, (100, 1)),
             ("g1.getEncoded", 0xDB, (7, 2)),
-            ("1.toBytes", 0xDB, (4, 6)), // v3: concrete %Int.toBytes
+            // v3 concrete %Int.toBytes — NON-constant receiver (a constant
+            // one folds since wave 2, gate (d) in emit_method_call).
+            ("HEIGHT.toBytes", 0xDB, (4, 6)),
             ("Global.serialize(HEIGHT)", 0xDC, (106, 3)),
         ] {
             let ir = emit_tc(src);

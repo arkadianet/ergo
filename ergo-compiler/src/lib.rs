@@ -621,9 +621,7 @@
 //!    `ArrayIndexOutOfBoundsException`): Scala bounds-checks the const index
 //!    while lowering to `ExtractRegisterAs`. Dynamic indices untouched
 //!    (MethodCall on both sides, Err/Err parity). The IN-RANGE literal
-//!    lowering to `ExtractRegisterAs` is Wave 2
-//!    (adversarial-findings-methodcalls.md F4) — until it lands, in-range
-//!    `getReg[T](lit)` stays a both-accept unevaluable residual on our side.
+//!    lowering to `ExtractRegisterAs` landed in Wave 2 (D-C6 item 1).
 //! 6. **Shared-SNumericType-container methods at `tree_version < 3`**
 //!    (`emit_method_call`; `GraphBuildingException`): `toBytes`/`toBits`
 //!    resolve to the `"SNumericType"` owner only pre-v3 (D-T10), where Scala
@@ -644,15 +642,91 @@
 //! everywhere — unused-val rhs and lambda bodies included (both
 //! oracle-pinned REJECT).
 //!
-//! Wave-2 items deliberately NOT fixed here (accept-direction or lowering
-//! work; see the findings reports): getReg in-range literal →
-//! `ExtractRegisterAs` lowering (F4), `slice[T]` explicit-type-arg residual
-//! (F5), v6 numeric constant-receiver folds at v3 (F6),
-//! `Coll[UnsignedBigInt]().size` fold / v0 TYPE-code gate (constants F-3),
-//! and the whole P2SH-address divergence family (fold/CSE/upcast/ident
-//! lowerings — numerics N-3, bindings F3, methodcalls class 4; D-C1's "P2SH
-//! unaffected" sentence holds only for the segregation axis and is falsified
-//! by IR-transformed trees).
+//! Wave-2 items (getReg in-range literal lowering F4, `slice[T]`
+//! explicit-type-arg residual F5, v6 numeric constant-receiver folds F6,
+//! `Coll[UnsignedBigInt]().size` fold / self-readability, constants F-3)
+//! landed as D-C6 below. Still open from the Task-11 findings: the whole
+//! P2SH-address divergence family (fold/CSE/upcast/ident lowerings —
+//! numerics N-3, bindings F3, methodcalls class 4; D-C1's "P2SH unaffected"
+//! sentence holds only for the segregation axis and is falsified by
+//! IR-transformed trees).
+//!
+//! ### D-C6 — evaluability lowerings + folds (Task-11 adversarial wave 2)
+//!
+//! Wave 2 closes the oracle-confirmed "both accept, OUR tree cannot evaluate
+//! (or re-read) where the oracle's can" families — unlike wave 1 these CHANGE
+//! the emitted bytes toward Scala's. Every rule is oracle-pinned (captures
+//! 2026-07-07, 3 identical runs each; committed as `compile_probes.txt` →
+//! `compile_seed.json` wave-2 vectors; byte/P2SH pins in `emit.rs`/`tree.rs`
+//! tests). Since our trees stay non-segregated (D-C1), the oracle-comparable
+//! byte surface is the P2SH address (hashes the constant-inlined
+//! proposition) — asserted for every lowering below.
+//!
+//! 1. **`Box.getReg[T](in-range literal)` → `ExtractRegisterAs` (0xC6)**
+//!    (`emit_method_call`; methodcalls F4): `SELF.getReg[Int](5)` emits the
+//!    SAME bytes as `SELF.R5[Int]` (oracle: both reply `1000d1e6c6a70504`);
+//!    the wire carries the INNER elem type T. Dynamic index stays MethodCall
+//!    on both sides. RESIDUAL: Scala const-PROPAGATES a val-bound index
+//!    (`{ val i = 4; …getReg[Int](i) }` lowers to reg 4, the val
+//!    eliminated); our typed AST keeps the ValUse → the MethodCall survives,
+//!    both-accept but unevaluable on our side under the v0 header — the
+//!    vector is therefore NOT committable (the semantic gate would grade it
+//!    mixed Ok/Err); pinned verdict-only in `tree.rs`
+//!    (`compile_val_bound_get_reg_index_stays_residual_method_call`).
+//!    Const-propagation is M5-family scope.
+//! 2. **Explicit-type-arg custom irBuilders lower** (`typer/assign.rs` §1.7;
+//!    methodcalls F5): the §1.7 `has_ir_builder` branch previously built a
+//!    MethodCall UNCONDITIONALLY; Scala routes through the method's OWN
+//!    irBuilder (`irBuilder.lift(...).getOrElse(mkMethodCall(subst))`,
+//!    SigmaTyper.scala:167-171). Now routed through the same `lower_method`
+//!    catalog: `arr1.slice[Byte](0, 1)` → `Slice` (byte-identical to the
+//!    un-annotated form, oracle-matched), same for `filter[T]`/`exists[T]`/
+//!    `getOrElse[T]`; MethodCallIrBuilder methods (getReg/some/none/…) still
+//!    survive as MethodCalls with the {T→rangeTpe} subst. (`map[T]` with a
+//!    concrete-range lambda REJECTS on BOTH sides — the §1.7 expected-args
+//!    check fires before the irBuilder, `STypeVar("OV") != SByte`; oracle
+//!    `REJECT 1:16 TyperException` — the F5 report's "map[T] OKPAR" control
+//!    note was inaccurate.)
+//! 3. **v6 numeric methods on CONSTANT receivers fold at v3**
+//!    (`emit_method_call` gate (d); methodcalls F6): the oracle-probed fold
+//!    set ONLY — `toBytes` (big-endian `Coll[Byte]`), `toBits`
+//!    (`Coll[Boolean]`, index 0 = MSB) on Byte/Short/Int/Long constants, and
+//!    `bitwiseAnd`/`bitwiseOr`/`bitwiseXor` over two constants (all three
+//!    probed to fold). A single explicit cast of a literal (`7.toByte`)
+//!    counts as constant (range-checked; out-of-range falls through to the
+//!    `fold_overflow_check` ArithmeticException, matching the oracle's
+//!    `300.toByte.toBytes` reject). NOT folded (oracle-probed Err/Err
+//!    parity): non-constant receivers (`HEIGHT.toBytes`), BigInt receivers
+//!    (`n1.toBytes`), `shiftLeft`/`shiftRight`. RESIDUAL: deeper constant
+//!    receivers Scala's full partial evaluation folds (arith results,
+//!    multi-cast chains) stay residual MethodCalls. The Err/Err pair
+//!    (PreV3V6Method, PreV3V6Method) these controls produce is audited in
+//!    `compile_semantic_parity.rs` — both compilers keep byte-matching
+//!    MethodCalls that neither evaluator accepts under v0.
+//! 4. **`SizeOf(<collection literal>)` folds to the element count**
+//!    (`tree.rs::fold_literal_coll_sizes`; constants F-3): Scala folds
+//!    `.size` of a `ConcreteCollection` literal regardless of element
+//!    constancy (`Coll(HEIGHT).size` folds; probed). Runs AFTER the D-C5
+//!    gates (discarded elements stay verdict-checked — `Coll(2147483647 +
+//!    1).size` still rejects) and BEFORE serialization, so
+//!    `Coll[UnsignedBigInt]().size == 0` emits clean v0 bytes (the v3-only
+//!    elem-type code 9 never hits the wire — previously a stranded-funds
+//!    P2S our own `read_ergo_tree` refused).
+//! 5. **Post-write self-check** (`compile`): the tree bytes are re-read via
+//!    `read_ergo_tree` before any address is derived; a failure is a
+//!    `CompileError::Serializer` reject. This is a DELIBERATE reject-side
+//!    divergence (M1 stray-brace precedent: wrong-accept strands funds,
+//!    wrong-reject surfaces a user error) for two oracle-probed families:
+//!    (a) **Note-A getVar-style v3-type-codes-under-v0** —
+//!    `getVar[UnsignedBigInt](1)`: the oracle ACCEPTs `1000d1e6e30109`,
+//!    bytes NEITHER side's version-gated reader re-parses (its tree_hex
+//!    would not even parse for the semantic gate), so the ACCEPT verdict is
+//!    itself poisoned — both products strand funds; (b) **missing-fold
+//!    residual shapes** — a val-bound `Coll[UnsignedBigInt]()` under
+//!    `.size`, where Scala's inline+fold keeps ITS wire clean (usable) and
+//!    ours would not be. Neither family is committable as a vector; both are
+//!    pinned in `tree.rs`
+//!    (`compile_self_unreadable_emission_rejects_serializer_class`).
 
 pub mod ast;
 pub mod binder;

@@ -66,3 +66,48 @@ cc	3	sigmaProp((2147483647 + 0) < 0)
 cc	3	sigmaProp((2147483646 + 1) < 0)
 cc	3	sigmaProp((-9223372036854775807L - 1L) < 0L)
 cc	3	sigmaProp((HEIGHT + 2147483647) > 0)
+#
+# ── wave 2 (Task-11): evaluability lowerings + folds (lib.rs D-C6) ──
+# ACCEPT vectors proving the wave-2 fixes: both sides accept AND both
+# reductions agree under the semantic gate. NOT committed (ledgered D-C6
+# residuals, pinned verdict-only in unit tests): the val-const getReg index
+# (`{ val i = 4; ...getReg[Int](i) }` — Scala const-propagates, we keep an
+# unevaluable MethodCall), the val-bound `Coll[UnsignedBigInt]()` size
+# (Scala inlines+folds; our post-write self-check REJECTS), and
+# `getVar[UnsignedBigInt](1)` (Note-A: oracle ACCEPTs bytes NEITHER side can
+# re-read — its tree_hex would not even parse for the gate).
+# ── wave-2 fix A: getReg[T](in-range literal) → ExtractRegisterAs ──
+cc	3	sigmaProp(SELF.getReg[Int](5).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](9).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](0).isDefined)
+cc	3	sigmaProp(SELF.getReg[Long](4).getOrElse(7L) == 7L)
+cc	3	sigmaProp(SELF.getReg[Int](HEIGHT).isDefined)
+# ── wave-2 fix B: explicit-type-arg custom irBuilders lower (slice & co.) ──
+ccs	3	sigmaProp(arr1.slice[Byte](0, 1).size == 1)
+ccs	3	sigmaProp(col1.slice[Long](0, 1).size == 1)
+ccs	3	sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)
+ccs	3	sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))
+ccs	3	sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)
+ccs	3	sigmaProp(arr1.map[Byte]({(t: Byte) => t}).size == 2)
+# ── wave-2 fix C: v6 numeric methods on CONSTANT receivers fold ──
+ccs	3	sigmaProp(x.toBytes.size == 4)
+ccs	3	sigmaProp(x.toBits.size == 32)
+cc	3	sigmaProp(7.toByte.toBytes.size == 1)
+cc	3	sigmaProp(7.toByte.toBits.size == 8)
+cc	3	sigmaProp(5.toShort.toBytes.size == 2)
+cc	3	sigmaProp(300.toByte.toBytes.size == 1)
+ccs	3	sigmaProp(height1.toBytes.size == 8)
+ccs	3	sigmaProp(b1.toBytes.size == 1)
+ccs	3	sigmaProp(x.bitwiseAnd(y) >= 0)
+ccs	3	sigmaProp(x.bitwiseOr(y) >= 0)
+ccs	3	sigmaProp(x.bitwiseXor(y) >= 0)
+ccs	3	sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)
+# fold-boundary controls (NOT folded on either side; Err/Err reduce parity)
+ccs	3	sigmaProp(HEIGHT.toBytes.size == 4)
+ccs	3	sigmaProp(n1.toBytes.size > 0)
+ccs	3	sigmaProp(x.shiftLeft(1) == 20)
+# ── wave-2 fix D: SizeOf-of-collection-literal fold ──
+cc	3	sigmaProp(Coll[UnsignedBigInt]().size == 0)
+cc	3	sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)
+cc	3	sigmaProp(Coll(HEIGHT).size == 1)
+cc	3	sigmaProp(Coll(1, 2).size == 2)

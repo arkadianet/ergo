@@ -524,6 +524,12 @@ fn compile_seed_semantic_parity() {
     const AUDITED_ERR_PAIRS: &[(&str, &str)] = &[
         ("TypeError", "TypeError"),        // context-bound scripts (both sides)
         ("RuntimeException", "TypeError"), // D-C4 multi-arg fold lambdas
+        // D-C6 wave-2 fold-boundary controls: dynamic-index `getReg[T](HEIGHT)`
+        // and non-folded v6 numeric MethodCalls (`HEIGHT.toBytes`, `n1.toBytes`,
+        // `x.shiftLeft(1)`) — BOTH compilers keep the residual MethodCall
+        // (oracle bodies byte-match ours) and the v0 wire header makes the v6
+        // wire pair unevaluable on BOTH sides. Genuine parity, not masking.
+        ("PreV3V6Method", "PreV3V6Method"),
     ];
     for (pair, (n, first)) in &err_pairs {
         assert!(
