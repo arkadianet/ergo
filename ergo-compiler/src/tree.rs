@@ -365,8 +365,10 @@ fn fold_literal_coll_sizes(e: Expr) -> Expr {
 ///   eliminated before the lowering that dies). Residual asymmetry vs the
 ///   zero-arg rule is oracle-pinned, not a modeling choice. A `FuncValue`
 ///   with an `SFunc` param NESTED inside an unused val's rhs (not directly
-///   the rhs) is still rejected — un-probed exotic corner, reject-side
-///   bounded (D-C5).
+///   the rhs) is still rejected — PROBE-CONFIRMED reject-valid divergence
+///   (the regression re-verify's NF-2: the oracle prunes the unused val and
+///   ACCEPTs; we reject). Reject-side bounded, ledgered at D-C5 class 3;
+///   closes when the M4/M5 pruning transform lands.
 fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
     use std::collections::HashSet;
 
@@ -1215,6 +1217,43 @@ mod tests {
         // Belt-and-braces: the raw prefix byte is testnet|P2S = 0x13.
         let raw = bs58::decode(&r.p2s_address).into_vec().unwrap();
         assert_eq!(raw[0], 0x13, "testnet P2S prefix, not P2PK (0x11)");
+    }
+
+    /// A second bare-const pin beyond the PK class — and the oracle
+    /// authority for the SigmaTyperTest env's `g2 = 2·G` value (final
+    /// whole-M3 review finding 1). The oracle constant-folds
+    /// `proveDlog(g2)` into a bare `SigmaPropConstant` carrying the
+    /// NORMALIZED compressed point, so its tree hex is a byte-level pin
+    /// of the 2·G bytes the twin envs must bind.
+    ///
+    /// Oracle: `ccs proveDlog(g2)` →
+    /// `OK 0008cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+    ///  5AgXz2LADsxyCxEWvvHHpM9vKJsKbCwMjhXmVVrjH1dFtMgEupoAtSQd
+    ///  rnwHaWHeaqaP7sCPFCF8VdN2Mxe72y4oLt8XKAt`
+    /// (sigma-state 6.0.2, ORACLE_NETWORK=testnet, captured 2026-07-07).
+    /// NOTE the D-C2 caveat does NOT apply to bytes here: OUR unfolded
+    /// `CreateProveDlog(Const)` differs from the oracle's folded bare
+    /// constant, so only the 33-byte point INSIDE our constant — and the
+    /// evaluation — are pinned, not whole-tree bytes.
+    #[test]
+    fn compile_provedlog_two_g_point_bytes_match_oracle_fold() {
+        let mut env = ScriptEnv::new();
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x02;
+        let x = hex::decode("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+            .expect("valid hex");
+        bytes[1..].copy_from_slice(&x);
+        env.insert(
+            "g2",
+            EnvValue::GroupElement(GroupElement::from_bytes(bytes)),
+        );
+        let r = compile_testnet(&env, "proveDlog(g2)").expect("compile");
+        // The 2·G point rides inside our (unfolded) GroupElement constant.
+        let ours = hex::encode(&r.tree_bytes);
+        assert!(
+            ours.contains("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
+            "compiled tree must carry the oracle-pinned compressed 2·G: {ours}"
+        );
     }
 
     #[test]

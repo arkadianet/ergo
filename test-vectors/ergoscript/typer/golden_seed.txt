@@ -704,3 +704,23 @@ tc	unsignedBigInt("-0000")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))
 # Verdict mirrored by the Rust frontend (parse error → class ParserException);
 # no binder change needed (task-8 brief step 1 probe).
 tc	val x = 1	REJECT 1:1 ParserException
+#
+# ── § 26: M3 final review — tcs `g2` = 2·G, NON-normalized oracle Ecp render ──
+#
+# LangTests.scala:52-69 binds g2 = g.multiply(g) (the generator squared);
+# TyperOracle.scala:162 is faithful. The M2-era Rust twin envs bound g2 = G
+# (adjudicated inert under type-only grading); the M3 semantic gate grades
+# VALUES, so the twins now bind the true 2·G — wire bytes oracle-pinned by the
+# folded compile capture `ccs proveDlog(g2)` →
+# `OK 0008cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5 …`
+# (sigma-state 6.0.2, ORACLE_NETWORK=testnet, 2026-07-07; also pinned as a
+# tree.rs unit vector).
+#
+# RENDER CAVEAT (why the record below is SWEEP_SKIP'd, tag: JACOBIAN-RENDER):
+# Scala's multiply leaves the ECPoint non-normalized, and the typer oracle's
+# toString prints the raw Jacobian coordinates — z ≠ 1 (third component
+# 9075b4ee…a970, not @1). Our printer always renders the decompressed AFFINE
+# (x,y,1) form, which is byte-unmatchable against a non-normalized oracle
+# point. Rendering-only deviation (R3 family); the VALUE (compressed wire
+# bytes) is exact per the compile capture above.
+tcs	g2	OK (ConstantNode:GroupElement (CGroupElement (Ecp @(7d152c041ea8e1dc2191843d1fa9db55b68f88fef695e2c791d40444b365afc2,56915849f52cc8f76f5fd7e4bf60db4a43bf633e1b1383f85fe89164bfadcbdb,9075b4ee4d4788cabb49f7f81c221151fa2f68914d0aa833388fa11ff621a970))))

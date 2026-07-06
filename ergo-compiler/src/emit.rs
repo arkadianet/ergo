@@ -32,8 +32,9 @@
 //! segregated `SBoolean` table entry (`0101`/`0100`) referenced by a
 //! `ConstPlaceholder` (`7300`) — NOT the dedicated `0x7F` True / `0x80` False
 //! opcodes. `emit` therefore builds `Expr::Const { SBoolean, Boolean(_) }`
-//! with no True/False special-casing; the Task 9/10 segregation transform
-//! turns inline constants into table entries. The captures also pin the
+//! with no True/False special-casing; the M4 segregation transform (the
+//! D-C1 flip point — M3 deliberately emits non-segregated trees) will turn
+//! inline constants into table entries. The captures also pin the
 //! default P2S tree header `0x10` (version 0 + constant-segregation bit).
 //! (Note: the Task-1 review notes mislabeled the `sigmaProp(HEIGHT > 100)`
 //! bytes as the `sigmaProp(true)` reply; the three-way capture above

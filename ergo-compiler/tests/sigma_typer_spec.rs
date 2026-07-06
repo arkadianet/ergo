@@ -44,14 +44,25 @@ use SType::{
 // Helper prelude (mirrors LangTests.scala:52-72 + the SigmaTyperTest helpers).
 // ============================================================================
 
-/// The secp256k1 generator point, SEC1-compressed (LangTests `g1`/`g2` are
-/// `dlogGroup.generator` and its square; only their TYPE — `GroupElement` — is
-/// asserted by any typer property, so the concrete point is immaterial and the
-/// generator stands in for both, matching the oracle's `demoEnv`).
+/// The secp256k1 generator point, SEC1-compressed (LangTests `g1` is
+/// `dlogGroup.generator`).
 fn generator_ge() -> GroupElement {
     let mut bytes = [0u8; 33];
     bytes[0] = 0x02;
     let x = hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        .expect("valid hex");
+    bytes[1..].copy_from_slice(&x);
+    GroupElement::from_bytes(bytes)
+}
+
+/// `2·G` (LangTests `g2 = g.multiply(g)`). Only the TYPE is asserted by any
+/// property in this suite, so the value is immaterial HERE — but the three
+/// SigmaTyperTest-env twins stay value-aligned (final whole-M3 review
+/// finding 1; oracle pin: `ccs proveDlog(g2)` → `…02c6047f9441…9ee5`).
+fn two_g_ge() -> GroupElement {
+    let mut bytes = [0u8; 33];
+    bytes[0] = 0x02;
+    let x = hex::decode("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
         .expect("valid hex");
     bytes[1..].copy_from_slice(&x);
     GroupElement::from_bytes(bytes)
@@ -77,7 +88,7 @@ fn env() -> ScriptEnv {
     e.insert("col1", EnvValue::LongArray(vec![1, 2]));
     e.insert("col2", EnvValue::LongArray(vec![10, 20]));
     e.insert("g1", EnvValue::GroupElement(generator_ge()));
-    e.insert("g2", EnvValue::GroupElement(generator_ge()));
+    e.insert("g2", EnvValue::GroupElement(two_g_ge()));
     // p1/p2 are ProveDlog SigmaBooleans in LangTests; only `: SSigmaProp` is ever
     // asserted, so an opaque SigmaProp payload is behavior-preserving here.
     e.insert("p1", EnvValue::SigmaProp("p1".to_string()));

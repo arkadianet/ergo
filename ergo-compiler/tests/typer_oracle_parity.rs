@@ -67,14 +67,21 @@ use ergo_compiler::{
 // (`seed_accept_skip_set_accepts`) — the single source of truth shared by both
 // (m2-deferred cleanup: previously two independently-hardcoded lists).
 //
-// Empty as of the D-T4/D-T5/D-T6 fix: `env::lift` on-curve-checks and stores
-// GroupElement bytes-of-record (D-T5/D-T6), and `typed_print.rs` decompresses
+// The D-T4/D-T5/D-T6 fix emptied the M2 population: `env::lift` on-curve-checks
+// and stores GroupElement bytes-of-record, and `typed_print.rs` decompresses
 // both the `GroupElement` and `ProveDlog` arms to the oracle's `Ecp (x,y,1)`
-// form (D-T4) — closing every M2 rendering deviation this list held: the PK
-// address record, the six g1/g2 method-arm records, and the g3 pair
-// (golden_seed.txt §23(c), M3 Task-2).  All 10 now byte-match and are swept
-// normally.  Kept as the mechanism for any future rendering-only deviation.
-const SWEEP_SKIP: &[(&str, &str)] = &[];
+// form — closing every M2 rendering deviation this list held (the PK address
+// record, the six g1/g2 method-arm records, and the g3 pair; all byte-match
+// and are swept normally).
+//
+// Current resident — `tcs g2` (golden_seed §26, tag JACOBIAN-RENDER): the
+// oracle's `g2 = g.multiply(g)` is a NON-normalized ECPoint whose toString
+// prints raw Jacobian coordinates (z ≠ 1); our printer always renders the
+// decompressed affine `(x,y,1)`. Rendering-only — the VALUE is oracle-pinned
+// byte-exact by the folded `ccs proveDlog(g2)` compile capture (see
+// `two_g_ge`). Unmatchable without reproducing BouncyCastle's internal
+// non-normalized coordinate state; permanent unless the oracle normalizes.
+const SWEEP_SKIP: &[(&str, &str)] = &[("tcs", "g2")];
 
 // Sources with a genuine, already-documented VERDICT divergence (oracle ACCEPTs;
 // our typer deliberately REJECTs) — distinct from SWEEP_SKIP, whose entries all
@@ -178,7 +185,23 @@ fn demo_env() -> ScriptEnv {
     env
 }
 
-/// SigmaTyperTest env (`tcs`): mirrors `LangTests.scala:52-69`.
+/// `2·G` — `LangTests.scala:52-69` binds `g2 = g.multiply(g)` (generator
+/// squared). Value oracle-pinned via the folded `ccs proveDlog(g2)` compile
+/// capture (`0008cd02c6047f9441…9ee5`, 2026-07-07). Typed-tree RENDER caveat:
+/// the oracle prints `tcs g2` as a NON-normalized Jacobian `Ecp @(x,y,z≠1)`
+/// (golden_seed §26, SWEEP_SKIP'd) — only the VALUE is faithful here.
+fn two_g_ge() -> GroupElement {
+    let mut bytes = [0u8; 33];
+    bytes[0] = 0x02;
+    let x = hex::decode("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+        .expect("valid hex");
+    bytes[1..].copy_from_slice(&x);
+    GroupElement::from_bytes(bytes)
+}
+
+/// SigmaTyperTest env (`tcs`): mirrors `LangTests.scala:52-69`, including
+/// `g2 = 2·G` (aligned by the final whole-M3 review; the M2-era `g2 = G`
+/// binding was inert under type-only grading).
 fn typer_test_env() -> ScriptEnv {
     let ge = generator_ge();
     let mut env = ScriptEnv::new();
@@ -195,7 +218,7 @@ fn typer_test_env() -> ScriptEnv {
     env.insert("col1", EnvValue::LongArray(vec![1, 2]));
     env.insert("col2", EnvValue::LongArray(vec![10, 20]));
     env.insert("g1", EnvValue::GroupElement(ge));
-    env.insert("g2", EnvValue::GroupElement(ge));
+    env.insert("g2", EnvValue::GroupElement(two_g_ge()));
     env.insert("p1", EnvValue::SigmaProp("p1".to_string()));
     env.insert("p2", EnvValue::SigmaProp("p2".to_string()));
     env.insert("n1", EnvValue::BigInt("10".to_string()));

@@ -206,7 +206,29 @@ fn demo_env() -> ScriptEnv {
     env
 }
 
-/// SigmaTyperTest env (`ccs`): mirrors `LangTests.scala:52-69`.
+/// `2·G` — the SigmaTyperTest env's `g2` (`LangTests.scala:52-69` binds
+/// `g2 = g.multiply(g)`, i.e. the generator squared, NOT the generator).
+/// Value oracle-pinned by the folded compile capture
+/// `ccs proveDlog(g2)` → `OK 0008cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5 …`
+/// (sigma-state 6.0.2, ORACLE_NETWORK=testnet, captured 2026-07-07 — the wire
+/// carries the normalized SEC1-compressed point). NOTE the typed-tree RENDER
+/// caveat: the oracle's `tcs g2` prints a NON-normalized Jacobian
+/// `Ecp @(x,y,z≠1)` (Scala's multiply leaves the point unnormalized), so
+/// typer records referencing `g2` are rendering-unmatchable — see the
+/// golden-seed §26 SWEEP_SKIP entry.
+fn two_g_ge() -> GroupElement {
+    let mut bytes = [0u8; 33];
+    bytes[0] = 0x02;
+    let x = hex::decode("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
+        .expect("valid hex");
+    bytes[1..].copy_from_slice(&x);
+    GroupElement::from_bytes(bytes)
+}
+
+/// SigmaTyperTest env (`ccs`): mirrors `LangTests.scala:52-69`, including
+/// `g2 = 2·G` (the M2-era twin bound `g2 = G`, inert under type-only grading;
+/// the value grading of this gate made faithfulness load-bearing — final
+/// whole-M3 review finding 1).
 fn typer_test_env() -> ScriptEnv {
     let ge = generator_ge();
     let mut env = ScriptEnv::new();
@@ -223,7 +245,7 @@ fn typer_test_env() -> ScriptEnv {
     env.insert("col1", EnvValue::LongArray(vec![1, 2]));
     env.insert("col2", EnvValue::LongArray(vec![10, 20]));
     env.insert("g1", EnvValue::GroupElement(ge));
-    env.insert("g2", EnvValue::GroupElement(ge));
+    env.insert("g2", EnvValue::GroupElement(two_g_ge()));
     env.insert("p1", EnvValue::SigmaProp("p1".to_string()));
     env.insert("p2", EnvValue::SigmaProp("p2".to_string()));
     env.insert("n1", EnvValue::BigInt("10".to_string()));

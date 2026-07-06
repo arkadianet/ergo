@@ -252,8 +252,9 @@
 //! - **Compile oracle:** `scripts/jvm_typer_oracle` gained the `cc`/`cce`/
 //!   `ccs` compile verbs (source → ErgoTree hex + P2S/P2SH, 6.0.2); 271
 //!   committed vectors in
-//!   `test-vectors/ergoscript/compile/compile_seed.json`, each carrying the
-//!   ORACLE's tree hex (ready byte targets for M4/M5).
+//!   `test-vectors/ergoscript/compile/compile_seed.json` — the ACCEPT
+//!   vectors (85) carry the ORACLE's tree hex + addresses (ready byte
+//!   targets for M4/M5); REJECT vectors carry the verdict + class.
 //! - **Gate** (`tests/compile_semantic_parity.rs`): every swept ACCEPT pair
 //!   reduces to the SAME SigmaBoolean under the dummy context (5
 //!   `SEMANTIC_SKIP`, all D-C3); rejects grade the oracle's exception class

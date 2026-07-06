@@ -43,8 +43,9 @@ byte-parity) — deliberately front-loaded in the design as the top risk.
     `tc1.sh` fresh-JVM mode for reject positions) (M2) **+ compile verbs cc/cce/ccs**
     (source → ErgoTree hex + P2S/P2SH addresses) (M3)
 - **Test corpora:** 229-record typer golden seed; **271-vector compile seed**
-  (`test-vectors/ergoscript/compile/compile_seed.json` — every vector carries the ORACLE's
-  tree hex = ready M4/M5 byte targets); 79 real contracts (M1 parse-verdicts + M2
+  (`test-vectors/ergoscript/compile/compile_seed.json` — the 85 ACCEPT vectors carry the
+  ORACLE's tree hex + addresses = ready M4/M5 byte targets; REJECTs carry verdict +
+  class); 79 real contracts (M1 parse-verdicts + M2
   typed-verdicts + M3 compile-verdicts, all 0-divergence); 29 CC0 contracts vendored from
   the cannonQ fork (`test-vectors/ergoscript/cannonq/` — **sources only; bytes must be
   re-derived vs 6.0.2**).
@@ -95,8 +96,8 @@ emptied) except `deserialize`, re-scoped to M4 — see the M4 worklist.
 Typed AST → opcode IR (`emit.rs`) → ErgoTree bytes + P2S/P2SH (`tree.rs`; `encode_p2sh`
 added to `ergo-ser`); `compile()` live end-to-end, `PK(...)` bare-constant class byte-
 and address-EXACT vs the oracle. Oracle infrastructure: `cc`/`cce`/`ccs` compile verbs
-on the JVM oracle + the 271-vector `compile_seed.json` (every vector carries the
-oracle's tree hex). Gate: SigmaBoolean-exact semantic parity on all 80 swept accepts
+on the JVM oracle + the 271-vector `compile_seed.json` (85 ACCEPT vectors carry the
+oracle's tree hex + addresses). Gate: SigmaBoolean-exact semantic parity on all 80 swept accepts
 (after 5 D-C3 `SEMANTIC_SKIP`), exact reject-class parity on the reject vectors, and a
 per-vector P2SH address gate (D-C7 mismatches pinned at 44). All M2 deferrals closed
 (D-T2 base58/64, D-T3, D-T4/D-T5/D-T6, D-T12 folds; `SWEEP_SKIP` emptied) except
@@ -196,6 +197,10 @@ becomes the M4/M5 progress meter):
 - [ ] `POST /script/p2sAddress` + `/script/p2shAddress` in `ergo-api` (calls DOWN into
       `ergo-compiler`; documented-omitted at `ergo-api/src/utils.rs:25`). Scala-compat JSON.
 - [ ] Optional: feature-gate behind config (user-facing compute).
+- [ ] **Recursion depth guards before untrusted input** (final M3 review): `parse`,
+      `emit`, and the tree.rs walks are recursion-unbounded — fine for trusted CLI/test
+      input, a stack-overflow DoS surface once REST exposes them. Bound or iterative-ize
+      before the endpoints ship.
 
 ## M7 — ContractParser + stdlib tail ⬜ TODO
 
