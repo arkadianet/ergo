@@ -22,7 +22,7 @@ use ergo_ser::sigma_value::SigmaValue;
 use super::super::cost::{add_cost, add_cost_per_item};
 use super::super::dispatch::{eval_expr, TraceEntry};
 use super::super::eval_ctx::EvalCtx;
-use super::super::helpers::{sigma_to_value, trace_val};
+use super::super::helpers::{infer_expr_type, sigma_to_value, trace_val};
 use super::super::types::{Env, EvalError, Value};
 
 // 0x73 ConstPlaceholder(index)
@@ -68,6 +68,62 @@ pub(in crate::evaluator) fn eval_val_use(
 // PRE-block env). Mirrored with a block-local clone; closures created
 // inside the block capture the block env, exactly like Scala's
 // FuncValue capturing `curEnv`.
+/// Scala `Value.checkType(vd, v)` (values.scala:251/998) narrowed to the single
+/// mismatch our runtime value model can exhibit. `SType.isValueOfType` requires
+/// a 2-item `STuple` value to be a `Tuple2`; a register holding a `Tuple`
+/// (0x86 `CreateTuple`) node evaluates to a `Coll` (see
+/// `box_context::read_register_option`), so binding it at a pair type must fail
+/// — bug-for-bug with Scala's InterpreterException "Invalid type returned by
+/// evaluator". The ValDef type is derived from `rhs` (Scala never serializes
+/// it); inference over the immediate `rhs` (empty binding env — the poison's
+/// producing `rhs` is a self-contained register read) is enough to catch it at
+/// its own binding, and any earlier re-binding was already checked. When the
+/// type cannot be inferred, or it is not an `STuple`, the value is accepted
+/// unchanged.
+fn check_valdef_pair_type(
+    rhs: &Expr,
+    constants: &[(SigmaType, SigmaValue)],
+    val: &Value,
+) -> Result<(), EvalError> {
+    // Scala runs `Value.checkType(vd, v)` on every ValDef binding
+    // (values.scala:998) and `SType.isValueOfType` handles ONLY the
+    // pair case for tuples: `STuple(2)` requires a `Tuple2` runtime
+    // value, and any other tuple arity hits
+    // `sys.error("Unsupported tuple type …")` — which inside
+    // `verifyInput` is also a rejection, unconditionally, whatever
+    // the runtime value class (SType.scala:200-202). Mirror both:
+    //
+    //   - a two-element `Value::Tuple` satisfies `STuple(2)` — the
+    //     only tuple shape Scala accepts — so it short-circuits
+    //     before the inference walk;
+    //   - inferred `STuple(2)` with any other value class rejects
+    //     (the poisoned 0x86-register Coll);
+    //   - inferred `STuple(n != 2)` rejects regardless of the value,
+    //     matching the `sys.error` (a 0x86 register of arity 3+ read
+    //     at its tuple type lands here — CodeRabbit PR #161 finding).
+    if matches!(val, Value::Tuple(items) if items.len() == 2) {
+        return Ok(());
+    }
+    if let Some(SigmaType::STuple(elems)) =
+        infer_expr_type(rhs, &std::collections::HashMap::new(), constants)
+    {
+        if elems.len() == 2 {
+            return Err(EvalError::TypeError {
+                expected:
+                    "Tuple2 for an (_, _) binding (Scala Value.checkType / SType.isValueOfType)",
+                got: "non-pair value — a 0x86 CreateTuple register read as (_, _) yields a Coll"
+                    .to_string(),
+            });
+        }
+        return Err(EvalError::TypeError {
+            expected: "pair — Scala SType.isValueOfType supports only 2-tuples and \
+                       sys.errors on any other STuple arity (SType.scala:200-202)",
+            got: format!("STuple arity {} binding", elems.len()),
+        });
+    }
+    Ok(())
+}
+
 pub(in crate::evaluator) fn eval_block_value(
     items: &[Expr],
     result: &Expr,
@@ -91,6 +147,21 @@ pub(in crate::evaluator) fn eval_block_value(
                     // AddToEnvironment — Scala charges it AFTER the rhs
                     // eval (addFixedCost wraps only the env update).
                     add_cost(cx.cost, 0xD6)?;
+                    // Scala `BlockValue.eval` runs `Value.checkType(vd, v)`
+                    // (values.scala:998) with `vd.tpe = rhs.tpe`. The only
+                    // mismatch our value model can produce is a register holding
+                    // a `Tuple` (0x86 `CreateTuple`) node, which evaluates to a
+                    // `Coll` (box_context::read_register_option); binding it where
+                    // a pair `(_, _)` is expected fails `SType.isValueOfType`
+                    // (`isInstanceOf[Tuple2]`), matching Scala's
+                    // InterpreterException "Invalid type returned by evaluator"
+                    // that fails `verifyInput`. Every legitimate `STuple` value
+                    // here is a `Value::Tuple`, so this rejects ONLY the poisoned
+                    // register-Coll — never a valid binding. The `rhs` type is
+                    // derived (Scala never serializes the ValDef type); when it
+                    // cannot be inferred the check is skipped (conservative:
+                    // no new reject-valid).
+                    check_valdef_pair_type(rhs, cx.constants, &val)?;
                     if let Some(t) = cx.trace.as_mut() {
                         t.push(TraceEntry {
                             label: format!("ValDef({id})"),
