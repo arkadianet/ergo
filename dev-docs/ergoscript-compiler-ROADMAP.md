@@ -132,9 +132,12 @@ below are self-contained).
   the serialization traversal; then a **serialize→re-read round-trip** materializes the
   `ConstantPlaceholder` nodes (step 5-6 of the recon §3 walkthrough) — reproduce the
   shape, not just the effect.
-- **NO dedup** of equal constants — each occurrence gets its own slot
-  (`TreeBuilding.scala:506-509` "two equal constants don't always have the same meaning"
-  strongly implies; recon OPEN QUESTION 1: confirm in `ConstantStore.scala` FIRST).
+- **NO dedup** of equal constants — each occurrence gets its own slot.
+  SOURCE-CONFIRMED (recon OQ1 closed, 2026-07-04, pinned v6.0.2 checkout
+  `sigma/serialization/ConstantStore.scala`): `put` is unconditionally
+  `store += c; mkConstantPlaceholder(store.length - 1, tpe)` — append-only,
+  index = slot position. (`TreeBuilding.scala:506-509` "two equal constants
+  don't always have the same meaning" is the design rationale.)
 - Bare-`SigmaPropConstant` roots stay `withoutSegregation` `0x00` on BOTH sides, and
   `proveDlog(<any const point>)` FOLDS into that class in Scala's IR (M3 Task-1 oracle
   fact) — segregated test fixtures need non-foldable scripts.
