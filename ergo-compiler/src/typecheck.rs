@@ -23,6 +23,7 @@
 use ergo_ser::address::NetworkPrefix;
 
 use crate::binder::{bind, BindError};
+use crate::emit::EmitError;
 use crate::env::ScriptEnv;
 use crate::error::ParseError;
 use crate::parse::parse;
@@ -40,6 +41,17 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 ///   PK address decode), carries a real position.
 /// - [`CompileError::Type`] — `TyperException` family (incl. `MethodNotFound`,
 ///   `NonApplicableMethod`, …); `pos()` is always `0` (E12).
+///
+/// The M3 `compile()` pipeline (`tree.rs`) adds three post-typecheck variants:
+/// - [`CompileError::Root`] — the typed root is neither `Boolean` nor
+///   `SigmaProp` (`ScriptApiRoute.scala:60-65` throws a bare `new Exception`;
+///   oracle: `cc HEIGHT` → `REJECT 0:0 Exception`).
+/// - [`CompileError::Emit`] — emit-phase failure ([`EmitError`]); a compiler
+///   bug surface or an `ergo-ser`-unrepresentable node (lib.rs D-E1..D-E3),
+///   not a user error. No dedicated Scala exception class exists — the route
+///   collapses every non-`CompilerException` throwable into its catch-all.
+/// - [`CompileError::Write`] — wire serialization of the assembled tree
+///   failed (`ergo_ser::error::WriteError`); same compiler-bug surface.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
     /// Parse-phase rejection (`sigmastate.lang.parsers.ParserException`).
@@ -51,6 +63,19 @@ pub enum CompileError {
     /// Typer-phase rejection (`sigma.exceptions.TyperException` and subclasses).
     #[error("type error: {0}")]
     Type(#[from] TyperError),
+    /// Root-type rejection: the compiled root is neither `Boolean` nor
+    /// `SigmaProp`. Message mirrors `ScriptApiRoute.scala:64-65`.
+    #[error("source compilation result is of type {tpe}, but `SBoolean` expected")]
+    Root {
+        /// Term-string of the offending root type ([`crate::typed_print::to_term_string`]).
+        tpe: String,
+    },
+    /// Emit-phase rejection (typed AST → opcode IR lowering failed).
+    #[error("emit error: {0}")]
+    Emit(#[from] EmitError),
+    /// Wire-write rejection (opcode IR → bytes failed).
+    #[error("tree serialization error: {0}")]
+    Write(#[from] ergo_ser::error::WriteError),
 }
 
 impl CompileError {
@@ -58,11 +83,15 @@ impl CompileError {
     ///
     /// `Parse`/`Bind` return the real offset; `Type` returns `0` — `TypedExpr`
     /// carries no positions, so typer rejections have no citable position (E12).
+    /// The post-typecheck phases (`Root`/`Emit`/`Write`) also return `0`: they
+    /// operate on position-less typed/IR nodes (and the oracle agrees — the
+    /// route's root-type throw grades as `REJECT 0:0 Exception`).
     pub fn pos(&self) -> Pos {
         match self {
             CompileError::Parse(e) => e.pos(),
             CompileError::Bind(e) => e.pos(),
             CompileError::Type(e) => e.pos(),
+            CompileError::Root { .. } | CompileError::Emit(_) | CompileError::Write(_) => 0,
         }
     }
 
@@ -82,6 +111,13 @@ impl CompileError {
                 BindError::InvalidAddress { .. } => "InvalidAddress",
             },
             CompileError::Type(e) => e.class_tag(),
+            // `Root` mirrors the route's bare `new Exception(...)`
+            // (ScriptApiRoute.scala:64-65; oracle `cc HEIGHT` → `REJECT 0:0
+            // Exception`). `Emit`/`Write` have no Scala analog (compiler-bug
+            // surfaces); they grade as the same generic catch-all class.
+            CompileError::Root { .. } | CompileError::Emit(_) | CompileError::Write(_) => {
+                "Exception"
+            }
         }
     }
 }

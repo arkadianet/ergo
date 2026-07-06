@@ -510,6 +510,32 @@
 //! SigmaTyperTest env's `p1`/`p2`) with no curve bytes to serialize; only
 //! reachable from a hand-built env, no oracle vector exists. `emit` returns
 //! `UnsupportedNode`; real keys flow through `ConstPayload::ProveDlog([u8;33])`.
+//!
+//! # Known M3 deviations (tree/compile layer)
+//!
+//! ### D-C1 — no constant segregation (`build_tree` = withoutSegregation only)
+//!
+//! Scala's `ErgoTree.fromProposition` segregates every root that is not a bare
+//! `SigmaPropConstant` (header `0x10`, constants pulled into the table,
+//! `ConstPlaceholder` in the body); `tree::build_tree` emits header `0x00`
+//! with inline constants for EVERY root. Consequence: for the segregated class
+//! the tree bytes and the P2S address DIFFER from Scala (oracle:
+//! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` vs our
+//! `00d191a304c801`) while remaining valid, parseable, semantically equal
+//! trees. The P2SH address is UNAFFECTED — it hashes the constant-inlined
+//! proposition, which is byte-identical to our body (oracle-pinned in
+//! `tree.rs` and `ergo-ser/src/address.rs` tests). The bare-constant class
+//! (e.g. `PK(...)`) takes the same withoutSegregation branch on both sides and
+//! is byte- and address-exact. The segregation transform is the M4 flip point.
+//!
+//! ### D-C2 — no `CreateProveDlog(Const)` → `SigmaPropConstant` fold
+//!
+//! Scala's IR pipeline constant-folds `proveDlog(<GroupElement const>)` into a
+//! bare `SigmaPropConstant` at the GraphBuilding stage (oracle:
+//! `cce proveDlog(g1)` replies with the SAME tree/addresses as the equivalent
+//! `PK(...)`, task-1-report Concern 1); we emit the unfolded
+//! `CreateProveDlog(Const)` node (`0xCD`) — same header `0x00`, different body
+//! bytes, different addresses. The constant fold is an M4/M5 lowering rule.
 
 pub mod ast;
 pub mod binder;
@@ -520,6 +546,7 @@ mod parse;
 pub mod span;
 pub mod stype;
 pub mod token;
+pub mod tree;
 pub mod typecheck;
 pub mod typed;
 pub mod typed_print;
@@ -532,6 +559,7 @@ pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;
 pub use parse::{parse, parse_type};
 pub use stype::SType;
+pub use tree::{compile, CompileResult};
 pub use typecheck::{typecheck, typecheck_with_network, CompileError};
 pub use typed::{node_tpe, ConstPayload, TypedExpr};
 pub use typed_print::print_typed;
