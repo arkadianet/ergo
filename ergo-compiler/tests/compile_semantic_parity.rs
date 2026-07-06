@@ -46,11 +46,13 @@
 //!   constant-inlined proposition, our P2SH address MUST equal the
 //!   oracle's (P2SH is segregation-invariant — D-C1's true scope); the
 //!   byte-diverging remainder is the D-C7 "no IR optimization pass" family
-//!   (lib.rs ledger), counted and pinned to
-//!   `EXPECTED_DC7_P2SH_MISMATCHES`. P2S must match exactly where the tree
-//!   bytes match (bare-const class) and differs everywhere else by D-C1
-//!   construction (we never segregate; Scala always does for non-bare
-//!   roots) — counted as telemetry.
+//!   (lib.rs ledger), SET-pinned to `DC7_P2SH_MISMATCH_SET` (M4 Task 1,
+//!   recon-gap.md Finding 5: a set, not a count — a compensating regression
+//!   must fail loudly). P2S must match exactly where the tree bytes match
+//!   (bare-const class) and differs everywhere else by D-C1 construction (we
+//!   never segregate; Scala always does for non-bare roots) — SET-pinned to
+//!   `P2S_DC1_MISMATCH_SET` the same way (nearly empties out once Task 2's
+//!   segregation transform lands).
 //!
 //! **Live recapture** ([`compile_seed_live_recapture`], `#[ignore]`): spawns
 //! the oracle once (batch stdin, EOF-close, grammar grep-filter — the
@@ -66,7 +68,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ergo_compiler::{compile, EnvValue, GroupElement, NetworkPrefix, ScriptEnv};
+use ergo_compiler::{compile, CompileResult, EnvValue, GroupElement, NetworkPrefix, ScriptEnv};
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::encode_p2sh;
@@ -142,27 +144,281 @@ const ORACLE_BARE_FOLD_EXCLUSIONS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Committed count of ACCEPT vectors whose P2SH address differs from the
-/// oracle's — the D-C7 "no IR optimization pass" family (lib.rs ledger):
+/// `(verb, source)` label for a vector, used as the key in the SET-based
+/// parity gates below (M4 Task 1, recon-gap.md Finding 5). Corpus-sourced
+/// vectors key on `corpus:<relative path>` instead of their `source` (a
+/// whole `.es` contract is unfit as a `&'static str` literal in a committed
+/// constant); seed/probe vectors key on the literal source text, matching
+/// the `label` computed in the sweep below minus its debug-quoting.
+fn mismatch_label(v: &Vector) -> (String, String) {
+    match &v.corpus_path {
+        Some(p) => (v.verb.clone(), format!("corpus:{p}")),
+        None => (v.verb.clone(), v.source.clone()),
+    }
+}
+
+/// Compare a freshly-swept mismatch-label SET against a committed constant,
+/// failing loudly in EITHER direction (recon-gap.md Finding 5): a vector
+/// ENTERING the set (a regression, or an un-triaged new probe) is just as
+/// much a test-integrity failure as one LEAVING it silently (a landed
+/// lowering that graduated a vector without updating the constant — the
+/// cannonQ "count stayed put, so nobody noticed the compensating
+/// regression" anti-pattern this whole mechanism exists to catch). The
+/// failure message prints both diffs as ready-to-paste `(verb, source)`
+/// tuple lines so updating the constant after a deliberate graduation is a
+/// copy-paste, not a hand-transcription.
+fn assert_mismatch_set_matches(
+    gate_name: &str,
+    actual: &std::collections::BTreeSet<(String, String)>,
+    committed: &[(&str, &str)],
+) {
+    let committed_set: std::collections::BTreeSet<(&str, &str)> =
+        committed.iter().copied().collect();
+    let actual_borrowed: std::collections::BTreeSet<(&str, &str)> = actual
+        .iter()
+        .map(|(verb, src)| (verb.as_str(), src.as_str()))
+        .collect();
+    let entered: Vec<&(&str, &str)> = actual_borrowed.difference(&committed_set).collect();
+    let left: Vec<&(&str, &str)> = committed_set.difference(&actual_borrowed).collect();
+    let fmt = |xs: &[&(&str, &str)]| -> String {
+        xs.iter()
+            .map(|(verb, src)| format!("    ({verb:?}, {src:?}),"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        entered.is_empty() && left.is_empty(),
+        "{gate_name} mismatch SET changed — {} entered (regression or un-triaged new \
+         probe; investigate before adding), {} left (a lowering graduated them — remove \
+         deliberately, never silently):\nENTERED (not in the committed constant):\n{}\n\
+         LEFT (in the committed constant but no longer mismatching):\n{}",
+        entered.len(),
+        left.len(),
+        fmt(&entered),
+        fmt(&left),
+    );
+}
+
+/// Committed SET of `(verb, source)` labels whose P2SH address differs from
+/// the oracle's — the D-C7 "no IR optimization pass" family (lib.rs ledger):
 /// P2SH hashes the constant-inlined proposition, so it diverges exactly
 /// where Scala's GraphBuilding transforms the tree shape (const folds, val
 /// inlining/pruning, CSE/ValDef sharing, single-element anyOf/atLeast
-/// unwrapping, explicit-cast folds, bare-ident PropertyCall lowerings,
-/// per-element env-collection lifts). The count INCLUDES the D-C2 and
-/// D-C6-residual instances of the family (e.g. the two `proveDlog(const)`
-/// fold vectors) — every P2SH divergence shares the one root cause. This
-/// number DECREASES as the M4/M5 lowerings land — update it deliberately
-/// with the lowering that moves it, never silently (a change in either
-/// direction without a matching code change is a regression or an unaudited
-/// behavior shift).
+/// unwrapping, explicit-cast folds, bare-ident PropertyCall lowerings). The
+/// set INCLUDES the D-C2 and D-C6-residual instances of the family (e.g. the
+/// two `proveDlog(const)` fold vectors) — every P2SH divergence shares the
+/// one root cause.
 ///
-/// 39 → 44 (wave-4 review follow-up): the 5 new ACCEPT probes are ALL
-/// fold-family instances — the min/max non-overflow controls and the two
-/// bitwise value pins (oracle folds each whole equality to
-/// `sigmaProp(true)`; ours stays unfolded), and the Negation-node chain
-/// (oracle folds the inner `0 + 2147483647` constant; ours keeps the
-/// `Plus`). No previously-matching vector moved.
-const EXPECTED_DC7_P2SH_MISMATCHES: usize = 44;
+/// SET, not a count (M4 Task 1, recon-gap.md Finding 5): a count assert is
+/// blind to a compensating regression — a fold that un-matches a previously
+/// exact vector while a coincidental shape change matches a different one
+/// leaves the total unchanged. The set catches both directions. GRADUATION:
+/// every M4 task that lands a lowering must remove the vectors it fixes from
+/// this set EXPLICITLY (never silently, never widen it to paper over a new
+/// regression — fix the regression instead, the cannonQ anti-pattern this
+/// gate exists to prevent).
+///
+/// History: 39 → 44 (wave-4 review follow-up: 5 new ACCEPT probes, all
+/// fold-family instances) → 43 (M4 Task 1: `sigmaProp(col1.slice[Long](0,
+/// 1).size == 1)` re-captured under `cce` instead of `ccs` — gap F2, its
+/// `ccs`-only mismatch was an oracle-env artifact, not a real IR-transform
+/// divergence; the `cce` capture is byte-identical to ours and graduates
+/// out). 43 vectors, derived from a full gate run against the M4 Task-1 seed
+/// (`compile_seed.json`, 272 vectors, 80 ACCEPT swept).
+const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
+    ("cc", "!true"),
+    ("cc", "1 < 2L"),
+    ("cc", "anyOf(Coll(HEIGHT > 5))"),
+    ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
+    ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
+    (
+        "cc",
+        "corpus:chaincash-basis/chaincash/layer2-old/redemption.es",
+    ),
+    (
+        "cc",
+        "corpus:chaincash-basis/chaincash/layer2-old/redproducer.es",
+    ),
+    (
+        "cc",
+        "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
+    ),
+    ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
+    ("cc", "corpus:chaincash-basis/chaincash/onchain/reserve.es"),
+    ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
+    ("cc", "corpus:crystalpool/deposit.es"),
+    ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
+    ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
+    ("cc", "corpus:crystalpool/swap-tokens.es"),
+    ("cc", "corpus:dexy/gort-dev/emission.es"),
+    ("cc", "corpus:lsp/test_contract.es"),
+    ("cc", "corpus:rosen-bridge/GuardSign.es"),
+    ("cc", "sigmaProp((-(0 + 2147483647) - 2) < 0)"),
+    ("cc", "sigmaProp((-9223372036854775807L - 1L) < 0L)"),
+    ("cc", "sigmaProp((2147483646 + 1) < 0)"),
+    ("cc", "sigmaProp((2147483647 + 0) < 0)"),
+    (
+        "cc",
+        "sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)",
+    ),
+    (
+        "cc",
+        "sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)",
+    ),
+    ("cc", "sigmaProp((max(1, 2) + 1) == 3)"),
+    ("cc", "sigmaProp((min(1, 2) + 1) == 2)"),
+    ("cc", "sigmaProp(Coll(1, 2).size == 2)"),
+    ("cc", "sigmaProp(Coll(HEIGHT).size == 1)"),
+    ("cc", "sigmaProp(Coll[UnsignedBigInt]().size == 0)"),
+    ("cc", "true && (1 == 1)"),
+    ("cc", "true ^ false"),
+    ("cc", "{ val x = HEIGHT; x > 5 }"),
+    ("cce", "atLeast(1, Coll(proveDlog(g1)))"),
+    ("cce", "proveDHTuple(g1, g2, g1, g2)"),
+    ("cce", "proveDlog(g1)"),
+    ("cce", "proveDlog(g3)"),
+    (
+        "ccs",
+        "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",
+    ),
+    (
+        "ccs",
+        "sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)",
+    ),
+    (
+        "ccs",
+        "sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)",
+    ),
+    ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
+    ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
+    ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),
+    ("ccs", "sigmaProp(x.bitwiseXor(y) >= 0)"),
+];
+
+/// Committed SET of `(verb, source)` labels whose P2S address differs from
+/// the oracle's — the D-C1 "we never segregate" family: Scala segregates
+/// every non-bare-constant root (header `0x10`, constants table +
+/// placeholders) while M3/M4-Task-1 `compile()` still always emits header
+/// `0x00`, so P2S (which embeds tree bytes verbatim, header included)
+/// diverges for every non-bare-const ACCEPT vector.
+///
+/// Wave 3 (Task-11 findings H-1/H-2) added the `p2s_dc1_mismatch` counter as
+/// non-gating telemetry only; this SET gives it the same Finding-5 treatment
+/// as DC7 up front, rather than landing a count assert first and upgrading
+/// it later. Task 2 (constant segregation / the D-C1 flip) is expected to
+/// empty this set down to the D-C7 residual only (recon-targets: P2S/byte
+/// matches 2→36 — 34 SEGREGATION-ONLY graduations + the 2 already-matching
+/// bare-const vectors) — i.e. nearly every entry here graduates in the very
+/// next task, which is exactly why the set form (not a count) matters: Task
+/// 2's commit must show the diff shrinking to (ideally) empty, not a number
+/// dropping by 34 with no way to confirm it dropped the RIGHT 34.
+const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
+    ("cc", "!true"),
+    ("cc", "1 < 2L"),
+    ("cc", "1 == 2"),
+    ("cc", "HEIGHT > 5"),
+    ("cc", "HEIGHT>5 && HEIGHT<9"),
+    ("cc", "INPUTS.size > 1"),
+    ("cc", "allOf(Coll(HEIGHT > 5, HEIGHT < 9))"),
+    ("cc", "anyOf(Coll(HEIGHT > 5))"),
+    ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
+    ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
+    (
+        "cc",
+        "corpus:chaincash-basis/chaincash/layer2-old/redemption.es",
+    ),
+    (
+        "cc",
+        "corpus:chaincash-basis/chaincash/layer2-old/redproducer.es",
+    ),
+    (
+        "cc",
+        "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
+    ),
+    ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
+    ("cc", "corpus:chaincash-basis/chaincash/onchain/reserve.es"),
+    ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
+    ("cc", "corpus:crystalpool/deposit.es"),
+    ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
+    ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
+    ("cc", "corpus:crystalpool/swap-tokens.es"),
+    ("cc", "corpus:dexy/gort-dev/emission.es"),
+    ("cc", "corpus:lsp/src/main.es"),
+    ("cc", "corpus:lsp/src/simple.es"),
+    ("cc", "corpus:lsp/test_contract.es"),
+    ("cc", "corpus:lsp/test_simple.es"),
+    ("cc", "corpus:rosen-bridge/GuardSign.es"),
+    ("cc", "getVar[Coll[Byte]](1).isDefined"),
+    ("cc", "sigmaProp((-(0 + 2147483647) - 2) < 0)"),
+    ("cc", "sigmaProp((-9223372036854775807L - 1L) < 0L)"),
+    ("cc", "sigmaProp((2147483646 + 1) < 0)"),
+    ("cc", "sigmaProp((2147483647 + 0) < 0)"),
+    (
+        "cc",
+        "sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)",
+    ),
+    (
+        "cc",
+        "sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)",
+    ),
+    ("cc", "sigmaProp((HEIGHT + 2147483647) > 0)"),
+    ("cc", "sigmaProp((max(1, 2) + 1) == 3)"),
+    ("cc", "sigmaProp((min(1, 2) + 1) == 2)"),
+    ("cc", "sigmaProp(5.toShort.toBytes.size == 2)"),
+    ("cc", "sigmaProp(7.toByte.toBits.size == 8)"),
+    ("cc", "sigmaProp(7.toByte.toBytes.size == 1)"),
+    ("cc", "sigmaProp(Coll(1, 2).size == 2)"),
+    ("cc", "sigmaProp(Coll(HEIGHT).size == 1)"),
+    ("cc", "sigmaProp(Coll[UnsignedBigInt]().size == 0)"),
+    (
+        "cc",
+        "sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)",
+    ),
+    ("cc", "sigmaProp(HEIGHT > 100)"),
+    ("cc", "sigmaProp(SELF.getReg[Int](0).isDefined)"),
+    ("cc", "sigmaProp(SELF.getReg[Int](5).isDefined)"),
+    ("cc", "sigmaProp(SELF.getReg[Int](9).isDefined)"),
+    ("cc", "sigmaProp(SELF.getReg[Int](HEIGHT).isDefined)"),
+    ("cc", "sigmaProp(SELF.getReg[Long](4).getOrElse(7L) == 7L)"),
+    ("cc", "sigmaProp(sigmaProp(true))"),
+    ("cc", "sigmaProp(true) && sigmaProp(false)"),
+    ("cc", "sigmaProp(true) || sigmaProp(false)"),
+    ("cc", "true && (1 == 1)"),
+    ("cc", "true ^ false"),
+    ("cc", "xorOf(Coll(HEIGHT > 5, HEIGHT < 9))"),
+    ("cc", "{ val x = HEIGHT; x > 5 }"),
+    ("cce", "atLeast(1, Coll(proveDlog(g1)))"),
+    ("cce", "col1.exists({(x:Long)=>x>1L})"),
+    ("cce", "proveDHTuple(g1, g2, g1, g2)"),
+    ("cce", "proveDlog(g1)"),
+    ("cce", "proveDlog(g3)"),
+    ("cce", "sigmaProp(col1.slice[Long](0, 1).size == 1)"),
+    ("ccs", "c1 && c2"),
+    ("ccs", "sigmaProp(HEIGHT.toBytes.size == 4)"),
+    (
+        "ccs",
+        "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",
+    ),
+    (
+        "ccs",
+        "sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)",
+    ),
+    (
+        "ccs",
+        "sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)",
+    ),
+    ("ccs", "sigmaProp(arr1.slice[Byte](0, 1).size == 1)"),
+    ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
+    ("ccs", "sigmaProp(b1.toBytes.size == 1)"),
+    ("ccs", "sigmaProp(height1.toBytes.size == 8)"),
+    ("ccs", "sigmaProp(n1.toBytes.size > 0)"),
+    ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
+    ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),
+    ("ccs", "sigmaProp(x.bitwiseXor(y) >= 0)"),
+    ("ccs", "sigmaProp(x.shiftLeft(1) == 20)"),
+    ("ccs", "sigmaProp(x.toBits.size == 32)"),
+    ("ccs", "sigmaProp(x.toBytes.size == 4)"),
+];
 
 // =============================================================================
 // Environment builders (mirror TyperOracle.scala demo/sigmaTyperTest envs;
@@ -594,6 +850,66 @@ fn proposition_bytes(body: &Expr) -> Vec<u8> {
     w.result()
 }
 
+/// Writer-child-order oracle check (M4 Task 1, locked decision 3): the ONE
+/// mechanism for byte-comparing OUR emitted wire output against the
+/// oracle's `tree_hex`, used by both the main gate's bare-constant assertion
+/// and [`inline_placeholders_reproduces_our_proposition_for_shape_identical_vectors`]
+/// — there was previously no single shared path, just two independent
+/// comparisons that happened to agree.
+///
+/// TODAY (pre-Task-2; `compile()` never segregates, every tree is header
+/// `0x00`): a non-segregated ORACLE tree (the bare-`SigmaPropConstant`
+/// class — Scala's own `withoutSegregation` branch) has no placeholders, so
+/// its FULL tree bytes compare directly against ours. A segregated ORACLE
+/// tree (header `0x10`, the general case) can only be compared after
+/// INLINING its placeholders back to a flat proposition
+/// ([`inline_placeholders`] — Scala's own `Pay2SHAddress.apply(script:
+/// ErgoTree)` substitution step, `ErgoAddress.scala:201-204`) and diffing
+/// PROPOSITION bytes on both sides — this is the "existing proposition-
+/// compare path" the brief refers to.
+///
+/// TASK-2 EXTENSION POINT: once `build_tree` grows the segregation branch
+/// (locked decision 2) and OUR trees gain real placeholders too, the
+/// segregated arm below must STOP inlining either side and instead byte-diff
+/// `ours.tree_bytes` against the oracle's `tree_hex` directly — the actual
+/// writer-child-order check locked decision 3 demands (constants-table slot
+/// order + placeholder emission order must match Scala's `ConstantStore`
+/// append order, not just the flattened proposition shape). Every task from
+/// Task 2 onward that makes emit produce a NEW shape must run this function
+/// (in its post-Task-2 form) against at least one vector whose SEGREGATED
+/// bytes are diffed against `tree_hex`.
+fn full_bytes_match_oracle(
+    ours: &CompileResult,
+    oracle_tree: &ErgoTree,
+    oracle_bytes: &[u8],
+) -> Result<(), String> {
+    if oracle_tree.constant_segregation {
+        let oracle_prop = proposition_bytes(&inline_placeholders(
+            &oracle_tree.body,
+            &oracle_tree.constants,
+        ));
+        let ours_prop = proposition_bytes(&ours.ergo_tree.body);
+        if ours_prop == oracle_prop {
+            Ok(())
+        } else {
+            Err(format!(
+                "inlined proposition bytes diverge (segregated oracle tree; \
+                 pre-D-C1 proposition-compare path): ours={} oracle={}",
+                hex::encode(&ours_prop),
+                hex::encode(&oracle_prop),
+            ))
+        }
+    } else if ours.tree_bytes == oracle_bytes {
+        Ok(())
+    } else {
+        Err(format!(
+            "full tree bytes diverge (non-segregated oracle tree): ours={} oracle={}",
+            hex::encode(&ours.tree_bytes),
+            hex::encode(oracle_bytes),
+        ))
+    }
+}
+
 // =============================================================================
 // The M3 gate (always-on; committed JSON only).
 // =============================================================================
@@ -619,11 +935,14 @@ fn compile_seed_semantic_parity() {
     let mut bare_total = 0usize;
     let mut bare_match = 0usize;
     let mut skipped = 0usize;
-    // Address-parity counters (wave 3, findings H-1/H-2).
+    // Address-parity counters (wave 3, findings H-1/H-2) + the M4 Task-1
+    // SET-based upgrade (recon-gap.md Finding 5) alongside them.
     let mut p2s_match = 0usize;
-    let mut p2s_dc1_mismatch = 0usize;
+    let mut p2s_dc1_mismatch_set: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
     let mut p2sh_match = 0usize;
-    let mut p2sh_dc7_mismatch = 0usize;
+    let mut p2sh_dc7_mismatch_set: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
     let mut fired_bare_exclusions: std::collections::BTreeSet<&str> =
         std::collections::BTreeSet::new();
 
@@ -708,15 +1027,17 @@ fn compile_seed_semantic_parity() {
                          (PK-class regression; ours={})",
                         hex::encode(&ours.tree_bytes),
                     ));
-                } else if ours.tree_bytes == oracle_bytes {
-                    bare_match += 1;
                 } else {
-                    divergences.push(format!(
-                        "{label}: bare-const SigmaProp class must be byte-identical: \
-                         ours={} oracle={}",
-                        hex::encode(&ours.tree_bytes),
-                        hex::encode(&oracle_bytes),
-                    ));
+                    // Wired through the ONE writer-child-order comparison
+                    // path (locked decision 3) — a bare-const oracle tree is
+                    // never segregated, so this reduces to the direct
+                    // tree_bytes comparison it always was.
+                    match full_bytes_match_oracle(&ours, &oracle_tree, &oracle_bytes) {
+                        Ok(()) => bare_match += 1,
+                        Err(e) => divergences.push(format!(
+                            "{label}: bare-const SigmaProp class must be byte-identical: {e}"
+                        )),
+                    }
                 }
             }
         }
@@ -752,7 +1073,7 @@ fn compile_seed_semantic_parity() {
         // P2SH: hard assert wherever the proposition BYTES agree (pins
         // encode_p2sh and the D-C1 claim's true scope — P2SH is
         // segregation-invariant); byte-diverging propositions are the D-C7
-        // family, counted against `EXPECTED_DC7_P2SH_MISMATCHES` below.
+        // family, SET-gated against `DC7_P2SH_MISMATCH_SET` below.
         let ours_prop = proposition_bytes(&ours.ergo_tree.body);
         if ours_prop == oracle_prop && ours.p2sh_address != oracle_p2sh {
             divergences.push(format!(
@@ -763,8 +1084,8 @@ fn compile_seed_semantic_parity() {
         if ours.p2sh_address == oracle_p2sh {
             p2sh_match += 1;
         } else {
-            p2sh_dc7_mismatch += 1;
-            // Triage telemetry for the counted D-C7 class (visible with
+            p2sh_dc7_mismatch_set.insert(mismatch_label(v));
+            // Triage telemetry for the D-C7 class (visible with
             // --nocapture): which vector, and both proposition byte strings
             // so the diverging IR transform is identifiable at a glance.
             eprintln!(
@@ -785,7 +1106,7 @@ fn compile_seed_semantic_parity() {
                 ));
             }
         } else {
-            p2s_dc1_mismatch += 1;
+            p2s_dc1_mismatch_set.insert(mismatch_label(v));
             if ours.tree_bytes == oracle_bytes {
                 divergences.push(format!(
                     "{label}: byte-equal trees must give equal P2S: ours={} oracle={}",
@@ -833,9 +1154,13 @@ fn compile_seed_semantic_parity() {
     println!(
         "byte-parity telemetry: {byte_match}/{accept_total} (bare-const {bare_match}/{bare_total})"
     );
-    println!("p2sh-parity: {p2sh_match}/{accept_total} (D-C7 mismatches: {p2sh_dc7_mismatch})");
     println!(
-        "p2s-parity: {p2s_match}/{accept_total} (D-C1 segregation mismatches: {p2s_dc1_mismatch})"
+        "p2sh-parity: {p2sh_match}/{accept_total} (D-C7 mismatches: {})",
+        p2sh_dc7_mismatch_set.len()
+    );
+    println!(
+        "p2s-parity: {p2s_match}/{accept_total} (D-C1 segregation mismatches: {})",
+        p2s_dc1_mismatch_set.len()
     );
     if !err_pairs.is_empty() {
         println!("Err/Err parity class pairs (ours, oracle-tree) x count [first vector]:");
@@ -871,16 +1196,14 @@ fn compile_seed_semantic_parity() {
              vector — remove or re-derive it"
         );
     }
-    // The D-C7 P2SH-mismatch class is a COUNTED, audited deviation — it moves
-    // only when an M4/M5 lowering (or a regression) changes which propositions
-    // we emit IR-identically to Scala. Never bump this constant to make a red
-    // run green without triaging what moved (in EITHER direction).
-    assert_eq!(
-        p2sh_dc7_mismatch, EXPECTED_DC7_P2SH_MISMATCHES,
-        "P2SH mismatch count moved ({p2sh_dc7_mismatch} vs expected \
-         {EXPECTED_DC7_P2SH_MISMATCHES}) — a lowering landed or a regression \
-         un-matched a vector; triage before updating EXPECTED_DC7_P2SH_MISMATCHES"
-    );
+    // The D-C7 P2SH-mismatch class and the D-C1 P2S-mismatch class are each a
+    // SET-gated, audited deviation (recon-gap.md Finding 5) — they move only
+    // when an M4/M5 lowering (or a regression) changes which propositions/
+    // trees we emit IR-identically to Scala. Never edit either constant to
+    // make a red run green without triaging what moved, in EITHER direction
+    // (a vector entering OR leaving the set).
+    assert_mismatch_set_matches("DC7 P2SH", &p2sh_dc7_mismatch_set, DC7_P2SH_MISMATCH_SET);
+    assert_mismatch_set_matches("D-C1 P2S", &p2s_dc1_mismatch_set, P2S_DC1_MISMATCH_SET);
     // Err/Err composition pin: D-C4 proved a masked shape divergence can hide
     // as Err/Err parity. Any pair class OUTSIDE this audited set is a NEW,
     // un-triaged masking candidate — fail loudly instead of letting it ride
@@ -951,11 +1274,10 @@ fn inline_placeholders_reproduces_our_proposition_for_shape_identical_vectors() 
             network_of(v),
         )
         .expect("our compile accepts");
-        assert_eq!(
-            hex::encode(&oracle_prop),
-            hex::encode(proposition_bytes(&ours.ergo_tree.body)),
-            "{src}: inlined oracle proposition != ours"
-        );
+        // Routed through the ONE writer-child-order comparison path (locked
+        // decision 3) shared with the main gate's bare-const assertion.
+        full_bytes_match_oracle(&ours, &oracle_tree, &oracle_bytes)
+            .unwrap_or_else(|e| panic!("{src}: {e}"));
         // Both roads to the same P2SH: encode_p2sh over the inlined oracle
         // prop, and our compile()'s own address, must equal the committed
         // oracle field.
@@ -1311,7 +1633,15 @@ fn compile_seed_live_recapture() {
              cc, {} compile-ACCEPT kept, {} compile-REJECT excluded (counted \
              here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 \
              GraphBuilding gate): {} vectors ({} compile-ACCEPT, {} \
-             compile-REJECT recorded verbatim)",
+             compile-REJECT recorded verbatim); M4 Task-1 (gap F2, \
+             recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size \
+             == 1)` moved from `ccs` to `cce` — the `ccs` capture bound \
+             `col1` to a per-element ConcreteCollection SValue \
+             (TyperOracle.scala:176), an oracle-harness artifact our \
+             EnvValue cannot represent and the real compile API never \
+             produces; `cce`'s `col1` is a single LongArrayConstant \
+             (TyperOracle.scala:141), API-reachable and now a genuine \
+             same-shape probe",
             seed_accepts + seed_rejects,
             seed_accepts,
             seed_rejects,

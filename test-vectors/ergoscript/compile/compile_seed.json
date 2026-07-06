@@ -1,7 +1,7 @@
 {
   "_captured": "2026-07-07",
   "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); settings pinned per-record",
-  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 171 vectors (30 compile-ACCEPT, 141 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 82 vectors (37 compile-ACCEPT, 45 compile-REJECT recorded verbatim)",
+  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 172 vectors (30 compile-ACCEPT, 142 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 82 vectors (37 compile-ACCEPT, 45 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
   "vectors": [
     {
       "network": "testnet",
@@ -2026,6 +2026,18 @@
       "verb": "cc"
     },
     {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "Exception",
+      "reject_pos": "0:0",
+      "source": "g2",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "ccs"
+    },
+    {
       "corpus_path": "chaincash-basis/basis-tracker-basis.es",
       "network": "testnet",
       "oracle": "ACCEPT",
@@ -2810,13 +2822,13 @@
     {
       "network": "testnet",
       "oracle": "ACCEPT",
-      "p2s_address": "RzfnG8M6ZPygVUUswvexTMvN4eL2QGkHYwcvofVFXaSW51",
-      "p2sh_address": "rNotGBwLSnW8a5qpGMD5SYYFztLCh1HVNAXiKYU",
+      "p2s_address": "sC9gZJghtVziEMDEVkvwjjbjZN1Kjz664tznC98",
+      "p2sh_address": "rqnSzYQxupQomK5q43t2pKFdK9ENjTN9Gp5iWoq",
       "reject_class": null,
       "source": "sigmaProp(col1.slice[Long](0, 1).size == 1)",
-      "tree_hex": "100505020504040004020402d193b1b483020573007301730273037304",
+      "tree_hex": "100411020204040004020402d193b1b47300730173027303",
       "tree_version": 3,
-      "verb": "ccs"
+      "verb": "cce"
     },
     {
       "network": "testnet",

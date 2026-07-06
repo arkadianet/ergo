@@ -258,10 +258,12 @@
 //! - **Gate** (`tests/compile_semantic_parity.rs`): every swept ACCEPT pair
 //!   reduces to the SAME SigmaBoolean under the dummy context (5
 //!   `SEMANTIC_SKIP`, all D-C3); rejects grade the oracle's exception class
-//!   exactly; the address gate pins P2SH per-vector
-//!   (`EXPECTED_DC7_P2SH_MISMATCHES = 44`, counts DOWN as M4/M5 lowerings
-//!   land) and hard-asserts byte-equal-prop ⇒ P2SH-equal. The `PK(...)`
-//!   bare-constant class is byte- and address-EXACT.
+//!   exactly; the address gate pins P2SH per-vector against a committed
+//!   failing-vector SET (`DC7_P2SH_MISMATCH_SET`, M4 Task 1 —
+//!   recon-gap.md Finding 5 upgraded this from a count assert; shrinks as
+//!   M4/M5 lowerings land, graduating vectors out explicitly) and
+//!   hard-asserts byte-equal-prop ⇒ P2SH-equal. The `PK(...)` bare-constant
+//!   class is byte- and address-EXACT.
 //! - **Deviation families:** `D-E1..D-E3` (emit layer) and `D-C1..D-C7`
 //!   (tree/compile layer), ledgered below. D-C7 (no IR optimization pass)
 //!   IS the M4/M5 byte-parity worklist — see the roadmap's "M4 worklist"
@@ -826,11 +828,23 @@
 //! - **bare-ident context/global singletons lowered to `PropertyCall`s**
 //!   (bare `LastBlockUtxoRootHash` → `PropertyCall` over `Context`; bare
 //!   `Global.groupGenerator` → `PropertyCall` over `Global`; the dot-forms
-//!   match);
-//! - **env collections lifted per-element** (env `Coll[Long]` → a
-//!   `ConcreteCollection` of element constants on the Scala side; ours
-//!   lifts one `Coll` constant; env `Coll[Byte]` lifts as a constant on
-//!   BOTH sides).
+//!   match).
+//!
+//! **CORRECTION (M4 Task 1, recon-gap.md Finding 2):** an earlier pass of
+//! this ledger listed "env collections lifted per-element" (env `Coll[Long]`
+//! → a per-element `ConcreteCollection` on the Scala side) as a sixth
+//! instance of this family. It is **not a compiler transform** — it was an
+//! artifact of the M3 test harness's `ccs` (SigmaTyperTest) oracle env,
+//! which binds `col1`/`col2` as a per-element `ConcreteCollection` SValue
+//! (`TyperOracle.scala:176`), while the `cce` (demo) env and the real
+//! `/script` compile API's `liftToConstant` path both always lift
+//! `Array[Long]` to a single `LongArrayConstant` (matching us exactly).
+//! `EnvValue` has no `ConcreteCollection` variant and never will — the
+//! production API cannot produce the shape that "transform" would need to
+//! undo. Vector `sigmaProp(col1.slice[Long](0, 1).size == 1)` was
+//! re-captured under `cce` instead of `ccs` (`compile_probes.txt`,
+//! `compile_seed.json`) and now byte-matches; it never belonged in the D-C7
+//! family.
 //!
 //! Consequence: PROPOSITION bytes — and therefore the P2SH address, which
 //! hashes them — diverge from Scala wherever ANY such rule fires, not just
@@ -839,13 +853,16 @@
 //! every ACCEPT pair to the same SigmaBoolean under the dummy context, and
 //! the Task-11 probe batteries verified sem=EQ on every mismatching probe
 //! (the untransformed control group P2SH-matches exactly, pinning
-//! `encode_p2sh` itself as correct). The class is COUNTED, not open-ended:
-//! the wave-3 address gate (`tests/compile_semantic_parity.rs`) pins the
-//! corpus at `EXPECTED_DC7_P2SH_MISMATCHES` (44 of the 80 swept ACCEPT
-//! vectors after the wave-4 probes landed; the other 36 P2SH-match and are
-//! hard-asserted equal wherever the proposition bytes agree). The M4 segregation transform plus the M5
+//! `encode_p2sh` itself as correct). The class is a SET, not open-ended (M4
+//! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
+//! compensating regression a count assert would miss): the address gate
+//! (`tests/compile_semantic_parity.rs`) pins the corpus at
+//! `DC7_P2SH_MISMATCH_SET` (43 of the 80 swept ACCEPT vectors as of M4
+//! Task 1; the other 37 P2SH-match and are hard-asserted equal wherever the
+//! proposition bytes agree). The M4 segregation transform plus the M5
 //! lowering/ValDef-sharing work close the family; each landed lowering
-//! moves the counted constant DOWN, deliberately.
+//! removes the vectors it graduates from the set, deliberately and
+//! explicitly.
 
 pub mod ast;
 pub mod binder;

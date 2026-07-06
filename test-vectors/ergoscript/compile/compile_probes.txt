@@ -84,7 +84,16 @@ cc	3	sigmaProp(SELF.getReg[Long](4).getOrElse(7L) == 7L)
 cc	3	sigmaProp(SELF.getReg[Int](HEIGHT).isDefined)
 # ── wave-2 fix B: explicit-type-arg custom irBuilders lower (slice & co.) ──
 ccs	3	sigmaProp(arr1.slice[Byte](0, 1).size == 1)
-ccs	3	sigmaProp(col1.slice[Long](0, 1).size == 1)
+# M4 gap F2 (recon-gap.md Finding 2): this source was captured under `ccs`
+# (SigmaTyperTest env), whose `col1` binds a per-element `ConcreteCollection`
+# SValue (TyperOracle.scala:176) — an oracle-harness artifact our `EnvValue`
+# cannot represent and the real `/script` compile API never produces (the
+# actual liftToConstant path always lifts Array[Long] to a single
+# LongArrayConstant). Re-captured under `cce` instead, whose `col1` binds
+# exactly that single `LongArrayConstant` (TyperOracle.scala:141,
+# API-reachable) — this is now a genuine same-shape compile probe, not an
+# env-representation artifact. See lib.rs D-C7 (COLL-LIFT correction).
+cce	3	sigmaProp(col1.slice[Long](0, 1).size == 1)
 ccs	3	sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)
 ccs	3	sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))
 ccs	3	sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)
