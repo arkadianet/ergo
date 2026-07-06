@@ -110,20 +110,22 @@ pub enum ConstPayload {
     /// `ergo_crypto::group_element::decompress_to_affine_hex` to reproduce
     /// the Scala `Ecp.toString` affine `(x_hex,y_hex,1)` form.
     GroupElement([u8; 33]),
-    /// Opaque SigmaProp payload (M3 scope for full parity).
+    /// Opaque SigmaProp payload — an env-injected label with no curve bytes;
+    /// not emittable (lib.rs D-E3). Real keys use [`ConstPayload::ProveDlog`].
     SigmaProp(String),
     /// `SigmaPropConstant(ProveDlog(pubkey))` produced by the binder's PK rule
     /// (SigmaBinder.scala:105-106, SigmaPredef.scala:159-166).
     /// Carries the 33-byte SEC1-compressed secp256k1 public key returned by
     /// `ergo_ser::address::decode_p2pk_address`.
     ///
-    /// Rendering: M2 uses a hex-string placeholder; M3 must replace with the
-    /// oracle-confirmed decompressed Ecp form (golden_seed.txt §10):
-    /// `(CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1))))`.
-    /// Note: NO CGroupElement wrapper inside ProveDlog (oracle-verified).
+    /// Rendering (M3, D-T4): the printer decompresses on demand to the
+    /// oracle-confirmed Ecp form (golden_seed.txt §10/§23):
+    /// `(CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1))))` with UNPADDED
+    /// coordinate hex. Note: NO CGroupElement wrapper inside ProveDlog
+    /// (oracle-verified).
     ///
-    /// deviation: on-curve validation deferred to M3 (see lib.rs deviation
-    /// ledger).  `decode_p2pk_address` length-checks only.
+    /// On-curve validation happens at construction (M3, D-T5):
+    /// `binder::bind_pk` / `env::lift` reject off-curve and identity points.
     ProveDlog([u8; 33]),
 }
 

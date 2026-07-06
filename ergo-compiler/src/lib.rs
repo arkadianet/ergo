@@ -228,8 +228,9 @@
 //! - **`deserialize` deferred, re-scoped (D-T2):** `predef_ir_builder` returns
 //!   `None` for `deserialize` unconditionally. Scala constant-folds
 //!   `deserialize(lit)` at typecheck time; closing this requires an
-//!   opcode-IR→`TypedExpr` reverse mapping, deferred past emit (M3 plan Task 12
-//!   decision).
+//!   opcode-IR→`TypedExpr` reverse mapping — scheduled at M4 alongside the
+//!   lowering catalog, which needs the same mapping (M3 close-out decision;
+//!   the adversarial pass surfaced no real-contract need).
 //! - **unsignedBigInt canonical constant + bigInt canonicalization — DONE
 //!   (M3 Task-6, D-T3).** `ConstPayload::UnsignedBigInt(String)` added;
 //!   `bigInt`/`unsignedBigInt` canonicalize leading zeros and enforce the
@@ -240,6 +241,30 @@
 //!   `ORACLE_NETWORK=testnet`. When adding golden-seed records for `PK(...)`, run the
 //!   oracle with the matching network env var and record the network in the seed comment.
 //!   M3 byte-vector work must account for the network prefix embedded in P2PK addresses.
+//!
+//! # M3: Emit + semantic parity — COMPLETE
+//!
+//! The full pipeline is live: **parse → bind → typecheck → emit** (`emit.rs`,
+//! typed AST → `ergo_ser` opcode IR) → **assemble** (`tree.rs`, v0 `0x00`
+//! header, no segregation — D-C1) → **bytes → P2S/P2SH address**. Entry
+//! point: [`compile`] → [`CompileResult`].
+//!
+//! - **Compile oracle:** `scripts/jvm_typer_oracle` gained the `cc`/`cce`/
+//!   `ccs` compile verbs (source → ErgoTree hex + P2S/P2SH, 6.0.2); 271
+//!   committed vectors in
+//!   `test-vectors/ergoscript/compile/compile_seed.json`, each carrying the
+//!   ORACLE's tree hex (ready byte targets for M4/M5).
+//! - **Gate** (`tests/compile_semantic_parity.rs`): every swept ACCEPT pair
+//!   reduces to the SAME SigmaBoolean under the dummy context (5
+//!   `SEMANTIC_SKIP`, all D-C3); rejects grade the oracle's exception class
+//!   exactly; the address gate pins P2SH per-vector
+//!   (`EXPECTED_DC7_P2SH_MISMATCHES = 44`, counts DOWN as M4/M5 lowerings
+//!   land) and hard-asserts byte-equal-prop ⇒ P2SH-equal. The `PK(...)`
+//!   bare-constant class is byte- and address-EXACT.
+//! - **Deviation families:** `D-E1..D-E3` (emit layer) and `D-C1..D-C7`
+//!   (tree/compile layer), ledgered below. D-C7 (no IR optimization pass)
+//!   IS the M4/M5 byte-parity worklist — see the roadmap's "M4 worklist"
+//!   section.
 //!
 //! # Known M2 deviations (typer layer)
 //!
@@ -290,8 +315,9 @@
 //! (accept-invalid deviation, bounded to malformed literals no real contract
 //! uses). Unlike `fromBase58`/`fromBase64`, closing this requires an
 //! opcode-IR→`TypedExpr` reverse mapping (`ValueSerializer` decodes to
-//! sigma-state's own AST representation, not ours) — deferred past emit (see
-//! M3 plan Task 12 decision).
+//! sigma-state's own AST representation, not ours) — scheduled at M4
+//! alongside the lowering catalog, which needs the same mapping (M3
+//! close-out decision; the adversarial pass surfaced no real-contract need).
 //!
 //! ### D-T3 — unsignedBigInt canonical constant + bigInt literal canonicalization — CLOSED (M3 Task-6)
 //!
@@ -625,8 +651,16 @@
 //! 3. **Function-typed lambda parameters** (same walk; `MatchError`): any
 //!    lambda with an `SFunc`-typed param rejects unless it is the rhs of an
 //!    UNUSED val (oracle: pruned → ACCEPT). Residual (reject-side bounded,
-//!    un-probed): an SFunc-param lambda NESTED inside an unused val's rhs is
-//!    rejected here but might be pruned by Scala.
+//!    probe-CONFIRMED reject-valid — re-verify finding NF-2, 2026-07-07):
+//!    an SFunc-param lambda NESTED inside an unused val's rhs BODY IS
+//!    pruned by Scala (oracle ACCEPTs `{ val unused = {(x: Int) =>
+//!    {(f: Int => Int) => f(x)}}; sigmaProp(true) }` — dead-code
+//!    elimination drops the whole unused val) while our ONE-HOP exemption
+//!    rejects with `MatchError`. Same unused-val-pruning transform family
+//!    as D-C7; bounded to deliberately-unused higher-order lambdas no real
+//!    contract contains; closes when the M4/M5 val-pruning lowering lands.
+//!    The zero-arg-lambda rule (class 2) must stay UN-exempted even in an
+//!    unused rhs — oracle-pinned REJECT.
 //! 4. **Postfix residual `size`** (`emit.rs` `emit_method_call`;
 //!    `GraphBuildingException`): `MethodCall %SCollection.size` (wire pair
 //!    (12,1), the space-form `arr1 size`) has no GraphBuilding arm and no
@@ -743,11 +777,21 @@
 //!    `getVar[UnsignedBigInt](1)`: the oracle ACCEPTs `1000d1e6e30109`,
 //!    bytes NEITHER side's version-gated reader re-parses (its tree_hex
 //!    would not even parse for the semantic gate), so the ACCEPT verdict is
-//!    itself poisoned — both products strand funds; (b) **missing-fold
-//!    residual shapes** — a val-bound `Coll[UnsignedBigInt]()` under
-//!    `.size`, where Scala's inline+fold keeps ITS wire clean (usable) and
-//!    ours would not be. Neither family is committable as a vector; both are
-//!    pinned in `tree.rs`
+//!    itself poisoned — both products strand funds; (b) **the UBI-fold
+//!    family (extended by re-verify finding NF-1, 2026-07-07)** —
+//!    reject-side divergent not only on the val-bound
+//!    `Coll[UnsignedBigInt]()`-under-`.size` self-check shape but on EVERY
+//!    UBI-constant expression whose fold Scala performs and we don't:
+//!    equality (`unsignedBigInt("1") == unsignedBigInt("1")`), tuple-select
+//!    (`(unsignedBigInt("5"), 1)._2 == 1`), and val-bound forms all fold to
+//!    `10010101d17300` on the oracle (usable — the UBI data never reaches
+//!    its wire), while our v0 UBI-data gate (`CompileError::Serializer`,
+//!    "UnsignedBigInt constant data") fires on the unfolded AST. Bounded to
+//!    UBI-under-v0 sources no real contract uses; the NON-foldable shapes
+//!    (`unsignedBigInt("5") > unsignedBigInt("3")`) still REJECT in parity,
+//!    so the data gate must NOT be weakened — the family closes when M4/M5
+//!    constant folding lands. Neither (a) nor (b) is committable as a
+//!    vector; the self-check flavor is pinned in `tree.rs`
 //!    (`compile_self_unreadable_emission_rejects_serializer_class`).
 //!
 //! ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (Task-11 adversarial wave 3)

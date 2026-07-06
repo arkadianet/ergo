@@ -71,7 +71,9 @@ due to deeply nested BigInt polynomial expressions causing CSE stack overflow.
 2. **Intended Consumers**: These sources are intended for:
    - M3 (Typer) — corpus for type-checking validation and comparison with Scala
    - M4+ (CSE/Optimizer) — inputs to common subexpression elimination and code quality testing
-   - **Not yet wired into any test suite** — M3 will integrate them.
+   - **Not yet wired into any test suite** (still true at M3 close-out, 2026-07-07 —
+     M3 used the 79-contract corpus + probe vectors instead). Integrate at M4/M5 as
+     byte-parity targets once re-derived vs 6.0.2.
 
 3. **License**: All contracts are CC0-licensed or contributed by their authors under
    compatible licenses (confirmed via cannonQ fork's MANIFEST). No attribution required.
