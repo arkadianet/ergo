@@ -841,8 +841,9 @@ impl crate::backend::HeaderSectionStore for DigestStateStore {
         // identical here — see `BlockProcessError::DigestApply`), so there is
         // no durable branch flag to persist. The executor's validation-verdict
         // classifier does not route digest apply failures here; this satisfies
-        // the shared trait for the non-incident path.
-        self.session_invalids.insert(header_id);
+        // the shared trait for the non-incident path. Delegate the insert to
+        // `mark_session_invalid` so it stays the single source of truth.
+        self.mark_session_invalid(header_id);
         Ok(vec![header_id])
     }
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {

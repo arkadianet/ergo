@@ -1486,6 +1486,14 @@ impl SyncExecutor {
                                     .sync_state_mut()
                                     .retain_pending_blocks(|b| !invalid_ids.contains(&b.header_id));
                                 let cs = store.chain_state_meta();
+                                // Drop stale header_index entries above the
+                                // re-anchored tip. Otherwise a subsequent
+                                // recover_coordinator (after reset_recovery_done)
+                                // could read an invalidated id at a height that
+                                // the rebuilt valid chain hasn't overwritten yet
+                                // and re-seed pending blocks from the dead branch.
+                                self.header_index
+                                    .retain(|&h, _| h <= cs.best_header_height);
                                 warn!(
                                     height = next,
                                     header_id = %hex::encode(header_id),

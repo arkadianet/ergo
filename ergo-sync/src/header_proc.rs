@@ -243,7 +243,12 @@ fn process_header_inner(
     // `isSemanticallyValid == Invalid`). Without it a peer could re-feed the
     // dead branch one header at a time and re-grow best_header above the
     // re-anchor, re-wedging the apply loop.
-    if store.is_invalid(&parent_id)? {
+    //
+    // DURABLE-only: a session-scoped mark is a transient/IO verdict (the parent
+    // may still apply), so it must not permanently block the whole descendant
+    // subtree for the session. Scala's parent check tests the durable
+    // `isSemanticallyValid == Invalid` row.
+    if store.is_durably_invalid(&parent_id)? {
         return Err(HeaderProcessError::Invalid { header_id });
     }
 

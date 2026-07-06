@@ -40,6 +40,16 @@ fn extend(store: &mut StateStore, id: [u8; 32], parent: [u8; 32], height: u32) {
         .unwrap();
 }
 
+/// Store `id` at `height` as a NON-best orphan (competing fork or a header
+/// stored above the current best tip). Indexed by height so
+/// `header_ids_at_height_all` returns it, but does not advance best_header.
+fn extend_orphan(store: &mut StateStore, id: [u8; 32], parent: [u8; 32], height: u32) {
+    let m = meta(parent, height);
+    store
+        .store_validated_header(&id, &[0u8; 8], &m, None)
+        .unwrap();
+}
+
 /// Build a linear best-header chain g(1) -> a1(2) -> a2(3) -> a3(4) -> a4(5).
 /// Returns the five ids in height order.
 fn linear_chain(store: &mut StateStore) -> [[u8; 32]; 5] {
@@ -161,6 +171,65 @@ fn valid_competing_branch_from_fork_point_extends_normally() {
     assert!(!store.is_invalid(&b3).unwrap());
     // The abandoned invalid branch stays invalid.
     assert!(store.is_invalid(&a2).unwrap());
+}
+
+// ----- forks -----
+
+/// A real fork at the invalidated height plus an orphan descendant stored
+/// ABOVE the best tip. `invalidate_validation_branch` must flag only the
+/// subtree rooted at the invalidated header — including the above-tip orphan
+/// (finding: the descendant walk must not stop at best_header_height) — while
+/// the competing branch that forks BEFORE the invalidated header stays valid.
+#[test]
+fn invalidate_flags_only_invalidated_subtree_across_forks_and_above_tip() {
+    let dir = TempDir::new().unwrap();
+    let mut store = StateStore::open(&dir.path().join("db")).unwrap();
+    // Best chain g(1) -> a1(2) -> a2(3) -> a3(4) -> a4(5).
+    let [_g, a1, a2, a3, a4] = linear_chain(&mut store);
+
+    // Competing branch forking at a1 (BEFORE a2): b2(3) -> b3(4), as orphans.
+    let b2 = [0xB2; 32];
+    let b3 = [0xB3; 32];
+    extend_orphan(&mut store, b2, a1, 3);
+    extend_orphan(&mut store, b3, b2, 4);
+
+    // An orphan descendant of the a-branch stored ABOVE the best tip (height 6,
+    // best_header_height is 5). The old `while h <= top` walk would miss this.
+    let a5 = [0xA5; 32];
+    extend_orphan(&mut store, a5, a4, 6);
+
+    let invalidated: std::collections::HashSet<[u8; 32]> = store
+        .invalidate_validation_branch(a2)
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    // Only the a2 subtree — including the above-tip orphan a5 — is flagged.
+    assert_eq!(
+        invalidated,
+        [a2, a3, a4, a5].into_iter().collect(),
+        "must flag exactly the invalidated header's forward subtree, incl. above-tip orphan"
+    );
+    for id in [a2, a3, a4, a5] {
+        assert!(
+            store.is_invalid(&id).unwrap(),
+            "{:02x?} should be invalid",
+            &id[..2]
+        );
+    }
+    // The pre-fork ancestors and the competing branch stay valid.
+    for id in [a1, b2, b3] {
+        assert!(
+            !store.is_invalid(&id).unwrap(),
+            "{:02x?} must stay valid",
+            &id[..2]
+        );
+    }
+    // best_header re-anchors to a1 (height 2) — the highest surviving canonical
+    // header below the invalidated a2.
+    let cs = store.chain_state();
+    assert_eq!(cs.best_header_height, 2);
+    assert_eq!(cs.best_header_id, a1);
 }
 
 // ----- error paths -----

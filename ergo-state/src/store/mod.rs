@@ -3219,6 +3219,22 @@ impl StateStore {
         Ok(false)
     }
 
+    /// Durable-only invalidity: persistent PoW (`== 2`) or full-block
+    /// validation (`== 3`) flags, **excluding** the session-scoped set.
+    ///
+    /// The hereditary parent-invalid guard in header processing must use this,
+    /// not [`Self::is_invalid`]: a session mark is a transient/IO verdict (a
+    /// block that may yet apply), so treating it as a permanent parent flag
+    /// would let one transient failure block the entire descendant subtree for
+    /// the session. Scala's parent check tests `isSemanticallyValid == Invalid`
+    /// — the durable `validityKey -> 0` row — which corresponds to `2 | 3` here.
+    pub fn is_durably_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+        if let Some(meta) = self.get_header_meta(header_id)? {
+            return Ok(meta.pow_validity == 2 || meta.pow_validity == 3);
+        }
+        Ok(false)
+    }
+
     /// Persistently invalidate a header that failed **full-block validation**
     /// and every stored descendant header, then re-anchor the best-header
     /// pointer down to the highest surviving header. Returns the full set of
@@ -3266,7 +3282,14 @@ impl StateStore {
         let mut invalidated: Vec<[u8; 32]> = vec![header_id];
         let top = self.chain_state.best_header_height;
         let mut h = start_meta.height + 1;
-        while h <= top {
+        // Walk until a height yields no further descendants — NOT bounded by
+        // `best_header_height`. A stored competing branch can extend above the
+        // current best tip (more blocks, less work), and every stored
+        // descendant of the failing header must be flagged or it could re-grow
+        // best_header on restart. The `added_any` gap check is the terminator;
+        // `header_ids_at_height_all` returns empty once heights run out, so the
+        // loop always ends. `top` is retained only for `loop_best_header_down`.
+        loop {
             let mut added_any = false;
             for id in self.header_ids_at_height_all(h)? {
                 if invalid_set.contains(&id) {
@@ -3280,9 +3303,6 @@ impl StateStore {
                     }
                 }
             }
-            // A height with no descendant of the invalid set terminates the
-            // walk: the best-header chain is contiguous, so a gap means no
-            // further headers descend from the failing branch.
             if !added_any {
                 break;
             }
@@ -3298,9 +3318,22 @@ impl StateStore {
         {
             let mut meta_table = write_txn.open_table(HEADER_META)?;
             for id in &invalidated {
-                // Re-read inside the txn is unnecessary; only pow_validity
-                // changes and the rest of the row is immutable once stored.
-                if let Some(mut meta) = self.get_header_meta(id)? {
+                // Read the row from the already-open write-txn table rather
+                // than `get_header_meta` (which opens a fresh read txn per id —
+                // an N+1 pattern while this write txn is live). Only
+                // pow_validity changes; the rest of the row is immutable once
+                // stored. Copy the value out and drop the borrow before insert.
+                let existing = match meta_table.get(id.as_slice())? {
+                    Some(guard) => Some(HeaderMeta::deserialize(guard.value()).map_err(|e| {
+                        StateError::DbCorruption {
+                            table: "header_meta",
+                            key: hex::encode(id),
+                            reason: e.to_string(),
+                        }
+                    })?),
+                    None => None,
+                };
+                if let Some(mut meta) = existing {
                     meta.pow_validity = 3;
                     meta_table.insert(id.as_slice(), meta.serialize().as_slice())?;
                 }

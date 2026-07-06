@@ -884,15 +884,48 @@ fn is_validation_verdict_true_for_consensus_rule_failures() {
 }
 
 #[test]
+fn is_validation_verdict_true_for_header_meta_and_epoch_extension() {
+    // The other two documented verdict branches: a header-rule failure and an
+    // extension/epoch-rule failure are both definitive consensus rejects.
+    let header_meta = BlockProcessError::HeaderMeta(
+        ergo_validation::header::HeaderValidationError::TimestampNotMonotonic {
+            parent_ts: 100,
+            child_ts: 99,
+        },
+    );
+    assert!(
+        is_validation_verdict(&header_meta),
+        "header-rule failure is a verdict"
+    );
+
+    let epoch_ext = BlockProcessError::EpochExtension(
+        ergo_validation::voting::extension_validation::ExtensionValidationError::BlockVersion {
+            computed: 3,
+            header: 2,
+        },
+    );
+    assert!(
+        is_validation_verdict(&epoch_ext),
+        "extension/epoch-rule failure is a verdict"
+    );
+}
+
+#[test]
 fn is_validation_verdict_false_for_io_and_consistency_failures() {
     // A stored section that won't parse could be disk corruption, not a bad
-    // block; a state-apply error is IO/DB; missing headers are data gaps.
+    // block; a state-apply error is IO/DB; missing headers are data gaps;
+    // DigestApply is session-scoped by contract (a stale local root and a bad
+    // block are observationally identical in digest mode).
     let cases = [
         BlockProcessError::Deserialize("truncated section".to_string()),
         BlockProcessError::HeaderNotFound { id: id(0xAA) },
         BlockProcessError::ParentNotFound { id: id(0xBB) },
         BlockProcessError::State(ergo_state::store::StateError::InvalidPrecondition {
             what: "io-ish",
+        }),
+        BlockProcessError::DigestApply(ergo_state::DigestApplyError::AdProofsRootMismatch {
+            computed: "aa".to_string(),
+            expected: "bb".to_string(),
         }),
     ];
     for e in cases {
