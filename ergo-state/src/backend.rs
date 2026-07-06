@@ -84,6 +84,16 @@ pub trait HeaderSectionStore {
     fn begin_header_batch(&mut self);
     fn flush_header_batch(&mut self) -> Result<(), StateError>;
     fn mark_session_invalid(&mut self, header_id: [u8; 32]);
+    /// Durably invalidate a full-block-validation-rejected header and all its
+    /// stored descendants, re-anchoring best_header to the surviving tip.
+    /// Returns the invalidated ids (inclusive). Scala
+    /// `ErgoHistory.reportModifierIsInvalid`. Only the UTXO backend persists;
+    /// the digest backend is session-scoped (its apply failures are
+    /// stale-root-ambiguous by contract).
+    fn invalidate_validation_branch(
+        &mut self,
+        header_id: [u8; 32],
+    ) -> Result<Vec<[u8; 32]>, StateError>;
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError>;
     fn reader_handle(&self) -> crate::reader::ChainStoreReader;
     fn shutdown_cleanly(&mut self) -> Result<(), StateError>;
@@ -200,6 +210,12 @@ impl HeaderSectionStore for StateStore {
     }
     fn mark_session_invalid(&mut self, header_id: [u8; 32]) {
         StateStore::mark_session_invalid(self, header_id)
+    }
+    fn invalidate_validation_branch(
+        &mut self,
+        header_id: [u8; 32],
+    ) -> Result<Vec<[u8; 32]>, StateError> {
+        StateStore::invalidate_validation_branch(self, header_id)
     }
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
         StateStore::is_invalid(self, header_id)
@@ -440,6 +456,15 @@ impl HeaderSectionStore for StateBackendKind {
         match self {
             StateBackendKind::Utxo(s) => s.mark_session_invalid(header_id),
             StateBackendKind::Digest(d) => d.mark_session_invalid(header_id),
+        }
+    }
+    fn invalidate_validation_branch(
+        &mut self,
+        header_id: [u8; 32],
+    ) -> Result<Vec<[u8; 32]>, StateError> {
+        match self {
+            StateBackendKind::Utxo(s) => s.invalidate_validation_branch(header_id),
+            StateBackendKind::Digest(d) => d.invalidate_validation_branch(header_id),
         }
     }
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {

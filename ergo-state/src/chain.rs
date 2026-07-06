@@ -14,10 +14,20 @@ use thiserror::Error;
 /// Persistent metadata for a validated header.
 ///
 /// Stored in the `header_meta` table keyed by header_id\[32\].
-/// `pow_validity` is the ONLY persisted validity flag. Per spec-freeze
-/// invariant #4, persistent invalidity is reserved exclusively for
-/// cryptographically definitive failures (invalid PoW). All other
-/// failures use session-scoped `ChainState::session_invalids`.
+/// `pow_validity` is the persisted validity flag. Persistent invalidity
+/// (`2` / `3`) is reserved for verdicts that are definitive regardless of
+/// our own state: a cryptographically-invalid PoW (`2`), or a full-block
+/// validation-rule rejection (`3`) — a block the Scala reference node also
+/// rejects, so re-applying it after restart can never succeed. All other,
+/// possibly-transient failures (IO, missing sections, digest stale-root
+/// ambiguity, or a suspected bug of ours) stay session-scoped in
+/// `ChainState::session_invalids` and are cleared on restart.
+///
+/// Scala parity: `ErgoHistory.reportModifierIsInvalid` writes
+/// `validityKey(id) -> 0` for a state-apply failure and every descendant
+/// header, which survives restart (`historyStorage`). Value `3` is that
+/// durable "semantically invalid" flag for the validation-verdict case;
+/// `2` remains the PoW-only flag it always was.
 #[derive(Clone, Debug)]
 pub struct HeaderMeta {
     /// 32-byte id of the parent header.
@@ -26,7 +36,8 @@ pub struct HeaderMeta {
     pub height: u32,
     /// Cumulative difficulty as big-endian bytes (variable length).
     pub cumulative_score: Vec<u8>,
-    /// 0 = unknown, 1 = valid, 2 = invalid_permanent (PoW only).
+    /// 0 = unknown, 1 = valid, 2 = invalid_permanent (PoW),
+    /// 3 = invalid_permanent (full-block validation rule).
     pub pow_validity: u8,
     /// Block timestamp, milliseconds since the Unix epoch.
     pub timestamp: u64,

@@ -235,6 +235,23 @@ fn process_header_inner(
     let parent_id = *header.parent_id.as_bytes();
     let height = header.height;
 
+    // Refuse to extend a branch already reported invalid. `finalize_header`
+    // rejects a header whose own id is flagged, but a NEVER-SEEN header
+    // building on an invalidated parent has no flag of its own yet — the
+    // parent check is what makes invalidity hereditary and permanent (Scala
+    // `HeadersProcessor.validate` fails a header whose parent
+    // `isSemanticallyValid == Invalid`). Without it a peer could re-feed the
+    // dead branch one header at a time and re-grow best_header above the
+    // re-anchor, re-wedging the apply loop.
+    //
+    // DURABLE-only: a session-scoped mark is a transient/IO verdict (the parent
+    // may still apply), so it must not permanently block the whole descendant
+    // subtree for the session. Scala's parent check tests the durable
+    // `isSemanticallyValid == Invalid` row.
+    if store.is_durably_invalid(&parent_id)? {
+        return Err(HeaderProcessError::Invalid { header_id });
+    }
+
     // Look up parent
     let parent_bytes = store
         .get_header(&parent_id)?

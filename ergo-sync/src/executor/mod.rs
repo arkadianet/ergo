@@ -49,6 +49,33 @@ fn utxo_header_store_mut(store: &mut ergo_state::StateBackendKind) -> &mut State
         .expect("header pipeline is UTXO-typed; Mode 5 digest header sync is gated off")
 }
 
+/// Classify a full-block apply failure as a definitive VALIDATION verdict —
+/// a block the Scala reference node also rejects and therefore can never
+/// apply — versus a transient/IO/consistency failure that must NOT poison
+/// the branch (it might be our bug, a stale local root, or missing data).
+///
+/// Only the three consensus-rule verdicts qualify. `Deserialize`,
+/// `HeaderNotFound`, `ParentNotFound`, and `State` are data/IO/consistency
+/// paths (a stored section that won't parse could be disk corruption, not a
+/// bad block); `DigestApply` is session-scoped by its own contract. When in
+/// doubt we do NOT invalidate — the conservative direction, since a wrongly
+/// persisted invalidity would permanently orphan a valid chain, whereas a
+/// missed one only leaves the (correct) session mark.
+///
+/// Scala mirror: `ErgoNodeViewHolder.applyState` reports invalid on ANY
+/// `applyModifier` `Failure`; the Rust node is deliberately stricter about
+/// which failures earn a *durable* flag, but the liveness effect
+/// (re-anchor + refuse re-apply) is the same for the consensus-verdict case
+/// that motivated it.
+fn is_validation_verdict(e: &BlockProcessError) -> bool {
+    matches!(
+        e,
+        BlockProcessError::Validation(_)
+            | BlockProcessError::HeaderMeta(_)
+            | BlockProcessError::EpochExtension(_)
+    )
+}
+
 /// Errors returned during startup while hydrating executor state from the
 /// persisted store. A variant here means the node must abort startup — the
 /// operator needs to see the specific cause.
@@ -1337,6 +1364,23 @@ impl SyncExecutor {
                 }
             };
 
+            // Refuse to (re-)apply a block already reported invalid. After a
+            // validation-verdict rejection the failing header (and every
+            // descendant) is durably flagged and best_header re-anchored below
+            // it, but its id may still sit in the stale canonical height index
+            // above the re-anchor. Without this guard the loop would re-select
+            // and re-reject the same block every tick — and re-wedge after a
+            // restart. Scala refuses re-application via the `validityKey -> 0`
+            // row (`ErgoHistoryReader.isSemanticallyValid`).
+            match HeaderSectionStore::is_invalid(store, &header_id) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(height = next, error = %e, "invalidity lookup failed");
+                    break;
+                }
+            }
+
             let parent_id = match store.get_header_meta(&header_id) {
                 Ok(Some(meta)) => meta.parent_id,
                 Ok(None) => break,
@@ -1424,7 +1468,60 @@ impl SyncExecutor {
                 Err(e) => {
                     warn!(height = next, error = %e, "block apply failed");
                     self.record_block_apply_error(header_id, next, e.to_string());
-                    store.mark_session_invalid(header_id);
+                    if is_validation_verdict(&e) {
+                        // Definitive validation-rule rejection: the Scala
+                        // reference node also rejects this block, so it can
+                        // never apply. Durably invalidate it and every stored
+                        // descendant and re-anchor best_header to the surviving
+                        // tip (Scala `reportModifierIsInvalid`). This reopens
+                        // the mining gate (`headers == full`) and stops the
+                        // apply loop wedging forever below the dead branch.
+                        match store.invalidate_validation_branch(header_id) {
+                            Ok(invalidated) => {
+                                let invalid_ids: std::collections::HashSet<[u8; 32]> =
+                                    invalidated.iter().copied().collect();
+                                // Evict the dead branch from the download queue
+                                // so the coordinator stops targeting it.
+                                coordinator
+                                    .sync_state_mut()
+                                    .retain_pending_blocks(|b| !invalid_ids.contains(&b.header_id));
+                                let cs = store.chain_state_meta();
+                                // Drop stale header_index entries above the
+                                // re-anchored tip. Otherwise a subsequent
+                                // recover_coordinator (after reset_recovery_done)
+                                // could read an invalidated id at a height that
+                                // the rebuilt valid chain hasn't overwritten yet
+                                // and re-seed pending blocks from the dead branch.
+                                self.header_index
+                                    .retain(|&h, _| h <= cs.best_header_height);
+                                warn!(
+                                    height = next,
+                                    header_id = %hex::encode(header_id),
+                                    invalidated = invalidated.len(),
+                                    reanchored_best_header_height = cs.best_header_height,
+                                    "invalidated block and descendants; best_header re-anchored",
+                                );
+                            }
+                            Err(inv_err) => {
+                                // Persisting the invalidation itself failed
+                                // (IO). Fall back to a session mark so we at
+                                // least stop re-applying this tick; the durable
+                                // walk retries next drain.
+                                warn!(
+                                    height = next,
+                                    error = %inv_err,
+                                    "branch invalidation failed; session-marking",
+                                );
+                                store.mark_session_invalid(header_id);
+                            }
+                        }
+                    } else {
+                        // Transient / IO / digest-ambiguous failure: never
+                        // poison the branch persistently — it might be our bug
+                        // or a stale local root. Session-scoped only, cleared
+                        // on restart.
+                        store.mark_session_invalid(header_id);
+                    }
                     break;
                 }
             }

@@ -235,6 +235,38 @@ fn process_header_with_real_mainnet_header() {
 }
 
 #[test]
+fn process_header_refuses_child_of_invalidated_parent() {
+    // Regression for the branch-invalidation liveness fix: once a header is
+    // durably invalidated (full-block validation reject), NO descendant may
+    // extend it. process_header_inner rejects a header whose parent is
+    // invalid, so a peer cannot re-grow the dead branch one header at a time
+    // and re-wedge the apply loop. Scala parity: HeadersProcessor fails a
+    // header whose parent isSemanticallyValid == Invalid.
+    use ergo_sync::header_proc::process_header;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+
+    // Durably invalidate header 1 (the parent of header 2).
+    let h1_id = get_header_id(&headers, 1);
+    let mut h1_meta = store.get_header_meta(&h1_id).unwrap().unwrap();
+    h1_meta.pow_validity = 3; // full-block validation invalid
+    store.store_header_meta(&h1_id, &h1_meta).unwrap();
+    assert!(store.is_invalid(&h1_id).unwrap());
+
+    let h2_bytes = get_header_bytes(&headers, 2);
+    let err = process_header(&mut store, &h2_bytes)
+        .expect_err("child of an invalidated parent must be refused");
+    assert!(
+        matches!(err, HeaderProcessError::Invalid { .. }),
+        "expected Invalid, got {err:?}"
+    );
+}
+
+#[test]
 fn process_header_chain_2_through_5() {
     // Process headers 2-5 sequentially, verifying cumulative score grows.
     use ergo_sync::header_proc::process_header;
