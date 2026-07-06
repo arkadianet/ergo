@@ -416,7 +416,29 @@ impl Scope {
             // ── collection-boolean gates: ONE arg (the collection expr) ───────
             T::AND { input, .. } => node(0x96, self.one(input)?),
             T::OR { input, .. } => node(0x97, self.one(input)?),
-            T::XorOf { input, .. } => node(0xFF, self.one(input)?),
+            T::XorOf { input, .. } => {
+                // Verdict parity with the FULL Scala compiler (Task-10 gate):
+                // the reference typer accepts `xorOf(Coll(sigmaProp(..)))` as
+                // `XorOf(ConcreteCollection[SigmaProp])` — the Bool↔SigmaProp
+                // unifier admits the elements WITHOUT the per-element
+                // `SigmaPropIsProven` coercion that `allOf`/`anyOf` get
+                // (golden_seed §14) — but GraphBuilding then force-casts the
+                // input to `Coll[Boolean]` (`asRep[Coll[Boolean]]` /
+                // `sigmaDslBuilder.xorOf`, GraphBuilding.scala:855-862) and
+                // dies with an `AssertionError`, so `compiler.compile` REJECTS
+                // every such source (oracle: `cc xorOf(Coll(sigmaProp(true)))`
+                // → `REJECT 0:0 AssertionError`, compile_seed.json). Mirror
+                // the verdict: a SigmaProp-element XorOf never reaches the
+                // wire. (0xFF's wire/eval semantics also require booleans.)
+                if matches!(node_tpe(input), SType::SColl(el) if **el == SType::SSigmaProp) {
+                    return Err(EmitError::UnsupportedNode(
+                        "XorOf over Coll[SigmaProp] (Scala GraphBuilding rejects: \
+                         xorOf input must be Coll[Boolean], GraphBuilding.scala:855-862)"
+                            .into(),
+                    ));
+                }
+                node(0xFF, self.one(input)?)
+            }
 
             // ── sigma combinators ─────────────────────────────────────────────
             T::AtLeast { bound, input, .. } => node(0x98, self.two(bound, input)?),

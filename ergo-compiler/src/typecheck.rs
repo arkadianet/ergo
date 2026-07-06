@@ -42,7 +42,7 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 /// - [`CompileError::Type`] — `TyperException` family (incl. `MethodNotFound`,
 ///   `NonApplicableMethod`, …); `pos()` is always `0` (E12).
 ///
-/// The M3 `compile()` pipeline (`tree.rs`) adds three post-typecheck variants:
+/// The M3 `compile()` pipeline (`tree.rs`) adds four post-typecheck variants:
 /// - [`CompileError::Root`] — the typed root is neither `Boolean` nor
 ///   `SigmaProp` (`ScriptApiRoute.scala:60-65` throws a bare `new Exception`;
 ///   oracle: `cc HEIGHT` → `REJECT 0:0 Exception`).
@@ -50,6 +50,10 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 ///   bug surface or an `ergo-ser`-unrepresentable node (lib.rs D-E1..D-E3),
 ///   not a user error. No dedicated Scala exception class exists — the route
 ///   collapses every non-`CompilerException` throwable into its catch-all.
+/// - [`CompileError::Serializer`] — the assembled tree contains constant DATA
+///   the v0 wire header cannot carry (e.g. an `UnsignedBigInt` constant);
+///   mirrors Scala's `SerializerException` (mechanism citations in `tree.rs`).
+///   A USER-reachable reject, unlike `Emit`/`Write`.
 /// - [`CompileError::Write`] — wire serialization of the assembled tree
 ///   failed (`ergo_ser::error::WriteError`); same compiler-bug surface.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -73,6 +77,16 @@ pub enum CompileError {
     /// Emit-phase rejection (typed AST → opcode IR lowering failed).
     #[error("emit error: {0}")]
     Emit(#[from] EmitError),
+    /// The assembled tree carries constant data that cannot be serialized
+    /// under the M3-fixed v0 wire header (v6-only data such as an
+    /// `UnsignedBigInt` constant). Mirrors Scala's `SerializerException`
+    /// (`CoreDataSerializer.scala:86` catch-all after the v3-gated arms);
+    /// see `tree.rs` for the full mechanism.
+    #[error("tree not serializable under a v0 header: {what}")]
+    Serializer {
+        /// What the v0 wire format cannot carry.
+        what: String,
+    },
     /// Wire-write rejection (opcode IR → bytes failed).
     #[error("tree serialization error: {0}")]
     Write(#[from] ergo_ser::error::WriteError),
@@ -91,7 +105,10 @@ impl CompileError {
             CompileError::Parse(e) => e.pos(),
             CompileError::Bind(e) => e.pos(),
             CompileError::Type(e) => e.pos(),
-            CompileError::Root { .. } | CompileError::Emit(_) | CompileError::Write(_) => 0,
+            CompileError::Root { .. }
+            | CompileError::Emit(_)
+            | CompileError::Serializer { .. }
+            | CompileError::Write(_) => 0,
         }
     }
 
@@ -118,6 +135,12 @@ impl CompileError {
             CompileError::Root { .. } | CompileError::Emit(_) | CompileError::Write(_) => {
                 "Exception"
             }
+            // Scala throws `sigma.serialization.SerializerException` from
+            // `CoreDataSerializer.scala:86` when v6-only constant data hits a
+            // v0-header serialization (oracle: `cc unsignedBigInt("5") >
+            // unsignedBigInt("3")` → `REJECT 0:0 SerializerException`,
+            // compile_seed.json).
+            CompileError::Serializer { .. } => "SerializerException",
         }
     }
 }

@@ -536,6 +536,49 @@
 //! `PK(...)`, task-1-report Concern 1); we emit the unfolded
 //! `CreateProveDlog(Const)` node (`0xCD`) — same header `0x00`, different body
 //! bytes, different addresses. The constant fold is an M4/M5 lowering rule.
+//!
+//! ### D-C3 — residual `SigmaPropIsProven` (0xCF): compile output unevaluable
+//!
+//! Sources mixing `SigmaProp` and `Boolean` in a logical context — e.g.
+//! `sigmaProp(true) && (1 == 1)`, `(1 == 1) ^ sigmaProp(true)`,
+//! `allOf(Coll(proveDlog(g1)))` — typecheck (byte-parity with the reference,
+//! golden_seed §14/§18) into trees carrying `SigmaPropIsProven` /
+//! `Select 'isProven'` coercions. Scala's IR pipeline ELIMINATES them:
+//! GraphBuilding lowers `isProven` → `p.isValid` (GraphBuilding.scala:528-529,
+//! 765-767) and then constant-folds / sigma-reconstructs — oracle compile
+//! replies: `sigmaProp(true) && (1 == 1)` → `BoolToSigmaProp(BinAnd(true,
+//! true))` (`1000d1ed8503`), the `^` forms → a folded segregated `false`
+//! constant (`10010100d17300`), `allOf(Coll(proveDlog(g1)))` → the bare
+//! folded `SigmaPropConstant` (`0008cd0279be…`). Our `emit` maps the node
+//! 1:1 to wire opcode `0xCF` — parseable, but NO evaluator accepts it: ours
+//! rejects it as internal (`InternalOpcode`), and the reference JIT cannot
+//! evaluate it either (`SigmaPropIsProven` has `costKind =
+//! Value.notSupportedError` and no `eval`, transformers.scala:321-329). So
+//! for these sources `compile()` ACCEPTS but produces a tree that cannot
+//! reduce, while Scala produces a folded, evaluable tree. Closing this needs
+//! the IR-level partial evaluation / sigma-reconstruction lowering (same
+//! M4/M5 machinery as D-C2's fold); a local pre-reject would flip the
+//! divergence direction (we-reject/oracle-accepts) and is worse. The five
+//! affected corpus vectors are excluded from the Task-10 semantic gate via
+//! `SEMANTIC_SKIP` (tests/compile_semantic_parity.rs), each tagged D-C3.
+//!
+//! ### D-C4 — multi-arg lambda emits a multi-arg `FuncValue`: unevaluable
+//!
+//! A two-parameter lambda (`.fold(0L, {(a: Long, b: Box) => ...})`) emits as
+//! a FuncValue with TWO args — wire-legal (`FuncValueSerializer` carries
+//! `numArgs`) but unevaluable: the reference JIT hard-errors on any
+//! non-1-arg function (`values.scala:1042-1056`, `"Function must have 1
+//! argument"`), and our evaluator equally rejects it. Scala's compile output
+//! never carries one — the IR pipeline lowers multi-arg lambdas to the
+//! 1-arg TUPLED form (`FuncValue(Array((id, STuple(..))), body)` with
+//! `SelectField` projections), which is what real `Fold` trees look like
+//! on-chain. Same missing-lowering family as D-C3, discovered by the Task-10
+//! Err/Err telemetry (4 of the 18 kept corpus compile vectors — the
+//! crystalpool contracts — carry such lambdas; they PASS the semantic gate
+//! only because the dummy reduction context makes BOTH sides err before the
+//! FuncValue applies on the oracle side). M4/M5 lowering scope; no
+//! `SEMANTIC_SKIP` entry is needed while the Err/Err rule covers them, but
+//! any richer gate context will surface this first.
 
 pub mod ast;
 pub mod binder;

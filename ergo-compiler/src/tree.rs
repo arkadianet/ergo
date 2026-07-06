@@ -11,6 +11,8 @@ use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::{encode_p2s, encode_p2sh, NetworkPrefix};
 use ergo_ser::ergo_tree::{write_ergo_tree, ErgoTree};
 use ergo_ser::opcode::{write_expr, Expr, IrNode, Payload};
+use ergo_ser::sigma_type::SigmaType;
+use ergo_ser::sigma_value::{CollValue, SigmaValue};
 
 use crate::emit::emit;
 use crate::env::ScriptEnv;
@@ -77,6 +79,109 @@ pub(crate) fn build_tree(root: Expr) -> ErgoTree {
     }
 }
 
+/// Scala-faithful predicate for constant DATA the v0 wire header cannot
+/// carry: `CoreDataSerializer.serialize` (v6.0.2) gates `SUnsignedBigInt`
+/// (`:39`) and `SOption` (`:78`) data on `isV3OrLaterErgoTreeVersion` — under
+/// the compile route's pinned `treeVersion = 0` both fall through to the
+/// `:86` `SerializerException` catch-all. Collections/tuples recurse per
+/// ELEMENT: an EMPTY `Coll[UnsignedBigInt]` constant serializes fine on both
+/// sides — only element DATA hits the gated arm; the TYPE-code write is
+/// ungated (`TypeSerializer.serialize`, `case p: SEmbeddable =>
+/// w.put(p.typeCode)`). `SHeader` data is likewise v3-gated
+/// (`DataSerializer.scala`), included for completeness though unreachable
+/// from ErgoScript source.
+fn v0_unserializable_data(tpe: &SigmaType, val: &SigmaValue) -> Option<&'static str> {
+    match (tpe, val) {
+        (SigmaType::SUnsignedBigInt, _) => Some("UnsignedBigInt constant data"),
+        (SigmaType::SOption(_), _) | (_, SigmaValue::Opt(_)) => Some("Option constant data"),
+        (SigmaType::SHeader, _) => Some("Header constant data"),
+        (SigmaType::SColl(el), SigmaValue::Coll(CollValue::Values(items))) => {
+            items.iter().find_map(|v| v0_unserializable_data(el, v))
+        }
+        (SigmaType::STuple(ts), SigmaValue::Tuple(vs)) => ts
+            .iter()
+            .zip(vs)
+            .find_map(|(t, v)| v0_unserializable_data(t, v)),
+        _ => None,
+    }
+}
+
+/// Walk an emitted body for constants whose DATA cannot serialize under the
+/// M3 v0 header (see the gate comment in [`compile`]). Returns a description
+/// of the first offender, or `None` when the tree is v0-clean.
+fn find_v0_unserializable(expr: &Expr) -> Option<String> {
+    let mut stack = vec![expr];
+    while let Some(e) = stack.pop() {
+        match e {
+            Expr::Const { tpe, val } => {
+                if let Some(what) = v0_unserializable_data(tpe, val) {
+                    return Some(what.to_string());
+                }
+            }
+            // Never produced by emit (soft-fork wrapper for UNPARSED wire
+            // trees only) — nothing to scan.
+            Expr::Unparsed(_) => {}
+            Expr::Op(IrNode { payload, .. }) => push_children(payload, &mut stack),
+        }
+    }
+    None
+}
+
+/// Push every child expression of `payload` onto `stack` — the exhaustive
+/// child map of [`Payload`] (a new child-carrying variant fails to compile
+/// here until it is mapped).
+fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
+    match payload {
+        Payload::Zero
+        | Payload::ValUse { .. }
+        | Payload::ConstPlaceholder { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::DeserializeContext { .. }
+        | Payload::NoneValue { .. } => {}
+        Payload::One(a) | Payload::NumericCast { input: a, .. } => stack.push(a),
+        Payload::Two(a, b) => stack.extend([a.as_ref(), b.as_ref()]),
+        Payload::Three(a, b, c) => stack.extend([a.as_ref(), b.as_ref(), c.as_ref()]),
+        Payload::Four(a, b, c, d) => stack.extend([a.as_ref(), b.as_ref(), c.as_ref(), d.as_ref()]),
+        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => stack.push(rhs),
+        Payload::BlockValue { items, result } => {
+            stack.extend(items.iter());
+            stack.push(result);
+        }
+        Payload::FuncValue { body, .. } => stack.push(body),
+        Payload::MethodCall { obj, args, .. } => {
+            stack.push(obj);
+            stack.extend(args.iter());
+        }
+        Payload::ConcreteCollection { items, .. }
+        | Payload::Tuple { items }
+        | Payload::SigmaCollection { items } => stack.extend(items.iter()),
+        Payload::SelectField { input, .. } | Payload::ExtractRegisterAs { input, .. } => {
+            stack.push(input)
+        }
+        Payload::DeserializeRegister { default, .. } => {
+            if let Some(d) = default {
+                stack.push(d);
+            }
+        }
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => {
+            stack.extend([input.as_ref(), index.as_ref()]);
+            if let Some(d) = default {
+                stack.push(d);
+            }
+        }
+        Payload::FuncApply { func, args } => {
+            stack.push(func);
+            stack.extend(args.iter());
+        }
+    }
+}
+
 /// Compile ErgoScript `source` end-to-end: typecheck, lower to opcode IR,
 /// assemble the ErgoTree, serialize, and derive the P2S/P2SH addresses.
 ///
@@ -118,13 +223,26 @@ pub(crate) fn build_tree(root: Expr) -> ErgoTree {
 /// `Pay2SHAddress.apply(script: ErgoTree)`, `ErgoAddress.scala:201-204`) —
 /// hashing a body with `ConstPlaceholder` nodes yields a wrong address.
 ///
-/// # Known accept-side residual (Task-10 gate input)
+/// # Task-10 verdict adjudication (the semantic-parity gate)
 ///
-/// Postfix method-call residuals the typer accepts (e.g. `coll size` typed as
-/// a residual `MethodCall`) emit successfully here, while Scala's FULL
-/// compiler (`compile`, not `typecheck`) throws at the later GraphBuilding
-/// stage. We deliberately do NOT pre-reject such shapes in `compile()` —
-/// Task 10's oracle verdict gate adjudicates each divergence.
+/// The Task-10 corpus run (`tests/compile_semantic_parity.rs`,
+/// `test-vectors/ergoscript/compile/compile_seed.json`) adjudicated every
+/// verdict divergence against the full Scala compiler:
+/// - Postfix method-call residuals (e.g. `arr1 size`): the residual
+///   `MethodCall` shapes that survive our typer all have non-`Boolean`/
+///   `SigmaProp` roots in the corpus, so the route's root dispatch already
+///   rejects them exactly where Scala's GraphBuilding throws — verdict
+///   parity holds with NO extra pre-reject.
+/// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala
+///   GraphBuilding `AssertionError`; see the `XorOf` arm).
+/// - v6-only constant data under the v0 header (`unsignedBigInt(..)`
+///   comparisons): rejected by the v0-header data gate below
+///   ([`CompileError::Serializer`], mirroring Scala's
+///   `SerializerException`).
+/// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
+///   contexts: STILL OPEN — lib.rs D-C3 (compile output carries wire
+///   opcode `0xCF`, which no evaluator accepts; the Scala IR folds or
+///   sigma-reconstructs it away).
 ///
 /// # Examples
 ///
@@ -158,6 +276,24 @@ pub fn compile(
             })
         }
     };
+
+    // v0-header data gate — Scala's compile route cannot serialize v6-only
+    // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
+    // `VersionContext.withVersions(_, treeVersion = ergoTree.version)`
+    // (v6.0.2 `data/.../ErgoTreeSerializer.scala:105-112`), and the route's
+    // header is ALWAYS `defaultHeaderWithVersion(0)` — so even an
+    // ORACLE_TREE_VERSION=3 compile serializes under `treeVersion = 0`, where
+    // `CoreDataSerializer.serialize`'s v3-gated arms (`SUnsignedBigInt` at
+    // :39, `SOption` at :78) fall through to the :86 catch-all
+    // `SerializerException`. Mirror the reject (oracle:
+    // `cc unsignedBigInt("5") > unsignedBigInt("3")` → `REJECT 0:0
+    // SerializerException`, compile_seed.json). Our wire layer is
+    // deliberately version-independent (ergo-ser stays consensus-lenient), so
+    // the gate lives here in the compile surface. M4 NOTE: when `build_tree`
+    // grows versioned headers, gate on the emitted header version < 3.
+    if let Some(what) = find_v0_unserializable(&root) {
+        return Err(CompileError::Serializer { what });
+    }
 
     let ergo_tree = build_tree(root);
 
@@ -347,6 +483,43 @@ mod tests {
     fn compile_parse_error_propagates_as_parse_phase() {
         let err = ct(")(").expect_err("parse must fail");
         assert!(matches!(err, CompileError::Parse(_)));
+    }
+
+    #[test]
+    fn compile_unsigned_bigint_constant_rejects_serializer_class() {
+        // Oracle (compile_seed.json, ORACLE_TREE_VERSION=3, captured
+        // 2026-07-07): both UnsignedBigInt comparison sources reply
+        // `REJECT 0:0 SerializerException` — the route's fixed v0 header
+        // cannot carry UnsignedBigInt constant DATA (the v0-header data gate
+        // in `compile`; mechanism citations there). tree_version = 3: the
+        // FRONTEND accepts the v6 predef; the reject is the WIRE header's —
+        // the two version axes are independent.
+        for src in [
+            r#"unsignedBigInt("5") == unsignedBigInt("3")"#,
+            r#"unsignedBigInt("5") > unsignedBigInt("3")"#,
+        ] {
+            let err = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
+                .expect_err("UBI constant under a v0 header must reject");
+            assert!(
+                matches!(&err, CompileError::Serializer { .. }),
+                "{src}: {err:?}"
+            );
+            assert_eq!(err.class(), "SerializerException", "{src}");
+            assert_eq!(err.pos(), 0, "{src}");
+        }
+    }
+
+    #[test]
+    fn compile_xorof_sigmaprop_coll_rejects_matching_oracle_verdict() {
+        // Oracle: `cc xorOf(Coll(sigmaProp(true)))` → `REJECT 0:0
+        // AssertionError` (GraphBuilding.scala:855-862 force-casts the input
+        // to Coll[Boolean] and dies; see the emit XorOf arm). The class is
+        // advisory — Java's AssertionError has no Rust analog — the REJECT
+        // verdict is the parity fact.
+        let err = ct("xorOf(Coll(sigmaProp(true)))").expect_err("must reject");
+        assert!(matches!(&err, CompileError::Emit(_)), "{err:?}");
+        // Boolean-element xorOf is untouched by the gate.
+        ct("xorOf(Coll(true, false))").expect("boolean xorOf still compiles");
     }
 
     // ----- oracle parity -----
