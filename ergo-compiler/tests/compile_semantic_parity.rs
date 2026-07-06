@@ -461,8 +461,15 @@ fn compile_seed_semantic_parity() {
                 }
             }
             (Err(a), Err(b)) => {
-                // Err/Err = parity (context-bound script); record the class
-                // pair, with the first vector's full error strings.
+                // Err/Err = parity — USUALLY a context-bound script (the dummy
+                // context lacks the registers/outputs it reads, both sides err
+                // the same way). KNOWN NON-CONTEXT-BOUND RESIDENT: the
+                // (RuntimeException, TypeError) pair is D-C4 (multi-arg fold
+                // lambdas emit an unevaluable multi-arg FuncValue; see the
+                // lib.rs ledger) passing by coincidence of the dummy context —
+                // when the reduction context is enriched or the lowering lands,
+                // those vectors flip to a LOUD mixed Ok/Err failure here.
+                // Record the class pair, with the first vector's full errors.
                 let entry = err_pairs
                     .entry((err_head(&a), err_head(&b)))
                     .or_insert_with(|| (0, format!("{label}: ours={a} oracle-tree={b}")));
@@ -506,6 +513,24 @@ fn compile_seed_semantic_parity() {
     );
     // The bare-constant class must actually be exercised (PK vectors).
     assert!(bare_total >= 1, "no bare-const SigmaProp vector swept");
+    // Err/Err composition pin: D-C4 proved a masked shape divergence can hide
+    // as Err/Err parity. Any pair class OUTSIDE this audited set is a NEW,
+    // un-triaged masking candidate — fail loudly instead of letting it ride
+    // as telemetry nobody reads on green runs. Extend the set ONLY with a
+    // ledger entry explaining the new pair (audit trail: lib.rs D-C3/D-C4).
+    const AUDITED_ERR_PAIRS: &[(&str, &str)] = &[
+        ("TypeError", "TypeError"),        // context-bound scripts (both sides)
+        ("RuntimeException", "TypeError"), // D-C4 multi-arg fold lambdas
+    ];
+    for (pair, (n, first)) in &err_pairs {
+        assert!(
+            AUDITED_ERR_PAIRS.contains(&(pair.0.as_str(), pair.1.as_str())),
+            "un-audited Err/Err class pair ({}, {}) x {n} — a new masked-divergence \
+             candidate; triage it (ledger + audit-set entry) before accepting: {first}",
+            pair.0,
+            pair.1,
+        );
+    }
 }
 
 // =============================================================================
