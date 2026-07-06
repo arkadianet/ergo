@@ -647,12 +647,18 @@
 //! Plus the **constant-fold overflow CHECK** (`tree.rs`
 //! `fold_overflow_check`; `ArithmeticException`): a bounded exact re-fold of
 //! Scala's compile-time constant evaluation — `+`,`-`,`*` over same-width
-//! `Byte`/`Short`/`Int`/`Long` constant operands and `Downcast`/`Upcast` of
-//! DIRECT constants; overflow rejects. The emitted tree stays UNFOLDED
+//! `Byte`/`Short`/`Int`/`Long` constant operands, `min`/`max` over the same
+//! (wave-4 review follow-up: they cannot overflow themselves but propagate
+//! the constant into the parent checks — `(min(2147483647, 1) +
+//! 2147483647)` REJECTs, previously accept-invalid), and `Downcast`/`Upcast`
+//! of DIRECT constants; overflow rejects. The emitted tree stays UNFOLDED
 //! (semantics unchanged). Probed fold boundary honored: division/modulo NOT
-//! folded (`1/0` compiles), BigInt arith NOT folded, `min`/`max` and
-//! `Negation` NOT folded (residual: a fold chained THROUGH min/max or a
-//! wrapping-folded Negation is un-modeled — accept-side bounded), casts of
+//! folded (`1/0` compiles), BigInt arith NOT folded, `Negation` NOT folded
+//! (probe-confirmed PARITY, wave 4: `-(0 + 2147483647) - 2` ACCEPTs with
+//! the Negation node unfolded in the oracle tree even over a folded
+//! constant, so our recurse-only arm matches; `-(<literal>)` folds at PARSE
+//! time on both sides and rejects via the `-` arm — the min/max-chain and
+//! Negation residuals flagged at wave 1 are BOTH closed), casts of
 //! non-direct-constant subexpressions NOT folded (`(x*100).toByte` compiles;
 //! cast-of-cast chains treated the same, un-probed). The fold check runs
 //! everywhere — unused-val rhs and lambda bodies included (both
@@ -790,9 +796,9 @@
 //! (the untransformed control group P2SH-matches exactly, pinning
 //! `encode_p2sh` itself as correct). The class is COUNTED, not open-ended:
 //! the wave-3 address gate (`tests/compile_semantic_parity.rs`) pins the
-//! corpus at `EXPECTED_DC7_P2SH_MISMATCHES` (39 of the 75 swept ACCEPT
-//! vectors; the other 36 P2SH-match and are hard-asserted equal wherever
-//! the proposition bytes agree). The M4 segregation transform plus the M5
+//! corpus at `EXPECTED_DC7_P2SH_MISMATCHES` (44 of the 80 swept ACCEPT
+//! vectors after the wave-4 probes landed; the other 36 P2SH-match and are
+//! hard-asserted equal wherever the proposition bytes agree). The M4 segregation transform plus the M5
 //! lowering/ValDef-sharing work close the family; each landed lowering
 //! moves the counted constant DOWN, deliberately.
 

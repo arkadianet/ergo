@@ -155,7 +155,14 @@ const ORACLE_BARE_FOLD_EXCLUSIONS: &[(&str, &str)] = &[
 /// with the lowering that moves it, never silently (a change in either
 /// direction without a matching code change is a regression or an unaudited
 /// behavior shift).
-const EXPECTED_DC7_P2SH_MISMATCHES: usize = 39;
+///
+/// 39 → 44 (wave-4 review follow-up): the 5 new ACCEPT probes are ALL
+/// fold-family instances — the min/max non-overflow controls and the two
+/// bitwise value pins (oracle folds each whole equality to
+/// `sigmaProp(true)`; ours stays unfolded), and the Negation-node chain
+/// (oracle folds the inner `0 + 2147483647` constant; ours keeps the
+/// `Plus`). No previously-matching vector moved.
+const EXPECTED_DC7_P2SH_MISMATCHES: usize = 44;
 
 // =============================================================================
 // Environment builders (mirror TyperOracle.scala demo/sigmaTyperTest envs;
@@ -866,6 +873,13 @@ fn compile_seed_semantic_parity() {
         // (oracle bodies byte-match ours) and the v0 wire header makes the v6
         // wire pair unevaluable on BOTH sides. Genuine parity, not masking.
         ("PreV3V6Method", "PreV3V6Method"),
+        // Wave-4 Negation-disposition probe (`-(0 + 2147483647) - 2`):
+        // NEITHER compiler folds the Negation node (lib.rs D-C5 fold note;
+        // the oracle tree keeps 0xF0 over its folded constant, ours over the
+        // unfolded Plus — the D-C7 shape delta), so BOTH trees hit the
+        // eval-time exact `-` on -2147483647 - 2 and err identically
+        // ("Int.- overflow"). Genuine parity, not masking.
+        ("RuntimeException", "RuntimeException"),
     ];
     for (pair, (n, first)) in &err_pairs {
         assert!(

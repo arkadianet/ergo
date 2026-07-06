@@ -490,16 +490,30 @@ fn in_fold_range(w: FoldWidth, v: i64) -> bool {
 /// fold boundary, honored exactly:
 /// - folded: `+`/`-`/`*` over same-width constant operands (operands may
 ///   themselves be folded arith or folded casts-of-literals — `cc
-///   sigmaProp((127.toByte + 1.toByte) < 0.toByte)` REJECTs); `Downcast`/
-///   `Upcast` of a DIRECT constant (`300.toByte` REJECTs; mixed-width `cc
-///   sigmaProp((9223372036854775807L + 1) < 0L)` REJECTs via the folded
+///   sigmaProp((127.toByte + 1.toByte) < 0.toByte)` REJECTs, and a folded
+///   result chains into a parent fold: `cc sigmaProp(((2147483646 + 1) + 1)
+///   < 0)` REJECTs); `min`/`max` over same-width constant operands (cannot
+///   themselves overflow — they select an operand — but the propagated
+///   constant feeds the parent checks: `cc sigmaProp((min(2147483647, 1) +
+///   2147483647) < 0)` and the `max` twin both REJECT; mixed-width `cc
+///   sigmaProp((min(1, 9223372036854775807L) + 9223372036854775807L) < 0L)`
+///   REJECTs via the typer's `Upcast(1)`, which the cast arm folds to a
+///   same-width operand); `Downcast`/`Upcast` of a DIRECT constant
+///   (`300.toByte` REJECTs; the mixed-width
+///   `cc sigmaProp((9223372036854775807L + 1) < 0L)` REJECTs via the folded
 ///   `Upcast(1)`); the fold runs EVERYWHERE — unused-val rhs (`cc { val
 ///   unused = 2147483647 + 1; sigmaProp(true) }` REJECTs) and lambda bodies
 ///   (`cc sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)`
-///   REJECTs) included (all fresh captures 2026-07-07, 3 identical runs);
+///   REJECTs) included (all fresh captures 2026-07-07, 3 identical runs
+///   each);
 /// - NOT folded: division/modulo (`cc sigmaProp(1 / 0 == 0)` → OK), BigInt
-///   arithmetic, `min`/`max`, `Negation` (Scala negates WRAPPING, never
-///   throws — probe 65), and casts of NON-direct-constant subexpressions
+///   arithmetic, `Negation` (probe-confirmed: `cc sigmaProp((-(0 +
+///   2147483647) - 2) < 0)` → OK with the Negation node UNFOLDED in the
+///   oracle tree even though its input constant-folds — so a recurse-only
+///   arm here is exact parity; a direct `-(2147483647)` never reaches this
+///   walk: the parser folds unary minus on literals, same as Scala's, and
+///   `cc sigmaProp((-(2147483647) - 2) < 0)` REJECTs on both sides via the
+///   `-` arithmetic fold), and casts of NON-direct-constant subexpressions
 ///   (`ccs sigmaProp((x * 100).toByte > 0.toByte)` → OK: Scala folds
 ///   `x * 100` to 1000 but leaves the Downcast unfolded; a cast-of-cast
 ///   chain is likewise treated as unfolded — un-probed, accept-side
@@ -524,8 +538,8 @@ fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> 
         Expr::Unparsed(_) => Ok(None),
         Expr::Op(IrNode { opcode, payload }) => match (opcode, payload) {
             // ArithOp +/-/* (wire bytes: Plus 0x9A, Minus 0x99, Multiply
-            // 0x9C). Division 0x9D / modulo 0x9E / min 0xA1 / max 0xA2 fall
-            // to the recurse-only arm below (not compile-folded).
+            // 0x9C). Division 0x9D / modulo 0x9E fall to the recurse-only
+            // arm below (not compile-folded — `1 / 0` compiles).
             (0x9A | 0x99 | 0x9C, Payload::Two(l, r)) => {
                 let lf = fold_overflow_check(l)?;
                 let rf = fold_overflow_check(r)?;
@@ -550,6 +564,30 @@ fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> 
                         "compile-time constant fold overflows {wl:?}: {a} {sym} {b}"
                     ))),
                 }
+            }
+            // ArithOp min (0xA1) / max (0xA2) over two same-width constants
+            // fold to the selected operand. The ops themselves cannot
+            // overflow (the result IS one of the operands, already in
+            // range); folding matters because the propagated constant feeds
+            // the +/-/* checks above (`(min(2147483647, 1) + 2147483647)`
+            // REJECTs — the fn docs' probe family).
+            (0xA1 | 0xA2, Payload::Two(l, r)) => {
+                let lf = fold_overflow_check(l)?;
+                let rf = fold_overflow_check(r)?;
+                let (Some((wl, a)), Some((wr, b))) = (lf, rf) else {
+                    return Ok(None);
+                };
+                if wl != wr {
+                    // Same conservatism as the +/-/* arm: post-typer
+                    // operands share a width (mixed widths carry an
+                    // `Upcast`, folded by the cast arm below).
+                    return Ok(None);
+                }
+                // The i64 carrier preserves numeric order for every width.
+                Ok(Some((
+                    wl,
+                    if *opcode == 0xA1 { a.min(b) } else { a.max(b) },
+                )))
             }
             // Downcast (0x7D) / Upcast (0x7E) of a DIRECT constant fold to
             // the target width; the downcast is range-checked exactly
@@ -1088,8 +1126,16 @@ mod tests {
             "sigmaProp(9223372036854775807L * 2L > 0L)",
             "sigmaProp((127.toByte + 1.toByte) < 0.toByte)",
             "sigmaProp(-2147483647 - 2 < 0)",
+            "sigmaProp((-(2147483647) - 2) < 0)", // parser folds -(<lit>) → the `-` fold fires
             "{ val unused = 2147483647 + 1; sigmaProp(true) }",
             "sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)",
+            // folded arith chains INTO a parent fold (review follow-up probe)
+            "sigmaProp(((2147483646 + 1) + 1) < 0)",
+            // min/max propagate their folded constant into the parent check
+            "sigmaProp((min(2147483647, 1) + 2147483647) < 0)",
+            "sigmaProp((max(2147483647, 1) + 2147483647) < 0)",
+            // mixed-width min: the typer's Upcast(1, SLong) folds first
+            "sigmaProp((min(1, 9223372036854775807L) + 9223372036854775807L) < 0L)",
         ] {
             let err = ct(src).expect_err(src);
             assert_eq!(err.class(), "ArithmeticException", "{src}");
@@ -1108,6 +1154,14 @@ mod tests {
             "sigmaProp((2147483646 + 1) < 0)",
             "sigmaProp((-9223372036854775807L - 1L) < 0L)", // exactly Long.MIN
             "sigmaProp((HEIGHT + 2147483647) > 0)",
+            // min/max fold-through NON-overflow controls (oracle OK)
+            "sigmaProp((min(1, 2) + 1) == 2)",
+            "sigmaProp((max(1, 2) + 1) == 3)",
+            // a non-constant min operand breaks the chain — no fold, no reject
+            "sigmaProp((min(HEIGHT, 1) + 2147483647) > 0)",
+            // Negation over a NON-literal folded constant stays unfolded on
+            // both sides (probe-confirmed: oracle tree keeps the 0xF0 node)
+            "sigmaProp((-(0 + 2147483647) - 2) < 0)",
         ] {
             ct(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
         }
@@ -1317,6 +1371,22 @@ mod tests {
         .expect("compile");
         assert_eq!(hex::encode(&bits.tree_bytes), "00d193b10d20000000500440");
         assert_eq!(bits.p2sh_address, "qse65TyiDnutjxRzCP1mnCttRKWZqPrhnsvG7cg");
+    }
+
+    #[test]
+    fn compile_bitwise_or_xor_fold_values_pinned() {
+        // Value-distinguishing forms of the wave-2 bitwise folds (review
+        // follow-up): the oracle folds the WHOLE equality to `sigmaProp
+        // (true)` (`10010101d17300`), so the ACCEPT alone would not catch a
+        // wrong folded value — pin our folded Byte constants directly
+        // (`5 | 3 = 7`, `5 ^ 3 = 6`; the rhs `7.toByte`/`6.toByte` stays a
+        // Downcast node, D-C7 cast-shape family).
+        let env = ScriptEnv::new();
+        let cv3 = |src| compile(&env, src, 3, NetworkPrefix::Testnet);
+        let or = cv3("sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)").expect("compile");
+        assert_eq!(hex::encode(&or.tree_bytes), "00d19302077d040e02");
+        let xor = cv3("sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)").expect("compile");
+        assert_eq!(hex::encode(&xor.tree_bytes), "00d19302067d040c02");
     }
 
     #[test]

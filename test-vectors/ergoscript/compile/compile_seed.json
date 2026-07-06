@@ -1,7 +1,7 @@
 {
   "_captured": "2026-07-07",
   "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); settings pinned per-record",
-  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 171 vectors (30 compile-ACCEPT, 141 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 72 vectors (32 compile-ACCEPT, 40 compile-REJECT recorded verbatim)",
+  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 171 vectors (30 compile-ACCEPT, 141 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 82 vectors (37 compile-ACCEPT, 45 compile-REJECT recorded verbatim)",
   "vectors": [
     {
       "network": "testnet",
@@ -3069,6 +3069,121 @@
       "p2sh_address": "rbcrmKEYduUvADj9Ts3dSVSG27h54pgrq5fPuwB",
       "reject_class": null,
       "source": "sigmaProp(Coll(1, 2).size == 2)",
+      "tree_hex": "10010101d17300",
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "ArithmeticException",
+      "reject_pos": "0:0",
+      "source": "sigmaProp((min(2147483647, 1) + 2147483647) < 0)",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "ArithmeticException",
+      "reject_pos": "0:0",
+      "source": "sigmaProp((max(2147483647, 1) + 2147483647) < 0)",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "ArithmeticException",
+      "reject_pos": "0:0",
+      "source": "sigmaProp((min(1, 9223372036854775807L) + 9223372036854775807L) < 0L)",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "Ms7smJwLGbUAjuWQ",
+      "p2sh_address": "rbcrmKEYduUvADj9Ts3dSVSG27h54pgrq5fPuwB",
+      "reject_class": null,
+      "source": "sigmaProp((min(1, 2) + 1) == 2)",
+      "tree_hex": "10010101d17300",
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "Ms7smJwLGbUAjuWQ",
+      "p2sh_address": "rbcrmKEYduUvADj9Ts3dSVSG27h54pgrq5fPuwB",
+      "reject_class": null,
+      "source": "sigmaProp((max(1, 2) + 1) == 3)",
+      "tree_hex": "10010101d17300",
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "ArithmeticException",
+      "reject_pos": "0:0",
+      "source": "sigmaProp(((2147483646 + 1) + 1) < 0)",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "ArithmeticException",
+      "reject_pos": "0:0",
+      "source": "sigmaProp((-(2147483647) - 2) < 0)",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "2HQucin1WJ6wfAGnbGaAU4p76dWBgZMp39PBtQNW1wCy",
+      "p2sh_address": "rTwjspaCMXtDKa7JsuoDu6p7mpQt9X2vXkABxru",
+      "reject_class": null,
+      "source": "sigmaProp((-(0 + 2147483647) - 2) < 0)",
+      "tree_hex": "100304feffffffffffffffff0104040400d18f99f0730073017302",
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "Ms7smJwLGbUAjuWQ",
+      "p2sh_address": "rbcrmKEYduUvADj9Ts3dSVSG27h54pgrq5fPuwB",
+      "reject_class": null,
+      "source": "sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)",
+      "tree_hex": "10010101d17300",
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "ACCEPT",
+      "p2s_address": "Ms7smJwLGbUAjuWQ",
+      "p2sh_address": "rbcrmKEYduUvADj9Ts3dSVSG27h54pgrq5fPuwB",
+      "reject_class": null,
+      "source": "sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)",
       "tree_hex": "10010101d17300",
       "tree_version": 3,
       "verb": "cc"
