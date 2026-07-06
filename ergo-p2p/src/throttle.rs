@@ -1,9 +1,21 @@
 //! Per-peer throughput limiter.
 //!
-//! Caps each peer at **100 msgs/sec and 2 MB/sec**, measured over a
+//! Caps each peer at **1000 msgs/sec and 2 MB/sec**, measured over a
 //! 10-second sliding window. This module is the single source of
 //! truth; callers (peer_loop on the read side) consult it before
 //! admitting a frame.
+//!
+//! The byte cap is the real resource bound; the message cap only
+//! guards against tiny-frame floods and must sit ABOVE the burst
+//! rates a healthy Scala peer produces. Scala's delivery checker
+//! re-requests every non-delivered modifier as a single-id
+//! `RequestModifier`, rescheduled in synchronized bursts (hundreds
+//! of frames inside one second), on top of 1/s SyncInfo and Inv
+//! ping-pong. The 2026-07-04 testnet stall showed a 100 msg/sec cap
+//! starves exactly those recovery bursts: requests drop → nothing
+//! delivers → the peer re-requests harder → permanent starvation of
+//! the only body-holding link. The Scala reference node has no
+//! inbound message-rate limit at all.
 //!
 //! The limiter is pure state — no I/O, no async — and takes `now` as
 //! a parameter so tests drive it deterministically. Production passes
@@ -13,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-/// Configuration. Defaults to 100 msg/sec and 2 MB/sec averaged over a
+/// Configuration. Defaults to 1000 msg/sec and 2 MB/sec averaged over a
 /// 10-second window.
 #[derive(Debug, Clone, Copy)]
 pub struct ThroughputLimits {
@@ -29,7 +41,7 @@ impl Default for ThroughputLimits {
     fn default() -> Self {
         Self {
             window: Duration::from_secs(10),
-            max_msgs_per_window: 1_000,       // 100 msg/sec × 10s
+            max_msgs_per_window: 10_000,      // 1000 msg/sec × 10s
             max_bytes_per_window: 20_000_000, // 2 MB/sec × 10s
         }
     }
@@ -314,7 +326,41 @@ mod tests {
     fn default_limits_match_spec() {
         let l = ThroughputLimits::default();
         assert_eq!(l.window, Duration::from_secs(10));
-        assert_eq!(l.max_msgs_per_window, 1_000); // 100 × 10
+        assert_eq!(l.max_msgs_per_window, 10_000); // 1000 × 10
         assert_eq!(l.max_bytes_per_window, 20_000_000); // 2 MB × 10
+    }
+
+    // Regression pin for the 2026-07-04 testnet stall: a Scala peer in
+    // delivery-recovery re-requests every non-delivered modifier as a
+    // single-id RequestModifier (~43 bytes on the wire), rescheduled in
+    // synchronized bursts of ~400 frames, on top of 1/s SyncInfo. The
+    // old 1,000 msgs/window default dropped exactly those frames on the
+    // only body-holding link and the starvation became self-sustaining.
+    // The default message cap must keep admitting this honest storm.
+    #[test]
+    fn scala_recovery_storm_survives_default_limits() {
+        let mut l = ThroughputLimiter::with_defaults();
+        let p = peer(1);
+        let start = Instant::now();
+        let mut admitted = 0u32;
+        // 10 one-second rounds: one SyncInfo (~100 B) + a 400-frame
+        // burst of single-id RequestModifiers (~43 B each).
+        for sec in 0..10u64 {
+            let now = start + Duration::from_secs(sec);
+            assert_eq!(l.check_and_record(p, now, 100), LimiterVerdict::Ok);
+            admitted += 1;
+            for _ in 0..400 {
+                assert_eq!(
+                    l.check_and_record(p, now, 43),
+                    LimiterVerdict::Ok,
+                    "recovery-storm frame dropped at second {sec}"
+                );
+                admitted += 1;
+            }
+        }
+        // The whole storm fits in one window and exceeds the OLD
+        // 1,000-msg cap several times over — encoding that a future
+        // re-lowering of the default reintroduces the stall.
+        assert!(admitted > 1_000, "storm no longer exercises the old cap");
     }
 }
