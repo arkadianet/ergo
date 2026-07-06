@@ -863,3 +863,42 @@ fn recover_coordinator_leaves_done_unset_during_bootstrap() {
         "mid-bootstrap must leave recovery_done unset so it re-runs after the install resets it"
     );
 }
+
+// ----- branch-invalidation classifier -----
+//
+// `is_validation_verdict` gates the durable branch-invalidation path
+// (Scala `reportModifierIsInvalid`). Only definitive consensus-rule
+// verdicts may persist invalidity; transient / IO / consistency failures
+// must stay session-scoped so a bug of ours or a stale local root can
+// never permanently orphan a valid chain.
+
+#[test]
+fn is_validation_verdict_true_for_consensus_rule_failures() {
+    let v = BlockProcessError::Validation(
+        ergo_validation::block::BlockValidationError::TransactionsRootMismatch {
+            expected: id(0x01),
+            computed: id(0x02),
+        },
+    );
+    assert!(is_validation_verdict(&v), "block validation is a verdict");
+}
+
+#[test]
+fn is_validation_verdict_false_for_io_and_consistency_failures() {
+    // A stored section that won't parse could be disk corruption, not a bad
+    // block; a state-apply error is IO/DB; missing headers are data gaps.
+    let cases = [
+        BlockProcessError::Deserialize("truncated section".to_string()),
+        BlockProcessError::HeaderNotFound { id: id(0xAA) },
+        BlockProcessError::ParentNotFound { id: id(0xBB) },
+        BlockProcessError::State(ergo_state::store::StateError::InvalidPrecondition {
+            what: "io-ish",
+        }),
+    ];
+    for e in cases {
+        assert!(
+            !is_validation_verdict(&e),
+            "non-verdict failure must NOT invalidate: {e}"
+        );
+    }
+}

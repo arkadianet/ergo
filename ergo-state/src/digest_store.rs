@@ -832,6 +832,19 @@ impl crate::backend::HeaderSectionStore for DigestStateStore {
     fn mark_session_invalid(&mut self, header_id: [u8; 32]) {
         self.session_invalids.insert(header_id);
     }
+    fn invalidate_validation_branch(
+        &mut self,
+        header_id: [u8; 32],
+    ) -> Result<Vec<[u8; 32]>, StateError> {
+        // Digest-mode invalidity is session-scoped by contract (a stale local
+        // parent root and a definitively bad block are observationally
+        // identical here — see `BlockProcessError::DigestApply`), so there is
+        // no durable branch flag to persist. The executor's validation-verdict
+        // classifier does not route digest apply failures here; this satisfies
+        // the shared trait for the non-incident path.
+        self.session_invalids.insert(header_id);
+        Ok(vec![header_id])
+    }
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
         Ok(self.session_invalids.contains(header_id))
     }
