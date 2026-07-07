@@ -6,8 +6,9 @@
 > (dev-docs is gitignored; this file is deliberately committed via `git add -f` as the
 > project's status anchor, like `m2-deferred-items.md`.)
 
-**Last updated:** 2026-07-07 (M3 complete at `7fadf32` + close-out)
-**Branch:** `feat/ergoscript-compiler` (worktree `ergoscript-compiler`) — NOT pushed / NOT PR'd
+**Last updated:** 2026-07-07 (M4 complete at `19409da` + adversarial-clean close-out)
+**Branch:** `feat/ergoscript-compiler` (worktree `ergoscript-compiler`) — pushed for external
+audit (branch only, NO PR / NO merge until the compiler is finalized)
 **End goal:** byte-identical ErgoTree output vs Scala `SigmaCompiler` (sigma-state 6.0.2)
 → identical P2S/P2SH address. Bytes are the contract; a wrong tree = wrong address =
 stranded funds, so the bar is byte-parity, not semantic equivalence.
@@ -21,13 +22,24 @@ stranded funds, so the bar is byte-parity, not semantic equivalence.
 | **M1** | Lexer + parser + untyped AST | ~20% | ✅ **DONE** — 14-round codex-clean |
 | **M2** | Binder + typer (typed AST) | ~20% | ✅ **DONE** — oracle-parity + adversarial-clean |
 | **M3** | Emit → opcode IR → bytes → address; *semantic* parity | ~10% | ✅ **DONE** — semantic + address gate, adversarial-clean |
-| **M4** | Writer canonicalization + lowering catalog + constant segregation | ~15% | ⬜ TODO (next) |
-| **M5** | CSE / ValDef-sharing → **full byte parity** (the hard one) | ~25% | ⬜ TODO |
+| **M4** | Writer canonicalization + lowering catalog + constant segregation | ~15% | ✅ **DONE** — 95/110 byte-exact, adversarial-clean |
+| **M5** | CSE / ValDef-sharing → **full byte parity** (the hard one) | ~25% | ⬜ TODO (next) — spike DONE, model validated 6/6 |
 | **M6** | REST `/script/p2sAddress` + `/script/p2shAddress` | ~3% | ⬜ TODO |
 | **M7** | `ContractParser` (`@contract`, named params) + stdlib tail | ~7% | ⬜ TODO |
 
-**Overall: ≈ 50% by effort** (M1 + M2 + M3 shipped). The fat tail is **M5** (Scalan CSE/ValDef
-byte-parity) — deliberately front-loaded in the design as the top risk.
+**Overall: ≈ 65% by effort** (M1–M4 shipped). The remaining fat tail is **M5** (Scalan CSE/
+ValDef byte-parity) — the M4-recon spike (`dev-docs/ergoscript-compiler-m5-recon/spike-scope-chain.md`,
+gitignored-local) validated a source-grounded scope-chain hash-cons model 6/6 against the live
+oracle, so M5 is de-risked from "research" to "empirical implementation against a known model"
+(~450-650 LOC, HIGH risk concentrated in intra-scope schedule order).
+
+**M4 result:** 95/110 committed compile vectors are **byte-identical** to Scala 6.0.2
+(`tree_bytes` + P2S + P2SH); the 15 residual mismatches are **exactly** the CSE/ValDef-sharing
+class = the M5 acceptance benchmark (chaincash ×7, crystalpool ×5, dexy emission, rosen-bridge,
+proveDHTuple). Semantic parity is 110/110 (every vector reduces to the same SigmaBoolean; 0
+semantic skips). Two milestone-end adversarial passes (M3: 10 finders, M4: 5 finders) found
+zero surviving verdict/semantic/evaluability divergences; all byte residuals are ledgered
+(D-C1..D-C8) as M5 or bounded-known.
 
 ---
 
@@ -108,89 +120,94 @@ constant-fold overflow check, P2SH re-scope + address gate D-C7); regression re-
 (150 live probes): 13 CLOSED / 5 LEDGERED / 0 REGRESSED / 2 NEW reject-valid
 (NF-1/NF-2, dispositioned into the ledger). 5389 workspace tests green.
 
-## M4 — Writer canon + lowering + segregation ⬜ TODO (next)
+## M4 — Writer canon + lowering + segregation ✅ DONE (`19409da`)
 
-- [ ] **Writer-canonicalization audit** — `ergo-ser`'s writer is NOT fully Scala-canonical
-      today (e.g. Relation2 `0x85` compact form re-emitted expanded). Verified design §2 gap.
-- [ ] MethodCall→primitive **lowering catalog** — build empirically from the oracle
-      (`unlowerMethodCalls` is not the whole set). M3 already landed the literal-`getReg`→
-      `ExtractRegisterAs` split (D-C6 item 1; dynamic stays MethodCall, val-bound const
-      propagation still open) and the explicit-type-arg irBuilder routing (D-C6 item 2).
-      Harvest cannonQ's LOWERING-SHAPE-AUDIT.
-- [ ] **Constant segregation** transform (collect/order → ConstPlaceholder); placeholder
-      indices are serialized — see the worklist below for the exact Scala shape.
-- [ ] typer-grade SMethod tables already ported in M2 — reuse for M4 numbering agreement.
+Ten reviewed tasks (`2d63e0b`..`19409da`), each landed as an AST→AST pass over the
+`ergo-ser opcode::Expr` IR between emit and write, graduating committed vectors out of the
+set-based mismatch gates. Final: **95/110 byte-exact**, 110/110 semantic, 0 skips.
 
-### M4 worklist (from M3 — read before starting)
+- [x] **Constant segregation (D-C1 flip)** — write-time constant-sink through `ergo-ser`'s
+      `write_expr` mirroring Scala's `withSegregation` serialize→getAll→re-read exactly
+      (append-only `ConstantStore`, slot = first-write order, NO dedup); consensus paths
+      proven byte-unchanged (396 ergo-ser tests + ~4,564-tree mainnet round-trip). Flipped
+      34 vectors.
+- [x] **Constant-fold engine** (`fold.rs`) — a faithful port of the `rewriteDef` cascade
+      (algebraic identities, both-const arith with fold-time overflow reject, env-const
+      propagation, div/mod on non-zero divisor, De Morgan / `!Const` flips, `SizeOf`
+      literal fold, all-const `anyOf`/`allOf`) — NOT a general evaluator. Closed NF-1.
+- [x] **Explicit-cast folds, both directions** (`tree.rs::fold_direct_const_casts`) —
+      fold single const casts (Scala AST-match, non-cascading so chains keep) AND stop
+      over-folding literal chains Scala keeps.
+- [x] **D-C2** `CreateProveDlog/DHTuple(const)` → `SigmaPropConstant` + single-element
+      sigma unwraps (`lower.rs`).
+- [x] **D-C3** `SigmaPropIsProven` elimination + Bool↔Sigma reconstruction (`isproven.rs`)
+      — emptied `SEMANTIC_SKIP`; every vector semantic-gated again.
+- [x] **D-C4** multi-arg lambda TUPLING (`tuple.rs`) — 1-arg `FuncValue(STuple)` +
+      `SelectField`, fold-slot lambdas now evaluable.
+- [x] **Singleton PropertyCall lowering + `deserialize`** (`emit.rs` + `predef_ir.rs`
+      reverse map) — closed the D-T2 residual; `lower_method_calls` dead flag deleted;
+      **D-C8** records the `allZK`/`anyZK`/`outerJoin` upstream-unimplemented predefs
+      (both sides reject `StagingException`, sigmastate#543).
+- [x] **`val` inlining + block flattening + dead-`val` pruning + dense renumbering**
+      (`inline.rs`) — GraphBuilding-exact usage-count materialization; closed NF-2 and the
+      D-C6 val-bound-`getReg` residual; dense id renumber for `ValDef`-free trees (per-
+      disjoint-scope restart, `processAstGraph` curId parity).
+- [x] **Adversarial re-verify** (5 finders) + **M5 spike** — see close-out below.
 
-Sources: the lib.rs D-ledger, the `dev-docs/ergoscript-compiler-m3-recon/` dossiers +
-adversarial-findings reports + `regression-reverify.md` (gitignored-local; the facts
-below are self-contained).
+**Canonical `compile()` pass order** (the actual pipeline, superseding the plan's original
+locked-decision-1 literal ordering — order is probe-pinned to mirror Scala's `rewriteDef`
+cascade; each step cites `tree.rs::compile`):
+`emit → D-C5 reject gates → fold_direct_const_casts → isProven(1) → inline_vals →
+fold(1) → prune_dead_vals → renumber_dense → v0-data gate → lower (D-C2/unwraps/
+singletons/getReg) → fold(2, D-C2-exposed Const==Const) → isProven(2) → tuple_lambdas →
+segregate → write_ergo_tree`. Segregation is LAST; folds run before the v0 gate (closes
+NF-1); `fold` runs twice (saturating; the second pass only sees `lower`-newly-exposed
+`Const==Const`).
 
-**Segregation transform (the D-C1 flip):**
-- Scala `withSegregation` (`ErgoTree.scala:384-398`) collects constants as a SIDE EFFECT
-  of serialization: single traversal, **slot = position = order of first write** during
-  the serialization traversal; then a **serialize→re-read round-trip** materializes the
-  `ConstantPlaceholder` nodes (step 5-6 of the recon §3 walkthrough) — reproduce the
-  shape, not just the effect.
-- **NO dedup** of equal constants — each occurrence gets its own slot.
-  SOURCE-CONFIRMED (recon OQ1 closed, 2026-07-04, pinned v6.0.2 checkout
-  `sigma/serialization/ConstantStore.scala`): `put` is unconditionally
-  `store += c; mkConstantPlaceholder(store.length - 1, tpe)` — append-only,
-  index = slot position. (`TreeBuilding.scala:506-509` "two equal constants
-  don't always have the same meaning" is the design rationale.)
-- Bare-`SigmaPropConstant` roots stay `withoutSegregation` `0x00` on BOTH sides, and
-  `proveDlog(<any const point>)` FOLDS into that class in Scala's IR (M3 Task-1 oracle
-  fact) — segregated test fixtures need non-foldable scripts.
-- `ergo-ser`'s writer auto-compacts a Relation2 over two literal-Boolean `Const`s into
-  `BoolCollection` `0x85` (`write.rs` `relation2_bool_pair`) — emit must NOT double-handle.
+**The 15 residual byte-mismatches = the M5 acceptance benchmark** (all semantically equal,
+all in `DC7_P2SH_MISMATCH_SET`): chaincash-basis ×7 + crystalpool ×5 + dexy/gort-dev
+emission + rosen-bridge/GuardSign + `proveDHTuple(g1,g2,g1,g2)`. Each is CSE/ValDef-sharing
++ schedule-order id allocation — decoded oracle trees show multi-use `ValDef`s with dense
+schedule-order ids that source-level `val` inlining cannot reproduce.
 
-**Lowering/fold catalog = the D-C7 no-IR-optimization family** (each landed rule moves
-`EXPECTED_DC7_P2SH_MISMATCHES` — 44 today — DOWN, deliberately; the oracle tree hexes in
-`compile_seed.json` are the ready byte targets, and the gate's byte-parity telemetry
-becomes the M4/M5 progress meter):
-- **constant folding**: env consts (`ccs` closures fold to `sigmaProp(true)`),
-  whole-expression folds, non-overflowing arith (the OVERFLOW check already landed as a
-  D-C5 gate), `== false` → `LogicalNot`; the **UBI-fold family (NF-1)** — equality /
-  tuple-select / val-bound UBI-constant shapes — closes here too (do NOT weaken the v0
-  UBI-data gate; non-foldable shapes still need it);
-- **`val` inlining + unused-`val` pruning** — also closes NF-2 (SFunc-param lambda nested
-  in an unused val's rhs body) and the D-C6 item-1 residual (val-bound `getReg` index
-  const-propagation);
-- **explicit-cast folds, BOTH directions**: Scala folds argument casts we keep as
-  `Downcast` nodes, while WE fold literal upcast chains Scala keeps
-  (`1.toByte.toLong.toBigInt` — numerics N-3 probe 34); either direction moves bytes;
-- **`CreateProveDlog(const)` → `SigmaPropConstant`** (D-C2);
-- **D-C3 `isProven` → `isValid` elimination** and **D-C4 multi-arg-lambda TUPLING**
-  (1-arg `FuncValue` over `STuple` + `SelectField` projections) — the two families whose
-  current output is unevaluable on both sides;
-- single-element `anyOf`/`atLeast` **unwrap**; bare-ident context/global singletons →
-  `PropertyCall` lowering; env `Coll[Long]` **per-element lift** (`Coll[Byte]` lifts as
-  one constant on both sides);
-- **CSE/ValDef sharing** of repeated subterms → M5 (do not fake it with heuristics here).
+**Deferred out of M4 (unchanged):** D-E1 `CreateAvlTree` 0xB6 ergo-ser↔Scala accept-set
+divergence → fuzz-differential backlog; D-T12 string-fold residual (opaque env SigmaProp,
+ByteColl/LongColl RHS); D-C6 item-3 deeper-constant-receiver v6-method folds; D-C7
+`Coll(true,false)==Coll(true,false)` leaf-triviality fold-lift (a bounded accept-side
+residual, fenced for self-readability).
 
-**Also at M4:**
-- **`deserialize` predef** (D-T2 residual, re-scoped here): needs the
-  opcode-IR→`TypedExpr` reverse mapping — build it alongside the lowering catalog, which
-  wants the same mapping.
-- **`TyperCtx.lower_method_calls` is a DEAD flag** (`typer/mod.rs`; recon-typed-ast.md) —
-  wire it up or delete it when the catalog lands.
-- **D-E1 `CreateAvlTree` 0xB6** ergo-ser↔Scala accept-set divergence → hand to the
-  **fuzz-differential backlog**, not a compiler fix (a Scala tree carrying it would
-  mis-parse in ergo-ser).
-- Residuals that stay until real partial evaluation exists: D-T12 string-fold residual
-  (opaque env SigmaProp, ByteColl/LongColl RHS), D-C6 item-3 deeper-constant-receiver
-  v6-method folds (arith results, multi-cast chains).
+## M5 — CSE / ValDef byte parity ⬜ TODO (next; highest risk, now de-risked)
 
-## M5 — CSE / ValDef byte parity ⬜ TODO (highest risk)
+**Spike DONE** — `dev-docs/ergoscript-compiler-m5-recon/spike-scope-chain.md` (gitignored-
+local) is the validated spec: a source-grounded model of Scala's CSE machinery, **6/6
+oracle predictions correct** (hand-decoded trees), anchored on a 29-`ValDef` chaincash
+vector. Key facts the M5 plan builds on:
 
-- [ ] Reproduce the Scalan graph's **observable** subexpression sharing + ValDef
-      introduction + id numbering — WITHOUT porting the ~10.6k-line Scalan framework
-      (design decision: Option B via C). This is the top risk; may need empirical
-      reverse-engineering against the oracle (generate/diff/deduce/repeat).
-- [ ] cannonQ proved heuristic-counting + patches plateaus below parity here; their
-      end-state note says the fix is Scalan-faithful hash-cons + serial per-scope id
-      emission (which they identified but never built). Start from that architecture.
+- **Identity = scope-chained hash-cons, decided by FIRST-BUILD SITE** (`Base.scala:777-808`,
+  `Thunks.scala:180-226`): a `Def` interns globally when the thunk stack is empty, else into
+  the innermost open `ThunkScope.bodyDefs`; siblings are never on each other's parent chain,
+  so a subexpression first built inside one branch is invisible to its sibling. The keystone
+  experiment (two sources differing only in an `if` condition → one shares a ValDef, the other
+  emits two copies) **falsifies every use-count-or-LCA model**, cannonQ's included.
+- **Which builders push a thunk scope:** `If` branches, `&&`/`||` right arms, `getOrElse`
+  defaults — **NOT** `FuncValue`/lambda bodies (a cannonQ error corrected: `Functions.scala:359`
+  pushes only `lambdaStack`; body membership is decided later by dependency scheduling).
+- **ValDef placement** = the one scope whose schedule contains the symbol
+  (`TreeBuilding:501-517`), gated by `hasManyUsagesGlobal && !IsContextProperty &&
+  !IsInternalDef && !IsConstantDef`; usage count is over the FLAT schedule (the phase that
+  reconciles scope-chained identity with global counting).
+- **Ids assigned serially once, top-down, NO renumber pass** (root ValDef starts at 1;
+  lambda arg = `defId+1`; **tuple arg = one id → `+1` not the M4-provisional `+2`**). The M4
+  `inline`/`renumber_dense` passes RETIRE into the M5 pass.
+
+- [ ] Build `mir/cse.rs` (~450-650 LOC): scope-stack hash-cons over our `Expr` + flat usage
+      count + per-scope schedule + ValDef materialize + assign-ids-once threading. Retire the
+      M4 inline/renumber passes into it. Gate on BOTH the ValDef set+ids AND the constant-pool
+      multiset+order (never byte-total).
+- [ ] **Top remaining risk (ORACLE-NEEDED):** intra-scope schedule order — which same-scope
+      multi-use symbol gets id 1 vs 2 (Scala `depthFirstOrderFrom(deps)`); our build order must
+      match byte-for-byte. Reverse-engineer against the 15-vector benchmark (generate/diff/
+      deduce/repeat) — this is where cannonQ plateaued.
 
 ## M6 — REST endpoints ⬜ TODO
 
