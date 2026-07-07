@@ -560,9 +560,12 @@
 //! first-write order, NO dedup) then a re-read to materialize the placeholder
 //! body — a literal transcription of Scala's serialize→getAll→re-read
 //! (`ErgoTree.scala:384-398`). The Relation2 `0x85` bool-pair compaction is
-//! bypassed for free (it never reaches the `Expr::Const` arm the sink lives
-//! in), so `true && (1 == 1)` segregates to a header-`0x10` tree with a
-//! ZERO-entry table, matching the oracle. Oracle-exact for
+//! bypassed for free (a compacted bool pair never reaches the `Expr::Const`
+//! arm the sink lives in — unit-pinned: `BinAnd(true,true)` → `ed8503`, sink
+//! empty). NOTE the oracle's `cc true && (1 == 1)` zero-entry table also
+//! depends on its `1 == 1 → true` CONSTANT FOLD, which is D-C7/Task-5 scope —
+//! until that lands, our tree for that source carries three Int placeholders
+//! and stays in the mismatch set. Oracle-exact today for
 //! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` (was our
 //! `00d191a304c801`).
 //!
