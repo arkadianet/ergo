@@ -77,6 +77,36 @@
       "source": "/**\n * Uses an unsupported tag.\n * @author someone\n * @param threshold the minimum height\n * @returns\n */\n@contract def tagged(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
       "verb": "ct",
       "oracle": "OK 0006746167676564185573657320616e20756e737570706f72746564207461672e01040001097468726573686f6c6412746865206d696e696d756d206865696768740005d191a37300"
+    },
+    {
+      "name": "str_comma_default",
+      "source": "/**\n * String default containing a comma.\n * @param s a label\n */\n@contract def strComma(s: String = \"a,b\") = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 0008737472436f6d6d6122537472696e672064656661756c7420636f6e7461696e696e67206120636f6d6d612e0166010103612c620101730761206c6162656c0006d191a304d00f"
+    },
+    {
+      "name": "str_paren_default",
+      "source": "/**\n * String default containing a close paren.\n */\n@contract def strParen(s: String = \")\") = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 0008737472506172656e28537472696e672064656661756c7420636f6e7461696e696e67206120636c6f736520706172656e2e016601010129010173000006d191a304d00f"
+    },
+    {
+      "name": "str_escaped_quote_default",
+      "source": "/**\n * String default containing an escaped quote.\n */\n@contract def strQuote(s: String = \"\\\"\") = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 000873747251756f74652b537472696e672064656661756c7420636f6e7461696e696e6720616e20657363617065642071756f74652e01660101025c22010173000006d191a304d00f"
+    },
+    {
+      "name": "str_multi_param",
+      "source": "/**\n * Mixed params with a string default carrying a comma and paren.\n */\n@contract def strMulti(a: Int = 1, s: String = \"x,y)\", b: Int = 2) = sigmaProp(HEIGHT > a && HEIGHT > b)\n",
+      "verb": "ct",
+      "oracle": "OK 00087374724d756c74693e4d6978656420706172616d732077697468206120737472696e672064656661756c74206361727279696e67206120636f6d6d6120616e6420706172656e2e030466040101020104782c79290104030161000001730001016200020ad1ed91a3730091a37302"
+    },
+    {
+      "name": "dup_param_names",
+      "source": "/**\n * Two parameters share a name — Scala rejects (uniqueness require).\n */\n@contract def dupNames(a: Int, a: Long) = sigmaProp(HEIGHT > a)\n",
+      "verb": "ct",
+      "oracle": "REJECT 0:0 IllegalArgumentException"
     }
   ]
 }

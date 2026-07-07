@@ -91,6 +91,13 @@ pub enum ContractError {
          (TODO(M7-hashmap-order))"
     )]
     TooManyParamsForOrdering { count: usize, max: usize },
+    /// Two `@contract` parameters share the same name. Scala's
+    /// `ContractTemplate.validate()` `require(!paramNames.contains(p.name), ...)`
+    /// (ContractTemplate.scala:116-117) throws `IllegalArgumentException` — a
+    /// runtime reject, NOT a last-wins collapse (verified: oracle REJECTs
+    /// `@contract def f(a: Int, a: Long)` with `IllegalArgumentException`).
+    #[error("parameter names must be unique; found duplicate parameter with name {name}")]
+    DuplicateParamName { name: String },
 }
 
 /// Compile an ErgoScript contract-template source into a [`ContractTemplate`]
@@ -170,6 +177,19 @@ pub fn compile_contract(
                 .collect::<Result<Vec<_>, _>>()?,
         )
     };
+
+    // Reject duplicate parameter names (ContractTemplate.validate(),
+    // ContractTemplate.scala:116-117): a runtime `require` throwing
+    // IllegalArgumentException. Mirror it AFTER typecheck, as Scala does in the
+    // ContractTemplate constructor. NOT last-wins — the template is rejected.
+    let mut seen_names = std::collections::HashSet::with_capacity(params.len());
+    for p in params {
+        if !seen_names.insert(p.name.as_str()) {
+            return Err(ContractError::DuplicateParamName {
+                name: p.name.clone(),
+            });
+        }
+    }
 
     let parameters = params
         .iter()
@@ -384,5 +404,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::Compile(_)));
+    }
+
+    #[test]
+    fn duplicate_param_names_reject() {
+        // Scala's `ContractTemplate.validate()` rejects duplicate parameter names
+        // with IllegalArgumentException (ContractTemplate.scala:116-117) — NOT a
+        // last-wins collapse (verified: ct oracle REJECTs `def f(a: Int, a: Long)`
+        // with IllegalArgumentException).
+        let err = compile_contract(
+            "/* */\n@contract def c(a: Int, a: Long) = sigmaProp(HEIGHT > a)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::DuplicateParamName { name } if name == "a"));
     }
 }

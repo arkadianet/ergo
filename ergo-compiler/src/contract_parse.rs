@@ -313,13 +313,21 @@ fn extract_param_docs(mut tokens: &[DocToken]) -> Vec<ParameterDoc> {
 
 /// Split a parameter list body (text INSIDE the outer parens) on the top-level
 /// commas — commas nested inside `[]`/`()`/`{}` (tuple/type-arg/collection
-/// syntax) do not separate parameters.
+/// syntax), OR inside a `"..."` string-literal default, do not separate
+/// parameters. Scala's `param.rep(1, ",")` reads each `ExprLiteral` with the
+/// real string grammar (`Literals.String`, Literals.scala:149-156, `\"`-escape
+/// aware), so a `,` inside a string literal is consumed as content, not a
+/// separator (verified: oracle ACCEPTs `@contract def f(s: String = "a,b")`).
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut depth = 0i32;
+    let mut str_scan = StrScan::new();
     let mut parts = Vec::new();
     let mut last = 0usize;
     for (i, &b) in bytes.iter().enumerate() {
+        if str_scan.step(b) {
+            continue; // inside a string literal (or the char that opened/closed it)
+        }
         match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
@@ -332,6 +340,50 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     }
     parts.push(&s[last..]);
     parts
+}
+
+/// Minimal `"..."` string-literal tracker for the parameter-list scanners
+/// (splitter + closing-`)` matcher). Mirrors the reject-side of Scala's
+/// `Literals.String` (Literals.scala:140-156): a `"` opens a literal, `\`
+/// escapes the next byte (so `\"` does NOT close), and an unescaped `"` closes
+/// it. This makes `,`/`)` inside a string-literal default non-structural, exactly
+/// as fastparse's `param.rep(1, ",")` and `"(" ~ ... ~ ")"` treat them.
+///
+/// Byte-level scanning is safe: every delimiter it cares about (`"`, `\`, and
+/// the paren/comma bytes at the call sites) is ASCII, and UTF-8 continuation
+/// bytes are all >= 0x80, so they never alias one.
+struct StrScan {
+    in_str: bool,
+    escaped: bool,
+}
+
+impl StrScan {
+    fn new() -> Self {
+        StrScan {
+            in_str: false,
+            escaped: false,
+        }
+    }
+
+    /// Feed one byte; returns `true` iff this byte is part of a string literal
+    /// (including its opening/closing quote) and must NOT be read as structural.
+    fn step(&mut self, b: u8) -> bool {
+        if self.in_str {
+            if self.escaped {
+                self.escaped = false;
+            } else if b == b'\\' {
+                self.escaped = true;
+            } else if b == b'"' {
+                self.in_str = false;
+            }
+            true
+        } else if b == b'"' {
+            self.in_str = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Find the top-level `=` that separates a parameter's `Type` from its literal
@@ -382,7 +434,10 @@ fn parse_param(part: &str, base: usize, tree_version: u8) -> Result<ContractPara
         }
         None => (type_and_default, None),
     };
-    let tpe = parse_type(type_str, tree_version)?;
+    // Shift `parse_type` positions (relative to the sliced type string) back
+    // into whole-source coordinates, matching the body path's `shift_err`. The
+    // type string starts at `base + colon + 1` in the source.
+    let tpe = parse_type(type_str, tree_version).map_err(|e| shift_err(e, base + colon + 1))?;
     Ok(ContractParam { name, tpe, default })
 }
 
@@ -484,12 +539,21 @@ pub fn parse_contract(
     if bytes.get(j) != Some(&b'(') {
         return Err(syntax(j, "'(' of the parameter list"));
     }
-    // Balanced-paren match to the closing `)`.
+    // Balanced-paren match to the closing `)` — string-literal aware, so a `)`
+    // inside a `"..."` default (e.g. `s: String = ")"`) does not close the list
+    // early (verified: oracle ACCEPTs it). Mirrors fastparse reading the closing
+    // `)` of `params` only AFTER each param's `ExprLiteral` string is consumed.
     let params_open = j + 1;
     let mut depth = 1i32;
     let mut k = params_open;
+    let mut str_scan = StrScan::new();
     while k < bytes.len() && depth > 0 {
-        match bytes[k] {
+        let b = bytes[k];
+        if str_scan.step(b) {
+            k += 1;
+            continue;
+        }
+        match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
             _ => {}
@@ -703,5 +767,80 @@ mod tests {
         let err = parse_contract("/* */\n@contract def c() = )(", 3).unwrap_err();
         assert!(matches!(err, ParseError::Syntax { .. }));
         assert!(err.pos() as usize >= "/* */\n@contract def c() = ".len());
+    }
+
+    // ----- string-literal default delimiters (M7 finding 1) -----
+
+    #[test]
+    fn signature_string_default_with_comma_parses() {
+        // A `,` inside a string-literal default is NOT a parameter separator —
+        // Scala reads each `ExprLiteral` with the real string grammar
+        // (Literals.String), so the comma is string content (oracle ACCEPTs).
+        let t = pc("/* */\n@contract def c(s: String = \"a,b\") = sigmaProp(true)");
+        assert_eq!(t.signature.params.len(), 1);
+        assert_eq!(t.signature.params[0].tpe, SType::SString);
+        assert!(matches!(
+            &t.signature.params[0].default,
+            Some(Expr::StringConst { value, .. }) if value == "a,b"
+        ));
+    }
+
+    #[test]
+    fn signature_string_default_with_close_paren_parses() {
+        // A `)` inside a string default must not close the parameter list early.
+        let t = pc("/* */\n@contract def c(s: String = \")\") = sigmaProp(true)");
+        assert_eq!(t.signature.params.len(), 1);
+        assert!(matches!(
+            &t.signature.params[0].default,
+            Some(Expr::StringConst { value, .. }) if value == ")"
+        ));
+    }
+
+    #[test]
+    fn signature_string_default_with_escaped_quote_parses() {
+        // `\"` inside the string does not terminate it. Scala's `strip` removes
+        // only the outer quotes, leaving the raw two-char `\"` content (verified
+        // byte-exact against the ct oracle: constValue bytes 02 5c 22).
+        let t = pc("/* */\n@contract def c(s: String = \"\\\"\") = sigmaProp(true)");
+        assert_eq!(t.signature.params.len(), 1);
+        assert!(matches!(
+            &t.signature.params[0].default,
+            Some(Expr::StringConst { value, .. }) if value == "\\\""
+        ));
+    }
+
+    #[test]
+    fn signature_multi_param_string_delimiters_dont_split() {
+        // A middle string default carrying both `,` and `)` must not corrupt the
+        // top-level comma split nor the closing-paren match.
+        let t = pc(
+            "/* */\n@contract def c(a: Int = 1, s: String = \"x,y)\", b: Int = 2) \
+             = sigmaProp(HEIGHT > a && HEIGHT > b)",
+        );
+        let names: Vec<&str> = t.signature.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "s", "b"]);
+        assert!(matches!(
+            &t.signature.params[1].default,
+            Some(Expr::StringConst { value, .. }) if value == "x,y)"
+        ));
+    }
+
+    #[test]
+    fn param_type_error_position_is_source_relative() {
+        // Param-type parse errors shift into whole-source coordinates (like the
+        // body path), not the sliced type-string offset. The type is
+        // bracket-balanced (so the paren-matcher is not what fails) but not a
+        // valid type, so `parse_type` rejects INSIDE the type region.
+        let source = "/* */\n@contract def c(x: Int Int) = sigmaProp(true)";
+        let err = parse_contract(source, 3).unwrap_err();
+        assert!(matches!(err, ParseError::Syntax { .. }));
+        // The error lands on the trailing `Int` INSIDE the type region — an
+        // unshifted (slice-relative) offset would be ~5, well before it.
+        let type_at = source.find("Int").expect("type present");
+        assert!(
+            err.pos() as usize >= type_at,
+            "param-type error pos {} should be >= type position {type_at}",
+            err.pos()
+        );
     }
 }
