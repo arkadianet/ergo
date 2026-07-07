@@ -2,7 +2,7 @@
   "_captured": "2026-07-07",
   "_format": "verb ct; oracle reply verbatim (never hand-edited). 'OK <hex>' = ContractTemplate.serializer.toBytes(SigmaTemplateCompiler(NET).compile(source)) as Base16; 'REJECT <line:col> <ExClass>'.",
   "_source": "TyperOracle.scala ct verb, scala-cli sigma-state 6.0.2 (Scala 2.12.21, JVM 17), ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet. Sources under test-vectors/ergoscript/contract/sources/.",
-  "_note": "M7 byte-exact target is the <=4-param ACCEPT class. The 'five_params' vector is an oracle-ACCEPT the Rust twin DEFERS (>=5 params => JVM-HashMap placeholder-order port, TODO M7-hashmap-order): compile_contract must REJECT it with ContractError::TooManyParamsForOrdering, NOT byte-match. The 'returns_with_text' vector is an oracle-REJECT (returnTag consumes only the bare '@returns' literal, trailing text fails the docLine Newline).",
+  "_note": "M7 byte-exact target is the FULL ACCEPT class, ≤4 params (Map1..Map4 declaration order) AND ≥5 params (Scala 2.12 HashTrieMap placeholder-iteration order, e.g. five/six/eight_hashorder — name sets whose order differs from declaration and alphabetical). The 'returns_with_text' vector is an oracle-REJECT (returnTag consumes only the bare '@returns' literal, trailing text fails the docLine Newline).",
   "tree_version": 3,
   "network": "testnet",
   "vectors": [
@@ -107,6 +107,24 @@
       "source": "/**\n * Two parameters share a name — Scala rejects (uniqueness require).\n */\n@contract def dupNames(a: Int, a: Long) = sigmaProp(HEIGHT > a)\n",
       "verb": "ct",
       "oracle": "REJECT 0:0 IllegalArgumentException"
+    },
+    {
+      "name": "five_hashorder",
+      "source": "/**\n * Five SigmaProp params whose HashTrieMap iteration order (2.12) differs from\n * both declaration and alphabetical order — the recon's p5 discriminator.\n */\n@contract def gate5h(zeta: SigmaProp, alpha: SigmaProp, mike: SigmaProp, bravo: SigmaProp, oscar: SigmaProp) = zeta && alpha && mike && bravo && oscar\n",
+      "verb": "ct",
+      "oracle": "OK 0006676174653568950146697665205369676d6150726f7020706172616d732077686f73652048617368547269654d617020697465726174696f6e206f726465722028322e31322920646966666572732066726f6d20626f7468206465636c61726174696f6e20616e6420616c7068616265746963616c206f7264657220e2809420746865207265636f6e2773207035206469736372696d696e61746f722e0508080808080005047a657461000005616c7068610001046d696b65000205627261766f0003056f73636172000412ea02ea02ea02ea0273017300730473027303"
+    },
+    {
+      "name": "six_hashorder",
+      "source": "/**\n * Six SigmaProp params — HashTrieMap order (2.12) differs from declaration and\n * alphabetical order.\n */\n@contract def gate6h(epsilon: SigmaProp, iota: SigmaProp, nu: SigmaProp, rho: SigmaProp, tau: SigmaProp, phi: SigmaProp) = epsilon && iota && nu && rho && tau && phi\n",
+      "verb": "ct",
+      "oracle": "OK 000667617465366862536978205369676d6150726f7020706172616d7320e280942048617368547269654d6170206f726465722028322e31322920646966666572732066726f6d206465636c61726174696f6e20616e6420616c7068616265746963616c206f726465722e06080808080808000607657073696c6f6e000004696f74610001026e7500020372686f000303746175000403706869000516ea02ea02ea02ea02ea02730273017300730473037305"
+    },
+    {
+      "name": "eight_hashorder",
+      "source": "/**\n * Eight SigmaProp params — the recon's p8 discriminator; includes the\n * zeta/bravo and delta/beta root-bucket collisions.\n */\n@contract def gate8h(sigma: SigmaProp, delta: SigmaProp, kappa: SigmaProp, omega: SigmaProp, theta: SigmaProp, gamma: SigmaProp, lambda: SigmaProp, beta: SigmaProp) = sigma && delta && kappa && omega && theta && gamma && lambda && beta\n",
+      "verb": "ct",
+      "oracle": "OK 0006676174653868774569676874205369676d6150726f7020706172616d7320e2809420746865207265636f6e2773207038206469736372696d696e61746f723b20696e636c7564657320746865207a6574612f627261766f20616e642064656c74612f6265746120726f6f742d6275636b657420636f6c6c6973696f6e732e0808080808080808080008057369676d6100000564656c74610001056b617070610002056f6d656761000305746865746100040567616d6d610005066c616d6264610006046265746100071eea02ea02ea02ea02ea02ea02ea0273037305730073027304730773017306"
     }
   ]
 }
