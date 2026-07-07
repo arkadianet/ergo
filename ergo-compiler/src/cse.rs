@@ -69,6 +69,34 @@
 //! keystone's `HEIGHT+1` is built by-name inside its If-branch and stays
 //! thunk-local even though it is bound-var-free.
 //!
+//! # Pair projections bypass thunk isolation (M5 Task 5d — `unzipPair`/`tuplesCache`)
+//!
+//! One node class breaks the "first-build scope decides identity" rule above:
+//! pair projections `t._1`/`t._2`. Scalan's `unzipPair` (`Tuples.scala:57-74`,
+//! pinned 6.0.2) memoizes them in a PROCESS-WIDE `tuplesCache`
+//! (`AVHashMap`, `:57`), a field on the IRContext, keyed by the pair `Ref`
+//! (nodeId identity) — NOT a per-thunk table. Two facts do all the work:
+//!
+//! 1. **Both-projections-eager** (`:65`): the FIRST access to EITHER `t._1` or
+//!    `t._2` constructs BOTH `First(t)` and `Second(t)` together, in the current
+//!    scope, even if only one is used there.
+//! 2. **Process-wide memo** (`:63-67`): once `(First(t), Second(t))` is cached
+//!    for pair `t`, EVERY later `t._1`/`t._2` anywhere — including inside a
+//!    sibling `if`-branch thunk — returns the SAME projection symbol, bypassing
+//!    thunk hash-cons isolation (`findDef`, `Thunks.scala:219-226`). This is the
+//!    SOLE such bypass; every non-projection node obeys thunk isolation.
+//!
+//! We port this as [`Interner::pair_projections`], a process-wide
+//! `BTreeMap<SymId, (SymId, SymId)>` keyed by the pair RECEIVER's `SymId`, never
+//! reset at scope push/pop ([`Interner::pair_projection`]). Because a root-shared
+//! pair has ONE receiver `SymId` across branches (global hash-cons) while a
+//! thunk-local pair gets a DISTINCT one, sharing happens IFF the receiver is
+//! root-shared — reproducing the `basis-token` cross-branch `SELF.tokens(1)._2`
+//! ValDef (`Tuples.scala:57-74`). It touches ONLY `SelectField` on `field_idx
+//! ∈ {1,2}`; `Plus` and every other opcode never enter it, so the E2 keystone
+//! (`HEIGHT+1`, a `Plus`) is untouchable. Literal-tuple receivers take the
+//! `Tup(a,b)` case (`:60`) and stay on the general path.
+//!
 //! # Lambdas are NOT thunks (spike §1.4 — the cannonQ correction)
 //!
 //! `FuncValue` (`0xD9`) bodies do NOT push a hash-cons scope: `lambda`
@@ -110,6 +138,16 @@ const VAL_DEF: u8 = 0xD6;
 const VAL_USE: u8 = 0x72;
 // `0xF4` BinXor is deliberately absent: it is EAGER and routes through the
 // general path (both arms in the current scope). See module docs.
+
+/// `SelectField` tuple projection (`0x8C`, types.rs:303) — `t._1`/`t._2` on a
+/// pair. The sole node routed through the process-wide pair-projection memo
+/// (Scalan `unzipPair`, `Tuples.scala:57-74`); see the module docs.
+const SELECT_FIELD: u8 = 0x8C;
+/// `Tuple` literal (`0x86`, types.rs). A `._1`/`._2` on a LITERAL tuple is the
+/// Scala `unzipPair` `Tup(a,b)` case (`Tuples.scala:60`): it projects to the
+/// element directly, NOT through `First`/`Second`, so it bypasses the memo and
+/// stays on the general path.
+const TUPLE: u8 = 0x86;
 
 // ----- admission-gate predicate opcodes (Task 2, spike §5) -----
 //
@@ -276,6 +314,14 @@ pub struct Interner {
     scope_kinds: Vec<ScopeKind>,
     /// The innermost open placement scope during interning.
     cur_scope: ScopeId,
+    /// Process-wide pair-projection memo — the port of Scalan's `tuplesCache`
+    /// (`Tuples.scala:57`, pinned 6.0.2). Keyed by a pair RECEIVER's [`SymId`] →
+    /// its `(First, Second)` projection symbols. Deliberately NOT cleared at
+    /// scope push/pop: a projection first built in an enclosing scope is reused
+    /// verbatim inside a sibling thunk, which is exactly how Scala shares one
+    /// `SELF.tokens(1)._2` ValDef across both `if` branches. See the module docs
+    /// and [`pair_projection`](Self::pair_projection).
+    pair_projections: BTreeMap<SymId, (SymId, SymId)>,
 }
 
 /// The kind of a schedule scope frame.
@@ -307,6 +353,7 @@ impl Interner {
             scope_parents: vec![None],
             scope_kinds: vec![ScopeKind::Root],
             cur_scope: 0,
+            pair_projections: BTreeMap::new(),
         }
     }
 
@@ -369,6 +416,26 @@ impl Interner {
                     Node::Op(node.payload.clone()),
                     vec![r_scope],
                 )
+            }
+            // Pair projection `t._1`/`t._2` — the process-wide `tuplesCache`
+            // bypass (Tuples.scala:57-74). On the first projection of the pair
+            // receiver `t` (via EITHER field), build BOTH First/Second together
+            // and memoize keyed by `t`'s SymId; later projections of `t` anywhere
+            // — incl. a sibling thunk — reuse them, bypassing thunk isolation.
+            // Only `field_idx ∈ {1,2}` on a NON-literal-tuple receiver enters:
+            // `._3+` (a >2-tuple) and a literal-tuple `Tup(a,b)` (Tuples.scala:60)
+            // stay on the general path.
+            SELECT_FIELD => {
+                if let Payload::SelectField { input, field_idx } = &node.payload {
+                    if matches!(field_idx, 1 | 2) {
+                        let p = self.intern(input);
+                        if !matches!(self.syms[p.0 as usize].key.tag, KeyTag::Op(TUPLE)) {
+                            let (first, second) = self.pair_projection(p, input);
+                            return if *field_idx == 1 { first } else { second };
+                        }
+                    }
+                }
+                self.intern_general(node)
             }
             // Every other opcode — incl. eager BinXor (0xF4) AND OptionGetOrElse
             // (0xE5), whose default is built EAGERLY in the enclosing scope, not a
@@ -518,6 +585,50 @@ impl Interner {
             child_syms,
             literal,
             Node::Op(node.payload.clone()),
+        )
+    }
+
+    /// Port of Scalan's `unzipPair` + process-wide `tuplesCache`
+    /// (`Tuples.scala:57-74`, pinned 6.0.2). On the FIRST projection of pair
+    /// receiver `p` (reached via `._1` OR `._2`), eagerly intern BOTH `First(p)`
+    /// and `Second(p)` in the CURRENT scope (`:65` builds them together) and
+    /// memoize them keyed by `p`'s [`SymId`]; every later projection of `p` —
+    /// including inside a sibling thunk — returns the memoized pair verbatim
+    /// (`:63-67`), the sole documented bypass of thunk hash-cons isolation.
+    /// Returns `(first, second)`.
+    ///
+    /// The eagerly-built sibling (the projection not requested here) is placed at
+    /// `cur_scope` like `p` itself; if it is never used elsewhere it is
+    /// unreachable from any schedule root and emits no `ValDef` (output-neutral).
+    /// `input` is the original receiver `Expr`, kept ONLY to seed each
+    /// projection's rebuild template — `build_op` reads a `SelectField`'s scalar
+    /// `field_idx` and substitutes the interned child `p`, never this stale
+    /// input.
+    fn pair_projection(&mut self, p: SymId, input: &Expr) -> (SymId, SymId) {
+        if let Some(&pair) = self.pair_projections.get(&p) {
+            return pair;
+        }
+        let first = self.select_projection(p, input, 1);
+        let second = self.select_projection(p, input, 2);
+        self.pair_projections.insert(p, (first, second));
+        (first, second)
+    }
+
+    /// Intern one `SelectField(p, field_idx)` projection: builds the key with the
+    /// exact `decompose` literal (so it hash-cons-agrees with any general-path
+    /// `SelectField` of the same shape) and a rebuild template carrying the
+    /// scalar `field_idx`.
+    fn select_projection(&mut self, p: SymId, input: &Expr, field_idx: u8) -> SymId {
+        let payload = Payload::SelectField {
+            input: Box::new(input.clone()),
+            field_idx,
+        };
+        let (_, literal) = decompose(&payload);
+        self.finish(
+            KeyTag::Op(SELECT_FIELD),
+            vec![p],
+            literal,
+            Node::Op(payload),
         )
     }
 
@@ -742,6 +853,46 @@ impl Interner {
         usage
     }
 
+    /// [`flat_usage`](Self::flat_usage) restricted to the syms REACHABLE from
+    /// `root` — Scala counts `hasManyUsagesGlobal` over the reachable
+    /// `flatSchedule` (`AstGraphs.scala:197-206`), never over dead nodes. This
+    /// matters ONLY since the pair-projection memo (`Tuples.scala:65`): a `._1`
+    /// access eagerly builds the `._2` sibling too, and if that sibling is never
+    /// used it is unreachable from every schedule root, so — exactly as in Scala —
+    /// it must NOT count as a use of its pair receiver (otherwise a single-`._1`
+    /// receiver like `b.creationInfo` would spuriously reach 2 uses and hoist).
+    /// For a memo-free tree every allocated sym is reachable, so this is identical
+    /// to [`flat_usage`](Self::flat_usage).
+    fn flat_usage_reachable(&self, root: SymId) -> BTreeMap<SymId, usize> {
+        let reachable = self.reachable_from(root);
+        let mut usage: BTreeMap<SymId, usize> = BTreeMap::new();
+        for &s in &reachable {
+            for &child in &self.syms[s.0 as usize].key.children {
+                *usage.entry(child).or_insert(0) += 1;
+            }
+        }
+        usage
+    }
+
+    /// The set of syms reachable from `root` by following structural children
+    /// (`key.children`) transitively. Lambda arg placeholders and bodies are
+    /// reached through their referencing nodes' children (a body's arg-using node
+    /// carries the arg sym in its own `key.children`), so this closure is
+    /// complete without special-casing `Node::Func`.
+    fn reachable_from(&self, root: SymId) -> BTreeSet<SymId> {
+        let mut seen: BTreeSet<SymId> = BTreeSet::new();
+        let mut stack = vec![root];
+        while let Some(s) = stack.pop() {
+            if !seen.insert(s) {
+                continue;
+            }
+            for &c in &self.syms[s.0 as usize].key.children {
+                stack.push(c);
+            }
+        }
+        seen
+    }
+
     /// `has_many(sym) := usage(sym) > 1` — predicate P1 of the admission gate
     /// (`mainG.hasManyUsagesGlobal(s)`, `TreeBuilding.scala:503`). Takes a map from
     /// [`flat_usage`](Self::flat_usage) so callers count once and query many times.
@@ -854,7 +1005,7 @@ impl Interner {
     /// chaincash root order `[1,2,3,4,5]` (a naive descend-in-source DFS predicts
     /// `[1,2,4,3,5]`).
     pub fn materialize(&self, root: SymId) -> Expr {
-        let usage = self.flat_usage();
+        let usage = self.flat_usage_reachable(root);
         let env: BTreeMap<SymId, u32> = BTreeMap::new();
         // The root program scope is scope 0 (`scope_parents[0] == None`).
         self.process_scope(root, 0, &env, 0, &usage)
@@ -1615,6 +1766,7 @@ mod tests {
     const GT: u8 = 0x91;
     const LT: u8 = 0x8F;
     const HEIGHT_OP: u8 = 0xA3;
+    const INPUTS_OP: u8 = 0xA4;
     const BIN_XOR: u8 = 0xF4;
     /// `opt.getOrElse(d)` — NOT a scope-push site (M5 Task 5c/R2): its default is
     /// built eagerly in the enclosing scope. Test-local only.
@@ -1655,6 +1807,23 @@ mod tests {
 
     fn height() -> Expr {
         op0(HEIGHT_OP)
+    }
+
+    /// An opaque non-literal-tuple pair receiver (stands in for `SELF.tokens(1)`
+    /// at the sym level — the memo keys on the receiver's SymId, not its type).
+    fn pair_receiver() -> Expr {
+        op0(INPUTS_OP)
+    }
+
+    /// `t._i` — a `SelectField` pair projection (`0x8C`, 1-based `field_idx`).
+    fn select_field(input: Expr, field_idx: u8) -> Expr {
+        Expr::Op(IrNode {
+            opcode: SELECT_FIELD,
+            payload: Payload::SelectField {
+                input: Box::new(input),
+                field_idx,
+            },
+        })
     }
 
     /// `HEIGHT + 1` — the shared keystone subexpression.
@@ -1915,6 +2084,98 @@ mod tests {
             1,
             "sibling getOrElse defaults share (eager, enclosing-scope) — NOT thunk-local"
         );
+    }
+
+    // ----- pair projections (M5 Task 5d, Tuples.scala:57-74) -----
+
+    #[test]
+    fn pair_projection_root_forced_receiver_shares_second_across_if_branches() {
+        // Probe A (m5-basis-token-recon §3): the pair receiver is projected at
+        // ROOT via `._1`, then `._2` in BOTH `if` branches. Scala's `unzipPair`
+        // builds First+Second together at the root `._1` (Tuples.scala:65) and
+        // memoizes them process-wide (`tuplesCache`, :57), so both branch `._2`
+        // resolve to the ONE root Second symbol — the cross-branch ValDef share.
+        //   { val r1 = p._1; if (HEIGHT>0) p._2 else p._2 }
+        let e = block(
+            vec![valdef(1, select_field(pair_receiver(), 1))],
+            op3(
+                IF,
+                op2(GT, height(), int(0)),
+                select_field(pair_receiver(), 2),
+                select_field(pair_receiver(), 2),
+            ),
+        );
+        let mut it = Interner::new();
+        it.intern(&e);
+
+        // Exactly two projection symbols exist: the root First (`._1`) and the
+        // root Second (`._2`) — both branches reuse the memoized Second, none is
+        // rebuilt thunk-locally.
+        assert_eq!(
+            count_op(&it, SELECT_FIELD),
+            2,
+            "root `._1` forces First+Second at root; both branch `._2` reuse the memo"
+        );
+        // Both `if` branches (children[1]/[2]) resolve `._2` to the SAME SymId.
+        let if_sym = only_op(&it, IF);
+        let branches = it.children_of(if_sym);
+        assert_eq!(
+            branches[1], branches[2],
+            "both branch `._2` must resolve to the one shared root Second symbol"
+        );
+    }
+
+    #[test]
+    fn pair_projection_thunk_local_receiver_does_not_share_second_across_branches() {
+        // Probe B (m5-basis-token-recon §3, the CONTROL): the receiver is NEVER
+        // projected at root — its first projection is INSIDE each branch. Each
+        // branch builds a DISTINCT thunk-local receiver SymId, so the memo (keyed
+        // by receiver SymId) never bridges them: two distinct `._2`, NO share.
+        // This is the exact non-share that keeps `selfOut.tokens(1)._2` unshared.
+        //   if (HEIGHT>0) p._2 else p._2      // no root projection of p
+        let e = op3(
+            IF,
+            op2(GT, height(), int(0)),
+            select_field(pair_receiver(), 2),
+            select_field(pair_receiver(), 2),
+        );
+        let mut it = Interner::new();
+        it.intern(&e);
+
+        // Each branch: a distinct receiver + its eager First/Second pair → four
+        // projection symbols, and the two `._2` are DISTINCT.
+        assert_eq!(
+            count_op(&it, SELECT_FIELD),
+            4,
+            "thunk-local receivers give each branch its own First/Second pair"
+        );
+        let if_sym = only_op(&it, IF);
+        let branches = it.children_of(if_sym);
+        assert_ne!(
+            branches[1], branches[2],
+            "sibling-thunk `._2` on a thunk-local receiver must NOT share"
+        );
+    }
+
+    #[test]
+    fn pair_projection_unused_sibling_does_not_inflate_receiver_usage() {
+        // The eager sibling (Tuples.scala:65) must be output-neutral when unused:
+        // `p._1 > 5` builds `._1` AND (eagerly) `._2`, but `._2` is unreachable
+        // from the root, so — like Scala's reachable-flatSchedule count — it must
+        // NOT add a use of `p`. Otherwise `p` would reach 2 uses and wrongly hoist.
+        let e = op2(GT, select_field(pair_receiver(), 1), int(5));
+        let mut it = Interner::new();
+        let root = it.intern(&e);
+        let usage = it.flat_usage_reachable(root);
+        // The receiver `p` (INPUTS) is used exactly ONCE (by the live `._1`),
+        // not twice — the dead `._2` sibling contributes nothing.
+        let p = only_op(&it, INPUTS_OP);
+        assert_eq!(
+            usage.get(&p).copied().unwrap_or(0),
+            1,
+            "unused eager sibling must not count as a use of the receiver"
+        );
+        assert!(!Interner::has_many(&usage, p));
     }
 
     // ----- lambdas (spike §1.4) -----
