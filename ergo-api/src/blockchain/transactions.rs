@@ -91,7 +91,7 @@ fn render_indexed_tx(state: &BlockchainState, tx: &IndexedErgoTransaction) -> Re
     }
 }
 
-pub(super) fn build_indexed_tx_response(
+pub(crate) fn build_indexed_tx_response(
     state: &BlockchainState,
     tx: &IndexedErgoTransaction,
 ) -> Result<IndexedErgoTransactionResponse, String> {
