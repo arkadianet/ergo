@@ -273,7 +273,10 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
 ///   Long, b: Long) => a + b}; sigmaProp(Coll(1L, 2L).fold(0L, f) == 3L) }`
 ///   → OK, the D-C4 both-accept class, e.g. corpus
 ///   `crystalpool/swap-tokens.es`) — stay ACCEPTED: the gate keys on the
-///   APPLICATION node, not on the `FuncValue`.
+///   APPLICATION node, not on the `FuncValue`. Those accepted multi-arg
+///   DEFINITIONS are lowered to the tupled 1-arg form downstream by
+///   [`crate::tuple`] (M4 Task 7, D-C4 CLOSED), which is why they are
+///   evaluable and byte-matchable — this gate itself is unchanged.
 /// - **A lambda with a FUNCTION-typed parameter rejects** (`{(f: Int => Int)
 ///   => f(10)}` and the param-unused body variant → `REJECT 0:0
 ///   MatchError`) UNLESS the lambda is the rhs of a ValDef whose id has zero
@@ -941,6 +944,23 @@ pub fn compile(
     // so this second pass is a no-op for them.
     let root = crate::isproven::eliminate_isproven(root);
 
+    // Multi-arg lambda TUPLING (M4 Task 7, D-C4; recon-transforms.md §6;
+    // `crate::tuple`): a fold-slot lambda `{(a, b) => ...}` emits as a 2-arg
+    // `FuncValue`, which is wire-legal but unevaluable — the reference JIT
+    // hard-errors on any non-1-arg function (`values.scala:1042-1056`). Scala's
+    // IR pipeline lowers it to the tupled 1-arg form
+    // `FuncValue([(id, STuple(t_a, t_b))], body[a := SelectField(ValUse(id),1),
+    // b := SelectField(ValUse(id),2)])` (`GraphBuilding.scala:917-924` +
+    // `TreeBuilding.scala:185-190/454-457`) — the only shape real `Fold` trees
+    // carry on-chain. Runs AFTER `graph_building_lambda_reject` above (which has
+    // already rejected the non-1-arg *applications* Scala refuses; every
+    // multi-arg *definition* surviving to here is the D-C4 both-accept class —
+    // fold-slot and un-applied lambdas both compilers accept) and is a no-op for
+    // every 1-arg lambda. The tuple param reuses the first arg's id, matching
+    // Scala's `varId = defId + 1` for the non-CSE case (byte-verified against the
+    // oracle).
+    let root = crate::tuple::tuple_lambdas(root);
+
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
     // hashes `toProposition(replaceConstants = isConstantSegregation)`
     // (`ErgoAddress.scala:201-204`), i.e. the constant-INLINED proposition. The
@@ -1068,6 +1088,21 @@ mod tests {
             .expect("typecheck");
         let root = emit(&typed).expect("emit");
         fold_direct_const_casts(root).expect("fold_direct_const_casts")
+    }
+
+    /// Depth-first search for the first `FuncValue` payload in `expr`
+    /// (test-only tree introspection — reuses [`push_children`]).
+    fn find_func_value(expr: &Expr) -> Option<&Payload> {
+        let mut stack = vec![expr];
+        while let Some(e) = stack.pop() {
+            if let Expr::Op(IrNode { payload, .. }) = e {
+                if matches!(payload, Payload::FuncValue { .. }) {
+                    return Some(payload);
+                }
+                push_children(payload, &mut stack);
+            }
+        }
+        None
     }
 
     fn generator_env() -> ScriptEnv {
@@ -1252,8 +1287,9 @@ mod tests {
     // ----- error paths: GraphBuilding parity gates (lib.rs D-C5, wave 1) -----
     // Every oracle fact below: captured 2026-07-07, 3 identical runs,
     // committed as compile_seed.json vectors (except the ACCEPT boundaries
-    // whose trees are unevaluable on our side — the D-C4 class — which are
-    // pinned here verdict-only).
+    // that byte-mismatch pending val-inline/pruning — the unused/aliased
+    // multi-arg-definition boundaries — which are pinned here verdict-only;
+    // the D-C4 fold-slot class is now tupled+committed, see the smoke vector).
 
     #[test]
     fn compile_bit_op_wrapped_in_sigmaprop_rejects_graph_building_class() {
@@ -1298,8 +1334,8 @@ mod tests {
         }
         // Accepts (oracle OK): the multi-arg DEFINITION is fine — unused
         // val, un-applied alias, and both fold-callback forms (direct and
-        // val-bound = the D-C4 both-accept class; our trees for these stay
-        // unevaluable multi-arg FuncValues, ledger D-C4/D-C5).
+        // val-bound = the D-C4 both-accept class; our trees for these now
+        // TUPLE to the evaluable 1-arg form, ledger D-C4 CLOSED / D-C5).
         for src in [
             "{ val unused = {(x: Int, y: Int) => x + y}; sigmaProp(true) }",
             "{ val f = {(x: Int, y: Int) => x + y}; val g = f; sigmaProp(true) }",
@@ -1308,6 +1344,27 @@ mod tests {
         ] {
             ct(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
         }
+    }
+
+    #[test]
+    fn compile_fold_slot_multi_arg_lambda_tuples_to_one_arg_funcvalue() {
+        // D-C4 (M4 Task 7): the fold's 2-arg lambda must reach `build_tree` as
+        // a TUPLED 1-arg `FuncValue(STuple)` — the only on-chain-valid shape.
+        // (The context-free smoke also byte-matches the oracle in
+        // compile_semantic_parity via compile_seed.json; this pins the shape
+        // through the full pipeline.)
+        let r = ct("sigmaProp(Coll(1, 2).fold(0, {(a: Int, b: Int) => a + b}) == 3)")
+            .expect("fold with a 2-arg lambda compiles");
+        let fv = find_func_value(&r.ergo_tree.body).expect("a FuncValue in the fold op slot");
+        let Payload::FuncValue { args, .. } = fv else {
+            unreachable!()
+        };
+        assert_eq!(args.len(), 1, "multi-arg lambda tupled to a single arg");
+        assert!(
+            matches!(&args[0].1, Some(SigmaType::STuple(ts)) if ts.len() == 2),
+            "the single arg is a 2-tuple, got {:?}",
+            args[0].1
+        );
     }
 
     #[test]

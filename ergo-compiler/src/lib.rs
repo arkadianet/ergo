@@ -644,26 +644,38 @@
 //! reachable exactly for these surviving-sigma cases, which the HasSigmas
 //! reconstruction (Tasks 8/9) will close.
 //!
-//! ### D-C4 — multi-arg lambda emits a multi-arg `FuncValue`: unevaluable
+//! ### D-C4 — multi-arg lambda TUPLING (CLOSED, M4 Task 7)
 //!
-//! A two-parameter lambda (`.fold(0L, {(a: Long, b: Box) => ...})`) emits as
-//! a FuncValue with TWO args — wire-legal (`FuncValueSerializer` carries
-//! `numArgs`) but unevaluable: the reference JIT hard-errors on any
+//! A two-parameter lambda (`.fold(0L, {(a: Long, b: Box) => ...})`) originally
+//! emitted as a FuncValue with TWO args — wire-legal (`FuncValueSerializer`
+//! carries `numArgs`) but unevaluable: the reference JIT hard-errors on any
 //! non-1-arg function (`values.scala:1042-1056`, `"Function must have 1
 //! argument"`), and our evaluator equally rejects it. Scala's compile output
 //! never carries one — the IR pipeline lowers multi-arg lambdas to the
 //! 1-arg TUPLED form (`FuncValue(Array((id, STuple(..))), body)` with
 //! `SelectField` projections), which is what real `Fold` trees look like
-//! on-chain. Same missing-lowering family as D-C3, discovered by the Task-10
-//! Err/Err telemetry (4 of the 18 kept corpus compile vectors — the
-//! crystalpool contracts — carry such lambdas; they PASS the semantic gate
-//! only because the dummy reduction context makes BOTH sides err before the
-//! FuncValue applies on the oracle side). M4/M5 lowering scope; no
-//! `SEMANTIC_SKIP` entry is needed while the Err/Err rule covers them, but
-//! any richer gate context will surface this first. Wave 1 NARROWED the
-//! class: a direct/aliased/inline `FuncApply` with != 1 args now rejects in
-//! oracle parity (D-C5 class 2), so D-C4 covers only the un-applied
-//! definitions and fold-callback uses that both compilers accept.
+//! on-chain.
+//!
+//! **M4 Task 7 CLOSED this** (`crate::tuple`, recon-transforms.md §6): a
+//! lowering pass in the pipeline's lowering block rewrites every multi-arg
+//! `FuncValue([(id1,t1),(id2,t2)], body)` to
+//! `FuncValue([(id1, STuple(t1,t2))], body[ValUse(id1) := SelectField(ValUse(id1),1),
+//! ValUse(id2) := SelectField(ValUse(id1),2)])` — the tuple param reuses the
+//! first arg's id, matching Scala's `varId = defId + 1`
+//! (`GraphBuilding.scala:917-924` + `TreeBuilding.scala:185-190/454-457`). A
+//! context-free fold smoke (`Coll(1,2).fold(0, {(a,b) => a + b}) == 3`) now
+//! compiles BYTE-IDENTICAL to the oracle and reduces Ok/Ok (committed via the
+//! recapture harness). The five crystalpool corpus contracts that carry
+//! fold-slot lambdas are now evaluable too, but stay byte-mismatched in
+//! `DC7_P2SH_MISMATCH_SET` pending val-inline/CSE (Tasks 8/9 — Scala inlines
+//! the single-use `val f` AND applies CSE, which we don't yet); under the
+//! dummy reduction context they still Err/Err (a fold-derived divide-by-zero
+//! or a context register read — verdict parity, audited in
+//! `AUDITED_ERR_PAIRS`). The reject side is UNCHANGED: a direct/aliased/inline
+//! `FuncApply` with != 1 args still rejects in oracle parity (D-C5 class 2,
+//! probe-confirmed 2026-07-07 — Scala REJECTS `f(1,2)` for a val-bound
+//! multi-arg `f` with `GraphBuildingException`); tupling applies to the
+//! multi-arg DEFINITIONS both compilers accept (fold-slot + un-applied).
 //!
 //! ### D-C5 — GraphBuilding reject-gate parity (Task-11 adversarial wave 1)
 //!
@@ -690,7 +702,10 @@
 //!    `FuncApply` with != 1 args rejects (direct/aliased/inline). The
 //!    multi-arg DEFINITION stays accepted — unused vals, un-applied aliases
 //!    and fold-callback uses (direct AND val-bound, e.g.
-//!    `crystalpool/swap-tokens.es`) are the D-C4 both-accept class.
+//!    `crystalpool/swap-tokens.es`) are the D-C4 both-accept class, and are
+//!    now TUPLED to the evaluable 1-arg form downstream (`crate::tuple`, D-C4
+//!    CLOSED — this reject gate is unchanged: it keys on the APPLICATION node,
+//!    never on the `FuncValue`, so tupling the definitions does not touch it).
 //! 3. **Function-typed lambda parameters** (same walk; `MatchError`): any
 //!    lambda with an `SFunc`-typed param rejects unless it is the rhs of an
 //!    UNUSED val (oracle: pruned → ACCEPT). Residual (reject-side bounded,
@@ -944,6 +959,7 @@ pub mod span;
 pub mod stype;
 pub mod token;
 pub mod tree;
+mod tuple;
 pub mod typecheck;
 pub mod typed;
 pub mod typed_print;

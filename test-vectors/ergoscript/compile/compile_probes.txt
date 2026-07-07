@@ -11,10 +11,15 @@
 #
 # Selection rule: REJECT probes (the wave-1 gates are all reject-direction)
 # plus the ACCEPT fold-boundary controls whose reductions AGREE on both
-# sides. ACCEPT boundaries whose trees are unevaluable on OUR side (the
-# D-C4 multi-arg-FuncValue class: unused/fold-slot lambdas) are deliberately
-# NOT committed — the semantic gate would flag them mixed Ok/Err; they are
-# pinned verdict-only in tree.rs unit tests instead.
+# sides. HISTORICAL NOTE (pre-M4-Task-7): ACCEPT boundaries whose trees were
+# unevaluable on OUR side — the D-C4 multi-arg-FuncValue class (fold-slot
+# lambdas) — were deliberately NOT committed because the semantic gate would
+# flag them mixed Ok/Err. M4 Task 7 CLOSED D-C4: multi-arg lambdas now lower
+# to the tupled 1-arg FuncValue(STuple)+SelectField form Scala emits, so a
+# fold-slot lambda over context-free constants is EVALUABLE and byte-matchable
+# — see the "M4 Task 7" section at the tail. (Fold-slot lambdas over CONTEXT
+# data, e.g. the crystalpool corpus, stay verdict-only Err/Err under the dummy
+# context and byte-mismatched pending val-inline/CSE, Tasks 8/9.)
 #
 # ── fix 1: bit ops — Scala GraphBuilding has no BitOp/BitInversion lowering ──
 cc	3	sigmaProp((1 | 2) == 3)
@@ -177,3 +182,13 @@ cc	3	allOf(Coll(true, false))
 # vector — this probe pins it per locked decision 3 (writer-child-order /
 # new-shape byte check).
 cc	3	sigmaProp(!(HEIGHT < 5))
+# M4 Task 7: multi-arg lambda TUPLING (D-C4 CLOSED; recon-transforms.md §6).
+# A fold-slot 2-arg lambda over context-free constants now lowers to the
+# tupled 1-arg form Scala emits and reduces Ok/Ok, byte-matching the oracle.
+# Tupled shape: FuncValue([(1, STuple(Int,Int))],
+# Plus(SelectField(ValUse(1),1), SelectField(ValUse(1),2))) — the tuple param
+# reuses the first arg's id (Scala varId = defId + 1). This is the reduce
+# smoke proving evaluability + the new-shape writer-child-order byte check
+# (locked decision 3): its SEGREGATED bytes are diffed vs the oracle tree_hex
+# by the always-on semantic gate.
+cc	3	sigmaProp(Coll(1, 2).fold(0, {(a: Int, b: Int) => a + b}) == 3)

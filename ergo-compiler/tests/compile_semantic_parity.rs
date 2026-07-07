@@ -1028,12 +1028,14 @@ fn compile_seed_semantic_parity() {
             (Err(a), Err(b)) => {
                 // Err/Err = parity — USUALLY a context-bound script (the dummy
                 // context lacks the registers/outputs it reads, both sides err
-                // the same way). KNOWN NON-CONTEXT-BOUND RESIDENT: the
-                // (RuntimeException, TypeError) pair is D-C4 (multi-arg fold
-                // lambdas emit an unevaluable multi-arg FuncValue; see the
-                // lib.rs ledger) passing by coincidence of the dummy context —
-                // when the reduction context is enriched or the lowering lands,
-                // those vectors flip to a LOUD mixed Ok/Err failure here.
+                // the same way). The (RuntimeException, TypeError) pair was
+                // D-C4's mask (multi-arg fold lambdas emitting an unevaluable
+                // multi-arg FuncValue); M4 Task 7 CLOSED D-C4 by tupling, so
+                // that vector now errs for a genuine dummy-context reason (a
+                // fold-derived divide-by-zero vs the oracle's context-read
+                // short-circuit) — see AUDITED_ERR_PAIRS. Any pair OUTSIDE the
+                // audited set still flips to a LOUD failure below when the
+                // reduction context is enriched or a lowering lands.
                 // Record the class pair, with the first vector's full errors.
                 let entry = err_pairs
                     .entry((err_head(&a), err_head(&b)))
@@ -1119,7 +1121,20 @@ fn compile_seed_semantic_parity() {
         // flip loudly to mixed Ok/Err — anticipated, not a surprise (the
         // D-C4 lesson; lib.rs D-C3 residual paragraph is the ledger).
         ("TypeError", "TypeError"),
-        ("RuntimeException", "TypeError"), // D-C4 multi-arg fold lambdas
+        // D-C4 (CLOSED, M4 Task 7): `crystalpool/sell-token-for-erg.es`. The
+        // fold-slot multi-arg lambda now TUPLES to the evaluable 1-arg
+        // `FuncValue(STuple)+SelectField` form (`crate::tuple`), so the tree is
+        // no longer unevaluable — the pre-Task-7 mask ("FuncValue must have
+        // exactly 1 argument") is GONE. Both sides still ERR under the dummy
+        // context, for a genuine reason: OUR tupled tree now evaluates the fold
+        // (returning 0 over the empty context) and hits the contract's
+        // `<fold> / tokensIn` division by that zero ("Long./ divide by zero"),
+        // while the oracle's tupled+inlined+CSE tree short-circuits earlier on a
+        // context register read (TypeError None). Verdict parity holds (neither
+        // yields a spendable Ok). This vector stays byte-mismatched in
+        // DC7_P2SH_MISMATCH_SET pending val-inline/CSE (Tasks 8/9); when those
+        // land its bytes converge on the oracle's and both reductions align.
+        ("RuntimeException", "TypeError"),
         // D-C6 wave-2 fold-boundary controls: dynamic-index `getReg[T](HEIGHT)`
         // and non-folded v6 numeric MethodCalls (`HEIGHT.toBytes`, `n1.toBytes`,
         // `x.shiftLeft(1)`) — BOTH compilers keep the residual MethodCall
