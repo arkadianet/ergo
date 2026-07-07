@@ -29,6 +29,12 @@ ergo-compiler      = { workspace = true }
 thiserror          = { workspace = true }
 rand               = { workspace = true }
 base64             = { workspace = true }
+# The v1 webhooks production delivery sink (`v1/webhooks/worker.rs`). rustls
+# ONLY — `default-features = false` is load-bearing: reqwest's defaults pull
+# `native-tls`/system OpenSSL, which this consensus node must never depend on
+# (CLAUDE.md §2, crypto: proven crates only). Only the features actually used
+# are enabled; the signed body is already a `String`, so `json` is not needed.
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tower           = { workspace = true, features = ["util"] }

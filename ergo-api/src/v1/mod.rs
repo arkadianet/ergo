@@ -40,8 +40,8 @@ pub use mempool_depth::{
 pub use realtime::{spawn_event_bridge, ConnLimiter, RealtimeBus, RealtimeHandle};
 pub use routes::{v1_router, V1State};
 pub use webhooks::{
-    spawn_webhook_worker, webhooks_router, WebhookEngine, WebhookSink, WebhooksHandle,
-    WebhooksState,
+    spawn_webhook_worker, spawn_webhook_worker_once, webhooks_router, ReqwestSink, WebhookEngine,
+    WebhookSink, WebhooksHandle, WebhooksState,
 };
 
 use axum::extract::ConnectInfo;

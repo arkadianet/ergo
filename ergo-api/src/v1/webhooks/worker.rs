@@ -3,21 +3,27 @@
 //! ([`WebhookSink`]) under the [`WebhookEngine`]'s at-least-once retry
 //! discipline (`v1-api-design.md` §4.1, fragment §3.3).
 //!
-//! **Transport seam (design decision).** The concrete outbound HTTP(S) client
-//! is abstracted behind [`WebhookSink`] and **injected**. The node's lock has
-//! no HTTP client and no TLS stack (`reqwest`/`hyper-rustls` are absent;
-//! `hyper` is only a transitive axum dep), so shipping a real HTTPS client
-//! would be exactly the heavy new dependency the brief says not to add
-//! unilaterally. This PR therefore ships the full worker + engine + retry state
-//! machine, tested end-to-end against a deterministic in-process sink (no
-//! network, nothing faked). Wiring a concrete TLS-capable sink is the one
-//! remaining, documented deferral — see the PR report.
+//! **Transport seam.** The concrete outbound HTTP(S) client is abstracted
+//! behind [`WebhookSink`] and injected — the engine + worker + retry
+//! discipline are fully unit-testable against a deterministic in-process fake
+//! with no network at all. [`ReqwestSink`] is the production implementation:
+//! a shared `reqwest` client, rustls-TLS only (no system OpenSSL — see
+//! `ergo-api/Cargo.toml`), constructed once and spawned at the server seam
+//! (`server.rs`) exactly like the O4 depth sampler / realtime-bridge feeder —
+//! only under a live Tokio runtime, so non-async test router builds never
+//! spawn it, and process-guarded (see [`spawn_webhook_worker_once`]) so
+//! repeated router assembly across the test suite never opens a duplicate
+//! outbound-network worker. Deliveries now actually reach operator-registered
+//! URLs; **persistence is the one remaining deferral** — the registry +
+//! delivery log are in-memory and bounded, so a node restart loses all
+//! registrations until a durable `*-db` schema lands (CLAUDE.md §2).
 //!
 //! **Never stalls the bus.** The worker owns a bounded [`BusSubscription`]; a
 //! slow endpoint only backs up that webhook's own deliveries (bounded ring +
 //! per-webhook in-flight cap in the engine), and the bus's own slow-consumer
 //! drop policy protects the fan-out if the worker itself falls behind.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -101,6 +107,103 @@ fn drain_due(engine: &Arc<WebhookEngine>, sink: &Arc<dyn WebhookSink>) {
             let outcome = sink.post(&req).await;
             engine.record_result(&req.delivery_id, outcome, now_unix_ms());
         });
+    }
+}
+
+/// Process-once guard for the production worker, mirroring
+/// [`crate::v1::mempool_depth::spawn_depth_sampler_once`]: router assembly
+/// runs once in production but many times across the test suite (each
+/// `#[tokio::test]` that builds the full server router does so under a live
+/// runtime); without this guard those builds would each spawn a duplicate
+/// worker. Unlike the depth sampler / realtime-bridge feeder, this worker
+/// opens real outbound network connections, so guarding against a duplicate
+/// spawn matters even more here.
+static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Spawn the production delivery worker at most ONCE per process (idempotent
+/// across repeated router assembly). Subsequent calls are no-ops. Call only
+/// from an async context (a Tokio runtime must be current) — the server
+/// wiring guards the call exactly like the O4 depth sampler.
+pub fn spawn_webhook_worker_once(
+    bus: Arc<RealtimeBus>,
+    engine: Arc<WebhookEngine>,
+    sink: Arc<dyn WebhookSink>,
+    tick: Duration,
+) {
+    if WORKER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // The JoinHandle is deliberately dropped: the worker runs for the process.
+    drop(spawn_webhook_worker(bus, engine, sink, tick));
+}
+
+/// Per-request timeout bound, covering the whole request lifecycle — DNS,
+/// TCP/TLS connect, send, and response read. A black-hole or slow-drip
+/// endpoint can hold a send task for at most this long; the engine's
+/// per-webhook in-flight cap (`MAX_INFLIGHT_PER_WEBHOOK`) bounds the blast
+/// radius while it does.
+pub const SINK_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The production [`WebhookSink`]: a shared `reqwest` client (rustls-TLS
+/// only — no system OpenSSL; see `ergo-api/Cargo.toml`) that POSTs each
+/// [`PreparedRequest`] and reports the HTTP outcome. Retry/backoff/dedupe is
+/// entirely the [`WebhookEngine`]'s job — this sink only reports what
+/// happened to one attempt, exactly once, and never retries internally.
+///
+/// **Redirects are disabled.** The SSRF guard
+/// ([`validate_url`](super::model::validate_url)) only screens the
+/// *registered* URL at registration time; if this sink auto-followed a 3xx it
+/// would silently connect to a location that was never validated, defeating
+/// the guard. A redirect response is therefore reported as an ordinary
+/// [`DeliveryOutcome::HttpError`] (retryable, never delivered) instead of
+/// being followed.
+///
+/// **DNS-rebinding residual gap (pre-existing, not introduced here).** Per
+/// `model.rs`'s documented limitation, the guard checks the URL's *literal*
+/// host at registration time only; a hostname that later resolves to a
+/// private address is not re-checked at connect time by this sink. Closing
+/// that gap needs a custom resolver/connector hook and is left as a
+/// follow-up — this sink deliberately does not re-resolve or otherwise
+/// second-guess the already-validated registration URL.
+pub struct ReqwestSink {
+    client: reqwest::Client,
+}
+
+impl ReqwestSink {
+    /// Build the shared client once (constructed at server start, not per
+    /// request). Fails only if the TLS backend cannot initialize (e.g. no
+    /// usable root store) — a startup-time error the caller should treat as
+    /// fatal, not a per-delivery condition.
+    pub fn new() -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(SINK_REQUEST_TIMEOUT)
+            .timeout(SINK_REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(ReqwestSink { client })
+    }
+}
+
+#[async_trait]
+impl WebhookSink for ReqwestSink {
+    async fn post(&self, req: &PreparedRequest) -> DeliveryOutcome {
+        let mut builder = self.client.post(&req.url);
+        for (name, value) in &req.headers {
+            builder = builder.header(*name, value);
+        }
+        match builder.body(req.body.clone()).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    DeliveryOutcome::Success(status.as_u16())
+                } else {
+                    DeliveryOutcome::HttpError(status.as_u16())
+                }
+            }
+            // Connect / TLS / timeout / mid-transfer failure — no response to
+            // grade, so there is no HTTP status to report.
+            Err(_) => DeliveryOutcome::TransportError,
+        }
     }
 }
 
@@ -244,5 +347,104 @@ mod tests {
         assert_eq!(v["seq"], 1);
         assert_eq!(v["data"]["height"], 1808901);
         assert_eq!(v["confirmed"], true);
+    }
+
+    // ----- ReqwestSink (real transport) -----
+
+    #[test]
+    fn reqwest_sink_builds_with_rustls_tls_backend() {
+        // Construction alone exercises the rustls-TLS backend wiring (no TLS
+        // handshake happens here — that only occurs against an https:// URL).
+        // A failure would mean the client cannot initialize its root store /
+        // connector, which should fail loudly at startup, not silently.
+        assert!(
+            ReqwestSink::new().is_ok(),
+            "reqwest client must build with the rustls-tls backend and no TLS deps missing"
+        );
+    }
+
+    /// The live-transport leg: a real `reqwest` POST over a real TCP
+    /// connection to a tiny in-process axum listener on `127.0.0.1:0` (an
+    /// ephemeral loopback port — no real external URL is ever contacted).
+    /// Asserts the listener actually received the exact signed body plus the
+    /// full `X-Ergo-*` header set, and that `ReqwestSink::post` grades the
+    /// 2xx response as [`DeliveryOutcome::Success`].
+    #[tokio::test]
+    async fn reqwest_sink_posts_signed_body_to_local_listener() {
+        use axum::body::Bytes;
+        use axum::extract::State;
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+        use tokio::sync::mpsc;
+
+        #[derive(Clone)]
+        struct Captured(Arc<mpsc::Sender<(HeaderMap, Bytes)>>);
+
+        async fn capture(
+            State(state): State<Captured>,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> axum::http::StatusCode {
+            let _ = state.0.send((headers, body)).await;
+            axum::http::StatusCode::OK
+        }
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let app = axum::Router::new()
+            .route("/hook", post(capture))
+            .with_state(Captured(Arc::new(tx)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral loopback port");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("local listener serves");
+        });
+
+        let secret = "whsec_test";
+        let body = r#"{"webhook_id":"wh_1","delivery_id":"dl_1","seq":1}"#.to_string();
+        let ts = now_unix_ms();
+        let sig = sign_body(secret, ts, &body);
+        let req = PreparedRequest {
+            delivery_id: "dl_1".into(),
+            webhook_id: "wh_1".into(),
+            url: format!("http://{addr}/hook"),
+            headers: vec![
+                ("Content-Type", "application/json".to_string()),
+                ("X-Ergo-Webhook-Id", "wh_1".to_string()),
+                ("X-Ergo-Delivery-Id", "dl_1".to_string()),
+                ("X-Ergo-Event-Seq", "1".to_string()),
+                ("X-Ergo-Timestamp", ts.to_string()),
+                ("X-Ergo-Delivery-Attempt", "1".to_string()),
+                ("X-Ergo-Signature", sig.clone()),
+            ],
+            body: body.clone(),
+        };
+
+        let sink = ReqwestSink::new().expect("client builds");
+        let outcome = sink.post(&req).await;
+        assert_eq!(outcome, DeliveryOutcome::Success(200));
+
+        let (headers, received_body) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("listener received the request within the timeout")
+            .expect("capture channel not closed");
+        assert_eq!(received_body.as_ref(), body.as_bytes(), "exact signed body");
+        assert_eq!(
+            headers.get("x-ergo-signature").unwrap().to_str().unwrap(),
+            sig
+        );
+        assert_eq!(
+            headers.get("x-ergo-webhook-id").unwrap().to_str().unwrap(),
+            "wh_1"
+        );
+        assert_eq!(
+            headers.get("x-ergo-delivery-id").unwrap().to_str().unwrap(),
+            "dl_1"
+        );
+
+        server.abort();
     }
 }
