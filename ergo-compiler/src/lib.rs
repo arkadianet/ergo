@@ -1156,6 +1156,10 @@
 
 pub mod ast;
 pub mod binder;
+// M5 Task 1 — CSE scope-chain hash-cons substrate. Built and unit-tested in
+// isolation; NOT yet wired into `compile()` (ValDef emission + pipeline
+// integration land in M5 Tasks 2-4).
+pub mod cse;
 pub mod emit;
 pub mod env;
 pub mod error;
