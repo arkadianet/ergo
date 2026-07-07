@@ -153,7 +153,12 @@ pub enum Reason {
     OracleUnavailable,
     Overloaded,
     ShuttingDown,
-    RouteDisabled,
+    /// A route/bridge is not wired in this build/deployment (operationally
+    /// **unavailable**, not a config-off subsystem). Uses the `_unavailable`
+    /// spelling so the suffix rule (`*_unavailable`→503) and the status agree,
+    /// mirroring the frozen compat `route_disabled`→503 mapping in
+    /// `server::map_submit_error`.
+    RouteUnavailable,
     /// Upstream/handler timeout. Maps to **504 Gateway Timeout** to mirror
     /// the frozen `server::map_submit_error` mapping for the same reason.
     Timeout,
@@ -290,7 +295,7 @@ impl Reason {
             | BlockPruned
             | Overloaded
             | ShuttingDown
-            | RouteDisabled => StatusCode::SERVICE_UNAVAILABLE,
+            | RouteUnavailable => StatusCode::SERVICE_UNAVAILABLE,
 
             // 401 — authentication required / wrong credential
             Unauthorized | WrongPassword => StatusCode::UNAUTHORIZED,
@@ -521,7 +526,7 @@ mod tests {
             ),
             (Overloaded, "overloaded", su),
             (ShuttingDown, "shutting_down", su),
-            (RouteDisabled, "route_disabled", su),
+            (RouteUnavailable, "route_unavailable", su),
             (Timeout, "timeout", StatusCode::GATEWAY_TIMEOUT),
             // auth / tier
             (Unauthorized, "unauthorized", ua),

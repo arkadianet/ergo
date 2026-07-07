@@ -41,8 +41,8 @@ use axum::{
     response::Response,
 };
 
-use super::client_ip;
 use super::error::{v1_error, Reason};
+use super::{client_ip, is_trusted_loopback};
 
 /// The bucket key used when a request carries no resolvable peer IP. All such
 /// requests share ONE bucket so a connect-info gap can't become an unbounded
@@ -82,6 +82,11 @@ pub struct GovernorConfig {
     pub max_tracked_ips: usize,
     /// A bucket idle at least this long AND full is eligible for pruning.
     pub idle_prune_after: Duration,
+    /// When `true`, a reverse proxy terminates in front of the API on
+    /// loopback, so the peer socket is the proxy — its loopback-ness cannot
+    /// grant the [`GovernorConfig::exempt_loopback`] exemption. Default
+    /// `false` (direct bind). See [`super::is_trusted_loopback`].
+    pub local_reverse_proxy: bool,
 }
 
 impl Default for GovernorConfig {
@@ -98,11 +103,56 @@ impl Default for GovernorConfig {
             exempt_loopback: true,
             max_tracked_ips: 65_536,
             idle_prune_after: Duration::from_secs(600),
+            local_reverse_proxy: false,
         }
     }
 }
 
+/// Rejection reason from [`GovernorConfig::validate`] / [`Governor::new`].
+/// Invalid config must never reach the bucket math: a negative weight ADDS
+/// tokens on charge, and a zero/non-finite refill or burst breaks throttling.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum GovernorConfigError {
+    /// `refill_per_sec` must be finite and strictly positive.
+    #[error("refill_per_sec must be finite and > 0, got {0}")]
+    Refill(f64),
+    /// `burst` must be finite and strictly positive.
+    #[error("burst must be finite and > 0, got {0}")]
+    Burst(f64),
+    /// A route-class weight must be finite and non-negative.
+    #[error("{class} weight must be finite and >= 0, got {value}")]
+    Weight {
+        /// The offending route class.
+        class: &'static str,
+        /// The rejected weight.
+        value: f64,
+    },
+}
+
 impl GovernorConfig {
+    /// Validate the knobs at the constructor boundary (`v1-api-design.md`
+    /// §2.2). Rejects a non-finite/non-positive `refill_per_sec` or `burst`
+    /// and any non-finite/negative route weight, so [`Governor::charge_at`]
+    /// never operates on config that would corrupt the token bucket.
+    pub fn validate(&self) -> Result<(), GovernorConfigError> {
+        if !self.refill_per_sec.is_finite() || self.refill_per_sec <= 0.0 {
+            return Err(GovernorConfigError::Refill(self.refill_per_sec));
+        }
+        if !self.burst.is_finite() || self.burst <= 0.0 {
+            return Err(GovernorConfigError::Burst(self.burst));
+        }
+        for (class, value) in [
+            ("cheap", self.cheap_weight),
+            ("heavy", self.heavy_weight),
+            ("compute", self.compute_weight),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(GovernorConfigError::Weight { class, value });
+            }
+        }
+        Ok(())
+    }
+
     /// Tokens a request of `class` consumes.
     fn weight(&self, class: RouteClass) -> f64 {
         match class {
@@ -139,11 +189,12 @@ enum Charge {
 impl Governor {
     /// Build the shared governor from config. `Arc`-wrapped so per-class
     /// [`GovernorState`] handles can share the one per-IP budget.
-    pub fn new(config: GovernorConfig) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(config: GovernorConfig) -> Result<Arc<Self>, GovernorConfigError> {
+        config.validate()?;
+        Ok(Arc::new(Self {
             config,
             buckets: Mutex::new(HashMap::new()),
-        })
+        }))
     }
 
     /// Per-route middleware state for `from_fn_with_state`, pinning the
@@ -188,7 +239,18 @@ impl Governor {
 
         if map.len() > self.config.max_tracked_ips {
             let cutoff = self.config.idle_prune_after;
-            map.retain(|_, b| b.tokens < burst || now.saturating_duration_since(b.last) < cutoff);
+            // Recompute each bucket's virtual refill (same logic as the live
+            // charge above) BEFORE the predicate: an idle bucket's stored
+            // `tokens` is stale, so without this an idle-but-drained bucket
+            // looks non-full forever and `max_tracked_ips` never bounds the
+            // table. Drop a bucket only once it is idle past the cutoff AND
+            // has virtually refilled to full (a fresh entry also starts full,
+            // so nothing is lost).
+            map.retain(|_, b| {
+                let idle = now.saturating_duration_since(b.last);
+                let refilled = (b.tokens + idle.as_secs_f64() * refill).min(burst);
+                refilled < burst || idle < cutoff
+            });
         }
         outcome
     }
@@ -216,13 +278,12 @@ pub async fn governor_mw(
     next: Next,
 ) -> Response {
     let cfg = &state.governor.config;
-    let ip = client_ip(&req);
 
-    if cfg.exempt_loopback && ip.map(|ip| ip.is_loopback()).unwrap_or(false) {
+    if cfg.exempt_loopback && is_trusted_loopback(&req, cfg.local_reverse_proxy) {
         return next.run(req).await;
     }
 
-    let key = ip.unwrap_or(UNKNOWN_IP);
+    let key = client_ip(&req).unwrap_or(UNKNOWN_IP);
     let cost = cfg.weight(state.class);
     match state.governor.charge(key, cost) {
         Charge::Allowed => next.run(req).await,
@@ -265,7 +326,9 @@ mod tests {
             exempt_loopback: true,
             max_tracked_ips: 1024,
             idle_prune_after: Duration::from_secs(600),
+            local_reverse_proxy: false,
         })
+        .expect("valid governor config")
     }
 
     fn allowed(c: Charge) -> bool {
@@ -295,7 +358,8 @@ mod tests {
             burst: 1.0,
             exempt_loopback: false,
             ..GovernorConfig::default()
-        });
+        })
+        .expect("valid governor config");
         let t0 = Instant::now();
         assert!(allowed(gov.charge_at(ip(2), 1.0, t0)));
         // Immediately after: empty.
@@ -431,5 +495,156 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(b.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    // ----- config validation -----
+
+    #[test]
+    fn new_rejects_non_positive_refill() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let cfg = GovernorConfig {
+                refill_per_sec: bad,
+                ..GovernorConfig::default()
+            };
+            // NaN != NaN, so match the variant rather than compare the payload.
+            assert!(matches!(
+                cfg.validate(),
+                Err(GovernorConfigError::Refill(_))
+            ));
+            assert!(Governor::new(cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn new_rejects_non_positive_burst() {
+        for bad in [0.0, -5.0, f64::NAN] {
+            let cfg = GovernorConfig {
+                burst: bad,
+                ..GovernorConfig::default()
+            };
+            assert!(matches!(cfg.validate(), Err(GovernorConfigError::Burst(_))));
+            assert!(Governor::new(cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn new_rejects_negative_or_nonfinite_weight() {
+        let cfg = GovernorConfig {
+            heavy_weight: -1.0,
+            ..GovernorConfig::default()
+        };
+        assert_eq!(
+            cfg.validate(),
+            Err(GovernorConfigError::Weight {
+                class: "heavy",
+                value: -1.0,
+            })
+        );
+        assert!(Governor::new(cfg).is_err());
+
+        let cfg = GovernorConfig {
+            compute_weight: f64::NAN,
+            ..GovernorConfig::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(GovernorConfigError::Weight {
+                class: "compute",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn new_accepts_valid_default_config() {
+        assert!(GovernorConfig::default().validate().is_ok());
+        assert!(Governor::new(GovernorConfig::default()).is_ok());
+    }
+
+    // ----- idle-bucket pruning (virtual-refill recompute) -----
+
+    #[test]
+    fn idle_full_bucket_is_pruned_after_virtual_refill() {
+        // max_tracked_ips=1: charging a second IP pushes the table over the
+        // bound and triggers the retain prune. The first IP was drained to 0
+        // at t0 (its STORED tokens stay 0), then sits idle past the cutoff.
+        // The prune must virtually refill it to full and drop it — the old
+        // stale-token predicate (0 < burst) would have kept it forever.
+        let gov = Governor::new(GovernorConfig {
+            refill_per_sec: 1.0,
+            burst: 5.0,
+            exempt_loopback: false,
+            max_tracked_ips: 1,
+            idle_prune_after: Duration::from_secs(10),
+            ..GovernorConfig::default()
+        })
+        .expect("valid governor config");
+        let t0 = Instant::now();
+        // Drain ip(1) to zero stored tokens.
+        assert!(allowed(gov.charge_at(ip(1), 5.0, t0)));
+        // 20s later (> cutoff): charge a different IP to trip the prune.
+        let t1 = t0 + Duration::from_secs(20);
+        assert!(allowed(gov.charge_at(ip(2), 1.0, t1)));
+
+        let map = gov.buckets.lock().expect("mutex");
+        assert!(
+            !map.contains_key(&ip(1)),
+            "idle bucket that virtually refilled to full must be pruned"
+        );
+        assert!(map.contains_key(&ip(2)), "the just-charged IP is retained");
+    }
+
+    #[test]
+    fn idle_but_not_yet_full_bucket_survives_prune() {
+        // Idle past the cutoff but NOT virtually refilled to full ⇒ kept:
+        // dropping it would refund the outstanding deficit.
+        let gov = Governor::new(GovernorConfig {
+            refill_per_sec: 0.01,
+            burst: 100.0,
+            exempt_loopback: false,
+            max_tracked_ips: 1,
+            idle_prune_after: Duration::from_secs(10),
+            ..GovernorConfig::default()
+        })
+        .expect("valid governor config");
+        let t0 = Instant::now();
+        // Drain ip(1) to zero, then 20s later it refills only +0.2 tokens ⇒
+        // far from full ⇒ must survive the prune.
+        assert!(allowed(gov.charge_at(ip(1), 100.0, t0)));
+        let t1 = t0 + Duration::from_secs(20);
+        assert!(allowed(gov.charge_at(ip(2), 1.0, t1)));
+        let map = gov.buckets.lock().expect("mutex");
+        assert!(map.contains_key(&ip(1)), "non-full idle bucket is kept");
+    }
+
+    // ----- proxy loopback-trust withdrawal -----
+
+    #[tokio::test]
+    async fn loopback_behind_declared_proxy_is_not_exempt() {
+        // With local_reverse_proxy=true the loopback socket is the proxy, so
+        // the exemption is withdrawn and the (single-token) bucket throttles.
+        let gov = Governor::new(GovernorConfig {
+            refill_per_sec: 0.0001,
+            burst: 1.0,
+            exempt_loopback: true,
+            local_reverse_proxy: true,
+            ..GovernorConfig::default()
+        })
+        .expect("valid governor config");
+        let loop_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let ok = app(&gov, RouteClass::CheapRead)
+            .oneshot(req_from(loop_ip))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), axum::http::StatusCode::OK);
+        let throttled = app(&gov, RouteClass::CheapRead)
+            .oneshot(req_from(loop_ip))
+            .await
+            .unwrap();
+        assert_eq!(
+            throttled.status(),
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "loopback must not be exempt when a reverse proxy is declared"
+        );
     }
 }

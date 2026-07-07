@@ -33,8 +33,8 @@ use std::sync::Arc;
 use axum::{body::Body, extract::State, middleware::Next, response::Response};
 use tracing::warn;
 
-use super::client_ip;
 use super::error::{v1_error, Reason};
+use super::is_trusted_loopback;
 use crate::auth::{ApiSecurity, API_KEY_HEADER};
 
 /// Exposure tier of a route (`v1-api-design.md` §2.1). Pinned per route/subtree
@@ -66,13 +66,19 @@ const KNOWN_WEAK_KEYS: &[&[u8]] = &[
 #[derive(Clone)]
 pub struct V1AuthConfig {
     /// The configured api-key verifier, or `None` when the node runs with no
-    /// key. With `None`, T1/T2 routes pass (dev parity with today's ungated
-    /// mounting) — the boot-warn is what makes that loud, not this gate.
+    /// key. With `None`, T1/T2 routes FAIL CLOSED (`unauthorized`) — the
+    /// operator/admin surfaces (shutdown, secret export) must never be open.
+    /// The boot-warn makes the misconfiguration loud; this gate makes it safe.
     pub security: Option<Arc<ApiSecurity>>,
     /// When `true`, [`Tier::Admin`] routes hard-deny any non-loopback caller
     /// (even with a valid key) with `sensitive_op_disabled`. Default `false`
     /// = warn-and-allow (§2.1).
     pub admin_hard_deny_nonloopback: bool,
+    /// When `true`, a reverse proxy terminates in front of the v1 API on
+    /// loopback, so a loopback peer socket is the PROXY, not a real local
+    /// client — the Admin loopback-preferred check must not trust it. Default
+    /// `false` (direct bind). See [`super::is_trusted_loopback`].
+    pub local_reverse_proxy: bool,
 }
 
 impl V1AuthConfig {
@@ -82,12 +88,22 @@ impl V1AuthConfig {
         Self {
             security,
             admin_hard_deny_nonloopback: false,
+            local_reverse_proxy: false,
         }
     }
 
     /// Opt into hard-denying remote [`Tier::Admin`] callers.
     pub fn with_admin_hard_deny(mut self, hard_deny: bool) -> Self {
         self.admin_hard_deny_nonloopback = hard_deny;
+        self
+    }
+
+    /// Declare that a reverse proxy terminates in front of the v1 API on
+    /// loopback. When set, the Admin loopback-preferred check no longer trusts
+    /// a loopback peer socket (it is the proxy), closing a spoofed-loopback
+    /// privilege-escalation path. See [`super::is_trusted_loopback`].
+    pub fn with_local_reverse_proxy(mut self, behind_proxy: bool) -> Self {
+        self.local_reverse_proxy = behind_proxy;
         self
     }
 
@@ -130,15 +146,17 @@ pub async fn require_tier(
     match state.tier {
         Tier::Public => next.run(req).await,
         Tier::Operator => match check_key(&state.config, &req) {
-            KeyOutcome::Ok | KeyOutcome::NoKeyConfigured => next.run(req).await,
+            KeyOutcome::Ok => next.run(req).await,
+            KeyOutcome::NoKeyConfigured => no_key_configured(),
             KeyOutcome::Rejected(resp) => resp,
         },
         Tier::Admin => {
             match check_key(&state.config, &req) {
                 KeyOutcome::Rejected(resp) => return resp,
-                KeyOutcome::Ok | KeyOutcome::NoKeyConfigured => {}
+                KeyOutcome::NoKeyConfigured => return no_key_configured(),
+                KeyOutcome::Ok => {}
             }
-            let is_loopback = client_ip(&req).map(|ip| ip.is_loopback()).unwrap_or(false);
+            let is_loopback = is_trusted_loopback(&req, state.config.local_reverse_proxy);
             if !is_loopback {
                 if state.config.admin_hard_deny_nonloopback {
                     return v1_error(
@@ -162,10 +180,25 @@ pub async fn require_tier(
 enum KeyOutcome {
     /// Header present and valid.
     Ok,
-    /// No key configured node-wide — routes pass (dev parity); boot-warn covers it.
+    /// No key configured node-wide. Public passes; Operator/Admin FAIL CLOSED
+    /// (`no_key_configured`) — sensitive routes are never open. The boot-warn
+    /// surfaces the misconfiguration.
     NoKeyConfigured,
     /// Missing or invalid key — the rendered `unauthorized` response.
     Rejected(Response),
+}
+
+/// The fail-closed response when the node runs with NO api-key configured but
+/// a T1/T2 route is reached. Operator/Admin routes gate sensitive operations
+/// (shutdown, secret export), so an unconfigured key must DENY, not pass. The
+/// boot-warn ([`warn_startup_posture`]) surfaces the misconfiguration loudly;
+/// it is not the gate. Answers the §1.3 `unauthorized` (401) envelope.
+fn no_key_configured() -> Response {
+    v1_error(
+        Reason::Unauthorized,
+        "no api_key is configured; operator/admin routes are closed",
+        "set [api] api_key_hash to enable authenticated v1 routes, or bind to loopback only",
+    )
 }
 
 fn check_key(config: &V1AuthConfig, req: &axum::http::Request<Body>) -> KeyOutcome {
@@ -342,13 +375,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_passes_when_no_key_configured() {
-        // Dev parity: no key node-wide ⇒ routes open; boot-warn is the guard.
+    async fn operator_fails_closed_when_no_key_configured() {
+        // No key node-wide ⇒ Operator FAILS CLOSED with `unauthorized` (401):
+        // sensitive routes must never be open. Boot-warn is loud, not the gate.
         let cfg = V1AuthConfig::new(None).into_shared();
-        assert_eq!(
-            status(&cfg, Tier::Operator, request(None, Some(REMOTE))).await,
-            200
-        );
+        let resp = app(&cfg, Tier::Operator)
+            .oneshot(request(None, Some(REMOTE)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["reason"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn admin_fails_closed_when_no_key_configured_even_from_loopback() {
+        // No key ⇒ Admin FAILS CLOSED before the loopback check even runs.
+        let cfg = V1AuthConfig::new(None).into_shared();
+        let resp = app(&cfg, Tier::Admin)
+            .oneshot(request(None, Some(LOCAL)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["reason"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn admin_behind_declared_proxy_treats_loopback_as_remote() {
+        // local_reverse_proxy=true + hard-deny ⇒ a loopback socket (the proxy)
+        // is NOT trusted, so a "loopback" caller is denied like any remote one.
+        let cfg = V1AuthConfig::new(Some(security_for(b"secretkey")))
+            .with_admin_hard_deny(true)
+            .with_local_reverse_proxy(true)
+            .into_shared();
+        let resp = app(&cfg, Tier::Admin)
+            .oneshot(request(Some("secretkey"), Some(LOCAL)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["reason"], "sensitive_op_disabled");
     }
 
     #[tokio::test]

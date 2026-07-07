@@ -28,7 +28,7 @@ pub use cursor::{
     CURSOR_VERSION, DEFAULT_LIMIT, MAX_LIMIT,
 };
 pub use error::{v1_error, Reason, V1Error, V1ErrorInner};
-pub use governor::{Governor, GovernorConfig, GovernorState, RouteClass};
+pub use governor::{Governor, GovernorConfig, GovernorConfigError, GovernorState, RouteClass};
 
 use axum::extract::ConnectInfo;
 use axum::http::Request;
@@ -50,4 +50,67 @@ pub(crate) fn client_ip<B>(req: &Request<B>) -> Option<IpAddr> {
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
+}
+
+/// Whether `req` should be treated as **trusted loopback** for privilege
+/// purposes — the [`governor`]'s loopback exemption and the [`auth`] Admin
+/// tier's loopback-preferred check.
+///
+/// Trust is derived ONLY from the real peer socket ([`client_ip`]). When
+/// `local_reverse_proxy` is set the operator has declared a reverse proxy on
+/// loopback in front of the API: the peer socket is then the PROXY, not a real
+/// local client, so its loopback-ness is meaningless and trust is withdrawn
+/// (fail closed). `X-Forwarded-For` is deliberately NOT consulted
+/// (client-spoofable) — loopback trust must come from a real peer address or
+/// explicit operator config, never inferred from a proxy socket.
+pub(crate) fn is_trusted_loopback<B>(req: &Request<B>, local_reverse_proxy: bool) -> bool {
+    if local_reverse_proxy {
+        return false;
+    }
+    client_ip(req).map(|ip| ip.is_loopback()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use std::net::Ipv4Addr;
+
+    fn req_with_peer(ip: Option<IpAddr>) -> Request<Body> {
+        let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        if let Some(ip) = ip {
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(ip, 40000)));
+        }
+        req
+    }
+
+    #[test]
+    fn loopback_socket_is_trusted_on_direct_bind() {
+        // Default (no proxy declared): a real loopback peer is trusted.
+        let req = req_with_peer(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(is_trusted_loopback(&req, false));
+    }
+
+    #[test]
+    fn loopback_socket_is_not_trusted_behind_declared_proxy() {
+        // The loopback socket is the reverse proxy, not a real local client.
+        let req = req_with_peer(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(!is_trusted_loopback(&req, true));
+    }
+
+    #[test]
+    fn non_loopback_peer_is_never_trusted() {
+        let req = req_with_peer(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))));
+        assert!(!is_trusted_loopback(&req, false));
+        assert!(!is_trusted_loopback(&req, true));
+    }
+
+    #[test]
+    fn absent_connect_info_is_not_trusted() {
+        // No ConnectInfo ⇒ unknown peer ⇒ never loopback-privileged.
+        let req = req_with_peer(None);
+        assert!(!is_trusted_loopback(&req, false));
+        assert!(!is_trusted_loopback(&req, true));
+    }
 }
