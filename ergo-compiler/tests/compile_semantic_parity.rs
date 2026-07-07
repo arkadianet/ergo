@@ -1109,7 +1109,16 @@ fn compile_seed_semantic_parity() {
     // as telemetry nobody reads on green runs. Extend the set ONLY with a
     // ledger entry explaining the new pair (audit trail: lib.rs D-C3/D-C4).
     const AUDITED_ERR_PAIRS: &[(&str, &str)] = &[
-        ("TypeError", "TypeError"),        // context-bound scripts (both sides)
+        // Context-bound scripts (both sides read registers/outputs the dummy
+        // context lacks). KNOWN MASKED RESIDENTS in this bucket: the 5 D-C3
+        // corpus vectors (chaincash basis-tracker family + rosen-bridge
+        // GuardSign, all in DC7_P2SH_MISMATCH_SET) whose residual 0xCF
+        // (HasSigmas reconstruction, un-implemented — Tasks 8/9 close) is
+        // never REACHED: a context-read short-circuits first on both sides.
+        // When the reconstruction lands or the context is enriched, these
+        // flip loudly to mixed Ok/Err — anticipated, not a surprise (the
+        // D-C4 lesson; lib.rs D-C3 residual paragraph is the ledger).
+        ("TypeError", "TypeError"),
         ("RuntimeException", "TypeError"), // D-C4 multi-arg fold lambdas
         // D-C6 wave-2 fold-boundary controls: dynamic-index `getReg[T](HEIGHT)`
         // and non-folded v6 numeric MethodCalls (`HEIGHT.toBytes`, `n1.toBytes`,
