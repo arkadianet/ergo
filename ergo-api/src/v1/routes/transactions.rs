@@ -385,7 +385,7 @@ async fn submit_inner(state: V1State, body: Bytes, mode: SubmitMode) -> Response
 /// onto the canonical v1 [`Reason`] enum; the HTTP status follows from the
 /// reason so it agrees with the compat mapping (503 for the transient trio,
 /// 504 for timeout, 500 for internal, 400 otherwise).
-fn submit_reason(reason: &str) -> Reason {
+pub(crate) fn submit_reason(reason: &str) -> Reason {
     match reason {
         "deserialize" => Reason::Deserialize,
         "non_canonical" => Reason::NonCanonical,

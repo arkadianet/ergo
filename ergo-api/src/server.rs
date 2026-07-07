@@ -1292,6 +1292,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         chain: v1_chain,
         indexer: v1_indexer,
         submit: v1_submit,
+        // Keyless build stays honest-unavailable (route_unavailable) until the
+        // extracted keyless TxBuilder core (§4.2 O7) is wired in ergo-node.
+        tx_builder: None,
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
         realtime: Some(v1_realtime),
