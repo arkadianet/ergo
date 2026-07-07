@@ -256,8 +256,10 @@
 //!   vectors (85) carry the ORACLE's tree hex + addresses (ready byte
 //!   targets for M4/M5); REJECT vectors carry the verdict + class.
 //! - **Gate** (`tests/compile_semantic_parity.rs`): every swept ACCEPT pair
-//!   reduces to the SAME SigmaBoolean under the dummy context (5
-//!   `SEMANTIC_SKIP`, all D-C3); rejects grade the oracle's exception class
+//!   reduces to the SAME SigmaBoolean under the dummy context
+//!   (`SEMANTIC_SKIP` is EMPTY as of M4 Task 6 — the D-C3 coercion
+//!   cancellation closed the last five); rejects grade the oracle's
+//!   exception class
 //!   exactly; the address gate pins P2SH per-vector against a committed
 //!   failing-vector SET (`DC7_P2SH_MISMATCH_SET`, M4 Task 1 —
 //!   recon-gap.md Finding 5 upgraded this from a count assert; shrinks as
@@ -600,30 +602,47 @@
 //! so that check never fires there either; this residual is M5 CSE/ValDef
 //! sharing (D-C7 below), not a D-C2 gap.
 //!
-//! ### D-C3 — residual `SigmaPropIsProven` (0xCF): compile output unevaluable
+//! ### D-C3 — `SigmaPropIsProven` (0xCF) coercion cancellation — CLOSED (M4 Task 6)
 //!
 //! Sources mixing `SigmaProp` and `Boolean` in a logical context — e.g.
 //! `sigmaProp(true) && (1 == 1)`, `(1 == 1) ^ sigmaProp(true)`,
 //! `allOf(Coll(proveDlog(g1)))` — typecheck (byte-parity with the reference,
-//! golden_seed §14/§18) into trees carrying `SigmaPropIsProven` /
-//! `Select 'isProven'` coercions. Scala's IR pipeline ELIMINATES them:
-//! GraphBuilding lowers `isProven` → `p.isValid` (GraphBuilding.scala:528-529,
-//! 765-767) and then constant-folds / sigma-reconstructs — oracle compile
-//! replies: `sigmaProp(true) && (1 == 1)` → `BoolToSigmaProp(BinAnd(true,
-//! true))` (`1000d1ed8503`), the `^` forms → a folded segregated `false`
-//! constant (`10010100d17300`), `allOf(Coll(proveDlog(g1)))` → the bare
-//! folded `SigmaPropConstant` (`0008cd0279be…`). Our `emit` maps the node
-//! 1:1 to wire opcode `0xCF` — parseable, but NO evaluator accepts it: ours
-//! rejects it as internal (`InternalOpcode`), and the reference JIT cannot
-//! evaluate it either (`SigmaPropIsProven` has `costKind =
-//! Value.notSupportedError` and no `eval`, transformers.scala:321-329). So
-//! for these sources `compile()` ACCEPTS but produces a tree that cannot
-//! reduce, while Scala produces a folded, evaluable tree. Closing this needs
-//! the IR-level partial evaluation / sigma-reconstruction lowering (same
-//! M4/M5 machinery as D-C2's fold); a local pre-reject would flip the
-//! divergence direction (we-reject/oracle-accepts) and is worse. The five
-//! affected corpus vectors are excluded from the Task-10 semantic gate via
-//! `SEMANTIC_SKIP` (tests/compile_semantic_parity.rs), each tagged D-C3.
+//! golden_seed §14/§18) into trees carrying `SigmaPropIsProven` (`.isProven`)
+//! / `BoolToSigmaProp` (`sigmaProp(..)`) round-trip coercions. Scala's IR
+//! pipeline ELIMINATES them: GraphBuilding lowers `isProven` → `p.isValid`
+//! and fuses the round trips (`GraphBuilding.scala:188-189`:
+//! `sigmaProp(bool).isValid → bool`, `sigmaProp(p.isValid) → p`; plus the
+//! top-level `removeIsProven` at `:245-252` applied at `:418`), then
+//! constant-folds / sigma-reconstructs.
+//!
+//! **Fix (M4 Task 6):** [`crate::isproven::eliminate_isproven`] ports the two
+//! fusion rules as an AST→AST pass run at BOTH Scala positions — before the
+//! generic fold ([`crate::fold`], the fixpoint fusion, so a fusion-exposed
+//! Boolean feeds `BinXor(true, true) → false`) and after the lowering block
+//! ([`crate::lower`], the top-level strip, over the adjacency the D-C2
+//! `proveDlog(const)` fold + single-element `AllOf`/`AnyOf` unwrap expose).
+//! All five now compile BYTE-IDENTICAL to the oracle: `sigmaProp(true) &&
+//! (1 == 1)` → `BoolToSigmaProp(BinAnd(true, true))` (`1000d1ed8503`); the `^`
+//! forms → the folded segregated `false` constant (`10010100d17300`);
+//! `allOf(Coll(proveDlog(g1)))` → the bare folded `SigmaPropConstant`
+//! (`0008cd0279be…`, header `0x00`). They are removed from `SEMANTIC_SKIP`
+//! (now EMPTY) and semantic-gated again.
+//!
+//! **Residual (NOT this task):** the coercion-CANCELLATION is closed, but the
+//! surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction is not.
+//! When a SigmaProp operand does NOT reduce to a plain Boolean (it is a real
+//! sigma, not `sigmaProp(<const bool>)`), Scala splits the mixed
+//! Bool/`isValid` logic into a `SigmaAnd`/`SigmaOr` (recon-transforms.md §3/§4,
+//! `GraphBuilding.scala:167-203`). Our pipeline does NOT — so the emit `0xCF`
+//! arm (`emit.rs:509`/`:838`) stays FRONTEND-REACHABLE and a residual `0xCF`
+//! survives in five corpus outputs (`chaincash-basis` basis-tracker /
+//! basis-token / basis / reserve, `rosen-bridge/GuardSign.es` — recon-targets
+//! #31/#32/#35/#36/#48). Those are co-blocked on val-inline/CSE (Tasks 8/9)
+//! and stay in `DC7_P2SH_MISMATCH_SET` (byte-diverge); they hold verdict
+//! parity via Err/Err on the dummy reduction context, so no `SEMANTIC_SKIP`
+//! entry is needed. The `0xCF` emit arm was AUDITED (not deleted): it is
+//! reachable exactly for these surviving-sigma cases, which the HasSigmas
+//! reconstruction (Tasks 8/9) will close.
 //!
 //! ### D-C4 — multi-arg lambda emits a multi-arg `FuncValue`: unevaluable
 //!
@@ -918,6 +937,7 @@ pub mod emit;
 pub mod env;
 pub mod error;
 mod fold;
+mod isproven;
 mod lower;
 mod parse;
 pub mod span;

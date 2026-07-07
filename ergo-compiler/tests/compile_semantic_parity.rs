@@ -85,38 +85,35 @@ use ergo_sigma::evaluator::{reduce_expr, EvalBox, ReductionContext, SECP256K1_GE
 // `(source, reason + ledger tag)` pairs excluded from the semantic-parity
 // sweep. Every entry needs a reason and a lib.rs ledger D-tag.
 //
-// The ONE open class at Task-10 close is D-C3 (lib.rs ledger): sources mixing
-// SigmaProp and Boolean in a logical context typecheck into trees carrying
-// `SigmaPropIsProven` coercions. Scala's IR pipeline eliminates them
-// (GraphBuilding.scala:528-529/765-767 `isProven` → `isValid`, then constant
-// folding / sigma reconstruction — the oracle trees are folded); our emit
-// maps the node 1:1 to wire opcode 0xCF, which NO evaluator accepts (ours:
-// `InternalOpcode`; Scala JIT: `costKind = notSupportedError`, no `eval`,
-// transformers.scala:321-329). Closing needs the M4/M5 IR lowering; a local
-// pre-reject would flip the divergence direction (we-reject/oracle-accepts).
-// Context-bound scripts are handled by Err/Err parity, never skipped.
-const SEMANTIC_SKIP: &[(&str, &str)] = &[
-    (
-        "allOf(Coll(proveDlog(g1)))",
-        "D-C3: SigmaPropIsProven inside AND; Scala folds to a bare SigmaPropConstant",
-    ),
-    (
-        "sigmaProp(true) && (1 == 1)",
-        "D-C3: isProven residual in BinAnd; Scala folds sigmaProp(true).isValid -> true",
-    ),
-    (
-        "(1 == 1) && sigmaProp(true)",
-        "D-C3: isProven residual in BinAnd (mirrored operands)",
-    ),
-    (
-        "sigmaProp(true) ^ (1 == 1)",
-        "D-C3: isProven residual in BinXor; Scala folds the whole XOR to a false constant",
-    ),
-    (
-        "(1 == 1) ^ sigmaProp(true)",
-        "D-C3: isProven residual in BinXor (mirrored operands)",
-    ),
-];
+// EMPTY as of M4 Task 6 — the list is EMPTIED, every ACCEPT vector is
+// semantic-gated again. It formerly held the five D-C3 sources (sources mixing
+// SigmaProp and Boolean in a logical context: `sigmaProp(true) && (1 == 1)` &
+// mirror, `sigmaProp(true) ^ (1 == 1)` & mirror, `allOf(Coll(proveDlog(g1)))`).
+// Those typecheck into trees carrying `BoolToSigmaProp`/`SigmaPropIsProven`
+// round-trip coercions (wire opcode 0xCF, which no evaluator accepts). The
+// D-C3 elimination pass (`crate::isproven`, GraphBuilding.scala:188-189/245-252
+// `sigmaProp(bool).isValid → bool` / `sigmaProp(p.isValid) → p`) now cancels
+// them before/after the fold+lower block, so all five compile to the same
+// folded, EVALUABLE tree Scala emits (byte-identical to the oracle) and pass the
+// semantic gate with no skip. Kept as a documented mechanism for the next
+// unevaluable-output class this discipline would catch — e.g. the
+// surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction that the five
+// chaincash/rosen corpus contracts still need (a residual 0xCF, MULTI-blocked
+// on val-inline/CSE, Tasks 8/9 — those stay in `DC7_P2SH_MISMATCH_SET`, not
+// here, because verdict parity holds via Err/Err on the dummy context).
+//
+// EMPTY as of M4 Task 6 (D-C3 CLOSED for these five). The
+// `SigmaPropIsProven` elimination pass (`crate::isproven`) now cancels the
+// `BoolToSigmaProp`/`SigmaPropIsProven` round-trip coercions before/after the
+// fold+lower block, so all five sources compile to the folded, EVALUABLE tree
+// Scala emits — byte-identical to the oracle (`allOf(Coll(proveDlog(g1)))` →
+// bare `SigmaPropConstant` `0008cd02…`; `sigmaProp(true) && (1 == 1)` →
+// `BoolToSigmaProp(BinAnd(true, true))` `1000d1ed8503`; the `^` forms →
+// segregated `false` `10010100d17300`). They are semantic-gated again — no
+// skip needed. Kept as a documented mechanism for the next unevaluable-output
+// class this discipline would catch (the surviving-sigma `HasSigmas`
+// SigmaAnd/SigmaOr reconstruction is Tasks 8/9 corpus work, not a skip here).
+const SEMANTIC_SKIP: &[(&str, &str)] = &[];
 
 // =============================================================================
 // Address-parity constants (Task-11 wave 3: findings H-1/H-2/H-3).
@@ -251,6 +248,17 @@ fn assert_mismatch_set_matches(
 /// residual are all MULTI: 12 corpus (CSE/val-inline/lowering, Tasks 8/9/M5) +
 /// `{ val x = HEIGHT; x > 5 }` (val-inline, Task 9) + `proveDHTuple(g1, g2, g1,
 /// g2)` (CSE repeated-point, M5); byte-parity telemetry 45/81 → 71/88.
+///
+/// M4 Task 6 (D-C3): the set is UNCHANGED at 17. The five graduated D-C3
+/// SEMANTIC_SKIP sources were never in this set — they were skip-gated, so
+/// removing the skip (they now byte-match, byte-parity 72/89-swept → 77/94-swept
+/// with 0 skipped) adds five clean matches without touching the residual. The
+/// D-C3 corpus ingredients that DO sit here (recon-targets #31/#32/#35/#36/#48 =
+/// the chaincash-basis + `rosen-bridge/GuardSign.es` `cc` entries) stay MULTI:
+/// their `SigmaPropIsProven:1→0`/`SigmaAnd:0→1` needs the surviving-sigma
+/// `HasSigmas` reconstruction (NOT the coercion cancellation Task 6 landed) AND
+/// they are co-blocked on val-inline/CSE (Tasks 8/9) — so they only flip when
+/// those land, left here honestly per the plan's graduation discipline.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
@@ -305,7 +313,10 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// oracle-identical, so only the header/segregation differed; the set form
 /// (not a count) confirmed it dropped the RIGHT vectors — the remainder
 /// stays converged EXACTLY onto the DC7 set, as the segregation-invariance
-/// of P2SH predicts.
+/// of P2SH predicts. M4 Task 6 (D-C3) leaves this set UNCHANGED at 17 for the
+/// same reason as `DC7_P2SH_MISMATCH_SET` — the five graduated D-C3 sources
+/// byte-match (so P2S matches too, never entering here), and the D-C3 corpus
+/// ingredients stay MULTI-blocked.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),

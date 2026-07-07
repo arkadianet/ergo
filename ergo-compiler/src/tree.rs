@@ -808,9 +808,12 @@ fn fold_bigint_cast(
 ///   ([`CompileError::Serializer`], mirroring Scala's
 ///   `SerializerException`).
 /// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
-///   contexts: STILL OPEN — lib.rs D-C3 (compile output carries wire
-///   opcode `0xCF`, which no evaluator accepts; the Scala IR folds or
-///   sigma-reconstructs it away).
+///   contexts: coercion-cancellation CLOSED (M4 Task 6, lib.rs D-C3) —
+///   [`crate::isproven`] cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
+///   round trips before the fold and after the lowering block. The
+///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
+///   residual `0xCF` in five corpus outputs) stays open, co-blocked on
+///   val-inline/CSE (Tasks 8/9).
 /// - Task-11 wave 1 added the GraphBuilding reject-gate family (lib.rs
 ///   D-C5): bit ops, zero-arg/non-1-arg lambda applications, SFunc-typed
 ///   lambda params, postfix `size`, out-of-range `getReg` literals,
@@ -872,6 +875,17 @@ pub fn compile(
     // `.size.toLong` regression that position protects.
     let root = fold_direct_const_casts(root).map_err(CompileError::Emit)?;
 
+    // isProven→isValid fusion (M4 Task 6, D-C3; recon-transforms.md §3;
+    // `crate::isproven`): `SigmaPropIsProven(BoolToSigmaProp(x)) → x` and its
+    // dual `BoolToSigmaProp(SigmaPropIsProven(p)) → p`. This first placement is
+    // the fixpoint fusion (`GraphBuilding.scala:188-189`) — it must run BEFORE
+    // the generic fold so a fusion-exposed Boolean feeds the fold (e.g.
+    // `sigmaProp(true) ^ (1 == 1)` → `BinXor(true, true)` → `false`). The
+    // second placement is AFTER the lowering block (the top-level
+    // `removeIsProven`, over the coercion adjacency the unwrap/D-C2 fold
+    // expose) — see below.
+    let root = crate::isproven::eliminate_isproven(root);
+
     // Generic constant fold (M4 Task 5, recon-transforms.md §1b/§2a-2d;
     // `crate::fold`) — the GraphBuilding-exact `rewriteDef` cascade as one
     // bottom-up fixpoint pass. It ABSORBS the two retired D-C5/D-C6 twins into
@@ -915,6 +929,17 @@ pub fn compile(
     // proposition bytes below are computed, so the folded/unwrapped shape is
     // what both the proposition hash and `build_tree`'s bare-root check see.
     let root = crate::lower::lower(root);
+
+    // Top-level `removeIsProven` (M4 Task 6, D-C3; recon-transforms.md §3;
+    // `GraphBuilding.scala:245-252`, applied at `:418` AFTER buildGraph). The
+    // lowering block above (D-C2 `proveDlog(const)` fold + single-element
+    // `AllOf`/`AnyOf` unwrap) is what makes the `BoolToSigmaProp`/
+    // `SigmaPropIsProven` adjacency appear: `allOf(Coll(proveDlog(g1)))` lowers
+    // to `BoolToSigmaProp(SigmaPropIsProven(Const{SigmaProp}))`, which this
+    // strips to the bare `SigmaPropConstant` root (header `0x00`, matching PK).
+    // The `false`-XOR / `BinAnd` forms were already fused+folded pre-fold above,
+    // so this second pass is a no-op for them.
+    let root = crate::isproven::eliminate_isproven(root);
 
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
     // hashes `toProposition(replaceConstants = isConstantSegregation)`
@@ -1896,5 +1921,67 @@ mod tests {
         assert_eq!(hex::encode(&r.tree_bytes), ORACLE_PK_TREE_HEX);
         assert_eq!(r.p2s_address, ORACLE_PK_P2S);
         assert_eq!(r.p2sh_address, ORACLE_PK_P2SH);
+    }
+
+    #[test]
+    fn compile_isproven_bool_and_reconstructs_binand_matching_oracle() {
+        // M4 Task 6 (D-C3): `sigmaProp(true) && (1 == 1)` — the SigmaProp
+        // operand's `.isProven` fuses (`SigmaPropIsProven(BoolToSigmaProp(true))
+        // → true`) BEFORE the fold, exposing `BinAnd(true, EQ(1,1))`. The fold
+        // reduces `EQ(1,1) → true` but keeps `BinAnd` (lazy, never const-folded),
+        // and the Boolean root re-wraps in `BoolToSigmaProp` — byte-identical to
+        // the oracle `BoolToSigmaProp(BinAnd(true, true))` (`1000d1ed8503`; the
+        // `85` bool-pair compaction extracts ZERO constants, header `0x10`/`00`).
+        for src in ["sigmaProp(true) && (1 == 1)", "(1 == 1) && sigmaProp(true)"] {
+            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).expect(src);
+            assert_eq!(hex::encode(&r.tree_bytes), "1000d1ed8503", "{src}");
+            assert_eq!(reparse(&r.tree_bytes), r.ergo_tree, "{src}");
+        }
+    }
+
+    #[test]
+    fn compile_isproven_bool_xor_folds_to_false_matching_oracle() {
+        // M4 Task 6 (D-C3): `sigmaProp(true) ^ (1 == 1)` — same isProven fusion
+        // exposes `BinXor(true, EQ(1,1))`; unlike BinAnd, BinXor IS eagerly
+        // const-folded (`true ^ true → false`), so the whole XOR collapses to a
+        // `false` constant. Segregation extracts it into the constants table
+        // (`0100` = SBoolean/false) with a placeholder body — byte-identical to
+        // the oracle `BoolToSigmaProp(placeholder0=false)` (`10010100d17300`).
+        for src in ["sigmaProp(true) ^ (1 == 1)", "(1 == 1) ^ sigmaProp(true)"] {
+            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).expect(src);
+            assert_eq!(hex::encode(&r.tree_bytes), "10010100d17300", "{src}");
+            assert_eq!(reparse(&r.tree_bytes), r.ergo_tree, "{src}");
+        }
+    }
+
+    #[test]
+    fn compile_allof_singleton_provedlog_strips_isproven_to_bare_const() {
+        // M4 Task 6 (D-C3): `allOf(Coll(proveDlog(g1)))` — the lowering block
+        // (D-C2 `CreateProveDlog(const)` fold + single-element `AllOf` unwrap)
+        // exposes `BoolToSigmaProp(SigmaPropIsProven(Const{SigmaProp}))`, which
+        // the post-lower top-level `removeIsProven` strips to the bare
+        // `SigmaPropConstant` root. Bare root → `withoutSegregation` (header
+        // `0x00`), byte-identical to the oracle `0008cd0279be…` — the SAME tree
+        // as `proveDlog(g1)`/PK.
+        let r = compile(
+            &generator_env(),
+            "allOf(Coll(proveDlog(g1)))",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(r.tree_bytes[0], 0x00, "bare root, no segregation");
+        assert!(matches!(
+            &r.ergo_tree.body,
+            Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(_)),
+            }
+        ));
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+        assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
     }
 }
