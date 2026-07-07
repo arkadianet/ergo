@@ -289,6 +289,16 @@ fn assert_mismatch_set_matches(
 /// crystalpool ×4, `GuardSign.es`, `proveDHTuple(g1,g2,g1,g2)`) — placement is
 /// right, intra-scope id order / float-up is Task 5. byte-parity 95/110 →
 /// 99/110.
+///
+/// M5 Task 5 Fix 2 (type-aware P4 `is_const`): 11 → 10. `proveDHTuple(g1,g2,g1,
+/// g2)` graduates. A `GroupElement` literal is a `LiftedConst`, not Scala's
+/// narrow `Const[_]`, so P4 cannot suppress it — the repeated point CSE-hoists to
+/// `ValDef(1)` (oracle `d801 d601 7300 ce 7201 7201 7201 7201`). Two coupled
+/// edits made it live: `cse::is_const` now keys on the SType, and
+/// `lower::fold_prove_dlog_dhtuple` folds the 4-const proveDHTuple only when the
+/// points are pairwise DISTINCT (a repeat means CSE shares it first, exactly as
+/// Scala hash-conses before its four-`Constant` fold-guard). byte-parity
+/// 99/110 → 100/110.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
@@ -303,7 +313,6 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cce", "proveDHTuple(g1, g2, g1, g2)"),
 ];
 
 /// Committed SET of `(verb, source)` labels whose P2S address differs from
@@ -340,7 +349,10 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// oracle-identical bytes so P2S matches too; chaincash + CSE residuals stay
 /// (M5). M5 Task 4 (CSE live) → 11, in lockstep with `DC7_P2SH_MISMATCH_SET`:
 /// the same four vectors (`redemption`/`redproducer`/`deposit`/`emission`) whose
-/// propositions CSE now shapes byte-exactly graduate here too.
+/// propositions CSE now shapes byte-exactly graduate here too. M5 Task 5 Fix 2
+/// → 10, lockstep with `DC7_P2SH_MISMATCH_SET`: `proveDHTuple(g1,g2,g1,g2)`'s
+/// CSE-hoisted `GroupElement` ValDef now matches, so its segregated bytes (and
+/// thus P2S) match too.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
@@ -355,7 +367,6 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cce", "proveDHTuple(g1, g2, g1, g2)"),
 ];
 
 // =============================================================================

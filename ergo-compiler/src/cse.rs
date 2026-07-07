@@ -637,16 +637,31 @@ impl Interner {
         matches!(self.tag_of(sym), KeyTag::Op(GLOBAL))
     }
 
-    /// **P4 `IsConstantDef`** (`TreeBuilding.scala:161-166`, `:509`). Any `Const`.
-    /// Constants are suppressed even at use-count > 1 "to increase effect of
-    /// constant segregation … two equal constants don't always have the same
-    /// meaning" (source comment `:506-508`); each occurrence re-segregates into its
-    /// own pool slot with no dedup (validated E3: `42` used twice → two `0454`
-    /// slots). NOT vacuous: an env-aliased identical `Const` reaches CSE unfolded
-    /// (the `proveDHTuple(g1,g2,g1,g2)` case, spike §3/OQ4, D-C7) — the
-    /// `provedhtuple_*` test below confirms P4 is load-bearing there.
+    /// **P4 `IsConstantDef`** (`TreeBuilding.scala:161-166`, `:509`). Matches
+    /// only Scala's NARROW `Const[_]` class — the primitive scalar literals the
+    /// `toRep` fallback (`GraphBuilding.scala:495-498`) produces:
+    /// Int/Byte/Short/Long/Boolean/String. Those are suppressed even at
+    /// use-count > 1 "to increase effect of constant segregation … two equal
+    /// constants don't always have the same meaning" (source comment `:506-508`);
+    /// each occurrence re-segregates into its own pool slot with no dedup
+    /// (validated E3: `42` used twice → two `0454` slots).
+    ///
+    /// **Type boundary (M5 Task 5, Fix 2, `m5-sched-small.md` §1.3).** Every
+    /// OTHER literal — `GroupElement`/`SigmaProp`/`BigInt`/`UnsignedBigInt`/
+    /// `Coll`/`Box`/`AvlTree` — lifts to a `GroupElementConst`-style
+    /// `LiftedConst` (`Base.scala:240`, `SigmaDslImpl.scala:539-593` via the
+    /// explicit `liftConst` arms, `GraphBuilding.scala:461-498`), a DIFFERENT
+    /// `Def` trait that `IsConstantDef.unapply`'s `case _: Const[_]` structurally
+    /// cannot see. So P4 NEVER fires for them and a multi-use literal of those
+    /// types HOISTS to an ordinary `ValDef` like any other node — the decisive
+    /// fact for `proveDHTuple(g1,g2,g1,g2)` (4 uses of one `GroupElement` value →
+    /// 1 pool slot + `ValDef(1)`, oracle `d801 d601 7300 ce 7201 7201 7201 7201`).
+    /// A type-BLIND `is_const` would wrongly suppress that ValDef.
     pub fn is_const(&self, sym: SymId) -> bool {
-        matches!(self.tag_of(sym), KeyTag::Const)
+        matches!(
+            &self.syms[sym.0 as usize].node,
+            Node::Const(tpe, _) if is_primitive_scalar_const_type(tpe)
+        )
     }
 
     /// The exact admission conjunction (`TreeBuilding.scala:503-509`):
@@ -1151,6 +1166,25 @@ fn recompose(template: &Payload, it: &mut dyn Iterator<Item = Expr>) -> Payload 
             }
         }
     }
+}
+
+/// Scala's narrow `Const[_]` class as a TYPE test (P4, `IsConstantDef`): the
+/// primitive scalar literals produced by the `toRep` fallback
+/// (`GraphBuilding.scala:495-498`) — Int/Byte/Short/Long/Boolean/String. Every
+/// other literal type lifts to a `LiftedConst` (`Base.scala:240`) that P4
+/// structurally cannot see and so hoists as an ordinary node (M5 Task 5 Fix 2,
+/// `m5-sched-small.md` §1.3). `SString` is `Coll[SByte]` at the value level but
+/// carries its own type code and IS a scalar `Const` in Scala, so it stays here.
+fn is_primitive_scalar_const_type(tpe: &SigmaType) -> bool {
+    matches!(
+        tpe,
+        SigmaType::SBoolean
+            | SigmaType::SByte
+            | SigmaType::SShort
+            | SigmaType::SInt
+            | SigmaType::SLong
+            | SigmaType::SString
+    )
 }
 
 /// Canonical span-free key bytes for a constant: its wire type+value encoding
@@ -1886,12 +1920,16 @@ mod tests {
     }
 
     #[test]
-    fn provedhtuple_repeated_ge_consts_are_const_suppressed_p4_load_bearing() {
-        // OQ4 / P4 witness: `proveDHTuple(g1, g2, g1, g2)` — the two DISTINCT group
-        // elements each arrive at CSE as a `Const` referenced TWICE (positions
-        // 0/2 and 1/3). On the oracle side these reach CSE unfolded (lib.rs:611-616,
-        // D-C7): each is `has_many` AND clears P2/P3 — so ONLY P4 keeps them from
-        // hoisting. This proves P4 is load-bearing, not vacuous.
+    fn provedhtuple_repeated_ge_consts_hoist_liftedconst_not_p4_suppressed() {
+        // M5 Task 5 Fix 2 (`m5-sched-small.md` §1.3): `proveDHTuple(…)` over
+        // repeated `GroupElement` constants. A `GroupElement` literal is a
+        // `LiftedConst`, NOT Scala's narrow `Const[_]`, so P4 (`IsConstantDef`)
+        // structurally cannot see it — it hoists like any ordinary multi-use
+        // node. Here two DISTINCT group elements each arrive at CSE referenced
+        // TWICE (positions 0/2 and 1/3); each is `has_many`, clears P2/P3, and is
+        // NOT `is_const` → BOTH hoist. (The live `cce` env binds g1==g2 to ONE
+        // value used 4×, giving the single `ValDef(1)` the oracle emits; this
+        // two-distinct-value probe isolates the predicate flip.)
         let e = op4(
             CREATE_PROVE_DHTUPLE,
             ge_const(0x11),
@@ -1908,17 +1946,41 @@ mod tests {
         for c in &consts {
             assert_eq!(usage.get(c).copied(), Some(2), "each GE const used twice");
             assert!(Interner::has_many(&usage, *c));
-            assert!(it.is_const(*c));
-            // Without P4 the symbol would clear the gate — P4 is the deciding vote.
-            let passes_without_p4 = Interner::has_many(&usage, *c)
-                && !it.is_context_property(*c)
-                && !it.is_internal(*c);
-            assert!(passes_without_p4, "the GE const clears P1/P2/P3");
             assert!(
-                !it.should_hoist(*c, &usage),
-                "P4 alone suppresses the GE const"
+                !it.is_const(*c),
+                "a GroupElement literal is a LiftedConst — P4 does not match it"
+            );
+            assert!(
+                it.should_hoist(*c, &usage),
+                "the GE const clears all four predicates → hoists (Fix 2)"
             );
         }
+    }
+
+    #[test]
+    fn provedhtuple_cce_single_ge_const_hoists_to_one_valdef_matches_oracle() {
+        // The live `cce` vector `proveDHTuple(g1, g2, g1, g2)` (seed index 61):
+        // the DEMO env binds g1 and g2 to the SAME `GroupElementConstant`
+        // (secp256k1 generator), so all four arguments are one const symbol used
+        // 4× → a single `ValDef(1)` whose rhs segregates to `ConstPlaceholder(0)`,
+        // result `ProveDHTuple(v1,v1,v1,v1)`. Byte-exact vs the Scala 6.0.2 `cce`
+        // oracle (`m5-sched-small.md` §1.2). Fix 2 is what makes this ValDef appear.
+        let g = ge_const(0x42);
+        let e = op4(CREATE_PROVE_DHTUPLE, g.clone(), g.clone(), g.clone(), g);
+        let mut it = Interner::new();
+        let root = it.intern(&e);
+        let mat = it.materialize(root);
+        let expected = block(
+            vec![val_def(1, ge_const(0x42))],
+            op4(
+                CREATE_PROVE_DHTUPLE,
+                valuse(1),
+                valuse(1),
+                valuse(1),
+                valuse(1),
+            ),
+        );
+        assert_eq!(mat, expected);
     }
 
     // ----- Task 3: ValDef materialization — byte-exact vs the JVM oracle -----

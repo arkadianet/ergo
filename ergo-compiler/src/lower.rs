@@ -213,7 +213,20 @@ fn fold_prove_dlog_dhtuple(expr: Expr) -> Expr {
                     tpe: SigmaType::SGroupElement,
                     val: SigmaValue::GroupElement(v),
                 },
-            ) => Expr::Const {
+                // Fold to a bare `SigmaPropConstant` ONLY when the four points are
+                // pairwise DISTINCT. Scala hash-conses (CSE) BEFORE `buildValue`'s
+                // four-`Constant` fold-guard runs, so a REPEATED point is already a
+                // shared `ValDef`/`ValUse` — not a `Constant` — by the time the
+                // guard is checked, and the guard does not fire (`m5-sched-small.md`
+                // §1.3; lib.rs D-C7). `proveDHTuple(g1,g2,g1,g2)` under the `cce`
+                // env (g1==g2) therefore stays a `CreateProveDHTuple` node whose one
+                // distinct `GroupElement` (a `LiftedConst`, NOT P4-suppressed) CSE
+                // hoists to `ValDef(1)` — oracle `d801 d601 7300 ce 7201 7201 7201
+                // 7201`. Distinct-arg proveDHTuple (no CSE sharing) still folds here.
+                // (A GroupElement literal shared with the REST of the tree but
+                // distinct WITHIN this node is a non-corpus theoretical residual the
+                // fully-faithful post-CSE ordering would also catch.)
+            ) if g != h && g != u && g != v && h != u && h != v && u != v => Expr::Const {
                 tpe: SigmaType::SSigmaProp,
                 val: SigmaValue::SigmaProp(SigmaBoolean::ProveDHTuple { g, h, u, v }),
             },
@@ -361,6 +374,37 @@ mod tests {
                     v: ge(4),
                 }),
             }
+        );
+    }
+
+    #[test]
+    fn lower_create_prove_dhtuple_repeated_point_stays_unfolded_for_cse() {
+        // `proveDHTuple(g1, g2, g1, g2)` under the `cce` env (g1==g2==G): all four
+        // args are ONE distinct point. Scala hash-conses that point into a shared
+        // ValDef BEFORE its four-`Constant` fold-guard runs, so the guard never
+        // fires — the node must stay a `CreateProveDHTuple` so CSE can hoist the
+        // (LiftedConst) point to `ValDef(1)`. Our all-distinct gate reproduces this
+        // (`m5-sched-small.md` §1.3; M5 Task 5 Fix 2).
+        let dht = Expr::Op(IrNode {
+            opcode: CREATE_PROVE_DHTUPLE,
+            payload: Payload::Four(
+                Box::new(ge_const(7)),
+                Box::new(ge_const(7)),
+                Box::new(ge_const(7)),
+                Box::new(ge_const(7)),
+            ),
+        });
+        assert_eq!(
+            lower(dht),
+            Expr::Op(IrNode {
+                opcode: CREATE_PROVE_DHTUPLE,
+                payload: Payload::Four(
+                    Box::new(ge_const(7)),
+                    Box::new(ge_const(7)),
+                    Box::new(ge_const(7)),
+                    Box::new(ge_const(7)),
+                ),
+            })
         );
     }
 
