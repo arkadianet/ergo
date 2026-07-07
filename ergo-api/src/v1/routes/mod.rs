@@ -16,6 +16,7 @@ pub mod dto;
 mod addresses;
 mod boxes;
 mod chain;
+mod mempool;
 mod tokens;
 mod transactions;
 
@@ -53,6 +54,9 @@ pub struct V1State {
     pub submit: Option<Arc<dyn NodeSubmit>>,
     /// Mempool overlay — the unconfirmed side of `transactions/{tx_id}`.
     pub mempool: Arc<dyn MempoolView>,
+    /// Shared O4 mempool-depth sample ring — the source for
+    /// `mempool/summary?history=` and (future) `stats/mempool-depth`.
+    pub mempool_depth: Arc<crate::v1::mempool_depth::MempoolDepthRing>,
     /// Address-encoding network prefix.
     pub network: NetworkPrefix,
 }
@@ -310,6 +314,13 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
     let cheap: Router<V1State> = Router::new()
         .route("/api/v1/boxes/:box_id", get(boxes::box_by_id))
         .route("/api/v1/tokens/:token_id", get(tokens::token_by_id))
+        // ----- mempool/* light point reads -----
+        .route("/api/v1/mempool/summary", get(mempool::summary))
+        .route(
+            "/api/v1/mempool/transactions/:tx_id",
+            get(mempool::transaction_by_id),
+        )
+        .route("/api/v1/mempool/fee-histogram", get(mempool::fee_histogram))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::CheapRead),
             governor_mw,
@@ -353,6 +364,25 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
         .route("/api/v1/transactions/submit", post(transactions::submit))
         .route("/api/v1/transactions/check", post(transactions::check))
+        // ----- mempool/* lists + O1 submit/check aliases -----
+        .route("/api/v1/mempool/transactions", get(mempool::transactions))
+        .route(
+            "/api/v1/mempool/by-address/:address",
+            get(mempool::by_address),
+        )
+        .route(
+            "/api/v1/mempool/by-ergo-tree/:ergo_tree",
+            get(mempool::by_ergo_tree),
+        )
+        .route("/api/v1/mempool/by-box-id/:box_id", get(mempool::by_box_id))
+        .route(
+            "/api/v1/mempool/by-token-id/:token_id",
+            get(mempool::by_token_id),
+        )
+        // O1: aliases of the canonical transactions/{submit,check} — SAME
+        // handler, second mount (no duplicated logic).
+        .route("/api/v1/mempool/submit", post(transactions::submit))
+        .route("/api/v1/mempool/check", post(transactions::check))
         // ----- boxes/* -----
         .route("/api/v1/boxes/range", get(boxes::box_range))
         .route(

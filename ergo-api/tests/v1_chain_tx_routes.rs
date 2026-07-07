@@ -326,6 +326,7 @@ fn app(deps: Deps) -> Router {
         indexer: deps.indexer,
         submit: deps.submit,
         mempool,
+        mempool_depth: Arc::new(ergo_api::v1::MempoolDepthRing::new()),
         network: NetworkPrefix::Mainnet,
     };
     let governor =

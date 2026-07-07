@@ -63,6 +63,7 @@ fn app(indexer: Option<Arc<dyn IndexerQuery>>) -> Router {
         indexer,
         submit: None,
         mempool,
+        mempool_depth: Arc::new(ergo_api::v1::MempoolDepthRing::new()),
         network: NetworkPrefix::Mainnet,
     };
     let governor =

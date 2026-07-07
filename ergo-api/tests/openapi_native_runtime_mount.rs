@@ -2,11 +2,12 @@
 //!
 //! The OpenAPI snapshot (`openapi_native_snapshot`) proves what the derive
 //! *emitted*; it cannot prove what the router actually *mounted*. The
-//! conditional routes — `mempool/submit`, `mempool/check`, `node/shutdown`
-//! — mount only when the matching handle is wired through `ServerCtx` and
-//! the security gate. This test drives the real axum router under each
-//! wiring combination and asserts the observed HTTP status codes, so a
-//! regression in conditional-mount wiring fails here even if the snapshot
+//! conditional route `node/shutdown` mounts only when the admin handle +
+//! security gate are wired through `ServerCtx`. The `mempool/{submit,check}`
+//! aliases (Overlap O1) mount UNCONDITIONALLY on the v1 product router and
+//! answer `409 submit_disabled` when no submit bridge is wired. This test
+//! drives the real axum router under each wiring combination and asserts the
+//! observed HTTP status codes, so a regression fails here even if the snapshot
 //! stays green.
 
 use std::sync::Arc;
@@ -170,8 +171,9 @@ impl NodeSubmit for StubSubmit {
 
 // ----- route inventory -----
 
-/// The 11 always-on GET routes. `transactions/aa` resolves to the stubbed
-/// tx so a mounted route answers 200 rather than a tx-absent 404.
+/// The always-on native derive-mounted GET routes. The `mempool/*` reads moved
+/// to the v1 product router (`crate::v1::v1_router`) and are covered by
+/// `v1_mempool_routes` / `mempool_source_schema`.
 const GET_ROUTES: &[&str] = &[
     "/api/v1/info",
     "/api/v1/identity",
@@ -180,12 +182,12 @@ const GET_ROUTES: &[&str] = &[
     "/api/v1/tip",
     "/api/v1/sync",
     "/api/v1/peers",
-    "/api/v1/mempool/summary",
-    "/api/v1/mempool/transactions",
-    "/api/v1/mempool/transactions/aa",
     "/api/v1/health",
 ];
 
+/// `mempool/{submit,check}` are Overlap-O1 aliases owned by the v1 product
+/// router: they mount UNCONDITIONALLY and answer `409 submit_disabled` (not a
+/// 404) when no submit bridge is wired.
 const SUBMIT_ROUTES: &[&str] = &["/api/v1/mempool/submit", "/api/v1/mempool/check"];
 const SHUTDOWN_ROUTE: &str = "/api/v1/node/shutdown";
 // Native, but gated on the Scala-compat chain reader (`compat`), which no
@@ -278,8 +280,8 @@ async fn runtime_mount_no_handles_mounts_only_unconditional_gets() {
     for path in SUBMIT_ROUTES {
         assert_eq!(
             post(&app, path, None).await.0,
-            StatusCode::NOT_FOUND,
-            "POST {path} must 404 when no submit handle is wired",
+            StatusCode::CONFLICT,
+            "POST {path} mounts unconditionally and answers 409 submit_disabled",
         );
     }
     assert_eq!(
@@ -319,8 +321,8 @@ async fn runtime_mount_admin_wired_mounts_unauthed_shutdown_202() {
     for path in SUBMIT_ROUTES {
         assert_eq!(
             post(&app, path, None).await.0,
-            StatusCode::NOT_FOUND,
-            "submit/check 404 without a submit handle",
+            StatusCode::CONFLICT,
+            "submit/check mount unconditionally; 409 submit_disabled without a bridge",
         );
     }
     // Admin wired, no security gate: shutdown accepts unauthenticated.

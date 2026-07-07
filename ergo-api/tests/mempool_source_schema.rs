@@ -1,7 +1,11 @@
-//! `/api/v1/mempool/transactions[/{tx_id}]` `.source` wire-shape pins.
+//! `/api/v1/mempool/*` v1 wire-shape pins (§3.8).
 //!
-//! `source` is a tagged union, not a flat string; these tests pin the
-//! end-to-end wire emission so it can't silently regress.
+//! The v1 product routes reshape the old native mempool endpoints: the list is
+//! a `{items, page}` cursor collection, per-tx `source` is a FLAT snake_case
+//! string (`peer|api|wallet|demoted_from_block` — the real `ApiTxSource`
+//! taxonomy, projected down from the tagged union), fee/weight amounts are
+//! strings, and `weight_function` moves onto `/summary`. These tests pin those
+//! shapes end-to-end so they can't silently regress.
 
 use std::sync::Arc;
 
@@ -188,176 +192,121 @@ async fn get_json(uri: &str) -> (StatusCode, serde_json::Value) {
     (status, value)
 }
 
-// ----- list route -----
+// ----- list route (v1 collection envelope) -----
 
-/// Every entry in `/api/v1/mempool/transactions` carries a tagged
-/// `source` object — never a flat string. Pins the wire shape
-/// against silent regression to a string.
+/// The list is a `{items, page}` collection — the old flat
+/// `{transactions, weight_function}` object is retired.
 #[tokio::test]
-async fn mempool_list_source_is_tagged_object_not_string() {
+async fn mempool_list_is_v1_collection_envelope() {
     let (status, body) = get_json("/api/v1/mempool/transactions").await;
     assert_eq!(status, StatusCode::OK);
-    let txs = body
-        .get("transactions")
-        .and_then(|v| v.as_array())
-        .expect("body.transactions must be an array");
-    assert!(!txs.is_empty(), "fixture pool must be non-empty");
-    for (i, tx) in txs.iter().enumerate() {
-        let src = tx
-            .get("source")
-            .unwrap_or_else(|| panic!("tx[{i}] missing source field"));
-        assert!(
-            src.is_object(),
-            "tx[{i}].source must be a JSON object (tagged union), got {src}",
-        );
-        assert!(
-            src.get("kind").and_then(|k| k.as_str()).is_some(),
-            "tx[{i}].source.kind must be a string, got {src}",
-        );
-    }
-}
-
-/// `peer` variant carries `kind` + `addr` and nothing else; the
-/// canonical Scala-shape host:port string lands on `addr`.
-#[tokio::test]
-async fn mempool_list_peer_variant_carries_kind_and_addr() {
-    let (_status, body) = get_json("/api/v1/mempool/transactions").await;
-    let txs = body
-        .get("transactions")
-        .and_then(|v| v.as_array())
-        .expect("transactions array");
-    let peer_tx = txs
-        .iter()
-        .find(|t| t.get("tx_id").and_then(|v| v.as_str()) == Some(PEER_TX_ID))
-        .expect("peer fixture must be present");
-    let src = peer_tx.get("source").unwrap();
-    assert_eq!(
-        src,
-        &serde_json::json!({ "kind": "peer", "addr": "159.65.11.55:9030" }),
-        "peer variant wire shape regression: got {src}",
+    assert!(
+        body.get("items").and_then(|v| v.as_array()).is_some(),
+        "list must be a {{items, page}} collection, got {body}",
+    );
+    assert!(body.get("page").is_some(), "collection must carry page");
+    assert!(
+        body.get("transactions").is_none(),
+        "legacy `transactions` key must be gone",
     );
 }
 
-/// `api` / `wallet` / `demoted_from_block` unit variants emit only
-/// `{"kind": "..."}` — no `addr`, no extra keys.
+/// Per-tx `source` is a FLAT snake_case string projected from the real
+/// `ApiTxSource` taxonomy — never the old tagged object.
 #[tokio::test]
-async fn mempool_list_unit_variants_emit_kind_only() {
+async fn mempool_list_source_is_flat_string() {
     let (_status, body) = get_json("/api/v1/mempool/transactions").await;
-    let txs = body
-        .get("transactions")
-        .and_then(|v| v.as_array())
-        .expect("transactions array");
-
+    let items = body["items"].as_array().expect("items array");
     let cases = [
+        (PEER_TX_ID, "peer"),
         (API_TX_ID, "api"),
         (WALLET_TX_ID, "wallet"),
         (DEMOTED_TX_ID, "demoted_from_block"),
     ];
-    for (tx_id, expected_kind) in cases {
-        let tx = txs
+    for (tx_id, expected) in cases {
+        let tx = items
             .iter()
             .find(|t| t.get("tx_id").and_then(|v| v.as_str()) == Some(tx_id))
             .unwrap_or_else(|| panic!("fixture {tx_id} must be present"));
-        let src = tx.get("source").and_then(|v| v.as_object()).unwrap();
         assert_eq!(
-            src.len(),
-            1,
-            "{expected_kind} variant must have exactly one key (kind), got {src:?}",
+            tx.get("source").and_then(|v| v.as_str()),
+            Some(expected),
+            "source must be the flat string {expected:?}, got {}",
+            tx["source"],
         );
-        assert_eq!(
-            src.get("kind").and_then(|v| v.as_str()),
-            Some(expected_kind),
-        );
+    }
+}
+
+/// Fee/weight amounts are strings (§1.1); the raw-number `ApiMempoolTransaction`
+/// field names are gone. `first_seen` follows the §1.2 flat `*_unix_ms`+`*_iso`
+/// rule.
+#[tokio::test]
+async fn mempool_list_amounts_are_strings_and_legacy_keys_absent() {
+    let (_status, body) = get_json("/api/v1/mempool/transactions").await;
+    let tx = &body["items"].as_array().expect("items")[0];
+    for k in ["fee", "fee_per_byte", "priority_weight"] {
+        assert!(tx[k].is_string(), "{k} must be a string, got {}", tx[k]);
+    }
+    assert!(tx["validation_cost_units"].is_u64());
+    assert!(tx["first_seen_unix_ms"].is_u64());
+    assert!(tx["first_seen_iso"].is_string());
+    let obj = tx.as_object().unwrap();
+    for legacy in ["fee_nano_erg", "fee_per_byte_nano_erg", "cost", "weight"] {
         assert!(
-            !src.contains_key("addr"),
-            "{expected_kind} variant must NOT carry addr, got {src:?}",
+            !obj.contains_key(legacy),
+            "legacy key {legacy:?} must be gone, keys = {:?}",
+            obj.keys().collect::<Vec<_>>(),
         );
     }
 }
 
 // ----- by-id route -----
 
-/// `/api/v1/mempool/transactions/{tx_id}` emits the same tagged
-/// source object — not a flat string and not omitted.
+/// `/api/v1/mempool/transactions/{tx_id}` emits the same flat-string source and
+/// carries the resolved `io_box` arrays (empty under the no-op overlay here).
 #[tokio::test]
-async fn mempool_by_id_emits_tagged_source() {
+async fn mempool_by_id_emits_flat_source_and_io() {
     let (status, body) = get_json(&format!("/api/v1/mempool/transactions/{PEER_TX_ID}")).await;
     assert_eq!(status, StatusCode::OK);
-    let src = body.get("source").unwrap_or_else(|| {
-        panic!("by-id response must carry .source, got {body}");
-    });
-    assert_eq!(
-        src,
-        &serde_json::json!({ "kind": "peer", "addr": "159.65.11.55:9030" }),
-        "by-id peer variant wire shape regression: got {src}",
-    );
+    assert_eq!(body["source"].as_str(), Some("peer"), "got {body}");
+    assert_eq!(body["tx_id"].as_str(), Some(PEER_TX_ID));
+    assert!(body["inputs"].is_array(), "detail carries io_box inputs");
+    assert!(body["outputs"].is_array(), "detail carries io_box outputs");
 }
 
-// ----- envelope-level weight_function + per-tx metric fields -----
-
-/// `/api/v1/mempool/transactions` envelope carries `weight_function`
-/// as a top-level field so clients can interpret `priority_weight`
-/// against the active policy without an out-of-band config read.
+/// A malformed id is `400 invalid_tx_id`; a well-formed-but-absent id is
+/// `404 tx_not_found` — both enveloped, never a bare status.
 #[tokio::test]
-async fn mempool_list_envelope_carries_weight_function() {
-    let (_status, body) = get_json("/api/v1/mempool/transactions").await;
-    let wf = body
-        .get("weight_function")
-        .and_then(|v| v.as_str())
-        .expect("envelope must carry weight_function as a string");
+async fn mempool_by_id_error_envelopes() {
+    let (status, body) = get_json("/api/v1/mempool/transactions/not-hex").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["reason"].as_str(), Some("invalid_tx_id"));
+
+    let absent = "0".repeat(64);
+    let (status, body) = get_json(&format!("/api/v1/mempool/transactions/{absent}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["reason"].as_str(), Some("tx_not_found"));
+}
+
+// ----- summary route -----
+
+/// `weight_function` moves onto `/summary`, alongside derived `utilization`.
+#[tokio::test]
+async fn mempool_summary_carries_weight_function_and_utilization() {
+    let (status, body) = get_json("/api/v1/mempool/summary").await;
+    assert_eq!(status, StatusCode::OK);
     assert!(
-        matches!(wf, "cost" | "size" | "min"),
-        "weight_function must be one of cost|size|min, got {wf:?}",
+        matches!(
+            body["weight_function"].as_str(),
+            Some("cost" | "size" | "min")
+        ),
+        "summary must carry weight_function, got {body}",
     );
-}
-
-/// Each mempool tx emits the metric fields `validation_cost_units`
-/// and `priority_weight` (units are explicit, not the bare
-/// `cost` / `weight` they replace).
-#[tokio::test]
-async fn mempool_list_tx_carries_renamed_metric_fields() {
-    let (_status, body) = get_json("/api/v1/mempool/transactions").await;
-    let tx = body
-        .get("transactions")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .expect("fixture pool is non-empty");
-    let cost = tx
-        .get("validation_cost_units")
-        .and_then(|v| v.as_u64())
-        .expect("validation_cost_units must be present as a number");
-    let weight = tx
-        .get("priority_weight")
-        .and_then(|v| v.as_u64())
-        .expect("priority_weight must be present as a number");
-    assert_eq!(cost, 17_390, "fixture validation_cost_units");
-    assert_eq!(weight, 88_326, "fixture priority_weight");
-}
-
-/// Legacy field names `cost` and `weight` MUST be absent on every tx
-/// emission — clients that grep for them must see them gone, not
-/// silently shadowed by both old + new keys. Tripwire against a
-/// future merge accidentally re-introducing the old names.
-#[tokio::test]
-async fn mempool_list_legacy_cost_and_weight_keys_are_absent() {
-    let (_status, body) = get_json("/api/v1/mempool/transactions").await;
-    for (i, tx) in body
-        .get("transactions")
-        .and_then(|v| v.as_array())
-        .expect("transactions array")
-        .iter()
-        .enumerate()
-    {
-        let obj = tx.as_object().unwrap();
-        assert!(
-            !obj.contains_key("cost"),
-            "tx[{i}] must not carry legacy `cost` key, got keys = {:?}",
-            obj.keys().collect::<Vec<_>>(),
-        );
-        assert!(
-            !obj.contains_key("weight"),
-            "tx[{i}] must not carry legacy `weight` key, got keys = {:?}",
-            obj.keys().collect::<Vec<_>>(),
-        );
-    }
+    assert!(body["utilization"]["count_pct"].is_number());
+    assert!(body["utilization"]["bytes_pct"].is_number());
+    assert_eq!(body["size"].as_u64(), Some(4), "fixture pool size");
+    assert!(
+        body.get("history").is_none(),
+        "history omitted unless ?history= is requested",
+    );
 }

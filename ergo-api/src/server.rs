@@ -25,8 +25,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use axum::{
-    body::Bytes,
-    extract::{Path, Query, Request, State},
+    extract::{Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -609,15 +608,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/api/v1/events", get(events_handler))
         .route("/api/v1/sync", get(sync_handler))
         .route("/api/v1/peers", get(peers_handler))
-        .route("/api/v1/mempool/summary", get(mempool_handler))
-        .route(
-            "/api/v1/mempool/transactions",
-            get(mempool_transactions_handler),
-        )
-        .route(
-            "/api/v1/mempool/transactions/:tx_id",
-            get(mempool_transaction_by_id_handler),
-        )
+        // `mempool/*` reads (summary, transactions[/{tx_id}]) are owned by the
+        // v1 product router (`crate::v1::v1_router`, §3.8) — reshaped into the
+        // envelope + cursor. Not mounted here to avoid a route collision.
         .route("/api/v1/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(read.clone());
@@ -875,15 +868,11 @@ pub fn router_with_mempool_and_wallet_and_security(
         operator
     };
 
-    let operator = if let Some(s) = submit.clone() {
-        let writes: Router = Router::new()
-            .route("/api/v1/mempool/submit", post(submit_handler))
-            .route("/api/v1/mempool/check", post(check_handler))
-            .with_state(s);
-        operator.merge(writes)
-    } else {
-        operator
-    };
+    // `POST /api/v1/mempool/{submit,check}` are Overlap-O1 aliases of the
+    // canonical `transactions/{submit,check}` handlers, owned by the v1 product
+    // router (`crate::v1::v1_router`, §3.8). They mount unconditionally there
+    // and answer `409 submit_disabled` when no submit bridge is wired (the v1
+    // honest-reason posture), superseding the old conditional native mount.
 
     // `/mining/*` mounts only when a NodeMining handle is plumbed
     // (integrator sets `[mining].enabled = true` and constructs the
@@ -1229,12 +1218,25 @@ pub fn router_with_mempool_and_wallet_and_security(
     // fronted by the per-IP governor at route-class `HeavyRead`. The shared
     // governor is one per node, so later route groups reuse the same per-IP
     // budget (`dev-docs/v1-api-design.md` §2.2).
+    // O4 shared mempool-depth ring (Appendix A O4). Fed by a background sampler
+    // (production only — guarded on a live Tokio runtime so non-async test
+    // router builds never spawn a task), read by `mempool/summary?history=` and
+    // the future `stats/mempool-depth`.
+    let v1_mempool_depth = std::sync::Arc::new(crate::v1::mempool_depth::MempoolDepthRing::new());
+    if tokio::runtime::Handle::try_current().is_ok() {
+        crate::v1::mempool_depth::spawn_depth_sampler(
+            v1_read.clone(),
+            v1_mempool_depth.clone(),
+            crate::v1::mempool_depth::DEFAULT_SAMPLE_INTERVAL,
+        );
+    }
     let v1_state = crate::v1::V1State {
         read: v1_read,
         chain: v1_chain,
         indexer: v1_indexer,
         submit: v1_submit,
         mempool: v1_mempool,
+        mempool_depth: v1_mempool_depth,
         network,
     };
     let v1_governor = crate::v1::governor::Governor::new(Default::default())
@@ -1469,10 +1471,11 @@ async fn dashboard_css() -> Response {
         title = "Ergo Rust Node — Native API",
         description = "Rust-native operator API for the Ergo node (`/api/v1/*`). \
 This document describes the production-superset route set: the conditional routes \
-(`/api/v1/mempool/submit`, `/api/v1/mempool/check`, `/api/v1/node/shutdown`, \
+(`/api/v1/node/shutdown`, \
 `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
-submit / admin / chain-reader handles, so a given process may serve fewer routes than \
-appear here. Query `GET /api/v1/health` to confirm a running node's state."
+admin / chain-reader handles, so a given process may serve fewer routes than \
+appear here. The `mempool/*` product routes are documented in the v1 product \
+router. Query `GET /api/v1/health` to confirm a running node's state."
     ),
     paths(
         info_handler,
@@ -1490,12 +1493,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         events_handler,
         sync_handler,
         peers_handler,
-        mempool_handler,
-        mempool_transactions_handler,
-        mempool_transaction_by_id_handler,
         health_handler,
-        submit_handler,
-        check_handler,
         shutdown_handler,
         crate::wallet::native::balance,
         crate::wallet::native::status,
@@ -2012,55 +2010,6 @@ async fn peers_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
     Json(read.peers()).into_response()
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/v1/mempool/summary",
-    tag = "mempool",
-    responses(
-        (status = 200, description = "Mempool size and capacity counters",
-         body = ApiMempoolSummary, content_type = "application/json"),
-    ),
-)]
-async fn mempool_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
-    Json(read.mempool_summary()).into_response()
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/mempool/transactions",
-    tag = "mempool",
-    responses(
-        (status = 200, description = "Pooled transactions with priority weights",
-         body = ApiMempoolTransactions, content_type = "application/json"),
-    ),
-)]
-async fn mempool_transactions_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
-    Json(read.mempool_transactions()).into_response()
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/mempool/transactions/{tx_id}",
-    tag = "mempool",
-    params(
-        ("tx_id" = String, Path, description = "Hex-encoded transaction id"),
-    ),
-    responses(
-        (status = 200, description = "Pooled transaction detail",
-         body = ApiMempoolTransaction, content_type = "application/json"),
-        (status = 404, description = "No such transaction in the pool"),
-    ),
-)]
-async fn mempool_transaction_by_id_handler(
-    State(read): State<Arc<dyn NodeReadState>>,
-    Path(tx_id): Path<String>,
-) -> Response {
-    match read.mempool_transaction(&tx_id) {
-        Some(tx) => Json(tx).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 /// Prometheus-text exposition derived from the same `NodeReadState`
 /// DTOs the operator API already serves. No new node state — every
 /// metric is a projection of `status()` + `mempool_summary()` +
@@ -2145,53 +2094,6 @@ ergo_node_mempool_peer_tx_rejected_total {peer_tx_rejected}
         body,
     )
         .into_response()
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/mempool/submit",
-    tag = "mempool",
-    request_body(
-        content = RawTransactionBytes,
-        content_type = "application/octet-stream",
-        description = "Serialized transaction bytes — forwarded verbatim to the admission pipeline",
-    ),
-    responses(
-        (status = 200, description = "Transaction accepted into the pool",
-         body = ApiSubmitResponse, content_type = "application/json"),
-        (status = 400, description = "Transaction rejected by admission",
-         body = ApiNativeSubmitError, content_type = "application/json"),
-    ),
-)]
-async fn submit_handler(State(submit): State<Arc<dyn NodeSubmit>>, body: Bytes) -> Response {
-    submit_inner(submit, body, SubmitMode::Broadcast).await
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/mempool/check",
-    tag = "mempool",
-    request_body(
-        content = RawTransactionBytes,
-        content_type = "application/octet-stream",
-        description = "Serialized transaction bytes — validated against the pool without admission",
-    ),
-    responses(
-        (status = 200, description = "Transaction would be accepted",
-         body = ApiSubmitResponse, content_type = "application/json"),
-        (status = 400, description = "Transaction rejected by validation",
-         body = ApiNativeSubmitError, content_type = "application/json"),
-    ),
-)]
-async fn check_handler(State(submit): State<Arc<dyn NodeSubmit>>, body: Bytes) -> Response {
-    submit_inner(submit, body, SubmitMode::CheckOnly).await
-}
-
-async fn submit_inner(submit: Arc<dyn NodeSubmit>, body: Bytes, mode: SubmitMode) -> Response {
-    match submit_via_node(submit, body.to_vec(), mode).await {
-        Ok(tx_id) => (StatusCode::OK, Json(ApiSubmitResponse { tx_id })).into_response(),
-        Err((status, err)) => (status, Json(ApiNativeSubmitError::from(err))).into_response(),
-    }
 }
 
 /// Channel-hop wrapper that lifts a `SubmitError` into `(StatusCode,
