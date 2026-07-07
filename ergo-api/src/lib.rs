@@ -24,6 +24,11 @@ pub mod server;
 pub mod traits;
 pub mod types;
 pub mod utils;
+/// `/api/v1/*` product-API shared primitives (G2). Error envelope, cursor
+/// codec, rate/cost governor, and the T0/T1/T2 auth tier split — built once
+/// here and adopted by every future v1 endpoint group. See
+/// `dev-docs/v1-api-design.md` §1 (conventions) and §2 (exposure model).
+pub mod v1;
 pub mod wallet;
 mod web;
 
