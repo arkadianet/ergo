@@ -169,7 +169,7 @@ function weightLabel(wf) {
 
 export async function onSlow() {
   const [summary, txWrap] = await Promise.all([api.mempoolSummary(), api.mempoolTransactions()]);
-  const txs = (txWrap && txWrap.transactions) || [];
+  const txs = (txWrap && txWrap.items) || []; // v1: mempool/transactions now returns {items,page}
   const set = (sel, t) => {
     const e = root.querySelector(sel);
     if (e) e.textContent = t;
