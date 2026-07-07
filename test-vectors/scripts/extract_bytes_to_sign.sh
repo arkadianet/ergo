@@ -10,7 +10,7 @@ set -euo pipefail
 # verify the bytes_to_sign field.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCALA_CLI="${SCALA_CLI:-/home/rkadias/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
+SCALA_CLI="${SCALA_CLI:-$HOME/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
 SCALA_HELPER="${SCRIPT_DIR}/scala/PrintBytesToSign.scala"
 
 if [ $# -lt 2 ]; then

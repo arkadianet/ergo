@@ -10,7 +10,7 @@ set -euo pipefail
 # For each transaction, emits canonical signed-tx bytes and bytes_to_sign.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCALA_CLI="${SCALA_CLI:-/home/rkadias/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
+SCALA_CLI="${SCALA_CLI:-$HOME/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
 NODE_URL="${NODE_URL:-http://localhost:9053}"
 SCALA_HELPER="${SCRIPT_DIR}/scala/PrintTransactionBytes.scala"
 

@@ -1,0 +1,726 @@
+# ErgoScript typer oracle golden seed
+#
+# Format: verb<TAB>source<TAB>expected-output
+#   verb     = tc (empty env) | tce (demo env: a,b:Coll[Byte]; col1,col2:Coll[Long];
+#              g1,g2,g3:GroupElement; n1:BigInt; bb1,bb2:Byte — g3 = g^7, a fixed
+#              NON-generator point, added post-M2 for D-T6 decompress captures) |
+#              tcs (SigmaTyperTest env, see LangTests.scala:52-69)
+#   source   = raw UTF-8 ErgoScript; the Rust harness hex-encodes it when calling the oracle
+#   expected = oracle reply: OK <sexpr> | REJECT <line>:<col> <ExClass> | ERR <msg>
+#
+# All expected values captured from ORACLE_TREE_VERSION=3 (v6) oracle runs.
+# Reject positions: batch-mode oracle contaminates positions for singleton-referencing
+# sources (Risk R1); use tc1.sh for fresh-JVM position grading. Positions marked with
+# [fresh] below are confirmed in fresh-JVM mode; batch may differ for reject cases.
+#
+# Sections: dossier samples | upcast/lambda/block/collection | reject probes |
+#           MethodCall survivors (E7) | v6-gate pair (v3 accept / v2 reject) |
+#           ORACLE_TREE_VERSION=2 reject records | AvlTree probe (Task-3 handoff)
+#
+# ── § 1: dossier samples ─────────────────────────────────────────────────────────
+tc	sigmaProp(HEIGHT > 100)	OK (BoolToSigmaProp:SigmaProp (GT:Boolean (Height:Int) (ConstantNode:Int @100)))
+tc	{ val x = HEIGHT; x > 5 }	OK (Block:Boolean [(ValNode:Int 'x' (Height:Int))] (GT:Boolean (Ident:Int 'x') (ConstantNode:Int @5)))
+tc	INPUTS.map({(b:Box)=>b.value})	OK (MapCollection:Coll[Long] (Inputs:Coll[Box]) (Lambda:(Box) => Long [] [b:#Box] #Long (Select:Long (Ident:Box 'b') 'value')))
+tce	a ++ b	OK (Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))
+tc	1L + 1	OK (ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-102)
+#
+# ── § 2: upcast / lambda / block / collection shapes ─────────────────────────────
+tc	1.toByte + 2.toByte	OK (ArithOp:Byte (Select:Byte (ConstantNode:Int @1) 'toByte') (Select:Byte (ConstantNode:Int @2) 'toByte') @-102)
+tc	true && (1 == 1)	OK (BinAnd:Boolean (ConstantNode:Boolean @true) (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))
+tc	HEIGHT>5 && HEIGHT<9	OK (BinAnd:Boolean (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (LT:Boolean (Height:Int) (ConstantNode:Int @9)))
+tc	Coll(1, 2, 3)	OK (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int)
+tce	col1.exists({(x:Long)=>x>1L})	OK (Exists:Boolean (ConstantNode:Coll[Long] <@1 @2>) (Lambda:(Long) => Boolean [] [x:#Long] #Boolean (GT:Boolean (Ident:Long 'x') (ConstantNode:Long @1))))
+tc	HEIGHT > 5	OK (GT:Boolean (Height:Int) (ConstantNode:Int @5))
+#
+# ── § 3: reject probes ────────────────────────────────────────────────────────────
+# class only; positions are advisory (batch-safe for standard rejects with no singleton contamination)
+tc	HEIGHT && true	REJECT 1:1 NonApplicableMethod [fresh]
+tc	sigmaProp(HEIGHT)	REJECT 1:1 TyperException [fresh]
+tc	zzz + 1	REJECT 1:1 TyperException [fresh]
+# R1 fresh-JVM position: 1:5 (the H in HEIGHT inside `if (HEIGHT) ...`).
+# Batch position contaminated by prior HEIGHT-referencing source ({ val x = HEIGHT ... }
+# sets singleton sourceContext to 1:11); use tc1.sh for correct position grading.
+tc	if (HEIGHT) 1 else 2	REJECT 1:5 TyperException [fresh]
+#
+# ── § 4: MethodCall survivors (E7 validation) ────────────────────────────────────
+# These methods have no irBuilder in sigma-state 6.0.2, so they SURVIVE as MethodCall
+# even with lowerMethodCalls=true. Verified deterministic across 3 runs (2 batch, 1 fresh-JVM).
+tc	Global.serialize(1)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConstantNode:Int @1)] {})
+tce	Global.some[Int](1)	OK (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.some [(ConstantNode:Int @1)] {#T->#Int})
+tc	Global.none[Int]()	OK (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int})
+tce	Global.fromBigEndianBytes[Long](a)	OK (MethodCall:Long (Global:SigmaDslBuilder) %SigmaDslBuilder.fromBigEndianBytes [(ConstantNode:Coll[Byte] <@1 @2>)] {#T->#Long})
+tce	Global.deserializeTo[Long](a)	OK (MethodCall:Long (Global:SigmaDslBuilder) %SigmaDslBuilder.deserializeTo [(ConstantNode:Coll[Byte] <@1 @2>)] {#T->#Long})
+tce	col1.zip(col2)	OK (MethodCall:Coll[(Long,Long)] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.zip [(ConstantNode:Coll[Long] <@3 @4>)] {})
+tce	g1.negate	OK (MethodCall:GroupElement (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) %GroupElement.negate [] {})
+tce	n1.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:BigInt (CBigInt @5)) %BigInt.toBytes [] {})
+tce	Coll(1,2,3).indexOf(1, 0)	OK (MethodCall:Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) %SCollection.indexOf [(ConstantNode:Int @1) (ConstantNode:Int @0)] {})
+tce	col1.flatMap({(x:Long)=>Coll(x)})	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.flatMap [(Lambda:(Long) => Coll[Long] [] [x:#Long] #Coll[Long] (ConcreteCollection:Coll[Long] [(Ident:Long 'x')] #Long))] {})
+tce	col1.patch(0, col2, 1)	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.patch [(ConstantNode:Int @0) (ConstantNode:Coll[Long] <@3 @4>) (ConstantNode:Int @1)] {})
+tce	col1.updated(0, 1L)	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.updated [(ConstantNode:Int @0) (ConstantNode:Long @1)] {})
+tce	col1.updateMany(Coll(0), Coll(1L))	OK (MethodCall:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) %SCollection.updateMany [(ConcreteCollection:Coll[Int] [(ConstantNode:Int @0)] #Int) (ConcreteCollection:Coll[Long] [(ConstantNode:Long @1)] #Long)] {})
+#
+# ── § 5: v6-gate pair (ORACLE_TREE_VERSION=3 accept / v2 reject) ────────────────
+# fromBigEndianBytes is a v6-only method (gated on ergoTree >= 3 in methods.scala).
+# The SAME source accepts at v3 (already recorded in § 4 above) and rejects at v2;
+# committed records are in § 6 below.
+# The Rust twin must gate these three methods on tree_version >= 3.
+#
+# ── § 6: ORACLE_TREE_VERSION=2 reject records ────────────────────────────────────
+# Same sources as § 4 v6 entries, run with ORACLE_TREE_VERSION=2 env var.
+# All three methods are v6-gated (ergoTree >= 3); at V=2 the typer returns MethodNotFound.
+# Verified in a single fresh oracle run (no singleton-contamination risk for MethodNotFound).
+tce	Global.fromBigEndianBytes[Long](a)	REJECT 1:1 MethodNotFound
+tce	Global.deserializeTo[Long](a)	REJECT 1:1 MethodNotFound
+tc	Global.none[Int]()	REJECT 1:1 MethodNotFound
+#
+# ── § 7: AvlTree probe (Task-3 handoff) ─────────────────────────────────────────
+# No AvlTree literal exists in the demo env; avlTree(...) predef rejects at v3 (TyperException).
+# Approach: getVar[AvlTree](1).get to obtain an AvlTree value and chain method calls.
+# Result: AvlTree methods have no irBuilder → all survive as MethodCall (not lowered to IR).
+# Confirmed: digest (Coll[Byte]), keyLength (Int), enabledOperations (Byte) all survive.
+# Two representative records committed; enabledOperations behaves identically.
+tc	getVar[AvlTree](1).get.digest	OK (MethodCall:Coll[Byte] (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.digest [] {})
+tc	getVar[AvlTree](1).get.keyLength	OK (MethodCall:Int (OptionGet:AvlTree (GetVar:Option[AvlTree] @1)) %AvlTree.keyLength [] {})
+#
+# ── § 8: Fix-round-1 oracle vectors (Unit constant + String constant) ────────────
+# All records captured ORACLE_TREE_VERSION=3 (v6). These pin the two critical
+# payload fixes: Unit emits @() (was suppressed), String emits 'text'.
+#
+# 2-subst probe summary: no 2-subst MethodCall producer found after 6 probes:
+#   col1.flatMap({(x:Long)=>Coll(x)}) — 0 subst (irBuilder lowers to MapCollection)
+#   Coll(1,2).zip(Coll(true,false))   — 0 subst
+#   Global.some[Coll[Int]](Coll(1))   — 1 subst (#T)
+#   Global.fromBigEndianBytes[Long]…  — 1 subst (#T)
+#   Coll(Coll(1,2),…).flatMap(…)      — 0 subst
+#   Coll(1,2).fold(0L, {…})           — lowers to Fold IR
+# Conclusion: sigma-state 6.0.2 has no method with 2+ type params surviving typecheck.
+# The comma-separator fix (N4) is verified by TyperOracle.scala:172-173 source read.
+tc	()	OK (ConstantNode:Unit @())
+tc	"ab" + "cd"	OK (ConstantNode:String 'abcd')
+#
+# ── § 9: Fix-round-1 owner-name oracle (SOption.map probe) ──────────────────────
+# Source: `getVar[Int](1).map({(x:Int)=>x})`
+# Goal: confirm the %Owner string printed for SOption methods.
+# Result: oracle prints `%SOption.map` — confirming typeName = "SOption" (not "Option").
+# Scala truth: STypeCompanion.typeName = getClass.getSimpleName (SType.scala:238-244);
+#   SOption companion object → "SOption" (methods.scala:701).
+# Note: SOption.map has MethodCallIrBuilder → survives as MethodCall (has_ir_builder=true).
+# ORACLE_TREE_VERSION=3 (v6), empty env (`tc`).
+tc	getVar[Int](1).map({(x:Int)=>x})	OK (MethodCall:Option[Int] (GetVar:Option[Int] @1) %SOption.map [(Lambda:(Int) => Int [] [x:#Int] #Int (Ident:Int 'x'))] {})
+#
+# ── § 10: PK oracle capture (binder rule 9) ──────────────────────────────────────
+# Captured 2026-07-04 with ORACLE_NETWORK=testnet (default) + ORACLE_TREE_VERSION=3.
+# Pubkey: secp256k1 generator G = 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+# Testnet P2PK address for G: 3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN
+#
+# Determinism: two independent oracle runs returned identical output (DETERMINISTIC).
+#
+# M3 deviation note: the oracle renders ProveDlog as (ProveDlog (Ecp @(x,y,1))),
+# NOT (ProveDlog (CGroupElement (Ecp @(x,y,1)))) — there is NO CGroupElement wrapper
+# inside ProveDlog. The M2 placeholder `(CSigmaProp (ProveDlog <M2:hex>))` MUST be
+# replaced at M3 with (CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1)))) exactly.
+# The incorrect deviation comment in typed.rs:107 and typed_print.rs:191 was fixed
+# in 723e795 (PK oracle capture commit).
+#
+# Accept record — oracle ORACLE_NETWORK=testnet; testnet address is required:
+tc	PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))
+# Reject probes (oracle class + position; correspondence to our BindError variants):
+# PK("notanaddress") → REJECT 0:0 Exception   — Scala Try.get on bad decode →
+#   NoSuchElementException, no source position on the exception; our class =
+#   InvalidAddress (more specific than Scala's base Exception; verdict parity holds).
+# PK(1)             → REJECT 1:1 TyperException — Scala MatchError on non-String
+#   irBuilder arg wrapped at the typer level; our class = InvalidArguments
+#   (deviation: MatchError → InvalidArguments; verdict parity holds).
+tc	PK("notanaddress")	REJECT 0:0 Exception
+tc	PK(1)	REJECT 1:1 TyperException
+#
+# ── § 11: Task-5 structural-arm captures (assignType core I) ─────
+# All captured ORACLE_TREE_VERSION=3 (v6), empty env (tc), deterministic across runs.
+# These pin the structural arms Task 5 implements end-to-end: Block (E1-lenient),
+# ValNode, Ident, If, relations, ArithOp (incl. Upcast), unary, Tuple.
+#
+# E1 (CRITICAL): the Val's explicit `Long` annotation is DISCARDED; x binds to SInt
+# (b1.tpe), the ValNode is :Int, and the result Ident x resolves to Int.
+# accept records (byte-graded end-to-end):
+tc	{ val x: Long = 1; x }	OK (Block:Int [(ValNode:Int 'x' (ConstantNode:Int @1))] (Ident:Int 'x'))
+tc	5 - 3	OK (ArithOp:Int (ConstantNode:Int @5) (ConstantNode:Int @3) @-103)
+tc	1L - 1	OK (ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-103)
+tc	if (HEIGHT > 5) 1 else 2	OK (If:Int (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (ConstantNode:Int @1) (ConstantNode:Int @2))
+tc	!true	OK (LogicalNot:Boolean (ConstantNode:Boolean @true))
+tc	1 == 2	OK (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @2))
+tc	(1, 2L)	OK (Tuple:(Int,Long) [(ConstantNode:Int @1) (ConstantNode:Long @2)])
+tc	1 < 2L	OK (LT:Boolean (Upcast:Long (ConstantNode:Int @1)) (ConstantNode:Long @2))
+tc	{ val x = 5; -x }	OK (Block:Int [(ValNode:Int 'x' (ConstantNode:Int @5))] (Negation:Int (Ident:Int 'x')))
+# reject records (class graded; line:col advisory, from fresh oracle, our pos=0):
+tc	Coll()	REJECT 1:1 TyperException	# empty collection, undefined element type (§1.3)
+tc	if (5) 1 else 2	REJECT 1:5 TyperException	# condition not Boolean (§1.13)
+tc	if (HEIGHT > 5) 1 else 2L	REJECT 1:17 TyperException	# branches differ Int vs Long (§1.13)
+tc	Coll(1, 2L)	REJECT 1:1 TyperException	# msgTypeOf: no numeric widening (§1.3)
+tc	HEIGHT.foo	REJECT 1:5 MethodNotFound	# SInt has no method foo (§1.5)
+tc	1 == true	REJECT 1:1 InvalidBinaryOperationParameters	# equalityOp SameType fail rewrapped (§1.15/§6)
+tc	{ val x = HEIGHT; val x = 5; x }	REJECT 1:23 TyperException	# duplicate val name in block (§1.1)
+#
+# ── § 12: Task-6 Apply-arm + predef-lowering captures (assignType core II) ─────
+# All captured ORACLE_TREE_VERSION=3 (v6); tc = empty env, tce = demo env.
+# These pin: predef irBuilder lowerings (§1.10 + PredefinedFuncApply), §1.7 explicit
+# type-arg method calls, §1.8 method irBuilder path (incl. exp→Exponentiate,
+# map→MapCollection, MethodCall survivors), §1.9 SGlobal via Ident (groupGenerator,
+# xor), §1.10 collection/tuple indexing, §1.12 ApplyTypes standalone,
+# adaptSigmaPropToBoolean, and the getVar-family constant narrowing.
+tc	allOf(Coll(HEIGHT > 5, HEIGHT < 9))	OK (AND:Boolean (ConcreteCollection:Coll[Boolean] [(GT:Boolean (Height:Int) (ConstantNode:Int @5)) (LT:Boolean (Height:Int) (ConstantNode:Int @9))] #Boolean))
+tc	anyOf(Coll(HEIGHT > 5))	OK (OR:Boolean (ConcreteCollection:Coll[Boolean] [(GT:Boolean (Height:Int) (ConstantNode:Int @5))] #Boolean))
+tc	xorOf(Coll(HEIGHT > 5, HEIGHT < 9))	OK (XorOf:Boolean (ConcreteCollection:Coll[Boolean] [(GT:Boolean (Height:Int) (ConstantNode:Int @5)) (LT:Boolean (Height:Int) (ConstantNode:Int @9))] #Boolean))
+tce	blake2b256(a)	OK (CalcBlake2b256:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>))
+tce	sha256(a)	OK (CalcSha256:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>))
+tce	proveDlog(g1)	OK (CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))
+tc	getVar[Int](1)	OK (GetVar:Option[Int] @1)
+tc	getVar[Int]	OK (Ident:(Byte) => Option[Int] 'getVar')
+tce	atLeast(1, Coll(proveDlog(g1)))	OK (AtLeast:SigmaProp (ConstantNode:Int @1) (ConcreteCollection:Coll[SigmaProp] [(CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))] #SigmaProp))
+tce	allOf(Coll(proveDlog(g1)))	OK (AND:Boolean (ConcreteCollection:Coll[Boolean] [(SigmaPropIsProven:Boolean (CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1))))))] #Boolean))
+tc	SELF.getReg[Long](4)	OK (MethodCall:Option[Long] (Self:Box) %Box.getReg [(ConstantNode:Int @4)] {#T->#Long})
+tce	g1.exp(n1)	OK (Exponentiate:GroupElement (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) (ConstantNode:BigInt (CBigInt @5)))
+tc	groupGenerator	OK (GroupGenerator:GroupElement)
+tce	xor(a, b)	OK (Xor:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))
+tc	Coll(1, 2, 3)(0)	OK (ByIndex:Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) (ConstantNode:Int @0) None)
+tc	(1, 2L)(1)	OK (SelectField:Long (Tuple:(Int,Long) [(ConstantNode:Int @1) (ConstantNode:Long @2)]) @2)
+tc	1 | 2L	OK (BitOp:Int (ConstantNode:Int @1) (ConstantNode:Long @2) @-14)
+tce	byteArrayToBigInt(a)	OK (ByteArrayToBigInt:BigInt (ConstantNode:Coll[Byte] <@1 @2>))
+tce	byteArrayToLong(a)	OK (ByteArrayToLong:Long (ConstantNode:Coll[Byte] <@1 @2>))
+tc	longToByteArray(1L)	OK (LongToByteArray:Coll[Byte] (ConstantNode:Long @1))
+tce	decodePoint(a)	OK (DecodePoint:GroupElement (ConstantNode:Coll[Byte] <@1 @2>))
+tc	executeFromVar[Int](1)	OK (DeserializeContext:Int @1)
+tce	proveDHTuple(g1, g2, g1, g2)	OK (CreateProveDHTuple:SigmaProp (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))
+tc	ZKProof(sigmaProp(HEIGHT > 5))	OK (ZKProofBlock:Boolean (BoolToSigmaProp:SigmaProp (GT:Boolean (Height:Int) (ConstantNode:Int @5))))
+tce	substConstants(a, Coll(0), Coll(1))	OK (SubstConstants:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConcreteCollection:Coll[Int] [(ConstantNode:Int @0)] #Int) (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1)] #Int))
+tc	{ val i = 1; Coll(1, 2, 3)(i) }	OK (Block:Int [(ValNode:Int 'i' (ConstantNode:Int @1))] (ByIndex:Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) (Ident:Int 'i') None))
+tc	(1, 2L, HEIGHT)(2)	OK (SelectField:Int (Tuple:(Int,Long,Int) [(ConstantNode:Int @1) (ConstantNode:Long @2) (Height:Int)]) @3)
+tce	Coll(1, 2, 3)(bb1)	OK (ByIndex:Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) (ConstantNode:Int @1) None)
+tc	getVarFromInput[Int](0, 1)	OK (MethodCall:Option[Int] (Context:Context) %Context.getVarFromInput [(ConstantNode:Short @0) (ConstantNode:Byte @1)] {#T->#Int})
+tc	CONTEXT.getVarFromInput[Int](0, 1)	OK (MethodCall:Option[Int] (Context:Context) %Context.getVarFromInput [(ConstantNode:Short @0) (ConstantNode:Byte @1)] {#T->#Int})
+tce	col1.getOrElse(0, 1L)	OK (ByIndex:Long (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) (ConstantNode:Long @1))
+tce	getVar[Int](1).getOrElse(0)	OK (OptionGetOrElse:Int (GetVar:Option[Int] @1) (ConstantNode:Int @0))
+tce	col1.map({(x:Long)=>x})	OK (MapCollection:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) (Lambda:(Long) => Long [] [x:#Long] #Long (Ident:Long 'x')))
+tce	col1.slice(0, 1)	OK (Slice:Coll[Long] (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) (ConstantNode:Int @1))
+tce	g1.multiply(g2)	OK (MultiplyGroup:GroupElement (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))) (ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))
+tc	getVar[Coll[Byte]](1).isDefined	OK (OptionIsDefined:Boolean (GetVar:Option[Coll[Byte]] @1))
+tc	{ val i = 1.toByte; Coll(1, 2, 3)(i) }	OK (Block:Int [(ValNode:Byte 'i' (Select:Byte (ConstantNode:Int @1) 'toByte'))] (ByIndex:Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) (Upcast:Int (Ident:Byte 'i')) None))
+tc	deserializeTo[Long](fromBase16("0e"))	OK (MethodCall:Long (Global:SigmaDslBuilder) %SigmaDslBuilder.deserializeTo [(ConstantNode:Coll[Byte] <@14>)] {#T->#Long})
+tc	bigInt("12345678901234567890")	OK (ConstantNode:BigInt (CBigInt @12345678901234567890))
+tc	fromBase16("deadbeef")	OK (ConstantNode:Coll[Byte] <@-34 @-83 @-66 @-17>)
+tc	executeFromSelfReg[Int](4)	OK (DeserializeRegister:Int @R4 None)
+#
+# ── § 13: Fix-round-1 oracle captures (id-narrowing + avlTree 4-arg + WithDefault) ──
+# All captured ORACLE_TREE_VERSION=3 (v6); tc = empty env, tce = demo env.
+# Reject records: oracle confirms ArithmeticException / InvalidArguments on overflow/negative.
+tc	getVar[Int](200)	REJECT 0:0 ArithmeticException
+tc	executeFromVar[Int](300)	REJECT 0:0 ArithmeticException
+tc	getVarFromInput[Int](70000, 1)	REJECT 0:0 ArithmeticException
+tc	unsignedBigInt("-5")	REJECT 0:0 InvalidArguments
+# Accept records: avlTree 4-arg form (reviewer probe-3) and executeFromSelfRegWithDefault.
+tce	avlTree(1.toByte, a, 32, Global.none[Int]())	OK (CreateAvlTree:AvlTree (Select:Byte (ConstantNode:Int @1) 'toByte') (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Int @32) (MethodCall:Option[Int] (Global:SigmaDslBuilder) %SigmaDslBuilder.none [] {#T->#Int}))
+tc	executeFromSelfRegWithDefault[Int](4, 0)	OK (DeserializeRegister:Int @R4 (ConstantNode:Int @0))
+#
+# ── § 14: Task-7 §1.11 MethodCallLike receiver-dispatch captures ─────────────────
+# All captured ORACLE_TREE_VERSION=3 (v6) via scripts/jvm_typer_oracle (batch);
+# tc = empty env, tce = demo env. These pin the §1.11 operator-resolution arms:
+# SColl ++, SNumeric +/*/^/<</>>/>>>, SSigmaProp/SBoolean ||/&&/^ (asymmetric
+# isProven coercion), SString const-concat fold, and the reject surface.
+#
+# SSigmaProp/SBoolean coercion matrix (SigmaTyper.scala:364-408):
+#   prop∘prop  → SigmaAnd/SigmaOr(Seq(a,b)); `^` between props → NotImplementedError
+#   prop∘bool  → LEFT wrapped in Select(isProven, Boolean) then Bin*
+#   bool∘prop  → RIGHT wrapped in Select(isProven, Boolean) then Bin*
+tc	sigmaProp(true) && sigmaProp(false)	OK (SigmaAnd:SigmaProp [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @false))])
+tc	sigmaProp(true) || sigmaProp(false)	OK (SigmaOr:SigmaProp [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @false))])
+tc	sigmaProp(true) && (1 == 1)	OK (BinAnd:Boolean (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven') (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))
+tc	(1 == 1) && sigmaProp(true)	OK (BinAnd:Boolean (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)) (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven'))
+tc	sigmaProp(true) ^ (1 == 1)	OK (BinXor:Boolean (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven') (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)))
+tc	(1 == 1) ^ sigmaProp(true)	OK (BinXor:Boolean (EQ:Boolean (ConstantNode:Int @1) (ConstantNode:Int @1)) (Select:Boolean (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)) 'isProven'))
+tc	true ^ false	OK (BinXor:Boolean (ConstantNode:Boolean @true) (ConstantNode:Boolean @false))
+# SNumeric arm: `+`/`*` → ArithOp (arithOp upcast); `^`/`<<`/`>>`/`>>>` → BitOp (NO upcast).
+tc	5 * 2	OK (ArithOp:Int (ConstantNode:Int @5) (ConstantNode:Int @2) @-100)
+tc	5 ^ 3	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @3) @-11)
+tc	5 << 1	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @1) @-9)
+tc	5 >> 1	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @1) @-10)
+tc	5 >>> 1	OK (BitOp:Int (ConstantNode:Int @5) (ConstantNode:Int @1) @-8)
+# Reject records (class graded; positions batch-mode, advisory):
+tce	col1 ++ a	REJECT 1:9 TyperException	# ++ Coll[Long] vs Coll[Byte] exact-type mismatch (§1.11 SColl)
+tc	(1, 2) ++ Coll(3)	REJECT 1:1 TyperException	# ++ on tuple receiver → else-arm (§1.11:419-420)
+tc	HEIGHT ^ true	REJECT 1:10 InvalidBinaryOperationParameters	# numeric ^ non-numeric rhs (§1.11 SNumeric:357-358)
+tc	sigmaProp(true) ^ sigmaProp(false)	REJECT 0:0 NotImplementedError	# SigmaProp ^ SigmaProp (§1.11:379)
+#
+# ── § 15: Task-8 SigmaTyperTest shape captures (public typecheck API port) ───────
+# All captured ORACLE_TREE_VERSION=3 (v6) via scripts/jvm_typer_oracle. Verb `tcs`
+# uses the SigmaTyperTest env (LangTests.scala:52-69) added to the oracle for this
+# task; `tc` = empty env. These pin the full-tree SHAPE assertions of
+# SigmaTyperTest.scala (`typecheck(env, x, expected)`): env substitution (x→10,
+# arr1→<1 2>), the Upcast placement in `x + height1`, INPUTS.size Select survival,
+# xor/Append lowering, and the numeric `.toBytes` MethodCall survivors (owner name =
+# the concrete numeric type: %Byte.toBytes etc.). The integration test
+# (tests/sigma_typer_spec.rs) is file-driven over these records, so each is byte-swept.
+tcs	x	OK (ConstantNode:Int @10)
+tcs	x + y	OK (ArithOp:Int (ConstantNode:Int @10) (ConstantNode:Int @11) @-102)
+tcs	x + height1	OK (ArithOp:Long (Upcast:Long (ConstantNode:Int @10)) (ConstantNode:Long @100) @-102)
+tcs	c1 && c2	OK (BinAnd:Boolean (ConstantNode:Boolean @true) (ConstantNode:Boolean @false))
+tcs	arr1	OK (ConstantNode:Coll[Byte] <@1 @2>)
+tc	HEIGHT	OK (Height:Int)
+tc	INPUTS	OK (Inputs:Coll[Box])
+tc	INPUTS.size > 1	OK (GT:Boolean (Select:Int (Inputs:Coll[Box]) 'size') (ConstantNode:Int @1))
+tcs	xor(arr1, arr2)	OK (Xor:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@10 @20>))
+tcs	arr1 ++ arr2	OK (Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@10 @20>))
+tc	1.toByte.toBytes	OK (MethodCall:Coll[Byte] (Select:Byte (ConstantNode:Int @1) 'toByte') %Byte.toBytes [] {})
+tc	1.toShort.toBytes	OK (MethodCall:Coll[Byte] (Select:Short (ConstantNode:Int @1) 'toShort') %Short.toBytes [] {})
+tc	1.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Int @1) %Int.toBytes [] {})
+tc	1.toLong.toBytes	OK (MethodCall:Coll[Byte] (Select:Long (ConstantNode:Int @1) 'toLong') %Long.toBytes [] {})
+tc	1.toBigInt.toBytes	OK (MethodCall:Coll[Byte] (Select:BigInt (ConstantNode:Int @1) 'toBigInt') %BigInt.toBytes [] {})
+tc	serialize((1, 2L))	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Tuple:(Int,Long) [(ConstantNode:Int @1) (ConstantNode:Long @2)])] {})
+#
+# ── § 16: Task-9 gapcheck-mandated edge vectors ──────────────────────────────
+# All captured ORACLE_TREE_VERSION=3 (v6); fresh-JVM positions confirmed.
+# Empty containers → MethodNotFound (E4: SBoolean/SString have NO methods → None
+#   from getMethod → MethodNotFound, not the "non-product type" branch).
+tc	true.foo	REJECT 1:1 MethodNotFound
+tc	"x".foo	REJECT 1:1 MethodNotFound
+# ByIndex/BigInt upcast-placement probe:
+#   col1(0) produces a ByIndex:Long result; adding n1 (BigInt) triggers numeric
+#   widening.  Oracle confirms: Upcast wraps the ByIndex RESULT (not inside ByIndex).
+#   Shape: (ArithOp:BigInt (Upcast:BigInt (ByIndex:Long ...)) (ConstantNode:BigInt ...) @-102)
+tce	col1(0) + n1	OK (ArithOp:BigInt (Upcast:BigInt (ByIndex:Long (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) None)) (ConstantNode:BigInt (CBigInt @5)) @-102)
+#
+# ── § 17: Fix-round-1 fromBase58/fromBase64 validation probes ────────────────
+# All captured ORACLE_TREE_VERSION=3 (v6); tc = empty env.
+# fromBase58 oracle: Scorex `Base58.decode(s).get` — `Predef.ensuring` throws
+#   `AssertionError("Wrong char in Base58 string")` on invalid char. `.get` on
+#   `Failure` rethrows. Class = AssertionError (non-reproducible; D-T2 in lib.rs).
+# fromBase64 oracle: `java.util.Base64.getDecoder().decode(s)` throws
+#   `IllegalArgumentException` on invalid char OR on padded strings whose length is
+#   not a multiple of 4. Class = IllegalArgumentException (non-reproducible; D-T2).
+# All REJECT records: verdict checked (both sides reject); class NOT asserted
+#   (non-reproducible oracle classes per `is_reproducible_class`).
+#
+# Reject probes — character-class (class non-reproducible; verdict-only assertion):
+tc	fromBase58("$reserveContractHash")	REJECT 0:0 AssertionError
+tc	fromBase64("$bankNFT")	REJECT 0:0 IllegalArgumentException
+tc	fromBase64("abc!")	REJECT 0:0 IllegalArgumentException
+tc	fromBase64("RWT_REPO_NFT")	REJECT 0:0 IllegalArgumentException
+#
+# Reject probes — structural padding (oracle 2026-07-04, fresh-JVM, ORACLE_TREE_VERSION=3):
+#   Java rejects padded strings whose total length is not a multiple of 4.
+tc	fromBase64("a=")	REJECT 0:0 IllegalArgumentException
+tc	fromBase64("abcde=")	REJECT 0:0 IllegalArgumentException
+#
+# Accept probes — canonical decode (oracle 2026-07-04, fresh-JVM, ORACLE_TREE_VERSION=3;
+# M3 Task-5 / D-T2 close: predef_ir_builder now folds a valid literal to a
+# ByteArrayConstant instead of leaving the Apply unlowered).
+#   fromBase58("") → Scorex empty = BigInt(0) = emptyByteArray.
+#   fromBase64("") → Java decoder: empty input = empty output.
+#   fromBase64("YWJj") → decodes "abc".
+#   fromBase64("ab") → unpadded, no length-mod-4 check; 2 data chars decode to 1
+#     byte (0x69 = 105), Java drops the 4 dangling low bits of the last quantum.
+tc	fromBase58("")	OK (ConstantNode:Coll[Byte] <>)
+tc	fromBase64("")	OK (ConstantNode:Coll[Byte] <>)
+tc	fromBase64("YWJj")	OK (ConstantNode:Coll[Byte] <@97 @98 @99>)
+tc	fromBase64("ab")	OK (ConstantNode:Coll[Byte] <@105>)
+
+# ── § 18: M2 adversarial wave A — type-parametric methods require explicit [T] (A1) ──
+# A type-parametric SMethod reached WITHOUT an explicit `[T]` ApplyTypes is rejected by
+# the reference typer (IllegalArgumentException — non-reproducible class, verdict graded).
+# Boundary: bare `getVar(1)` keeps `Option[T]` and ACCEPTS on both sides (predef-IR path,
+# a free T nested inside SOption is tolerated); only a §1.8/§1.9 SGlobal/SBox method rejects.
+tc	Global.some(1)	REJECT 0:0 IllegalArgumentException
+tc	Global.none()	REJECT 0:0 IllegalArgumentException
+tc	SELF.getReg(4)	REJECT 0:0 IllegalArgumentException
+tce	fromBigEndianBytes(a)	REJECT 0:0 IllegalArgumentException
+tce	Global.fromBigEndianBytes(a)	REJECT 0:0 IllegalArgumentException
+tc	getVar(1)	OK (GetVar:Option[T] @1)
+#
+# ── § 19: M2 adversarial wave A — predef env (A2), serialize args (A3), string folds (A4) ──
+# A2: min/max ARE valid idents (in the env) → block duplicate-name check fires; PK is NOT a
+#     func ident (binder-only) → bare `PK` rejects, `val PK` does not duplicate.
+tc	{ val min = 1; min }	REJECT 1:7 TyperException
+tc	{ val max = 1; max }	REJECT 1:7 TyperException
+tc	PK	REJECT 1:1 TyperException
+tc	{ val PK = 1; PK }	OK (Block:Int [(ValNode:Int 'PK' (ConstantNode:Int @1))] (Ident:Int 'PK'))
+# A3: bare serialize(<operator-expr>) leaves an untyped MethodCallLike → reference printer
+#     throws RuntimeException (non-reproducible class, verdict graded).  Relations/if/Coll/
+#     constants stay typed → ACCEPT; the Select-form Global.serialize(a ++ b) is unaffected.
+tc	serialize(1 + 1)	REJECT 0:0 RuntimeException
+tc	serialize((1 + 1) == 2)	REJECT 0:0 RuntimeException
+tc	serialize(1)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConstantNode:Int @1)] {})
+tc	serialize(Coll(1, 2))	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2)] #Int)] {})
+tce	Global.serialize(a ++ b)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Append:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))] {})
+# A4: StringConstant + any-Constant folds via JVM toString (both operands Constant, @unchecked
+#     erased).  GroupElement/SigmaProp RHS toString is not reproducible → kept as reject (D-T6
+#     sub-deviation, see lib.rs ledger).
+tc	"ab" + 1	OK (ConstantNode:String 'ab1')
+tc	"ab" + 1L	OK (ConstantNode:String 'ab1')
+tc	"ab" + true	OK (ConstantNode:String 'abtrue')
+tc	"ab" + ()	OK (ConstantNode:String 'ab()')
+tc	"ab" + -1	OK (ConstantNode:String 'ab-1')
+tce	"ab" + n1	OK (ConstantNode:String 'abCBigInt(5)')
+#
+# ── § 20: M2 adversarial wave B — printed-typed-shape parity (v3) ─────────────────
+# All captured ORACLE_TREE_VERSION=3.  Swept at v3 by seed_accept_records_byte_parity.
+# B1: SGlobal methods with dedicated-node irBuilders lower on the `Global.<m>` receiver
+#     form too (not just the predef-function form): groupGenerator → GroupGenerator,
+#     xor → Xor.  All other SGlobal methods stay MethodCall.
+tc	Global.groupGenerator	OK (GroupGenerator:GroupElement)
+tce	Global.xor(a, b)	OK (Xor:Coll[Byte] (ConstantNode:Coll[Byte] <@1 @2>) (ConstantNode:Coll[Byte] <@3 @4>))
+# B2: xorOf's @unchecked irBuilder fires for ANY single Coll[_] arg; a Coll[SigmaProp]
+#     lowers to XorOf directly (no isProven wrap — xorOf is not adaptSigmaPropToBoolean).
+#     Boundary: Coll[Int] fails the arg-type unify first → both REJECT.
+tc	xorOf(Coll(sigmaProp(true)))	OK (XorOf:Boolean (ConcreteCollection:Coll[SigmaProp] [(BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true))] #SigmaProp))
+tc	xorOf(Coll(1, 2, 3))	REJECT 1:1 TyperException
+# B3: sigmaProp's @unchecked irBuilder wraps a SigmaProp arg directly in BoolToSigmaProp
+#     (no SigmaPropIsProven), matching the oracle's nested BoolToSigmaProp.
+tc	sigmaProp(sigmaProp(true))	OK (BoolToSigmaProp:SigmaProp (BoolToSigmaProp:SigmaProp (ConstantNode:Boolean @true)))
+# B5: unapplied polymorphic method/predef values print their [T]/[K,L,R,O] binder
+#     (SType::SFunc.tpe_params).
+tc	serialize	OK (Ident:[T](T) => Coll[Byte] 'serialize')
+tc	min	OK (Ident:[T](T,T) => T 'min')
+tc	outerJoin	OK (Ident:[K,L,R,O](Coll[(K,L)],Coll[(K,R)],(K,L) => O,(K,R) => O,(K,L,R) => O) => Coll[(K,O)] 'outerJoin')
+tc	Coll(1, 2, 3).map	OK (Select:[OV]((Int) => OV) => Coll[OV] (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2) (ConstantNode:Int @3)] #Int) 'map')
+tc	SELF.R4	OK (Select:[T]() => Option[T] (Self:Box) 'R4')
+tc	SELF.getReg	OK (Select:[T](Int) => Option[T] (Self:Box) 'getReg')
+#
+# ── § 21: M2 adversarial wave B — v5 numeric MethodCall owner = SNumericType ──────
+# B4: at tree_version < 3 the numeric toBytes/toBits methods live on the shared
+#     SNumericTypeMethods container (objType.typeName = "SNumericType"); the per-type
+#     container (%Int/%Long/…) exists only at V6.  Captured ORACLE_TREE_VERSION=2.
+#     Sources are UNIQUE (not in § 15) and are run at v2 by the dedicated test
+#     `v2_numeric_method_owner_is_snumerictype`; excluded from the v3 accept sweep via
+#     V2_ACCEPT_SOURCES (they print the concrete owner %Int/%Long at v3 — see § 15).
+tc	1.toBits	OK (MethodCall:Coll[Boolean] (ConstantNode:Int @1) %SNumericType.toBits [] {})
+tc	1L.toBits	OK (MethodCall:Coll[Boolean] (ConstantNode:Long @1) %SNumericType.toBits [] {})
+tc	1L.toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:Long @1) %SNumericType.toBytes [] {})
+#
+# ── § 22: M2 adversarial wave M2 — bare-serialize arg is the reference BOUND tree ──
+# A bare `serialize(v)` binds to `MethodCall(Global, serialize, [v])` with an un-typed
+# arg (Rule-10); §1.24 passes it through un-typed, mirroring the reference, which then
+# RENDERS the bound arg.  Verdict parity is real across all three reference stages:
+# the reference `typecheck` ACCEPTS (its `case MethodCall => v` does not recurse into
+# args, leaving a NoType descendant), but the full `compiler.compile` REJECTS at
+# graph-building (GraphBuildingException/StagingException), and the oracle surfaces the
+# same reject early because its s-expr printer THROWS (RuntimeException → REJECT,
+# non-reproducible class → verdict graded) on any node whose bound `tpe` is NoType.
+# We reject one stage earlier still, at the typer's NoType arg scan — all agree on
+# verdict.  Every node the binder types renders clean and ACCEPTS with the bound shape.
+# A property/method `Select` carries the DECLARED method signature (`declared_select_tpe`),
+# NOT the resolved value type — `SELF.value → (Box) => Long`, `xs.size → (Coll[IV]) => Int`
+# (receiver kept, IV un-substituted, res_type=None) — distinct from the typed Select
+# (§20 B5: receiver dropped, IV→concrete).  Chaining a property/method on that
+# function-typed Select (`SELF.tokens.size`, `SELF.R4[Long].get`) yields NoType → REJECT.
+# REJECT — un-renderable (NoType) bound arg:
+tc	serialize(a)	REJECT 0:0 RuntimeException
+tc	serialize({val x = 1; x})	REJECT 0:0 RuntimeException
+tce	serialize(blake2b256(a))	REJECT 0:0 RuntimeException
+tc	serialize(getVar[Int](1))	REJECT 0:0 RuntimeException
+tc	serialize(getVar[Int](1).get)	REJECT 0:0 RuntimeException
+tc	serialize(SELF.R4[Long].get)	REJECT 0:0 RuntimeException
+tc	serialize(xorOf(Coll(true, false)))	REJECT 0:0 RuntimeException
+tc	serialize(SELF.tokens.size)	REJECT 0:0 RuntimeException
+tc	serialize(SELF.value + 1)	REJECT 0:0 RuntimeException
+# ACCEPT — bound Select/If carries the declared method signature, byte-for-byte:
+tc	serialize(SELF.value)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Long (Self:Box) 'value' None)] {})
+tc	serialize(SELF.id)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Coll[Byte] (Self:Box) 'id' None)] {})
+tc	serialize(OUTPUTS(0).value)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Box) => Long (Apply:Box (Outputs:Coll[Box]) [(ConstantNode:Int @0)]) 'value' None)] {})
+tc	serialize(Coll(1, 2).size)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(Select:(Coll[IV]) => Int (ConcreteCollection:Coll[Int] [(ConstantNode:Int @1) (ConstantNode:Int @2)] #Int) 'size' None)] {})
+tc	serialize(if (HEIGHT > 5) SELF.value else SELF.id)	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaDslBuilder.serialize [(If:(Box) => Long (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (Select:(Box) => Long (Self:Box) 'value' None) (Select:(Box) => Coll[Byte] (Self:Box) 'id' None))] {})
+#
+# ── § 23: M3 Task-2 — deferred typed-shape captures (postfix-ident, tuple ────────
+#           dynamic-index, D-T6 non-generator GroupElement, D-T12 string fold,
+#           identity-point probe, D-T12/D-T4/D-T6 leading-zero-coordinate fix) ───
+# All captured live ORACLE_TREE_VERSION=3 (v6), scala-cli batch mode (2026-07-04
+# for (a)-(e); 2026-07-05 for the leading-zero PK records appended to (d) and
+# the new (f)). ORACLE_NETWORK=testnet is the default and is unused by (a)-(e)
+# (no PK/address literals in that batch) but IS required for the leading-zero
+# PK records (network recorded inline per record, matching the §10 convention).
+# Every source below is an ACCEPT verdict; there were no REJECTs to re-grade
+# via tc1.sh in this batch.
+#
+# (a) Postfix-ident zero-arg calls (m2-deferred-items.md:101-104, "confirm the
+#     Select arm fires correctly for zero-arg postfix calls"). Two DISTINCT
+#     surfaces, both ACCEPT but with DIFFERENT shapes:
+#     - `col1.size` (dot, no parens) parses as a bare property Select
+#       (Exprs.scala ExprSuffix "." branch — no Apply wrapper) and the typer
+#       leaves zero-arg property access as a plain `Select`, matching the
+#       existing `INPUTS.size > 1` §12 record (Select, no MethodCall).
+#     - `arr1 size` (no dot — the grammar's dedicated PostFix rule, Exprs.scala:96-99)
+#       ALWAYS desugars to `mkMethodCallLike(obj, name, [])`, i.e. an explicit
+#       zero-arg Apply; since `size` has no custom irBuilder it survives as a
+#       generic `MethodCall` (%SCollection.size [] {#IV->#Byte}) — the same
+#       owner/typeSubst shape as every other no-irBuilder SCollection method in
+#       §12/§14. Captured under `tcs` (SigmaTyperTest env) for env diversity;
+#       Task 8 consumes both shapes for the postfix-ident binder/typer arm.
+#       NOTE: `col1` (not `arr1`) was the first choice, but tcs's `col1`/`col2`
+#       are a LangTests.scala idiosyncrasy — LangTests.scala:52-69 binds them
+#       directly to a raw `ConcreteCollection.fromItems(...)` AST node (bypassing
+#       Platform.liftToConstant entirely), unlike every other tcs free var
+#       (arr1/arr2/g1/g2/... are genuine folded Constants). Our `typer_test_env()`
+#       has no `EnvValue` variant for "pre-built ConcreteCollection passed
+#       through" — `arr1` (a genuine `ByteArrayConstant` on both the oracle and
+#       Rust side) avoids the gap; the `col1`/`col2`-as-ConcreteCollection fixture
+#       quirk is not otherwise exercised and is out of scope for Task 2.
+tce	col1.size	OK (Select:Int (ConstantNode:Coll[Long] <@1 @2>) 'size')
+tcs	arr1 size	OK (MethodCall:Int (ConstantNode:Coll[Byte] <@1 @2>) %SCollection.size [] {#IV->#Byte})
+#
+# (b) Tuple dynamic-index (SigmaTyper.scala:278-291, STuple branch). CONTRARY to
+#     the brief's REJECT expectation, the oracle ACCEPTS BOTH probes — flagged
+#     prominently for Task 8. Root cause: `STuple` extends `SCollection[SAny.type]`
+#     (SType.scala:822-825, `elemType = SAny`), so a non-constant tuple index
+#     falls through to the STuple `case Seq(index) => ... mkByIndex(new_f.asCollection[SAny.type], ...)`
+#     branch (asCollection is an unchecked asInstanceOf — the underlying node is
+#     still the Tuple value; only ByIndex's static `V` type param changes),
+#     producing `ByIndex:Any` (elemType SAny, printed "Any") — NOT a REJECT.
+#   - True dynamic index (`i` bound to `HEIGHT`, not a compile-time constant):
+#     genuinely exercises the STuple `Seq(index)` (non-Constant) arm → ByIndex:Any.
+tc	{ val i = HEIGHT; (1, 2)(i) }	OK (Block:Any [(ValNode:Int 'i' (Height:Int))] (ByIndex:Any (Tuple:(Int,Int) [(ConstantNode:Int @1) (ConstantNode:Int @2)]) (Ident:Int 'i') None))
+#   - `bb1` is a tce demo-env free var, substituted by the BINDER as a literal
+#     Constant (SigmaBinder.liftAny), NOT an Ident — so by typer time the index
+#     arg is `Constant(1, SByte)`, hitting the STuple `Seq(Constant(index, _))`
+#     STATIC arm instead (`fieldIndex = SByte.downcast(1) + 1 = 2`), producing a
+#     STATIC `SelectField` (selecting the tuple's 2nd item, the literal `1`) —
+#     this probe does NOT exercise the dynamic arm despite using a non-literal
+#     source token; it demonstrates the env-substitution collapse instead.
+tce	(col1(0), 1)(bb1)	OK (SelectField:Int (Tuple:(Long,Int) [(ByIndex:Long (ConstantNode:Coll[Long] <@1 @2>) (ConstantNode:Int @0) None) (ConstantNode:Int @1)]) @2)
+#
+# (c) D-T6 — g3 (g^7, a fixed NON-generator point; env.rs `demoEnv` g3 added in
+#     8e4dc09, TyperOracle.scala only). The oracle folds the free-var reference
+#     directly to a decompressed-affine `Ecp @(x,y,z)` ConstantNode (SigmaBinder
+#     liftAny substitutes a Constant leaf for env values) — confirms x =
+#     5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc matches the
+#     independently-computed secp256k1 scalar-7 point (SEC1-compressed
+#     025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc, y even
+#     → 0x02 prefix). `env.rs::lift` renders this as an M2 hex placeholder, not
+#     the decompressed form — SWEEP_SKIP, D-T6 (fix at M3 alongside g1/g2).
+tce	g3	OK (ConstantNode:GroupElement (CGroupElement (Ecp @(5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc,6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da,1))))
+tce	proveDlog(g3)	OK (CreateProveDlog:SigmaProp (ConstantNode:GroupElement (CGroupElement (Ecp @(5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc,6aebca40ba255960a3178d6d861a54dba813d0b813fde7b5a5082628087264da,1)))))
+#
+# (d) D-T12 — `"ab" + g1` is a compile-time STRING FOLD: Scala's `+` on
+#     (String, GroupElement) stringifies the RHS via the JVM's runtime
+#     `.toString` (ECPoint's default, non-canonical, TRUNCATED "…" repr) and
+#     concatenates, producing a single folded `ConstantNode:String`. The payload
+#     string is the exact D-T12 target — commit it byte-for-byte; do not
+#     normalize the embedded `GroupElement(ECPoint(...))` text.
+#     CLOSED at M3 Task 4: derivable byte-exactly from the stored `[u8; 33]` via
+#     `ergo_crypto::group_element::decompress_to_affine_hex` (Task 3), taking the
+#     first 6 lowercase hex chars of each of x/y — see `const_java_to_string`
+#     (typer/assign.rs).
+tce	"ab" + g1	OK (ConstantNode:String 'abGroupElement(ECPoint(79be66,483ada,...))')
+#     Second probe with the non-generator point g3 (x/y per (c) above) confirms
+#     the truncated repr is derivable from any decompressed affine (x,y), not
+#     special-cased to the generator: `GroupElement(ECPoint(<x[0:6]>,<y[0:6]>,...))`
+#     where x[0:6]/y[0:6] are the first 6 lowercase hex chars of the 64-char
+#     affine coordinates (Task 3's `decompress_to_affine_hex`). Live-captured
+#     2026-07-05 via `scripts/jvm_typer_oracle` `tce` on hex `227822202b206733`.
+tce	"x" + g3	OK (ConstantNode:String 'xGroupElement(ECPoint(5cbdf0,6aebca,...))')
+#     Third probe: a `ProveDlog`-payload RHS (SigmaProp Constant with REAL bytes,
+#     produced by `PK("<addr>")` — see §10 line 126, same generator pubkey as g1)
+#     folds via the identical JVM `.toString` scheme but through the
+#     `SigmaProp(ProveDlog(...))` wrapper rather than bare `GroupElement(...)`:
+#     `SigmaProp(ProveDlog(ECPoint(<x[0:6]>,<y[0:6]>,...)))`. Also CLOSED at M3
+#     Task 4 (`ConstPayload::ProveDlog` stores real bytes, on-curve-checked at
+#     `bind_pk`, D-T5) — same helper, `SigmaProp(ProveDlog(...))` format.
+#     Live-captured 2026-07-05 via `scripts/jvm_typer_oracle` `tc` on hex
+#     `227822202b20504b282233577758707373615a77634e7a61474d7633416778426454504a5142743567436d714273673344796b513339625964684a42734e2229`.
+#     Residual (still an unpinned-format REJECT, NOT covered here): an opaque
+#     env-lifted `ConstPayload::SigmaProp(String)` (e.g. `tcs` env's `p1`/`p2`)
+#     carries no real curve bytes in our representation — only a label — so the
+#     fold cannot be reproduced for that payload; `ByteColl`/`LongColl` RHS
+#     (Scala prints `Coll(<v1>,<v2>,...)`, oracle-probed but NOT pinned/wired)
+#     are likewise left as a REJECT residual. See lib.rs D-T12 for the ledger.
+tc	"x" + PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")	OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))')
+#     ADVERSARIAL CORRECTION (critical-finding fix, 2026-07-05): none of the
+#     three probes above has a leading-zero-nibble coordinate (generator/g3/
+#     g1-pubkey x and y all start with a nonzero nibble), so they do NOT
+#     actually pin whether the truncation source is padded or unpadded hex —
+#     they only confirm the truncate-to-6-chars SHAPE. This fourth probe,
+#     chosen specifically for a leading-zero y-coordinate (`0ab0902e8d88...`),
+#     is what discriminates: the oracle folds `ab0902` — the first 6 chars of
+#     the UNPADDED `BigInteger.toString(16)` (`CryptoFacade.showPoint`'s
+#     `getRawXCoord.toString.substring(0,6)`, Platform.scala:81-85) — NOT
+#     `0ab090` (the padded-slice bug this fix closes). `const_java_to_string`
+#     (typer/assign.rs) now runs `strip_leading_zero_hex` (ergo-crypto) before
+#     truncating. Live-captured 2026-07-05 via `scripts/jvm_typer_oracle` `tc`
+#     on hex `227822202b20504b282233577a506d4d566f7972726a316d394e6b6d70576368576f695a7931774e337759736d6e38674531635a58636477636b374c42672229`
+#     (ORACLE_NETWORK=testnet). Verbatim reply:
+#     `OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(f28773,ab0902,...)))')`.
+tc	"x" + PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")	OK (ConstantNode:String 'xSigmaProp(ProveDlog(ECPoint(f28773,ab0902,...)))')
+#
+# (e) Identity-point probe (informs Task 3's identity policy). `decodePoint` is a
+#     predef Global function call (SigmaPredef), NOT a free-var substitution — it
+#     is NEVER constant-folded at typecheck time regardless of its argument being
+#     a literal; it always types as a `DecodePoint` transformer node wrapping the
+#     (untouched) `Coll[Byte]` argument. The typer performs NO on-curve/identity
+#     validation here — an all-zero 33-byte string (not a well-formed SEC1
+#     encoding: prefix byte 0x00 is neither 0x02 nor 0x03) still types ACCEPT;
+#     any identity/decompress rejection is a LATER-stage (interpreter/graph) concern,
+#     out of typer scope. No GroupElement constant is rendered (only a plain
+#     Coll[Byte] constant, already fully supported) — PASSES the byte-parity
+#     sweep outright, no SWEEP_SKIP needed.
+tce	decodePoint(fromBase16("000000000000000000000000000000000000000000000000000000000000000000"))	OK (DecodePoint:GroupElement (ConstantNode:Coll[Byte] <@0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0 @0>))
+#
+# (f) D-T4/D-T6 leading-zero-y — the PLAIN typed-tree `Ecp @(x,y,1)` RENDER
+#     (Task-3, `typed_print.rs`'s GroupElement/ProveDlog printer arms), never
+#     before probed with a leading-zero coordinate. Same pubkey as (d)'s
+#     fourth probe, WITHOUT the string-fold wrapper, to isolate the printer's
+#     own rendering from the fold's. ORACLE_NETWORK=testnet.
+#     Live-captured 2026-07-05 via `scripts/jvm_typer_oracle` `tc` on hex
+#     `504b282233577a506d4d566f7972726a316d394e6b6d70576368576f695a7931774e337759736d6e38674531635a58636477636b374c42672229`.
+#     Verbatim reply:
+#     `OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))`.
+#     RESULT: the x-coordinate is 64 hex chars (its top nibble is nonzero, `f2`,
+#     so padded/unpadded coincide) but the y-coordinate is only 63 hex chars —
+#     `ab0902e8...ed81`, NOT the 64-char zero-padded `0ab0902e...ed81` our
+#     `decompress_to_affine_hex` (ergo-crypto) returns. This CONFIRMS the plain
+#     `Ecp @(x,y,1)` printer render is ALSO unpadded `BigInteger.toString(16)`
+#     hex — the SAME source as `showPoint`'s truncated fold repr in (d), just
+#     not truncated to 6 chars.
+#     Renderer-source cross-check (scripts/jvm_typer_oracle/TyperOracle.scala,
+#     `renderNode`/`renderField`, lines 207-247): there is NO special-cased
+#     GroupElement/Ecp branch in `renderField`. A `GroupElementConstant`'s
+#     `CGroupElement` payload falls to the generic `case p: Product =>` arm
+#     (line 243: `s"(${p.productPrefix} $inner)"`), recursing into the
+#     wrapped `Ecp` (also a `Product` — `case class Ecp(value: ECPoint)`,
+#     `Platform.scala:125`), which recurses AGAIN into the raw BouncyCastle
+#     `ECPoint` value — NOT a Scala `Product`, so it falls through to the
+#     final catch-all `case other => "@" + other.toString` (line 247).
+#     `ECPoint.toString()` (BouncyCastle) composes `getRawXCoord`/
+#     `getRawYCoord` — each an `ECFieldElement` whose own `.toString()` is
+#     `toBigInteger().toString(16)`, i.e. UNPADDED — into the `(x,y,z)` triple
+#     the harness prints as `Ecp @(x,y,1)`. There is no separate
+#     zero-padding pretty-printer branch anywhere in this path; the printer
+#     and `showPoint` (`Platform.scala:81-85`) share the identical unpadded
+#     `BigInteger`-hex root, just at different truncation lengths (full vs. 6
+#     chars). `typed_print.rs`'s GroupElement/ProveDlog arms now run
+#     `strip_leading_zero_hex` on each coordinate before rendering (D-T4/D-T6
+#     fix, this commit).
+tc	PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")	OK (ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))
+#
+# ── § 24: M3 Task-6 — D-T3 unsignedBigInt canonical constant + bigInt ───────────
+#           literal canonicalization ──────────────────────────────────────────
+# All captured live via `scripts/jvm_typer_oracle` (2026-07-05), batch mode,
+# ORACLE_TREE_VERSION=3 unless noted otherwise (v2 records below are grouped
+# together and explicitly marked, same convention as § 6).
+#
+# (a) Canonicalization: does the JVM strip leading zeros from the decimal
+#     literal? YES for both `bigInt` and `unsignedBigInt` — `new BigInteger(s)`
+#     parses then `.toString()`s the canonical value; the printer shows the
+#     canonical decimal, not the source text.
+tc	bigInt("0005")	OK (ConstantNode:BigInt (CBigInt @5))
+tc	unsignedBigInt("0005")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))
+#
+# (b) `unsignedBigInt("5")` — the flagship D-T3 record (previously only
+#     documented in lib.rs prose/§13, never committed as an actual OK record).
+#     A 128-bit value from the brief confirms no premature truncation below
+#     the real 256-bit cap.
+tc	unsignedBigInt("5")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))
+tc	unsignedBigInt("340282366920938463463374607431768211456")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @340282366920938463463374607431768211456))
+#
+# (c) Range caps (source: `CUnsignedBigInt.scala:14-22`, `CBigInt.scala:12-20`,
+#     pinned v6.0.2 worktree `core/shared/.../sigma/data/`). `UnsignedBigInt`
+#     caps at 256 bits UNCONDITIONALLY (`wrappedValue.bitLength() > 256` →
+#     `ArithmeticException`, no `VersionContext` check at all); `BigInt` caps
+#     at 255 bits ONLY at `tree_version >= 3`
+#     (`VersionContext.current.isV3OrLaterErgoTreeVersion && bitLength() > 255`).
+#     `ArithmeticException` is a Java-runtime class — non-reproducible per
+#     `is_reproducible_class`, so only the REJECT verdict is graded, not the
+#     class (same policy as every other Java-runtime reject in this file).
+tc	unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @115792089237316195423570985008687907853269984665640564039457584007913129639935))
+tc	unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639936")	REJECT 0:0 ArithmeticException
+tc	bigInt("57896044618658097711785492504343953926634992332820282019728792003956564819967")	OK (ConstantNode:BigInt (CBigInt @57896044618658097711785492504343953926634992332820282019728792003956564819967))
+tc	bigInt("57896044618658097711785492504343953926634992332820282019728792003956564819968")	REJECT 0:0 ArithmeticException
+#     Negative-boundary corollary of the same 255-bit signed two's-complement
+#     cap: `-2^255` has `bitLength() == 255` (2^255 is itself a power of two,
+#     so its two's-complement negation needs one fewer bit) and fits; one past
+#     it does not.
+tc	bigInt("-57896044618658097711785492504343953926634992332820282019728792003956564819968")	OK (ConstantNode:BigInt (CBigInt @-57896044618658097711785492504343953926634992332820282019728792003956564819968))
+tc	bigInt("-57896044618658097711785492504343953926634992332820282019728792003956564819969")	REJECT 0:0 ArithmeticException
+#
+# (d) D-T12 string-fold extension: `UnsignedBigIntConstant.value.toString` →
+#     `"CUnsignedBigInt(<decimal>)"` (Scala case-class default toString),
+#     matching `CBigInt(<decimal>)`'s existing fold (§8/§20).
+tc	"x" + unsignedBigInt("5")	OK (ConstantNode:String 'xCUnsignedBigInt(5)')
+#
+# (e) Version-gate investigation: is the `unsignedBigInt`/`bigInt` PREDEF
+#     itself gated on `tree_version >= 3`, the way `SUnsignedBigInt`'s bare
+#     type-annotation syntax is (`is_predef_available`, M1)? NO — the predef
+#     REGISTRY is version-independent in Scala (`predefFuncRegistry.funcs`
+#     registers unconditionally; already documented in `predef_ir.rs` module
+#     docs pre-Task-6) and neither irBuilder has a version check of its own.
+#     `unsignedBigInt("5")` (§b above), `bigInt("5")`, and full
+#     ArithOp/comparison on two `UnsignedBigInt` operands typecheck IDENTICALLY
+#     at v2 and v3 (re-verified below, ORACLE_TREE_VERSION=2). The ONLY place
+#     `tree_version` matters for `UnsignedBigInt` is (1) `bigInt`'s 255-bit cap
+#     (§c above) and (2) UBI METHOD calls, which are correctly gated by the
+#     EXISTING `min_version = 3` on every entry in `unsigned_bigint_methods()`
+#     (methods.rs) — unaffected by this task, re-verified below with a v2/v3
+#     pair (same convention as § 4/§ 6's MethodNotFound gate pair; the source
+#     is excluded from the default reject-class sweep via
+#     `V2_REJECT_SOURCES` in `typer_oracle_parity.rs`, since the § 4-style v3
+#     OK line below is what the default accept sweep grades).
+#     ORACLE_TREE_VERSION=2 for this whole group unless marked v3.
+tc	bigInt("5")	OK (ConstantNode:BigInt (CBigInt @5))
+tc	unsignedBigInt("5") + unsignedBigInt("3")	OK (ArithOp:UnsignedBigInt (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)) @-102)
+tc	unsignedBigInt("5") == unsignedBigInt("3")	OK (EQ:Boolean (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)))
+tc	unsignedBigInt("5") > unsignedBigInt("3")	OK (GT:Boolean (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)))
+#     v2: REJECT MethodNotFound (min_version=3 gate correctly fires).
+tc	unsignedBigInt("5").toBytes	REJECT 1:1 MethodNotFound
+#     v3 (contrast pair, same source, default sweep version): OK.
+tc	unsignedBigInt("5").toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) %UnsignedBigInt.toBytes [] {})
+#
+# (f) `bigInt`'s 255-bit cap is ABSENT (not merely unreached) pre-v3: a value
+#     enormously over any plausible accidental limit (2^1000, same literal as
+#     `big_int_cap_is_version_gated` in predef_ir.rs, computed there via
+#     `BigUint::from(2u32).pow(1000)` rather than inlined) still ACCEPTS at
+#     ORACLE_TREE_VERSION=2. Captured live but deliberately left as
+#     documentation ONLY (not a parsed record) — the v2/v3 pair is exercised
+#     by a Rust unit test directly, avoiding a second exclusion-list mechanism
+#     for the "accepts at v2, rejects at v3" direction (no existing golden-seed
+#     convention covers it; `V2_REJECT_SOURCES`/`V2_ACCEPT_SOURCES` are both
+#     the opposite or same-verdict shape). Verbatim v2 reply:
+#     `OK (ConstantNode:BigInt (CBigInt @10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376))`.
+#     The v3 REJECT for the SAME literal is a real parsed record, swept normally:
+tc	bigInt("10715086071862673209484250490600018105614048117055336074437503883703510511249361224931983788156958581275946729175531468251871452856923140435984577574698574803934567774824230985421074605062371141877954182153046474983581941267398767559165543946077062914571196477686542167660429831652624386837205668069376")	REJECT 0:0 ArithmeticException
+#
+# (g) Negative ZERO (M3 Task-11 adversarial finding, constants F-1): Scala's
+#     `UnsignedBigIntFunc` constructs `new BigInteger(s)` FIRST and rejects
+#     only `signum() < 0` — and `BigInteger("-0").signum() == 0`, so
+#     `"-0"`/`"-0000"` ACCEPT as the canonical `@0` (the minus sign and the
+#     leading zeros both normalize away). Captured live 2026-07-07 (`tc`
+#     verb, ORACLE_TREE_VERSION=3, 3 identical runs). Rust mirrors by parsing
+#     with `num_bigint::BigInt` first and rejecting only `Sign::Minus`
+#     (`predef_ir.rs::parse_unsigned_big_int`; num-bigint normalizes `-0` to
+#     `NoSign`).
+tc	unsignedBigInt("-0")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))
+tc	unsignedBigInt("-0000")	OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))
+#
+# ── § 25: M3 Task-8 — standalone top-level `val` probe (binder m2-deferred) ──
+# Captured live 2026-07-05 via scripts/jvm_typer_oracle (`tc` verb, source hex
+# 76616c2078203d2031, ORACLE_TREE_VERSION=3). A bare top-level `val x = 1`
+# (no enclosing block, no result expression) is a PARSE-level reject in the
+# reference grammar — a ValNode can never be a typed-tree ROOT, so emit's
+# ValNode-outside-Block arm is a compiler-bug surface, not a user-error path.
+# Verdict mirrored by the Rust frontend (parse error → class ParserException);
+# no binder change needed (task-8 brief step 1 probe).
+tc	val x = 1	REJECT 1:1 ParserException
+#
+# ── § 26: M3 final review — tcs `g2` = 2·G, NON-normalized oracle Ecp render ──
+#
+# LangTests.scala:52-69 binds g2 = g.multiply(g) (the generator squared);
+# TyperOracle.scala:162 is faithful. The M2-era Rust twin envs bound g2 = G
+# (adjudicated inert under type-only grading); the M3 semantic gate grades
+# VALUES, so the twins now bind the true 2·G — wire bytes oracle-pinned by the
+# folded compile capture `ccs proveDlog(g2)` →
+# `OK 0008cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5 …`
+# (sigma-state 6.0.2, ORACLE_NETWORK=testnet, 2026-07-07; also pinned as a
+# tree.rs unit vector).
+#
+# RENDER CAVEAT (why the record below is SWEEP_SKIP'd, tag: JACOBIAN-RENDER):
+# Scala's multiply leaves the ECPoint non-normalized, and the typer oracle's
+# toString prints the raw Jacobian coordinates — z ≠ 1 (third component
+# 9075b4ee…a970, not @1). Our printer always renders the decompressed AFFINE
+# (x,y,1) form, which is byte-unmatchable against a non-normalized oracle
+# point. Rendering-only deviation (R3 family); the VALUE (compressed wire
+# bytes) is exact per the compile capture above.
+tcs	g2	OK (ConstantNode:GroupElement (CGroupElement (Ecp @(7d152c041ea8e1dc2191843d1fa9db55b68f88fef695e2c791d40444b365afc2,56915849f52cc8f76f5fd7e4bf60db4a43bf633e1b1383f85fe89164bfadcbdb,9075b4ee4d4788cabb49f7f81c221151fa2f68914d0aa833388fa11ff621a970))))

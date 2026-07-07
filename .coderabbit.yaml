@@ -1,0 +1,10 @@
+# CodeRabbit review configuration.
+# Exclude oracle-captured test-vector corpus and design/recon docs from review
+# scope: they are generated/data files (127 corpus files in this compiler PR),
+# not hand-written code. Reviewers see only source, and the file count stays
+# under CodeRabbit's per-PR limit. Source under ergo-*/src is always reviewed.
+reviews:
+  path_filters:
+    - "!test-vectors/**"
+    - "!dev-docs/**"
+    - "!**/*.snap"

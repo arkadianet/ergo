@@ -6,6 +6,7 @@ members = [
     "ergo-chain-spec",
     "ergo-crypto",
     "ergo-sigma",
+    "ergo-compiler",
     "ergo-validation",
     "ergo-wallet",
     "ergo-state",
@@ -34,6 +35,7 @@ ergo-ser           = { path = "ergo-ser" }
 ergo-chain-spec    = { path = "ergo-chain-spec" }
 ergo-crypto        = { path = "ergo-crypto" }
 ergo-sigma         = { path = "ergo-sigma" }
+ergo-compiler      = { path = "ergo-compiler" }
 ergo-validation    = { path = "ergo-validation" }
 ergo-wallet        = { path = "ergo-wallet" }
 ergo-state         = { path = "ergo-state" }
@@ -72,6 +74,7 @@ serde_json = "1"
 toml       = "0.8"
 uuid       = "1"
 bs58       = "0.5"
+base64     = "0.22"
 bytes      = "1"
 
 # Errors / async runtime

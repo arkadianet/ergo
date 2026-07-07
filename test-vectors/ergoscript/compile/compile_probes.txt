@@ -1,0 +1,266 @@
+# Compile-only probe sources — M3 Task-11 wave-1 GraphBuilding reject-gate
+# vectors (lib.rs D-C5). Unlike golden_seed.txt records these carry no typer
+# s-expression: they exist solely to feed the compile oracle, so the
+# compile_seed.json recapture (`compile_seed_live_recapture`) replays them
+# through the SAME cc/cce/ccs verbs and records the verdict verbatim — no
+# oracle field is ever hand-written.
+#
+# Format: verb<TAB>tree_version<TAB>source. The recapture spawns one oracle
+# process per distinct tree_version (ORACLE_TREE_VERSION), ORACLE_NETWORK=
+# testnet throughout.
+#
+# Selection rule: REJECT probes (the wave-1 gates are all reject-direction)
+# plus the ACCEPT fold-boundary controls whose reductions AGREE on both
+# sides. HISTORICAL NOTE (pre-M4-Task-7): ACCEPT boundaries whose trees were
+# unevaluable on OUR side — the D-C4 multi-arg-FuncValue class (fold-slot
+# lambdas) — were deliberately NOT committed because the semantic gate would
+# flag them mixed Ok/Err. M4 Task 7 CLOSED D-C4: multi-arg lambdas now lower
+# to the tupled 1-arg FuncValue(STuple)+SelectField form Scala emits, so a
+# fold-slot lambda over context-free constants is EVALUABLE and byte-matchable
+# — see the "M4 Task 7" section at the tail. (Fold-slot lambdas over CONTEXT
+# data, e.g. the crystalpool corpus, stay verdict-only Err/Err under the dummy
+# context and byte-mismatched pending val-inline/CSE, Tasks 8/9.)
+#
+# ── fix 1: bit ops — Scala GraphBuilding has no BitOp/BitInversion lowering ──
+cc	3	sigmaProp((1 | 2) == 3)
+cc	3	sigmaProp((1 & 2) == 0)
+cc	3	sigmaProp((5 ^ 3) == 6)
+cc	3	sigmaProp((5 << 1) == 10)
+cc	3	sigmaProp((5 >> 1) == 2)
+cc	3	sigmaProp((5 >>> 1) == 2)
+cc	3	sigmaProp((~1) == -2)
+cc	3	sigmaProp((1 | 2L) == 3L)
+ccs	3	sigmaProp((b1 | b2) == 3.toByte)
+# ── fix 2: zero-arg lambdas + non-1-arg applications ──
+cc	3	{ val f = {(x: Int, y: Int) => x + y}; sigmaProp(f(1, 2) == 3) }
+cc	3	{ val f = {(x: Int, y: Int, z: Int) => x + y + z}; sigmaProp(f(1, 2, 3) == 6) }
+cc	3	{ val f = {(x: Int, y: Int) => x + y}; val g = f; sigmaProp(g(1, 2) == 3) }
+cc	3	{ val f = {() => 1}; sigmaProp(f() == 1) }
+cc	3	{ val unused = {() => 1}; sigmaProp(true) }
+cc	3	sigmaProp({(x: Int, y: Int) => x + y}(1, 2) == 3)
+# ── fix 3: function-typed lambda parameters ──
+cc	3	{ val h = {(f: Int => Int) => f(10)}; sigmaProp(h({(x: Int) => x + 1}) == 11) }
+cc	3	{ val h = {(f: Int => Int) => 1}; sigmaProp(h({(x: Int) => x}) == 1) }
+# ── fix 4: postfix residual `size` MethodCall (wire pair (12,1)) ──
+ccs	3	sigmaProp((arr1 size) > 0)
+ccs	3	sigmaProp((arr1 size) == (arr2 size))
+cc	3	sigmaProp((OUTPUTS size) >= 0)
+cc	3	sigmaProp((INPUTS size) > 0)
+# ── fix 5: getReg out-of-range literal index ──
+cc	3	sigmaProp(SELF.getReg[Int](-1).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](10).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](100).isDefined)
+# ── fix 6: v6-only numeric methods on the shared SNumericType container (v2) ──
+ccs	2	sigmaProp(x.toBytes.size == 4)
+ccs	2	sigmaProp(x.toBits.size == 32)
+cc	2	sigmaProp(1.toBytes.size == 1)
+# ── fix 7: compile-time constant-fold overflow ──
+cc	3	sigmaProp(300.toByte < 0.toByte)
+cc	3	sigmaProp(2147483647.toShort > 0.toShort)
+cc	3	sigmaProp((2147483647 + 1) < 0)
+cc	3	sigmaProp((9223372036854775807L + 1L) < 0L)
+cc	3	sigmaProp((9223372036854775807L + 1) < 0L)
+cc	3	sigmaProp(9223372036854775807L * 2L > 0L)
+cc	3	sigmaProp((127.toByte + 1.toByte) < 0.toByte)
+ccs	3	sigmaProp((127.toByte + b1) < 0.toByte)
+cc	3	sigmaProp(-2147483647 - 2 < 0)
+cc	3	{ val unused = 2147483647 + 1; sigmaProp(true) }
+cc	3	sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)
+# ── fix 7 fold-boundary ACCEPT controls (reductions agree on both sides) ──
+cc	3	sigmaProp((2147483647 + 0) < 0)
+cc	3	sigmaProp((2147483646 + 1) < 0)
+cc	3	sigmaProp((-9223372036854775807L - 1L) < 0L)
+cc	3	sigmaProp((HEIGHT + 2147483647) > 0)
+#
+# ── wave 2 (Task-11): evaluability lowerings + folds (lib.rs D-C6) ──
+# ACCEPT vectors proving the wave-2 fixes: both sides accept AND both
+# reductions agree under the semantic gate. NOT committed (ledgered D-C6
+# residuals, pinned verdict-only in unit tests): the val-const getReg index
+# (`{ val i = 4; ...getReg[Int](i) }` — Scala const-propagates, we keep an
+# unevaluable MethodCall), the val-bound `Coll[UnsignedBigInt]()` size
+# (Scala inlines+folds; our post-write self-check REJECTS), and
+# `getVar[UnsignedBigInt](1)` (Note-A: oracle ACCEPTs bytes NEITHER side can
+# re-read — its tree_hex would not even parse for the gate).
+# ── wave-2 fix A: getReg[T](in-range literal) → ExtractRegisterAs ──
+cc	3	sigmaProp(SELF.getReg[Int](5).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](9).isDefined)
+cc	3	sigmaProp(SELF.getReg[Int](0).isDefined)
+cc	3	sigmaProp(SELF.getReg[Long](4).getOrElse(7L) == 7L)
+cc	3	sigmaProp(SELF.getReg[Int](HEIGHT).isDefined)
+# ── wave-2 fix B: explicit-type-arg custom irBuilders lower (slice & co.) ──
+ccs	3	sigmaProp(arr1.slice[Byte](0, 1).size == 1)
+# M4 gap F2 (recon-gap.md Finding 2): this source was captured under `ccs`
+# (SigmaTyperTest env), whose `col1` binds a per-element `ConcreteCollection`
+# SValue (TyperOracle.scala:176) — an oracle-harness artifact our `EnvValue`
+# cannot represent and the real `/script` compile API never produces (the
+# actual liftToConstant path always lifts Array[Long] to a single
+# LongArrayConstant). Re-captured under `cce` instead, whose `col1` binds
+# exactly that single `LongArrayConstant` (TyperOracle.scala:141,
+# API-reachable) — this is now a genuine same-shape compile probe, not an
+# env-representation artifact. See lib.rs D-C7 (COLL-LIFT correction).
+cce	3	sigmaProp(col1.slice[Long](0, 1).size == 1)
+ccs	3	sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)
+ccs	3	sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))
+ccs	3	sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)
+ccs	3	sigmaProp(arr1.map[Byte]({(t: Byte) => t}).size == 2)
+# ── wave-2 fix C: v6 numeric methods on CONSTANT receivers fold ──
+ccs	3	sigmaProp(x.toBytes.size == 4)
+ccs	3	sigmaProp(x.toBits.size == 32)
+cc	3	sigmaProp(7.toByte.toBytes.size == 1)
+cc	3	sigmaProp(7.toByte.toBits.size == 8)
+cc	3	sigmaProp(5.toShort.toBytes.size == 2)
+cc	3	sigmaProp(300.toByte.toBytes.size == 1)
+ccs	3	sigmaProp(height1.toBytes.size == 8)
+ccs	3	sigmaProp(b1.toBytes.size == 1)
+ccs	3	sigmaProp(x.bitwiseAnd(y) >= 0)
+ccs	3	sigmaProp(x.bitwiseOr(y) >= 0)
+ccs	3	sigmaProp(x.bitwiseXor(y) >= 0)
+ccs	3	sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)
+# fold-boundary controls (NOT folded on either side; Err/Err reduce parity)
+ccs	3	sigmaProp(HEIGHT.toBytes.size == 4)
+ccs	3	sigmaProp(n1.toBytes.size > 0)
+ccs	3	sigmaProp(x.shiftLeft(1) == 20)
+# ── wave-2 fix D: SizeOf-of-collection-literal fold ──
+cc	3	sigmaProp(Coll[UnsignedBigInt]().size == 0)
+cc	3	sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)
+cc	3	sigmaProp(Coll(HEIGHT).size == 1)
+cc	3	sigmaProp(Coll(1, 2).size == 2)
+#
+# ── wave 4 (Task-11 review follow-up): min/max fold-through + value pins ──
+# min/max over same-width constants FOLD in Scala's compile-time constant
+# evaluation (they select an operand — the fold matters because it feeds
+# the +,-,* overflow checks); mixed-width folds via the typer's Upcast.
+cc	3	sigmaProp((min(2147483647, 1) + 2147483647) < 0)
+cc	3	sigmaProp((max(2147483647, 1) + 2147483647) < 0)
+cc	3	sigmaProp((min(1, 9223372036854775807L) + 9223372036854775807L) < 0L)
+cc	3	sigmaProp((min(1, 2) + 1) == 2)
+cc	3	sigmaProp((max(1, 2) + 1) == 3)
+# a folded arith result chains into a parent fold (reviewer-verified)
+cc	3	sigmaProp(((2147483646 + 1) + 1) < 0)
+# Negation disposition: -(<literal>) folds at PARSE time on both sides →
+# the `-` arithmetic fold rejects; a Negation NODE (non-literal input) is
+# NOT compile-folded by Scala even over a graph-folded constant (the
+# oracle tree keeps 0xF0 unfolded) → both sides accept, parity.
+cc	3	sigmaProp((-(2147483647) - 2) < 0)
+cc	3	sigmaProp((-(0 + 2147483647) - 2) < 0)
+# value-distinguishing bitwise fold pins (the oracle folds the whole
+# equality to sigmaProp(true); these fail loudly if our folded VALUE drifts)
+cc	3	sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)
+cc	3	sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)
+# M4 Task 4 crux regression pin (M3 numerics N-3 probe 34,
+# adversarial-findings-numerics.md:137): a literal cast CHAIN folds ONLY the
+# innermost cast (`fold_direct_const_casts`'s anti-cascade discipline) — the
+# oracle keeps the outer two `Upcast` nodes over the folded Byte constant
+# (`10020201060100d1917e7e730005067301`). Committing this vector is the
+# fold-one-level/keep-chain invariant's ONLY gate: a bottom-up refactor that
+# re-checked a cast's child AFTER recursing into it would cascade-fold the
+# whole chain to a bare `BigInt` constant and this vector would silently
+# regress without it.
+cc	3	sigmaProp(1.toByte.toLong.toBigInt > 0.toBigInt)
+# M4 Task 5 (generic const-fold): division/modulo DO compile-fold when the
+# divisor is a NON-ZERO constant (DivOp.shouldPropagate = rhs != n.zero,
+# NumericOps.scala:73) — the M3/dossier "division/modulo never folded" note
+# was drawn from the rhs==0 case ALONE and is corrected here. Fresh cc probes
+# (2026-07-07, ORACLE_TREE_VERSION=3, 3 identical runs): 4/2 and 5/2 both fold
+# the whole equality to sigmaProp(true) (`10010101d17300`); 5%3 likewise; the
+# rhs==0 forms 1/0 and 1%0 stay UNFOLDED (the Division/Modulo node survives,
+# so the enclosing Eq keeps its non-const operand and also stays) — pins the
+# kept-shape both ways.
+cc	3	sigmaProp((4 / 2) == 2)
+cc	3	sigmaProp((5 / 2) == 2)
+cc	3	sigmaProp((5 % 3) == 2)
+cc	3	sigmaProp((1 / 0) == 0)
+cc	3	sigmaProp((1 % 0) == 0)
+# M4 Task 5: anyOf/allOf over an all-Const[Boolean] Coll const-folds
+# (GraphBuilding.rewriteDef :214-219, gated on constantPropagation) — anyOf =
+# exists, allOf = forall. Fresh cc probes: anyOf(Coll(true,false)) →
+# sigmaProp(true), allOf(Coll(true,false)) → sigmaProp(false).
+cc	3	anyOf(Coll(true, false))
+cc	3	allOf(Coll(true, false))
+# M4 Task 5 review nit: the De Morgan comparison-flip (!(x<y) -> x>=y,
+# DefRewriting.scala:73-91) produced a NEW emitted shape with no oracle
+# vector — this probe pins it per locked decision 3 (writer-child-order /
+# new-shape byte check).
+cc	3	sigmaProp(!(HEIGHT < 5))
+# M4 Task 7: multi-arg lambda TUPLING (D-C4 CLOSED; recon-transforms.md §6).
+# A fold-slot 2-arg lambda over context-free constants now lowers to the
+# tupled 1-arg form Scala emits and reduces Ok/Ok, byte-matching the oracle.
+# Tupled shape: FuncValue([(1, STuple(Int,Int))],
+# Plus(SelectField(ValUse(1),1), SelectField(ValUse(1),2))) — the tuple param
+# reuses the first arg's id (Scala varId = defId + 1). This is the reduce
+# smoke proving evaluability + the new-shape writer-child-order byte check
+# (locked decision 3): its SEGREGATED bytes are diffed vs the oracle tree_hex
+# by the always-on semantic gate.
+cc	3	sigmaProp(Coll(1, 2).fold(0, {(a: Int, b: Int) => a + b}) == 3)
+# M4 Task 9: val inlining + dead-val pruning + block flattening
+# (recon-transforms.md §8; GraphBuilding.scala:583-604 env-thread inline +
+# ProgramGraphs.scala:35-64 schedule DCE + TreeBuilding.scala:502-516
+# hasManyUsagesGlobal ValDef re-intro). Boundary probes pinning the dead-code
+# reject asymmetry Scala's eager buildNode vs schedule-time lowering produces.
+#
+# NF-2 CLOSED (the D-C5 class-3 residual): a higher-order (SFunc-param) lambda
+# NESTED inside an UNUSED val's rhs is pruned by the schedule before the
+# lowering that MatchErrors → oracle ACCEPTs. Previously rejected (only a
+# direct-rhs unused lambda was exempt); the reachability-based, transitive
+# dead-flag exemption now accepts it, matching the oracle.
+cc	3	{ val unused = Coll({(f: Int => Int) => 1}); sigmaProp(true) }
+# Control: a zero-arg lambda is an EAGER graph-construction failure (mkFuncValue
+# on empty args) that fires even in dead code → still REJECT, dead or not.
+cc	3	{ val unused = Coll({() => 1}); sigmaProp(true) }
+# Control: a multi-arg APPLICATION is likewise eager (buildNode lowers only
+# 1-arg applies) → REJECT even when the applying val is itself dead.
+cc	3	{ val f = {(x: Int, y: Int) => x + y}; val unused = f(1, 2); sigmaProp(true) }
+# Control: an arithmetic overflow in a DEAD val's rhs is folded by the eager
+# buildNode (ArithmeticException) BEFORE the schedule prunes → REJECT. Pins
+# that dead-val pruning must run AFTER the fold passes, not before.
+cc	3	{ val unused = 300.toByte; sigmaProp(true) }
+# ACCEPT: chained single-use inline collapses to a bare body (no ValDef).
+cc	3	{ val a = HEIGHT; val b = a; val c = b; sigmaProp(c > 5) }
+# ACCEPT: fold sees the INLINED constant (inline runs before the arith fold) →
+# sigmaProp(true). A cast over an inlined val, by contrast, stays a Downcast
+# node (Scala's Downcast(Constant) fold is an AST-pattern match, never over a
+# ValUse) — pinned by the next probe.
+cc	3	{ val x = 2; sigmaProp(x + 1 == 3) }
+cc	3	{ val x = 2; sigmaProp(x.toByte < 0.toByte) }
+# ACCEPT: a dead val holding v3-only data is pruned before the v0 gate scans.
+cc	3	{ val unused = Coll[BigInt](); sigmaProp(true) }
+# M4 Task 9 review nits: (a) lock single-use-val-inlined-INTO-a-lambda-body
+# (count_valuses counts flat across FuncValue scopes; Scala schedules a
+# single-use node in the lambda sub-schedule with no ValDef — same inline);
+# (b) the Plus-overflow dead-val prune-after-fold probe (only the Downcast
+# sibling was committed).
+cc	3	{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }
+cc	3	{ val unused = 2147483647 + 1; sigmaProp(true) }
+# ─── M4 close-out adversarial wave (segwriter / regression / scopes reports) ───
+# FINDING 2 (segwriter): an empty typed boolean collection passed DIRECTLY to
+# allOf/anyOf typechecks (declared elem type preserved) and the vacuous AND/OR
+# folds — allOf(empty)→sigmaProp(true), anyOf(empty)→sigmaProp(false). Was a
+# class-1 verdict divergence (we rejected "Undefined type of empty collection").
+cc	3	sigmaProp(allOf(Coll[Boolean]()))
+cc	3	sigmaProp(anyOf(Coll[Boolean]()))
+# FINDING 1 (segwriter): an all-boolean-constant Coll[Boolean] literal in a
+# value position packs to the compact 0x85 ConcreteCollectionBooleanConstant
+# form (VLQ count + LSB-first bits), so the booleans never reach the constant
+# segregation sink — matching Scala's ConcreteCollectionSerializer dispatch.
+cc	3	sigmaProp(SELF.R4[Coll[Boolean]].getOrElse(Coll(true, false)).size == 2)
+cc	3	sigmaProp(SELF.R4[Coll[Boolean]].getOrElse(Coll(true, false, true, false, true)).size > 0)
+# Control: a Coll[Int] literal stays the generic 0x83 ConcreteCollection with
+# its elements segregated individually (the 0x85 packing is boolean-only).
+cc	3	sigmaProp(SELF.R4[Coll[Int]].getOrElse(Coll(1, 2)).size == 2)
+# NF-M4-1 (regression): renumber_dense restarts FuncValue arg ids per DISJOINT
+# (sibling, non-nested) scope — two disjoint lambdas both get id 1 (Scala reuses
+# curId across disjoint scopes), not globally-dense 1, 2. Nested scopes continue.
+cc	3	{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.value > t}) && INPUTS.exists({(c: Box) => c.value > 0})) }
+cc	3	sigmaProp(Coll(1L, 2L).fold(0L, {(a: Long, c: Long) => a + c}) > 0 && OUTPUTS.exists({(b: Box) => b.value > 0}))
+cc	3	sigmaProp(OUTPUTS.exists({(a: Box) => a.value > 0}) || INPUTS.exists({(b: Box) => b.value > 1}) || OUTPUTS.exists({(c: Box) => c.value > 2}))
+# NF-M4-2 (regression): a re-fold after lowering lets the Const==Const
+# equal-operand rule see the D-C2-folded proveDlog constants —
+# proveDlog(g1) == proveDlog(g1) folds to sigmaProp(true), as Scala's single
+# rewriteDef fixpoint does.
+cce	3	sigmaProp(proveDlog(g1) == proveDlog(g1))
+# M4 final-wave review confirmatory probe: a type-MISMATCHED empty collection
+# under allOf/anyOf must keep rejecting after the empty-coll elem_type fix
+# (the fix defers the rejection from finalize_collection to the param-type
+# check; oracle REJECT 1:11 TyperException both).
+cc	3	sigmaProp(allOf(Coll[Int]()))
+cc	3	sigmaProp(anyOf(Coll[Int]()))

@@ -1540,3 +1540,99 @@ fn find_v3_only_method_walks_dead_branch_and_skips_clean_tree() {
     });
     assert_eq!(find_v3_only_method(&clean), None);
 }
+
+// ----- constant segregation (write-time sink) -----
+
+// Segregating an expression whose ONLY constants are a compact Relation2
+// bool-pair must leave the sink EMPTY: the `0x85` BoolCollection compaction
+// bypasses the `Expr::Const` arm the sink lives in, so those two booleans are
+// written inline (as `85 <packed>`) and never reach the store. Oracle-derived:
+// the segregated `true && (1 == 1)` tree is `1000d1ed8503` — a segregated
+// header (0x10) with a ZERO-entry constants table; the body here is the inner
+// `BinAnd(true, true)` = `ed 85 03` (0xED BinAnd, 0x85 marker, 0x03 packed
+// bits = both true). See `dev-docs/.../recon-segregation.md` §3.
+#[test]
+fn segregate_relation2_bool_pair_stays_inline_zero_constants() {
+    let bin_and = Expr::Op(IrNode {
+        opcode: 0xED, // BinAnd (a Relation2-class opcode)
+        payload: Payload::Two(
+            Box::new(Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            }),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            }),
+        ),
+    });
+
+    let mut sink = ConstantSink::new();
+    let mut w = VlqWriter::new();
+    write_expr_segregating(&mut w, &bin_and, &mut sink).unwrap();
+    let bytes = w.result();
+
+    // Compact form emitted, NO placeholders, NO extracted constants.
+    assert_eq!(hex::encode(&bytes), "ed8503", "compact bool-pair body");
+    assert!(
+        sink.into_constants().is_empty(),
+        "the compacted bool pair must NOT segregate"
+    );
+}
+
+// A non-bool constant DOES segregate: it is replaced by a `ConstPlaceholder`
+// (opcode 0x73 + index) and appended to the sink. Slot order = first-write
+// (pre-order) order, append-only with NO dedup — two equal constants at
+// distinct positions take distinct slots.
+#[test]
+fn segregate_extracts_constants_in_first_write_order_no_dedup() {
+    // `Plus(100, 100)` — a non-Relation2 op over two structurally-equal `Int`
+    // constants; each segregates to its OWN slot (append-only, NO dedup).
+    let plus = Expr::Op(IrNode {
+        opcode: 0x9A, // ArithOp Plus (ArgPattern::Two, NOT Relation2)
+        payload: Payload::Two(
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(100),
+            }),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(100),
+            }),
+        ),
+    });
+
+    let mut sink = ConstantSink::new();
+    let mut w = VlqWriter::new();
+    write_expr_segregating(&mut w, &plus, &mut sink).unwrap();
+    let bytes = w.result();
+
+    // Two distinct slots (no dedup); both are (SInt, 100).
+    let constants = sink.into_constants();
+    assert_eq!(constants.len(), 2, "two slots, no dedup");
+    assert_eq!(constants[0], (SigmaType::SInt, SigmaValue::Int(100)));
+    assert_eq!(constants[1], (SigmaType::SInt, SigmaValue::Int(100)));
+
+    // Re-reading the segregated bytes materializes ConstPlaceholder nodes in
+    // place of the constants (Scala's withSegregation step-6 re-read shape),
+    // in first-write slot order.
+    let mut r = VlqReader::new(&bytes);
+    let reread = parse_expr(&mut r, 0, 0).unwrap();
+    assert!(r.is_empty());
+    let Expr::Op(IrNode {
+        opcode: 0x9A,
+        payload: Payload::Two(a, b),
+    }) = &reread
+    else {
+        panic!("expected Plus root, got {reread:?}");
+    };
+    let ph = |e: &Expr| match e {
+        Expr::Op(IrNode {
+            payload: Payload::ConstPlaceholder { index },
+            ..
+        }) => Some(*index),
+        _ => None,
+    };
+    assert_eq!(ph(a), Some(0), "first constant → ConstPlaceholder(0)");
+    assert_eq!(ph(b), Some(1), "second constant → ConstPlaceholder(1)");
+}

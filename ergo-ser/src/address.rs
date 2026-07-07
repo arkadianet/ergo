@@ -9,8 +9,12 @@
 //!   `[network|0x03] || ergoTreeBytes || blake2b256(prefix||ergoTreeBytes)[..4]`,
 //!   base58.
 //!
-//! P2SH (low nibble 0x02) is a deprecated address class kept around in Scala
-//! for parity but never produced by `fromProposition`; we don't emit it.
+//! P2SH (low nibble 0x02) is never produced by Scala's `fromProposition`, so
+//! the node's address surfaces here don't route to it either. The COMPILER
+//! path (`ergo-compiler`'s `compile()`) DOES construct it deliberately via
+//! [`encode_p2sh`], mirroring `Pay2SHAddress.apply` (sigma-state 6.0.2,
+//! `ErgoAddress.scala:201-218`): content = `blake2b256(proposition_bytes)[..24]`
+//! (Scala `hash192`).
 //!
 //! References:
 //! - [`ErgoAddressEncoder.scala`](https://github.com/ergoplatform/ergo/blob/master/ergo-core/src/main/scala/org/ergoplatform/ErgoAddressEncoder.scala)
@@ -97,6 +101,35 @@ pub fn encode_p2s(network: NetworkPrefix, ergo_tree_bytes: &[u8]) -> String {
     let mut buf = Vec::with_capacity(1 + ergo_tree_bytes.len() + CHECKSUM_LEN);
     buf.push(header);
     buf.extend_from_slice(ergo_tree_bytes);
+    append_checksum(&mut buf);
+    bs58::encode(&buf).into_string()
+}
+
+/// P2SH content length: 24 bytes = 192 bits, Scala `ErgoAddressEncoder.hash192`
+/// (`Blake2b256` truncated), `ErgoAddress.scala:214-216`.
+const P2SH_CONTENT_LEN: usize = 24;
+
+/// Encode a serialized PROPOSITION as a P2SH Ergo address
+/// (`[network|0x02] || blake2b256(proposition_bytes)[..24] || checksum4`, base58).
+///
+/// Mirrors Scala `Pay2SHAddress.apply(prop: SigmaPropValue)` (sigma-state
+/// 6.0.2, `ErgoAddress.scala:210-218`): `contentBytes =
+/// hash192(ValueSerializer.serialize(prop))`. `proposition_bytes` must be the
+/// serialized ROOT EXPRESSION only — no ErgoTree header byte, no constants
+/// table (contrast [`encode_p2s`], which takes the full tree bytes).
+///
+/// The caller owns the constant-inlining contract: for a constant-segregated
+/// tree, Scala's `Pay2SHAddress.apply(script: ErgoTree)` overload first
+/// substitutes placeholders back into the body
+/// (`script.toProposition(replaceConstants = script.isConstantSegregation)`,
+/// `ErgoAddress.scala:201-204`) and hashes THAT — hashing a body that still
+/// contains `ConstPlaceholder` nodes yields a different (wrong) address.
+pub fn encode_p2sh(network: NetworkPrefix, proposition_bytes: &[u8]) -> String {
+    let header = network.as_byte() | TYPE_P2SH;
+    let digest = blake2b256(proposition_bytes);
+    let mut buf = Vec::with_capacity(1 + P2SH_CONTENT_LEN + CHECKSUM_LEN);
+    buf.push(header);
+    buf.extend_from_slice(&digest.as_bytes()[..P2SH_CONTENT_LEN]);
     append_checksum(&mut buf);
     bs58::encode(&buf).into_string()
 }
@@ -659,5 +692,59 @@ mod tests {
         let s = bs58::encode(&raw).into_string();
         let err = decode_address_to_tree_bytes(&s, NetworkPrefix::Mainnet).unwrap_err();
         assert!(matches!(err, AddressDecodeError::UnsupportedType(0x02)));
+    }
+
+    #[test]
+    fn encode_p2sh_mainnet_shape_and_checksum() {
+        // Structural check independent of any oracle: 29 raw bytes,
+        // header = mainnet|0x02, content = blake2b256(prop)[..24],
+        // checksum = blake2b256(prefix||content)[..4].
+        let prop = [0xD1u8, 0x91, 0xA3, 0x04, 0xC8, 0x01];
+        let addr = encode_p2sh(NetworkPrefix::Mainnet, &prop);
+        let raw = bs58::decode(&addr).into_vec().unwrap();
+        assert_eq!(raw.len(), 1 + P2SH_CONTENT_LEN + CHECKSUM_LEN);
+        assert_eq!(raw[0], 0x02, "mainnet P2SH header");
+        let digest = blake2b256(&prop);
+        assert_eq!(&raw[1..25], &digest.as_bytes()[..P2SH_CONTENT_LEN]);
+        let csum = blake2b256(&raw[..25]);
+        assert_eq!(&raw[25..29], &csum.as_bytes()[..CHECKSUM_LEN]);
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn encode_p2sh_matches_scala_pay2sh_oracle_vector() {
+        // Oracle: TyperOracle.scala `cc` verb (sigma-state 6.0.2 SigmaCompiler +
+        // Pay2SHAddress, ORACLE_NETWORK=testnet), captured 2026-07-04
+        // (.superpowers/sdd/task-1-report.md, Step-4 smoke, line 2):
+        //   cc PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")
+        //   → OK 0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+        //        5AgXz2KadZrAXE86MMjVQ7UAWeRFbhBZcQms4j2RgBuHNrVRwY7xvp2S
+        //        qETVgcEctaXurNbFRgGUcZEGg4EKa8R4a5UNHY7
+        // The proposition Scala hashes is the tree body WITHOUT the 0x00
+        // header byte (bare SigmaPropConstant, no segregated constants).
+        let prop =
+            hex::decode("08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap();
+        assert_eq!(
+            encode_p2sh(NetworkPrefix::Testnet, &prop),
+            "qETVgcEctaXurNbFRgGUcZEGg4EKa8R4a5UNHY7"
+        );
+    }
+
+    #[test]
+    fn encode_p2sh_matches_scala_inlined_proposition_oracle_vector() {
+        // Oracle: same capture, line 1: cc sigmaProp(HEIGHT > 100)
+        //   → OK 100104c801d191a37300 Xw4DF8oEhUcUi3f7LAHt
+        //        qT5wgrLU3mrxjSQ8FLdaxK3TYcHcHsSLizxPe4S
+        // Scala's P2SH hashes the CONSTANT-INLINED proposition of that
+        // segregated tree — placeholder 0x7300 substituted with constant
+        // 0x04c801 — i.e. `d191a304c801` (BoolToSigmaProp(GT(Height, 100))).
+        // Pins the caller-inlines-first contract in the fn doc.
+        let prop = hex::decode("d191a304c801").unwrap();
+        assert_eq!(
+            encode_p2sh(NetworkPrefix::Testnet, &prop),
+            "qT5wgrLU3mrxjSQ8FLdaxK3TYcHcHsSLizxPe4S"
+        );
     }
 }
