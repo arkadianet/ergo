@@ -668,7 +668,13 @@
 //! recapture harness). The five crystalpool corpus contracts that carry
 //! fold-slot lambdas are now evaluable too, but stay byte-mismatched in
 //! `DC7_P2SH_MISMATCH_SET` pending val-inline/CSE (Tasks 8/9 — Scala inlines
-//! the single-use `val f` AND applies CSE, which we don't yet); under the
+//! the single-use `val f` AND applies CSE, which we don't yet). M5 NOTE
+//! (Task-7 review): for a tupled lambda whose BODY carries an inner
+//! id-materializing binding (nested lambda or val — not present in the
+//! current corpus, whose fold bodies are flat), our tupled body ids start at
+//! tuple_id+2 where Scala's start at tuple_id+1 (we consumed two arg slots,
+//! Scala allocates one) — inner-id parity is an ADDITIONAL M5 dependency for
+//! such shapes, beyond CSE itself; under the
 //! dummy reduction context they still Err/Err (a fold-derived divide-by-zero
 //! or a context register read — verdict parity, audited in
 //! `AUDITED_ERR_PAIRS`). The reject side is UNCHANGED: a direct/aliased/inline
