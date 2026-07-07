@@ -617,6 +617,23 @@ pub(crate) fn v1box_from_indexed_response(
     decode: bool,
 ) -> V1Box {
     let confirmed = resp.inclusion_height >= 1;
+    // O6: the shared semantic-decode seam. Built from the box body BEFORE the
+    // assets are consumed below. `None` (field omitted) unless `?decode=true`;
+    // when requested, `decode_box` yields `{registers, contract}` with an honest
+    // `contract: null` for an unrecognized box (never fabricated state).
+    let decoded = decode.then(|| {
+        let tokens: Vec<(String, u64)> = resp
+            .assets
+            .iter()
+            .map(|a| (a.token_id.clone(), a.amount))
+            .collect();
+        crate::v1::decode::decode_box(
+            &resp.ergo_tree,
+            resp.value,
+            &tokens,
+            &resp.additional_registers,
+        )
+    });
     let assets = resp
         .assets
         .into_iter()
@@ -642,7 +659,7 @@ pub(crate) fn v1box_from_indexed_response(
             .then(|| confirmations(best_full_block_height, resp.inclusion_height)),
         global_index: confirmed.then_some(resp.global_index),
         spending_proof: None,
-        decoded: decode.then_some(serde_json::Value::Null),
+        decoded,
     }
 }
 
@@ -948,12 +965,17 @@ mod tests {
     }
 
     #[test]
-    fn v1box_decode_toggle_emits_null_decoded_when_requested() {
+    fn v1box_decode_toggle_populates_registers_and_null_contract_when_unmatched() {
         let v = v1box_from_indexed_response(indexed_box_response(1), 1, true);
         let json = serde_json::to_value(&v).unwrap();
-        // Requested but unmatched → present and `null` (§0.3).
+        // `?decode=true` → `decoded` present as `{registers, contract}` (§4.3).
         assert!(json.get("decoded").is_some());
-        assert!(json["decoded"].is_null());
+        // The box carries no known protocol NFT and a non-protocol tree, so the
+        // contract is honestly `null` — but the typed registers are still there
+        // (a raw box is never *less* useful with decode=true, fragment §4.1).
+        assert!(json["decoded"]["contract"].is_null());
+        assert_eq!(json["decoded"]["registers"]["R4"]["type"], "coll[byte]");
+        assert_eq!(json["decoded"]["registers"]["R4"]["value"], "54455354");
     }
 
     #[test]
