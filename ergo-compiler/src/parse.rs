@@ -466,6 +466,17 @@ fn starts_type(t: &Token) -> bool {
 /// is recognised only when the `=>` token starts at offset 0 (any leading
 /// space/newline/comment pushes its start past 0 and breaks the raw match).
 fn type_(c: &mut Cursor, raw_entry: bool) -> Result<SType, ParseError> {
+    with_depth_guard(c, |c| type_impl(c, raw_entry))
+}
+
+/// The shared depth-guard wrapper used by [`type_`] and [`expr`]: increment
+/// the cursor's depth, reject past [`MAX_PARSE_DEPTH`] (position = the token
+/// about to be parsed), run the guarded body, and decrement on every path.
+/// One implementation so the two guards cannot drift.
+fn with_depth_guard<T>(
+    c: &mut Cursor,
+    f: impl FnOnce(&mut Cursor) -> Result<T, ParseError>,
+) -> Result<T, ParseError> {
     c.depth += 1;
     if c.depth > MAX_PARSE_DEPTH {
         let pos = c.peek().start;
@@ -473,7 +484,7 @@ fn type_(c: &mut Cursor, raw_entry: bool) -> Result<SType, ParseError> {
         c.depth -= 1;
         return Err(ParseError::TooDeep { pos, depth });
     }
-    let result = type_impl(c, raw_entry);
+    let result = f(c);
     c.depth -= 1;
     result
 }
@@ -957,16 +968,7 @@ fn try_literal(t: &Token, src: &str) -> Option<Expr> {
 /// sides. See `MAX_PARSE_DEPTH`'s doc for why one counter at this single
 /// choke point covers the whole pipeline.
 fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
-    c.depth += 1;
-    if c.depth > MAX_PARSE_DEPTH {
-        let pos = c.peek().start;
-        let depth = c.depth;
-        c.depth -= 1;
-        return Err(ParseError::TooDeep { pos, depth });
-    }
-    let result = expr_impl(c, ctx);
-    c.depth -= 1;
-    result
+    with_depth_guard(c, |c| expr_impl(c, ctx))
 }
 
 /// `Expr` (Exprs.scala:46-75): `If | Fun | PostfixLambda`. Ordered choice by

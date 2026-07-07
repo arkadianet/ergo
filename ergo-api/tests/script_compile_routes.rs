@@ -47,6 +47,9 @@ const ADDR: &str = "9gZyL9m7J9eJv7h6gvxurbD986nWkw44NmHBgMkcxGezesPiETp";
 /// `ergo-api/tests/wallet_stubs.rs`'s `MinimalAdmin` pattern.
 struct StubAdmin {
     addrs: Vec<String>,
+    /// When set, `addresses()` fails with `WalletAdminError::Locked` — drives
+    /// the route's `wallet_error_response` not-ready branch (400, not 500).
+    fail_locked: bool,
 }
 
 #[async_trait::async_trait]
@@ -88,6 +91,9 @@ impl WalletAdmin for StubAdmin {
         unimplemented!()
     }
     async fn addresses(&self) -> Result<WalletAddressList, WalletAdminError> {
+        if self.fail_locked {
+            return Err(WalletAdminError::Locked);
+        }
         Ok(WalletAddressList(self.addrs.clone()))
     }
     async fn boxes(&self, _: Page) -> Result<WalletBoxesPage, WalletAdminError> {
@@ -177,7 +183,10 @@ impl WalletAdmin for StubAdmin {
 }
 
 fn app(addrs: Vec<String>) -> Router {
-    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin { addrs });
+    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin {
+        addrs,
+        fail_locked: false,
+    });
     Router::new()
         .route(
             "/script/p2sAddress",
@@ -329,6 +338,30 @@ async fn p2sh_address_route_invalid_source_is_bad_request() {
 }
 
 #[tokio::test]
+async fn p2s_address_route_locked_wallet_maps_to_400_not_500() {
+    // Drives the `wallet_error_response` not-ready branch through the route
+    // layer: a Locked wallet is a well-formed request against a wallet that
+    // isn't ready (400 + the standard bad-request envelope), never a 500.
+    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin {
+        addrs: vec![],
+        fail_locked: true,
+    });
+    let router = Router::new()
+        .route(
+            "/script/p2sAddress",
+            post(ergo_api::script::p2s_address_handler),
+        )
+        .with_state((NetworkPrefix::Mainnet, admin));
+    let body = serde_json::json!({ "source": "sigmaProp(true)", "treeVersion": 0 }).to_string();
+    let (status, json) = post_json(router, "/script/p2sAddress", &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["reason"], "bad-request");
+    assert!(json["detail"]
+        .as_str()
+        .is_some_and(|d| d.contains("wallet not ready")));
+}
+
+#[tokio::test]
 async fn p2s_address_route_boolean_root_compiles_via_bool_to_sigmaprop() {
     // ScriptApiRoute.scala:60-65 root dispatch: a bare Boolean root wraps via
     // BoolToSigmaProp -- exercised end-to-end through the route (not just
@@ -351,7 +384,10 @@ async fn p2s_address_route_is_reachable_and_public_on_the_real_merged_router() {
     // hand-built single-purpose router `app()` exercises above. Also proves
     // the route is PUBLIC (no api_key required, unlike `/wallet/*`) --
     // Scala's `ScriptApiRoute` carries no `withAuth` (decision 1).
-    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin { addrs: vec![] });
+    let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin {
+        addrs: vec![],
+        fail_locked: false,
+    });
     let router = ergo_api::server::router_with_wallet(
         Arc::new(UnusedReadState),
         None,

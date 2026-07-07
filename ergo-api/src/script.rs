@@ -184,4 +184,20 @@ mod tests {
         // `ergo-api/tests/script_compile_routes.rs`.
         let _ = err.to_string();
     }
+
+    #[test]
+    fn wallet_error_response_not_ready_variants_map_to_400() {
+        use crate::wallet::WalletAdminError;
+        for e in [WalletAdminError::Locked, WalletAdminError::Uninitialized] {
+            let resp = wallet_error_response(e);
+            assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn wallet_error_response_other_maps_to_500() {
+        use crate::wallet::WalletAdminError;
+        let resp = wallet_error_response(WalletAdminError::Internal("boom".into()));
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
