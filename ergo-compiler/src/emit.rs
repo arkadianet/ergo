@@ -123,6 +123,20 @@ pub fn emit(expr: &TypedExpr) -> Result<Expr, EmitError> {
     Scope::new().emit(expr)
 }
 
+/// Emit a typed contract body, resolving each named parameter to its
+/// `ConstantPlaceholder(index)` node (M7). `placeholders` maps a param name to
+/// its constant-table index (declaration order for ≤4 params). Any body
+/// identifier that is neither a `val`/lambda binding nor a known predef gap and
+/// IS in `placeholders` becomes a placeholder; everything else behaves exactly
+/// as [`emit`]. Mirrors `SigmaCompiler.compileTyped` seeding `env ++
+/// placeholdersEnv` before `buildGraph` (SigmaCompiler.scala:88-93).
+pub fn emit_with_placeholders(
+    expr: &TypedExpr,
+    placeholders: std::collections::HashMap<String, u32>,
+) -> Result<Expr, EmitError> {
+    Scope::with_placeholders(placeholders).emit(expr)
+}
+
 /// `Ok(Expr::Op { .. })` shorthand shared by every opcode arm.
 fn node(opcode: u8, payload: Payload) -> Result<Expr, EmitError> {
     Ok(Expr::Op(IrNode { opcode, payload }))
@@ -200,6 +214,13 @@ fn upcast_ir(input: Expr, tpe: SigmaType) -> Expr {
 struct Scope {
     bindings: Vec<HashMap<String, (u32, SigmaType)>>,
     next_id: u32,
+    /// Contract-template named parameters → their `ConstantPlaceholder` index
+    /// (M7). Mirrors `SigmaCompiler.compileTyped`'s `placeholdersEnv`
+    /// (SigmaCompiler.scala:88-92): a param name that is not bound by any
+    /// enclosing `val`/lambda resolves to `ConstantPlaceholder(index, tpe)`
+    /// instead of erroring. Empty for the ordinary (non-contract) compile path,
+    /// so this is a pure superset — the base pipeline is unaffected.
+    placeholders: HashMap<String, u32>,
 }
 
 impl Scope {
@@ -207,6 +228,17 @@ impl Scope {
         Scope {
             bindings: vec![HashMap::new()],
             next_id: 1,
+            placeholders: HashMap::new(),
+        }
+    }
+
+    /// Emission scope seeded with a contract's named-parameter placeholder env
+    /// (M7). See [`emit_with_placeholders`].
+    fn with_placeholders(placeholders: HashMap<String, u32>) -> Self {
+        Scope {
+            bindings: vec![HashMap::new()],
+            next_id: 1,
+            placeholders,
         }
     }
 
@@ -687,18 +719,26 @@ impl Scope {
                 //    Constants and the typer only emits Ident for in-scope
                 //    val/lambda-arg names or (1) above, so any OTHER unbound
                 //    Ident is a genuine pipeline bug.
-                None => match known_predef_gap(name) {
-                    Some(what) => Err(EmitError::GraphBuildingReject {
-                        class: "StagingException",
-                        what: format!(
-                            "predef function `{what}` has no compile-time lowering \
-                             (Scala SigmaPredef irBuilder = undefined; GraphBuilding's \
-                             Ident eval throws for an unbound predef name)"
-                        ),
-                    }),
-                    None => Err(EmitError::InvalidShape(
-                        "Ident not bound to any enclosing ValDef or lambda arg",
-                    )),
+                None => match self.placeholders.get(name) {
+                    // M7: a contract named parameter → ConstantPlaceholder(index)
+                    // (opcode 0x73; SigmaCompiler.scala:88-92). The wire type is
+                    // recovered from the template's `constTypes` on read
+                    // (ConstantPlaceholderSerializer parity), so only the index
+                    // is emitted.
+                    Some(index) => node(0x73, Payload::ConstPlaceholder { index: *index }),
+                    None => match known_predef_gap(name) {
+                        Some(what) => Err(EmitError::GraphBuildingReject {
+                            class: "StagingException",
+                            what: format!(
+                                "predef function `{what}` has no compile-time lowering \
+                                 (Scala SigmaPredef irBuilder = undefined; GraphBuilding's \
+                                 Ident eval throws for an unbound predef name)"
+                            ),
+                        }),
+                        None => Err(EmitError::InvalidShape(
+                            "Ident not bound to any enclosing ValDef or lambda arg",
+                        )),
+                    },
                 },
             },
             T::Lambda {

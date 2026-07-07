@@ -1225,6 +1225,8 @@
 
 pub mod ast;
 pub mod binder;
+pub mod contract_parse;
+pub mod contract_template;
 // M5 Task 1 — CSE scope-chain hash-cons substrate. Built and unit-tested in
 // isolation; NOT yet wired into `compile()` (ValDef emission + pipeline
 // integration land in M5 Tasks 2-4).
@@ -1249,6 +1251,11 @@ pub mod typer;
 
 pub use ast::{ArithKind, BitKind, Expr, RelKind, ValDef};
 pub use binder::{bind, BindError};
+pub use contract_parse::{
+    parse_contract, ContractDoc, ContractParam, ContractSignature, ParameterDoc,
+    ParsedContractTemplate,
+};
+pub use contract_template::{compile_contract, ContractError, ContractTemplate, Parameter};
 pub use emit::{emit, EmitError};
 pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;

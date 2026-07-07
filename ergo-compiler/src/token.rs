@@ -191,7 +191,7 @@ fn is_op_char(c: char) -> bool {
 /// each of category `Cs`, which are never `isLowerCase` or `isUpperCase` and
 /// can never start an identifier. Hence the BMP gate (mirrors `is_id_char`).
 /// oracle: `𝐀` (U+1D400, `Lu`) REJECT 1:1; `{ val x = 𝐀 }` REJECT 1:11.
-fn is_id_start(c: char) -> bool {
+pub(crate) fn is_id_start(c: char) -> bool {
     let cp = c as u32;
     if cp > 0xFFFF {
         return false;
@@ -216,7 +216,7 @@ fn is_id_start(c: char) -> bool {
 /// id-tail char. Hence the BMP gate. oracle: `x𝟎` (U+1D7CE `Nd`) / `x𝐀` (U+1D400
 /// `Lu`) REJECT; `x²` (U+00B2 `No`) / `x①` (U+2460 `No`) / `xְ` (U+05B0 `Mn`)
 /// REJECT; `x५` (U+096B `Nd`) / `xＡ` (U+FF21 `Lu`) ACCEPT.
-fn is_id_char(c: char) -> bool {
+pub(crate) fn is_id_char(c: char) -> bool {
     if c == '$' {
         return true;
     }

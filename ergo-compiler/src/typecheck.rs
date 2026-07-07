@@ -205,6 +205,37 @@ pub fn typecheck_with_network(
     Ok(typed)
 }
 
+/// Typecheck an already-parsed contract body against a named-parameter TYPE
+/// environment (M7). Mirrors `SigmaCompiler.typecheck(env, parsedExpr)`
+/// (SigmaCompiler.scala:71-79) as driven by `SigmaTemplateCompiler.compile`
+/// (SigmaTemplateCompiler.scala:28-30): the contract's `parEnv` is a
+/// `Map[String, SType]` — declared param TYPES, no values — so the binder runs
+/// against an EMPTY `ScriptEnv` (no constant substitution) and the typer's
+/// `typeEnv = env.collect { case (k, v: SType) => ... }` (SigmaCompiler.scala:76)
+/// is exactly those param types layered on `predefinedEnv`. A bare param
+/// identifier in the body then types as its declared type via the ordinary
+/// env-lookup rule (SigmaTyper.scala:76), no new typer logic.
+///
+/// The param → `ConstantPlaceholder` substitution happens later, at emit
+/// (`SigmaCompiler.compileTyped`'s `placeholdersEnv`, SigmaCompiler.scala:88-92);
+/// this stage only assigns types.
+pub fn typecheck_contract_body(
+    body: &crate::ast::Expr,
+    params: &[(String, crate::stype::SType)],
+    tree_version: u8,
+    network: NetworkPrefix,
+) -> Result<TypedExpr, CompileError> {
+    let empty = ScriptEnv::new();
+    let bound = bind(&empty, body, network, tree_version)?;
+    let mut type_env = predefined_env(tree_version);
+    for (name, tpe) in params {
+        type_env.insert(name.clone(), tpe.clone());
+    }
+    let ctx = TyperCtx::new(tree_version);
+    let typed = assign_type(&type_env, bound, &ctx)?;
+    Ok(typed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
