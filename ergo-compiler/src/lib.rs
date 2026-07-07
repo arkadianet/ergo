@@ -650,12 +650,17 @@
 //! arm (`emit.rs:509`/`:838`) stays FRONTEND-REACHABLE and a residual `0xCF`
 //! survives in five corpus outputs (`chaincash-basis` basis-tracker /
 //! basis-token / basis / reserve, `rosen-bridge/GuardSign.es` — recon-targets
-//! #31/#32/#35/#36/#48). Those are co-blocked on val-inline/CSE (Tasks 8/9)
-//! and stay in `DC7_P2SH_MISMATCH_SET` (byte-diverge); they hold verdict
-//! parity via Err/Err on the dummy reduction context, so no `SEMANTIC_SKIP`
-//! entry is needed. The `0xCF` emit arm was AUDITED (not deleted): it is
-//! reachable exactly for these surviving-sigma cases, which the HasSigmas
-//! reconstruction (Tasks 8/9) will close.
+//! #31/#32/#35/#36/#48). With Task 9 (`val` inlining) landed, these are now
+//! co-blocked on CSE/`ValDef`-sharing (M5) AND the `HasSigmas` reconstruction
+//! (Task 6 deferred it for lack of a byte target); they stay in
+//! `DC7_P2SH_MISMATCH_SET` (byte-diverge) and hold verdict parity via Err/Err
+//! on the dummy reduction context, so no `SEMANTIC_SKIP` entry is needed. The
+//! `0xCF` emit arm was AUDITED (not deleted): it is reachable exactly for these
+//! surviving-sigma cases. NOTE (M4 Task 9): `val` inlining does NOT expose the
+//! `HasSigmas` gap as a SOLE last blocker for any chaincash vector — each is
+//! still CSE-blocked (surviving multi-use `ValDef`s with dense M5 ids), a
+//! strictly larger gap, so the deferred `HasSigmas` reconstruction stays
+//! deferred with no new byte target to pin it against (see the Task-9 report).
 //!
 //! ### D-C4 — multi-arg lambda TUPLING (CLOSED, M4 Task 7)
 //!
@@ -680,8 +685,9 @@
 //! compiles BYTE-IDENTICAL to the oracle and reduces Ok/Ok (committed via the
 //! recapture harness). The five crystalpool corpus contracts that carry
 //! fold-slot lambdas are now evaluable too, but stay byte-mismatched in
-//! `DC7_P2SH_MISMATCH_SET` pending val-inline/CSE (Tasks 8/9 — Scala inlines
-//! the single-use `val f` AND applies CSE, which we don't yet). M5 NOTE
+//! `DC7_P2SH_MISMATCH_SET` pending CSE (M5). With Task 9 landed we DO now
+//! inline the single-use `val f`, but the crystalpool contracts additionally
+//! carry repeated-subterm CSE that only M5's hash-cons model reproduces. M5 NOTE
 //! (Task-7 review): for a tupled lambda whose BODY carries an inner
 //! id-materializing binding (nested lambda or val — not present in the
 //! current corpus, whose fold bodies are flat), our tupled body ids start at
@@ -726,18 +732,19 @@
 //!    CLOSED — this reject gate is unchanged: it keys on the APPLICATION node,
 //!    never on the `FuncValue`, so tupling the definitions does not touch it).
 //! 3. **Function-typed lambda parameters** (same walk; `MatchError`): any
-//!    lambda with an `SFunc`-typed param rejects unless it is the rhs of an
-//!    UNUSED val (oracle: pruned → ACCEPT). Residual (reject-side bounded,
-//!    probe-CONFIRMED reject-valid — re-verify finding NF-2, 2026-07-07):
-//!    an SFunc-param lambda NESTED inside an unused val's rhs BODY IS
-//!    pruned by Scala (oracle ACCEPTs `{ val unused = {(x: Int) =>
-//!    {(f: Int => Int) => f(x)}}; sigmaProp(true) }` — dead-code
-//!    elimination drops the whole unused val) while our ONE-HOP exemption
-//!    rejects with `MatchError`. Same unused-val-pruning transform family
-//!    as D-C7; bounded to deliberately-unused higher-order lambdas no real
-//!    contract contains; closes when the M4/M5 val-pruning lowering lands.
-//!    The zero-arg-lambda rule (class 2) must stay UN-exempted even in an
-//!    unused rhs — oracle-pinned REJECT.
+//!    lambda with an `SFunc`-typed param rejects unless it sits in DEAD code
+//!    that Scala's schedule prunes before the lowering that dies (oracle:
+//!    pruned → ACCEPT). **NF-2 CLOSED (M4 Task 9):** the exemption is now
+//!    REACHABILITY-based and transitive, keyed on the same
+//!    `crate::inline::live_def_ids` reachability the dead-`val` pruning
+//!    transform prunes on. An SFunc-param lambda anywhere inside an
+//!    unreachable `val`'s rhs — direct rhs OR NESTED (oracle ACCEPTs
+//!    `{ val unused = Coll({(f: Int => Int) => 1}); sigmaProp(true) }`,
+//!    recaptured probe) — is exempt; a `val` used only by other dead `val`s
+//!    is itself dead, so its nested higher-order lambdas are exempt too. The
+//!    zero-arg-lambda rule (class 2) stays UN-exempted even in dead code —
+//!    it is an eager `mkFuncValue` construction failure, not a schedule-
+//!    pruned lowering (oracle-pinned REJECT, control probe committed).
 //! 4. **Postfix residual `size`** (`emit.rs` `emit_method_call`;
 //!    `GraphBuildingException`): `MethodCall %SCollection.size` (wire pair
 //!    (12,1), the space-form `arr1 size`) has no GraphBuilding arm and no
@@ -910,11 +917,25 @@
 //!   directions in one non-cascading pass (verified byte-identical to the
 //!   oracle capture `10020201060100d1917e7e730005067301` for the probe-34
 //!   vector);
-//! - **`val` inlining and unused-`val` pruning** (`{ val x = HEIGHT; x > 5 }`
-//!   → bare `GT(HEIGHT, 5)`);
-//! - **CSE/ValDef sharing** of repeated subterms (`proveDHTuple(g1, g2, g1,
-//!   g2)` with one distinct point → a shared constant `ValDef` + four
-//!   `ValUse`s; the M5 ValDef-sharing roadmap item);
+//! - ~~`val` inlining and unused-`val` pruning~~ **CLOSED (M4 Task 9,
+//!   recon-transforms.md §8; `crate::inline`):** single-use and
+//!   constant-valued `val`s inline into every use site, dead `val`s are
+//!   pruned, and an emptied block flattens to its bare result
+//!   (`{ val x = HEIGHT; x > 5 }` → `GT(Height, 5)`;
+//!   `corpus:lsp/test_contract.es` → `GT(Height, SELF.R4[Int].get)`) — both
+//!   graduate to byte-identical. Multi-use NON-constant `val`s KEEP their
+//!   `ValDef` untouched — that residual is CSE/id-renumbering (below), NOT
+//!   this transform. The dead-code reject asymmetry (overflow / zero-arg /
+//!   multi-arg-apply reject in dead `val`s; nested SFunc-param lambdas in
+//!   dead `val`s ACCEPT — NF-2) is oracle-probe-pinned and committed;
+//! - **CSE/ValDef sharing** of repeated subterms AND schedule-order id
+//!   renumbering of surviving `ValDef`s (`proveDHTuple(g1, g2, g1, g2)` with
+//!   one distinct point → a shared constant `ValDef` + four `ValUse`s; the
+//!   chaincash-basis family, whose oracle props carry surviving `ValDef`s with
+//!   DENSE ids `1,2,3,…` allocated by `TreeBuilding.processAstGraph` over the
+//!   post-CSE graph — e.g. `basis-tracker` `ValDef:60→25`. These do NOT
+//!   graduate under Task 9's source-`val` inlining and are the M5
+//!   ValDef-sharing roadmap item; see `.superpowers/sdd/m4-task-9-report.md`);
 //! - ~~single-element `anyOf`/`atLeast` unwrapping~~ **CLOSED (M4 Task 3):**
 //!   `anyOf(Coll(HEIGHT > 5))` → the bare comparison. Correction: only
 //!   `AllOf`/`AnyOf`/`AllZk`/`AnyZk` unwrap on `items.length == 1`
@@ -945,8 +966,8 @@
 //!   are compile-time REJECTs (non-Bool/SigmaProp root, unaffected by this
 //!   transform), and the chaincash corpus's bare `groupGenerator` usage
 //!   (`val g: GroupElement = groupGenerator`, `reserve.es` + 5 sibling
-//!   contracts) is `val`-bound and stays MULTI-blocked pending Task 9's
-//!   val-inlining regardless. Direct byte-exact regression coverage instead
+//!   contracts) is `val`-bound and stays MULTI-blocked on CSE/`ValDef`-sharing
+//!   (M5) even with Task 9's `val` inlining landed. Direct byte-exact regression coverage instead
 //!   lives in two new tests: `emit::tests::
 //!   lowered_singletons_emit_property_call_and_roundtrip` (shape) and
 //!   `tree::tests::compile_bare_singleton_lowering_matches_oracle_property_call`
@@ -979,15 +1000,17 @@
 //! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
 //! compensating regression a count assert would miss): the address gate
 //! (`tests/compile_semantic_parity.rs`) pins the corpus at
-//! `DC7_P2SH_MISMATCH_SET` (17 of the 88 swept ACCEPT vectors as of M4
-//! Task 5, down from 36 at Task 4, 39 at Task 3, 43 at Task 1/2 — Task 5's
-//! generic constant fold graduated 19 CONST-FOLD vectors; the other 71
+//! `DC7_P2SH_MISMATCH_SET` (15 of the swept ACCEPT vectors as of M4 Task 9,
+//! down from 17 at Task 5, 36 at Task 4, 39 at Task 3, 43 at Task 1/2 —
+//! Task 9's `val` inlining graduated the two PURE single-use-inline vectors
+//! `{ val x = HEIGHT; x > 5 }` and `corpus:lsp/test_contract.es`; the rest
 //! P2SH-match and are hard-asserted equal wherever the proposition bytes
-//! agree). The 17 residual are all MULTI (12 corpus CSE/val-inline/lowering,
-//! `{ val x = HEIGHT; x > 5 }`, `proveDHTuple(g1, g2, g1, g2)`); the M4
-//! lowering tasks plus the M5 CSE/ValDef-sharing work close the remainder;
-//! each landed lowering removes the vectors it graduates from the set,
-//! deliberately and explicitly.
+//! agree). The 15 residual are all CSE/`ValDef`-sharing MULTI (7 chaincash-
+//! basis, 5 crystalpool, `dexy/gort-dev/emission.es`, `rosen-bridge/
+//! GuardSign.es`, `proveDHTuple(g1, g2, g1, g2)`) — the M5 acceptance-
+//! benchmark set: each carries surviving multi-use `ValDef`s with schedule-
+//! order dense ids the hash-cons model must reproduce. Every landed lowering
+//! removes the vectors it graduates from the set, deliberately and explicitly.
 //!
 //! ### MethodCall lowering catalog (M4 Task 8, recon-transforms.md §10, recon-cannonq.md Part A)
 //!
@@ -1114,6 +1137,7 @@ pub mod emit;
 pub mod env;
 pub mod error;
 mod fold;
+mod inline;
 mod isproven;
 mod lower;
 mod parse;

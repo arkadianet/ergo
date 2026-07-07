@@ -259,6 +259,24 @@ fn assert_mismatch_set_matches(
 /// `HasSigmas` reconstruction (NOT the coercion cancellation Task 6 landed) AND
 /// they are co-blocked on val-inline/CSE (Tasks 8/9) — so they only flip when
 /// those land, left here honestly per the plan's graduation discipline.
+///
+/// M4 Task 9 (`val` inlining + dead-`val` pruning + block flattening): 17 → 15.
+/// The two PURE single-use-inline vectors graduate — `{ val x = HEIGHT; x > 5 }`
+/// (→ `GT(Height, 5)`, no block) and `corpus:lsp/test_contract.es`
+/// (`{ val deadline = SELF.R4[Int].get; sigmaProp(HEIGHT > deadline) }` →
+/// `GT(Height, SELF.R4[Int].get)`, oracle `1000d191a3e4c6a70404`) — both inline
+/// to a bare body with ZERO surviving `ValDef`s, so no id renumbering is needed.
+/// The seven chaincash-basis `cc` entries do NOT graduate: their oracle props
+/// carry surviving `ValDef`s with DENSE ids `1,2,3,…` allocated by
+/// `TreeBuilding.processAstGraph` over the POST-CSE graph (e.g.
+/// `basis-tracker` `ValDef:60→25`, `redemption` `163→58`). Reproducing that
+/// needs the M5 hash-cons/`hasManyUsagesGlobal` model + schedule-order id
+/// allocation, not source-`val` inlining — decoded, M5-blocking, left here
+/// honestly (see `.superpowers/sdd/m4-task-9-report.md`). `proveDHTuple(g1, g2,
+/// g1, g2)` (repeated-point CSE), the five crystalpool + `dexy/gort-dev` (pure
+/// CSE) and `rosen-bridge/GuardSign.es` entries stay MULTI on M5 too — the 15
+/// residual are exactly the M5 acceptance-benchmark set. byte-parity telemetry
+/// 78/95 → 80/95.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
@@ -282,9 +300,7 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
     ("cc", "corpus:dexy/gort-dev/emission.es"),
-    ("cc", "corpus:lsp/test_contract.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
 ];
 
@@ -316,7 +332,11 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// of P2SH predicts. M4 Task 6 (D-C3) leaves this set UNCHANGED at 17 for the
 /// same reason as `DC7_P2SH_MISMATCH_SET` — the five graduated D-C3 sources
 /// byte-match (so P2S matches too, never entering here), and the D-C3 corpus
-/// ingredients stay MULTI-blocked.
+/// ingredients stay MULTI-blocked. M4 Task 9 (`val` inlining) → 15, tracking
+/// `DC7_P2SH_MISMATCH_SET` in lockstep: the two pure single-use-inline vectors
+/// (`{ val x = HEIGHT; x > 5 }`, `corpus:lsp/test_contract.es`) now segregate to
+/// oracle-identical bytes so P2S matches too; chaincash + CSE residuals stay
+/// (M5).
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
@@ -340,9 +360,7 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
     ("cc", "corpus:dexy/gort-dev/emission.es"),
-    ("cc", "corpus:lsp/test_contract.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
 ];
 

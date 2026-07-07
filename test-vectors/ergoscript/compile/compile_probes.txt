@@ -192,3 +192,35 @@ cc	3	sigmaProp(!(HEIGHT < 5))
 # (locked decision 3): its SEGREGATED bytes are diffed vs the oracle tree_hex
 # by the always-on semantic gate.
 cc	3	sigmaProp(Coll(1, 2).fold(0, {(a: Int, b: Int) => a + b}) == 3)
+# M4 Task 9: val inlining + dead-val pruning + block flattening
+# (recon-transforms.md §8; GraphBuilding.scala:583-604 env-thread inline +
+# ProgramGraphs.scala:35-64 schedule DCE + TreeBuilding.scala:502-516
+# hasManyUsagesGlobal ValDef re-intro). Boundary probes pinning the dead-code
+# reject asymmetry Scala's eager buildNode vs schedule-time lowering produces.
+#
+# NF-2 CLOSED (the D-C5 class-3 residual): a higher-order (SFunc-param) lambda
+# NESTED inside an UNUSED val's rhs is pruned by the schedule before the
+# lowering that MatchErrors → oracle ACCEPTs. Previously rejected (only a
+# direct-rhs unused lambda was exempt); the reachability-based, transitive
+# dead-flag exemption now accepts it, matching the oracle.
+cc	3	{ val unused = Coll({(f: Int => Int) => 1}); sigmaProp(true) }
+# Control: a zero-arg lambda is an EAGER graph-construction failure (mkFuncValue
+# on empty args) that fires even in dead code → still REJECT, dead or not.
+cc	3	{ val unused = Coll({() => 1}); sigmaProp(true) }
+# Control: a multi-arg APPLICATION is likewise eager (buildNode lowers only
+# 1-arg applies) → REJECT even when the applying val is itself dead.
+cc	3	{ val f = {(x: Int, y: Int) => x + y}; val unused = f(1, 2); sigmaProp(true) }
+# Control: an arithmetic overflow in a DEAD val's rhs is folded by the eager
+# buildNode (ArithmeticException) BEFORE the schedule prunes → REJECT. Pins
+# that dead-val pruning must run AFTER the fold passes, not before.
+cc	3	{ val unused = 300.toByte; sigmaProp(true) }
+# ACCEPT: chained single-use inline collapses to a bare body (no ValDef).
+cc	3	{ val a = HEIGHT; val b = a; val c = b; sigmaProp(c > 5) }
+# ACCEPT: fold sees the INLINED constant (inline runs before the arith fold) →
+# sigmaProp(true). A cast over an inlined val, by contrast, stays a Downcast
+# node (Scala's Downcast(Constant) fold is an AST-pattern match, never over a
+# ValUse) — pinned by the next probe.
+cc	3	{ val x = 2; sigmaProp(x + 1 == 3) }
+cc	3	{ val x = 2; sigmaProp(x.toByte < 0.toByte) }
+# ACCEPT: a dead val holding v3-only data is pruned before the v0 gate scans.
+cc	3	{ val unused = Coll[BigInt](); sigmaProp(true) }

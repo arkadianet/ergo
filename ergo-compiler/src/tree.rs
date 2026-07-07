@@ -279,36 +279,39 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
 ///   evaluable and byte-matchable — this gate itself is unchanged.
 /// - **A lambda with a FUNCTION-typed parameter rejects** (`{(f: Int => Int)
 ///   => f(10)}` and the param-unused body variant → `REJECT 0:0
-///   MatchError`) UNLESS the lambda is the rhs of a ValDef whose id has zero
-///   `ValUse` occurrences (fresh capture: `cc { val unused = {(f: Int =>
-///   Int) => 1}; sigmaProp(true) }` → OK — the unused val is dead-code
-///   eliminated before the lowering that dies). Residual asymmetry vs the
-///   zero-arg rule is oracle-pinned, not a modeling choice. A `FuncValue`
-///   with an `SFunc` param NESTED inside an unused val's rhs (not directly
-///   the rhs) is still rejected — PROBE-CONFIRMED reject-valid divergence
-///   (the regression re-verify's NF-2: the oracle prunes the unused val and
-///   ACCEPTs; we reject). Reject-side bounded, ledgered at D-C5 class 3;
-///   closes when the M4/M5 pruning transform lands.
+///   MatchError`) UNLESS the lambda sits in DEAD code that Scala's schedule
+///   prunes before the lowering that dies. The exemption is now
+///   REACHABILITY-based and transitive (M4 Task 9, NF-2 CLOSED): a
+///   `FuncValue` with an `SFunc` param anywhere inside an unreachable `val`'s
+///   rhs — direct rhs (`cc { val unused = {(f: Int => Int) => 1};
+///   sigmaProp(true) }` → OK) OR nested (`cc { val unused = Coll({(f: Int =>
+///   Int) => 1}); sigmaProp(true) }` → OK) — is exempt, matching the oracle.
+///   A val used only by other dead vals is itself dead, so its nested
+///   higher-order lambdas are exempt too. This uses the same
+///   [`crate::inline::live_def_ids`] reachability that [`crate::inline::
+///   prune_dead_vals`] prunes on, keeping the gate and the pruning transform
+///   in lockstep. The zero-arg rule is deliberately NOT dead-exempted (see
+///   above) — it is an eager construction failure, not a schedule-pruned
+///   lowering.
 fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
-    use std::collections::HashSet;
+    // The set of `val` ids that survive dead-`val` pruning (reachable from
+    // their block result). A higher-order (`SFunc`-param) lambda is exempt from
+    // the `MatchError` reject exactly when it sits in DEAD code — Scala's
+    // schedule prunes it before the lowering that would `MatchError`
+    // (`crate::inline` §8; NF-2: `{ val unused = Coll({(f: Int => Int) => 1});
+    // sigmaProp(true) }` → oracle OK). The zero-arg-lambda and multi-arg-apply
+    // rejects are EAGER `buildNode`-over-every-bind failures that fire in dead
+    // code too (`{ val unused = Coll({() => 1}); ... }` → reject; `{ val f =
+    // {(x, y) => ...}; val unused = f(1, 2); ... }` → reject), so they are NOT
+    // dead-exempt.
+    let live = crate::inline::live_def_ids(root);
 
-    // Pass 1: every ValUse id occurring anywhere in the body.
-    let mut used: HashSet<u32> = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(e) = stack.pop() {
-        if let Expr::Op(IrNode { payload, .. }) = e {
-            if let Payload::ValUse { id } = payload {
-                used.insert(*id);
-            }
-            push_children(payload, &mut stack);
-        }
-    }
-
-    // Pass 2: walk with a one-hop exemption flag for a FuncValue that is the
-    // rhs of an UNUSED ValDef (Scala prunes it before the SFunc-param
-    // lowering; the zero-arg rule is NOT exempted — see the fn docs).
+    // Walk with a transitively-inherited `dead` flag: once inside a dead
+    // `ValDef`'s rhs, every descendant is dead (so a NESTED `SFunc`-param lambda
+    // — not just a direct rhs — is exempt, closing NF-2). A def is dead here iff
+    // it is already in a dead region OR its id did not survive pruning.
     let mut stack: Vec<(&Expr, bool)> = vec![(root, false)];
-    while let Some((e, pruned_rhs)) = stack.pop() {
+    while let Some((e, dead)) = stack.pop() {
         let Expr::Op(IrNode { payload, .. }) = e else {
             continue;
         };
@@ -322,7 +325,7 @@ fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
                             .into(),
                     });
                 }
-                if !pruned_rhs
+                if !dead
                     && args
                         .iter()
                         .any(|(_, t)| matches!(t, Some(SigmaType::SFunc { .. })))
@@ -334,7 +337,7 @@ fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
                             .into(),
                     });
                 }
-                stack.push((body, false));
+                stack.push((body, dead));
             }
             Payload::FuncApply { func, args } => {
                 if args.len() != 1 {
@@ -347,24 +350,16 @@ fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
                         ),
                     });
                 }
-                stack.push((func.as_ref(), false));
-                stack.push((&args[0], false));
+                stack.push((func.as_ref(), dead));
+                stack.push((&args[0], dead));
             }
-            Payload::ValDef { id, rhs, .. } => {
-                let exempt = !used.contains(id)
-                    && matches!(
-                        rhs.as_ref(),
-                        Expr::Op(IrNode {
-                            payload: Payload::FuncValue { .. },
-                            ..
-                        })
-                    );
-                stack.push((rhs.as_ref(), exempt));
+            Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
+                stack.push((rhs.as_ref(), dead || !live.contains(id)));
             }
             other => {
                 let mut children = Vec::new();
                 push_children(other, &mut children);
-                stack.extend(children.into_iter().map(|c| (c, false)));
+                stack.extend(children.into_iter().map(|c| (c, dead)));
             }
         }
     }
@@ -889,6 +884,24 @@ pub fn compile(
     // expose) — see below.
     let root = crate::isproven::eliminate_isproven(root);
 
+    // `val` inlining (M4 Task 9, recon-transforms.md §8; `crate::inline`).
+    // Reproduces `buildGraph`'s env-threading inline: single-use `val`s and
+    // constant-valued `val`s are substituted into every use site; multi-use
+    // non-constant `val`s KEEP their `ValDef` (the M5 CSE surface, untouched);
+    // dead `val`s are LEFT IN PLACE here so the fold pass below still folds
+    // (and rejects overflow in) their rhs — the eager `buildNode`-over-every-
+    // bind behaviour (`{ val unused = 2147483647 + 1; ... }` → reject;
+    // `{ val unused = 300.toByte; ... }` → reject) — then removed by
+    // `prune_dead_vals` AFTER the fold. Runs AFTER `fold_direct_const_casts`
+    // (Scala's `Downcast(Constant)` fold is an AST-pattern match that never
+    // fires over a `ValUse`, so a cast over an inlined `val` must stay a
+    // `NumericCast` node — `{ val x = 5; x.toByte < 0.toByte }` keeps
+    // `Downcast(5, Byte)`) and BEFORE `crate::fold::fold` (so the arithmetic
+    // fold sees the inlined constant — `{ val x = 2; x + 1 == 3 }` →
+    // `sigmaProp(true)`). All three orderings are oracle-probed; see the
+    // `crate::inline` module docs.
+    let root = crate::inline::inline_vals(root);
+
     // Generic constant fold (M4 Task 5, recon-transforms.md §1b/§2a-2d;
     // `crate::fold`) — the GraphBuilding-exact `rewriteDef` cascade as one
     // bottom-up fixpoint pass. It ABSORBS the two retired D-C5/D-C6 twins into
@@ -905,6 +918,18 @@ pub fn compile(
     // `unsignedBigInt == unsignedBigInt` closure) never puts that data on the
     // wire (locked decision 1).
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
+
+    // Dead-`val` pruning (M4 Task 9, recon-transforms.md §8; `crate::inline`).
+    // Removes every `val` unreachable from its block result — Scala's schedule
+    // DFS (`ProgramGraphs.scala:35-64`) never visits it, so it is absent from
+    // the final tree. Runs AFTER `crate::fold::fold` (so any overflow in a dead
+    // `val`'s rhs has already rejected, matching the eager `buildNode`) and
+    // recomputes reachability, so a `val` that a fold turned dead (its sole use
+    // erased by `x * 0 -> 0`) is dropped too. Runs BEFORE the v0-data gate so a
+    // dead `val` holding v3-only data (`{ val unused = Coll[BigInt](); ... }`)
+    // is gone before the gate scans — the oracle accepts it (the schedule
+    // prunes it), and the gate must too.
+    let root = crate::inline::prune_dead_vals(root);
 
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
@@ -1195,6 +1220,79 @@ mod tests {
             "the compacted bool pair must NOT segregate"
         );
         assert_eq!(hex::encode(&r.tree_bytes), "1000d1ed8501");
+    }
+
+    #[test]
+    fn compile_single_use_val_inlines_matching_oracle_bytes() {
+        // M4 Task 9 graduation (recon-targets #2): `{ val x = HEIGHT; x > 5 }`
+        // inlines the single-use `val x` and flattens the block to the bare
+        // `GT(Height, 5)` — no `BlockValue`/`ValDef`/`ValUse` survives. Oracle
+        // (`cc`, sigma-state 6.0.2, testnet): `1001040ad191a37300` (header 0x10,
+        // one segregated SInt constant `5`, body `d191a37300` =
+        // BoolToSigmaProp(GT(Height, ConstPlaceholder(0)))).
+        let r = ct("{ val x = HEIGHT; x > 5 }").expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "1001040ad191a37300");
+    }
+
+    #[test]
+    fn compile_lsp_test_contract_val_inlines_matching_oracle_bytes() {
+        // M4 Task 9 graduation (recon-targets #46, `corpus:lsp/test_contract.es`):
+        // `{ val deadline = SELF.R4[Int].get; sigmaProp(HEIGHT > deadline) }`
+        // inlines `deadline` (single use) to `GT(Height, SELF.R4[Int].get)` with
+        // no block and ZERO constants. Oracle (`cc`, testnet):
+        // `1000d191a3e4c6a70404` (header 0x10, empty constants table, body
+        // `d191a3e4c6a70404` = BoolToSigmaProp(GT(Height,
+        // ExtractRegisterAs(Self, R4, SInt).get))).
+        let r = ct("{ val deadline = SELF.R4[Int].get; sigmaProp(HEIGHT > deadline) }")
+            .expect("compile");
+        assert!(r.ergo_tree.constants.is_empty(), "no literal constants");
+        assert_eq!(hex::encode(&r.tree_bytes), "1000d191a3e4c6a70404");
+    }
+
+    #[test]
+    fn compile_inline_then_fold_reaches_sigmaprop_true() {
+        // Pipeline-order pin (M4 Task 9): inline runs BEFORE the arithmetic fold,
+        // so `{ val x = 2; sigmaProp(x + 1 == 3) }` folds the INLINED constant to
+        // `sigmaProp(true)`. Oracle (`cc`, testnet): `10010101d17300` (one SBoolean
+        // constant `true`, body BoolToSigmaProp(ConstPlaceholder(0))).
+        let r = ct("{ val x = 2; sigmaProp(x + 1 == 3) }").expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
+    }
+
+    #[test]
+    fn compile_cast_over_inlined_val_stays_unfolded() {
+        // Pipeline-order pin (M4 Task 9): `fold_direct_const_casts` runs BEFORE
+        // inline, and Scala's `Downcast(Constant)` fold is an AST-pattern match
+        // that never fires over a `ValUse`, so a cast over an inlined `val` keeps
+        // its `Downcast` node. `{ val x = 2; sigmaProp(x.toByte < 0.toByte) }`
+        // keeps `Downcast(2, Byte)`. Oracle (`cc`, testnet):
+        // `100204040200d18f7d7300027301`.
+        let r = ct("{ val x = 2; sigmaProp(x.toByte < 0.toByte) }").expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "100204040200d18f7d7300027301");
+    }
+
+    #[test]
+    fn compile_overflow_in_dead_val_still_rejects() {
+        // Pipeline-order pin (M4 Task 9): a dead `val`'s rhs is folded by the
+        // fold pass BEFORE pruning (mirroring Scala's eager `buildNode`), so an
+        // overflow in an unused `val` still rejects. Oracle (`cc`, testnet):
+        // `{ val unused = 300.toByte; sigmaProp(true) }` → REJECT
+        // ArithmeticException.
+        assert!(matches!(
+            ct("{ val unused = 300.toByte; sigmaProp(true) }"),
+            Err(CompileError::Emit(_))
+        ));
+    }
+
+    #[test]
+    fn compile_nested_sfunc_in_dead_val_accepts_nf2() {
+        // NF-2 CLOSED (M4 Task 9): a higher-order (`SFunc`-param) lambda NESTED
+        // inside an unreachable `val`'s rhs is pruned by Scala's schedule before
+        // the lowering that `MatchError`s → oracle ACCEPTs. Previously rejected
+        // (only a direct-rhs unused lambda was exempt).
+        let r = ct("{ val unused = Coll({(f: Int => Int) => 1}); sigmaProp(true) }")
+            .expect("NF-2: nested SFunc-param lambda in a dead val must compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
     }
 
     // ----- round-trips -----
@@ -1647,13 +1745,19 @@ mod tests {
 
     #[test]
     fn compile_val_bound_get_reg_index_stays_residual_method_call() {
-        // D-C6 residual, pinned verdict-only (NOT a committed vector): Scala
-        // const-propagates the val and still lowers (oracle: `cc { val i =
-        // 4; sigmaProp(SELF.getReg[Int](i).isDefined) }` → `1000d1e6c6a70404`,
-        // the val eliminated entirely); our typed AST keeps the ValUse, so
-        // the MethodCall survives — BOTH sides accept, but our tree is
-        // unevaluable under the v0 header (the oracle's evaluates), which is
-        // why the semantic gate cannot carry this vector.
+        // getReg dynamic→static lowering residual (MEMORY "getReg dynamic-index
+        // plan"), pinned verdict-only (NOT a committed vector). M4 Task 9's `val`
+        // inlining now DOES eliminate `val i` (`crate::inline`), so the index
+        // becomes the inlined constant `4` — matching Scala's const-propagation
+        // this far. What still diverges is the SECOND half: Scala lowers
+        // `getReg[Int](4)` (a now-constant index) to the STATIC
+        // `ExtractRegisterAs(Self, R4, Int)` (`cc { val i = 4;
+        // sigmaProp(SELF.getReg[Int](i).isDefined) }` → `1000d1e6c6a70404`, zero
+        // constants), whereas our emit fixed the getReg static-vs-dynamic shape
+        // in the TYPED AST (where `i` was still a `ValUse`), so it stays a
+        // dynamic `getReg` MethodCall with the inlined `4` as a
+        // ConstPlaceholder. BOTH sides accept; the residual is the getReg
+        // static lowering, no longer `val` inlining.
         let r = compile(
             &ScriptEnv::new(),
             "{ val i = 4; sigmaProp(SELF.getReg[Int](i).isDefined) }",
@@ -1661,15 +1765,11 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("both-accept residual must still compile");
-        // Self-pin (NOT an oracle vector): our tree keeps the ValUse/MethodCall
-        // where Scala eliminates the val, so our SEGREGATED bytes (header 0x10,
-        // one SInt(4) constant slot, ValDef rhs → ConstPlaceholder(0)) differ
-        // from the oracle's `1000d1e6c6a70404`. A regression guard on our own
-        // deterministic output, not a parity claim.
-        assert_eq!(
-            hex::encode(&r.tree_bytes),
-            "10010408d801d6017300d1e6dc6313a701720104"
-        );
+        // Self-pin (NOT an oracle vector): header 0x10, one SInt(4) constant
+        // slot, dynamic getReg MethodCall over ConstPlaceholder(0) — differs
+        // from the oracle's static `1000d1e6c6a70404` on the getReg lowering
+        // only. A regression guard on our own deterministic output.
+        assert_eq!(hex::encode(&r.tree_bytes), "10010408d1e6dc6313a701730004");
     }
 
     #[test]
@@ -1945,7 +2045,10 @@ mod tests {
     fn compile_self_unreadable_emission_rejects_serializer_class() {
         // Post-write self-check (D-C6): compile() re-reads its own bytes and
         // REFUSES to hand out an address for a script no deserializer
-        // accepts. Two oracle-probed families flip verdict DELIBERATELY
+        // accepts. One oracle-probed family (1) still flips verdict DELIBERATELY
+        // (a poisoned type code BOTH readers reject); the other (2) GRADUATED to
+        // a byte-exact accept once M4 Task 9 val-inlining landed. Historically
+        // both were documented reject-side divergences DELIBERATELY
         // (documented reject-side divergences, NOT committed vectors):
         //
         // (1) Note A: `cc sigmaProp(getVar[UnsignedBigInt](1).isDefined)` —
@@ -1963,19 +2066,24 @@ mod tests {
         assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
         assert_eq!(err.class(), "SerializerException");
         //
-        // (2) Missing-fold residual: a VAL-BOUND `Coll[UnsignedBigInt]()`
-        //     under `.size` — Scala inlines the val and folds (oracle reply
-        //     identical to the inline form, `10010400d1937e730005c1a7`); our
-        //     `SizeOf(ValUse)` keeps the poisoned literal on the wire, so
-        //     the self-check rejects rather than strand funds.
-        let err = compile(
+        // (2) GRADUATED (M4 Task 9): a VAL-BOUND `Coll[UnsignedBigInt]()` under
+        //     `.size` used to keep a poisoned `SizeOf(ValUse)` literal on the
+        //     wire (our self-check rejected rather than strand funds). Now
+        //     `crate::inline` inlines the single-use `val u` and
+        //     `crate::fold::fold` collapses `SizeOf(Coll[UnsignedBigInt]())` to
+        //     `Const(0)` BEFORE the v0 gate — so the v3-only UBI data never
+        //     reaches the wire, exactly like Scala's inline-then-fold. Output is
+        //     now BYTE- AND ADDRESS-IDENTICAL to the oracle
+        //     (`10010400d1937e730005c1a7`), closing this D-C6 self-check
+        //     divergence (the NF-1 val-behind closure).
+        let r = compile(
             &ScriptEnv::new(),
             "{ val u = Coll[UnsignedBigInt](); sigmaProp(u.size.toLong == SELF.value) }",
             3,
             NetworkPrefix::Testnet,
         )
-        .expect_err("val-bound poisoned literal must reject");
-        assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
+        .expect("val-inline + SizeOf fold erases the UBI data before the v0 gate");
+        assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
     }
 
     #[test]
