@@ -1204,6 +1204,10 @@ pub fn router_with_mempool_and_wallet_and_security(
         wallet_admin.clone(),
         security.clone(),
     ));
+    // The v1 T1 (operator) auth config — the same api-key gate the wallet
+    // surface uses, reused for the `webhooks/*` management routes below.
+    // Captured before `security` is consumed by the native wallet mount.
+    let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone()).into_shared();
     // Native `/api/v1/wallet/*` — a second adapter over the SAME wallet admin,
     // gated by the same operator api-key (route_layer + catch-alls). Factual
     // DTOs + EIP-27-aware balance; the Scala-compat router above is untouched.
@@ -1245,6 +1249,23 @@ pub fn router_with_mempool_and_wallet_and_security(
             crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
         );
     }
+    // Webhooks (§4.1) — the durable, retried, signed sibling of WS. An internal
+    // subscriber to the SAME `RealtimeBus` (one event source, one global seq).
+    // The registry + delivery-log + retry/backoff/HMAC state machine are wired
+    // here; the concrete outbound HTTP(S) sink is a deferred dependency decision
+    // (the node's lock ships no HTTP client / TLS stack), so no delivery worker
+    // is spawned yet — registration + the delivery log are live and correct,
+    // deliveries enqueue and are queryable as `pending` until a `WebhookSink`
+    // lands. Persistence is in-memory this PR: registrations are lost on restart
+    // until a durable `*-db` store lands (both deferrals are documented).
+    let v1_webhooks_state = crate::v1::WebhooksState {
+        handle: Some(crate::v1::WebhooksHandle {
+            engine: std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default())),
+            bus: v1_realtime.bus.clone(),
+            url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
+        }),
+        network,
+    };
     let v1_state = crate::v1::V1State {
         read: v1_read,
         chain: v1_chain,
@@ -1258,6 +1279,8 @@ pub fn router_with_mempool_and_wallet_and_security(
     let v1_governor = crate::v1::governor::Governor::new(Default::default())
         .expect("default GovernorConfig is valid");
     let assembled = assembled.merge(crate::v1::v1_router(v1_state, v1_governor));
+    // Mount the T1 `webhooks/*` router under the operator api-key gate.
+    let assembled = assembled.merge(crate::v1::webhooks_router(v1_webhooks_state, v1_auth));
 
     // tower-http TraceLayer wraps every request in an INFO span carrying a
     // monotonic request id + method + path. Handler logs ride that span as
