@@ -22,6 +22,7 @@ pub mod governor;
 pub mod mempool_depth;
 pub mod realtime;
 pub mod routes;
+pub mod script;
 pub mod webhooks;
 
 pub use auth::{
@@ -41,6 +42,7 @@ pub use realtime::{
     spawn_event_bridge, spawn_event_bridge_once, ConnLimiter, RealtimeBus, RealtimeHandle,
 };
 pub use routes::{v1_router, V1State};
+pub use script::{script_router, ScalaOracle, ScriptConfig, ScriptState};
 pub use webhooks::{
     spawn_webhook_worker, spawn_webhook_worker_once, webhooks_router, ReqwestSink, WebhookEngine,
     WebhookSink, WebhooksHandle, WebhooksState,

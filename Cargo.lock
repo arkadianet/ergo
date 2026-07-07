@@ -685,6 +685,7 @@ dependencies = [
  "ergo-primitives",
  "ergo-rest-json",
  "ergo-ser",
+ "ergo-sigma",
  "futures-util",
  "hex",
  "hmac",

@@ -25,6 +25,10 @@ ergo-indexer-types = { workspace = true }
 ergo-ser           = { workspace = true }
 ergo-primitives    = { workspace = true }
 ergo-rest-json     = { workspace = true }
+# The `/api/v1/script/*` playground: the consensus-exact interpreter
+# (`ergo-sigma` reduce/cost path) and the byte-parity compiler
+# (`ergo-compiler::compile`) — the node-only surfaces this group adapts.
+ergo-sigma         = { workspace = true }
 ergo-compiler      = { workspace = true }
 thiserror          = { workspace = true }
 rand               = { workspace = true }
