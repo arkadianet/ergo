@@ -15,6 +15,7 @@
 //! the first route-group PR consumes it. Re-exports below are the stable
 //! surface those groups import.
 
+pub mod accounts;
 pub mod auth;
 pub mod cursor;
 pub mod decode;
@@ -27,6 +28,7 @@ pub mod routes;
 pub mod script;
 pub mod webhooks;
 
+pub use accounts::{accounts_router, AccountsState};
 pub use auth::{
     assess_posture, warn_startup_posture, InsecurePosture, Tier, V1AuthConfig, V1AuthState,
 };

@@ -1225,6 +1225,10 @@ pub fn router_with_mempool_and_wallet_and_security(
     // surface uses, reused for the `webhooks/*` management routes below.
     // Captured before `security` is consumed by the native wallet mount.
     let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone()).into_shared();
+    // Captured before the native mount consumes `wallet_admin`: the v1
+    // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`, §3.10–§3.11)
+    // reuses the SAME wallet-admin bridge for scan + key operations.
+    let v1_accounts_admin = wallet_admin.clone();
     // Native `/api/v1/wallet/*` — a second adapter over the SAME wallet admin,
     // gated by the same operator api-key (route_layer + catch-alls). Factual
     // DTOs + EIP-27-aware balance; the Scala-compat router above is untouched.
@@ -1374,6 +1378,19 @@ pub fn router_with_mempool_and_wallet_and_security(
     };
     let assembled = assembled.merge(crate::v1::operator_router(
         v1_operator_state,
+        v1_governor.clone(),
+        v1_auth.clone(),
+    ));
+    // Scan registry + account-abstraction group (`/api/v1/scan/*`,
+    // `/api/v1/accounts/*` — §3.10–§3.11). T0 watch reads (governor), T1 scan +
+    // watch writes + account/PSBT seams (`require_tier(Operator)`), T2 private-key
+    // export (`require_tier(Admin)` — api-key + loopback-preferred).
+    let v1_accounts_state = crate::v1::AccountsState {
+        admin: v1_accounts_admin,
+        network,
+    };
+    let assembled = assembled.merge(crate::v1::accounts_router(
+        v1_accounts_state,
         v1_governor.clone(),
         v1_auth.clone(),
     ));
