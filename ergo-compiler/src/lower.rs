@@ -229,12 +229,17 @@ fn fold_prove_dlog_dhtuple(expr: Expr) -> Expr {
 /// Single-element unwrap (recon-transforms.md §4, `GraphBuilding.scala:
 /// 205-208`): `And`(0x96)/`Or`(0x97) over a one-item `ConcreteCollection`, or
 /// `SigmaAnd`(0xEA)/`SigmaOr`(0xEB) over a one-item `SigmaCollection`,
-/// collapses to its sole item. The `SigmaAnd`/`SigmaOr` arm is currently
-/// unreachable from ErgoScript source (our typer has no working `allZK`/
-/// `anyZK` irBuilder, and binary `&&`/`||` between `SigmaProp`s always
-/// produces >= 2 items) but is pinned by the same source citation as the
-/// `And`/`Or` arm, so it is implemented for spec completeness — a future
-/// `allZK`/`anyZK` wiring inherits the unwrap for free.
+/// collapses to its sole item. The `SigmaAnd`/`SigmaOr` arm is PERMANENTLY
+/// unreachable from ErgoScript source, not merely pending a future wiring
+/// (M4 Task 8 review, lib.rs D-C8): binary `&&`/`||` between `SigmaProp`s
+/// always produces >= 2 items, and `allZK`/`anyZK` — the only OTHER route
+/// that could construct a single-item `SigmaAnd`/`SigmaOr` — never lowers to
+/// one at all: Scala's own `SigmaPredef.AllZKFunc`/`AnyZKFunc` irBuilder is
+/// the `undefined` sentinel (genuinely unimplemented upstream, not a porting
+/// gap), so `allZK(Coll(x))` rejects with `StagingException` before any
+/// lowering runs (oracle-probed, 3 forms, 3 runs — see D-C8). This arm is
+/// pinned by the same `GraphBuilding.scala:205-208` citation as the
+/// `And`/`Or` arm it ships alongside and is kept for spec completeness.
 fn unwrap_single_element_sigma_collection(expr: Expr) -> Expr {
     match expr {
         Expr::Op(IrNode {

@@ -145,6 +145,25 @@ fn bit_op_symbol(opcode: i8) -> &'static str {
     }
 }
 
+/// Predef function names the TYPER accepts (present in `predefined_env`,
+/// `typer/predef_ir.rs`) but whose Scala `irBuilder` is the literal
+/// `PredefFuncInfo(undefined)` sentinel (`SigmaPredef.scala:79-92` for
+/// `allZK`/`anyZK`, `:108-123` for `outerJoin`) — genuinely unimplemented in
+/// the REFERENCE compiler itself, not merely unported. `predef_ir_builder`
+/// (`typer/predef_ir.rs`, comment at its match's tail) falls through with
+/// `None` for exactly these three names, so their typed tree keeps the raw
+/// `Apply(Ident, args)` shape all the way to here — see the `T::Ident` arm's
+/// doc comment (D-C8) for the full oracle-probe citation. Returns the bare
+/// function name for the `GraphBuildingReject` message when `name` is one of
+/// these; `None` for every other identifier (which means "genuine pipeline
+/// bug" at the call site, not "known predef gap").
+fn known_predef_gap(name: &str) -> Option<&str> {
+    match name {
+        "allZK" | "anyZK" | "outerJoin" => Some(name),
+        _ => None,
+    }
+}
+
 /// Wrap an already-emitted IR expression in `Upcast` (0x7E) to `tpe`.
 fn upcast_ir(input: Expr, tpe: SigmaType) -> Expr {
     Expr::Op(IrNode {
@@ -636,12 +655,51 @@ impl Scope {
             )),
             T::Ident { name, .. } => match self.lookup(name) {
                 Some(id) => node(0x72, Payload::ValUse { id }),
-                // The binder substitutes env values as Constants and the typer
-                // only emits Ident for in-scope val/lambda-arg names, so an
-                // unbound Ident is a pipeline bug.
-                None => Err(EmitError::InvalidShape(
-                    "Ident not bound to any enclosing ValDef or lambda arg",
-                )),
+                // Two distinct reasons an Ident can be unbound here, and they
+                // must NOT be conflated (M4 Task 8 review, D-C8):
+                //
+                // 1. `name` is a KNOWN predef function (`allZK`/`anyZK`/
+                //    `outerJoin` — `predef_ir.rs`'s `predefined_env`) whose
+                //    Scala `irBuilder` is the literal `PredefFuncInfo(undefined)`
+                //    sentinel (SigmaPredef.scala:79-92/108-123) — genuinely
+                //    UNIMPLEMENTED in the reference compiler itself (tracked
+                //    upstream: sigmastate-interpreter#543), not a gap in this
+                //    port. `predef_ir_builder` mirrors that with a `None`
+                //    fall-through, so the typed tree keeps the raw
+                //    `Apply(Ident, args)` shape all the way here — BYTE-
+                //    IDENTICAL to the oracle's own `tce`/`tcs` residual
+                //    (probed 2026-07-07). Scala's `compiler.compile` (the
+                //    `cc`/`cce`/`ccs` verbs this crate's `compile()` mirrors)
+                //    reaches `GraphBuilding.eval`'s `Ident` case,
+                //    `env.getOrElse(n, !!!(...))`, which throws unconditionally
+                //    (`n` was never bound as a lambda arg or block val) — a
+                //    `StagingException`. Live-probed 3x: literal single-/multi-
+                //    element `Coll` AND a val-bound `Coll` all REJECT
+                //    identically for both `allZK`/`anyZK` — there is no
+                //    accepting form, not even the "literal Coll unwraps to
+                //    SigmaAnd/SigmaOr" shape this port used to assume (that
+                //    unwrap only fires for the `&&`/`||` OPERATOR route, which
+                //    builds a `SigmaAnd`/`SigmaOr` node directly and never
+                //    passes through `PredefinedFuncApply` at all). This is a
+                //    real, user-reachable REJECT — reported as such, not as an
+                //    internal pipeline-bug.
+                // 2. Anything else: the binder substitutes env values as
+                //    Constants and the typer only emits Ident for in-scope
+                //    val/lambda-arg names or (1) above, so any OTHER unbound
+                //    Ident is a genuine pipeline bug.
+                None => match known_predef_gap(name) {
+                    Some(what) => Err(EmitError::GraphBuildingReject {
+                        class: "StagingException",
+                        what: format!(
+                            "predef function `{what}` has no compile-time lowering \
+                             (Scala SigmaPredef irBuilder = undefined; GraphBuilding's \
+                             Ident eval throws for an unbound predef name)"
+                        ),
+                    }),
+                    None => Err(EmitError::InvalidShape(
+                        "Ident not bound to any enclosing ValDef or lambda arg",
+                    )),
+                },
             },
             T::Lambda {
                 tpe_params,
@@ -3261,6 +3319,43 @@ mod tests {
             emit(&node).unwrap_err(),
             EmitError::InvalidShape(_)
         ));
+    }
+
+    /// D-C8: `allZK`/`anyZK`/`outerJoin` are KNOWN predefs (present in
+    /// `predefined_env`) with no Scala irBuilder — reaching them here as a
+    /// bare unbound `Apply(Ident, args)` is a real, oracle-confirmed user
+    /// REJECT (`StagingException` — probed 2026-07-07, ×3 identical runs,
+    /// literal single-/multi-element `Coll` AND val-bound forms all reject),
+    /// not a pipeline bug. Must classify as `GraphBuildingReject`, never
+    /// `InvalidShape` — the two are user-facing-vs-internal, not
+    /// interchangeable (`unbound_ident_returns_invalid_shape` above pins the
+    /// genuine-bug case stays `InvalidShape`).
+    #[test]
+    fn known_predef_gap_ident_returns_graph_building_reject_not_invalid_shape() {
+        for name in ["allZK", "anyZK", "outerJoin"] {
+            let node = TypedExpr::Apply {
+                func: Box::new(TypedExpr::Ident {
+                    name: name.to_string(),
+                    tpe: SType::SFunc {
+                        dom: vec![SType::SColl(Box::new(SType::SSigmaProp))],
+                        range: Box::new(SType::SSigmaProp),
+                        tpe_params: vec![],
+                    },
+                }),
+                args: vec![TypedExpr::Constant {
+                    value: ConstPayload::ByteColl(vec![]),
+                    tpe: SType::SColl(Box::new(SType::SSigmaProp)),
+                }],
+                tpe: SType::SSigmaProp,
+            };
+            match emit(&node).unwrap_err() {
+                EmitError::GraphBuildingReject { class, what } => {
+                    assert_eq!(class, "StagingException", "{name}");
+                    assert!(what.contains(name), "{name}: {what}");
+                }
+                other => panic!("{name}: expected GraphBuildingReject, got {other:?}"),
+            }
+        }
     }
 
     #[test]

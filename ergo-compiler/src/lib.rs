@@ -1020,17 +1020,22 @@
 //!   ("same target opcode?" for the predef vs method forms) definitively: the
 //!   predef form doesn't exist in reachable ErgoScript at all.
 //! - **`allZK`/`anyZK` single-literal-`Coll` unwrap (recon-cannonq.md A.1 row
-//!   4):** OUT OF SCOPE, not merely unpinned — `predef_ir_builder` has no
-//!   `"allZK"`/`"anyZK"` arm at all (`_ => None` fall-through), so neither
-//!   predef function is reachable from ErgoScript source in this compiler yet
-//!   (confirmed: zero references in `golden_seed.txt`/any test vector/the
-//!   79-contract corpus). `crate::lower`'s `SigmaAnd`/`SigmaOr` single-element
-//!   unwrap arm (recon-transforms.md §4) is already implemented and pinned by
-//!   the SAME `GraphBuilding.scala:205-208` citation as the `And`/`Or` arm it
-//!   ships alongside, so wiring `allZK`/`anyZK` predef functions in a future
-//!   task inherits the unwrap for free — but implementing those two predefs
-//!   is new-feature scope (parsing/typing/emitting a function this compiler
-//!   has never supported), not a lowering-catalog fix, and is left undone.
+//!   4): RESOLVED, corrected (M4 Task 8 review, D-C8 below).** The M4 Task 8
+//!   framing above ("OUT OF SCOPE... implementing those two predefs is
+//!   new-feature scope") was itself wrong: `predef_ir.rs`'s `predefined_env`
+//!   DOES register `"allZK"`/`"anyZK"` (parsing/typing already worked), and
+//!   the assumption that a literal `Coll` argument lowers to `SigmaAnd`/
+//!   `SigmaOr` was never oracle-checked. A live probe (2026-07-07) shows the
+//!   opposite: `compiler.compile` REJECTS every form (`StagingException`) —
+//!   see D-C8 for the full account and the fix (a `GraphBuildingReject`
+//!   classification, not a lowering). `crate::lower`'s `SigmaAnd`/`SigmaOr`
+//!   single-element unwrap arm (recon-transforms.md §4) stays PERMANENTLY
+//!   unreachable from ErgoScript source, not merely "currently" so — it is
+//!   pinned by the same `GraphBuilding.scala:205-208` citation as the
+//!   `And`/`Or` arm it ships alongside, and exercises only the `&&`/`||`
+//!   OPERATOR route (which builds `SigmaAnd`/`SigmaOr` typed nodes directly,
+//!   bypassing `PredefinedFuncApply` entirely), never the `allZK`/`anyZK`
+//!   function-call route.
 //! - The remaining §10a "primitives that stay primitives" and §10b fallback
 //!   rows (Coll/Box/Option/Sigma ops, numeric unary `toBytes`/`toBits`/bitwise
 //!   binops) were spot-checked against `emit.rs`/`methods.rs` and are already
@@ -1047,6 +1052,61 @@
 //! (`predef_ir::predef_ir_builder`, `assign::lower_method`) to reproduce a
 //! mode Scala's own production path never takes. Deleted rather than wired;
 //! see `typer/mod.rs`'s `TyperCtx` doc comment for the full reasoning.
+//!
+//! ### D-C8 — `allZK`/`anyZK`/`outerJoin` reject-valid divergence (M4 Task 8
+//! review)
+//!
+//! Reviewer-caught bug: the typer accepts `allZK(Coll(proveDlog(g1)))`
+//! identically to Scala (residual `Apply(Ident 'allZK') [...]`, both sides —
+//! `predefined_env` has the name, `predef_ir_builder` has no irBuilder arm so
+//! it falls through, matching Scala's `PredefinedFuncApply.unapply` doing the
+//! same for a name whose registry entry has `irBuilder == undefined`), but
+//! `emit`'s `T::Ident` arm then hit its OWN "unbound identifier" branch and
+//! returned `EmitError::InvalidShape("Ident not bound...")` — a message that
+//! FRAMES a real, oracle-confirmed user REJECT as an internal pipeline bug.
+//!
+//! **Root-cause, oracle-pinned (2026-07-07, ×3 identical runs,
+//! `ORACLE_TREE_VERSION=3` testnet, `tce`/`cce` verbs against the demo env):**
+//! `SigmaPredef.scala:79-92` registers `AllZKFunc`/`AnyZKFunc` with
+//! `PredefFuncInfo(undefined)` as the irBuilder — genuinely UNIMPLEMENTED in
+//! the reference compiler itself (`sc/.../LanguageSpecificationV6.scala:1298`
+//! carries a literal `// TODO v6.0: implement allZK func
+//! .../issues/543`), not a porting gap. `outerJoin` (`SigmaPredef.scala:
+//! 108-123`) is the same story — already documented as such at
+//! `predef_ir.rs`'s registration site. Because none of the three ever match
+//! `PredefinedFuncApply`, the typed tree keeps the raw `Apply(Ident, args)`
+//! shape into `compiler.compile`'s GraphBuilding stage, where `eval`'s
+//! `Ident(n, _)` case does `env.getOrElse(n, !!!(...))` — `n` was never bound
+//! as a lambda arg or block val, so this throws UNCONDITIONALLY:
+//! `StagingException`. Probed exhaustively for `allZK`/`anyZK`: literal
+//! single-element `Coll`, literal multi-element `Coll`, AND a val-bound
+//! `Coll` all reject IDENTICALLY — there is no accepting form at all, not
+//! even the "literal `Coll` lowers to `SigmaAnd`/`SigmaOr`" shape this
+//! ledger's M4 Task 8 entry (above) used to assume without checking: that
+//! lowering only fires for the `&&`/`||` OPERATOR route (`GraphBuilding.
+//! scala`'s `case SigmaAnd(items) => ... sigmaDslBuilder.allZK(...)`), which
+//! builds a `SigmaAnd` typed node directly and never touches
+//! `PredefinedFuncApply`.
+//!
+//! **Fix:** `emit.rs`'s new `known_predef_gap` helper recognizes exactly
+//! these three names when `T::Ident` lookup fails, returning
+//! `EmitError::GraphBuildingReject { class: "StagingException", what }`
+//! instead of `InvalidShape` — a real REJECT-class, oracle-graded verdict
+//! (lib.rs D-C5 convention), leaving `InvalidShape` for genuinely-unbound
+//! names (any OTHER identifier reaching this arm remains a pipeline bug, per
+//! `unbound_ident_returns_invalid_shape`). Full-pipeline coverage:
+//! `tree::tests::compile_allzk_anyzk_reject_staging_exception_full_pipeline`
+//! (byte-for-class match against the oracle) plus a unit-level
+//! `emit::tests::known_predef_gap_ident_returns_graph_building_reject_not_invalid_shape`.
+//!
+//! Also closed in the same review pass: `typer/predef_ir.rs`'s `unmap_const`
+//! (the `emit::map_const` reverse mapping `deserialize[T]` uses, M4 Task 8
+//! §3 above) was missing the `ConstPayload::ProveDlog` arm — a real
+//! `map_const ∘ unmap_const` drift, now fixed with a
+//! `map_const_unmap_const_roundtrips_every_variant` property test sweeping
+//! every `ConstPayload` variant (except `SigmaProp`, which `map_const` itself
+//! refuses to emit — pinned by its own dedicated test — so it is not a gap
+//! to guard).
 
 pub mod ast;
 pub mod binder;

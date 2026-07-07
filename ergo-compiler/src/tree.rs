@@ -1408,6 +1408,33 @@ mod tests {
     }
 
     #[test]
+    fn compile_allzk_anyzk_reject_staging_exception_full_pipeline() {
+        // D-C8 (M4 Task 8 review): `allZK`/`anyZK` typecheck fine (the
+        // typer's `predefined_env` has both names) but Scala's
+        // `SigmaPredef.AllZKFunc`/`AnyZKFunc` register `PredefFuncInfo(
+        // undefined)` as their irBuilder — genuinely unimplemented upstream
+        // (sigmastate-interpreter#543), not a porting gap. The typed tree
+        // keeps the raw `Apply(Ident, args)` shape (byte-identical to the
+        // oracle's `tce` residual), and `compiler.compile`'s GraphBuilding
+        // stage throws `StagingException` reaching that unbound `Ident` —
+        // live-probed 2026-07-07, ×3 identical runs: literal single-element,
+        // literal multi-element, AND a val-bound `Coll` ALL reject
+        // identically for both names. There is NO accepting form — the
+        // "literal Coll unwraps to SigmaAnd/SigmaOr" shape this port used to
+        // assume never fires for the direct function-call route (that
+        // unwrap only applies to typed `SigmaAnd`/`SigmaOr` nodes built by
+        // the `&&`/`||` OPERATORS, a disjoint code path).
+        for src in [
+            "allZK(Coll(proveDlog(g1)))",
+            "anyZK(Coll(proveDlog(g1)))",
+            "{ val c = Coll(proveDlog(g1)); allZK(c) }",
+        ] {
+            let err = compile_testnet(&generator_env(), src).expect_err(src);
+            assert_eq!(err.class(), "StagingException", "{src}");
+        }
+    }
+
+    #[test]
     fn compile_constant_fold_overflow_rejects_arithmetic_exception_class() {
         // Oracle: `REJECT 0:0 ArithmeticException` on the whole family
         // (compile-time exact fold of constant +,-,* and casts-of-literals;

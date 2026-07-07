@@ -72,19 +72,31 @@
 //! `deserializeTo`/`fromBigEndianBytes`'s existing `global_deserialize` gate.
 //!
 //! **Scope (probe-bounded):** [`unlower_expr`] covers every `Const` shape
-//! [`crate::emit::map_const`] can produce in reverse, plus the nine
+//! [`crate::emit::map_const`] can produce in reverse (the `unmap_const`
+//! lockstep — M4 Task 8 review closed the `ConstPayload::ProveDlog` gap,
+//! D-C8: `unmap_const` had no arm for `SigmaValue::SigmaProp(SigmaBoolean::
+//! ProveDlog(_))`, silently falling through to reject instead of
+//! reconstructing a shape `map_const` can re-emit byte-identically; a
+//! `map_const ∘ unmap_const = identity` test now sweeps every `ConstPayload`
+//! variant to guard the pair against future drift), plus the nine
 //! zero-payload context/global singleton primitives (`Height`/`Inputs`/
 //! `Outputs`/`Self_`/`MinerPubkey`/`LastBlockUtxoRootHash`/`Context`/`Global`/
-//! `GroupGenerator`) — both oracle-confirmed. Anything else a crafted byte
-//! string could decode to (a `BinOp`, a `MethodCall`, a materialized
-//! `Coll[Int]`/`Coll[Boolean]` constant — `ConstPayload` has no variant for
-//! those, only `Coll[Byte]`/`Coll[Long]`, mirroring `map_const`'s own
-//! coverage) is REJECTED with a descriptive `TyperError` rather than silently
-//! mismapped — an honest, bounded residual: no source in the 79-contract
-//! corpus calls `deserialize` at all (grep-confirmed), so this is not a
-//! corpus blocker, and closing the general case would mean porting a second
-//! full opcode-IR↔TypedExpr symmetric mapping for a predef nothing exercises.
-//! See lib.rs § "Known M2 deviations" (D-T2) for the full ledger.
+//! `GroupGenerator`) — both oracle-confirmed. `ConstPayload::SigmaProp`
+//! (the opaque env-injected proposition label) is the one variant that
+//! genuinely CANNOT round-trip: `map_const` itself refuses to emit it
+//! (`EmitError::UnsupportedNode`, "opaque SigmaProp constant payload" — no
+//! curve bytes to serialize), so no wire bytes carrying that shape ever
+//! exist for `unmap_const` to invert — this is not a gap, there is nothing
+//! to reverse. Anything else a crafted byte string could decode to (a
+//! `BinOp`, a `MethodCall`, a materialized `Coll[Int]`/`Coll[Boolean]`
+//! constant — `ConstPayload` has no variant for those, only `Coll[Byte]`/
+//! `Coll[Long]`, mirroring `map_const`'s own coverage) is REJECTED with a
+//! descriptive `TyperError` rather than silently mismapped — an honest,
+//! bounded residual: no source in the 79-contract corpus calls `deserialize`
+//! at all (grep-confirmed), so this is not a corpus blocker, and closing the
+//! general case would mean porting a second full opcode-IR↔TypedExpr
+//! symmetric mapping for a predef nothing exercises. See lib.rs § "Known M2
+//! deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
 //! typer).
@@ -95,7 +107,7 @@ use ergo_primitives::group_element::GroupElement;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::opcode::{parse_expr, Expr as OpExpr, IrNode, Payload as OpPayload};
 use ergo_ser::sigma_type::SigmaType as WireType;
-use ergo_ser::sigma_value::{CollValue, SigmaValue as WireValue};
+use ergo_ser::sigma_value::{CollValue, SigmaBoolean, SigmaValue as WireValue};
 
 use crate::stype::SType;
 use crate::typed::{ConstPayload, MethodRef, TypedExpr};
@@ -954,6 +966,21 @@ fn unmap_const(tpe: &WireType, val: &WireValue) -> Option<(SType, ConstPayload)>
             SType::SGroupElement,
             ConstPayload::GroupElement(*group_element_bytes(ge)),
         )),
+        // Mirrors `emit::map_const`'s `ConstPayload::ProveDlog` arm (the
+        // binder PK-rule / P2PK-address shape) — closes the M4 Task 8 review
+        // gap (D-C8 lockstep): `unmap_const` previously had no arm for
+        // `SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(_))`, so a
+        // `deserialize[SigmaProp](...)` decoding a `ProveDlog` constant would
+        // silently fall through to the `_ => None` reject instead of
+        // reconstructing the payload `map_const` can re-emit byte-identically.
+        // `SigmaBoolean::{Cand,Cor,Cthreshold,ProveDHTuple,TrivialProp}` have
+        // no `ConstPayload` variant at all (mirrors `map_const`'s own
+        // coverage — those shapes never appear as bare Constants on the wire
+        // in this port) and correctly stay unmapped below.
+        (WireType::SSigmaProp, WireValue::SigmaProp(SigmaBoolean::ProveDlog(ge))) => Some((
+            SType::SSigmaProp,
+            ConstPayload::ProveDlog(*group_element_bytes(ge)),
+        )),
         (WireType::SColl(elem), WireValue::Coll(CollValue::Bytes(bytes)))
             if matches!(**elem, WireType::SByte) =>
         {
@@ -1746,5 +1773,85 @@ mod tests {
         let res =
             predef_ir_builder("bigInt", &f, &[str_const(&over_neg)], 3).expect("isDefinedAt true");
         assert!(res.is_err(), "-(2^255+1) must be rejected");
+    }
+
+    // ----- round-trips -----
+
+    /// A valid on-curve secp256k1 point (the standard generator) for the
+    /// `GroupElement`/`ProveDlog` round-trip cases below — reuses the same
+    /// x-coordinate `emit.rs`'s `generator_ge()` test helper does.
+    fn generator_ge_bytes() -> [u8; 33] {
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x02;
+        let x = hex::decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .expect("valid hex");
+        bytes[1..].copy_from_slice(&x);
+        bytes
+    }
+
+    /// D-C8 drift guard (M4 Task 8 review): `emit::map_const` and this
+    /// module's `unmap_const` must stay exact inverses over every
+    /// `ConstPayload` variant `map_const` can actually emit. The review found
+    /// `unmap_const` silently missing the `ProveDlog` arm (now fixed above) —
+    /// this test sweeps every OTHER variant too so a future `ConstPayload`
+    /// addition can't reintroduce the same silent one-sided gap.
+    /// `ConstPayload::SigmaProp` is deliberately excluded — see
+    /// `map_const_rejects_opaque_sigma_prop_no_roundtrip_possible` below for
+    /// why it is not a gap.
+    #[test]
+    fn map_const_unmap_const_roundtrips_every_variant() {
+        let ge_bytes = generator_ge_bytes();
+        let cases: Vec<(ConstPayload, SType)> = vec![
+            (ConstPayload::Bool(true), SType::SBoolean),
+            (ConstPayload::Byte(-3), SType::SByte),
+            (ConstPayload::Short(300), SType::SShort),
+            (ConstPayload::Int(42), SType::SInt),
+            (ConstPayload::Long(-7), SType::SLong),
+            (ConstPayload::BigInt("12345".to_string()), SType::SBigInt),
+            (
+                ConstPayload::UnsignedBigInt("12345".to_string()),
+                SType::SUnsignedBigInt,
+            ),
+            (ConstPayload::String("abc".to_string()), SType::SString),
+            (ConstPayload::Unit, SType::SUnit),
+            (
+                ConstPayload::ByteColl(vec![-1, 2]),
+                SType::SColl(Box::new(SType::SByte)),
+            ),
+            (
+                ConstPayload::LongColl(vec![1, -2]),
+                SType::SColl(Box::new(SType::SLong)),
+            ),
+            (ConstPayload::GroupElement(ge_bytes), SType::SGroupElement),
+            (ConstPayload::ProveDlog(ge_bytes), SType::SSigmaProp),
+        ];
+
+        for (payload, tpe) in cases {
+            let (wire_tpe, wire_val) = crate::emit::map_const(&payload, &tpe)
+                .unwrap_or_else(|e| panic!("map_const({payload:?}) failed: {e:?}"));
+            let (round_tpe, round_payload) = unmap_const(&wire_tpe, &wire_val)
+                .unwrap_or_else(|| panic!("unmap_const has no inverse arm for {payload:?}"));
+            assert_eq!(round_tpe, tpe, "type mismatch round-tripping {payload:?}");
+            assert_eq!(
+                round_payload, payload,
+                "payload mismatch round-tripping {payload:?}"
+            );
+        }
+    }
+
+    /// `ConstPayload::SigmaProp` is the one variant EXCLUDED from the sweep
+    /// above: it is an opaque env-injected proposition label with no curve
+    /// bytes, and `map_const` itself refuses to emit it
+    /// (`EmitError::UnsupportedNode`) — no wire bytes carrying this shape
+    /// ever exist for `unmap_const` to invert. Pinned here so this stays a
+    /// documented, verified non-round-trip rather than a silent gap.
+    #[test]
+    fn map_const_rejects_opaque_sigma_prop_no_roundtrip_possible() {
+        let err = crate::emit::map_const(
+            &ConstPayload::SigmaProp("p1".to_string()),
+            &SType::SSigmaProp,
+        )
+        .expect_err("opaque SigmaProp must not be emittable");
+        assert!(matches!(err, crate::emit::EmitError::UnsupportedNode(_)));
     }
 }
