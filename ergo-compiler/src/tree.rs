@@ -884,23 +884,20 @@ pub fn compile(
     // expose) — see below.
     let root = crate::isproven::eliminate_isproven(root);
 
-    // `val` inlining (M4 Task 9, recon-transforms.md §8; `crate::inline`).
-    // Reproduces `buildGraph`'s env-threading inline: single-use `val`s and
-    // constant-valued `val`s are substituted into every use site; multi-use
-    // non-constant `val`s KEEP their `ValDef` (the M5 CSE surface, untouched);
-    // dead `val`s are LEFT IN PLACE here so the fold pass below still folds
-    // (and rejects overflow in) their rhs — the eager `buildNode`-over-every-
-    // bind behaviour (`{ val unused = 2147483647 + 1; ... }` → reject;
-    // `{ val unused = 300.toByte; ... }` → reject) — then removed by
-    // `prune_dead_vals` AFTER the fold. Runs AFTER `fold_direct_const_casts`
-    // (Scala's `Downcast(Constant)` fold is an AST-pattern match that never
-    // fires over a `ValUse`, so a cast over an inlined `val` must stay a
-    // `NumericCast` node — `{ val x = 5; x.toByte < 0.toByte }` keeps
-    // `Downcast(5, Byte)`) and BEFORE `crate::fold::fold` (so the arithmetic
-    // fold sees the inlined constant — `{ val x = 2; x + 1 == 3 }` →
-    // `sigmaProp(true)`). All three orderings are oracle-probed; see the
-    // `crate::inline` module docs.
-    let root = crate::inline::inline_vals(root);
+    // `val` inlining RETIRED (M5 Task 4, locked decision 4; spike §7.2): the
+    // M4 `inline_vals` pass is gone — `crate::cse::cse` below is now the SOLE
+    // subexpression-sharing pass and subsumes it (a use-count-1 symbol is not
+    // hoisted, so its one use inlines at materialization; a constant-valued
+    // `val` is P4-suppressed and inlines per-use). `inline_vals` could not stay:
+    // it SYNTACTICALLY clones a shared `def`'s rhs into each use site, so two
+    // uses in sibling `If`/`&&` thunks became sibling-distinct symbols that CSE
+    // (scope-chain hash-cons) could never re-share — the exact under-hoisting
+    // the M5 model exists to fix. CSE instead threads the shared graph node
+    // (`intern` gives every `ValUse` of a `ValDef` the same symbol), matching
+    // Scala's `buildGraph`. The overflow-reject-in-dead-`val` behaviour
+    // (`{ val unused = 2147483647 + 1; ... }` → reject) is UNCHANGED: the fold
+    // below still traverses every `ValDef` rhs (dead or live) and `prune_dead_
+    // vals` runs AFTER it, so the eager `buildNode` overflow still fires.
 
     // Generic constant fold (M4 Task 5, recon-transforms.md §1b/§2a-2d;
     // `crate::fold`) — the GraphBuilding-exact `rewriteDef` cascade as one
@@ -928,26 +925,16 @@ pub fn compile(
     // erased by `x * 0 -> 0`) is dropped too. Runs BEFORE the v0-data gate so a
     // dead `val` holding v3-only data (`{ val unused = Coll[BigInt](); ... }`)
     // is gone before the gate scans — the oracle accepts it (the schedule
-    // prunes it), and the gate must too.
+    // prunes it), and the gate must too. STILL REQUIRED pre-CSE (M5 Task 4): a
+    // dead `val`'s rhs must not be interned, else its `ValUse` refs would
+    // inflate `crate::cse`'s flat usage count and wrongly hoist a
+    // used-only-in-dead-code subexpression.
     let root = crate::inline::prune_dead_vals(root);
 
-    // Dense id renumbering (M4 Task 9 review nit; `crate::inline::
-    // renumber_dense`). Inlining a single-use/const `val` erases its `ValDef`
-    // but not its id, so a `FuncValue` arg allocated AFTER the inlined `val`
-    // keeps a numbering gap our emit never closes (oracle probe: `{ val t =
-    // HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 <
-    // t})) }` — the lambda arg `b` is id 2 pre-renumber, but Scala's
-    // post-inline schedule gives it id 1). Only fires when the tree has NO
-    // surviving `ValDef`/`FunDef` (every remaining id is then a `FuncValue`
-    // arg with no sharing decision left, so pre-order first-appearance IS
-    // Scala's schedule order); a tree that keeps a `ValDef` is the M5
-    // schedule-order surface and is left untouched. Runs AFTER
-    // `prune_dead_vals` (only SURVIVING defs should block renumbering) and
-    // BEFORE the v0-data gate / lowering block below (both walk ids
-    // structurally, not by value, so running here vs. after either is
-    // equivalent; here keeps the whole Task-9 id story in one pipeline
-    // neighborhood).
-    let root = crate::inline::renumber_dense(root);
+    // Dense id renumbering RETIRED (M5 Task 4, locked decision 4; spike §7.2):
+    // `crate::inline::renumber_dense` is gone. Dense, assign-once ids now come
+    // from `crate::cse::cse` below, which allocates them top-down as the final
+    // tree is built (spike §4) — there is no post-hoc renumber pass to layer.
 
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
@@ -1021,6 +1008,35 @@ pub fn compile(
     // Scala's `varId = defId + 1` for the non-CSE case (byte-verified against the
     // oracle).
     let root = crate::tuple::tuple_lambdas(root);
+
+    // CSE / ValDef materialization (M5, locked decision 4; spike §7.1/§7.2;
+    // `crate::cse`) — the SOLE subexpression-sharing pass, replacing the retired
+    // M4 `inline_vals`/`renumber_dense`. A scope-chain hash-cons decides identity
+    // by FIRST-BUILD scope (both `If` branches / `&&`/`||` right arm /
+    // `getOrElse` default push a scope; siblings never share), a flat global
+    // usage count + the 4-predicate gate (`has_many && !IsContextProperty &&
+    // !IsInternalDef && !IsConstantDef`) decides which symbols become `ValDef`s,
+    // and dense ids are threaded assign-once top-down (no renumber). Runs at the
+    // spike §7.2 position: AFTER every fold/lowering/tupling (so it sees the
+    // final lowered shape) and BEFORE constant segregation / `write_ergo_tree`.
+    // Its input is `prune_dead_vals`-cleaned (above) so dead-code refs do not
+    // inflate the usage count.
+    let root = crate::cse::cse(root);
+
+    // Re-fold after CSE (M5 Task 4, oracle-pinned; mirrors the post-`lower`
+    // re-fold above). Scala folds continuously in `rewriteDef` AS the graph is
+    // built, so a constant threaded through a `val` (`{ val x = 1 + 1;
+    // sigmaProp(x > 0 && x < 3) }`) is already folded through its uses before the
+    // comparison nodes exist. Our fold ran BEFORE CSE, where `x`'s uses were
+    // still `ValUse` nodes it cannot fold through; CSE then P4-inlines the
+    // constant `2` at each use, newly exposing `2 > 0` / `2 < 3` as
+    // `Const`-adjacent. This pass collapses exactly those CSE-exposed constant
+    // adjacencies (oracle: the source above → `1000d1ed8503`, ZERO constants,
+    // ZERO ValDefs — identical to `sigmaProp(1 > 0 && 1 < 3)`). It never touches
+    // a hoisted `ValDef`/`ValUse` (fold does not propagate through `ValUse`), so
+    // it cannot disturb CSE's placement or ids; idempotence guarantees it only
+    // acts on the newly-inlined-constant shapes.
+    let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
 
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
     // hashes `toProposition(replaceConstants = isConstantSegregation)`
@@ -1313,12 +1329,36 @@ mod tests {
 
     #[test]
     fn compile_inline_then_fold_reaches_sigmaprop_true() {
-        // Pipeline-order pin (M4 Task 9): inline runs BEFORE the arithmetic fold,
-        // so `{ val x = 2; sigmaProp(x + 1 == 3) }` folds the INLINED constant to
-        // `sigmaProp(true)`. Oracle (`cc`, testnet): `10010101d17300` (one SBoolean
-        // constant `true`, body BoolToSigmaProp(ConstPlaceholder(0))).
+        // Pipeline-order pin (M5 Task 4): the constant-through-`val` fold now
+        // comes from CSE + the post-CSE re-fold, not the retired `inline_vals`.
+        // `{ val x = 2; sigmaProp(x + 1 == 3) }`: the pre-CSE fold cannot fold
+        // `ValUse(x) + 1`, CSE P4-inlines the constant `2` at its use, and the
+        // re-fold then collapses `2 + 1 == 3` → `true`. Oracle (`cc`, testnet):
+        // `10010101d17300` (one SBoolean constant `true`, body
+        // BoolToSigmaProp(ConstPlaceholder(0))).
         let r = ct("{ val x = 2; sigmaProp(x + 1 == 3) }").expect("compile");
         assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
+    }
+
+    #[test]
+    fn compile_const_through_multiuse_val_folds_after_cse_matching_oracle() {
+        // M5 Task 4 fold-ordering decision, oracle-pinned. The keystone probe for
+        // "does fold run before or after CSE": a MULTI-use constant `val`. Scala
+        // folds `1 + 1` → `2` and threads it through the env so both comparisons
+        // are `Const`-adjacent and fold at build time — the whole thing collapses
+        // to `true && true` with ZERO constants and ZERO ValDefs. Our pipeline
+        // reproduces this ONLY because a `crate::fold::fold` runs AFTER CSE: the
+        // pre-CSE fold folds `1 + 1` inside the `ValDef` rhs but cannot fold
+        // `ValUse(x) > 0`; CSE then P4-inlines the constant `2` at each use,
+        // newly exposing `2 > 0` / `2 < 3`; the post-CSE fold collapses them. If
+        // fold ran ONLY before CSE this would wrongly emit `2 > 0 && 2 < 3` with
+        // four segregated constants. Oracle (`cc`, testnet, decoded live):
+        // `1000d1ed8503` — header 0x10, EMPTY constants table, body
+        // `d1 ed 8503` (BoolToSigmaProp(BinAnd(compacted-bool-pair[true,true]))),
+        // byte-identical to `sigmaProp(1 > 0 && 1 < 3)`.
+        let r = ct("{ val x = 1 + 1; sigmaProp(x > 0 && x < 3) }").expect("compile");
+        assert!(r.ergo_tree.constants.is_empty(), "no surviving constants");
+        assert_eq!(hex::encode(&r.tree_bytes), "1000d1ed8503");
     }
 
     #[test]

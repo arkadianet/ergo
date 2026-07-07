@@ -901,6 +901,28 @@ impl Interner {
     }
 }
 
+/// The single subexpression-sharing pass — Scala's scope-chain hash-cons +
+/// `hasManyUsagesGlobal` ValDef materialization (spike §7.1), the SOLE replacement
+/// for the retired M4 `inline_vals`/`renumber_dense` machinery (locked decision 4,
+/// spike §7.2). Interns the tree once (Phase A: identity by first-build scope),
+/// then materializes from the root symbol (Phase B: flat usage count → 4-predicate
+/// admission gate → per-scope `ValDef` schedule with assign-once dense ids).
+///
+/// Subsumes val inlining for free: a use-count-1 symbol is not hoisted, so its one
+/// use inlines at the materialization site; a multi-use non-const/non-context
+/// symbol hoists to a `ValDef` in its first-build scope. Dense ids are assigned as
+/// the tree is built (no post-hoc renumber). Runs at the spike §7.2 position
+/// (after all folds/lowering/tupling, before segregation); its input must already
+/// be `prune_dead_vals`-cleaned so dead-code refs do not inflate the flat usage
+/// count, and a final `crate::fold::fold` must run over its output to collapse the
+/// constant adjacencies it exposes by P4-inlining constant-valued `val`s (the
+/// constant-through-`val` case — see `crate::tree::compile`, oracle-pinned).
+pub(crate) fn cse(root: Expr) -> Expr {
+    let mut it = Interner::new();
+    let root_sym = it.intern(&root);
+    it.materialize(root_sym)
+}
+
 /// A materialized `ValDef` node (`0xD6`). `tpe` is never on the wire (the reader
 /// always has a constant store), so it is pinned `None` exactly as emit does
 /// (`emit.rs` `emit_block`, `parse.rs` ValDef arm).

@@ -940,14 +940,15 @@
 //!   NON-trivial expression survive as `ValDef`s on both sides. Reproducing the
 //!   leaf inlining is a concrete, CSE-INDEPENDENT M5 inliner task (a
 //!   leaf-triviality rule), distinct from the `hasManyUsagesGlobal` hash-cons
-//!   model. Also M5 (fold-then-classify ordering, folds adversarial re-verify,
-//!   NOT CSE): a multi-use `val` whose rhs FOLDS to a constant (`val x = 1 + 1`)
-//!   is currently classified "multi-use non-constant" and KEPT, because
-//!   `inline_vals` runs before `crate::fold` and its const carve-out keys on a
-//!   LITERAL `Expr::Const` rhs — Scala's bottom-up `rewriteDef` has already
-//!   folded the rhs to `Const(2)` by bind time and inlines it. Semantically
-//!   inert (byte/P2SH-only, both reduce identically); the fix is fold-before-
-//!   classify or inline-after-fold, sequenced with the M5 inliner work. The
+//!   model. CLOSED (M5 Task 4): a multi-use `val` whose rhs FOLDS to a constant
+//!   (`val x = 1 + 1`) now reaches the oracle shape. `inline_vals`/`renumber_
+//!   dense` are RETIRED — `crate::cse` is the sole sharing pass. The
+//!   constant-through-`val` fold is recovered by a `crate::fold::fold` run AFTER
+//!   CSE: the pre-CSE fold folds `1 + 1` in the `ValDef` rhs, CSE P4-inlines the
+//!   constant `2` at each use, and the post-CSE re-fold collapses the now
+//!   `Const`-adjacent comparisons — matching Scala's bind-time `rewriteDef` fold
+//!   (`{ val x = 1 + 1; sigmaProp(x > 0 && x < 3) }` → `1000d1ed8503`, oracle-
+//!   pinned in `crate::tree::compile`'s tests). The
 //!   dead-code reject asymmetry (overflow / zero-arg /
 //!   multi-arg-apply reject in dead `val`s; nested SFunc-param lambdas in
 //!   dead `val`s ACCEPT — NF-2) is oracle-probe-pinned and committed;

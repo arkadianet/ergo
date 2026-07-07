@@ -277,17 +277,21 @@ fn assert_mismatch_set_matches(
 /// CSE) and `rosen-bridge/GuardSign.es` entries stay MULTI on M5 too — the 15
 /// residual are exactly the M5 acceptance-benchmark set. byte-parity telemetry
 /// 78/95 → 80/95.
+///
+/// M5 Task 4 (CSE wired as the SOLE sharing pass, `inline_vals`/`renumber_dense`
+/// retired): 15 → 11. FOUR corpus vectors graduate now that CSE's scope-chain
+/// hash-cons + `hasManyUsagesGlobal` ValDef materialization is live in
+/// `compile()` — `chaincash/layer2-old/redemption.es`, `.../redproducer.es`,
+/// `crystalpool/deposit.es` and `dexy/gort-dev/emission.es` reach byte-exact
+/// ValDef sets/ids. ZERO regressions (every previously-matching vector still
+/// matches — CSE fully subsumes the retired inline/renumber). The 11 residual
+/// are the multi-ValDef SCHEDULE-ORDER + lambda-float-up vectors (chaincash ×5,
+/// crystalpool ×4, `GuardSign.es`, `proveDHTuple(g1,g2,g1,g2)`) — placement is
+/// right, intra-scope id order / float-up is Task 5. byte-parity 95/110 →
+/// 99/110.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
-    (
-        "cc",
-        "corpus:chaincash-basis/chaincash/layer2-old/redemption.es",
-    ),
-    (
-        "cc",
-        "corpus:chaincash-basis/chaincash/layer2-old/redproducer.es",
-    ),
     (
         "cc",
         "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
@@ -295,11 +299,9 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/onchain/reserve.es"),
     ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
-    ("cc", "corpus:crystalpool/deposit.es"),
     ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
-    ("cc", "corpus:dexy/gort-dev/emission.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
 ];
@@ -336,18 +338,12 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// `DC7_P2SH_MISMATCH_SET` in lockstep: the two pure single-use-inline vectors
 /// (`{ val x = HEIGHT; x > 5 }`, `corpus:lsp/test_contract.es`) now segregate to
 /// oracle-identical bytes so P2S matches too; chaincash + CSE residuals stay
-/// (M5).
+/// (M5). M5 Task 4 (CSE live) → 11, in lockstep with `DC7_P2SH_MISMATCH_SET`:
+/// the same four vectors (`redemption`/`redproducer`/`deposit`/`emission`) whose
+/// propositions CSE now shapes byte-exactly graduate here too.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
-    (
-        "cc",
-        "corpus:chaincash-basis/chaincash/layer2-old/redemption.es",
-    ),
-    (
-        "cc",
-        "corpus:chaincash-basis/chaincash/layer2-old/redproducer.es",
-    ),
     (
         "cc",
         "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
@@ -355,11 +351,9 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/onchain/reserve.es"),
     ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
-    ("cc", "corpus:crystalpool/deposit.es"),
     ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
-    ("cc", "corpus:dexy/gort-dev/emission.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
 ];

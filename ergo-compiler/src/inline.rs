@@ -1,150 +1,48 @@
-//! M4 Task 9 — `val` inlining + block flattening + dead-`val` pruning over the
-//! emitted opcode IR (`ergo_ser::opcode::Expr`), reproducing the OBSERVABLE
-//! output of Scala's `buildGraph`/`buildTree` round trip
+//! Dead-`val` pruning + dead-code reachability over the emitted opcode IR
+//! (`ergo_ser::opcode::Expr`), reproducing the OBSERVABLE effect of Scala's
+//! `buildGraph`/`buildTree` schedule pruning
 //! (`dev-docs/ergoscript-compiler-m4-recon/recon-transforms.md` §8).
 //!
-//! ## What Scala does (and what we mirror)
+//! ## Scope (post-M5-Task-4)
 //!
-//! - **`buildGraph` inlines every `val`** (`GraphBuilding.scala:583-604`): a
-//!   `Block`/`BlockValue` threads each bind's *graph node* into the env; there
-//!   is **no `ValDef` in the graph**. Every `ValUse` resolves directly to the
-//!   bound subgraph, so `{ val x = HEIGHT; x > 5 }` builds `GT(Height, 5)`.
-//! - **Dead `val`s vanish**: a bound value never referenced from the root is
-//!   unreachable from the DFS `schedule` (`ProgramGraphs.scala:35-64`, from
-//!   `roots` following `deps`), so it is never visited → pruned.
-//! - **`buildTree` RE-INTRODUCES a `ValDef` only for a node with many usages**
-//!   (`TreeBuilding.scala:502-516`, `processAstGraph`): the gate is
-//!   `mainG.hasManyUsagesGlobal(s) && IsContextProperty.isEmpty &&
-//!   IsInternalDef.isEmpty && IsConstantDef.isEmpty`. So a **single-use** node
-//!   inlines, a **constant** node inlines even when used many times (segregation
-//!   treats equal constants as distinct — the `IsConstantDef` carve-out), and
-//!   only a **multi-use non-constant** node keeps a `ValDef`.
+//! This module was originally the M4 `val`-inlining + id-renumbering surface.
+//! Those responsibilities RETIRED into `crate::cse` (M5 Task 4, locked decision
+//! 4): the scope-chain hash-cons is now the SOLE subexpression-sharing pass —
+//! single-use `val`s inline for free (a use-count-1 symbol is not hoisted),
+//! multi-use non-constant `val`s hoist to `ValDef`s in their first-build scope,
+//! and dense ids are assigned assign-once with no renumber pass. What remains
+//! here are the two pieces that are NOT sharing decisions:
 //!
-//! Our M3 emit is 1:1 (one `ValDef` per source `val`, no CSE). This pass turns
-//! that into the Scala-observable shape at the **source-`val` granularity**:
+//! - **[`prune_dead_vals`]** — dead-code elimination. A `val` never referenced
+//!   from its block result is unreachable from Scala's DFS `schedule`
+//!   (`ProgramGraphs.scala:35-64`) → never emitted. Kept as a distinct pass
+//!   because it must run at a SPECIFIC pipeline slot (see below), and CSE relies
+//!   on it: a dead `val`'s rhs must not be interned, else its `ValUse` refs
+//!   would inflate CSE's flat usage count and wrongly hoist a
+//!   used-only-in-dead-code subexpression.
+//! - **[`live_def_ids`]** — the reachability query
+//!   `crate::tree::graph_building_lambda_reject` consumes (NF-2): which
+//!   higher-order (`SFunc`-param) lambdas sit in dead code Scala's schedule
+//!   prunes before the lowering that would `MatchError`. Sharing the exact same
+//!   reachability the pruner uses keeps the reject gate and the prune transform
+//!   in lockstep.
 //!
-//! | live-use count of a `val` | rhs is `Const` | action                    |
-//! |---------------------------|----------------|---------------------------|
-//! | 0 (unreachable)           | any            | prune (post-fold)         |
-//! | 1                         | any            | inline                    |
-//! | >= 2                      | yes            | inline (const carve-out)  |
-//! | >= 2                      | no             | KEEP `ValDef` (M5 CSE)    |
+//! ## Pipeline slot (pinned by oracle probes — see `crate::tree::compile`)
 //!
-//! **Multi-use non-constant `val`s are KEPT untouched** — that is the M5
-//! ValDef-sharing surface (`hasManyUsagesGlobal` + the schedule-order id
-//! renumbering `processAstGraph` performs). This pass deliberately does NOT
-//! renumber surviving `ValDef` ids: no Task-9 graduation target has a surviving
-//! `ValDef` (vectors 2 + `lsp/test_contract.es` inline to a bare body; the
-//! chaincash family additionally needs M5 CSE — see the task report), and the
-//! schedule order is not determined without the M5 hash-cons model. A tree that
-//! keeps its emit-time ids is self-consistent (`ValUse` references by id); it
-//! simply stays byte-divergent from Scala exactly where M5 is still owed.
-//!
-//! ## Dense id renumbering (M4 Task 9 review nit — [`renumber_dense`])
-//!
-//! Inlining a single-use/constant `val` removes its `ValDef` but NOT its id
-//! from the numbering: `emit` allocates ids monotonically over the PRE-inline
-//! source tree (one id per source `val`/lambda param), so an inlined `val`
-//! leaves a permanent gap in whatever ids follow it. Scala has no such gap —
-//! `processAstGraph` assigns `ValDef`/`FuncValue` ids over the POST-inline
-//! schedule graph, so a tree with nothing left to number BUT `FuncValue` args
-//! comes out dense (1, 2, …) regardless of how many source `val`s were inlined
-//! ahead of them. Oracle-probed: `{ val t = HEIGHT + 1;
-//! sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }` inlines
-//! `t` (single-use) into the lambda body, so our emit's lambda-arg `b` is left
-//! holding id **2** (it was allocated after `t`'s id **1**) while the oracle's
-//! `FuncValue` arg is id **1** (`d90101` vs our `d90102`).
-//!
-//! [`renumber_dense`] closes this gap, but **only when the tree has NO
-//! surviving `ValDef`/`FunDef` anywhere** (checked globally, not per-block):
-//! in that case every remaining id is a `FuncValue` arg, and there is no sharing
-//! decision left to make (a `FuncValue` arg is never itself a CSE candidate).
-//! The renumbering is SCOPED, mirroring `processAstGraph`'s `curId`
-//! save-on-entry / restore-on-exit: a nested `FuncValue` CONTINUES from its
-//! enclosing scope's counter, while DISJOINT (sibling, non-nested)
-//! `FuncValue`s each RESTART from the same inherited value — so two top-level
-//! lambdas both come out as arg id `1` (Scala reuses ids across disjoint
-//! scopes), and a once-nested lambda as id `2` ([`assign_scoped_ids`]). NF-M4-1
-//! (M4 close-out): an earlier revision numbered every arg GLOBALLY dense in
-//! pre-order first-appearance, which coincides with Scala only for a
-//! single-scope tree — two disjoint lambdas were mis-numbered `1, 2` where the
-//! oracle reuses `1, 1`; the scoped rule is the correct generalization. A
-//! tree WITH a surviving `ValDef` is left completely alone — that is still the
-//! undetermined M5 schedule-order surface (`hasManyUsagesGlobal` + hash-consing
-//! decide BOTH which nodes keep a `ValDef` AND the id order over the mixed
-//! `ValDef`/`FuncValue`-arg population), and guessing an order here would only
-//! produce a scheme M5 has to tear out. Run AFTER [`prune_dead_vals`] (so
-//! `ValDef`s pruned as dead don't count as "surviving") and, transitively,
-//! after `crate::fold::fold` (dead-`val` folds must land before pruning decides
-//! what survives) — see the pipeline slot list below.
-//!
-//! ## Why the pass is SPLIT across the fold (pipeline order, pinned by oracle
-//! probes — see `crate::tree::compile`)
-//!
-//! Scala's `buildGraph` interleaves inlining (env threading) with the
-//! `rewriteDef` constant-fold fixpoint and runs the eager per-bind checks
-//! (overflow, zero-arg lambda, multi-arg apply) over **every** bind, dead or
-//! alive, *before* the schedule prunes anything. Three oracle facts pin our
-//! ordering (all `ORACLE_TREE_VERSION` probes, testnet):
-//!
-//! 1. `{ val x = 2; sigmaProp(x + 1 == 3) }` → `sigmaProp(true)`: the arithmetic
-//!    fold must see the INLINED constant → **inline runs BEFORE `crate::fold`**.
-//! 2. `{ val x = 5; sigmaProp(x.toByte < 0.toByte) }` KEEPS `Downcast(5, Byte)`
-//!    unfolded: Scala's `Downcast(Constant)` fold is an **AST-pattern** match at
-//!    `buildNode` (`GraphBuilding.scala:514-518`) that never fires over a
-//!    `ValUse`, so inlining must NOT expose a new cast fold →
-//!    **`fold_direct_const_casts` runs BEFORE inline** (a cast over an inlined
-//!    `val` stays a `NumericCast` node, matching the oracle).
-//! 3. `{ val unused = 2147483647 + 1; sigmaProp(true) }` → `REJECT
-//!    ArithmeticException` and `{ val unused = 300.toByte; sigmaProp(true) }` →
-//!    `REJECT ArithmeticException`: an overflow in a DEAD `val`'s rhs still
-//!    rejects (eager `buildNode`) → the fold passes must run over dead `val`s
-//!    BEFORE they are pruned → **[`inline_vals`] keeps dead `val`s in place**
-//!    (only inlining single-use/const), and **[`prune_dead_vals`] removes them
-//!    AFTER the folds** (mirroring `buildNode`-then-`schedule`).
-//!
-//! Net pipeline slot: `fold_direct_const_casts` → `isProven` fusion →
-//! [`inline_vals`] → `crate::fold::fold` → [`prune_dead_vals`] →
-//! [`renumber_dense`] → v0-data gate.
-//! Pruning before the v0 gate is required so a dead `val` holding v3-only data
-//! (`{ val unused = Coll[BigInt](); sigmaProp(true) }` → OK) is gone before the
-//! gate scans, matching the oracle's accept.
-//!
-//! **Known single-pass limitation** (M5-adjacent, no Task-9 target hits it): a
-//! multi-use `val` that a fold later reduces to single-use is NOT re-inlined
-//! (Scala's `toExp` fixpoint would). It stays a kept `ValDef`; such vectors are
-//! CSE-blocked on M5 regardless.
+//! [`prune_dead_vals`] runs AFTER `crate::fold::fold` and BEFORE CSE / the
+//! v0-data gate. AFTER fold: an overflow in a DEAD `val`'s rhs must still reject
+//! (Scala's eager `buildNode` runs over every bind before the schedule prunes),
+//! so the fold traverses dead `val` rhs first — `{ val unused = 2147483647 + 1;
+//! sigmaProp(true) }` → `REJECT ArithmeticException`. Reachability is recomputed
+//! from scratch, so a `val` a fold turned dead (sole use erased by `x * 0 -> 0`)
+//! is dropped too. BEFORE the v0-data gate: a dead `val` holding v3-only data
+//! (`{ val unused = Coll[BigInt](); sigmaProp(true) }` → OK) must be gone before
+//! the gate scans, matching the oracle's accept.
 
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 use std::collections::{HashMap, HashSet};
 
-const VAL_DEF: u8 = 0xD6;
 const BLOCK_VALUE: u8 = 0xD8;
-
-/// Inline single-use and constant `val`s (substituting them into every use
-/// site) and flatten a block whose `ValDef` list empties out. DEAD (unreachable)
-/// `val`s and multi-use non-constant `val`s are left in place — the former for
-/// the fold passes' eager overflow check (removed later by [`prune_dead_vals`]),
-/// the latter as the M5 ValDef-sharing surface. Bottom-up: inner blocks are
-/// processed before the enclosing one, so an inlined inner `val`'s (possibly
-/// outer-`val`-referencing) rhs is embedded before the outer block decides.
-pub(crate) fn inline_vals(expr: Expr) -> Expr {
-    match expr {
-        Expr::Op(IrNode {
-            opcode: BLOCK_VALUE,
-            payload: Payload::BlockValue { items, result },
-        }) => {
-            let items: Vec<Expr> = items.into_iter().map(inline_vals).collect();
-            let result = inline_vals(*result);
-            process_block(items, result)
-        }
-        Expr::Op(IrNode { opcode, payload }) => Expr::Op(IrNode {
-            opcode,
-            payload: map_children(payload, inline_vals),
-        }),
-        other => other,
-    }
-}
 
 /// Remove `val`s that are unreachable from the block result and flatten a block
 /// whose `ValDef` list empties out. Runs AFTER the fold passes (so a dead
@@ -188,107 +86,6 @@ pub(crate) fn prune_dead_vals(expr: Expr) -> Expr {
     }
 }
 
-/// Renumber `FuncValue` arg ids (and their `ValUse` references) densely —
-/// 1, 2, … in pre-order first-appearance order — but ONLY when `expr` contains
-/// NO surviving `ValDef`/`FunDef` anywhere. Run AFTER [`prune_dead_vals`]. See
-/// the module docs "Dense id renumbering" section for why the boundary is
-/// drawn exactly here (a tree with a surviving `ValDef` is the M5
-/// schedule-order surface and is left untouched, gap and all).
-pub(crate) fn renumber_dense(expr: Expr) -> Expr {
-    if has_surviving_def(&expr) {
-        return expr;
-    }
-    let mut map: HashMap<u32, u32> = HashMap::new();
-    assign_scoped_ids(&expr, 0, &mut map);
-    if map.iter().all(|(old, new)| old == new) {
-        return expr; // already dense (the common case — nothing was inlined ahead of a gap)
-    }
-    remap_ids(expr, &map)
-}
-
-/// `true` iff `expr` contains a `ValDef`/`FunDef` node anywhere (not just at
-/// the top level) — the boundary check for [`renumber_dense`].
-fn has_surviving_def(expr: &Expr) -> bool {
-    if matches!(
-        expr,
-        Expr::Op(IrNode {
-            payload: Payload::ValDef { .. } | Payload::FunDef { .. },
-            ..
-        })
-    ) {
-        return true;
-    }
-    let mut found = false;
-    for_each_child(expr, &mut |c| found = found || has_surviving_def(c));
-    found
-}
-
-/// Assign each surviving `FuncValue` arg a new id via a SCOPED counter,
-/// recording `old → new` in `map`. Mirrors Scala's `processAstGraph`, whose
-/// `curId` counter is saved on scope entry and RESTORED on scope exit: a nested
-/// `FuncValue` CONTINUES from its enclosing scope's counter, while DISJOINT
-/// (sibling, non-nested) `FuncValue`s each RESTART from the same inherited value
-/// — so two top-level lambdas both get arg id `1` (id reuse across disjoint
-/// scopes), and a lambda nested one level deep gets id `2`.
-///
-/// Passing `counter` BY VALUE into each child is what makes siblings independent
-/// (each sees the parent's counter, not a preceding sibling's advances) while a
-/// `FuncValue`'s own body inherits the post-arg counter (continuation). Old ids
-/// are globally unique pre-renumber, so a single flat `old → new` map is
-/// unambiguous even though several disjoint olds may map to the same new id —
-/// each such new id only appears inside its own scope's body.
-fn assign_scoped_ids(expr: &Expr, counter: u32, map: &mut HashMap<u32, u32>) {
-    if let Expr::Op(IrNode {
-        payload: Payload::FuncValue { args, body },
-        ..
-    }) = expr
-    {
-        let mut c = counter;
-        for (id, _) in args {
-            c += 1;
-            map.insert(*id, c);
-        }
-        assign_scoped_ids(body, c, map);
-    } else {
-        for_each_child(expr, &mut |child| assign_scoped_ids(child, counter, map));
-    }
-}
-
-/// Rewrite every `FuncValue` arg id and `ValUse` id through `map` (ids absent
-/// from `map` — unreachable here since [`renumber_dense`] only runs when every
-/// remaining id IS a `FuncValue` arg — pass through unchanged).
-fn remap_ids(expr: Expr, map: &HashMap<u32, u32>) -> Expr {
-    match expr {
-        Expr::Op(IrNode {
-            opcode,
-            payload: Payload::ValUse { id },
-        }) => Expr::Op(IrNode {
-            opcode,
-            payload: Payload::ValUse {
-                id: *map.get(&id).unwrap_or(&id),
-            },
-        }),
-        Expr::Op(IrNode {
-            opcode,
-            payload: Payload::FuncValue { args, body },
-        }) => Expr::Op(IrNode {
-            opcode,
-            payload: Payload::FuncValue {
-                args: args
-                    .into_iter()
-                    .map(|(id, tpe)| (*map.get(&id).unwrap_or(&id), tpe))
-                    .collect(),
-                body: Box::new(remap_ids(*body, map)),
-            },
-        }),
-        Expr::Op(IrNode { opcode, payload }) => Expr::Op(IrNode {
-            opcode,
-            payload: map_children(payload, |c| remap_ids(c, map)),
-        }),
-        other => other,
-    }
-}
-
 /// The set of `ValDef`/`FunDef` ids that survive pruning, across the WHOLE tree
 /// — a def id is "live" iff it is reachable from its own block's result. Used by
 /// [`crate::tree::graph_building_lambda_reject`] to know which higher-order
@@ -312,75 +109,6 @@ fn collect_live(expr: &Expr, out: &mut HashSet<u32>) {
         out.extend(block_reachable(items, result));
     }
     for_each_child(expr, &mut |c| collect_live(c, out));
-}
-
-/// Apply this block's inline/keep/prune decisions to an already child-processed
-/// `(items, result)` and either rebuild the `BlockValue` or flatten to the bare
-/// result. See the module docs for the decision table.
-fn process_block(items: Vec<Expr>, result: Expr) -> Expr {
-    let defined: HashSet<u32> = items.iter().filter_map(def_id).collect();
-    let live = block_reachable(&items, &result);
-
-    // Live-use counts: ValUse occurrences of each block-local id in the result
-    // plus in every LIVE def's rhs. Dead defs' rhs are excluded — a `val` used
-    // only from dead code is itself dead and must not count as a use (so a
-    // once-live-once-dead `val` inlines, matching Scala's post-DCE usage count).
-    let mut count: HashMap<u32, usize> = HashMap::new();
-    count_valuses(&result, &defined, &mut count);
-    for item in &items {
-        if let (Some(id), Some(rhs)) = (def_id(item), def_rhs(item)) {
-            if live.contains(&id) {
-                count_valuses(rhs, &defined, &mut count);
-            }
-        }
-    }
-
-    let mut env: HashMap<u32, Expr> = HashMap::new();
-    let mut out_items: Vec<Expr> = Vec::with_capacity(items.len());
-    for item in items {
-        let Expr::Op(IrNode { opcode, payload }) = item else {
-            out_items.push(item);
-            continue;
-        };
-        // Only genuine `ValDef`s are inlinable; anything else (a `FunDef`, which
-        // emit never currently produces) is kept verbatim.
-        let Payload::ValDef { id, tpe, rhs } = payload else {
-            out_items.push(Expr::Op(IrNode { opcode, payload }));
-            continue;
-        };
-        let rhs_s = subst(*rhs, &env);
-        let keep = |items: &mut Vec<Expr>, id, tpe, rhs: Expr| {
-            items.push(Expr::Op(IrNode {
-                opcode: VAL_DEF,
-                payload: Payload::ValDef {
-                    id,
-                    tpe,
-                    rhs: Box::new(rhs),
-                },
-            }));
-        };
-        if !live.contains(&id) {
-            // DEAD: keep for the fold passes' eager overflow check; pruned later.
-            keep(&mut out_items, id, tpe, rhs_s);
-        } else if count.get(&id).copied().unwrap_or(0) == 1 || matches!(rhs_s, Expr::Const { .. }) {
-            env.insert(id, rhs_s); // inline (single-use, or the constant carve-out)
-        } else {
-            keep(&mut out_items, id, tpe, rhs_s); // multi-use non-constant: M5 surface
-        }
-    }
-
-    let result_s = subst(result, &env);
-    if out_items.is_empty() {
-        result_s
-    } else {
-        Expr::Op(IrNode {
-            opcode: BLOCK_VALUE,
-            payload: Payload::BlockValue {
-                items: out_items,
-                result: Box::new(result_s),
-            },
-        })
-    }
 }
 
 /// Reachable-from-result set of a block's own def ids: a fixpoint following
@@ -425,28 +153,6 @@ fn count_valuses(expr: &Expr, defined: &HashSet<u32>, count: &mut HashMap<u32, u
         }
     }
     for_each_child(expr, &mut |c| count_valuses(c, defined, count));
-}
-
-/// Substitute every `ValUse{id}` for which `env` has a replacement with a clone
-/// of that replacement (constants are duplicated per use site, exactly as
-/// Scala's non-deduplicating segregation expects). `env` values are already
-/// fully resolved w.r.t. earlier inlines, so a single non-recursive pass over
-/// each use site suffices.
-fn subst(expr: Expr, env: &HashMap<u32, Expr>) -> Expr {
-    if env.is_empty() {
-        return expr;
-    }
-    match expr {
-        Expr::Op(IrNode {
-            opcode: _,
-            payload: Payload::ValUse { id },
-        }) if env.contains_key(&id) => env.get(&id).expect("checked").clone(),
-        Expr::Op(IrNode { opcode, payload }) => Expr::Op(IrNode {
-            opcode,
-            payload: map_children(payload, |c| subst(c, env)),
-        }),
-        other => other,
-    }
 }
 
 /// `ValDef`/`FunDef` id of a block item, if it is one.
@@ -671,7 +377,7 @@ mod tests {
 
     fn valdef(id: u32, rhs: Expr) -> Expr {
         Expr::Op(IrNode {
-            opcode: VAL_DEF,
+            opcode: 0xD6, // ValDef
             payload: Payload::ValDef {
                 id,
                 tpe: None,
@@ -697,139 +403,65 @@ mod tests {
         })
     }
 
-    fn func_value(args: Vec<u32>, body: Expr) -> Expr {
-        Expr::Op(IrNode {
-            opcode: 0xD9,
-            payload: Payload::FuncValue {
-                args: args
-                    .into_iter()
-                    .map(|id| (id, Some(SigmaType::SInt)))
-                    .collect(),
-                body: Box::new(body),
-            },
-        })
-    }
-
-    fn func_value_id(expr: &Expr) -> u32 {
-        match expr {
-            Expr::Op(IrNode {
-                payload: Payload::FuncValue { args, .. },
-                ..
-            }) => args[0].0,
-            other => panic!("expected FuncValue, got {other:?}"),
-        }
-    }
-
-    /// Run the full Task-9 sequence (inline then prune) the way the pipeline
-    /// does, minus the intervening fold (irrelevant for these shape tests).
-    fn run(e: Expr) -> Expr {
-        prune_dead_vals(inline_vals(e))
-    }
-
-    // ----- happy path -----
-
-    #[test]
-    fn single_use_val_inlines_and_block_flattens() {
-        // `{ val x = HEIGHT; x > 5 }` -> `GT(Height, 5)` (recon-targets #2).
-        let e = block(vec![valdef(1, height())], gt(valuse(1), int_const(5)));
-        assert_eq!(run(e), gt(height(), int_const(5)));
-    }
-
-    #[test]
-    fn chained_single_use_vals_inline_transitively() {
-        // `{ val a = HEIGHT; val b = a; val c = b; c > 5 }` -> `GT(Height, 5)`
-        // (oracle `1001040ad191a37300`).
-        let e = block(
-            vec![
-                valdef(1, height()),
-                valdef(2, valuse(1)),
-                valdef(3, valuse(2)),
-            ],
-            gt(valuse(3), int_const(5)),
-        );
-        assert_eq!(run(e), gt(height(), int_const(5)));
-    }
+    // ----- happy path (dead-`val` pruning; inlining/id-density is now CSE) -----
 
     #[test]
     fn zero_use_val_is_pruned() {
-        // `{ val unused = HEIGHT; sigmaProp(true) }`-shape: dead val dropped.
+        // `{ val unused = HEIGHT; sigmaProp(true) }`-shape: dead val dropped and
+        // the emptied block flattens to its bare result.
         let e = block(vec![valdef(1, height())], int_const(0));
-        assert_eq!(run(e), int_const(0));
-    }
-
-    #[test]
-    fn constant_val_inlines_even_when_used_twice() {
-        // `{ val x = 5; x > HEIGHT ... x }`: the IsConstantDef carve-out — a
-        // constant is duplicated at every use site, never a ValDef.
-        let e = block(
-            vec![valdef(1, int_const(5))],
-            gt(valuse(1), gt(height(), valuse(1))),
-        );
-        assert_eq!(run(e), gt(int_const(5), gt(height(), int_const(5))));
-    }
-
-    #[test]
-    fn multi_use_non_constant_val_is_kept() {
-        // `{ val x = HEIGHT; x > (x cmp ...) }`: HEIGHT used twice, non-const →
-        // KEEP the ValDef (M5 sharing surface). Id is NOT renumbered.
-        let e = block(
-            vec![valdef(7, height())],
-            gt(valuse(7), gt(valuse(7), int_const(1))),
-        );
-        // The kept block retains id 7 and both ValUses.
-        assert_eq!(
-            run(e),
-            block(
-                vec![valdef(7, height())],
-                gt(valuse(7), gt(valuse(7), int_const(1))),
-            )
-        );
+        assert_eq!(prune_dead_vals(e), int_const(0));
     }
 
     #[test]
     fn val_used_only_by_dead_val_both_prune() {
         // `{ val a = HEIGHT; val dead = a; sigmaProp(true) }`: `dead` is
-        // unreachable and `a` is used only by `dead` → both gone.
+        // unreachable from the result and `a` is used only by `dead` → both gone.
         let e = block(
             vec![valdef(1, height()), valdef(2, valuse(1))],
             int_const(0),
         );
-        assert_eq!(run(e), int_const(0));
+        assert_eq!(prune_dead_vals(e), int_const(0));
     }
 
     #[test]
-    fn val_used_once_live_once_dead_inlines() {
-        // `{ val a = HEIGHT; val dead = a; sigmaProp(a > 5) }`: `a`'s only LIVE
-        // use is the result → inline; `dead` pruned. Matches Scala's post-DCE
-        // single-use count (NOT the textual count of 2).
+    fn live_single_use_val_is_kept_not_inlined() {
+        // `prune_dead_vals` is DCE only — it never inlines. A live single-use
+        // `val` keeps its `ValDef`; the actual inlining is CSE's job now
+        // (use-count-1 → not hoisted → inlined at materialization).
+        let e = block(vec![valdef(1, height())], gt(valuse(1), int_const(5)));
+        assert_eq!(prune_dead_vals(e.clone()), e);
+    }
+
+    #[test]
+    fn live_multi_use_val_is_kept() {
+        // A live multi-use non-constant `val` KEEPS its `ValDef` (the CSE
+        // sharing surface). Id is untouched.
         let e = block(
-            vec![valdef(1, height()), valdef(2, valuse(1))],
+            vec![valdef(7, height())],
+            gt(valuse(7), gt(valuse(7), int_const(1))),
+        );
+        assert_eq!(prune_dead_vals(e.clone()), e);
+    }
+
+    #[test]
+    fn prune_recurses_into_nested_block() {
+        // A dead `val` inside a nested block is pruned; the live outer `val` and
+        // the surviving structure are kept verbatim.
+        let inner = block(
+            vec![valdef(3, height())], // dead: result does not use id 3
             gt(valuse(1), int_const(5)),
         );
-        assert_eq!(run(e), gt(height(), int_const(5)));
-    }
-
-    #[test]
-    fn inline_recurses_into_nested_block() {
-        // Outer single-use val whose use sits inside a (single-use) inner block.
-        // `{ val a = HEIGHT; { val b = a; b > 5 } }` -> `GT(Height, 5)`.
-        let inner = block(vec![valdef(2, valuse(1))], gt(valuse(2), int_const(5)));
         let e = block(vec![valdef(1, height())], inner);
-        assert_eq!(run(e), gt(height(), int_const(5)));
+        let expected = block(vec![valdef(1, height())], gt(valuse(1), int_const(5)));
+        assert_eq!(prune_dead_vals(e), expected);
     }
 
     // ----- round-trips -----
 
     #[test]
-    fn idempotent_on_inlined_tree() {
-        let e = gt(height(), int_const(5));
-        assert_eq!(run(e.clone()), e);
-    }
-
-    #[test]
     fn no_block_no_change() {
         let e = gt(height(), int_const(5));
-        assert_eq!(inline_vals(e.clone()), e);
         assert_eq!(prune_dead_vals(e.clone()), e);
     }
 
@@ -850,93 +482,5 @@ mod tests {
         assert!(live.contains(&3));
         assert!(!live.contains(&1));
         assert!(!live.contains(&2));
-    }
-
-    // ----- renumber_dense -----
-
-    #[test]
-    fn renumber_dense_closes_gap_left_by_inlined_val() {
-        // Shape mirroring the oracle probe (`{ val t = HEIGHT + 1;
-        // sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }`)
-        // AFTER `inline_vals`/`prune_dead_vals` already ran: the val (id 1)
-        // is gone, leaving the lambda arg at id 2 — a gap. No `ValDef`
-        // survives, so `renumber_dense` must close it to id 1.
-        let e = func_value(vec![2], gt(valuse(2), height()));
-        let renumbered = renumber_dense(e);
-        assert_eq!(func_value_id(&renumbered), 1);
-        assert_eq!(renumbered, func_value(vec![1], gt(valuse(1), height())));
-    }
-
-    #[test]
-    fn renumber_dense_leaves_tree_with_surviving_valdef_untouched() {
-        // A multi-use non-constant `val` KEEPS its `ValDef` (M5 surface) —
-        // renumber_dense must not touch id 7 (or the nested lambda's id 9)
-        // even though 9 is not dense relative to 7.
-        let e = block(
-            vec![valdef(7, height())],
-            gt(valuse(7), func_value(vec![9], gt(valuse(9), valuse(7)))),
-        );
-        assert_eq!(renumber_dense(e.clone()), e);
-    }
-
-    #[test]
-    fn renumber_dense_nested_lambda_density() {
-        // Two nested lambdas, both left with gapped ids by upstream inlining
-        // (5 and 9, with no surviving `ValDef` anywhere): pre-order
-        // first-appearance densifies the OUTER lambda to 1 and the INNER
-        // (nested in its body) to 2.
-        let e = func_value(vec![5], func_value(vec![9], gt(valuse(9), valuse(5))));
-        let renumbered = renumber_dense(e);
-        assert_eq!(
-            renumbered,
-            func_value(vec![1], func_value(vec![2], gt(valuse(2), valuse(1))))
-        );
-    }
-
-    #[test]
-    fn renumber_dense_disjoint_siblings_reuse_id_one() {
-        // NF-M4-1: two DISJOINT (sibling, non-nested) lambdas — no surviving
-        // `ValDef` — must each RESTART at id 1 (Scala reuses `curId` across
-        // disjoint scopes), NOT get globally dense `1, 2`. The `gt` node just
-        // provides a two-child parent to hang the siblings off of.
-        let e = gt(
-            func_value(vec![1], gt(valuse(1), height())),
-            func_value(vec![2], gt(valuse(2), height())),
-        );
-        let renumbered = renumber_dense(e);
-        assert_eq!(
-            renumbered,
-            gt(
-                func_value(vec![1], gt(valuse(1), height())),
-                func_value(vec![1], gt(valuse(1), height())),
-            )
-        );
-    }
-
-    #[test]
-    fn renumber_dense_nested_sibling_mix_scopes_correctly() {
-        // A nested lambda CONTINUES (id 2), while a disjoint sibling of the
-        // OUTER lambda RESTARTS (id 1) — the two rules composed. Ids gapped by
-        // upstream inlining (7 outer, 9 nested, 4 sibling).
-        let e = gt(
-            func_value(vec![7], func_value(vec![9], gt(valuse(9), valuse(7)))),
-            func_value(vec![4], gt(valuse(4), height())),
-        );
-        let renumbered = renumber_dense(e);
-        assert_eq!(
-            renumbered,
-            gt(
-                func_value(vec![1], func_value(vec![2], gt(valuse(2), valuse(1)))),
-                func_value(vec![1], gt(valuse(1), height())),
-            )
-        );
-    }
-
-    #[test]
-    fn renumber_dense_already_dense_is_noop() {
-        // No gap (nothing was inlined ahead of the lambda) — the fast-path
-        // equality check short-circuits and returns the input unchanged.
-        let e = func_value(vec![1], gt(valuse(1), height()));
-        assert_eq!(renumber_dense(e.clone()), e);
     }
 }
