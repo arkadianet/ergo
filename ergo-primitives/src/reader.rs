@@ -41,6 +41,20 @@ pub struct VlqReader<'a> {
     /// by `isV3OrLaterErgoTreeVersion`. Set by the ErgoTree body parser around the
     /// body (and segregated constants); `None` defaults to the v6/activated set.
     ergo_tree_version: Option<u8>,
+    /// Optional override for the version that gates V6-EMBEDDABLE TYPE CODES
+    /// (`SUnsignedBigInt` = code 9, …) — the ACTIVATED version, per Scala
+    /// `TypeSerializer.getEmbeddableType` selecting `embeddableV5`/`embeddableV6`
+    /// by `VersionContext.current.isV6Activated` (the ACTIVATED version, NOT the
+    /// tree header). When `Some(v)`, the type decoder gates embeddable codes on
+    /// `v` instead of the header version [`ergo_tree_version`](Self::ergo_tree_version).
+    ///
+    /// `None` (the default) preserves the header-version gating every consensus
+    /// caller uses — this knob is BYTE-INERT for them. It is set ONLY by the
+    /// ergo-compiler post-write self-check (`read_ergo_tree_with_activated_version`),
+    /// which emits a header-v0 tree but must accept the V6 type codes a
+    /// `tree_version >= 3` (V6-activated) compile legitimately produces and Scala
+    /// re-parses on a V6-activated network. See that function's docs.
+    embeddable_activated_version: Option<u8>,
     /// Trusted (already-validated) source: when `true`, the box-script ACCEPTANCE
     /// gates (ErgoTree version cap / size-bit / method-resolution / sigma-root) are
     /// skipped — for the TOP-LEVEL box tree and for any tree NESTED in a register,
@@ -120,6 +134,7 @@ impl<'a> VlqReader<'a> {
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
             ergo_tree_version: None,
+            embeddable_activated_version: None,
             trusted: false,
         }
     }
@@ -209,6 +224,20 @@ impl<'a> VlqReader<'a> {
     /// tree (a box reader parses the tree then headerless register values).
     pub fn set_ergo_tree_version(&mut self, version: Option<u8>) {
         self.ergo_tree_version = version;
+    }
+
+    /// The activated-version override for V6-embeddable TYPE-code gating
+    /// (`None` = gate on the header version, the consensus default). See
+    /// [`embeddable_activated_version`](Self::embeddable_activated_version).
+    pub fn embeddable_activated_version(&self) -> Option<u8> {
+        self.embeddable_activated_version
+    }
+
+    /// Set the activated-version override for V6-embeddable TYPE-code gating.
+    /// `None` restores header-version gating. Set ONLY by the ergo-compiler
+    /// self-check; byte-inert for consensus callers (which never touch it).
+    pub fn set_embeddable_activated_version(&mut self, version: Option<u8>) {
+        self.embeddable_activated_version = version;
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped

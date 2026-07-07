@@ -602,14 +602,25 @@ fn decode_constructor_at_depth(
 /// `embeddableV5` (codes 1..=8). Matches `isV3OrLaterErgoTreeVersion`.
 const V6_EMBEDDABLE_TREE_VERSION: u8 = 3;
 
-/// The version used to gate embeddable type codes: the body's header version when
-/// parsing inside a tree, else the activated/v6 set (a headerless register /
-/// context-var value deserializes under the activated version, where the v6 set
-/// applies and `SUnsignedBigInt` values are instead rejected by the V6-type value
-/// gate). Mirrors Scala `TypeSerializer.getEmbeddableType` selecting
-/// `embeddableV5` vs `embeddableV6` by `VersionContext.current`.
+/// The version used to gate embeddable type codes.
+///
+/// Scala's `TypeSerializer.getEmbeddableType` selects `embeddableV5` vs
+/// `embeddableV6` by `VersionContext.current.isV6Activated` — the ACTIVATED
+/// version (`VersionContext.scala:33`, `activatedVersion >= V6SoftForkVersion`),
+/// NOT the tree header. On the consensus path this crate uses the body's header
+/// version as the gate (the activated version is not threaded through the
+/// byte-level reader): a headerless register/context-var value falls back to the
+/// v6 set, and a v0/v1/v2-header tree body gates on that header version.
+///
+/// The ergo-compiler self-check needs the true activated axis: it emits a
+/// header-v0 tree whose body may carry a V6 type code that a `tree_version >= 3`
+/// (V6-activated) compile legitimately produces and Scala re-parses. It sets
+/// [`VlqReader::set_embeddable_activated_version`]; when present, that override
+/// takes precedence here, mirroring Scala's activated-version gate exactly.
+/// `None` (every consensus caller) keeps the header-version fallback — byte-inert.
 fn embeddable_gate_version(r: &VlqReader) -> u8 {
-    r.ergo_tree_version().unwrap_or(V6_EMBEDDABLE_TREE_VERSION)
+    r.embeddable_activated_version()
+        .unwrap_or_else(|| r.ergo_tree_version().unwrap_or(V6_EMBEDDABLE_TREE_VERSION))
 }
 
 fn prim_from_code(code: u8, gate_version: u8) -> Result<SigmaType, ReadError> {
@@ -685,6 +696,37 @@ mod tests {
         assert_eq!(embeddable_gate_version(&r), V6_EMBEDDABLE_TREE_VERSION);
         r.set_ergo_tree_version(Some(1));
         assert_eq!(embeddable_gate_version(&r), 1);
+    }
+
+    /// F1: the activated-version OVERRIDE
+    /// ([`VlqReader::set_embeddable_activated_version`]) takes precedence over the
+    /// header version for embeddable-code gating — mirroring Scala
+    /// `getEmbeddableType` gating on `VersionContext.isV6Activated` (the ACTIVATED
+    /// version), NOT the tree header. A header-v0 reader with an activated
+    /// override of 3 admits code 9; the default (`None`) keeps header-version
+    /// gating (byte-inert for consensus callers).
+    #[test]
+    fn embeddable_activated_version_override_wins_over_header() {
+        let mut r = VlqReader::new(&[]);
+        // Header v0, no override → strict v5 set, code 9 rejected.
+        r.set_ergo_tree_version(Some(0));
+        assert_eq!(embeddable_gate_version(&r), 0);
+        assert!(prim_from_code(9, embeddable_gate_version(&r)).is_err());
+        // Header v0 but activated override = 3 → code 9 admitted at the TYPE layer.
+        r.set_embeddable_activated_version(Some(3));
+        assert_eq!(embeddable_gate_version(&r), 3);
+        assert_eq!(
+            prim_from_code(9, embeddable_gate_version(&r)).unwrap(),
+            SigmaType::SUnsignedBigInt
+        );
+        // An override BELOW v3 keeps the strict gate (an activated < V6 network).
+        r.set_embeddable_activated_version(Some(2));
+        assert_eq!(embeddable_gate_version(&r), 2);
+        assert!(prim_from_code(9, embeddable_gate_version(&r)).is_err());
+        // Clearing the override restores header-version gating (the consensus
+        // default) — the knob is byte-inert once removed.
+        r.set_embeddable_activated_version(None);
+        assert_eq!(embeddable_gate_version(&r), 0);
     }
 
     fn roundtrip(t: &SigmaType) {

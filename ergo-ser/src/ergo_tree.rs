@@ -901,6 +901,37 @@ pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     Ok(tree)
 }
 
+/// Like [`read_ergo_tree`] but gates V6-EMBEDDABLE TYPE CODES (`SUnsignedBigInt`
+/// = code 9, …) under `activated_version` rather than the tree's header version.
+///
+/// This mirrors Scala `TypeSerializer.getEmbeddableType`, which selects
+/// `embeddableV5`/`embeddableV6` by `VersionContext.current.isV6Activated` — the
+/// ACTIVATED version (`VersionContext.scala:33`), NOT the tree header. The
+/// default [`read_ergo_tree`] gates embeddable codes on the header version
+/// (`embeddable_gate_version`), which is correct for the consensus path but wrong
+/// for the ergo-compiler post-write self-check: the compile route emits a
+/// header-v0 tree (`ErgoTree.defaultHeaderWithVersion(0)`), yet a
+/// `tree_version >= 3` (V6-activated) compile legitimately produces a body
+/// carrying code 9 that Scala re-parses fine on a V6-activated network
+/// (`ErgoTreeSerializer.scala:148-154`, deser runs body/type parse under
+/// `withVersions(activatedVersion, treeVersion)`).
+///
+/// ONLY the compiler self-check uses this — passing its requested `tree_version`
+/// as the activated-version floor. Every consensus caller keeps
+/// [`read_ergo_tree`] (header-version gating); this function does not exist on
+/// their path and is byte-inert for them. The override is restored to its prior
+/// value on return so a shared reader is unaffected.
+pub fn read_ergo_tree_with_activated_version(
+    r: &mut VlqReader,
+    activated_version: u8,
+) -> Result<ErgoTree, ReadError> {
+    let saved = r.embeddable_activated_version();
+    r.set_embeddable_activated_version(Some(activated_version));
+    let result = read_ergo_tree_tracking_wrap(r);
+    r.set_embeddable_activated_version(saved);
+    result.map(|(tree, _was_wrapped)| tree)
+}
+
 /// Like [`read_ergo_tree`] but also reports whether the returned tree
 /// was rebuilt by `unparsed_soft_fork_tree` instead of fully parsed
 /// (Scala's `Left(UnparsedErgoTree)` branch). Used by the template-hash
@@ -2772,6 +2803,38 @@ mod tests {
         let mut w = VlqWriter::new();
         write_ergo_tree(&mut w, &tree).unwrap();
         assert_eq!(w.result(), bytes);
+    }
+
+    /// F1: a SIZELESS header-v0 tree whose body carries a V6-embeddable TYPE code
+    /// (`SUnsignedBigInt` = code 9, here `SELF.R4[UnsignedBigInt].isDefined` →
+    /// `1000d1e6c6a70409`) is REJECTED by the default header-version-gated
+    /// [`read_ergo_tree`] but ACCEPTED by
+    /// [`read_ergo_tree_with_activated_version`] at activated version 3 — mirroring
+    /// Scala `getEmbeddableType` gating on the ACTIVATED version, not the header.
+    /// The compile self-check uses the activated-version reader so a
+    /// `tree_version >= 3` compile's header-v0 output round-trips (oracle:
+    /// `cc sigmaProp(SELF.R4[UnsignedBigInt].isDefined)`, ORACLE_TREE_VERSION=3 →
+    /// `OK 1000d1e6c6a70409`; sigma-state 6.0.2).
+    #[test]
+    fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
+        let bytes = hex::decode("1000d1e6c6a70409").unwrap();
+        // Default reader: header-version (0) gate rejects code 9.
+        let err = read_ergo_tree(&mut VlqReader::new(&bytes))
+            .expect_err("header-v0 reader must reject the v6 embeddable code");
+        assert!(matches!(err, ReadError::InvalidData(_)), "{err:?}");
+        // Activated-version reader at v3: accepts, round-trips byte-identically.
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree_with_activated_version(&mut r, 3)
+            .expect("activated-v6 reader must accept the v6 embeddable code");
+        assert!(r.is_empty(), "no trailing bytes");
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).unwrap();
+        assert_eq!(w.result(), bytes, "re-serialize is byte-identical");
+        // Below-v3 activated override stays strict (an activated < V6 network).
+        assert!(
+            read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), 2).is_err(),
+            "activated v2 must still reject code 9"
+        );
     }
 
     /// `check_tree_version_supported` HARD-rejects a tree whose version exceeds

@@ -114,13 +114,31 @@ pub enum EmitError {
     },
 }
 
+/// ErgoTree version at/above which the V6 (EIP-50) method surface is active —
+/// `VersionContext.isV3OrLaterErgoTreeVersion` (tree/activated version >= 3).
+/// Below it the emit-time GraphBuilding-parity gates reject the V6-only
+/// `SGlobal` methods that reach emit through the bare predef aliases.
+const V6_ERGO_TREE_VERSION: u8 = 3;
+
 /// Lower a typed expression to the `ergo-ser` opcode IR.
 ///
 /// Fixed-arity forms map 1:1 onto `Payload::Zero/One/Two/Three/Four` and the
 /// named-field payloads per the `opcode_pattern` table; constants map through
 /// [`map_const`]; binding forms allocate ids through a fresh [`Scope`].
+///
+/// Version-agnostic entry: emits under [`V6_ERGO_TREE_VERSION`] (V6 active), so
+/// the emit-time V6-method gates never fire. Use [`emit_with_version`] from the
+/// compile route to feed the requested `tree_version` and reject V6-only
+/// `SGlobal` predefs under a v5 target.
 pub fn emit(expr: &TypedExpr) -> Result<Expr, EmitError> {
-    Scope::new().emit(expr)
+    emit_with_version(expr, V6_ERGO_TREE_VERSION)
+}
+
+/// Like [`emit`] but carries the requested `tree_version` so the emit-time
+/// GraphBuilding-parity gates can reject V6-only constructs under a v5 target
+/// (`tree_version < 3`). The compile route threads its `tree_version` here.
+pub fn emit_with_version(expr: &TypedExpr, tree_version: u8) -> Result<Expr, EmitError> {
+    Scope::new(tree_version).emit(expr)
 }
 
 /// Emit a typed contract body, resolving each named parameter to its
@@ -221,24 +239,33 @@ struct Scope {
     /// instead of erroring. Empty for the ordinary (non-contract) compile path,
     /// so this is a pure superset — the base pipeline is unaffected.
     placeholders: HashMap<String, u32>,
+    /// The requested ErgoTree version for this compile (Scala's `treeVersion`
+    /// under `VersionContext.withVersions`). Rides on the scope so every nested
+    /// `emit_method_call` sees it; drives the V6-method GraphBuilding gate.
+    tree_version: u8,
 }
 
 impl Scope {
-    fn new() -> Self {
+    fn new(tree_version: u8) -> Self {
         Scope {
             bindings: vec![HashMap::new()],
             next_id: 1,
             placeholders: HashMap::new(),
+            tree_version,
         }
     }
 
     /// Emission scope seeded with a contract's named-parameter placeholder env
-    /// (M7). See [`emit_with_placeholders`].
+    /// (M7). See [`emit_with_placeholders`]. Compiles under V6-active
+    /// (`tree_version` = [`V6_ERGO_TREE_VERSION`]), so the emit-time V6 gate
+    /// never fires on the contract path — the same version-agnostic behavior
+    /// [`emit`] has always given the ordinary path's default entry.
     fn with_placeholders(placeholders: HashMap<String, u32>) -> Self {
         Scope {
             bindings: vec![HashMap::new()],
             next_id: 1,
             placeholders,
+            tree_version: V6_ERGO_TREE_VERSION,
         }
     }
 
@@ -1077,6 +1104,37 @@ impl Scope {
                     "v6-only numeric method '{}' on the shared SNumericType container \
                      (tree_version < 3): Scala GraphBuilding rejects it under v5 activation",
                     method.name,
+                ),
+            });
+        }
+        // (a2) V6-only `SGlobal` methods reached through a BARE predef alias
+        //      (`fromBigEndianBytes`/`deserializeTo`/… — `typer/predef_ir.rs`
+        //      `global_deserialize`): the bare form builds `MethodCall(Global, m)`
+        //      DIRECTLY, bypassing the version-scoped `SGlobal` method table the
+        //      dotted `Global.<m>` form resolves against (which the typer already
+        //      v6-gates). Scala exposes these methods ONLY at
+        //      `isV3OrLaterErgoTreeVersion` — the v5 `SGlobal` method set is just
+        //      `{groupGenerator, xor}` (`SGlobalMethods.getMethods`,
+        //      methods.scala:2001-2021, pinned v6.0.2) — and GraphBuilding throws
+        //      `GraphBuildingException` on the residual `MethodCall` under v5
+        //      activation. Mirror that reject for `tree_version < 3` (oracle
+        //      ORACLE_TREE_VERSION=0: `cc sigmaProp(fromBigEndianBytes[Int](
+        //      Coll[Byte](0.toByte)) > 0)` → `REJECT 0:0 GraphBuildingException`;
+        //      at v3 both accept, byte-identical
+        //      `100202000400d191dc6a05dd018301027300047301`). `SigmaDslBuilder`
+        //      is the `SGlobal` owner name (`owner_name_for_type`).
+        if method.owner == "SigmaDslBuilder"
+            && self.tree_version < V6_ERGO_TREE_VERSION
+            && !matches!(method.name.as_str(), "groupGenerator" | "xor")
+        {
+            return Err(EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: format!(
+                    "v6-only Global method '{}' requires ErgoTree version >= {} \
+                     (v5 SGlobal methods are groupGenerator, xor): the bare predef \
+                     alias bypasses the version-scoped method table; Scala \
+                     GraphBuilding rejects it under v5 activation",
+                    method.name, V6_ERGO_TREE_VERSION,
                 ),
             });
         }

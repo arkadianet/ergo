@@ -752,7 +752,7 @@
 //! `compile_probes.txt` → `compile_seed.json` vectors; findings reports
 //! `dev-docs/ergoscript-compiler-m3-recon/adversarial-findings-*.md`).
 //!
-//! Six gated classes:
+//! Seven gated classes:
 //! 1. **Bit ops** (`emit.rs` BitOp/BitInversion arms;
 //!    `GraphBuildingException`): Scala 6.0.2 has NO lowering for
 //!    `|`,`&`,`^`(numeric),`<<`,`>>`,`>>>`,`~` at any width — opcodes
@@ -799,6 +799,18 @@
 //!    resolve to the `"SNumericType"` owner only pre-v3 (D-T10), where Scala
 //!    rejects the v6 method under v5 activation. At v3 the per-type residual
 //!    MethodCall is unchanged.
+//! 7. **V6-only `SGlobal` methods via the bare predef at `tree_version < 3`**
+//!    (`emit_method_call`; `GraphBuildingException`; F2, 2026-07-07): the bare
+//!    `fromBigEndianBytes[T]` predef (and its `global_deserialize` siblings)
+//!    builds `MethodCall(Global, m)` DIRECTLY in `typer/predef_ir.rs`, bypassing
+//!    the version-scoped `SGlobal` method table the dotted `Global.<m>` form
+//!    resolves against. Scala exposes these on `SGlobal` only at
+//!    `isV3OrLaterErgoTreeVersion` (`SGlobalMethods.getMethods`,
+//!    methods.scala:2001-2021; v5 set = `{groupGenerator, xor}`), so
+//!    GraphBuilding rejects the residual MethodCall under v5 activation. Before
+//!    the gate this was accept-invalid — a SPENDABLE address at tv 0/1/2 the
+//!    oracle rejects (`REJECT 0:0 GraphBuildingException`). At v3 both accept,
+//!    byte-identical.
 //!
 //! Plus the **constant-fold overflow REJECT** (`ArithmeticException`): as of M4
 //! Task 5 this is no longer a separate check pass — it is the reject arm of the
@@ -896,32 +908,44 @@
 //!    `SizeOf` over a `Coll` CONSTANT (not a literal — `x.toBytes.size`) is
 //!    NOT folded (oracle-pinned; the `CollConst.length` graph rule does not
 //!    fire for a lifted `toBytes`/`toBits` constant).
-//! 5. **Post-write self-check** (`compile`): the tree bytes are re-read via
-//!    `read_ergo_tree` before any address is derived; a failure is a
-//!    `CompileError::Serializer` reject. This is a DELIBERATE reject-side
-//!    divergence (M1 stray-brace precedent: wrong-accept strands funds,
-//!    wrong-reject surfaces a user error) for two oracle-probed families:
-//!    (a) **Note-A getVar-style v3-type-codes-under-v0** —
-//!    `getVar[UnsignedBigInt](1)`: the oracle ACCEPTs `1000d1e6e30109`,
-//!    bytes NEITHER side's version-gated reader re-parses (its tree_hex
-//!    would not even parse for the semantic gate), so the ACCEPT verdict is
-//!    itself poisoned — both products strand funds; (b) **the UBI-fold
-//!    family (re-verify finding NF-1, 2026-07-07; NARROWED by M4 Task 5)** —
-//!    the INLINE-constant cases whose fold Scala performs now fold on OUR side
-//!    too: `unsignedBigInt("1") == unsignedBigInt("1")` folds via the generic
-//!    engine's `Const == Const → true` to a byte-identical `10010101d17300`
-//!    BEFORE the v0 UBI-data gate sees the UBI (the NF-1 closure — locked
-//!    decision 1: folds run before the gate). This ACCEPT is now GENUINE
-//!    (oracle-matched, verified cc probe), not a divergence. The NON-foldable
-//!    shapes still REJECT in parity on BOTH sides (`unsignedBigInt("5") >
-//!    unsignedBigInt("3")`, `unsignedBigInt("5") == unsignedBigInt("3")` —
-//!    unequal operands, Eq's terminal case does not fold), so the data gate
-//!    must NOT be weakened. RESIDUAL: a VAL-BOUND `Coll[UnsignedBigInt]()`
-//!    under `.size` (`{ val u = Coll[UnsignedBigInt](); u.size.toLong ==
-//!    SELF.value }`) still reject-side divergent — `SizeOf(ValUse)` needs the
-//!    Task 9 val-inline to fold; the self-check reject is pinned in `tree.rs`
-//!    (`compile_self_unreadable_emission_rejects_serializer_class`). (a)
-//!    stays a documented reject-side divergence.
+//! 5. **Post-write self-check** (`compile`): the tree bytes are re-read before
+//!    any address is derived; a failure is a `CompileError::Serializer` reject
+//!    (wrong-accept strands funds, wrong-reject surfaces a user error). The
+//!    re-read runs under the ACTIVATED-version axis (`tree_version`) via
+//!    `read_ergo_tree_with_activated_version`, NOT the emitted header version
+//!    (always 0) — because Scala gates V6-EMBEDDABLE TYPE CODES
+//!    (`SUnsignedBigInt`, …) on the ACTIVATED version
+//!    (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
+//!    `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
+//!    treeVersion)`, `ErgoTreeSerializer.scala:148-154`).
+//!    (a) **V6-type-code-under-v0-header family — CORRECTED (F1, 2026-07-07;
+//!    was a FALSE reject-side premise).** A `tree_version >= 3` compile emits a
+//!    header-v0 tree whose body carries a V6 type code, e.g.
+//!    `getVar[UnsignedBigInt](1)` → `1000d1e6e30109` /
+//!    `SELF.R4[UnsignedBigInt].isDefined` → `1000d1e6c6a70409`. This USED to be
+//!    documented as a deliberate reject ("bytes neither side's version-gated
+//!    reader re-parses → strands funds") — that premise was WRONG. Scala
+//!    re-parses these fine on a V6-ACTIVATED network (the embeddable gate is on
+//!    the activated version, not the tree header), so the oracle's ACCEPT is
+//!    GENUINE. The only thing rejecting them was OUR self-check reading on the
+//!    wrong (header-version) axis; the activated-version reader now ACCEPTS all
+//!    7 captured blast-radius shapes byte-identically to the oracle (pinned in
+//!    `tree.rs` `compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle`).
+//!    (b) **the UBI-fold family (re-verify finding NF-1; NARROWED by M4 Task
+//!    5)** — the INLINE-constant cases whose fold Scala performs now fold on OUR
+//!    side too: `unsignedBigInt("1") == unsignedBigInt("1")` folds via the
+//!    generic engine's `Const == Const → true` to a byte-identical
+//!    `10010101d17300` BEFORE the v0 UBI-data gate sees the UBI (the NF-1
+//!    closure — locked decision 1: folds run before the gate). This ACCEPT is
+//!    GENUINE (oracle-matched). The NON-foldable shapes still REJECT in parity
+//!    on BOTH sides (`unsignedBigInt("5") > unsignedBigInt("3")`,
+//!    `unsignedBigInt("5") == unsignedBigInt("3")` — unequal operands, Eq's
+//!    terminal case does not fold), so the v0-DATA gate (`find_v0_unserializable`,
+//!    which gates v6-only constant DATA/VALUES on the header-0 wire — distinct
+//!    from the embeddable-TYPE-code axis fixed in (a)) must NOT be weakened. The
+//!    val-bound `Coll[UnsignedBigInt]()` under `.size` folds the UBI off the
+//!    wire before either gate (M4 Task 9), so it too is byte-exact. No self-check
+//!    reject-side divergence remains.
 //!
 //! ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (Task-11 adversarial wave 3)
 //!
@@ -1238,7 +1262,7 @@ mod fold;
 mod inline;
 mod isproven;
 mod lower;
-pub mod param_order;
+pub(crate) mod param_order;
 mod parse;
 pub mod span;
 pub mod stype;
@@ -1257,7 +1281,7 @@ pub use contract_parse::{
     ParsedContractTemplate,
 };
 pub use contract_template::{compile_contract, ContractError, ContractTemplate, Parameter};
-pub use emit::{emit, EmitError};
+pub use emit::{emit, emit_with_version, EmitError};
 pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;
 pub use parse::{parse, parse_type};
