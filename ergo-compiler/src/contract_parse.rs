@@ -615,6 +615,10 @@ fn shift_err(e: ParseError, base: usize) -> ParseError {
             pos: pos + base,
             msg,
         },
+        ParseError::TooDeep { pos, depth } => ParseError::TooDeep {
+            pos: pos + base,
+            depth,
+        },
     }
 }
 
