@@ -747,111 +747,16 @@ fn fold_bigint_cast(
     }))
 }
 
-/// Compile ErgoScript `source` end-to-end: typecheck, lower to opcode IR,
-/// assemble the ErgoTree, serialize, and derive the P2S/P2SH addresses.
-///
-/// Pipeline: parse → bind → typecheck → root-coerce → emit → [`build_tree`] →
-/// `write_ergo_tree` → addresses. Mirrors `ScriptApiRoute.compileSource`
-/// (`ScriptApiRoute.scala:56-67`).
-///
-/// # The three version axes
-///
-/// 1. **`tree_version` (axis 1, frontend gate ONLY):** threads the v5/v6
-///    method-table + predef visibility gate through parse/bind/typecheck
-///    (`tree_version >= 3` ⇔ `VersionContext.isV3OrLaterErgoTreeVersion`).
-///    Scala's route forwards its `treeVersion` param ONLY into
-///    `VersionContext.withVersions` — never into the tree header.
-/// 2. **Wire header version (axis 2):** fixed at 0 in M3 (and in the route:
-///    `ErgoTree.defaultHeaderWithVersion(0.toByte)` unconditionally). See
-///    [`build_tree`].
-/// 3. **Activated script version (axis 3):** the EVALUATOR's
-///    block-consensus version; a compile-time no-op here — it decides how a
-///    node executes the tree, not what bytes we produce.
-///
-/// # Root coercion
-///
-/// Mirrors the route's dispatch (`ScriptApiRoute.scala:60-65`): a
-/// `SigmaProp`-typed root passes through; a `Boolean`-typed root is wrapped
-/// in `BoolToSigmaProp` (opcode `0xD1`, Scala `script.toSigmaProp`); any
-/// other root type is [`CompileError::Root`] (the route's bare
-/// `new Exception(...)`; oracle: `cc HEIGHT` → `REJECT 0:0 Exception`).
-///
-/// # P2SH contract
-///
-/// The P2SH content hash covers the PROPOSITION bytes — the serialized root
-/// expression WITHOUT the ErgoTree header/constants wrapper
-/// (`Pay2SHAddress.apply(prop)`, `ErgoAddress.scala:210-218`). Scala hashes
-/// `toProposition(replaceConstants = isConstantSegregation)`
-/// (`ErgoAddress.scala:201-204`) — i.e. it re-INLINES placeholders before
-/// hashing. We hash the PRE-segregation `root` (still fully inline) directly,
-/// which is byte-equal to that re-inlined proposition and cheaper. This is why
-/// P2SH is SEGREGATION-invariant (the D-C1 flip never moves it; D-C7 covers the
-/// residual IR-shape divergences that DO move it).
-///
-/// # Task-10 verdict adjudication (the semantic-parity gate)
-///
-/// The Task-10 corpus run (`tests/compile_semantic_parity.rs`,
-/// `test-vectors/ergoscript/compile/compile_seed.json`) adjudicated every
-/// verdict divergence against the full Scala compiler:
-/// - Postfix method-call residuals (e.g. `arr1 size`): the UNWRAPPED corpus
-///   forms have non-`Boolean`/`SigmaProp` roots, so the route's root
-///   dispatch rejects them (class advisory); the WRAPPED forms
-///   (`sigmaProp((arr1 size) > 0)`) are rejected by the Task-11 wave-1
-///   `%SCollection.size` gate in `emit_method_call` (lib.rs D-C5, exact
-///   `GraphBuildingException` class).
-/// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala
-///   GraphBuilding `AssertionError`; see the `XorOf` arm).
-/// - v6-only constant data under the v0 header (`unsignedBigInt(..)`
-///   comparisons): rejected by the v0-header data gate below
-///   ([`CompileError::Serializer`], mirroring Scala's
-///   `SerializerException`).
-/// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
-///   contexts: coercion-cancellation CLOSED (M4 Task 6, lib.rs D-C3) —
-///   [`crate::isproven`] cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
-///   round trips before the fold and after the lowering block. The
-///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
-///   residual `0xCF` in five corpus outputs) stays open, co-blocked on
-///   val-inline/CSE (Tasks 8/9).
-/// - Task-11 wave 1 added the GraphBuilding reject-gate family (lib.rs
-///   D-C5): bit ops, zero-arg/non-1-arg lambda applications, SFunc-typed
-///   lambda params, postfix `size`, out-of-range `getReg` literals,
-///   pre-v3 SNumericType methods, and the constant-fold overflow check
-///   ([`graph_building_lambda_reject`] below + [`crate::fold`]'s
-///   arithmetic-overflow reject arm + the emit-arm gates).
-///
-/// # Examples
-///
-/// ```
-/// use ergo_compiler::{compile, NetworkPrefix, ScriptEnv};
-///
-/// let r = compile(&ScriptEnv::new(), "sigmaProp(HEIGHT > 100)", 0, NetworkPrefix::Mainnet)
-///     .unwrap();
-/// // A non-bare root segregates: header byte 0x10 (constant-segregation bit).
-/// assert_eq!(r.tree_bytes[0], 0x10);
-/// ```
-pub fn compile(
-    env: &ScriptEnv,
-    source: &str,
-    tree_version: u8,
-    network: NetworkPrefix,
-) -> Result<CompileResult, CompileError> {
-    let typed = typecheck_with_network(env, source, tree_version, network)?;
-
-    // Root dispatch — ScriptApiRoute.scala:60-65.
-    let root = match node_tpe(&typed) {
-        SType::SSigmaProp => emit(&typed)?,
-        SType::SBoolean => Expr::Op(IrNode {
-            // BoolToSigmaProp — Scala `script.toSigmaProp` (values.scala:58).
-            opcode: 0xD1,
-            payload: Payload::One(Box::new(emit(&typed)?)),
-        }),
-        other => {
-            return Err(CompileError::Root {
-                tpe: to_term_string(other),
-            })
-        }
-    };
-
+/// The GraphBuilding pipeline shared by [`compile`] and the M7 contract-template
+/// assembler (`crate::contract_template`). Runs every fold, lowering,
+/// isProven-fusion, multi-arg-tupling and CSE pass that Scala's `IR.buildGraph`
+/// then `IR.buildTree` run, in the oracle-pinned order. Takes the emitted (and
+/// `toSigmaProp`-wrapped) root and returns the fully graph-built root — the exact
+/// tree Scala serialises as `expressionTree` or segregates into an `ErgoTree`.
+/// Extracted verbatim from `compile` so both surfaces stay byte-identical; the
+/// only difference between the two callers is whether the emitted root carried
+/// `ConstantPlaceholder` nodes for named params.
+pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
     // GraphBuilding verdict-parity gates (lib.rs D-C5): reject the emitted
     // shapes Scala's full compiler rejects — lambda/application rules first.
     if let Some(e) = graph_building_lambda_reject(&root) {
@@ -1037,6 +942,115 @@ pub fn compile(
     // it cannot disturb CSE's placement or ids; idempotence guarantees it only
     // acts on the newly-inlined-constant shapes.
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
+    Ok(root)
+}
+
+/// Compile ErgoScript `source` end-to-end: typecheck, lower to opcode IR,
+/// assemble the ErgoTree, serialize, and derive the P2S/P2SH addresses.
+///
+/// Pipeline: parse → bind → typecheck → root-coerce → emit → [`build_tree`] →
+/// `write_ergo_tree` → addresses. Mirrors `ScriptApiRoute.compileSource`
+/// (`ScriptApiRoute.scala:56-67`).
+///
+/// # The three version axes
+///
+/// 1. **`tree_version` (axis 1, frontend gate ONLY):** threads the v5/v6
+///    method-table + predef visibility gate through parse/bind/typecheck
+///    (`tree_version >= 3` ⇔ `VersionContext.isV3OrLaterErgoTreeVersion`).
+///    Scala's route forwards its `treeVersion` param ONLY into
+///    `VersionContext.withVersions` — never into the tree header.
+/// 2. **Wire header version (axis 2):** fixed at 0 in M3 (and in the route:
+///    `ErgoTree.defaultHeaderWithVersion(0.toByte)` unconditionally). See
+///    [`build_tree`].
+/// 3. **Activated script version (axis 3):** the EVALUATOR's
+///    block-consensus version; a compile-time no-op here — it decides how a
+///    node executes the tree, not what bytes we produce.
+///
+/// # Root coercion
+///
+/// Mirrors the route's dispatch (`ScriptApiRoute.scala:60-65`): a
+/// `SigmaProp`-typed root passes through; a `Boolean`-typed root is wrapped
+/// in `BoolToSigmaProp` (opcode `0xD1`, Scala `script.toSigmaProp`); any
+/// other root type is [`CompileError::Root`] (the route's bare
+/// `new Exception(...)`; oracle: `cc HEIGHT` → `REJECT 0:0 Exception`).
+///
+/// # P2SH contract
+///
+/// The P2SH content hash covers the PROPOSITION bytes — the serialized root
+/// expression WITHOUT the ErgoTree header/constants wrapper
+/// (`Pay2SHAddress.apply(prop)`, `ErgoAddress.scala:210-218`). Scala hashes
+/// `toProposition(replaceConstants = isConstantSegregation)`
+/// (`ErgoAddress.scala:201-204`) — i.e. it re-INLINES placeholders before
+/// hashing. We hash the PRE-segregation `root` (still fully inline) directly,
+/// which is byte-equal to that re-inlined proposition and cheaper. This is why
+/// P2SH is SEGREGATION-invariant (the D-C1 flip never moves it; D-C7 covers the
+/// residual IR-shape divergences that DO move it).
+///
+/// # Task-10 verdict adjudication (the semantic-parity gate)
+///
+/// The Task-10 corpus run (`tests/compile_semantic_parity.rs`,
+/// `test-vectors/ergoscript/compile/compile_seed.json`) adjudicated every
+/// verdict divergence against the full Scala compiler:
+/// - Postfix method-call residuals (e.g. `arr1 size`): the UNWRAPPED corpus
+///   forms have non-`Boolean`/`SigmaProp` roots, so the route's root
+///   dispatch rejects them (class advisory); the WRAPPED forms
+///   (`sigmaProp((arr1 size) > 0)`) are rejected by the Task-11 wave-1
+///   `%SCollection.size` gate in `emit_method_call` (lib.rs D-C5, exact
+///   `GraphBuildingException` class).
+/// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala
+///   GraphBuilding `AssertionError`; see the `XorOf` arm).
+/// - v6-only constant data under the v0 header (`unsignedBigInt(..)`
+///   comparisons): rejected by the v0-header data gate below
+///   ([`CompileError::Serializer`], mirroring Scala's
+///   `SerializerException`).
+/// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
+///   contexts: coercion-cancellation CLOSED (M4 Task 6, lib.rs D-C3) —
+///   [`crate::isproven`] cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
+///   round trips before the fold and after the lowering block. The
+///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
+///   residual `0xCF` in five corpus outputs) stays open, co-blocked on
+///   val-inline/CSE (Tasks 8/9).
+/// - Task-11 wave 1 added the GraphBuilding reject-gate family (lib.rs
+///   D-C5): bit ops, zero-arg/non-1-arg lambda applications, SFunc-typed
+///   lambda params, postfix `size`, out-of-range `getReg` literals,
+///   pre-v3 SNumericType methods, and the constant-fold overflow check
+///   ([`graph_building_lambda_reject`] below + [`crate::fold`]'s
+///   arithmetic-overflow reject arm + the emit-arm gates).
+///
+/// # Examples
+///
+/// ```
+/// use ergo_compiler::{compile, NetworkPrefix, ScriptEnv};
+///
+/// let r = compile(&ScriptEnv::new(), "sigmaProp(HEIGHT > 100)", 0, NetworkPrefix::Mainnet)
+///     .unwrap();
+/// // A non-bare root segregates: header byte 0x10 (constant-segregation bit).
+/// assert_eq!(r.tree_bytes[0], 0x10);
+/// ```
+pub fn compile(
+    env: &ScriptEnv,
+    source: &str,
+    tree_version: u8,
+    network: NetworkPrefix,
+) -> Result<CompileResult, CompileError> {
+    let typed = typecheck_with_network(env, source, tree_version, network)?;
+
+    // Root dispatch — ScriptApiRoute.scala:60-65.
+    let root = match node_tpe(&typed) {
+        SType::SSigmaProp => emit(&typed)?,
+        SType::SBoolean => Expr::Op(IrNode {
+            // BoolToSigmaProp — Scala `script.toSigmaProp` (values.scala:58).
+            opcode: 0xD1,
+            payload: Payload::One(Box::new(emit(&typed)?)),
+        }),
+        other => {
+            return Err(CompileError::Root {
+                tpe: to_term_string(other),
+            })
+        }
+    };
+
+    let root = graph_build(root)?;
 
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
     // hashes `toProposition(replaceConstants = isConstantSegregation)`

@@ -1,0 +1,112 @@
+{
+  "_captured": "2026-07-07",
+  "_format": "verb ct; oracle reply verbatim (never hand-edited). 'OK <hex>' = ContractTemplate.serializer.toBytes(SigmaTemplateCompiler(NET).compile(source)) as Base16; 'REJECT <line:col> <ExClass>'.",
+  "_source": "TyperOracle.scala ct verb, scala-cli sigma-state 6.0.2 (Scala 2.12.21, JVM 17), ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet. Sources under test-vectors/ergoscript/contract/sources/.",
+  "_note": "M7 byte-exact target is the <=4-param ACCEPT class. The 'five_params' vector is an oracle-ACCEPT the Rust twin DEFERS (>=5 params => JVM-HashMap placeholder-order port, TODO M7-hashmap-order): compile_contract must REJECT it with ContractError::TooManyParamsForOrdering, NOT byte-match. The 'returns_with_text' vector is an oracle-REJECT (returnTag consumes only the bare '@returns' literal, trailing text fails the docLine Newline).",
+  "tree_version": 3,
+  "network": "testnet",
+  "vectors": [
+    {
+      "name": "bare_no_params",
+      "source": "/**\n * A contract with no parameters.\n */\n@contract def bare() = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 0004626172651e4120636f6e74726163742077697468206e6f20706172616d65746572732e00000006d191a304d00f"
+    },
+    {
+      "name": "empty_doc",
+      "source": "/* */\n@contract def emptyDoc(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "verb": "ct",
+      "oracle": "OK 0008656d707479446f630001040001097468726573686f6c64000005d191a37300"
+    },
+    {
+      "name": "five_params",
+      "source": "/**\n * Five params — exercises the deferred HashMap-order path.\n * @param a a\n * @param b b\n * @param c c\n * @param d d\n * @param e e\n */\n@contract def gate5(a: Int, b: Int, c: Int, d: Int, e: Int) = sigmaProp(a + b + c + d + e > 0)\n",
+      "verb": "ct",
+      "oracle": "OK 000567617465353a4669766520706172616d7320e28094206578657263697365732074686520646566657272656420486173684d61702d6f7264657220706174682e05040404040400050161016100016201620101630163020164016403016501650412d1919a9a9a9a730173027303730473000400"
+    },
+    {
+      "name": "four_params",
+      "source": "/**\n * Four-parameter arithmetic gate.\n * @param a first\n * @param b second\n * @param c third\n * @param d fourth\n */\n@contract def gate4(a: Int, b: Int, c: Int, d: Int) = sigmaProp(a + b + c + d > 0)\n",
+      "verb": "ct",
+      "oracle": "OK 000567617465341f466f75722d706172616d657465722061726974686d6574696320676174652e040404040400040161056669727374000162067365636f6e6401016305746869726402016406666f75727468030fd1919a9a9a73007301730273030400"
+    },
+    {
+      "name": "mixed_default",
+      "source": "/**\n * One defaulted, one not.\n * @param base base value\n * @param delta the increment\n */\n@contract def mixed(base: Long, delta: Long = 5L) = sigmaProp(base + delta > 0L)\n",
+      "verb": "ct",
+      "oracle": "OK 00056d69786564174f6e652064656661756c7465642c206f6e65206e6f742e0205050100010a0204626173650a626173652076616c7565000564656c74610d74686520696e6372656d656e740109d1919a730073010500"
+    },
+    {
+      "name": "one_param_no_default",
+      "source": "/**\n * Height-locked contract.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "verb": "ct",
+      "oracle": "OK 000a6865696768744c6f636b174865696768742d6c6f636b656420636f6e74726163742e01040001097468726573686f6c6412746865206d696e696d756d206865696768740005d191a37300"
+    },
+    {
+      "name": "one_param_with_default",
+      "source": "/**\n * Height-locked contract with a default.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int = 1000) = sigmaProp(HEIGHT > threshold)\n",
+      "verb": "ct",
+      "oracle": "OK 000a6865696768744c6f636b264865696768742d6c6f636b656420636f6e7472616374207769746820612064656661756c742e01040101d00f01097468726573686f6c6412746865206d696e696d756d206865696768740005d191a37300"
+    },
+    {
+      "name": "returns_with_text",
+      "source": "/**\n * A returns tag carrying text — a reference reject.\n * @returns a sigma proposition\n */\n@contract def retText(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "verb": "ct",
+      "oracle": "REJECT 3:2 ParserException"
+    },
+    {
+      "name": "two_params",
+      "source": "/**\n * Range check on HEIGHT.\n * @param lo lower bound\n * @param hi upper bound\n */\n@contract def rangeCheck(lo: Int, hi: Int) = sigmaProp(HEIGHT > lo && HEIGHT < hi)\n",
+      "verb": "ct",
+      "oracle": "OK 000a72616e6765436865636b1652616e676520636865636b206f6e204845494748542e0204040002026c6f0b6c6f77657220626f756e64000268690b757070657220626f756e64010ad1ed91a373008fa37301"
+    },
+    {
+      "name": "two_params_bool",
+      "source": "/**\n * Combines a parameter flag with a height check.\n * @param enabled whether the lock is active\n * @param threshold the minimum height\n */\n@contract def flagLock(enabled: Boolean, threshold: Int) = sigmaProp(enabled && HEIGHT > threshold)\n",
+      "verb": "ct",
+      "oracle": "OK 0008666c61674c6f636b2e436f6d62696e6573206120706172616d6574657220666c6167207769746820612068656967687420636865636b2e020104000207656e61626c65641a7768657468657220746865206c6f636b2069732061637469766500097468726573686f6c6412746865206d696e696d756d206865696768740108d1ed730091a37301"
+    },
+    {
+      "name": "two_params_with_defaults",
+      "source": "/**\n * Range check with default bounds.\n * @param lo lower bound\n * @param hi upper bound\n */\n@contract def rangeCheck(lo: Int = 100, hi: Int = 1000) = sigmaProp(HEIGHT > lo && HEIGHT < hi)\n",
+      "verb": "ct",
+      "oracle": "OK 000a72616e6765436865636b2052616e676520636865636b20776974682064656661756c7420626f756e64732e0204040101c80101d00f02026c6f0b6c6f77657220626f756e64000268690b757070657220626f756e64010ad1ed91a373008fa37301"
+    },
+    {
+      "name": "unsupported_tag",
+      "source": "/**\n * Uses an unsupported tag.\n * @author someone\n * @param threshold the minimum height\n * @returns\n */\n@contract def tagged(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "verb": "ct",
+      "oracle": "OK 0006746167676564185573657320616e20756e737570706f72746564207461672e01040001097468726573686f6c6412746865206d696e696d756d206865696768740005d191a37300"
+    },
+    {
+      "name": "str_comma_default",
+      "source": "/**\n * String default containing a comma.\n * @param s a label\n */\n@contract def strComma(s: String = \"a,b\") = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 0008737472436f6d6d6122537472696e672064656661756c7420636f6e7461696e696e67206120636f6d6d612e0166010103612c620101730761206c6162656c0006d191a304d00f"
+    },
+    {
+      "name": "str_paren_default",
+      "source": "/**\n * String default containing a close paren.\n */\n@contract def strParen(s: String = \")\") = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 0008737472506172656e28537472696e672064656661756c7420636f6e7461696e696e67206120636c6f736520706172656e2e016601010129010173000006d191a304d00f"
+    },
+    {
+      "name": "str_escaped_quote_default",
+      "source": "/**\n * String default containing an escaped quote.\n */\n@contract def strQuote(s: String = \"\\\"\") = sigmaProp(HEIGHT > 1000)\n",
+      "verb": "ct",
+      "oracle": "OK 000873747251756f74652b537472696e672064656661756c7420636f6e7461696e696e6720616e20657363617065642071756f74652e01660101025c22010173000006d191a304d00f"
+    },
+    {
+      "name": "str_multi_param",
+      "source": "/**\n * Mixed params with a string default carrying a comma and paren.\n */\n@contract def strMulti(a: Int = 1, s: String = \"x,y)\", b: Int = 2) = sigmaProp(HEIGHT > a && HEIGHT > b)\n",
+      "verb": "ct",
+      "oracle": "OK 00087374724d756c74693e4d6978656420706172616d732077697468206120737472696e672064656661756c74206361727279696e67206120636f6d6d6120616e6420706172656e2e030466040101020104782c79290104030161000001730001016200020ad1ed91a3730091a37302"
+    },
+    {
+      "name": "dup_param_names",
+      "source": "/**\n * Two parameters share a name — Scala rejects (uniqueness require).\n */\n@contract def dupNames(a: Int, a: Long) = sigmaProp(HEIGHT > a)\n",
+      "verb": "ct",
+      "oracle": "REJECT 0:0 IllegalArgumentException"
+    }
+  ]
+}
