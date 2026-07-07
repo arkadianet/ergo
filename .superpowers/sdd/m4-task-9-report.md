@@ -148,4 +148,51 @@ byte target against. No reconstruction implemented; documented in `lib.rs` D-C3.
   Task-9 target hits it (those are M5-CSE-blocked regardless).
 - **Gate:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
   --all-features -D warnings`, `cargo test --workspace` all green; no `#[allow]`.
+
+## Follow-up: controller-probe divergence — dense id renumbering (commit cd492b3)
+
+**Finding.** New probe `{ val t = HEIGHT + 1;
+sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }` graduated the
+cross-lambda inline correctly (Plus(Height, 1) landed inside the lambda body)
+but left a numbering gap: our M3 emit allocates ids over the PRE-inline source
+tree, so `val t` took id 1 and the lambda arg `b` took id 2; inlining `t` erased
+its `ValDef` but not the id, so `b` stayed at 2 (`d90102`) while the oracle's
+post-inline schedule gives it id 1 (`d90101`). Surfaced as a 1-entered
+`DC7_P2SH_MISMATCH_SET` failure.
+
+**Fix.** Added `crate::inline::renumber_dense` (runs immediately after
+`prune_dead_vals`): fires ONLY when the tree has no surviving `ValDef`/`FunDef`
+anywhere (every remaining id is then a `FuncValue` arg with no M5 sharing
+decision outstanding), renumbers those ids 1..N in pre-order first-appearance
+order, and rewrites both the `FuncValue` arg slots and their `ValUse`
+references. A tree that keeps a `ValDef` — the M5 schedule-order/CSE surface —
+is left completely untouched, per the brief's boundary. Documented in the
+`crate::inline` module docs ("Dense id renumbering" section) alongside the
+existing pipeline-order rationale.
+
+**Printing question (item 3): verdict (a), cosmetic.** The gate's D-C7 triage
+`eprintln!` computed `ours_prop` from `ours.ergo_tree.body` — the
+POST-segregation body, still carrying `ConstPlaceholder`s — while `oracle_prop`
+re-inlined the oracle's placeholders first. The two were never on equal
+footing for a segregated `ours` tree, independent of any real bug: `compile()`
+itself always hashed the PRE-segregation, genuinely-inlined `root` for
+`p2sh_address` (tree.rs, unchanged), so the actual P2SH computation was never
+wrong. Fixed the test's `ours_prop` to run through `inline_placeholders` with
+`ours.ergo_tree.constants`, matching the oracle side; re-verified the fix
+against the corpus (p2sh_match count and the mismatch-set membership are
+identical before/after — only the diagnostic hex printed for the
+still-diverging D-C7 vectors changed from placeholder bytes to inlined-constant
+bytes).
+
+**Verification.** `cargo test -p ergo-compiler --test compile_semantic_parity`:
+`DC7_P2SH_MISMATCH_SET` / `P2S_DC1_MISMATCH_SET` back to 15/15, zero entered,
+zero left. Added 4 `crate::inline` unit tests (gap-closing happy path,
+surviving-`ValDef` no-op, nested-lambda density, already-dense no-op) and 1
+`tree.rs` full-pipeline byte-exact oracle test (tree bytes + both addresses
+against the captured 2026-07-07 vector). Full workspace gate (`cargo fmt --all
+-- --check`, `cargo clippy --workspace --all-targets --all-features -D
+warnings`, `cargo test --workspace`) green; no `#[allow]`. Duplicate probe
+`{ val unused = 2147483647 + 1; sigmaProp(true) }` verified as an
+already-committed REJECT/ArithmeticException vector (pre-existing coverage,
+no new fix needed).
   11 `inline` unit tests + 6 `tree` full-pipeline byte-exact tests added.

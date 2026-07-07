@@ -258,3 +258,9 @@ cc	3	sigmaProp(OUTPUTS.exists({(a: Box) => a.value > 0}) || INPUTS.exists({(b: B
 # proveDlog(g1) == proveDlog(g1) folds to sigmaProp(true), as Scala's single
 # rewriteDef fixpoint does.
 cce	3	sigmaProp(proveDlog(g1) == proveDlog(g1))
+# M4 final-wave review confirmatory probe: a type-MISMATCHED empty collection
+# under allOf/anyOf must keep rejecting after the empty-coll elem_type fix
+# (the fix defers the rejection from finalize_collection to the param-type
+# check; oracle REJECT 1:11 TyperException both).
+cc	3	sigmaProp(allOf(Coll[Int]()))
+cc	3	sigmaProp(anyOf(Coll[Int]()))

@@ -1,7 +1,7 @@
 {
   "_captured": "2026-07-07",
   "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); settings pinned per-record",
-  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 172 vectors (30 compile-ACCEPT, 142 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 110 vectors (62 compile-ACCEPT, 48 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
+  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 172 vectors (30 compile-ACCEPT, 142 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 112 vectors (62 compile-ACCEPT, 50 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
   "vectors": [
     {
       "network": "testnet",
@@ -3510,6 +3510,30 @@
       "tree_hex": "10010101d17300",
       "tree_version": 3,
       "verb": "cce"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "TyperException",
+      "reject_pos": "1:11",
+      "source": "sigmaProp(allOf(Coll[Int]()))",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
+    },
+    {
+      "network": "testnet",
+      "oracle": "REJECT",
+      "p2s_address": null,
+      "p2sh_address": null,
+      "reject_class": "TyperException",
+      "reject_pos": "1:11",
+      "source": "sigmaProp(anyOf(Coll[Int]()))",
+      "tree_hex": null,
+      "tree_version": 3,
+      "verb": "cc"
     }
   ]
 }

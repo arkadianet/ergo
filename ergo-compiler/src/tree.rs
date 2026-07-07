@@ -987,8 +987,11 @@ pub fn compile(
     // `Const`-restricted `Equals` rule correctly declines. `crate::lower` then
     // exposes the identical-`Const` pair, but nothing re-examines it. Presenting
     // the lowered tree to the fold a second time closes exactly that
-    // ordering-dependent gap (it is idempotent on already-folded shapes — only a
-    // D-C2-exposed `Const == Const` / `Const != Const` has anything left to do).
+    // ordering-dependent gap. Idempotence: `fold` rewrites each node to its
+    // per-node fixpoint, so the first pass SATURATED every shape it could see —
+    // the second pass can only act on nodes `lower` newly exposed (the
+    // D-C2-created `Const == Const` / `Const != Const` pairs); everything else
+    // is already at its fixpoint and passes through unchanged.
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
 
     // Top-level `removeIsProven` (M4 Task 6, D-C3; recon-transforms.md §3;
