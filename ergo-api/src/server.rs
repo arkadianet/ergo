@@ -1330,7 +1330,14 @@ pub fn router_with_mempool_and_wallet_and_security(
         v1_governor.clone(),
         v1_auth.clone(),
     ));
-    let assembled = assembled.merge(crate::v1::v1_router(v1_state, v1_governor));
+    let assembled = assembled.merge(crate::v1::v1_router(v1_state.clone(), v1_governor.clone()));
+    // `POST /api/v1/batch` (§3.18/§4.7) — a bounded read-only multiplexer over
+    // the SAME `chain/*`/`boxes/*`/`tokens/*`/`addresses/*`/`mempool/*`/
+    // `transactions/*`(reads)/`stats/*`/`diagnostics`/`light/*`/`protocols/*`
+    // handlers just mounted above, dispatched in-process (never HTTP-to-
+    // itself) through a second, restricted router built from the same
+    // `V1State` + the same shared per-node governor.
+    let assembled = assembled.merge(crate::v1::batch_router(v1_state, v1_governor));
     // Mount the T1 `webhooks/*` router under the operator api-key gate.
     let assembled = assembled.merge(crate::v1::webhooks_router(v1_webhooks_state, v1_auth));
 

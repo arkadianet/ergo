@@ -288,6 +288,37 @@ impl Governor {
     fn charge(&self, ip: IpAddr, cost: f64) -> Charge {
         self.charge_at(ip, cost, Instant::now())
     }
+
+    /// The token cost of a request in `class` under this governor's
+    /// configured weights (§2.2) — the ONE weight table `batch` (§4.7,
+    /// `routes::batch`) and any future non-middleware caller draws from,
+    /// rather than inventing a second per-endpoint cost vocabulary.
+    pub(crate) fn class_weight(&self, class: RouteClass) -> f64 {
+        self.config.weight(class)
+    }
+
+    /// Charge `cost` tokens against `ip`'s bucket right now, returning the
+    /// whole-second `Retry-After` hint (seconds) on throttle. The one
+    /// non-middleware entry point into the SAME per-IP bucket
+    /// [`governor_mw`] draws from — `batch` (§4.7) charges once, up front,
+    /// for its members' summed weight rather than re-entering the bucket
+    /// once per dispatched item (which would double-charge every item
+    /// against both batch's own charge and a per-route middleware layer).
+    pub(crate) fn try_charge(&self, ip: IpAddr, cost: f64) -> Result<(), u64> {
+        match self.charge(ip, cost) {
+            Charge::Allowed => Ok(()),
+            Charge::Throttled { retry_after_secs } => Err(retry_after_secs),
+        }
+    }
+
+    /// Whether `req`'s peer is the trusted-loopback exemption under this
+    /// governor's config — the exact policy [`governor_mw`] applies, reused
+    /// (never forked) so a non-middleware caller like `batch`'s upfront
+    /// charge agrees with what the per-route middleware would have decided
+    /// for the same peer.
+    pub(crate) fn exempt_loopback(&self, req: &Request<Body>) -> bool {
+        self.config.exempt_loopback && is_trusted_loopback(req, self.config.local_reverse_proxy)
+    }
 }
 
 /// Per-route middleware state: the shared [`Governor`] plus the [`RouteClass`]
@@ -314,9 +345,9 @@ pub async fn governor_mw(
 
     let key = client_ip(&req).unwrap_or(UNKNOWN_IP);
     let cost = cfg.weight(state.class);
-    match state.governor.charge(key, cost) {
-        Charge::Allowed => next.run(req).await,
-        Charge::Throttled { retry_after_secs } => {
+    match state.governor.try_charge(key, cost) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after_secs) => {
             let mut resp = v1_error(
                 Reason::RateLimited,
                 "per-IP rate/cost limit exceeded",

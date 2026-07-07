@@ -14,6 +14,7 @@
 pub mod dto;
 
 mod addresses;
+mod batch;
 mod boxes;
 mod chain;
 mod decode;
@@ -25,6 +26,8 @@ mod stats;
 mod tokens;
 pub(crate) mod transactions;
 mod tx_intel;
+
+pub use batch::batch_router;
 
 use std::sync::Arc;
 

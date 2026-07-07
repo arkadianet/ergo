@@ -39,9 +39,12 @@ base64             = { workspace = true }
 # (CLAUDE.md §2, crypto: proven crates only). Only the features actually used
 # are enabled; the signed body is already a `String`, so `json` is not needed.
 reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# `POST /api/v1/batch` (§3.18/§4.7) dispatches each sub-request in-process
+# against a restricted `Router` via `tower::util::ServiceExt::oneshot` — the
+# established "never HTTP-to-itself" idiom for a router-internal multiplex.
+tower              = { workspace = true, features = ["util"] }
 
 [dev-dependencies]
-tower           = { workspace = true, features = ["util"] }
 http-body-util  = { workspace = true }
 bs58            = { workspace = true }
 # WS transport integration test for `/api/v1/ws`: a real client over a real
