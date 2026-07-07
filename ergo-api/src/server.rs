@@ -1232,6 +1232,19 @@ pub fn router_with_mempool_and_wallet_and_security(
             crate::v1::mempool_depth::DEFAULT_SAMPLE_INTERVAL,
         );
     }
+    // Real-time subscriptions (§4.1). The `RealtimeBus` is constructed once and
+    // shared like the O4 depth ring. It is fed by the coarse-ring bridge task
+    // (production only — same live-runtime guard as the depth sampler so
+    // non-async test router builds never spawn it). Phase-1 feeds only the
+    // `blocks` channel; the fine-grained taps are a node-internals follow-up.
+    let v1_realtime = crate::v1::RealtimeHandle::blocks_only();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        crate::v1::spawn_event_bridge(
+            v1_read.clone(),
+            v1_realtime.bus.clone(),
+            crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
+        );
+    }
     let v1_state = crate::v1::V1State {
         read: v1_read,
         chain: v1_chain,
@@ -1239,6 +1252,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         submit: v1_submit,
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
+        realtime: Some(v1_realtime),
         network,
     };
     let v1_governor = crate::v1::governor::Governor::new(Default::default())

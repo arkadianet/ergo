@@ -20,6 +20,7 @@ pub mod cursor;
 pub mod error;
 pub mod governor;
 pub mod mempool_depth;
+pub mod realtime;
 pub mod routes;
 
 pub use auth::{
@@ -35,6 +36,7 @@ pub use mempool_depth::{
     sample_into, spawn_depth_sampler, spawn_depth_sampler_once, MempoolDepthRing,
     MempoolDepthSample, DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
 };
+pub use realtime::{spawn_event_bridge, ConnLimiter, RealtimeBus, RealtimeHandle};
 pub use routes::{v1_router, V1State};
 
 use axum::extract::ConnectInfo;

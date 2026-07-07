@@ -8,7 +8,7 @@ repository.workspace = true
 publish    = false
 
 [dependencies]
-axum               = { workspace = true }
+axum               = { workspace = true, features = ["ws"] }
 tower-http         = { workspace = true, features = ["trace"] }
 tokio              = { workspace = true, features = ["rt", "macros", "net", "sync"] }
 serde              = { workspace = true, features = ["derive"] }
@@ -32,6 +32,12 @@ base64             = { workspace = true }
 tower           = { workspace = true, features = ["util"] }
 http-body-util  = { workspace = true }
 bs58            = { workspace = true }
+# WS transport integration test for `/api/v1/ws`: a real client over a real
+# upgrade (the axum `ws` feature already pulls tokio-tungstenite 0.24 into the
+# lock; these are dev-only so the production build is untouched).
+tokio-tungstenite = "0.24"
+futures-util      = "0.3"
+tokio             = { workspace = true, features = ["rt", "macros", "net", "sync", "rt-multi-thread"] }
 # Tests need IndexerHandle to fixture the trait surface — kept dev-only
 # so the production build of ergo-api never pulls in redb or ergo-state.
 ergo-indexer    = { workspace = true }

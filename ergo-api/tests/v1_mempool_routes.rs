@@ -289,6 +289,7 @@ fn app_full(
         submit,
         mempool,
         mempool_depth: ring,
+        realtime: None,
         network: NetworkPrefix::Mainnet,
     };
     v1_router(
