@@ -216,9 +216,7 @@ pub fn match_box(
     // Pass 1: identifying tokens (highest confidence).
     for entry in REGISTRY {
         for matcher in entry.matchers {
-            if matcher.kind == MatchKind::IdentifyingToken
-                && token_ids.contains(&matcher.key)
-            {
+            if matcher.kind == MatchKind::IdentifyingToken && token_ids.contains(&matcher.key) {
                 return Some(RegistryMatch {
                     entry,
                     matcher,
