@@ -328,7 +328,8 @@ fn app(deps: Deps) -> Router {
         mempool,
         network: NetworkPrefix::Mainnet,
     };
-    let governor = ergo_api::v1::governor::Governor::new(Default::default());
+    let governor =
+        ergo_api::v1::governor::Governor::new(Default::default()).expect("valid governor config");
     v1_router(state, governor)
 }
 

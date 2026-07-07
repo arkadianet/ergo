@@ -1237,7 +1237,8 @@ pub fn router_with_mempool_and_wallet_and_security(
         mempool: v1_mempool,
         network,
     };
-    let v1_governor = crate::v1::governor::Governor::new(Default::default());
+    let v1_governor = crate::v1::governor::Governor::new(Default::default())
+        .expect("default GovernorConfig is valid");
     let assembled = assembled.merge(crate::v1::v1_router(v1_state, v1_governor));
 
     // tower-http TraceLayer wraps every request in an INFO span carrying a

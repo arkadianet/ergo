@@ -404,7 +404,7 @@ fn submit_reason(reason: &str) -> Reason {
         "invalid_pow" => Reason::InvalidPow,
         "overloaded" => Reason::Overloaded,
         "shutting_down" => Reason::ShuttingDown,
-        "route_disabled" => Reason::RouteDisabled,
+        "route_disabled" => Reason::RouteUnavailable,
         "timeout" => Reason::Timeout,
         "internal_error" => Reason::InternalError,
         // Unknown reason from a future admission verb: fail closed as a 400.
