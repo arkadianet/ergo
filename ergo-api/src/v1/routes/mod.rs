@@ -148,14 +148,16 @@ struct ListQuery {
 /// else (wrong length, non-hex, or uppercase) *before* hitting the store so a
 /// malformed id is a `400 invalid_*` (§1.4 rule 2), not a `404`.
 fn valid_modifier_id(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 fn invalid_hex() -> Response {
     v1_error(
         Reason::InvalidHex,
-        "id is not a 64-character hex string",
-        "supply an unprefixed hex modifier id",
+        "id is not a 64-character lowercase hex string",
+        "supply an unprefixed lowercase hex modifier id",
     )
 }
 

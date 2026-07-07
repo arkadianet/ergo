@@ -293,7 +293,7 @@ fn app_full(
     };
     v1_router(
         state,
-        ergo_api::v1::governor::Governor::new(Default::default()),
+        ergo_api::v1::governor::Governor::new(Default::default()).expect("valid governor config"),
     )
 }
 
@@ -684,7 +684,7 @@ fn app_with_mempool(mempool: Arc<dyn MempoolView>) -> Router {
     };
     v1_router(
         state,
-        ergo_api::v1::governor::Governor::new(Default::default()),
+        ergo_api::v1::governor::Governor::new(Default::default()).expect("valid governor config"),
     )
 }
 
