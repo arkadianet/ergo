@@ -19,6 +19,7 @@ pub mod auth;
 pub mod cursor;
 pub mod error;
 pub mod governor;
+pub mod routes;
 
 pub use auth::{
     assess_posture, warn_startup_posture, InsecurePosture, Tier, V1AuthConfig, V1AuthState,
@@ -29,6 +30,7 @@ pub use cursor::{
 };
 pub use error::{v1_error, Reason, V1Error, V1ErrorInner};
 pub use governor::{Governor, GovernorConfig, GovernorConfigError, GovernorState, RouteClass};
+pub use routes::{v1_router, V1State};
 
 use axum::extract::ConnectInfo;
 use axum::http::Request;
