@@ -2,7 +2,13 @@
 
 > Give this file (and repo access at branch `feat/ergoscript-compiler`) to the auditor.
 > It is self-contained: scope, ground truth, how to drive the oracle, the exclusion gate,
-> and the evidence bar. **Status at audit time: M1–M4 complete (M5 not yet started).**
+> and the evidence bar. **Status: M1–M5 COMPLETE and merged to main (PR #164) —
+> 110/110 byte-exact; both mismatch sets EMPTY; D-C7 closed. §5 below is retained
+> as history. Follow-ups: M6 REST slice (PR #165), M7 @contract layer (PR #166),
+> and the F1/F2 version-gate parity fixes from the M5 adversarial pass.
+> 6.0.5 delta-check done: sigma-state 6.0.2→6.0.5 carries ZERO changes to the
+> compiler-output surface (parser/typer/lowering/serialization-we-emit), so the
+> 6.0.2 pin remains the correct oracle.**
 
 ## 1. What you are auditing
 
@@ -25,7 +31,7 @@ Public API: `ergo_compiler::compile(env, source, tree_version, network) -> Compi
 
 **The bar is BYTE parity**, not semantic equivalence: a wrong tree = wrong address =
 stranded funds. The end goal is `compile()` output byte-identical to Scala 6.0.2 for the
-full language. **M5 (CSE/ValDef sharing) is NOT done** — see §5 for the exact known gap.
+full language. **M5 (CSE/ValDef sharing) is DONE — 110/110** (§5 kept as history).
 
 ## 2. Ground truth — where "correct" is defined
 
@@ -66,7 +72,8 @@ full language. **M5 (CSE/ValDef sharing) is NOT done** — see §5 for the exact
   tracked by **set-based** asserts: `DC7_P2SH_MISMATCH_SET` and `P2S_DC1_MISMATCH_SET` are the
   *exact* committed sets of still-diverging labels — a vector entering OR leaving without a
   deliberate edit fails loudly. `AUDITED_ERR_PAIRS` similarly pins every Err/Err class-pair.
-- Current standing: **95/110 byte-exact, 110/110 semantic, 0 skips.** The 15 byte-mismatches
+- Current standing: **110/110 byte-exact, 110/110 semantic, 0 skips** (both mismatch
+  sets EMPTY as of M5 close). Historical at M4: 95/110; the 15 byte-mismatches
   are the M5 set (§5).
 - Run the whole gate: `cargo test --workspace` (and the `#[ignore]` recapture needs scala-cli).
 
@@ -82,7 +89,12 @@ wrong (e.g. it claims "both sides reject" but the oracle accepts — that kind o
 been found and fixed before, and is exactly what we want you to hunt). An **un-ledgered**
 divergence, or a ledger entry contradicted by a live probe, IS a finding.
 
-## 5. The known M5 gap — OUT OF SCOPE as a "bug"
+## 5. The known M5 gap — CLOSED (historical; retained for context)
+
+> **M5 landed:** the 15-vector set below is now EMPTY — closed by the CSE
+> scope-chain pass plus, on `basis-token`, the pair-projection memo
+> (`Tuples.scala:57-74`) and the root freeVar schedule-order fix
+> (`Thunks.scala:196-212`). A byte-mismatch found NOW is a REAL finding.
 
 The 15 residual byte-mismatches (all semantically correct, all in `DC7_P2SH_MISMATCH_SET`)
 are the **CSE/ValDef-sharing** class, deferred to M5: chaincash-basis ×7, crystalpool ×5,
