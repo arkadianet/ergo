@@ -93,6 +93,34 @@ const VAL_USE: u8 = 0x72;
 // `0xF4` BinXor is deliberately absent: it is EAGER and routes through the
 // general path (both arms in the current scope). See module docs.
 
+// ----- admission-gate predicate opcodes (Task 2, spike §5) -----
+//
+// The four *free context globals* recognized by Scala's `IsContextProperty`
+// (`TreeBuilding.scala:140-148`: `ContextM.HEIGHT/INPUTS/OUTPUTS/SELF` →
+// `Height`/`Inputs`/`Outputs`/`Self`). These NEVER get a ValDef even at high
+// use-count — they re-emit inline per use (validated E2/E3/E5, `a3` per use).
+// Opcode bytes verified against `ergo-ser/src/opcode/types.rs:327-331`.
+//
+// NOTE the deliberate omissions, matching Scala exactly: `LastBlockUtxoRootHash`
+// (`0xA6`, types.rs:330) and `MinerPubkey` (`0xAC`, types.rs:333) are context
+// nodes but are NOT in `IsContextProperty` — so they are hoistable like any
+// other node and are absent here.
+const HEIGHT: u8 = 0xA3;
+const INPUTS: u8 = 0xA4;
+const OUTPUTS: u8 = 0xA5;
+const SELF_BOX: u8 = 0xA7;
+
+/// `Global` / `SGlobal` (`0xDD`, types.rs:388) — our lowering of `SigmaDslBuilder`
+/// (`TypedExpr::Global` → `Op(0xDD, Zero)`, `emit.rs:322`; `SType::SGlobal`
+/// prints as `"SigmaDslBuilder"`, `typed_print.rs:53`). This is the OUR-IR
+/// analogue of Scala's `IsInternalDef` (`TreeBuilding.scala:153-158`:
+/// `SigmaDslBuilder | CollBuilder`). The `CollBuilder` alternative has NO node in
+/// our lowered IR (collections lower straight to `ConcreteCollection`, never
+/// through an explicit builder singleton), so that half of the predicate is
+/// vacuous for us — documented, not fabricated (no `grep` hit for a CollBuilder
+/// node in `ergo-compiler/src/emit.rs`).
+const GLOBAL: u8 = 0xDD;
+
 // ----- symbol identity -----
 
 /// A build-time symbol identity. Assigned densely in interning (evaluation)
@@ -406,6 +434,18 @@ impl Interner {
             .count()
     }
 
+    /// The distinct `Const` symbols, in allocation order (the `Const` analogue of
+    /// [`symbols_with_opcode`](Self::symbols_with_opcode); `Const` is not an
+    /// opcode class, so it needs its own accessor).
+    pub fn symbols_with_opcode_const(&self) -> Vec<SymId> {
+        self.syms
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.key.tag == KeyTag::Const)
+            .map(|(i, _)| SymId(i as u32))
+            .collect()
+    }
+
     /// Bound-var ids a symbol transitively depends on (empty ⇒ float-up
     /// candidate).
     pub fn deps_of(&self, sym: SymId) -> &BTreeSet<u32> {
@@ -415,6 +455,106 @@ impl Interner {
     /// A symbol's ordered child symbols.
     pub fn children_of(&self, sym: SymId) -> &[SymId] {
         &self.syms[sym.0 as usize].key.children
+    }
+
+    // ----- Phase B: flat usage count (spike §3) -----
+
+    /// **Phase B — emit-time usage counting, FLAT and GLOBAL per SymId.**
+    ///
+    /// Scala's `hasManyUsagesGlobal(s)` (`AstGraphs.scala:201-206`) counts uses of
+    /// symbol `s` over `buildUsageMap(flatSchedule, usingDeps=false)`
+    /// (`AstGraphs.scala:197-199`): `flatSchedule` recursively unfolds EVERY lambda
+    /// and thunk body into one flat sequence, and counting is over `syms`
+    /// (structural children), not `deps`. Our interned graph is already that flat
+    /// sequence — `self.syms` holds every distinct symbol across all scopes exactly
+    /// once, and `key.children` are its structural children. So a straight pass
+    /// tallying each child reference (WITH multiplicity: `x * x` counts `x` twice,
+    /// matching Scala's `syms = [x, x]`) reproduces the flat global count.
+    ///
+    /// The CRITICAL nuance (spike §3, §1.2): sibling-thunk COPIES of a byte-identical
+    /// subexpression are DISTINCT SymIds (Task 1's scope-chained interning gave them
+    /// different ids because siblings are never on each other's parent chain), so
+    /// each is referenced once and counted once — never merged. That is exactly why
+    /// E2's two `HEIGHT+1` copies each land at count 1 (→ no hoist) while E6's single
+    /// condition-built `HEIGHT+1` lands at count 3. We get this for free from
+    /// per-SymId reference counting; the `e2_*` test below asserts it explicitly.
+    ///
+    /// Returns a map over every referenced SymId. A symbol referenced nowhere (a
+    /// tree root) is absent — read via `.get(&sym).copied().unwrap_or(0)`.
+    pub fn flat_usage(&self) -> BTreeMap<SymId, usize> {
+        let mut usage: BTreeMap<SymId, usize> = BTreeMap::new();
+        for info in &self.syms {
+            for &child in &info.key.children {
+                *usage.entry(child).or_insert(0) += 1;
+            }
+        }
+        usage
+    }
+
+    /// `has_many(sym) := usage(sym) > 1` — predicate P1 of the admission gate
+    /// (`mainG.hasManyUsagesGlobal(s)`, `TreeBuilding.scala:503`). Takes a map from
+    /// [`flat_usage`](Self::flat_usage) so callers count once and query many times.
+    pub fn has_many(usage: &BTreeMap<SymId, usize>, sym: SymId) -> bool {
+        usage.get(&sym).copied().unwrap_or(0) > 1
+    }
+
+    // ----- the 4-predicate admission gate (spike §5, TreeBuilding.scala:503-509) -----
+
+    /// The class tag of an interned symbol — the node-class discriminant the P2/P3/P4
+    /// predicates key on.
+    fn tag_of(&self, sym: SymId) -> &KeyTag {
+        &self.syms[sym.0 as usize].key.tag
+    }
+
+    /// **P2 `IsContextProperty`** (`TreeBuilding.scala:140-148`,
+    /// `:504`). True for the four free context globals `Height`/`Inputs`/`Outputs`/
+    /// `Self` (`0xA3`/`0xA4`/`0xA5`/`0xA7`) — and ONLY those; `LastBlockUtxoRootHash`
+    /// / `MinerPubkey` are intentionally excluded (see the opcode-const docs).
+    /// A context property re-emits inline at every use, never a ValDef.
+    pub fn is_context_property(&self, sym: SymId) -> bool {
+        matches!(
+            self.tag_of(sym),
+            KeyTag::Op(HEIGHT) | KeyTag::Op(INPUTS) | KeyTag::Op(OUTPUTS) | KeyTag::Op(SELF_BOX)
+        )
+    }
+
+    /// **P3 `IsInternalDef`** (`TreeBuilding.scala:153-158`, `:505`). Scala:
+    /// `SigmaDslBuilder | CollBuilder`. In OUR lowered IR the only representable
+    /// alternative is `SigmaDslBuilder` = the `Global` node (`0xDD`); `CollBuilder`
+    /// has no node (vacuous for us, see the `GLOBAL` const docs). A builder singleton
+    /// threads through many nodes but is never itself a ValDef.
+    pub fn is_internal(&self, sym: SymId) -> bool {
+        matches!(self.tag_of(sym), KeyTag::Op(GLOBAL))
+    }
+
+    /// **P4 `IsConstantDef`** (`TreeBuilding.scala:161-166`, `:509`). Any `Const`.
+    /// Constants are suppressed even at use-count > 1 "to increase effect of
+    /// constant segregation … two equal constants don't always have the same
+    /// meaning" (source comment `:506-508`); each occurrence re-segregates into its
+    /// own pool slot with no dedup (validated E3: `42` used twice → two `0454`
+    /// slots). NOT vacuous: an env-aliased identical `Const` reaches CSE unfolded
+    /// (the `proveDHTuple(g1,g2,g1,g2)` case, spike §3/OQ4, D-C7) — the
+    /// `provedhtuple_*` test below confirms P4 is load-bearing there.
+    pub fn is_const(&self, sym: SymId) -> bool {
+        matches!(self.tag_of(sym), KeyTag::Const)
+    }
+
+    /// The exact admission conjunction (`TreeBuilding.scala:503-509`):
+    /// `has_many && !IsContextProperty && !IsInternalDef && !IsConstantDef`.
+    /// A symbol clears the gate ⇒ Task 3 will materialize it as a `ValDef`; a
+    /// single-use symbol fails P1 and stays inlined at its one use (this is where
+    /// single-use inlining "falls out free", spike §7.2). Takes the precomputed
+    /// [`flat_usage`](Self::flat_usage) map.
+    ///
+    /// Note this is the PURE 4-predicate gate. Lambda-argument placeholder symbols
+    /// (`KeyTag::Arg`) are not excluded here by a predicate — Scala excludes them
+    /// structurally (a bound `Variable` is never in a scope's `schedule`), which is
+    /// Task 3's schedule-membership concern, not a gate predicate.
+    pub fn should_hoist(&self, sym: SymId, usage: &BTreeMap<SymId, usize>) -> bool {
+        Self::has_many(usage, sym)
+            && !self.is_context_property(sym)
+            && !self.is_internal(sym)
+            && !self.is_const(sym)
     }
 }
 
@@ -593,6 +733,7 @@ fn put_args(w: &mut VlqWriter, args: &[(u32, Option<SigmaType>)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::group_element::GroupElement;
     use ergo_ser::opcode::{Expr, IrNode, Payload};
     use ergo_ser::sigma_type::SigmaType;
     use ergo_ser::sigma_value::SigmaValue;
@@ -605,6 +746,10 @@ mod tests {
     const HEIGHT_OP: u8 = 0xA3;
     const BIN_XOR: u8 = 0xF4;
     const TUPLE: u8 = 0x86;
+    /// `Global` / `SigmaDslBuilder` singleton (P3 `IsInternalDef`).
+    const GLOBAL_OP: u8 = 0xDD;
+    /// `CreateProveDHTuple` (spike §5 / OQ4 P4 witness).
+    const CREATE_PROVE_DHTUPLE: u8 = 0xCE;
 
     fn op0(opcode: u8) -> Expr {
         Expr::Op(IrNode {
@@ -681,9 +826,34 @@ mod tests {
         })
     }
 
+    fn op4(opcode: u8, a: Expr, b: Expr, c: Expr, d: Expr) -> Expr {
+        Expr::Op(IrNode {
+            opcode,
+            payload: Payload::Four(Box::new(a), Box::new(b), Box::new(c), Box::new(d)),
+        })
+    }
+
+    /// A `GroupElement` constant with a deterministic body (distinct `prefix` ⇒
+    /// distinct value ⇒ distinct hash-cons symbol). Valid SEC1 compressed prefix.
+    fn ge_const(prefix: u8) -> Expr {
+        let mut bytes = [prefix; 33];
+        bytes[0] = 0x02;
+        Expr::Const {
+            tpe: SigmaType::SGroupElement,
+            val: SigmaValue::GroupElement(GroupElement::from_bytes(bytes)),
+        }
+    }
+
     /// Count distinct interned symbols whose class is opcode `op`.
     fn count_op(it: &Interner, op: u8) -> usize {
         it.symbols_with_opcode(op).len()
+    }
+
+    /// The single symbol of opcode `op` (asserts uniqueness first).
+    fn only_op(it: &Interner, op: u8) -> SymId {
+        let syms = it.symbols_with_opcode(op);
+        assert_eq!(syms.len(), 1, "expected exactly one {op:#x} symbol");
+        syms[0]
     }
 
     // ----- happy path -----
@@ -911,5 +1081,251 @@ mod tests {
         assert_eq!(funcs.len(), 2);
         assert_eq!(it.deps_of(funcs[0]), &BTreeSet::from([2]));
         assert_eq!(it.deps_of(funcs[1]), &BTreeSet::from([3]));
+    }
+
+    // ----- Phase B: flat usage count + admission gate (Task 2, spike §3/§5) -----
+
+    #[test]
+    fn flat_usage_counts_each_reference_with_multiplicity() {
+        // `7 + 7` — the two operands hash-cons to ONE const symbol referenced
+        // twice (Scala's `syms = [x, x]` counts with multiplicity, spike §3).
+        let e = op2(PLUS, int(7), int(7));
+        let mut it = Interner::new();
+        it.intern(&e);
+        let usage = it.flat_usage();
+        let c7 = only_op_const(&it);
+        assert_eq!(
+            usage.get(&c7).copied(),
+            Some(2),
+            "one operand symbol used 2x"
+        );
+        assert!(Interner::has_many(&usage, c7));
+        // The Plus is a tree root — referenced by nothing.
+        let plus = only_op(&it, PLUS);
+        assert_eq!(usage.get(&plus).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn e1_shared_val_is_hoist_eligible() {
+        // E1: `{ val a = HEIGHT+1; a>5 && a<100 }`. `a` (the Plus) is referenced by
+        // both comparison arms → count 2 → has_many, and clears P2/P3/P4 → HOIST.
+        let e1 = block(
+            vec![valdef(1, height_plus_one())],
+            op2(
+                BIN_AND,
+                op2(GT, valuse(1), int(5)),
+                op2(LT, valuse(1), int(100)),
+            ),
+        );
+        let mut it = Interner::new();
+        it.intern(&e1);
+        let usage = it.flat_usage();
+        let plus = only_op(&it, PLUS);
+        assert_eq!(usage.get(&plus).copied(), Some(2));
+        assert!(
+            it.should_hoist(plus, &usage),
+            "E1 `a = HEIGHT+1` used twice, all predicates pass → hoist-eligible"
+        );
+        // HEIGHT inside the Plus is used once here and is a context property either
+        // way → never hoisted.
+        let h = only_op(&it, HEIGHT_OP);
+        assert!(it.is_context_property(h));
+        assert!(!it.should_hoist(h, &usage));
+    }
+
+    #[test]
+    fn e5_root_val_hoists_e6_condition_built_hoists() {
+        // E5: root `val a` → Plus used by both if-branches (count 2) → hoist.
+        let e5 = block(
+            vec![valdef(1, height_plus_one())],
+            op3(
+                IF,
+                op2(GT, height(), int(0)),
+                op2(GT, valuse(1), int(5)),
+                op2(LT, valuse(1), int(100)),
+            ),
+        );
+        let mut it5 = Interner::new();
+        it5.intern(&e5);
+        let u5 = it5.flat_usage();
+        let plus5 = only_op(&it5, PLUS);
+        assert_eq!(u5.get(&plus5).copied(), Some(2));
+        assert!(it5.should_hoist(plus5, &u5), "E5 root val hoists");
+
+        // E6: HEIGHT+1 first built in the condition → shared by cond + both
+        // branches (count 3) → hoist.
+        let e6 = op3(
+            IF,
+            op2(GT, height_plus_one(), int(0)),
+            op2(GT, height_plus_one(), int(5)),
+            op2(LT, height_plus_one(), int(100)),
+        );
+        let mut it6 = Interner::new();
+        it6.intern(&e6);
+        let u6 = it6.flat_usage();
+        let plus6 = only_op(&it6, PLUS);
+        assert_eq!(u6.get(&plus6).copied(), Some(3));
+        assert!(
+            it6.should_hoist(plus6, &u6),
+            "E6 condition-built Plus hoists"
+        );
+    }
+
+    #[test]
+    fn e3_height_context_prop_and_const_both_used_twice_never_hoist() {
+        // E3: `HEIGHT>42 && HEIGHT<42`. HEIGHT and `42` each hash-cons to one
+        // symbol used twice → has_many BOTH — yet P2 (HEIGHT) and P4 (`42`)
+        // suppress each → NOTHING hoists (spike's "no ValDef" E3 prediction).
+        let e3 = op2(
+            BIN_AND,
+            op2(GT, height(), int(42)),
+            op2(LT, height(), int(42)),
+        );
+        let mut it = Interner::new();
+        it.intern(&e3);
+        let usage = it.flat_usage();
+
+        let h = only_op(&it, HEIGHT_OP);
+        assert!(Interner::has_many(&usage, h), "HEIGHT used twice");
+        assert!(it.is_context_property(h));
+        assert!(!it.should_hoist(h, &usage), "P2 suppresses HEIGHT");
+
+        let c42 = only_op_const(&it);
+        assert!(Interner::has_many(&usage, c42), "`42` used twice");
+        assert!(it.is_const(c42));
+        assert!(!it.should_hoist(c42, &usage), "P4 suppresses the constant");
+
+        // No symbol at all clears the gate.
+        assert!(
+            (0..it.syms.len()).all(|i| !it.should_hoist(SymId(i as u32), &usage)),
+            "E3 hoists nothing"
+        );
+    }
+
+    #[test]
+    fn e2_sibling_copies_each_used_once_do_not_hoist() {
+        // E2: `if(HEIGHT>0) HEIGHT+1>5 else HEIGHT+1<100`. The two sibling-thunk
+        // `HEIGHT+1` copies are DISTINCT symbols (Task 1), each referenced once →
+        // neither has_many → nothing hoists. Sibling-distinctness is load-bearing:
+        // if interning had merged them the count would be 2 and one would hoist.
+        let e2 = op3(
+            IF,
+            op2(GT, height(), int(0)),
+            op2(GT, height_plus_one(), int(5)),
+            op2(LT, height_plus_one(), int(100)),
+        );
+        let mut it = Interner::new();
+        it.intern(&e2);
+        let usage = it.flat_usage();
+        let pluses = it.symbols_with_opcode(PLUS);
+        assert_eq!(pluses.len(), 2, "sibling copies are distinct symbols");
+        for p in &pluses {
+            assert_eq!(usage.get(p).copied().unwrap_or(0), 1, "each copy used once");
+            assert!(!it.should_hoist(*p, &usage));
+        }
+    }
+
+    #[test]
+    fn single_use_subexpr_is_not_hoisted() {
+        // `(HEIGHT+1) > 5` — the Plus is referenced exactly once (by the GT), so
+        // has_many is false → not hoisted. Single-use inlining falls out for free.
+        let e = op2(GT, height_plus_one(), int(5));
+        let mut it = Interner::new();
+        it.intern(&e);
+        let usage = it.flat_usage();
+        let plus = only_op(&it, PLUS);
+        assert_eq!(usage.get(&plus).copied(), Some(1));
+        assert!(!Interner::has_many(&usage, plus));
+        assert!(
+            !it.should_hoist(plus, &usage),
+            "single-use → inline, not hoist"
+        );
+    }
+
+    #[test]
+    fn global_builder_singleton_used_twice_is_internal_not_hoisted() {
+        // P3: `Global`(0xDD) = our `SigmaDslBuilder`. Referenced twice → has_many,
+        // but `is_internal` suppresses the ValDef. (`CollBuilder` has no OUR-IR
+        // node, so that half of `IsInternalDef` is vacuous — see the const docs.)
+        let e = op2(PLUS, op0(GLOBAL_OP), op0(GLOBAL_OP));
+        let mut it = Interner::new();
+        it.intern(&e);
+        let usage = it.flat_usage();
+        let g = only_op(&it, GLOBAL_OP);
+        assert!(
+            Interner::has_many(&usage, g),
+            "builder singleton used twice"
+        );
+        assert!(it.is_internal(g));
+        assert!(
+            !it.should_hoist(g, &usage),
+            "P3 suppresses the builder singleton"
+        );
+    }
+
+    #[test]
+    fn context_property_predicate_excludes_a6_and_ac() {
+        // Lock the exact `IsContextProperty` set: `LastBlockUtxoRootHash`(0xA6) and
+        // `MinerPubkey`(0xAC) are context nodes but are NOT context properties in
+        // Scala (`TreeBuilding.scala:140-148`), so they must NOT match P2.
+        let mut it = Interner::new();
+        let a6 = it.intern(&op0(0xA6));
+        let ac = it.intern(&op0(0xAC));
+        assert!(
+            !it.is_context_property(a6),
+            "0xA6 is not a context property"
+        );
+        assert!(
+            !it.is_context_property(ac),
+            "0xAC is not a context property"
+        );
+        // Sanity: a genuine one does match.
+        let h = it.intern(&height());
+        assert!(it.is_context_property(h));
+    }
+
+    #[test]
+    fn provedhtuple_repeated_ge_consts_are_const_suppressed_p4_load_bearing() {
+        // OQ4 / P4 witness: `proveDHTuple(g1, g2, g1, g2)` — the two DISTINCT group
+        // elements each arrive at CSE as a `Const` referenced TWICE (positions
+        // 0/2 and 1/3). On the oracle side these reach CSE unfolded (lib.rs:611-616,
+        // D-C7): each is `has_many` AND clears P2/P3 — so ONLY P4 keeps them from
+        // hoisting. This proves P4 is load-bearing, not vacuous.
+        let e = op4(
+            CREATE_PROVE_DHTUPLE,
+            ge_const(0x11),
+            ge_const(0x22),
+            ge_const(0x11),
+            ge_const(0x22),
+        );
+        let mut it = Interner::new();
+        it.intern(&e);
+        let usage = it.flat_usage();
+
+        let consts = it.symbols_with_opcode_const();
+        assert_eq!(consts.len(), 2, "g1 and g2 are two distinct const symbols");
+        for c in &consts {
+            assert_eq!(usage.get(c).copied(), Some(2), "each GE const used twice");
+            assert!(Interner::has_many(&usage, *c));
+            assert!(it.is_const(*c));
+            // Without P4 the symbol would clear the gate — P4 is the deciding vote.
+            let passes_without_p4 = Interner::has_many(&usage, *c)
+                && !it.is_context_property(*c)
+                && !it.is_internal(*c);
+            assert!(passes_without_p4, "the GE const clears P1/P2/P3");
+            assert!(
+                !it.should_hoist(*c, &usage),
+                "P4 alone suppresses the GE const"
+            );
+        }
+    }
+
+    // ----- test-only introspection helpers -----
+
+    /// The single `Const` symbol (asserts uniqueness).
+    fn only_op_const(it: &Interner) -> SymId {
+        let syms = it.symbols_with_opcode_const();
+        assert_eq!(syms.len(), 1, "expected exactly one Const symbol");
+        syms[0]
     }
 }
