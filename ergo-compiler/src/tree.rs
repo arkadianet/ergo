@@ -2041,4 +2041,44 @@ mod tests {
         );
         assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
     }
+
+    #[test]
+    fn compile_bare_singleton_lowering_matches_oracle_property_call() {
+        // M4 Task 8 (recon-transforms.md §9, D-C7 singleton bullet, vector
+        // 30): bare `LastBlockUtxoRootHash` and bare `groupGenerator` are NOT
+        // `IsContextProperty` primitives on the Scala side — both re-emit as
+        // `PropertyCall`s. Oracle-confirmed 2026-07-07, `ORACLE_TREE_VERSION=3`:
+        for (src, oracle_hex) in [
+            (
+                "sigmaProp(LastBlockUtxoRootHash.digest.size > 0)",
+                "10010400d191b1db6401db6509fe7300",
+            ),
+            (
+                "sigmaProp(groupGenerator.getEncoded.size > 0)",
+                "10010400d191b1db0702db6a01dd7300",
+            ),
+        ] {
+            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet).expect(src);
+            assert_eq!(hex::encode(&r.tree_bytes), oracle_hex, "{src}");
+            assert_eq!(reparse(&r.tree_bytes), r.ergo_tree, "{src}");
+        }
+    }
+
+    #[test]
+    fn compile_deserialize_constant_matches_oracle() {
+        // M4 Task 8 (gap F6, D-T2 CLOSED): `deserialize[Int]("Jq")` decodes
+        // (Base58) to bytes `04 0a` — `IntConstant(5)` — and folds through the
+        // generic constant fold (`5 == 5` → `true`) exactly like the oracle.
+        // Oracle-confirmed 2026-07-07: `sigmaProp(deserialize[Int]("Jq") == 5)`
+        // → `10010101d17300`.
+        let r = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(deserialize[Int](\"Jq\") == 5)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect("compile");
+        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
+        assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
+    }
 }

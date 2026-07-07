@@ -59,18 +59,43 @@
 //! matching `java.util.Base64.getDecoder()` exactly; M3 Task-5 closes the
 //! deferred shape).
 //!
-//! `deserialize` remains fully deferred — `None` unconditionally.  Scala
-//! constant-folds `deserialize(lit)` at type-check time and throws on invalid
-//! bytes (accept-invalid deviation; no real contract calls `deserialize(bad)`).
-//! Re-scoped (M3 Task-5): closing this requires an opcode-IR→`TypedExpr` reverse
-//! mapping (`ValueSerializer` decodes to sigma-state's own AST, not ours) —
-//! deferred past emit (M3 plan Task 12 decision).
+//! `deserialize[T](s)` — CLOSED (M4 Task 8, D-T2).  `SigmaPredef.scala:169-188`
+//! Base58-decodes `s`, runs `ValueSerializer.deserialize` (the SAME general
+//! `Value` grammar `ergo_ser::opcode::parse_expr` reads ErgoTree bodies with)
+//! over the bytes, and embeds the resulting expression IN PLACE at typecheck
+//! time — a genuine opcode-IR→`TypedExpr` reverse mapping (gap F6). Oracle
+//! 2026-07-07 (×2 confirms, `ORACLE_TREE_VERSION=3`): `deserialize[Int]("Jq")`
+//! (bytes `04 0a`, a bare `IntConstant(5)`) embeds `ConstantNode:Int @5`;
+//! `deserialize[Int]("3p")` (byte `a3`, bare `Height`) embeds `Height:Int` — a
+//! non-constant, genuinely RUNTIME node. A bare `deserialize(...)` with no
+//! explicit `[T]` REJECTs `InvalidArguments` (oracle-confirmed), mirroring
+//! `deserializeTo`/`fromBigEndianBytes`'s existing `global_deserialize` gate.
+//!
+//! **Scope (probe-bounded):** [`unlower_expr`] covers every `Const` shape
+//! [`crate::emit::map_const`] can produce in reverse, plus the nine
+//! zero-payload context/global singleton primitives (`Height`/`Inputs`/
+//! `Outputs`/`Self_`/`MinerPubkey`/`LastBlockUtxoRootHash`/`Context`/`Global`/
+//! `GroupGenerator`) — both oracle-confirmed. Anything else a crafted byte
+//! string could decode to (a `BinOp`, a `MethodCall`, a materialized
+//! `Coll[Int]`/`Coll[Boolean]` constant — `ConstPayload` has no variant for
+//! those, only `Coll[Byte]`/`Coll[Long]`, mirroring `map_const`'s own
+//! coverage) is REJECTED with a descriptive `TyperError` rather than silently
+//! mismapped — an honest, bounded residual: no source in the 79-contract
+//! corpus calls `deserialize` at all (grep-confirmed), so this is not a
+//! corpus blocker, and closing the general case would mean porting a second
+//! full opcode-IR↔TypedExpr symmetric mapping for a predef nothing exercises.
 //! See lib.rs § "Known M2 deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
 //! typer).
 
 use base64::Engine as _;
+
+use ergo_primitives::group_element::GroupElement;
+use ergo_primitives::reader::VlqReader;
+use ergo_ser::opcode::{parse_expr, Expr as OpExpr, IrNode, Payload as OpPayload};
+use ergo_ser::sigma_type::SigmaType as WireType;
+use ergo_ser::sigma_value::{CollValue, SigmaValue as WireValue};
 
 use crate::stype::SType;
 use crate::typed::{ConstPayload, MethodRef, TypedExpr};
@@ -555,8 +580,18 @@ pub fn predef_ir_builder(
                 Ok(()) => Some(decode_base64(s)),
             }
         }
-        // deserialize: fully deferred (accept-invalid deviation; see module docs).
-        "deserialize" => None,
+        // deserialize[T](s): CLOSED (M4 Task 8, D-T2) — see module docs.
+        "deserialize" => {
+            let s = string_const(args.first()?)?;
+            let target_tpe = func_range(func)?.clone();
+            if stype_has_free_type_var(&target_tpe) {
+                return Some(Err(typer_err(
+                    "'deserialize' is type-parametric and requires an explicit type argument [T]"
+                        .to_string(),
+                )));
+            }
+            Some(deserialize_predef(s, &target_tpe, tree_version))
+        }
         // allZK/anyZK/outerJoin/serialize(binder-handled)/PK(binder-handled):
         // no typer-time irBuilder → fall through.
         _ => None,
@@ -804,6 +839,150 @@ fn decode_base58(s: &str) -> Result<TypedExpr, TyperError> {
         value: ConstPayload::ByteColl(bytes.into_iter().map(|b| b as i8).collect()),
         tpe: coll_byte(),
     })
+}
+
+/// `deserialize[T](s)` (SigmaPredef.scala:169-188, D-T2 CLOSED): Base58-decode
+/// `s` (same alphabet/decoder as `fromBase58` — `Base58.decode(str).get`,
+/// verdict-parity class deviation retained, same as `fromBase58`'s own
+/// `AssertionError`↔`TyperError` mismatch), `ergo_ser::opcode::parse_expr` the
+/// bytes as ONE general `Value` node (Scala doesn't check the byte count is
+/// fully consumed either — `ValueSerializer.deserialize(bytes, pos=0)` just
+/// stops after one node), [`unlower_expr`] it back to a `TypedExpr`, and
+/// reject if the result's type disagrees with the declared `T`
+/// (`res.tpe != tpe` → `InvalidArguments`, oracle-mirrored).
+fn deserialize_predef(
+    s: &str,
+    target_tpe: &SType,
+    tree_version: u8,
+) -> Result<TypedExpr, TyperError> {
+    let bytes = bs58::decode(s)
+        .into_vec()
+        .map_err(|e| typer_err(format!("deserialize: invalid Base58 string: {e}")))?;
+    let mut r = VlqReader::new(&bytes);
+    let op = parse_expr(&mut r, 0, tree_version)
+        .map_err(|e| typer_err(format!("deserialize: malformed serialized value: {e:?}")))?;
+    let typed = unlower_expr(&op).ok_or_else(|| {
+        typer_err(
+            "deserialize: the decoded value is a shape this compiler's opcode-IR reverse \
+             mapping does not (yet) cover — supported: constants and the bare context/global \
+             singleton primitives; composite expressions (BinOps, MethodCalls, …) are not"
+                .to_string(),
+        )
+    })?;
+    if crate::typed::node_tpe(&typed) != target_tpe {
+        return Err(typer_err(format!(
+            "deserialize: wrong type after deserialization, expected {target_tpe:?}, got {:?}",
+            crate::typed::node_tpe(&typed)
+        )));
+    }
+    Ok(typed)
+}
+
+/// Reverse of [`crate::emit::map_const`] plus the nine zero-payload
+/// singleton primitives — the opcode-IR→`TypedExpr` mapping `deserialize`
+/// needs (gap F6). `None` for anything else (composite expressions, or a
+/// `Const` shape `ConstPayload` has no variant for).
+fn unlower_expr(op: &OpExpr) -> Option<TypedExpr> {
+    match op {
+        OpExpr::Const { tpe, val } => {
+            let (stype, payload) = unmap_const(tpe, val)?;
+            Some(TypedExpr::Constant {
+                value: payload,
+                tpe: stype,
+            })
+        }
+        OpExpr::Op(IrNode {
+            opcode,
+            payload: OpPayload::Zero,
+        }) => match *opcode {
+            0xA3 => Some(TypedExpr::Height { tpe: SType::SInt }),
+            0xA4 => Some(TypedExpr::Inputs {
+                tpe: SType::SColl(Box::new(SType::SBox)),
+            }),
+            0xA5 => Some(TypedExpr::Outputs {
+                tpe: SType::SColl(Box::new(SType::SBox)),
+            }),
+            0xA7 => Some(TypedExpr::Self_ { tpe: SType::SBox }),
+            0xAC => Some(TypedExpr::MinerPubkey {
+                tpe: SType::SColl(Box::new(SType::SByte)),
+            }),
+            0xA6 => Some(TypedExpr::LastBlockUtxoRootHash {
+                tpe: SType::SAvlTree,
+            }),
+            0xFE => Some(TypedExpr::Context {
+                tpe: SType::SContext,
+            }),
+            0xDD => Some(TypedExpr::Global {
+                tpe: SType::SGlobal,
+            }),
+            0x82 => Some(TypedExpr::GroupGenerator {
+                tpe: SType::SGroupElement,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Reverse of [`crate::emit::map_const`]: an ergo-ser `(SigmaType, SigmaValue)`
+/// pair back to a typed `(SType, ConstPayload)` pair. `None` for shapes
+/// `ConstPayload` cannot represent — e.g. a materialized `Coll[Int]` or
+/// `Coll[Boolean]` constant (only `Coll[Byte]`/`Coll[Long]` have dedicated
+/// variants, mirroring `map_const`'s own coverage exactly) — the caller turns
+/// that into a `TyperError` rather than silently mismapping it.
+fn unmap_const(tpe: &WireType, val: &WireValue) -> Option<(SType, ConstPayload)> {
+    match (tpe, val) {
+        (WireType::SBoolean, WireValue::Boolean(b)) => {
+            Some((SType::SBoolean, ConstPayload::Bool(*b)))
+        }
+        (WireType::SByte, WireValue::Byte(v)) => Some((SType::SByte, ConstPayload::Byte(*v))),
+        (WireType::SShort, WireValue::Short(v)) => Some((SType::SShort, ConstPayload::Short(*v))),
+        (WireType::SInt, WireValue::Int(v)) => Some((SType::SInt, ConstPayload::Int(*v))),
+        (WireType::SLong, WireValue::Long(v)) => Some((SType::SLong, ConstPayload::Long(*v))),
+        (WireType::SBigInt, WireValue::BigInt(v)) => {
+            Some((SType::SBigInt, ConstPayload::BigInt(v.to_string())))
+        }
+        (WireType::SUnsignedBigInt, WireValue::BigInt(v)) => Some((
+            SType::SUnsignedBigInt,
+            ConstPayload::UnsignedBigInt(v.to_string()),
+        )),
+        (WireType::SString, WireValue::Str(s)) => {
+            Some((SType::SString, ConstPayload::String(s.clone())))
+        }
+        (WireType::SUnit, WireValue::Unit) => Some((SType::SUnit, ConstPayload::Unit)),
+        (WireType::SGroupElement, WireValue::GroupElement(ge)) => Some((
+            SType::SGroupElement,
+            ConstPayload::GroupElement(*group_element_bytes(ge)),
+        )),
+        (WireType::SColl(elem), WireValue::Coll(CollValue::Bytes(bytes)))
+            if matches!(**elem, WireType::SByte) =>
+        {
+            Some((
+                SType::SColl(Box::new(SType::SByte)),
+                ConstPayload::ByteColl(bytes.iter().map(|b| *b as i8).collect()),
+            ))
+        }
+        (WireType::SColl(elem), WireValue::Coll(CollValue::Values(items)))
+            if matches!(**elem, WireType::SLong) =>
+        {
+            let mut longs = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    WireValue::Long(v) => longs.push(*v),
+                    _ => return None,
+                }
+            }
+            Some((
+                SType::SColl(Box::new(SType::SLong)),
+                ConstPayload::LongColl(longs),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn group_element_bytes(ge: &GroupElement) -> &[u8; 33] {
+    ge.as_bytes()
 }
 
 /// `fromBase64(s)` → `ByteArrayConstant(Base64.getDecoder().decode(s))` via the
@@ -1162,13 +1341,99 @@ mod tests {
 
     // ----- error paths / fall-through -----
 
-    /// `deserialize` is always deferred (accept-invalid deviation; re-scoped
-    /// M3 Task-5 — requires an opcode-IR→`TypedExpr` reverse mapping, deferred
-    /// past emit, see module docs / lib.rs D-T2).
+    /// `deserialize` without an explicit `[T]` REJECTs `InvalidArguments`
+    /// (oracle-confirmed 2026-07-07: `deserialize("Jq") == 5` → `REJECT 0:0
+    /// InvalidArguments`) — the range stays an unresolved type var, same gate
+    /// as `deserializeTo`/`fromBigEndianBytes`'s `global_deserialize`.
     #[test]
-    fn deserialize_falls_through() {
+    fn deserialize_without_explicit_type_arg_errors() {
+        let f = ident("deserialize", vec![SType::SString], tv("T"));
+        assert!(predef_ir_builder("deserialize", &f, &[str_const("Jq")], 3)
+            .unwrap()
+            .is_err());
+    }
+
+    /// `deserialize[Int]("Jq")` → `ConstantNode:Int @5` (oracle-confirmed
+    /// 2026-07-07 ×2: bytes `04 0a` = `IntConstant(5)`; `"Jq"` is that pair's
+    /// Base58 encoding).
+    #[test]
+    fn deserialize_constant_folds_to_typed_constant() {
         let f = ident("deserialize", vec![SType::SString], SType::SInt);
-        assert!(predef_ir_builder("deserialize", &f, &[str_const("x")], 3).is_none());
+        let out = predef_ir_builder("deserialize", &f, &[str_const("Jq")], 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out,
+            TypedExpr::Constant {
+                value: ConstPayload::Int(5),
+                tpe: SType::SInt,
+            }
+        );
+    }
+
+    /// `deserialize[Int]("3p")` → bare `Height` (oracle-confirmed 2026-07-07:
+    /// byte `a3` is the bare `Height` opcode) — a genuinely NON-constant,
+    /// runtime node, not just a constant-folding shortcut.
+    #[test]
+    fn deserialize_non_constant_singleton_embeds_the_node() {
+        let f = ident("deserialize", vec![SType::SString], SType::SInt);
+        let out = predef_ir_builder("deserialize", &f, &[str_const("3p")], 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, TypedExpr::Height { tpe: SType::SInt });
+    }
+
+    /// Invalid Base58 char → `TyperError` (Scala: `Base58.decode(str).get` →
+    /// `AssertionError`; verdict-parity class deviation, same discipline as
+    /// `fromBase58`'s own reject).
+    #[test]
+    fn deserialize_invalid_base58_char_errors() {
+        let f = ident("deserialize", vec![SType::SString], SType::SInt);
+        assert!(
+            predef_ir_builder("deserialize", &f, &[str_const("not-base58!!!")], 3)
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    /// Malformed (truncated) ValueSerializer bytes → `TyperError` (Scala:
+    /// `BufferUnderflowException`, oracle-confirmed 2026-07-07).
+    #[test]
+    fn deserialize_malformed_bytes_errors() {
+        // Base58 of a single 0x04 byte: a lone SInt type tag with no value
+        // data to follow — `parse_expr` must run out of input mid-value.
+        let s = bs58::encode([0x04u8]).into_string();
+        let f = ident("deserialize", vec![SType::SString], SType::SInt);
+        assert!(predef_ir_builder("deserialize", &f, &[str_const(&s)], 3)
+            .unwrap()
+            .is_err());
+    }
+
+    /// A declared type disagreeing with the decoded value's type REJECTs
+    /// (Scala: `res.tpe != tpe` → `InvalidArguments`).
+    #[test]
+    fn deserialize_type_mismatch_errors() {
+        // "Jq" decodes to an Int constant; declaring [Boolean] must reject.
+        let f = ident("deserialize", vec![SType::SString], SType::SBoolean);
+        assert!(predef_ir_builder("deserialize", &f, &[str_const("Jq")], 3)
+            .unwrap()
+            .is_err());
+    }
+
+    /// A shape `unlower_expr` does not cover (a composite expression — here a
+    /// `GT` relation over two Height/Const nodes) rejects with a descriptive
+    /// error rather than silently mismapping (probe-bounded scope: gap F6
+    /// covers constants + the nine singleton primitives only).
+    #[test]
+    fn deserialize_composite_expression_rejects_honestly() {
+        // Base58 of `HEIGHT > 0`: `d1 91 a3 04 00` — Height(0xa3) is covered,
+        // but the enclosing GT(0x91)/BoolToSigmaProp(0xd1) wrapper is not.
+        let bytes = [0xd1u8, 0x91, 0xa3, 0x04, 0x00];
+        let s = bs58::encode(bytes).into_string();
+        let f = ident("deserialize", vec![SType::SString], SType::SSigmaProp);
+        assert!(predef_ir_builder("deserialize", &f, &[str_const(&s)], 3)
+            .unwrap()
+            .is_err());
     }
 
     // ----- fromBase58 / fromBase64 canonical decode (oracle §17, D-T2 closed) -----

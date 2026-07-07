@@ -69,7 +69,7 @@ use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{CollValue, SigmaBoolean, SigmaValue};
 
 use crate::stype::SType;
-use crate::typed::{node_tpe, ConstPayload, TypedExpr};
+use crate::typed::{node_tpe, ConstPayload, MethodRef, TypedExpr};
 use crate::typer::methods::wire_method;
 use crate::typer::unify::numeric_index;
 
@@ -299,10 +299,52 @@ impl Scope {
             T::Outputs { .. } => node(0xA5, Payload::Zero),
             T::Self_ { .. } => node(0xA7, Payload::Zero),
             T::MinerPubkey { .. } => node(0xAC, Payload::Zero),
-            T::LastBlockUtxoRootHash { .. } => node(0xA6, Payload::Zero),
             T::Context { .. } => node(0xFE, Payload::Zero),
             T::Global { .. } => node(0xDD, Payload::Zero),
-            T::GroupGenerator { .. } => node(0x82, Payload::Zero),
+
+            // ── M4 Task 8 (recon-transforms.md §9, D-C7 singleton bullet):
+            //    bare `LastBlockUtxoRootHash` and bare/dotted `groupGenerator`
+            //    are NOT `IsContextProperty`-recognized primitives on the
+            //    Scala side (unlike Height/Inputs/Outputs/Self/MinerPubkey) —
+            //    buildTree's fallback re-materializes both as PropertyCalls.
+            //    Oracle-confirmed 2026-07-07 (×2 runs each,
+            //    `ORACLE_TREE_VERSION=3`): `LastBlockUtxoRootHash.digest.size`
+            //    and `CONTEXT.LastBlockUtxoRootHash.digest.size` both reply
+            //    `…db6509fe…` (`PropertyCall(101, 9)` over a bare `Context`
+            //    receiver, opcode 0xFE) — so this arm alone closes the gap
+            //    without touching the (already-correct) dotted-form typer
+            //    path, which never constructs this TypedExpr variant.
+            //    `groupGenerator == groupGenerator` and
+            //    `Global.groupGenerator.getEncoded.size`/bare
+            //    `groupGenerator.getEncoded.size` both reply
+            //    `…db6a01dd…` (`PropertyCall(106, 1)` over a bare `Global`
+            //    receiver, opcode 0xDD) for BOTH forms — unlike
+            //    LastBlockUtxoRootHash, our typer routes bare `groupGenerator`
+            //    (`process_global_method`) AND dotted `Global.groupGenerator`
+            //    (`lower_method`) to the SAME `TypedExpr::GroupGenerator`
+            //    node, so this single arm fixes both call sites at once.
+            T::LastBlockUtxoRootHash { .. } => self.emit_method_call(
+                &TypedExpr::Context {
+                    tpe: SType::SContext,
+                },
+                &MethodRef {
+                    owner: "Context".to_string(),
+                    name: "LastBlockUtxoRootHash".to_string(),
+                },
+                &[],
+                &[],
+            ),
+            T::GroupGenerator { .. } => self.emit_method_call(
+                &TypedExpr::Global {
+                    tpe: SType::SGlobal,
+                },
+                &MethodRef {
+                    owner: "SigmaDslBuilder".to_string(),
+                    name: "groupGenerator".to_string(),
+                },
+                &[],
+                &[],
+            ),
 
             // ── constants: always the constant path (incl. Booleans — see the
             //    module docs; never the 0x7F/0x80 True/False opcodes) ──────────
@@ -1707,10 +1749,8 @@ mod tests {
             ("OUTPUTS", 0xA5),
             ("SELF", 0xA7),
             ("MinerPubkey", 0xAC),
-            ("LastBlockUtxoRootHash", 0xA6),
             ("CONTEXT", 0xFE),
             ("Global", 0xDD),
-            ("Global.groupGenerator", 0x82),
         ] {
             let ir = emit_tc(src);
             assert_eq!(root_opcode(&ir), opcode, "{src}");
@@ -1719,6 +1759,55 @@ mod tests {
                     assert_eq!(payload, &Payload::Zero, "{src}: singleton payload")
                 }
                 other => panic!("{src}: expected Op, got {other:?}"),
+            }
+            wire_roundtrip(&ir);
+        }
+    }
+
+    #[test]
+    fn lowered_singletons_emit_property_call_and_roundtrip() {
+        // M4 Task 8 (recon-transforms.md §9, D-C7): bare `LastBlockUtxoRootHash`
+        // and bare/dotted `groupGenerator` are NOT `IsContextProperty`
+        // primitives on the Scala side — both lower to a `PropertyCall`
+        // (opcode 0xDB), not the dedicated 0xA6/0x82 leaf. Oracle-confirmed
+        // 2026-07-07 (`ORACLE_TREE_VERSION=3`, ×2 runs each): both
+        // `LastBlockUtxoRootHash.digest.size` and
+        // `CONTEXT.LastBlockUtxoRootHash.digest.size` reply the SAME
+        // `PropertyCall(101, 9)` receiver bytes (`…db6509fe…`); both
+        // `groupGenerator.getEncoded.size` and
+        // `Global.groupGenerator.getEncoded.size` reply the SAME
+        // `PropertyCall(106, 1)` receiver bytes (`…db6a01dd…`).
+        for (src, (type_id, method_id), receiver_opcode) in [
+            ("LastBlockUtxoRootHash", (101u8, 9u8), 0xFEu8),
+            ("groupGenerator", (106, 1), 0xDD),
+            ("Global.groupGenerator", (106, 1), 0xDD),
+        ] {
+            let ir = emit_tc(src);
+            assert_eq!(root_opcode(&ir), 0xDB, "{src}: PropertyCall opcode");
+            match &ir {
+                Expr::Op(IrNode {
+                    payload:
+                        Payload::MethodCall {
+                            type_id: tid,
+                            method_id: mid,
+                            obj,
+                            args,
+                            type_args,
+                        },
+                    ..
+                }) => {
+                    assert_eq!((*tid, *mid), (type_id, method_id), "{src}: wire ids");
+                    assert!(args.is_empty(), "{src}: PropertyCall has no args");
+                    assert!(type_args.is_empty(), "{src}: no explicit type args");
+                    assert_eq!(root_opcode(obj), receiver_opcode, "{src}: receiver");
+                    match obj.as_ref() {
+                        Expr::Op(IrNode { payload, .. }) => {
+                            assert_eq!(payload, &Payload::Zero, "{src}: receiver is a bare leaf")
+                        }
+                        other => panic!("{src}: expected Op receiver, got {other:?}"),
+                    }
+                }
+                other => panic!("{src}: expected MethodCall payload, got {other:?}"),
             }
             wire_roundtrip(&ir);
         }

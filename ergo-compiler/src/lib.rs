@@ -291,7 +291,7 @@
 //! matches, error class differs. Bounded to out-of-range literal ids which no
 //! real contract uses.
 //!
-//! ### D-T2 — fromBase58/fromBase64 canonical decode — CLOSED (M3 Task-5); deserialize re-scoped
+//! ### D-T2 — fromBase58/fromBase64 canonical decode — CLOSED (M3 Task-5); deserialize CLOSED (M4 Task 8)
 //!
 //! **`fromBase58` / `fromBase64` — CLOSED.** Both character-class AND structural
 //! padding validation are implemented in `predef_ir_builder` and match Scala's
@@ -314,15 +314,28 @@
 //! byte-exact ACCEPT records for `fromBase58("")`, `fromBase64("")`,
 //! `fromBase64("YWJj")`, `fromBase64("ab")`.
 //!
-//! **`deserialize` — remains deferred, re-scoped.** `predef_ir_builder` returns
-//! `None` unconditionally. Scala constant-folds `deserialize(lit)` at type-check
-//! time and throws on undeserializable bytes; we accept the `Apply` unlowered
-//! (accept-invalid deviation, bounded to malformed literals no real contract
-//! uses). Unlike `fromBase58`/`fromBase64`, closing this requires an
-//! opcode-IR→`TypedExpr` reverse mapping (`ValueSerializer` decodes to
-//! sigma-state's own AST representation, not ours) — scheduled at M4
-//! alongside the lowering catalog, which needs the same mapping (M3
-//! close-out decision; the adversarial pass surfaced no real-contract need).
+//! **`deserialize[T](s)` — CLOSED (M4 Task 8, gap F6).** `predef_ir.rs`
+//! implements the opcode-IR→`TypedExpr` reverse mapping `ValueSerializer`
+//! needs (it decodes to sigma-state's own general `Value` AST, not just
+//! constants — `deserialize[Int]("3p")` embeds a bare, non-constant `Height`
+//! node, oracle-confirmed): Base58-decode `s` (same alphabet/class-deviation
+//! discipline as `fromBase58`), `ergo_ser::opcode::parse_expr` the bytes as
+//! one general node, `predef_ir::unlower_expr` it back to a `TypedExpr`, and
+//! reject on a declared/actual type mismatch (`deserialize_predef`). Bare
+//! `deserialize(...)` (no explicit `[T]`) REJECTs `InvalidArguments`, mirroring
+//! `deserializeTo`/`fromBigEndianBytes`'s existing gate (oracle-confirmed).
+//! **Scope (probe-bounded):** `unlower_expr` covers every `Const` shape
+//! `emit::map_const` can produce in reverse, plus the nine zero-payload
+//! context/global singleton primitives (`Height`/`Inputs`/`Outputs`/`Self_`/
+//! `MinerPubkey`/`LastBlockUtxoRootHash`/`Context`/`Global`/`GroupGenerator`).
+//! A crafted byte string decoding to anything else (a `BinOp`, a `MethodCall`,
+//! a materialized `Coll[Int]`/`Coll[Boolean]` constant — `ConstPayload` has no
+//! variant for those, only `Coll[Byte]`/`Coll[Long]`) is REJECTED with a
+//! descriptive `TyperError` rather than silently mismapped: an honest, bounded
+//! residual (accept-Scala/reject-ours, the safe direction) — no source in the
+//! 79-contract corpus calls `deserialize` at all (grep-confirmed), so closing
+//! the fully general case would mean porting a second full symmetric
+//! opcode-IR↔TypedExpr mapping for a predef nothing exercises.
 //!
 //! ### D-T3 — unsignedBigInt canonical constant + bigInt literal canonicalization — CLOSED (M3 Task-6)
 //!
@@ -910,10 +923,34 @@
 //!   even over a singleton `Coll`); `crate::lower` implements the fold;
 //! - ~~`proveDlog(const)` → `SigmaPropConstant`~~ **CLOSED, see D-C2 above**
 //!   (one instance of this family);
-//! - **bare-ident context/global singletons lowered to `PropertyCall`s**
-//!   (bare `LastBlockUtxoRootHash` → `PropertyCall` over `Context`; bare
-//!   `Global.groupGenerator` → `PropertyCall` over `Global`; the dot-forms
-//!   match).
+//! - ~~bare-ident context/global singletons lowered to `PropertyCall`s~~
+//!   **CLOSED (M4 Task 8, recon-transforms.md §9):** bare
+//!   `LastBlockUtxoRootHash` → `PropertyCall(101, 9)` over a bare `Context`
+//!   receiver; bare `groupGenerator` AND dotted `Global.groupGenerator` (both
+//!   route to the SAME `TypedExpr::GroupGenerator` node in our typer) →
+//!   `PropertyCall(106, 1)` over a bare `Global` receiver — `emit.rs`'s
+//!   `T::LastBlockUtxoRootHash`/`T::GroupGenerator` arms now call
+//!   `emit_method_call` instead of emitting the dedicated 0xA6/0x82 leaf.
+//!   Oracle-confirmed 2026-07-07 (×2 runs each, `ORACLE_TREE_VERSION=3`):
+//!   `LastBlockUtxoRootHash.digest.size` and
+//!   `CONTEXT.LastBlockUtxoRootHash.digest.size` both reply the identical
+//!   `…db6509fe…`; `groupGenerator.getEncoded.size` and
+//!   `Global.groupGenerator.getEncoded.size` both reply the identical
+//!   `…db6a01dd…` — confirming the dot-form typer path (which never
+//!   constructs these two `TypedExpr` variants) was already correct and is
+//!   untouched. Graduation: no CURRENTLY COMMITTED vector's byte-match
+//!   classification changes (`compile_seed_semantic_parity`'s
+//!   `DC7_P2SH_MISMATCH_SET`/`P2S_DC1_MISMATCH_SET` pass unmodified) — the
+//!   seed's two bare-form vectors (`groupGenerator`, `Global.groupGenerator`)
+//!   are compile-time REJECTs (non-Bool/SigmaProp root, unaffected by this
+//!   transform), and the chaincash corpus's bare `groupGenerator` usage
+//!   (`val g: GroupElement = groupGenerator`, `reserve.es` + 5 sibling
+//!   contracts) is `val`-bound and stays MULTI-blocked pending Task 9's
+//!   val-inlining regardless. Direct byte-exact regression coverage instead
+//!   lives in two new tests: `emit::tests::
+//!   lowered_singletons_emit_property_call_and_roundtrip` (shape) and
+//!   `tree::tests::compile_bare_singleton_lowering_matches_oracle_property_call`
+//!   (full-pipeline, byte-identical to the oracle capture above).
 //!
 //! **CORRECTION (M4 Task 1, recon-gap.md Finding 2):** an earlier pass of
 //! this ledger listed "env collections lifted per-element" (env `Coll[Long]`
@@ -951,6 +988,65 @@
 //! lowering tasks plus the M5 CSE/ValDef-sharing work close the remainder;
 //! each landed lowering removes the vectors it graduates from the set,
 //! deliberately and explicitly.
+//!
+//! ### MethodCall lowering catalog (M4 Task 8, recon-transforms.md §10, recon-cannonq.md Part A)
+//!
+//! Every cannonQ-only row was re-probed against the pinned 6.0.2 checkout/live
+//! oracle before entering this ledger (per the plan's authority rule) rather
+//! than trusted from the 6.1.2-derived fork audit:
+//!
+//! - **`g.multiply(h)` → `MultiplyGroup` (recon-cannonq.md A.1 row 2):**
+//!   already correct — `typer/assign.rs`'s `(SType::SGroupElement, "multiply")`
+//!   arm (and the binder's `*`-operator route) both build
+//!   `TypedExpr::MultiplyGroup` directly, `emit.rs` writes the dedicated
+//!   `0xA0` opcode. Was a ledger DOCUMENTATION gap (never listed under any
+//!   D-C item), not a code gap — no change needed. `exp`/`Exponentiate`
+//!   (`0x9F`) is the same story.
+//! - **`tree.get(key, proof)` → `MethodCall(100, 10)`, NOT `TreeLookup`
+//!   (recon-cannonq.md A.1 row 3):** already correct — no special-case
+//!   irBuilder for `(SAvlTree, "get")` in `lower_method`, so it falls to the
+//!   generic `MethodCall` fallback (wire pair confirmed against the AvlTree
+//!   method table, `methods.rs` `avl_tree_methods` id 10).
+//!   `TypedExpr::TreeLookup`/opcode `0xB7` is UNREACHABLE from any frontend
+//!   surface (no code path constructs it, `emit.rs` comment at the
+//!   `TreeLookup` arm) — this is CORRECT, not dead-code rot: the pinned 6.0.2
+//!   checkout's `SigmaPredef.scala:678-680` marks the `treeLookup(tree, key,
+//!   proof)` predef-function form `specialFuncs`, commented "not used in
+//!   frontend, and should not be used... used in SpecGen only" — i.e. Scala's
+//!   OWN frontend cannot reach `TreeLookup` either. Oracle-confirmed
+//!   2026-07-07: `treeLookup(...)` REJECTs (`ParserException`/`TyperException`
+//!   depending on phrasing) — verdict-matches our compiler's lack of a
+//!   `treeLookup` predef. This resolves recon-cannonq.md's open question
+//!   ("same target opcode?" for the predef vs method forms) definitively: the
+//!   predef form doesn't exist in reachable ErgoScript at all.
+//! - **`allZK`/`anyZK` single-literal-`Coll` unwrap (recon-cannonq.md A.1 row
+//!   4):** OUT OF SCOPE, not merely unpinned — `predef_ir_builder` has no
+//!   `"allZK"`/`"anyZK"` arm at all (`_ => None` fall-through), so neither
+//!   predef function is reachable from ErgoScript source in this compiler yet
+//!   (confirmed: zero references in `golden_seed.txt`/any test vector/the
+//!   79-contract corpus). `crate::lower`'s `SigmaAnd`/`SigmaOr` single-element
+//!   unwrap arm (recon-transforms.md §4) is already implemented and pinned by
+//!   the SAME `GraphBuilding.scala:205-208` citation as the `And`/`Or` arm it
+//!   ships alongside, so wiring `allZK`/`anyZK` predef functions in a future
+//!   task inherits the unwrap for free — but implementing those two predefs
+//!   is new-feature scope (parsing/typing/emitting a function this compiler
+//!   has never supported), not a lowering-catalog fix, and is left undone.
+//! - The remaining §10a "primitives that stay primitives" and §10b fallback
+//!   rows (Coll/Box/Option/Sigma ops, numeric unary `toBytes`/`toBits`/bitwise
+//!   binops) were spot-checked against `emit.rs`/`methods.rs` and are already
+//!   byte-correct (M2/M3's wire-id sweep + M4 Task 8's re-audit found no
+//!   further gaps) — no code change.
+//!
+//! **`TyperCtx::lower_method_calls` dead flag — DELETED (M4 Task 8).** The
+//! field mirrored Scala's `SigmaTyper` constructor parameter but was always
+//! constructed `true` (`TyperCtx::new`) and never read by any dispatch site —
+//! a knob that implied a toggle nothing in this crate implements. Scala's own
+//! `SigmaCompiler.scala` always passes `true` in the production `compile()`
+//! path this port targets, so wiring a real `false` branch would mean
+//! threading it through every property/method irBuilder call site
+//! (`predef_ir::predef_ir_builder`, `assign::lower_method`) to reproduce a
+//! mode Scala's own production path never takes. Deleted rather than wired;
+//! see `typer/mod.rs`'s `TyperCtx` doc comment for the full reasoning.
 
 pub mod ast;
 pub mod binder;

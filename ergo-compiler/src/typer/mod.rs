@@ -50,25 +50,31 @@ pub type TypeEnv = BTreeMap<String, SType>;
 ///
 /// Mirrors the `SigmaTyper` constructor parameters relevant to typing
 /// (SigmaTyper.scala:21-24).  `builder`/`predefFuncRegistry` are folded into the
-/// Rust port's method tables + node constructors, so only these two remain.
+/// Rust port's method tables + node constructors, so only `tree_version` remains.
+///
+/// M4 Task 8 (recon-transforms.md §10, roadmap dead-flag note): the Scala
+/// constructor's `lowerMethodCalls` parameter is DROPPED here rather than
+/// ported. `SigmaCompiler.scala` always constructs `SigmaTyper` with
+/// `lowerMethodCalls = true` in the production `compile()` path this port
+/// targets — the Rust port's property/method irBuilders
+/// (`predef_ir::predef_ir_builder`, `assign::lower_method`) are correspondingly
+/// unconditional, matching that fixed value. An earlier `lower_method_calls: bool`
+/// field on this struct was always constructed `true` and never read anywhere
+/// in the dispatch — a dead knob that implied a toggle nothing in this crate
+/// implements. Wiring it for real would mean threading a `false` branch
+/// through every one of those call sites to reproduce a mode Scala's own
+/// production path never takes; deleting it instead keeps the struct honest
+/// about what it actually models.
 #[derive(Debug, Clone, Copy)]
 pub struct TyperCtx {
     /// ErgoTree version, gating the v5/v6 method tables
     /// (`VersionContext.isV3OrLaterErgoTreeVersion` ⇔ `tree_version >= 3`).
     pub tree_version: u8,
-    /// `lowerMethodCalls` — always `true` in production (SigmaTyper.scala:24,
-    /// `SigmaCompiler` passes `true`).  When `true`, property/method IR builders
-    /// are invoked; when `false`, everything falls back to `MethodCall`.
-    pub lower_method_calls: bool,
 }
 
 impl TyperCtx {
-    /// Production context: `lower_method_calls = true`.
     pub fn new(tree_version: u8) -> Self {
-        TyperCtx {
-            tree_version,
-            lower_method_calls: true,
-        }
+        TyperCtx { tree_version }
     }
 }
 
