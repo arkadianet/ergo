@@ -16,6 +16,7 @@ pub mod dto;
 mod addresses;
 mod boxes;
 mod chain;
+mod decode;
 pub(crate) mod extract;
 mod mempool;
 mod tokens;
@@ -333,6 +334,12 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             get(mempool::transaction_by_id),
         )
         .route("/api/v1/mempool/fee-histogram", get(mempool::fee_histogram))
+        // ----- protocols/* registry discovery (static, indexer-free) -----
+        .route("/api/v1/protocols", get(decode::list_protocols))
+        .route(
+            "/api/v1/protocols/:protocol_id",
+            get(decode::protocol_by_id),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::CheapRead),
             governor_mw,
@@ -403,6 +410,12 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .route("/api/v1/mempool/check", post(transactions::check))
         // ----- boxes/* -----
         .route("/api/v1/boxes/range", get(boxes::box_range))
+        // Off-chain semantic decode (stateless) + the singleton state one-shot.
+        .route("/api/v1/boxes/decode", post(decode::decode_off_chain_box))
+        .route(
+            "/api/v1/protocols/:protocol_id/state",
+            get(decode::protocol_state),
+        )
         .route(
             "/api/v1/boxes/by-address/:address",
             get(boxes::boxes_by_address),
