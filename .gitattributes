@@ -4,3 +4,11 @@
 # checkout and the comparison fails locally even though the committed
 # bytes are correct. Pin it to LF so the snapshot is platform-stable.
 ergo-api/tests/fixtures/openapi_native.yaml text eol=lf
+
+# test-vectors are byte-exact oracle artifacts (JVM-oracle-captured corpus
+# sources, verdict/seed JSON, wire hex). EOL conversion must never touch them:
+# on Windows, autocrlf CRLF-rewrites the .es corpus at checkout, shifting the
+# parser's line:col positions against the committed oracle verdicts
+# (corpus_verdict_parity fails with position-only divergences). -text disables
+# all conversion so every OS sees the committed bytes verbatim.
+test-vectors/** -text
