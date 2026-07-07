@@ -562,10 +562,11 @@
 //! (`ErgoTree.scala:384-398`). The Relation2 `0x85` bool-pair compaction is
 //! bypassed for free (a compacted bool pair never reaches the `Expr::Const`
 //! arm the sink lives in — unit-pinned: `BinAnd(true,true)` → `ed8503`, sink
-//! empty). NOTE the oracle's `cc true && (1 == 1)` zero-entry table also
-//! depends on its `1 == 1 → true` CONSTANT FOLD, which is D-C7/Task-5 scope —
-//! until that lands, our tree for that source carries three Int placeholders
-//! and stays in the mismatch set. Oracle-exact today for
+//! empty). The oracle's `cc true && (1 == 1)` zero-entry table also
+//! depends on its `1 == 1 → true` CONSTANT FOLD — **landed M4 Task 5**
+//! (`crate::fold`, `Const == Const → true`), so that source now folds to the
+//! oracle-exact `1000d1ed8503` (`BinAnd(true, true)`, zero-entry table) and
+//! graduated out of the mismatch set. Oracle-exact for
 //! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` (was our
 //! `00d191a304c801`).
 //!
@@ -701,25 +702,25 @@
 //!    rejects the v6 method under v5 activation. At v3 the per-type residual
 //!    MethodCall is unchanged.
 //!
-//! Plus the **constant-fold overflow CHECK** (`tree.rs`
-//! `fold_overflow_check`; `ArithmeticException`): a bounded exact re-fold of
-//! Scala's compile-time constant evaluation — `+`,`-`,`*` over same-width
-//! `Byte`/`Short`/`Int`/`Long` constant operands, `min`/`max` over the same
-//! (wave-4 review follow-up: they cannot overflow themselves but propagate
-//! the constant into the parent checks — `(min(2147483647, 1) +
-//! 2147483647)` REJECTs, previously accept-invalid), and `Downcast`/`Upcast`
-//! of DIRECT constants; overflow rejects. The emitted tree stays UNFOLDED
-//! (semantics unchanged). Probed fold boundary honored: division/modulo NOT
-//! folded (`1/0` compiles), BigInt arith NOT folded, `Negation` NOT folded
-//! (probe-confirmed PARITY, wave 4: `-(0 + 2147483647) - 2` ACCEPTs with
-//! the Negation node unfolded in the oracle tree even over a folded
-//! constant, so our recurse-only arm matches; `-(<literal>)` folds at PARSE
-//! time on both sides and rejects via the `-` arm — the min/max-chain and
-//! Negation residuals flagged at wave 1 are BOTH closed), casts of
+//! Plus the **constant-fold overflow REJECT** (`ArithmeticException`): as of M4
+//! Task 5 this is no longer a separate check pass — it is the reject arm of the
+//! generic constant fold (`crate::fold`, D-C7 below). A `+`/`-`/`*` over
+//! same-width `Byte`/`Short`/`Int`/`Long` constants that overflows its width
+//! rejects; otherwise the node is now actually REPLACED by the folded constant
+//! (the tree is folded, not merely checked — that is the D-C7 graduation). The
+//! `Downcast`/`Upcast`-of-DIRECT-constant fold + overflow moved to
+//! `tree.rs::fold_direct_const_casts` in M4 Task 4. Probed fold boundary
+//! honored: BigInt arith NOT folded (outside the `i64` ladder), `Negation` NOT
+//! folded (probe-confirmed PARITY: `-(0 + 2147483647) - 2` ACCEPTs with the
+//! Negation node unfolded even over a folded constant); casts of
 //! non-direct-constant subexpressions NOT folded (`(x*100).toByte` compiles;
-//! cast-of-cast chains treated the same, un-probed). The fold check runs
-//! everywhere — unused-val rhs and lambda bodies included (both
-//! oracle-pinned REJECT).
+//! `crate::fold` recurses through a cast but never folds it). **Correction (M4
+//! Task 5, source-authoritative `DivOp.shouldPropagate = rhs != 0`, fresh cc
+//! probe):** division/modulo DO fold when the divisor is a NON-ZERO constant
+//! (`4/2`, `5%3` fold); only the divisor-`0` forms (`1/0`, `1%0`) stay
+//! unfolded — the earlier "division/modulo never folded" note was drawn from
+//! the `rhs==0` case alone. The fold runs everywhere — unused-val rhs and
+//! lambda bodies included (both oracle-pinned REJECT on overflow).
 //!
 //! Wave-2 items (getReg in-range literal lowering F4, `slice[T]`
 //! explicit-type-arg residual F5, v6 numeric constant-receiver folds F6,
@@ -783,14 +784,20 @@
 //!    `compile_semantic_parity.rs` — both compilers keep byte-matching
 //!    MethodCalls that neither evaluator accepts under v0.
 //! 4. **`SizeOf(<collection literal>)` folds to the element count**
-//!    (`tree.rs::fold_literal_coll_sizes`; constants F-3): Scala folds
+//!    (M4 Task 5: absorbed into `crate::fold`; constants F-3): Scala folds
 //!    `.size` of a `ConcreteCollection` literal regardless of element
-//!    constancy (`Coll(HEIGHT).size` folds; probed). Runs AFTER the D-C5
-//!    gates (discarded elements stay verdict-checked — `Coll(2147483647 +
-//!    1).size` still rejects) and BEFORE serialization, so
-//!    `Coll[UnsignedBigInt]().size == 0` emits clean v0 bytes (the v3-only
-//!    elem-type code 9 never hits the wire — previously a stranded-funds
-//!    P2S our own `read_ergo_tree` refused).
+//!    constancy (`Coll(HEIGHT).size` folds; probed). Children fold BEFORE a
+//!    parent's `SizeOf` (discarded elements stay verdict-checked —
+//!    `Coll(2147483647 + 1).size` still rejects), and the fold runs BEFORE
+//!    serialization, so `Coll[UnsignedBigInt]().size == 0` emits clean v0
+//!    bytes (the v3-only elem-type code 9 never hits the wire — previously a
+//!    stranded-funds P2S our own `read_ergo_tree` refused). **M4 Task 5** now
+//!    ALSO folds the surrounding `== 0` (`Const == Const → true`), so
+//!    `Coll[UnsignedBigInt]().size == 0`/`Coll(HEIGHT).size == 1`/`Coll(1,
+//!    2).size == 2` graduate to a byte-identical `sigmaProp(true)` (D-C7). A
+//!    `SizeOf` over a `Coll` CONSTANT (not a literal — `x.toBytes.size`) is
+//!    NOT folded (oracle-pinned; the `CollConst.length` graph rule does not
+//!    fire for a lifted `toBytes`/`toBits` constant).
 //! 5. **Post-write self-check** (`compile`): the tree bytes are re-read via
 //!    `read_ergo_tree` before any address is derived; a failure is a
 //!    `CompileError::Serializer` reject. This is a DELIBERATE reject-side
@@ -801,21 +808,22 @@
 //!    bytes NEITHER side's version-gated reader re-parses (its tree_hex
 //!    would not even parse for the semantic gate), so the ACCEPT verdict is
 //!    itself poisoned — both products strand funds; (b) **the UBI-fold
-//!    family (extended by re-verify finding NF-1, 2026-07-07)** —
-//!    reject-side divergent not only on the val-bound
-//!    `Coll[UnsignedBigInt]()`-under-`.size` self-check shape but on EVERY
-//!    UBI-constant expression whose fold Scala performs and we don't:
-//!    equality (`unsignedBigInt("1") == unsignedBigInt("1")`), tuple-select
-//!    (`(unsignedBigInt("5"), 1)._2 == 1`), and val-bound forms all fold to
-//!    `10010101d17300` on the oracle (usable — the UBI data never reaches
-//!    its wire), while our v0 UBI-data gate (`CompileError::Serializer`,
-//!    "UnsignedBigInt constant data") fires on the unfolded AST. Bounded to
-//!    UBI-under-v0 sources no real contract uses; the NON-foldable shapes
-//!    (`unsignedBigInt("5") > unsignedBigInt("3")`) still REJECT in parity,
-//!    so the data gate must NOT be weakened — the family closes when M4/M5
-//!    constant folding lands. Neither (a) nor (b) is committable as a
-//!    vector; the self-check flavor is pinned in `tree.rs`
-//!    (`compile_self_unreadable_emission_rejects_serializer_class`).
+//!    family (re-verify finding NF-1, 2026-07-07; NARROWED by M4 Task 5)** —
+//!    the INLINE-constant cases whose fold Scala performs now fold on OUR side
+//!    too: `unsignedBigInt("1") == unsignedBigInt("1")` folds via the generic
+//!    engine's `Const == Const → true` to a byte-identical `10010101d17300`
+//!    BEFORE the v0 UBI-data gate sees the UBI (the NF-1 closure — locked
+//!    decision 1: folds run before the gate). This ACCEPT is now GENUINE
+//!    (oracle-matched, verified cc probe), not a divergence. The NON-foldable
+//!    shapes still REJECT in parity on BOTH sides (`unsignedBigInt("5") >
+//!    unsignedBigInt("3")`, `unsignedBigInt("5") == unsignedBigInt("3")` —
+//!    unequal operands, Eq's terminal case does not fold), so the data gate
+//!    must NOT be weakened. RESIDUAL: a VAL-BOUND `Coll[UnsignedBigInt]()`
+//!    under `.size` (`{ val u = Coll[UnsignedBigInt](); u.size.toLong ==
+//!    SELF.value }`) still reject-side divergent — `SizeOf(ValUse)` needs the
+//!    Task 9 val-inline to fold; the self-check reject is pinned in `tree.rs`
+//!    (`compile_self_unreadable_emission_rejects_serializer_class`). (a)
+//!    stays a documented reject-side divergence.
 //!
 //! ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (Task-11 adversarial wave 3)
 //!
@@ -825,12 +833,18 @@
 //! (adversarial reports: harness H-1, numerics N-3, bindings F3,
 //! methodcalls class 4 — five consolidated root causes plus folds):
 //!
-//! - **constant folding** — including env constants (`ccs` binds `x`/`b1`/
-//!   `n1`/… as constants, so closed-over comparisons fold to
-//!   `sigmaProp(true)`), whole-expression folds (`arr1.size > 0` →
-//!   `sigmaProp(true)`), non-overflowing arithmetic
-//!   (`sigmaProp((2147483647 + 0) < 0)` folds — the OVERFLOW check is the
-//!   D-C5 gate), and `== false` → `LogicalNot`;
+//! - ~~constant folding~~ **CLOSED (M4 Task 5, `crate::fold`)** — the generic
+//!   GraphBuilding-exact fold now performs env-constant propagation (`ccs`
+//!   binds `x`/`b1`/… as constants, so closed-over comparisons fold to
+//!   `sigmaProp(true)`), both-`Const` relational/boolean folds
+//!   (`<`/`<=`/`>`/`>=`/`==`(equal-operand)/`^`/`!`), the `+`/`-`/`*`/`min`/
+//!   `max`/`/`/`%` arithmetic folds (overflow → reject; `/`/`%` fold on a
+//!   non-zero divisor), the `§2a` identities (`x+0`, `x*1`, `-(-x)`, …), the
+//!   `SizeOf(<literal>)` fold, all-`Const` `anyOf`/`allOf`, and De Morgan on
+//!   `!`. 19 CONST-FOLD vectors graduated (incl. the NF-1
+//!   `unsignedBigInt == unsignedBigInt` closure and the MULTI cast+const
+//!   vectors #73/#84/#85, now fully folded). RESIDUAL: `val`-bound operands
+//!   (below) and CSE-shared repeats (below) whose fold needs Task 9/M5;
 //! - ~~explicit constant-cast shape differences~~ **CLOSED (M4 Task 4):**
 //!   both directions now match Scala exactly — `Downcast`/`Upcast` of a
 //!   DIRECT constant folds (`0.toByte` argument casts, methodcalls (a)), and
@@ -888,21 +902,22 @@
 //! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
 //! compensating regression a count assert would miss): the address gate
 //! (`tests/compile_semantic_parity.rs`) pins the corpus at
-//! `DC7_P2SH_MISMATCH_SET` (36 of the 80 swept ACCEPT vectors as of M4
-//! Task 4, down from 39 at Task 3 and 43 at Task 1/2 — Task 4's
-//! explicit-cast direct-constant fold graduated 3 (`arr1.exists`/
-//! `arr1.filter`/`arr1.getOrElse`, recon-targets.md vectors #61/#60/#62);
-//! the other 44 P2SH-match and are hard-asserted equal wherever the
-//! proposition bytes agree). The M4 lowering tasks plus the M5
-//! CSE/ValDef-sharing work close the remainder; each landed lowering
-//! removes the vectors it graduates from the set, deliberately and
-//! explicitly.
+//! `DC7_P2SH_MISMATCH_SET` (17 of the 88 swept ACCEPT vectors as of M4
+//! Task 5, down from 36 at Task 4, 39 at Task 3, 43 at Task 1/2 — Task 5's
+//! generic constant fold graduated 19 CONST-FOLD vectors; the other 71
+//! P2SH-match and are hard-asserted equal wherever the proposition bytes
+//! agree). The 17 residual are all MULTI (12 corpus CSE/val-inline/lowering,
+//! `{ val x = HEIGHT; x > 5 }`, `proveDHTuple(g1, g2, g1, g2)`); the M4
+//! lowering tasks plus the M5 CSE/ValDef-sharing work close the remainder;
+//! each landed lowering removes the vectors it graduates from the set,
+//! deliberately and explicitly.
 
 pub mod ast;
 pub mod binder;
 pub mod emit;
 pub mod env;
 pub mod error;
+mod fold;
 mod lower;
 mod parse;
 pub mod span;

@@ -252,156 +252,6 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
     }
 }
 
-/// Rewrite pass: `SizeOf(<ConcreteCollection literal>)` → `IntConstant(n)`
-/// (Task-11 wave 2, adversarial-findings-constants.md F-3; lib.rs D-C6).
-///
-/// Scala's GraphBuilding folds `.size` of a collection LITERAL to the element
-/// count regardless of element constancy (oracle 2026-07-07 ×3:
-/// `cc sigmaProp(Coll(HEIGHT).size == 1)` and `cc sigmaProp(Coll(1, 2).size
-/// == 2)` both fold — replies are the fully-folded `10010101d17300`; `cc
-/// sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)` folds the
-/// `.size` to `Int 0` even though the surrounding expression cannot fold —
-/// reply `10010400d1937e730005c1a7`). The fold is what keeps Scala's WIRE
-/// clean for `Coll[UnsignedBigInt]()`: without it our emitted bytes carry
-/// v3-only TYPE code 9 (the ConcreteCollection elem type) under the v0
-/// header — bytes our own `read_ergo_tree` refuses (a stranded-funds P2S).
-///
-/// Runs AFTER the GraphBuilding gates so the discarded elements are still
-/// verdict-checked (`Coll(2147483647 + 1).size` must keep rejecting with
-/// Scala's ArithmeticException), and BEFORE serialization/addresses. The walk
-/// is bottom-up, so nested literals fold inside-out. Residual (lib.rs D-C6):
-/// a VAL-BOUND collection literal (`{ val u = Coll[UnsignedBigInt](); …
-/// u.size … }`) is `SizeOf(ValUse)` here — Scala inlines the val and still
-/// folds (same oracle reply as the inline form); we don't, and the v3-type
-/// residue is then caught by the post-write self-check in [`compile`].
-fn fold_literal_coll_sizes(e: Expr) -> Expr {
-    /// Map every child expression of `payload` through the fold — the
-    /// exhaustive by-value twin of [`push_children`] (a new child-carrying
-    /// variant fails to compile here until it is mapped).
-    fn fold_payload(p: Payload) -> Payload {
-        let f = |b: Box<Expr>| Box::new(fold_literal_coll_sizes(*b));
-        let fv = |items: Vec<Expr>| -> Vec<Expr> {
-            items.into_iter().map(fold_literal_coll_sizes).collect()
-        };
-        match p {
-            Payload::Zero
-            | Payload::ValUse { .. }
-            | Payload::ConstPlaceholder { .. }
-            | Payload::TaggedVar { .. }
-            | Payload::BoolCollection { .. }
-            | Payload::GetVar { .. }
-            | Payload::DeserializeContext { .. }
-            | Payload::NoneValue { .. } => p,
-            Payload::One(a) => Payload::One(f(a)),
-            Payload::NumericCast { input, tpe } => Payload::NumericCast {
-                input: f(input),
-                tpe,
-            },
-            Payload::Two(a, b) => Payload::Two(f(a), f(b)),
-            Payload::Three(a, b, c) => Payload::Three(f(a), f(b), f(c)),
-            Payload::Four(a, b, c, d) => Payload::Four(f(a), f(b), f(c), f(d)),
-            Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
-                id,
-                tpe,
-                rhs: f(rhs),
-            },
-            Payload::FunDef {
-                id,
-                tpe,
-                tpe_args,
-                rhs,
-            } => Payload::FunDef {
-                id,
-                tpe,
-                tpe_args,
-                rhs: f(rhs),
-            },
-            Payload::BlockValue { items, result } => Payload::BlockValue {
-                items: fv(items),
-                result: f(result),
-            },
-            Payload::FuncValue { args, body } => Payload::FuncValue {
-                args,
-                body: f(body),
-            },
-            Payload::MethodCall {
-                type_id,
-                method_id,
-                obj,
-                args,
-                type_args,
-            } => Payload::MethodCall {
-                type_id,
-                method_id,
-                obj: f(obj),
-                args: fv(args),
-                type_args,
-            },
-            Payload::ConcreteCollection { elem_type, items } => Payload::ConcreteCollection {
-                elem_type,
-                items: fv(items),
-            },
-            Payload::Tuple { items } => Payload::Tuple { items: fv(items) },
-            Payload::SigmaCollection { items } => Payload::SigmaCollection { items: fv(items) },
-            Payload::SelectField { input, field_idx } => Payload::SelectField {
-                input: f(input),
-                field_idx,
-            },
-            Payload::ExtractRegisterAs { input, reg_id, tpe } => Payload::ExtractRegisterAs {
-                input: f(input),
-                reg_id,
-                tpe,
-            },
-            Payload::DeserializeRegister {
-                reg_id,
-                tpe,
-                default,
-            } => Payload::DeserializeRegister {
-                reg_id,
-                tpe,
-                default: default.map(f),
-            },
-            Payload::ByIndex {
-                input,
-                index,
-                default,
-            } => Payload::ByIndex {
-                input: f(input),
-                index: f(index),
-                default: default.map(f),
-            },
-            Payload::FuncApply { func, args } => Payload::FuncApply {
-                func: f(func),
-                args: fv(args),
-            },
-        }
-    }
-
-    match e {
-        Expr::Op(IrNode { opcode, payload }) => {
-            let payload = fold_payload(payload);
-            // SizeOf (0xB1) over a ConcreteCollection (0x83) literal.
-            if opcode == 0xB1 {
-                if let Payload::One(inner) = &payload {
-                    if let Expr::Op(IrNode {
-                        opcode: 0x83,
-                        payload: Payload::ConcreteCollection { items, .. },
-                    }) = inner.as_ref()
-                    {
-                        return Expr::Const {
-                            tpe: SigmaType::SInt,
-                            // A source literal's arity is far below i32::MAX.
-                            val: SigmaValue::Int(items.len() as i32),
-                        };
-                    }
-                }
-            }
-            Expr::Op(IrNode { opcode, payload })
-        }
-        other => other,
-    }
-}
-
 /// GraphBuilding verdict-parity gate over the emitted body — lambda and
 /// application shapes the FULL Scala compiler rejects (lib.rs D-C5, wave 1;
 /// adversarial-findings-bindings.md F1/F2 + fresh boundary captures
@@ -522,7 +372,7 @@ fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
 /// signed ladder only — BigInt arithmetic is NOT compile-folded by Scala,
 /// oracle control `cc sigmaProp(bigInt(2^254) + bigInt(2^254) > 0)` → OK).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FoldWidth {
+pub(crate) enum FoldWidth {
     Byte,
     Short,
     Int,
@@ -539,153 +389,12 @@ fn fold_width(t: &SigmaType) -> Option<FoldWidth> {
     }
 }
 
-fn in_fold_range(w: FoldWidth, v: i64) -> bool {
+pub(crate) fn in_fold_range(w: FoldWidth, v: i64) -> bool {
     match w {
         FoldWidth::Byte => i8::try_from(v).is_ok(),
         FoldWidth::Short => i16::try_from(v).is_ok(),
         FoldWidth::Int => i32::try_from(v).is_ok(),
         FoldWidth::Long => true,
-    }
-}
-
-/// Compile-time constant-fold overflow CHECK (lib.rs D-C5; the emitted tree
-/// stays UNFOLDED — this walk never rewrites, it only mirrors the verdict).
-///
-/// Scala's GraphBuilding evaluates constant-operand `Byte`/`Short`/`Int`/
-/// `Long` arithmetic with EXACT semantics at compile time; the
-/// `ArithmeticException` aborts compilation (oracle: `cc sigmaProp(
-/// (2147483647 + 1) < 0)` → `REJECT 0:0 ArithmeticException` — the whole
-/// N-2/F-2 family, adversarial-findings-{numerics,constants}.md). Probed
-/// fold boundary, honored exactly:
-/// - folded: `+`/`-`/`*` over same-width constant operands (operands may
-///   themselves be folded arith or folded casts-of-literals — `cc
-///   sigmaProp((127.toByte + 1.toByte) < 0.toByte)` REJECTs, and a folded
-///   result chains into a parent fold: `cc sigmaProp(((2147483646 + 1) + 1)
-///   < 0)` REJECTs); `min`/`max` over same-width constant operands (cannot
-///   themselves overflow — they select an operand — but the propagated
-///   constant feeds the parent checks: `cc sigmaProp((min(2147483647, 1) +
-///   2147483647) < 0)` and the `max` twin both REJECT; mixed-width `cc
-///   sigmaProp((min(1, 9223372036854775807L) + 9223372036854775807L) < 0L)`
-///   REJECTs via the typer's `Upcast(1)`, which [`fold_direct_const_casts`]
-///   folds to a same-width operand BEFORE this walk ever runs — see below);
-///   the fold runs EVERYWHERE — unused-val rhs (`cc { val
-///   unused = 2147483647 + 1; sigmaProp(true) }` REJECTs) and lambda bodies
-///   (`cc sigmaProp(Coll(1).map({(t: Int) => 2147483647 + 1})(0) < 0)`
-///   REJECTs) included (all fresh captures 2026-07-07, 3 identical runs
-///   each);
-/// - NOT folded: division/modulo (`cc sigmaProp(1 / 0 == 0)` → OK), BigInt
-///   arithmetic, `Negation` (probe-confirmed: `cc sigmaProp((-(0 +
-///   2147483647) - 2) < 0)` → OK with the Negation node UNFOLDED in the
-///   oracle tree even though its input constant-folds — so a recurse-only
-///   arm here is exact parity; a direct `-(2147483647)` never reaches this
-///   walk: the parser folds unary minus on literals, same as Scala's, and
-///   `cc sigmaProp((-(2147483647) - 2) < 0)` REJECTs on both sides via the
-///   `-` arithmetic fold).
-///
-/// **M4 Task 4 flip:** `Downcast`/`Upcast` of a DIRECT constant (`300.toByte`
-/// REJECTs; `9223372036854775807L + 1` REJECTs via the folded `Upcast(1)`)
-/// is no longer this function's concern — [`fold_direct_const_casts`] runs
-/// BEFORE this walk (tree.rs `compile`'s pipeline) and folds/rejects those
-/// shapes directly, so a foldable cast can no longer reach this checker at
-/// all (the arm retired in lockstep, gap F5 discipline: one code path, not
-/// two). Casts of NON-direct-constant subexpressions (`ccs sigmaProp((x *
-/// 100).toByte > 0.toByte)` → OK: Scala folds `x * 100` to 1000 but leaves
-/// the Downcast unfolded) and cast-of-cast chains (`1.toByte.toLong
-/// .toBigInt` — numerics N-3 probe 34: Scala keeps BOTH outer casts over the
-/// folded Byte constant) are likewise untouched by either pass — see
-/// [`fold_direct_const_casts`]'s docs for why the fold boundary is drawn
-/// there and not here.
-///
-/// Returns the folded `(width, value)` for constant subtrees (`Ok(None)` for
-/// non-constant ones) so parent arith arms can chain; an overflow anywhere
-/// is `Err` (class `ArithmeticException`, matching the oracle).
-fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> {
-    let overflow = |what: String| EmitError::GraphBuildingReject {
-        class: "ArithmeticException",
-        what,
-    };
-    match e {
-        Expr::Const { val, .. } => Ok(match val {
-            SigmaValue::Byte(v) => Some((FoldWidth::Byte, i64::from(*v))),
-            SigmaValue::Short(v) => Some((FoldWidth::Short, i64::from(*v))),
-            SigmaValue::Int(v) => Some((FoldWidth::Int, i64::from(*v))),
-            SigmaValue::Long(v) => Some((FoldWidth::Long, *v)),
-            _ => None,
-        }),
-        Expr::Unparsed(_) => Ok(None),
-        Expr::Op(IrNode { opcode, payload }) => match (opcode, payload) {
-            // ArithOp +/-/* (wire bytes: Plus 0x9A, Minus 0x99, Multiply
-            // 0x9C). Division 0x9D / modulo 0x9E fall to the recurse-only
-            // arm below (not compile-folded — `1 / 0` compiles).
-            (0x9A | 0x99 | 0x9C, Payload::Two(l, r)) => {
-                let lf = fold_overflow_check(l)?;
-                let rf = fold_overflow_check(r)?;
-                let (Some((wl, a)), Some((wr, b))) = (lf, rf) else {
-                    return Ok(None);
-                };
-                if wl != wr {
-                    // Post-typer operands share a width; a mismatch means a
-                    // hand-built tree — stay conservative, no fold.
-                    return Ok(None);
-                }
-                // i64 math is exact for Byte/Short/Int operands (|v| <= 2^31,
-                // so even products fit i64); Long uses checked ops.
-                let (sym, v) = match opcode {
-                    0x9A => ("+", a.checked_add(b)),
-                    0x99 => ("-", a.checked_sub(b)),
-                    _ => ("*", a.checked_mul(b)),
-                };
-                match v.filter(|v| in_fold_range(wl, *v)) {
-                    Some(v) => Ok(Some((wl, v))),
-                    None => Err(overflow(format!(
-                        "compile-time constant fold overflows {wl:?}: {a} {sym} {b}"
-                    ))),
-                }
-            }
-            // ArithOp min (0xA1) / max (0xA2) over two same-width constants
-            // fold to the selected operand. The ops themselves cannot
-            // overflow (the result IS one of the operands, already in
-            // range); folding matters because the propagated constant feeds
-            // the +/-/* checks above (`(min(2147483647, 1) + 2147483647)`
-            // REJECTs — the fn docs' probe family).
-            (0xA1 | 0xA2, Payload::Two(l, r)) => {
-                let lf = fold_overflow_check(l)?;
-                let rf = fold_overflow_check(r)?;
-                let (Some((wl, a)), Some((wr, b))) = (lf, rf) else {
-                    return Ok(None);
-                };
-                if wl != wr {
-                    // Same conservatism as the +/-/* arm: post-typer
-                    // operands share a width (mixed widths carry an
-                    // `Upcast`, folded by [`fold_direct_const_casts`] BEFORE
-                    // this walk runs).
-                    return Ok(None);
-                }
-                // The i64 carrier preserves numeric order for every width.
-                Ok(Some((
-                    wl,
-                    if *opcode == 0xA1 { a.min(b) } else { a.max(b) },
-                )))
-            }
-            // Downcast (0x7D) / Upcast (0x7E): retired (M4 Task 4) — folding
-            // and overflow-rejecting a DIRECT-constant cast is now
-            // [`fold_direct_const_casts`]'s job, run BEFORE this walk. Falls
-            // to the generic arm below, which still recurses into the cast's
-            // input (an overflow buried deeper — e.g. inside a non-constant
-            // cast argument — is still caught).
-            //
-            // Everything else: not foldable itself, but every child subtree
-            // is still checked (folds run everywhere in Scala's graph
-            // construction — see the fn docs).
-            (_, payload) => {
-                let mut children = Vec::new();
-                push_children(payload, &mut children);
-                for c in children {
-                    fold_overflow_check(c)?;
-                }
-                Ok(None)
-            }
-        },
     }
 }
 
@@ -731,27 +440,31 @@ fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> 
 ///   traversal would cascade-fold the whole chain — this is the exact bug
 ///   class this function must NOT reintroduce.
 ///
-/// **Pass position:** runs immediately BEFORE [`fold_overflow_check`] (whose
-/// cast arm this replaces — one code path, not two) and BEFORE
-/// [`fold_literal_coll_sizes`]/the v0-data gate/[`crate::lower::lower`]. Both
-/// orderings are load-bearing, not incidental:
-/// - **before `fold_overflow_check`:** a direct-constant `Upcast` (e.g. the
+/// **Pass position:** runs immediately BEFORE [`crate::fold::fold`] (the
+/// generic constant fold, whose overflow-reject arm this pass's retired D-C5
+/// twin folded into) and BEFORE that pass's `SizeOf`-literal fold / the
+/// v0-data gate / [`crate::lower::lower`]. Both orderings are load-bearing,
+/// not incidental:
+/// - **before the arithmetic fold:** a direct-constant `Upcast` (e.g. the
 ///   typer's mixed-width widening in `9223372036854775807L + 1` — the Int
 ///   `1` upcasts to `Long`) must already be a plain `Const` by the time the
-///   arithmetic-overflow walk inspects it, or its `Expr::Const` fast path
-///   never sees a value to propagate into the enclosing `+`/`-`/`*`/
-///   `min`/`max` check, silently losing the overflow detection.
-/// - **before `fold_literal_coll_sizes`:** `sigmaProp(Coll[UnsignedBigInt]()
+///   arithmetic fold inspects it, or its `Expr::Const` fast path never sees a
+///   value to propagate into the enclosing `+`/`-`/`*`/`min`/`max`, silently
+///   losing the overflow detection. Symmetrically, [`crate::fold::fold`] never
+///   folds a `NumericCast` node itself — so a cast whose child only BECOMES a
+///   `Const` via a later arith fold (`ccs (x*100).toByte`) stays unfolded,
+///   exactly like the oracle.
+/// - **before the `SizeOf` fold:** `sigmaProp(Coll[UnsignedBigInt]()
 ///   .size.toLong == SELF.value)` is an oracle-pinned regression
 ///   (`compile_sizeof_coll_literal_folds_to_clean_v0_bytes`, tree_hex
 ///   `10010400d1937e730005c1a7`) whose `.toLong` wraps a `SizeOf` that is
-///   STILL an unevaluated `Op` node at this point (D-C6 hasn't run yet) — so
-///   this walk correctly leaves the `Upcast` unfolded, exactly like the
-///   oracle (Scala's `.size` fold is a separate, later rewrite that never
-///   retroactively un-wraps an already-built enclosing `Upcast`). Running
-///   this fold any later — e.g. after `fold_literal_coll_sizes` has already
-///   turned that `SizeOf` into `Const(0)` — would see an apparently-direct
-///   constant and WRONGLY fold the `Upcast`, regressing that pin.
+///   STILL an unevaluated `Op` node at THIS pass's position — so this walk
+///   correctly leaves the `Upcast` unfolded, exactly like the oracle (Scala's
+///   `.size` fold is a separate, later rewrite that never retroactively
+///   un-wraps an already-built enclosing `Upcast`). Running this cast fold any
+///   later — after [`crate::fold::fold`] has already turned that `SizeOf` into
+///   `Const(0)` — would see an apparently-direct constant and WRONGLY fold the
+///   `Upcast`, regressing that pin.
 fn fold_direct_const_casts(e: Expr) -> Result<Expr, EmitError> {
     match e {
         Expr::Op(IrNode {
@@ -786,8 +499,8 @@ fn fold_direct_const_casts(e: Expr) -> Result<Expr, EmitError> {
 }
 
 /// By-value, fallible child map for [`fold_direct_const_casts`] — the
-/// exhaustive twin of [`push_children`]/`fold_literal_coll_sizes`'s private
-/// `fold_payload` (a new child-carrying `Payload` variant fails to compile
+/// exhaustive twin of [`push_children`]/[`crate::fold`]'s private
+/// `fold_children` (a new child-carrying `Payload` variant fails to compile
 /// here until it is mapped). Kept separate from `crate::lower`'s own
 /// (infallible) child map: this pass runs at a different, earlier pipeline
 /// position (see the fn docs) and must reject on downcast overflow, so it
@@ -935,7 +648,7 @@ fn fold_numeric_cast(
 /// among these four are always in range by construction (the source is
 /// strictly narrower — that is what made `opcode == 0x7E` in the first
 /// place); Downcast is range-checked via [`in_fold_range`]/[`fold_width`],
-/// the SAME width ladder [`fold_overflow_check`]'s retired cast arm used.
+/// the SAME width ladder [`crate::fold`]'s arithmetic fold uses.
 fn fold_i64_cast(
     opcode: u8,
     v: i64,
@@ -1102,8 +815,8 @@ fn fold_bigint_cast(
 ///   D-C5): bit ops, zero-arg/non-1-arg lambda applications, SFunc-typed
 ///   lambda params, postfix `size`, out-of-range `getReg` literals,
 ///   pre-v3 SNumericType methods, and the constant-fold overflow check
-///   ([`graph_building_lambda_reject`] / [`fold_overflow_check`] below +
-///   the emit-arm gates).
+///   ([`graph_building_lambda_reject`] below + [`crate::fold`]'s
+///   arithmetic-overflow reject arm + the emit-arm gates).
 ///
 /// # Examples
 ///
@@ -1147,31 +860,34 @@ pub fn compile(
     // Explicit-cast folds, BOTH directions (M4 Task 4, lib.rs D-C7 cast
     // bullet; recon-transforms.md §7): fold `Downcast`/`Upcast` of a DIRECT
     // constant (range-checked — the reject side of the retired D-C5 checker
-    // cast arm now lives here, one code path) while leaving a cast-of-cast
-    // CHAIN's outer casts unfolded, exactly like Scala. MUST run BEFORE
-    // `fold_overflow_check` below: a direct-constant `Upcast` (e.g. the
+    // cast arm now lives in this pass, one code path) while leaving a
+    // cast-of-cast CHAIN's outer casts unfolded, exactly like Scala. MUST run
+    // BEFORE `crate::fold::fold` below: a direct-constant `Upcast` (e.g. the
     // typer's mixed-width widening in `9223372036854775807L + 1`) needs to
-    // already BE a plain `Const` by the time the arithmetic-overflow walk
-    // looks at it, or that walk's `Expr::Const` fast path never sees a value
-    // to propagate into the parent `+`/`-`/`*`/`min`/`max` check (the
-    // overflow would silently go undetected). MUST ALSO run BEFORE
-    // `fold_literal_coll_sizes` below — see `fold_direct_const_casts`'s docs
-    // for the oracle-pinned regression (`.size.toLong`) that position
-    // protects.
+    // already BE a plain `Const` by the time the arithmetic fold looks at it,
+    // or that pass's `Expr::Const` fast path never sees a value to propagate
+    // into the parent `+`/`-`/`*`/`min`/`max` (the overflow would silently go
+    // undetected). It also runs before the generic fold's `SizeOf`-literal
+    // rule — see `fold_direct_const_casts`'s docs for the oracle-pinned
+    // `.size.toLong` regression that position protects.
     let root = fold_direct_const_casts(root).map_err(CompileError::Emit)?;
 
-    // Constant-fold overflow CHECK (lib.rs D-C5) — precedes the serializer
-    // gate below because GraphBuilding runs before serialization in Scala
-    // (the relative order of the two walks is deterministic but advisory —
-    // the oracle grades the verdict, classes are exact per family).
-    fold_overflow_check(&root).map_err(CompileError::Emit)?;
-
-    // Wave-2 lowering rewrite (lib.rs D-C6): fold `SizeOf(<coll literal>)` to
-    // the element count, as Scala's GraphBuilding does. AFTER the gates above
-    // — the discarded literal elements must still be verdict-checked — and
-    // BEFORE the v0 data gate/serialization, so a `Coll[UnsignedBigInt]()`
-    // under `.size` never puts its v3-only elem-type code on the wire.
-    let root = fold_literal_coll_sizes(root);
+    // Generic constant fold (M4 Task 5, recon-transforms.md §1b/§2a-2d;
+    // `crate::fold`) — the GraphBuilding-exact `rewriteDef` cascade as one
+    // bottom-up fixpoint pass. It ABSORBS the two retired D-C5/D-C6 twins into
+    // one traversal (F5 discipline): the overflow CHECK is now the fold's
+    // reject arm (a both-`Const` `+`/`-`/`*` that overflows its width is
+    // Scala's `ArithmeticException` → compile reject, now byte-correct because
+    // the node is actually replaced), and the `SizeOf(<coll literal>)` element-
+    // count fold is one rule among many. Runs AFTER `fold_direct_const_casts`
+    // (casts fold their immediate-`Const` children BEFORE arith sees them, and
+    // this pass never re-folds a cast — mirroring Scala's build-time cast
+    // interception vs the `rewriteDef` fixpoint) and BEFORE the v0 data gate
+    // below — so a fold that erases v3-only constant DATA (a
+    // `Coll[UnsignedBigInt]().size` collapsing to `Int`, or the NF-1
+    // `unsignedBigInt == unsignedBigInt` closure) never puts that data on the
+    // wire (locked decision 1).
+    let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
 
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
@@ -1922,30 +1638,23 @@ mod tests {
 
     #[test]
     fn compile_bitwise_or_xor_fold_values_pinned() {
-        // Value-distinguishing forms of the wave-2 bitwise folds (review
-        // follow-up): the oracle folds the WHOLE equality to `sigmaProp
-        // (true)` (`10010101d17300`), so the ACCEPT alone would not catch a
-        // wrong folded value — pin our folded Byte constants directly
-        // (`5 | 3 = 7`, `5 ^ 3 = 6`).
+        // Value-distinguishing forms of the bitwise folds: the whole equality
+        // folds to `sigmaProp(true)` ONLY if the folded byte VALUE is right
+        // (`5 | 3 = 7`, `5 ^ 3 = 6`) — a wrong value would leave a residual
+        // `Eq(<byte>, <byte>)` (or fold to `false`), so this pins the value.
         //
-        // **M4 Task 4 flip:** the explicit-cast direct-constant fold now
-        // folds EVERY `.toByte` literal argument here (`5.toByte`,
-        // `3.toByte`, and the rhs `7.toByte`/`6.toByte`), so the pre-existing
-        // D-C6 bitwiseOr/bitwiseXor-of-constants fold (which already ran)
-        // now sees two bare Byte constants either side of the `Eq` instead
-        // of a folded lhs vs. an unfolded rhs `Downcast`. This vector is
-        // recon-targets.md #84/#85 — still MULTI (the `Eq` itself only folds
-        // once Task 5's generic engine lands; that residual keeps this
-        // vector in `DC7_P2SH_MISMATCH_SET`).
+        // **M4 Task 5:** with the cast fold (Task 4: `5.toByte`, `3.toByte`,
+        // `7.toByte`/`6.toByte` all fold to bare Byte constants) AND the
+        // pre-existing bitwiseOr/Xor-of-constants fold feeding two equal Byte
+        // constants into the `Eq`, the generic engine's `Const == Const →
+        // true` closes it: byte-identical to the oracle (`10010101d17300`).
+        // recon-targets vectors 84/85 graduate out of `DC7_P2SH_MISMATCH_SET`.
         let env = ScriptEnv::new();
         let cv3 = |src| compile(&env, src, 3, NetworkPrefix::Testnet);
-        // Self-pin (oracle folds the whole equality to sigmaProp(true) — a
-        // D-C7 divergence): our SEGREGATED bytes, header 0x10, table = two
-        // folded Byte constants (the bitwiseOr/Xor result and the rhs cast).
         let or = cv3("sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)").expect("compile");
-        assert_eq!(hex::encode(&or.tree_bytes), "100202070207d19373007301");
+        assert_eq!(hex::encode(&or.tree_bytes), "10010101d17300");
         let xor = cv3("sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)").expect("compile");
-        assert_eq!(hex::encode(&xor.tree_bytes), "100202060206d19373007301");
+        assert_eq!(hex::encode(&xor.tree_bytes), "10010101d17300");
     }
 
     #[test]
@@ -2091,11 +1800,12 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        // Self-pin (oracle fully folds `== 0` to sigmaProp(true), a D-C7
-        // divergence): our segregated bytes keep the un-folded equality. The
-        // KEY F-3 invariant still holds — no v3-only elem-type code reaches the
-        // wire (the SizeOf fold removed the empty `Coll[UnsignedBigInt]()`).
-        assert_eq!(hex::encode(&r.tree_bytes), "100204000400d19373007301");
+        // M4 Task 5: the generic const fold now folds `.size` → Int 0 AND the
+        // enclosing `0 == 0` → `sigmaProp(true)`, byte-identical to the oracle
+        // (`10010101d17300`) — recon-targets vector 77 graduates (NF-1 closure:
+        // the SizeOf fold erases the empty `Coll[UnsignedBigInt]()` BEFORE the
+        // v0-data gate, so the F-3 stranded-funds invariant holds too).
+        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
         assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
         let r = compile(
             &ScriptEnv::new(),
@@ -2109,13 +1819,15 @@ mod tests {
         // segregated bytes are byte-identical to the oracle capture.
         assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
         assert_eq!(r.p2sh_address, "pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9");
-        // The fold covers NON-constant elements too (oracle: `cc sigmaProp(
-        // Coll(HEIGHT).size == 1)` folds to sigmaProp(true); we keep the
-        // un-folded `== 1` — self-pin of our segregated bytes, D-C7).
+        // The `.size` fold covers NON-constant elements too (a `Coll(HEIGHT)`
+        // literal folds to Int 1 regardless of item constancy); M4 Task 5's
+        // `Const == Const → true` then closes the equality, byte-identical to
+        // the oracle (`10010101d17300`) — recon-targets vector 79 graduates.
         let r = ct("sigmaProp(Coll(HEIGHT).size == 1)").expect("compile");
-        assert_eq!(hex::encode(&r.tree_bytes), "100204020402d19373007301");
-        // Discarded elements are still verdict-checked: the constant-fold
-        // overflow gate runs BEFORE the rewrite (oracle rejects this too).
+        assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
+        // Discarded elements are still verdict-checked: children fold BEFORE a
+        // parent's SizeOf, so the overflow in the dropped item still rejects
+        // (oracle rejects this too).
         let err = ct("sigmaProp(Coll(2147483647 + 1).size == 1)").expect_err("overflow");
         assert_eq!(err.class(), "ArithmeticException");
     }

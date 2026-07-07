@@ -236,17 +236,22 @@ fn assert_mismatch_set_matches(
 /// folded-cast Byte operands) stay MULTI — the surrounding `Eq` only folds
 /// once Task 5's generic constant-folding engine lands). 36 vectors, derived
 /// from a full gate run against the M4 Task-1 seed (`compile_seed.json`, 272
-/// vectors, 80 ACCEPT swept). Still 36 after the M4 Task 4 crux-regression
-/// pin (`compile_probes.txt`: `sigmaProp(1.toByte.toLong.toBigInt >
-/// 0.toBigInt)`, M3 numerics N-3 probe 34, added AFTER this task's fix
-/// already landed) — that vector byte-matches the oracle exactly (the
-/// fold-one-level/keep-chain invariant it pins is a FULL match, not a D-C7
-/// divergence), so it counts toward the ordinary `byte_match`/`accept_total`
-/// telemetry below instead of this set (`compile_seed.json` now 273 vectors,
-/// 81 ACCEPT swept; byte-parity telemetry 44/80 → 45/81).
+/// vectors, 80 ACCEPT swept; byte-parity telemetry 44/80 → 45/81 after the M4
+/// Task 4 crux-regression pin `sigmaProp(1.toByte.toLong.toBigInt >
+/// 0.toBigInt)`, which byte-matches the oracle and so is ordinary telemetry,
+/// not this set) → 17 (M4 Task 5: the generic constant fold graduates 19
+/// CONST-FOLD vectors — `!true`, `1 < 2L`, the four `+`/`-` overflow-boundary
+/// arith folds (#49/#50/#51/#83), `min`/`max` (#81/#82), the three `.size`
+/// folds (#77/#79/#80), `true && (1 == 1)`, `true ^ false`, and the six ccs/cc
+/// bitwise-then-relational MULTI vectors (#70/#71/#72/#73/#84/#85) that now
+/// FULLY fold to `sigmaProp(true)`. Five div/mod + two anyOf/allOf ACCEPT
+/// probes were added to `compile_probes.txt` in lockstep — division/modulo DO
+/// fold on a NON-ZERO constant divisor (`DivOp.shouldPropagate = rhs != 0`,
+/// source-authoritative, correcting the dossier's "never folded" note). The 17
+/// residual are all MULTI: 12 corpus (CSE/val-inline/lowering, Tasks 8/9/M5) +
+/// `{ val x = HEIGHT; x > 5 }` (val-inline, Task 9) + `proveDHTuple(g1, g2, g1,
+/// g2)` (CSE repeated-point, M5); byte-parity telemetry 45/81 → 71/88.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
-    ("cc", "!true"),
-    ("cc", "1 < 2L"),
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
     (
@@ -271,31 +276,8 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:dexy/gort-dev/emission.es"),
     ("cc", "corpus:lsp/test_contract.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cc", "sigmaProp((-(0 + 2147483647) - 2) < 0)"),
-    ("cc", "sigmaProp((-9223372036854775807L - 1L) < 0L)"),
-    ("cc", "sigmaProp((2147483646 + 1) < 0)"),
-    ("cc", "sigmaProp((2147483647 + 0) < 0)"),
-    (
-        "cc",
-        "sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)",
-    ),
-    (
-        "cc",
-        "sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)",
-    ),
-    ("cc", "sigmaProp((max(1, 2) + 1) == 3)"),
-    ("cc", "sigmaProp((min(1, 2) + 1) == 2)"),
-    ("cc", "sigmaProp(Coll(1, 2).size == 2)"),
-    ("cc", "sigmaProp(Coll(HEIGHT).size == 1)"),
-    ("cc", "sigmaProp(Coll[UnsignedBigInt]().size == 0)"),
-    ("cc", "true && (1 == 1)"),
-    ("cc", "true ^ false"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
-    ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
-    ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
-    ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),
-    ("ccs", "sigmaProp(x.bitwiseXor(y) >= 0)"),
 ];
 
 /// Committed SET of `(verb, source)` labels whose P2S address differs from
@@ -308,25 +290,23 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// exactly like Scala. Because a segregated tree's bytes are equal iff its
 /// constant-inlined proposition is equal, P2S now matches iff P2SH matches —
 /// so this set has collapsed onto the D-C7 residual and stays IDENTICAL to
-/// [`DC7_P2SH_MISMATCH_SET`] (36 vectors post-Task-4: the remaining IR-shape
-/// divergences — folds, val inlining, CSE, unwraps — that reshape the
-/// proposition itself). The D-C1 segregation axis is CLOSED; what remains is
-/// the D-C7 axis.
+/// [`DC7_P2SH_MISMATCH_SET`] (17 vectors post-Task-5: the remaining IR-shape
+/// divergences — CSE, val inlining, lowering — that reshape the proposition
+/// itself). The D-C1 segregation axis is CLOSED; what remains is the D-C7 axis.
 ///
 /// History: 78 (M3/M4-Task-1: every non-bare-const ACCEPT vector) → 43 (M4
 /// Task 2: 35 SEGREGATION-ONLY vectors graduated — the 37 P2S/byte matches are
 /// those 35 plus the 2 already-matching bare-const vectors) → 39 (M4 Task 3:
 /// the same 4 D-C2/unwrap graduations as `DC7_P2SH_MISMATCH_SET` — P2S moves
 /// in lockstep with P2SH post-Task-2) → 36 (M4 Task 4: the same 3
-/// explicit-cast-fold graduations as `DC7_P2SH_MISMATCH_SET`). Each
-/// graduation is a vector whose proposition was already (or is now)
+/// explicit-cast-fold graduations as `DC7_P2SH_MISMATCH_SET`) → 17 (M4 Task 5:
+/// the same 19 generic-constant-fold graduations as `DC7_P2SH_MISMATCH_SET`).
+/// Each graduation is a vector whose proposition was already (or is now)
 /// oracle-identical, so only the header/segregation differed; the set form
 /// (not a count) confirmed it dropped the RIGHT vectors — the remainder
 /// stays converged EXACTLY onto the DC7 set, as the segregation-invariance
 /// of P2SH predicts.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
-    ("cc", "!true"),
-    ("cc", "1 < 2L"),
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
     (
@@ -351,31 +331,8 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:dexy/gort-dev/emission.es"),
     ("cc", "corpus:lsp/test_contract.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cc", "sigmaProp((-(0 + 2147483647) - 2) < 0)"),
-    ("cc", "sigmaProp((-9223372036854775807L - 1L) < 0L)"),
-    ("cc", "sigmaProp((2147483646 + 1) < 0)"),
-    ("cc", "sigmaProp((2147483647 + 0) < 0)"),
-    (
-        "cc",
-        "sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)",
-    ),
-    (
-        "cc",
-        "sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)",
-    ),
-    ("cc", "sigmaProp((max(1, 2) + 1) == 3)"),
-    ("cc", "sigmaProp((min(1, 2) + 1) == 2)"),
-    ("cc", "sigmaProp(Coll(1, 2).size == 2)"),
-    ("cc", "sigmaProp(Coll(HEIGHT).size == 1)"),
-    ("cc", "sigmaProp(Coll[UnsignedBigInt]().size == 0)"),
-    ("cc", "true && (1 == 1)"),
-    ("cc", "true ^ false"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
-    ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
-    ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
-    ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),
-    ("ccs", "sigmaProp(x.bitwiseXor(y) >= 0)"),
 ];
 
 // =============================================================================
