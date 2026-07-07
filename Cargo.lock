@@ -622,6 +622,7 @@ dependencies = [
  "axum",
  "blake2",
  "bs58",
+ "ergo-compiler",
  "ergo-indexer",
  "ergo-indexer-types",
  "ergo-primitives",

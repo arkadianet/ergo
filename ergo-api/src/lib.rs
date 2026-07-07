@@ -20,6 +20,7 @@ pub mod blockchain;
 pub mod compat;
 pub mod emission;
 pub mod mining;
+pub mod script;
 pub mod server;
 pub mod traits;
 pub mod types;

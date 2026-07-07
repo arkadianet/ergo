@@ -22,9 +22,11 @@
 //! | `GET`  | `/script/addressToTree/{address}` | `{"tree": "<ergoTree hex>"}` |
 //! | `GET`  | `/script/addressToBytes/{address}` | `{"bytes": "<Coll[Byte] const hex>"}` |
 //!
-//! `/script/*`'s compile-requiring members (`p2sAddress`, `p2shAddress`,
-//! `executeWithContext`) are not implemented — they compile ErgoScript source,
-//! and this node ships no compiler.
+//! `/script/*`'s two compile-requiring members, `p2sAddress` and
+//! `p2shAddress`, live in `crate::script` (M6) — they need `Arc<dyn
+//! WalletAdmin>` in addition to `NetworkPrefix`, a different state shape than
+//! the stateless routes in this file. `executeWithContext` (the one `/script/*`
+//! member taking a caller-supplied env) remains unimplemented.
 
 use axum::{
     body::Bytes,
@@ -227,13 +229,13 @@ fn decode_error_message(e: &AddressDecodeError) -> String {
 
 // ----- /script/* address-conversion endpoints (Scala ScriptApiRoute) -----
 //
-// The two decode-only members of Scala's `/script` family. The rest of that
-// route — `p2sAddress` / `p2shAddress` / `executeWithContext` — compiles
-// ErgoScript *source* (the request body carries a `source` + `treeVersion`),
-// which needs an ErgoScript compiler this node deliberately does not ship
-// (it is an interpreter, not a compiler). Those stay unimplemented; these two
-// need only the address decoder, which already backs the `/utils` and
-// `/blockchain` address routes.
+// The two decode-only members of Scala's `/script` family. The other two
+// compile-requiring members, `p2sAddress` / `p2shAddress`, live in
+// `crate::script` (M6, wired against `ergo_compiler::compile`) — see that
+// module for the source-compiling routes. `executeWithContext` (the one
+// `/script/*` member taking a caller-supplied env) remains unimplemented.
+// These two need only the address decoder, which already backs the `/utils`
+// and `/blockchain` address routes.
 //
 // P2PK and P2S addresses are supported; a P2SH address decodes to
 // `UnsupportedType` (a 400) — the same boundary `decode_address_to_tree_bytes`

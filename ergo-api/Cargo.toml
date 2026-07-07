@@ -23,6 +23,7 @@ ergo-indexer-types = { workspace = true }
 ergo-ser           = { workspace = true }
 ergo-primitives    = { workspace = true }
 ergo-rest-json     = { workspace = true }
+ergo-compiler      = { workspace = true }
 thiserror          = { workspace = true }
 rand               = { workspace = true }
 
