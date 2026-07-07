@@ -708,7 +708,12 @@ fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> 
 ///   argument casts) and is an ingredient of 73/84/85 and the chaincash
 ///   corpus's `Upcast` residuals (still MULTI — those also need Task 5's
 ///   generic const-fold for the surrounding `Eq`/bitwise).
-/// - **do NOT fold** (direction (b) — where OUR emit used to over-fold):
+/// - **do NOT fold** (direction (b) — the cascade a naive bottom-up
+///   implementation of this SAME pass would introduce; no such over-fold
+///   ever shipped in either the typer or emit — pinned by the
+///   `mod tests` regression pair
+///   `compile_cast_chain_keeps_only_innermost_fold_matching_oracle_probe_34`
+///   / `compile_cast_chain_depth_three_nested_under_gt_keeps_all_outer_casts`):
 ///   when the child is anything else — critically, ANOTHER
 ///   `Downcast`/`Upcast` node. A literal cast CHAIN (`1.toByte.toLong
 ///   .toBigInt`) builds `Upcast(Upcast(Downcast(Const(1),Byte),Long),BigInt)`
@@ -1311,6 +1316,17 @@ mod tests {
 
     fn ct(source: &str) -> Result<CompileResult, CompileError> {
         compile_testnet(&ScriptEnv::new(), source)
+    }
+
+    /// The [`fold_direct_const_casts`] output BEFORE `build_tree`/
+    /// segregation — needed to inspect a cast-fold's shape directly, since
+    /// `CompileResult::ergo_tree.body` replaces every folded constant with
+    /// a `ConstPlaceholder` once segregation runs.
+    fn folded_root(source: &str) -> Expr {
+        let typed = typecheck_with_network(&ScriptEnv::new(), source, 0, NetworkPrefix::Testnet)
+            .expect("typecheck");
+        let root = emit(&typed).expect("emit");
+        fold_direct_const_casts(root).expect("fold_direct_const_casts")
     }
 
     fn generator_env() -> ScriptEnv {
@@ -1930,6 +1946,131 @@ mod tests {
         assert_eq!(hex::encode(&or.tree_bytes), "100202070207d19373007301");
         let xor = cv3("sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)").expect("compile");
         assert_eq!(hex::encode(&xor.tree_bytes), "100202060206d19373007301");
+    }
+
+    #[test]
+    fn compile_cast_chain_keeps_only_innermost_fold_matching_oracle_probe_34() {
+        // The crux regression this task's fold-one-level/keep-chain
+        // invariant exists to pin (M3 numerics N-3 probe 34,
+        // adversarial-findings-numerics.md:137; now committed as an M4
+        // Task 4 `cc` vector in `compile_probes.txt`/`compile_seed.json`,
+        // re-verified via `compile_seed_live_recapture`): a literal cast
+        // CHAIN folds ONLY the cast immediately adjacent to the literal —
+        // `1.toByte` folds to a bare `Const(Byte, 1)`, but the two outer
+        // `.toLong`/`.toBigInt` casts stay real `Upcast` nodes wrapping it,
+        // exactly like Scala's `GraphBuilding.scala:514-518` (a
+        // non-recursive structural match against the untouched AST child).
+        // Byte-exact vs. the oracle capture — NOT a self-oracle: this is
+        // the live-recaptured, committed `p2sh_address`
+        // (`rnuja5Bnkuz4BzMETLRwybfPAo6VBt4eC4dP3CL`) too.
+        let r = ct("sigmaProp(1.toByte.toLong.toBigInt > 0.toBigInt)").expect("compile");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "10020201060100d1917e7e730005067301"
+        );
+        assert_eq!(r.p2sh_address, "rnuja5Bnkuz4BzMETLRwybfPAo6VBt4eC4dP3CL");
+        // Structural pin, same invariant from the AST side: exactly TWO
+        // real `Upcast` (0x7E) nodes remain over a folded `Const(Byte, 1)`
+        // — a cascade-fold bug would collapse both into a single
+        // `Const(BigInt, 1)` and this match would fail to find any cast
+        // node at all. Inspected on the PRE-segregation tree (`emit` +
+        // `fold_direct_const_casts` directly): `r.ergo_tree.body` has
+        // already been segregated into a `ConstPlaceholder`, which would
+        // hide the very shape this test pins.
+        let folded = folded_root("sigmaProp(1.toByte.toLong.toBigInt > 0.toBigInt)");
+        let Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(gt),
+        }) = &folded
+        else {
+            panic!("root must be BoolToSigmaProp: {folded:?}");
+        };
+        let Expr::Op(IrNode {
+            opcode: 0x91,
+            payload: Payload::Two(lhs, _rhs),
+        }) = gt.as_ref()
+        else {
+            panic!("expected GT: {gt:?}");
+        };
+        let Expr::Op(IrNode {
+            opcode: 0x7E,
+            payload: Payload::NumericCast { input: inner1, .. },
+        }) = lhs.as_ref()
+        else {
+            panic!("expected outer Upcast (toBigInt): {lhs:?}");
+        };
+        let Expr::Op(IrNode {
+            opcode: 0x7E,
+            payload: Payload::NumericCast { input: inner2, .. },
+        }) = inner1.as_ref()
+        else {
+            panic!("expected middle Upcast (toLong): {inner1:?}");
+        };
+        assert!(
+            matches!(
+                inner2.as_ref(),
+                Expr::Const {
+                    tpe: SigmaType::SByte,
+                    val: SigmaValue::Byte(1),
+                }
+            ),
+            "innermost cast must have folded to a bare Const(Byte, 1): {inner2:?}"
+        );
+    }
+
+    #[test]
+    fn compile_cast_chain_depth_three_nested_under_gt_keeps_all_outer_casts() {
+        // Generalizes the probe-34 invariant one nesting level deeper
+        // (`1.toByte.toShort.toLong.toBigInt`, 4 casts total): the
+        // anti-cascade rule Scala's structural match implements
+        // (GraphBuilding.scala:514-518, depth-independent by construction —
+        // it only ever inspects ONE node's immediate, untouched child) must
+        // leave THREE real `Upcast` nodes over the folded innermost
+        // constant, not just the two probe-34 pins. This is a
+        // self-consistency shape check on OUR OWN non-cascading discipline
+        // (not an independent oracle round-trip — the underlying rule is
+        // already oracle-verified at depth 2 above; this extends it
+        // structurally to depth 3, which the fold's node-local recursion
+        // makes mechanically identical).
+        let r = ct("sigmaProp(1.toByte.toShort.toLong.toBigInt > 0.toBigInt)").expect("compile");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "10020201060100d1917e7e7e73000305067301"
+        );
+        fn cast_depth_over_byte_const(e: &Expr) -> usize {
+            match e {
+                Expr::Op(IrNode {
+                    opcode: 0x7E,
+                    payload: Payload::NumericCast { input, .. },
+                }) => 1 + cast_depth_over_byte_const(input),
+                Expr::Const {
+                    tpe: SigmaType::SByte,
+                    val: SigmaValue::Byte(1),
+                } => 0,
+                other => panic!("expected an Upcast chain over Const(Byte, 1): {other:?}"),
+            }
+        }
+        // Inspected on the PRE-segregation tree — see `folded_root`'s docs.
+        let folded = folded_root("sigmaProp(1.toByte.toShort.toLong.toBigInt > 0.toBigInt)");
+        let Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(gt),
+        }) = &folded
+        else {
+            panic!("root must be BoolToSigmaProp: {folded:?}");
+        };
+        let Expr::Op(IrNode {
+            opcode: 0x91,
+            payload: Payload::Two(lhs, _rhs),
+        }) = gt.as_ref()
+        else {
+            panic!("expected GT: {gt:?}");
+        };
+        assert_eq!(
+            cast_depth_over_byte_const(lhs),
+            3,
+            "depth-3 chain must keep exactly 3 real Upcast nodes, not cascade-fold"
+        );
     }
 
     #[test]

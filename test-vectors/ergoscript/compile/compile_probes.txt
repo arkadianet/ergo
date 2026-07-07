@@ -142,3 +142,13 @@ cc	3	sigmaProp((-(0 + 2147483647) - 2) < 0)
 # equality to sigmaProp(true); these fail loudly if our folded VALUE drifts)
 cc	3	sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)
 cc	3	sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)
+# M4 Task 4 crux regression pin (M3 numerics N-3 probe 34,
+# adversarial-findings-numerics.md:137): a literal cast CHAIN folds ONLY the
+# innermost cast (`fold_direct_const_casts`'s anti-cascade discipline) — the
+# oracle keeps the outer two `Upcast` nodes over the folded Byte constant
+# (`10020201060100d1917e7e730005067301`). Committing this vector is the
+# fold-one-level/keep-chain invariant's ONLY gate: a bottom-up refactor that
+# re-checked a cast's child AFTER recursing into it would cascade-fold the
+# whole chain to a bare `BigInt` constant and this vector would silently
+# regress without it.
+cc	3	sigmaProp(1.toByte.toLong.toBigInt > 0.toBigInt)

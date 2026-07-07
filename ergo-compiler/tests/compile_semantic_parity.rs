@@ -236,7 +236,14 @@ fn assert_mismatch_set_matches(
 /// folded-cast Byte operands) stay MULTI — the surrounding `Eq` only folds
 /// once Task 5's generic constant-folding engine lands). 36 vectors, derived
 /// from a full gate run against the M4 Task-1 seed (`compile_seed.json`, 272
-/// vectors, 80 ACCEPT swept).
+/// vectors, 80 ACCEPT swept). Still 36 after the M4 Task 4 crux-regression
+/// pin (`compile_probes.txt`: `sigmaProp(1.toByte.toLong.toBigInt >
+/// 0.toBigInt)`, M3 numerics N-3 probe 34, added AFTER this task's fix
+/// already landed) — that vector byte-matches the oracle exactly (the
+/// fold-one-level/keep-chain invariant it pins is a FULL match, not a D-C7
+/// divergence), so it counts toward the ordinary `byte_match`/`accept_total`
+/// telemetry below instead of this set (`compile_seed.json` now 273 vectors,
+/// 81 ACCEPT swept; byte-parity telemetry 44/80 → 45/81).
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "!true"),
     ("cc", "1 < 2L"),

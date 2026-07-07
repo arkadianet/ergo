@@ -1028,9 +1028,10 @@ impl Scope {
         //     already rejected. Out-of-range cast receivers
         //     (`300.toByte.toBytes`) do NOT fold here ([`const_numeric_i64`]
         //     returns `None`): the residual Downcast reaches tree.rs's
-        //     `fold_overflow_check`, which rejects with the oracle's
-        //     ArithmeticException. Residual (lib.rs D-C6): deeper constant
-        //     receivers Scala's full partial evaluation also folds —
+        //     `fold_direct_const_casts` (M4 Task 4 — retired
+        //     `fold_overflow_check`'s cast arm), which rejects with the
+        //     oracle's ArithmeticException. Residual (lib.rs D-C6): deeper
+        //     constant receivers Scala's full partial evaluation also folds —
         //     arithmetic results (`(1 + 2).toBytes`) and multi-cast chains —
         //     stay residual MethodCalls here.
         if let Some(width_bytes) = match method.owner.as_str() {
@@ -1150,7 +1151,8 @@ impl Scope {
 /// (`7.toByte` — a typed `Select` the typer leaves unfolded, class-4(a)).
 /// The cast case is range-checked: an out-of-range cast (`300.toByte`)
 /// returns `None`, so the residual `Downcast` reaches
-/// `tree.rs::fold_overflow_check`, which rejects with the oracle's
+/// `tree.rs::fold_direct_const_casts` (M4 Task 4 — retired
+/// `fold_overflow_check`'s cast arm), which rejects with the oracle's
 /// `ArithmeticException` (oracle: `cc sigmaProp(300.toByte.toBytes.size ==
 /// 1)` → `REJECT 0:0 ArithmeticException`, 2026-07-07 ×3).
 fn const_numeric_i64(e: &TypedExpr) -> Option<i64> {
