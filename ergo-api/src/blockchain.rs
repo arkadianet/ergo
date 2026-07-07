@@ -48,7 +48,9 @@ mod storage_rent;
 mod tokens;
 mod transactions;
 mod unspent_byaddress;
-use balance::{address_to_tree_hash, invalid_address};
+pub(crate) use balance::address_to_tree_hash;
+use balance::invalid_address;
+pub(crate) use balance::unconfirmed_balance_for_tree;
 pub use balance::{
     balance_for_address_handler, balance_post_handler, BalanceInfoEntry, BalanceResponse,
     TokenAmountEntry,
@@ -66,6 +68,7 @@ pub use byaddress::{
     txs_by_address_post_handler,
 };
 pub use byergotree::{boxes_by_ergo_tree_post_handler, boxes_unspent_by_ergo_tree_post_handler};
+pub(crate) use bytemplate::pool_unspent_for_template;
 pub use bytemplate::{boxes_by_template_hash_handler, boxes_unspent_by_template_hash_handler};
 pub use range::{
     box_range_get_handler, box_range_post_handler, transaction_range_get_handler,
@@ -76,6 +79,7 @@ pub use storage_rent::{
     storage_rent_matures_in_range_handler, StorageRentEligibleEntry, StorageRentEligibleResponse,
     StorageRentMaturesInRangeQuery,
 };
+pub(crate) use tokens::pool_unspent_for_token;
 pub use tokens::{
     boxes_by_token_id_handler, boxes_unspent_by_token_id_handler, token_by_id_handler,
     tokens_by_ids_handler, IndexedTokenResponse,
@@ -85,7 +89,7 @@ pub use transactions::{
     tx_by_id_handler, tx_by_index_handler, tx_detail_handler, DataInputEntry,
     IndexedErgoTransactionResponse,
 };
-use unspent_byaddress::pool_unspent_for_tree;
+pub(crate) use unspent_byaddress::pool_unspent_for_tree;
 pub use unspent_byaddress::{
     boxes_unspent_by_address_get_handler, boxes_unspent_by_address_post_handler,
     UnspentByAddressQuery,

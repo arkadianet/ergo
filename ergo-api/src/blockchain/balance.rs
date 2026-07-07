@@ -113,7 +113,7 @@ fn render_balance(state: &BlockchainState, address: &str) -> Response {
 /// `ArrayBuffer` ordering on the confirmed path, but matches the spec's
 /// "stable wire shape under snapshot rebuilds" requirement for the P5
 /// overlay.
-fn unconfirmed_balance_for_tree(
+pub(crate) fn unconfirmed_balance_for_tree(
     mempool: &dyn MempoolView,
     tree_hash: &TreeHash,
 ) -> BalanceInfoEntry {
@@ -164,7 +164,7 @@ fn unconfirmed_balance_for_tree(
 /// Decode the base58 address into its canonical `tree_hash` (the redb
 /// key for `INDEXED_ADDRESS`). Errors are returned as `String` for the
 /// `400 invalid-address` envelope's `detail` field.
-pub(super) fn address_to_tree_hash(s: &str, network: NetworkPrefix) -> Result<TreeHash, String> {
+pub(crate) fn address_to_tree_hash(s: &str, network: NetworkPrefix) -> Result<TreeHash, String> {
     let raw =
         decode_address_to_tree_hash(s, network).map_err(|e: AddressDecodeError| e.to_string())?;
     Ok(TreeHash::from_bytes(raw))

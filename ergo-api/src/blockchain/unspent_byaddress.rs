@@ -143,7 +143,7 @@ fn render_unspent_by_address(
 /// snapshot rebuilds; this matches Scala's `mempool.getAll` order being
 /// `pool.orderedTransactions.values` (insertion order, also unstable
 /// across re-orgs / replacements). Tests assert membership, not order.
-pub(super) fn pool_unspent_for_tree(
+pub(crate) fn pool_unspent_for_tree(
     mempool: &dyn MempoolView,
     tree_hash: &TreeHash,
     exclude_spent: bool,
