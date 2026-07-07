@@ -620,6 +620,7 @@ version = "0.5.1"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "blake2",
  "bs58",
  "ergo-indexer",
