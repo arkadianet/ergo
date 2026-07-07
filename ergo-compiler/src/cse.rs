@@ -163,6 +163,38 @@ struct ScopeTable {
     by_key: BTreeMap<ExprKey, SymId>,
 }
 
+/// The rebuild template for an interned symbol — everything Task 3's
+/// [`Interner::materialize`] needs to reconstruct the node's `Expr` from its
+/// interned children. The interner's [`ExprKey`] is a hash key (span- and
+/// structure-stripped); it is intentionally lossy about scalar payload layout,
+/// so materialization keeps this parallel template. Rebuilt children come from
+/// [`ExprKey::children`] (in `decompose` order); the scalar fields come from
+/// here.
+#[derive(Debug)]
+enum Node {
+    /// A constant leaf — its wire type + value, re-emitted inline at every use
+    /// (constants never hoist, spike §5 P4).
+    Const(SigmaType, SigmaValue),
+    /// A whole-tree `Unparsed` body kept verbatim.
+    Unparsed(Vec<u8>),
+    /// A generic opcode node. The stored `Payload`'s CHILD slots are stale
+    /// (they hold the original pre-interning `Expr`s); rebuild reads only its
+    /// SCALAR fields and substitutes fresh children from [`ExprKey::children`].
+    Op(Payload),
+    /// A `FuncValue` (lambda). Unlike a generic op it re-assigns its argument
+    /// ids at materialization (spike §4), so it keeps the arg placeholder
+    /// [`SymId`]s (to bind them in the body env) and the body symbol directly
+    /// rather than going through the generic child list.
+    Func {
+        args: Vec<(SymId, Option<SigmaType>)>,
+        body: SymId,
+    },
+    /// A lambda-argument placeholder (carries its original wire arg id). Never
+    /// scheduled or rebuilt directly — only ever resolved to a `ValUse` through
+    /// the materialization env.
+    Arg,
+}
+
 /// Everything recorded about one interned symbol.
 #[derive(Debug)]
 struct SymInfo {
@@ -171,6 +203,13 @@ struct SymInfo {
     /// lambda-invariant (floats up in Task 3); non-empty ⇒ pinned inside the
     /// lambda whose arg id it names.
     deps: BTreeSet<u32>,
+    /// The rebuild template (Task 3 materialization).
+    node: Node,
+    /// The hash-cons scope DEPTH this symbol was first built at (0 = global /
+    /// root; each pushed thunk scope is one deeper — lambdas do NOT push, spike
+    /// §1.4). A `ValDef` is materialized in the scope of this depth
+    /// (`TreeBuilding` `processAstGraph` per-scope schedule, spike §3).
+    scope_depth: u32,
 }
 
 /// The scope-chain hash-cons interner (Phase A of the spike). Owns the scope
@@ -209,9 +248,19 @@ impl Interner {
         match expr {
             Expr::Const { tpe, val } => {
                 let literal = const_key_bytes(tpe, val);
-                self.finish(KeyTag::Const, Vec::new(), literal)
+                self.finish(
+                    KeyTag::Const,
+                    Vec::new(),
+                    literal,
+                    Node::Const(tpe.clone(), val.clone()),
+                )
             }
-            Expr::Unparsed(bytes) => self.finish(KeyTag::Unparsed, Vec::new(), bytes.clone()),
+            Expr::Unparsed(bytes) => self.finish(
+                KeyTag::Unparsed,
+                Vec::new(),
+                bytes.clone(),
+                Node::Unparsed(bytes.clone()),
+            ),
             Expr::Op(node) => self.intern_op(node),
         }
     }
@@ -232,13 +281,23 @@ impl Interner {
                 let c = self.intern(children[0]);
                 let t = self.intern_scoped(children[1]);
                 let e = self.intern_scoped(children[2]);
-                self.finish(KeyTag::Op(op), vec![c, t, e], literal)
+                self.finish(
+                    KeyTag::Op(op),
+                    vec![c, t, e],
+                    literal,
+                    Node::Op(node.payload.clone()),
+                )
             }
             BIN_AND | BIN_OR | OPT_GET_OR_ELSE if children.len() == 2 => {
                 // left/receiver in the current scope; right/default thunked.
                 let l = self.intern(children[0]);
                 let r = self.intern_scoped(children[1]);
-                self.finish(KeyTag::Op(op), vec![l, r], literal)
+                self.finish(
+                    KeyTag::Op(op),
+                    vec![l, r],
+                    literal,
+                    Node::Op(node.payload.clone()),
+                )
             }
             // Every other opcode (incl. eager BinXor 0xF4): all children in the
             // current scope.
@@ -247,7 +306,12 @@ impl Interner {
                 for c in &children {
                     child_syms.push(self.intern(c));
                 }
-                self.finish(KeyTag::Op(op), child_syms, literal)
+                self.finish(
+                    KeyTag::Op(op),
+                    child_syms,
+                    literal,
+                    Node::Op(node.payload.clone()),
+                )
             }
         }
     }
@@ -261,7 +325,12 @@ impl Interner {
                 return sym;
             }
         }
-        self.finish(KeyTag::Op(VAL_USE), Vec::new(), literal)
+        self.finish(
+            KeyTag::Op(VAL_USE),
+            Vec::new(),
+            literal,
+            Node::Op(node.payload.clone()),
+        )
     }
 
     /// A standalone `ValDef` interns its rhs in the current scope and registers
@@ -298,11 +367,13 @@ impl Interner {
     fn intern_func(&mut self, node: &IrNode, literal: Vec<u8>) -> SymId {
         if let Payload::FuncValue { args, body } = &node.payload {
             let mut saved: Vec<(u32, Option<SymId>)> = Vec::with_capacity(args.len());
-            for (arg_id, _tpe) in args {
+            let mut arg_syms: Vec<(SymId, Option<SigmaType>)> = Vec::with_capacity(args.len());
+            for (arg_id, tpe) in args {
                 let prev = self.bindings.get(arg_id).copied();
                 let arg_sym = self.alloc_arg(*arg_id);
                 self.bindings.insert(*arg_id, arg_sym);
                 saved.push((*arg_id, prev));
+                arg_syms.push((arg_sym, tpe.clone()));
             }
             let body_sym = self.intern(body);
             for (arg_id, prev) in saved.into_iter().rev() {
@@ -315,7 +386,35 @@ impl Interner {
                     }
                 }
             }
-            return self.finish(KeyTag::Op(FUNC_VALUE), vec![body_sym], literal);
+            // A lambda's own bound vars are NOT free in it (Scala `freeVars`
+            // excludes a Lambda's arguments): the arg is defined INSIDE the
+            // FuncValue, so the FuncValue is lambda-invariant w.r.t. it. Subtract
+            // this lambda's arg ids from the body's transitive deps — otherwise
+            // the FuncValue would carry its own arg id and never schedule as a
+            // ValDef (a shared `def` like `deposit.es`'s `getSellerPk` would be
+            // wrongly inlined). Deps from ENCLOSING lambdas' args stay (a nested
+            // lambda genuinely depends on an outer bound var).
+            let key = ExprKey {
+                tag: KeyTag::Op(FUNC_VALUE),
+                children: vec![body_sym],
+                literal,
+            };
+            if let Some(sym) = self.lookup(&key) {
+                return sym;
+            }
+            let mut deps = self.union_child_deps(&key.children);
+            for (arg_id, _tpe) in args {
+                deps.remove(arg_id);
+            }
+            return self.alloc(
+                key,
+                deps,
+                true,
+                Node::Func {
+                    args: arg_syms,
+                    body: body_sym,
+                },
+            );
         }
         self.intern_general(node)
     }
@@ -329,7 +428,12 @@ impl Interner {
         for c in &children {
             child_syms.push(self.intern(c));
         }
-        self.finish(KeyTag::Op(node.opcode), child_syms, literal)
+        self.finish(
+            KeyTag::Op(node.opcode),
+            child_syms,
+            literal,
+            Node::Op(node.payload.clone()),
+        )
     }
 
     /// Intern `expr` inside a freshly pushed thunk scope, popping it after. The
@@ -346,7 +450,7 @@ impl Interner {
     /// return the existing symbol, on a miss allocate a fresh one in the
     /// INNERMOST open scope. A new symbol's `deps` are the union of its
     /// children's `deps` (bound-var dependency flows up).
-    fn finish(&mut self, tag: KeyTag, children: Vec<SymId>, literal: Vec<u8>) -> SymId {
+    fn finish(&mut self, tag: KeyTag, children: Vec<SymId>, literal: Vec<u8>, node: Node) -> SymId {
         let key = ExprKey {
             tag,
             children,
@@ -356,7 +460,7 @@ impl Interner {
             return sym;
         }
         let deps = self.union_child_deps(&key.children);
-        self.alloc(key, deps, true)
+        self.alloc(key, deps, true, node)
     }
 
     /// Allocate a lambda-argument placeholder: a leaf symbol tagged with its own
@@ -370,7 +474,7 @@ impl Interner {
         };
         let mut deps = BTreeSet::new();
         deps.insert(arg_id);
-        self.alloc(key, deps, false)
+        self.alloc(key, deps, false, Node::Arg)
     }
 
     /// Look up `key` from the innermost open scope down through the parent chain
@@ -386,8 +490,9 @@ impl Interner {
 
     /// Insert a fresh symbol into `syms`; when `shared`, also register it in the
     /// innermost open scope's table so later builds can hash-cons to it.
-    fn alloc(&mut self, key: ExprKey, deps: BTreeSet<u32>, shared: bool) -> SymId {
+    fn alloc(&mut self, key: ExprKey, deps: BTreeSet<u32>, shared: bool, node: Node) -> SymId {
         let id = SymId(self.syms.len() as u32);
+        let scope_depth = (self.scopes.len() - 1) as u32;
         if shared {
             self.scopes
                 .last_mut()
@@ -395,7 +500,12 @@ impl Interner {
                 .by_key
                 .insert(key.clone(), id);
         }
-        self.syms.push(SymInfo { key, deps });
+        self.syms.push(SymInfo {
+            key,
+            deps,
+            node,
+            scope_depth,
+        });
         id
     }
 
@@ -555,6 +665,469 @@ impl Interner {
             && !self.is_context_property(sym)
             && !self.is_internal(sym)
             && !self.is_const(sym)
+    }
+
+    // ----- Task 3: per-scope schedule + ValDef materialization + assign-once ids -----
+
+    /// Reconstruct an opcode `Expr` from the interned graph rooted at `root`,
+    /// materializing a `ValDef`/`ValUse`/`BlockValue`/`FuncValue` tree with
+    /// serial, assign-once ids — the observable of Scala's `TreeBuilding`
+    /// (`buildTree`/`processAstGraph`/`buildValue`, `TreeBuilding.scala:186-191,
+    /// 498-546`, spike §3/§4/§7.1 step 3-4).
+    ///
+    /// A symbol clearing the [`should_hoist`](Self::should_hoist) gate is emitted
+    /// as ONE `ValDef` in the scope it was first built (spike §3); every
+    /// reference to it becomes a `ValUse` of the assigned id. A single-use symbol
+    /// (or a gate-suppressed context/builder/constant) is INLINED at each use
+    /// (single-use inlining falls out for free, spike §7.2 / locked decision 4).
+    ///
+    /// # Scope class (Task-3 boundary)
+    ///
+    /// This lands the **single-ValDef class** byte-exact: the root scope emits
+    /// its hoisted symbols as dense ids `1, 2, …` in post-order-DFS schedule
+    /// order, and lambda-argument ids thread exactly per spike §4 (arg =
+    /// `defId+1`, body from `varId+1`, tuple arg = ONE id). Thunk (`If`/`&&`/
+    /// `||`/`getOrElse`) sub-scopes and lambda bodies are materialized too, but a
+    /// multi-ValDef scope's INTRA-SCOPE ORDER matching Scala's exact
+    /// `GraphUtil.depthFirstOrderFrom(deps)` (`Thunks.scala:196-212`) is the
+    /// ORACLE-NEEDED reverse-engineering loop reserved for Task 5 (spike
+    /// §7.4/OQ1). Post-order DFS is provably correct for a single-ValDef scope
+    /// (order-trivial); a multi-ValDef vector whose id-order diverges is left in
+    /// the mismatch set for Task 5, not hacked here.
+    pub fn materialize(&self, root: SymId) -> Expr {
+        let usage = self.flat_usage();
+        let env: BTreeMap<SymId, u32> = BTreeMap::new();
+        self.process_scope(root, 0, &env, 0, &usage)
+    }
+
+    /// Materialize one scope (root `PGraph`, a thunk `ThunkDef`, or a lambda
+    /// body) — Scala's `processAstGraph` (`TreeBuilding.scala:498-531`). Emits a
+    /// `ValDef` for each scheduled hoisted symbol (ids threaded from `def_id`),
+    /// binds it in the env, then builds the scope result; wraps in a
+    /// `BlockValue` when any `ValDef` was emitted, applying the
+    /// `{ val idNew = id; idNew } → id` collapse (`TreeBuilding.scala:522-525`).
+    fn process_scope(
+        &self,
+        scope_root: SymId,
+        depth: u32,
+        env: &BTreeMap<SymId, u32>,
+        def_id: u32,
+        usage: &BTreeMap<SymId, usize>,
+    ) -> Expr {
+        let schedule = self.scope_schedule(scope_root, depth, env, usage);
+        let mut cur_id = def_id;
+        let mut cur_env = env.clone();
+        let mut valdefs: Vec<Expr> = Vec::with_capacity(schedule.len());
+        for s in &schedule {
+            // rhs is built with defId = curId BEFORE the increment (so a lambda
+            // in the rhs takes `curId+1` as its arg id), then curId++ and
+            // ValDef(curId) — `TreeBuilding.scala:510-513`.
+            let rhs = self.build_value(*s, depth, &cur_env, cur_id, usage);
+            cur_id += 1;
+            valdefs.push(val_def(cur_id, rhs));
+            cur_env.insert(*s, cur_id);
+        }
+        let rhs = self.build_value(scope_root, depth, &cur_env, cur_id, usage);
+        wrap_block(valdefs, rhs)
+    }
+
+    /// The scheduled (hoisted) symbols of the scope at hash-cons `depth` rooted
+    /// at `scope_root`, in post-order DFS (dependency) order — Scala's
+    /// `subG.schedule` (`AstGraph.schedule`, spike §3). A symbol is scheduled
+    /// here iff it clears the admission gate, was first built at THIS scope's
+    /// depth, is lambda-invariant (no bound-var deps — a bound-var-dependent
+    /// node belongs to the lambda body that binds it, spike §1.4), and is not
+    /// already bound by an enclosing scope.
+    ///
+    /// Post-order over the full reachable DAG yields a valid topological order
+    /// (a symbol's hoisted dependencies precede it), which is what makes the
+    /// dense id allocation in [`process_scope`](Self::process_scope) sound. For a
+    /// single-ValDef scope the order is trivial; the multi-ValDef tie-break is
+    /// Task 5 (see [`materialize`](Self::materialize)).
+    fn scope_schedule(
+        &self,
+        scope_root: SymId,
+        depth: u32,
+        env: &BTreeMap<SymId, u32>,
+        usage: &BTreeMap<SymId, usize>,
+    ) -> Vec<SymId> {
+        let mut visited: BTreeSet<SymId> = BTreeSet::new();
+        let mut out: Vec<SymId> = Vec::new();
+        self.schedule_dfs(scope_root, depth, env, usage, &mut visited, &mut out);
+        out
+    }
+
+    fn schedule_dfs(
+        &self,
+        sym: SymId,
+        depth: u32,
+        env: &BTreeMap<SymId, u32>,
+        usage: &BTreeMap<SymId, usize>,
+        visited: &mut BTreeSet<SymId>,
+        out: &mut Vec<SymId>,
+    ) {
+        if !visited.insert(sym) {
+            return;
+        }
+        // Descend into every structural child (through thunk/lambda children too)
+        // so a symbol first built at THIS depth but referenced only from a deeper
+        // scope is still found (e.g. E4's root `k`, referenced only inside the two
+        // lambda bodies).
+        for &child in &self.syms[sym.0 as usize].key.children {
+            self.schedule_dfs(child, depth, env, usage, visited, out);
+        }
+        let info = &self.syms[sym.0 as usize];
+        let scheduled = self.should_hoist(sym, usage)
+            && info.scope_depth == depth
+            && info.deps.is_empty()
+            && !env.contains_key(&sym)
+            && !matches!(info.node, Node::Arg);
+        if scheduled {
+            out.push(sym);
+        }
+    }
+
+    /// Reconstruct the `Expr` for a single symbol — Scala's `buildValue`
+    /// (`TreeBuilding.scala:498-517`). A symbol bound in `env` (an emitted
+    /// `ValDef` id or a lambda arg) resolves to a `ValUse` (the recursion base);
+    /// otherwise the node is rebuilt from its template and children.
+    fn build_value(
+        &self,
+        sym: SymId,
+        depth: u32,
+        env: &BTreeMap<SymId, u32>,
+        def_id: u32,
+        usage: &BTreeMap<SymId, usize>,
+    ) -> Expr {
+        // recursion base: an in-scope binding → ValUse (TreeBuilding.scala:498).
+        if let Some(&id) = env.get(&sym) {
+            return val_use(id);
+        }
+        let info = &self.syms[sym.0 as usize];
+        match &info.node {
+            Node::Const(tpe, val) => Expr::Const {
+                tpe: tpe.clone(),
+                val: val.clone(),
+            },
+            Node::Unparsed(bytes) => Expr::Unparsed(bytes.clone()),
+            Node::Arg => {
+                // A bound var reached outside its binding env is an ill-formed
+                // graph; keep the walk total with an opaque ValUse leaf rather
+                // than panicking (never hit by well-formed emitted IR).
+                val_use(0)
+            }
+            Node::Func { args, body } => self.build_func(args, *body, depth, env, def_id, usage),
+            Node::Op(_) => self.build_op(sym, depth, env, def_id, usage),
+        }
+    }
+
+    /// Rebuild a lambda — Scala's `buildValue` `Lambda` case
+    /// (`TreeBuilding.scala:186-191`). Each argument consumes ONE id starting at
+    /// `def_id+1` (a tupled lambda still has a single `STuple` arg → one id, the
+    /// Task-7 `+1`-not-`+2` correction, spike §4); the body is a nested
+    /// materialization scope whose ids continue from `varId+1`.
+    fn build_func(
+        &self,
+        args: &[(SymId, Option<SigmaType>)],
+        body: SymId,
+        depth: u32,
+        env: &BTreeMap<SymId, u32>,
+        def_id: u32,
+        usage: &BTreeMap<SymId, usize>,
+    ) -> Expr {
+        let mut body_env = env.clone();
+        let mut wire_args: Vec<(u32, Option<SigmaType>)> = Vec::with_capacity(args.len());
+        let mut cur = def_id;
+        for (arg_sym, tpe) in args {
+            cur += 1;
+            body_env.insert(*arg_sym, cur);
+            wire_args.push((cur, tpe.clone()));
+        }
+        // A lambda does NOT push a hash-cons thunk scope (spike §1.4), so the
+        // body materializes at the SAME `depth`; only the id counter advances.
+        let body_expr = self.process_scope(body, depth, &body_env, cur + 1, usage);
+        Expr::Op(IrNode {
+            opcode: FUNC_VALUE,
+            payload: Payload::FuncValue {
+                args: wire_args,
+                body: Box::new(body_expr),
+            },
+        })
+    }
+
+    /// Rebuild a generic opcode node. `If` branches and the `&&`/`||`/
+    /// `getOrElse` right-hand operand are their own thunk sub-scopes (depth +1,
+    /// spike §2); every other child is rebuilt in the current scope. Scalar
+    /// fields come from the stored template; children from the symbol's
+    /// `key.children` (in `decompose` order).
+    fn build_op(
+        &self,
+        sym: SymId,
+        depth: u32,
+        env: &BTreeMap<SymId, u32>,
+        def_id: u32,
+        usage: &BTreeMap<SymId, usize>,
+    ) -> Expr {
+        let info = &self.syms[sym.0 as usize];
+        let Node::Op(template) = &info.node else {
+            unreachable!("build_op on a non-Op symbol");
+        };
+        let child_syms = &info.key.children;
+        let opcode = op_of(&info.key.tag);
+        // Which child indices open a thunk sub-scope (spike §2). A thunk carries
+        // the SAME `def_id` (no arg, no id consumed — `ThunkDef` case,
+        // `TreeBuilding.scala:195-197`).
+        let is_scoped = |idx: usize| -> bool {
+            match opcode {
+                IF => idx == 1 || idx == 2,
+                BIN_AND | BIN_OR | OPT_GET_OR_ELSE => idx == 1,
+                _ => false,
+            }
+        };
+        let rebuilt: Vec<Expr> = child_syms
+            .iter()
+            .enumerate()
+            .map(|(idx, &c)| {
+                if is_scoped(idx) {
+                    self.process_scope(c, depth + 1, env, def_id, usage)
+                } else {
+                    self.build_value(c, depth, env, def_id, usage)
+                }
+            })
+            .collect();
+        let mut it = rebuilt.into_iter();
+        let payload = recompose(template, &mut it);
+        Expr::Op(IrNode { opcode, payload })
+    }
+}
+
+/// A materialized `ValDef` node (`0xD6`). `tpe` is never on the wire (the reader
+/// always has a constant store), so it is pinned `None` exactly as emit does
+/// (`emit.rs` `emit_block`, `parse.rs` ValDef arm).
+fn val_def(id: u32, rhs: Expr) -> Expr {
+    Expr::Op(IrNode {
+        opcode: VAL_DEF,
+        payload: Payload::ValDef {
+            id,
+            tpe: None,
+            rhs: Box::new(rhs),
+        },
+    })
+}
+
+/// A materialized `ValUse` node (`0x72`) — an untyped reference to a bound id.
+fn val_use(id: u32) -> Expr {
+    Expr::Op(IrNode {
+        opcode: VAL_USE,
+        payload: Payload::ValUse { id },
+    })
+}
+
+/// Wrap a scope's `ValDef`s + result into a `BlockValue` (`0xD8`), or the bare
+/// result when nothing hoisted — Scala's `processAstGraph` tail
+/// (`TreeBuilding.scala:518-529`). Applies the one documented peephole: a block
+/// whose sole `ValDef` is `idNew = <ValUse>` and whose result is `ValUse(idNew)`
+/// collapses to that inner `ValUse` (`TreeBuilding.scala:522-525`).
+fn wrap_block(valdefs: Vec<Expr>, rhs: Expr) -> Expr {
+    if valdefs.is_empty() {
+        return rhs;
+    }
+    if valdefs.len() == 1 {
+        if let Expr::Op(IrNode {
+            payload:
+                Payload::ValDef {
+                    id: id_new,
+                    rhs: source,
+                    ..
+                },
+            ..
+        }) = &valdefs[0]
+        {
+            if matches!(
+                source.as_ref(),
+                Expr::Op(IrNode {
+                    payload: Payload::ValUse { .. },
+                    ..
+                })
+            ) {
+                if let Expr::Op(IrNode {
+                    payload: Payload::ValUse { id: id_use },
+                    ..
+                }) = &rhs
+                {
+                    if id_use == id_new {
+                        return (**source).clone();
+                    }
+                }
+            }
+        }
+    }
+    Expr::Op(IrNode {
+        opcode: BLOCK_VALUE,
+        payload: Payload::BlockValue {
+            items: valdefs,
+            result: Box::new(rhs),
+        },
+    })
+}
+
+/// The opcode byte of an interned `Op` symbol (its `KeyTag::Op` discriminant).
+/// Only ever called on `Node::Op` symbols, whose tag is `Op(_)` by construction.
+fn op_of(tag: &KeyTag) -> u8 {
+    match tag {
+        KeyTag::Op(op) => *op,
+        // Const/Unparsed/Arg are handled by their own `Node` arms in
+        // `build_value` and never reach `build_op`.
+        _ => unreachable!("op_of on a non-Op symbol"),
+    }
+}
+
+fn boxn(it: &mut dyn Iterator<Item = Expr>) -> Box<Expr> {
+    Box::new(
+        it.next()
+            .expect("recompose: fewer rebuilt children than the template"),
+    )
+}
+
+fn takev(it: &mut dyn Iterator<Item = Expr>, n: usize) -> Vec<Expr> {
+    (0..n)
+        .map(|_| {
+            it.next()
+                .expect("recompose: fewer rebuilt children than the template")
+        })
+        .collect()
+}
+
+/// EXHAUSTIVE inverse of [`decompose`]: rebuild a `Payload` from its template
+/// (scalar fields) and the rebuilt children `it` yields in `decompose` child
+/// order. A `_ =>` arm is FORBIDDEN — a new child-carrying `Payload` variant must
+/// fail to compile here, mirroring [`decompose`]'s own exhaustiveness discipline
+/// (a mismatch would silently drop or misplace a child). The child COUNT and
+/// ORDER for each variant match [`decompose`] exactly.
+fn recompose(template: &Payload, it: &mut dyn Iterator<Item = Expr>) -> Payload {
+    match template {
+        Payload::Zero => Payload::Zero,
+        Payload::One(_) => Payload::One(boxn(it)),
+        Payload::Two(_, _) => Payload::Two(boxn(it), boxn(it)),
+        Payload::Three(_, _, _) => Payload::Three(boxn(it), boxn(it), boxn(it)),
+        Payload::Four(_, _, _, _) => Payload::Four(boxn(it), boxn(it), boxn(it), boxn(it)),
+        Payload::ValUse { id } => Payload::ValUse { id: *id },
+        Payload::ConstPlaceholder { index } => Payload::ConstPlaceholder { index: *index },
+        Payload::TaggedVar { id, tpe } => Payload::TaggedVar {
+            id: *id,
+            tpe: tpe.clone(),
+        },
+        Payload::ValDef { id, tpe, .. } => Payload::ValDef {
+            id: *id,
+            tpe: tpe.clone(),
+            rhs: boxn(it),
+        },
+        Payload::FunDef {
+            id, tpe, tpe_args, ..
+        } => Payload::FunDef {
+            id: *id,
+            tpe: tpe.clone(),
+            tpe_args: tpe_args.clone(),
+            rhs: boxn(it),
+        },
+        Payload::BlockValue { items, .. } => {
+            let n = items.len();
+            let items = takev(it, n);
+            Payload::BlockValue {
+                items,
+                result: boxn(it),
+            }
+        }
+        Payload::FuncValue { args, .. } => Payload::FuncValue {
+            args: args.clone(),
+            body: boxn(it),
+        },
+        Payload::MethodCall {
+            type_id,
+            method_id,
+            args,
+            type_args,
+            ..
+        } => {
+            let obj = boxn(it);
+            let n = args.len();
+            let args = takev(it, n);
+            Payload::MethodCall {
+                type_id: *type_id,
+                method_id: *method_id,
+                obj,
+                args,
+                type_args: type_args.clone(),
+            }
+        }
+        Payload::ConcreteCollection { elem_type, items } => {
+            let n = items.len();
+            Payload::ConcreteCollection {
+                elem_type: elem_type.clone(),
+                items: takev(it, n),
+            }
+        }
+        Payload::BoolCollection { bits } => Payload::BoolCollection { bits: bits.clone() },
+        Payload::Tuple { items } => {
+            let n = items.len();
+            Payload::Tuple {
+                items: takev(it, n),
+            }
+        }
+        Payload::SelectField { field_idx, .. } => Payload::SelectField {
+            input: boxn(it),
+            field_idx: *field_idx,
+        },
+        Payload::ExtractRegisterAs { reg_id, tpe, .. } => Payload::ExtractRegisterAs {
+            input: boxn(it),
+            reg_id: *reg_id,
+            tpe: tpe.clone(),
+        },
+        Payload::GetVar { var_id, tpe } => Payload::GetVar {
+            var_id: *var_id,
+            tpe: tpe.clone(),
+        },
+        Payload::DeserializeContext { id, tpe } => Payload::DeserializeContext {
+            id: *id,
+            tpe: tpe.clone(),
+        },
+        Payload::DeserializeRegister {
+            reg_id,
+            tpe,
+            default,
+        } => Payload::DeserializeRegister {
+            reg_id: *reg_id,
+            tpe: tpe.clone(),
+            default: default.as_ref().map(|_| boxn(it)),
+        },
+        Payload::SigmaCollection { items } => {
+            let n = items.len();
+            Payload::SigmaCollection {
+                items: takev(it, n),
+            }
+        }
+        Payload::NoneValue { tpe } => Payload::NoneValue { tpe: tpe.clone() },
+        Payload::ByIndex { default, .. } => {
+            let input = boxn(it);
+            let index = boxn(it);
+            Payload::ByIndex {
+                input,
+                index,
+                default: default.as_ref().map(|_| boxn(it)),
+            }
+        }
+        Payload::NumericCast { tpe, .. } => Payload::NumericCast {
+            input: boxn(it),
+            tpe: tpe.clone(),
+        },
+        Payload::FuncApply { args, .. } => {
+            let func = boxn(it);
+            let n = args.len();
+            Payload::FuncApply {
+                func,
+                args: takev(it, n),
+            }
+        }
     }
 }
 
@@ -1076,11 +1649,17 @@ mod tests {
             "HEIGHT+1 is bound-var-free (floats up in Task 3)"
         );
 
-        // Each FuncValue symbol carries its own arg id as a dependency.
+        // A FuncValue is lambda-invariant w.r.t. its OWN bound var (Scala
+        // `freeVars` excludes a Lambda's arguments): each of these lambdas
+        // references only its own arg + the root-shared `k`, so its deps are
+        // EMPTY (a float-up candidate). The arg dependency lives on the BODY
+        // nodes (the two GTs above, deps {2}/{3}), not on the FuncValue itself —
+        // this is what lets a shared closed `def` (`deposit.es`'s `getSellerPk`)
+        // schedule as a root ValDef instead of inlining.
         let funcs = it.symbols_with_opcode(FUNC_VALUE);
         assert_eq!(funcs.len(), 2);
-        assert_eq!(it.deps_of(funcs[0]), &BTreeSet::from([2]));
-        assert_eq!(it.deps_of(funcs[1]), &BTreeSet::from([3]));
+        assert!(it.deps_of(funcs[0]).is_empty());
+        assert!(it.deps_of(funcs[1]).is_empty());
     }
 
     // ----- Phase B: flat usage count + admission gate (Task 2, spike §3/§5) -----
@@ -1318,6 +1897,315 @@ mod tests {
                 "P4 alone suppresses the GE const"
             );
         }
+    }
+
+    // ----- Task 3: ValDef materialization — byte-exact vs the JVM oracle -----
+    //
+    // Each vector below runs the pipeline PREFIX that precedes CSE (emit → the
+    // M4 fold/inline transforms), then this module's `materialize`, then the
+    // existing segregation + `write_ergo_tree`, and byte-compares the FULL tree
+    // bytes to the Scala 6.0.2 `cc` oracle (spike §6 E1–E6, captured live via
+    // `scripts/jvm_typer_oracle`). This is the first CSE task producing bytes to
+    // diff, so the comparison is end-to-end against the reference compiler — not
+    // a self-oracle.
+    //
+    // Placement note (route coercion vs explicit `sigmaProp`): the route wraps a
+    // Boolean source in `BoolToSigmaProp` AFTER `buildTree` (so the block sits
+    // INSIDE: `d1 d801 …`), while an explicit `sigmaProp({block})` has the
+    // wrapper IN the graph root (block OUTSIDE: `d801 … d1 …`). Both are the SAME
+    // `materialize`, applied at a different root — `via_cse` reproduces the
+    // order by materializing the inner Boolean and wrapping after, matching
+    // Scala's `buildTree`-then-`toSigmaProp` order. Both placements are asserted
+    // (e1_* covers both).
+
+    use crate::env::ScriptEnv;
+    use crate::stype::SType;
+    use crate::typed::node_tpe;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::address::NetworkPrefix;
+    use ergo_ser::ergo_tree::write_ergo_tree;
+    use ergo_ser::opcode::write_expr;
+
+    /// Compile `source` through the CSE materializer and return the full
+    /// segregated `ergo_tree` bytes as lowercase hex — the exact string the
+    /// `cc <hex>` oracle answers with. `tree_version = 3`, mainnet (matching the
+    /// oracle default).
+    fn via_cse(source: &str) -> String {
+        let (inner, wrap_sigma) = pre_cse_root(source);
+        let mut it = Interner::new();
+        let root = it.intern(&inner);
+        let mat = it.materialize(root);
+        // Route coercion, applied AFTER CSE (Scala buildTree-then-toSigmaProp).
+        let final_root = if wrap_sigma {
+            Expr::Op(IrNode {
+                opcode: 0xD1, // BoolToSigmaProp
+                payload: Payload::One(Box::new(mat)),
+            })
+        } else {
+            mat
+        };
+        let tree = crate::tree::build_tree(final_root).expect("build_tree");
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).expect("write_ergo_tree");
+        hex(&w.result())
+    }
+
+    /// Run the pipeline transforms that PRECEDE the CSE slot (spike §7.2), the
+    /// same ones `crate::tree::compile` runs, and return the pre-CSE root plus
+    /// whether the route must re-wrap it in `BoolToSigmaProp` after CSE. A
+    /// Boolean source is materialized bare and wrapped after (matching Scala's
+    /// order); an explicit `sigmaProp(...)` source keeps its wrapper in the tree.
+    fn pre_cse_root(source: &str) -> (Expr, bool) {
+        let typed =
+            crate::typecheck_with_network(&ScriptEnv::new(), source, 3, NetworkPrefix::Mainnet)
+                .expect("typecheck");
+        let (inner, wrap) = match node_tpe(&typed) {
+            SType::SSigmaProp => (crate::emit::emit(&typed).expect("emit"), false),
+            SType::SBoolean => (crate::emit::emit(&typed).expect("emit"), true),
+            other => panic!("unexpected root type: {other:?}"),
+        };
+        // The CSE-preceding M4 transforms, MINUS `inline_vals`: CSE subsumes val
+        // inlining via its hash-cons (locked decision 4). This is load-bearing,
+        // not incidental — `inline_vals` SYNTACTICALLY clones a shared `def`'s
+        // rhs into each use site, and when two uses land in sibling thunks (e.g.
+        // `deposit.es`: `def f = …; if (c) f(SELF) else f(SELF)`) the clones
+        // become sibling-distinct symbols that never share, so CSE would never
+        // hoist the def. Scala's `buildGraph` instead threads the shared GRAPH
+        // NODE, which is exactly what `intern` reproduces (a `ValDef`'s rhs is
+        // interned once; every `ValUse` resolves to that one symbol). So CSE must
+        // see the un-inlined tree. `prune_dead_vals` is kept so a dead `val`'s
+        // rhs is not interned (its refs would otherwise inflate the flat usage
+        // count). `fold_direct_const_casts` is a no-op for these cast-free
+        // vectors and is private to tree.rs, so it is omitted.
+        //
+        // Task-4 note: the fold pass in `crate::tree::compile` runs AFTER
+        // `inline_vals` (so `{val x=2; x+1}` folds to `3`). Dropping the inline
+        // here loses that constant-through-`val` propagation — none of the Task-3
+        // single-ValDef vectors exercise it, but Task 4's retirement of
+        // `inline.rs` into CSE must fold over the interned graph (or keep a
+        // constant-only pre-inline) to preserve it.
+        let inner = crate::isproven::eliminate_isproven(inner);
+        let inner = crate::fold::fold(inner).expect("fold");
+        let inner = crate::inline::prune_dead_vals(inner);
+        (inner, wrap)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    // ----- E1..E6 oracle byte-parity (single-ValDef class) -----
+
+    #[test]
+    fn e1_bool_source_valdef_inside_sigmaprop_matches_oracle() {
+        // E1 route-coerced Boolean: ValDef(1)=HEIGHT+1 shared across both `&&`
+        // arms, block INSIDE BoolToSigmaProp.
+        assert_eq!(
+            via_cse("{val a = HEIGHT + 1; a > 5 && a < 100}"),
+            "10030402040a04c801d1d801d6019aa37300ed91720173018f72017302"
+        );
+    }
+
+    #[test]
+    fn e1_explicit_sigmaprop_valdef_outside_matches_oracle() {
+        // Same graph, explicit `sigmaProp({block})`: the wrapper is the graph
+        // root, so the ValDef block hoists ABOVE it (`d801 … d1 …`). Proves the
+        // id/ValDef materialization is placement-agnostic.
+        assert_eq!(
+            via_cse("sigmaProp({val a = HEIGHT + 1; a > 5 && a < 100})"),
+            "10030402040a04c801d801d6019aa37300d1ed91720173018f72017302"
+        );
+    }
+
+    #[test]
+    fn e2_sibling_if_branches_no_valdef_matches_oracle() {
+        // Keystone: HEIGHT+1 first built inside each branch (sibling thunks) →
+        // two distinct single-use copies → NO ValDef, no BlockValue.
+        assert_eq!(
+            via_cse("if (HEIGHT > 0) HEIGHT + 1 > 5 else HEIGHT + 1 < 100"),
+            "100504000402040a040204c801d19591a37300919aa3730173028f9aa373037304"
+        );
+    }
+
+    #[test]
+    fn e3_const_and_context_prop_suppressed_no_valdef_matches_oracle() {
+        // `42` used 2× but P4-suppressed (two pool slots, no dedup); HEIGHT
+        // P2-suppressed (inline both arms) → no ValDef.
+        assert_eq!(
+            via_cse("HEIGHT > 42 && HEIGHT < 42"),
+            "100204540454d1ed91a373008fa37301"
+        );
+    }
+
+    #[test]
+    fn e5_root_val_shared_across_if_branches_matches_oracle() {
+        // Root `val a` dominates both If branches → ValDef(1), branches ValUse(1).
+        assert_eq!(
+            via_cse("{val a = HEIGHT + 1; if (HEIGHT > 0) a > 5 else a < 100}"),
+            "100404020400040a04c801d1d801d6019aa373009591a3730191720173028f72017303"
+        );
+    }
+
+    #[test]
+    fn e6_condition_built_expr_shared_across_branches_matches_oracle() {
+        // HEIGHT+1 first built in the condition (root) → shared cond + both
+        // branches → ValDef(1). Same tree shape as E5 bar the condition operand.
+        assert_eq!(
+            via_cse("if (HEIGHT + 1 > 0) HEIGHT + 1 > 5 else HEIGHT + 1 < 100"),
+            "100404020400040a04c801d1d801d6019aa3730095917201730191720173028f72017303"
+        );
+    }
+
+    #[test]
+    fn e4_lambda_arg_id_threading_matches_oracle() {
+        // Root ValDef k=id1 shared into TWO sibling lambdas; each lambda arg =
+        // defId(1)+1 = id 2 (`d9 01 02`), body ValUse(1)=k. Proves the assign-once
+        // id threading through FuncValue (spike §4).
+        assert_eq!(
+            via_cse(
+                "{val k = HEIGHT + 1; \
+                 OUTPUTS.exists({(b: Box) => b.creationInfo._1 > k}) && \
+                 INPUTS.exists({(b: Box) => b.creationInfo._1 > k})}"
+            ),
+            "10010402d1d801d6019aa37300edaea5d9010263918cc77202017201\
+aea4d9010263918cc77202017201"
+        );
+    }
+
+    // ----- pre-segregation body structure (dual gate: ValDef/ValUse shape) -----
+
+    #[test]
+    fn e1_pre_segregation_body_has_expected_valdef_valuse_shape() {
+        // Independently of constant segregation, the materialized body (constants
+        // still inline) must carry the ValDef/ValUse/BlockValue structure:
+        // `d1 d801 d601 <plus> ed 91 7201 <5> 8f 7201 <100>` with inline consts
+        // `0402`/`040a`/`04c801`. This is the ValDef-shape half of the dual gate
+        // (the segregated tests above pin the constant-pool half).
+        let (inner, wrap) = pre_cse_root("{val a = HEIGHT + 1; a > 5 && a < 100}");
+        assert!(wrap, "Boolean source must re-wrap after CSE");
+        let mut it = Interner::new();
+        let root = it.intern(&inner);
+        let mat = it.materialize(root);
+        let wrapped = Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(Box::new(mat)),
+        });
+        let mut w = VlqWriter::new();
+        write_expr(&mut w, &wrapped, false).expect("write_expr");
+        assert_eq!(
+            hex(&w.result()),
+            "d1d801d6019aa30402ed917201040a8f720104c801"
+        );
+    }
+
+    // ----- id-threading / collapse unit checks (hand-built, no source) -----
+
+    #[test]
+    fn materialize_no_hoist_returns_bare_tree() {
+        // A single-use subexpression is inlined (not hoisted): `(HEIGHT+1) > 5`
+        // materializes back to the same GT tree, no BlockValue.
+        let e = op2(GT, height_plus_one(), int(5));
+        let mut it = Interner::new();
+        let root = it.intern(&e);
+        let mat = it.materialize(root);
+        assert_eq!(mat, e);
+    }
+
+    #[test]
+    fn materialize_root_valdef_gets_dense_id_one() {
+        // E1 inner (Boolean) materializes to BlockValue([ValDef(1, HEIGHT+1)],
+        // BinAnd(GT(ValUse(1),5), LT(ValUse(1),100))) — id 1 dense, both arms
+        // ValUse(1). Asserted structurally (independent of serialization).
+        let e = block(
+            vec![valdef(9, height_plus_one())], // emit-time id 9 → reassigned to 1
+            op2(
+                BIN_AND,
+                op2(GT, valuse(9), int(5)),
+                op2(LT, valuse(9), int(100)),
+            ),
+        );
+        let mut it = Interner::new();
+        let root = it.intern(&e);
+        let mat = it.materialize(root);
+        let expected = block(
+            vec![valdef(1, height_plus_one())],
+            op2(
+                BIN_AND,
+                op2(GT, valuse(1), int(5)),
+                op2(LT, valuse(1), int(100)),
+            ),
+        );
+        assert_eq!(mat, expected);
+    }
+
+    #[test]
+    fn materialize_singleton_valuse_block_collapses() {
+        // The `{ val idNew = ValUse(t); ValUse(idNew) } → ValUse(t)` peephole
+        // (TreeBuilding.scala:522-525). Hand-build a graph where the scope root
+        // is exactly a shared alias to a lambda arg used twice inside a body,
+        // exercised via a lambda whose body is `{ val n = b; (n, n) }`-shaped is
+        // over-complex; instead assert the peephole directly on `wrap_block`.
+        let collapsed = wrap_block(vec![val_def(3, val_use(7))], val_use(3));
+        assert_eq!(collapsed, val_use(7));
+        // Non-matching id → no collapse (stays a block).
+        let kept = wrap_block(vec![val_def(3, val_use(7))], val_use(4));
+        assert!(matches!(
+            kept,
+            Expr::Op(IrNode {
+                opcode: BLOCK_VALUE,
+                ..
+            })
+        ));
+    }
+
+    // ----- corpus graduation (single-ValDef class) -----
+
+    #[test]
+    fn corpus_crystalpool_deposit_matches_oracle() {
+        // `crystalpool/deposit.es` — a shared `def getSellerPk` (a closed lambda)
+        // called from BOTH `if` branches. Its FuncValue is built once at root and
+        // used twice → hoisted as a single root `ValDef(1, FuncValue)` with the
+        // two branch calls as `FuncApply(ValUse(1), SELF)` — the single-ValDef
+        // class over a lambda rhs. This vector is in `DC7_P2SH_MISMATCH_SET`
+        // (M4-blocked on CSE); Task 3's `materialize` produces byte-identical
+        // bytes to the Scala 6.0.2 `cc` oracle. It stays SET-listed until Task 4
+        // wires CSE into `compile()` (this test proves the materializer, not the
+        // live path).
+        let src =
+            std::fs::read_to_string("../test-vectors/ergoscript/corpus/crystalpool/deposit.es")
+                .expect("read deposit.es");
+        assert_eq!(
+            via_cse(&src),
+            "10010400d801d601d9010163b2e4c6720104147300009591a3\
+dad9010263e4c67202050401a7da720101a7da720101a7"
+        );
+    }
+
+    #[test]
+    fn corpus_dexy_gort_emission_matches_oracle() {
+        // `dexy/gort-dev/emission.es` — a SEVEN-ValDef root `BlockValue`
+        // (`d807`) plus a nested one-ValDef block. Post-order-DFS schedule order
+        // already matches Scala's `depthFirstOrderFrom(deps)` for this vector, so
+        // it is byte-identical to the oracle — a Task-5 preview showing the
+        // multi-ValDef machinery works where the schedule order coincides.
+        // (The remaining chaincash/crystalpool multi-ValDef vectors do NOT yet
+        // agree on schedule order — that is Task 5's reverse-engineering loop,
+        // spike §7.4/OQ1 — so they stay in the mismatch set.) Also in
+        // `DC7_P2SH_MISMATCH_SET`; graduates only once Task 4 wires CSE live.
+        let src =
+            std::fs::read_to_string("../test-vectors/ergoscript/corpus/dexy/gort-dev/emission.es")
+                .expect("read emission.es");
+        assert_eq!(
+            via_cse(&src),
+            "100d040004000402040204020402040004020402040204020402\
+0402d807d601b2a57ee4e300030400d602db63087201d603db6308a7d604c27201d605c2a7\
+d606ededed93b27202730000b27203730100938cb27202730200018cb272037303000193b4\
+72047304b17204b472057305b1720592c17201c1a7d607e4c6a7040495937ee4e301020473\
+06d1ededed7206918cb27202730700028cb272037308000293e4c672010404720793e4c672\
+010508e4c6a70508d801d608e4c672010404ea02d1edededed7206918cb27203730900028c\
+b27202730a000290998cb27203730b00028cb27202730c00027e997208720705917208720\
+7907208a3e4c6a70508"
+        );
     }
 
     // ----- test-only introspection helpers -----
