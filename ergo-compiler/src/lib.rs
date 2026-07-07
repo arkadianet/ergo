@@ -615,7 +615,7 @@
 //! so that check never fires there either; this residual is M5 CSE/ValDef
 //! sharing (D-C7 below), not a D-C2 gap.
 //!
-//! ### D-C3 — `SigmaPropIsProven` (0xCF) coercion cancellation — CLOSED (M4 Task 6)
+//! ### D-C3 — `SigmaPropIsProven` (0xCF) coercion cancellation + `HasSigmas` reconstruction — CLOSED (M4 Task 6 + M5 Task 5b)
 //!
 //! Sources mixing `SigmaProp` and `Boolean` in a logical context — e.g.
 //! `sigmaProp(true) && (1 == 1)`, `(1 == 1) ^ sigmaProp(true)`,
@@ -641,26 +641,37 @@
 //! (`0008cd0279be…`, header `0x00`). They are removed from `SEMANTIC_SKIP`
 //! (now EMPTY) and semantic-gated again.
 //!
-//! **Residual (NOT this task):** the coercion-CANCELLATION is closed, but the
-//! surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction is not.
-//! When a SigmaProp operand does NOT reduce to a plain Boolean (it is a real
-//! sigma, not `sigmaProp(<const bool>)`), Scala splits the mixed
-//! Bool/`isValid` logic into a `SigmaAnd`/`SigmaOr` (recon-transforms.md §3/§4,
-//! `GraphBuilding.scala:167-203`). Our pipeline does NOT — so the emit `0xCF`
-//! arm (`emit.rs:509`/`:838`) stays FRONTEND-REACHABLE and a residual `0xCF`
-//! survives in five corpus outputs (`chaincash-basis` basis-tracker /
-//! basis-token / basis / reserve, `rosen-bridge/GuardSign.es` — recon-targets
-//! #31/#32/#35/#36/#48). With Task 9 (`val` inlining) landed, these are now
-//! co-blocked on CSE/`ValDef`-sharing (M5) AND the `HasSigmas` reconstruction
-//! (Task 6 deferred it for lack of a byte target); they stay in
-//! `DC7_P2SH_MISMATCH_SET` (byte-diverge) and hold verdict parity via Err/Err
-//! on the dummy reduction context, so no `SEMANTIC_SKIP` entry is needed. The
-//! `0xCF` emit arm was AUDITED (not deleted): it is reachable exactly for these
-//! surviving-sigma cases. NOTE (M4 Task 9): `val` inlining does NOT expose the
-//! `HasSigmas` gap as a SOLE last blocker for any chaincash vector — each is
-//! still CSE-blocked (surviving multi-use `ValDef`s with dense M5 ids), a
-//! strictly larger gap, so the deferred `HasSigmas` reconstruction stays
-//! deferred with no new byte target to pin it against (see the Task-9 report).
+//! **`HasSigmas` reconstruction (M5 Task 5b — CLOSES the D-C3 residual):** when
+//! a SigmaProp operand does NOT reduce to a plain Boolean (it is a real sigma,
+//! not `sigmaProp(<const bool>)`), Scala does NOT leave a residual `0xCF` — it
+//! splits the mixed Bool/`isValid` logic into a `SigmaAnd`(0xEA)/`SigmaOr`(0xEB)
+//! over sigma operands, coercing every Boolean operand UP via `BoolToSigmaProp`
+//! (`GraphBuilding.scala:167-203`: the lazy `ApplyBinOpLazy(And/Or)` rules for
+//! `&&`/`||`, and the `AllOf`/`AnyOf` `HasSigmas` rules with the single-element
+//! `allZK`/`anyZK`/`allOf`/`anyOf` unwraps). M5 Task 4/5 landed CSE, which made
+//! the schedule of the corpus mixed-logic vectors byte-exact and exposed this
+//! reconstruction as their SOLE remaining blocker. [`crate::isproven`] now
+//! ports it in the SAME post-order pass as the cancellation
+//! ([`isproven::reconstruct_binop`] for `BinAnd`/`BinOr`,
+//! [`isproven::reconstruct_collop`] for `And`/`Or` over a `Coll[Boolean]`):
+//! the reconstruction emits Scala's `res.isValid` = `SigmaPropIsProven(<sigma>)`
+//! shape, which the pass's own `BoolToSigmaProp(SigmaPropIsProven(p)) → p`
+//! cancellation then strips against the enclosing `sigmaProp(..)`. It fires ONLY
+//! on a mixed Bool/Sigma logical op (a pure-Boolean op is untouched → ZERO
+//! regressions). Three corpus vectors — `chaincash-basis/basis-tracker-basis.es`
+//! and `chaincash/offchain/basis.es` (the `&&`-chain `BinAnd` form,
+//! `ea02d1…cd7208`) and `rosen-bridge/GuardSign.es` (the `allOf(Coll(..))`
+//! form, `ea02d196 8303…`) — now compile BYTE-IDENTICAL to the oracle and
+//! graduate from `DC7_P2SH_MISMATCH_SET`/`P2S_DC1_MISMATCH_SET` (byte-parity
+//! 102/110 → 105/110). They still Err/Err on the dummy reduction context (a
+//! context-read short-circuits over the now-identical tree), so the audited
+//! `TypeError`/`TypeError` pair is UNCHANGED. `BinXor` is NOT reconstructed
+//! (strict op, no Scala lazy rule, SigmaProp has no XOR — the `^` forms fold to
+//! a constant). **D-C3 is now FULLY CLOSED (cancellation + reconstruction).**
+//! Residual: two `chaincash-basis` vectors (`basis-token`, `reserve` via
+//! `basis-token`) + the four crystalpool vectors stay in the mismatch set on a
+//! DISTINCT, characterized M5 rule (a pure-constant `getOrElse`-default thunk
+//! that Scala hoists to a ROOT global constant), NOT on `HasSigmas`.
 //!
 //! ### D-C4 — multi-arg lambda TUPLING (CLOSED, M4 Task 7)
 //!

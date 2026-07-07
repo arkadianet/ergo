@@ -317,18 +317,27 @@ fn assert_mismatch_set_matches(
 /// it is a distinct mechanism from the validated schedule rule (the dossiers
 /// simulated over the decoded oracle tree, where those constants were already
 /// global). byte-parity 100/110 → 102/110.
+///
+/// M5 Task 5b (D-C3 `HasSigmas` reconstruction): 8 → 5. The THREE vectors that
+/// were byte-identical to the oracle EXCEPT the `SigmaAnd`(0xea)/
+/// `SigmaPropIsProven`(0xcf) reconstruction shape — `basis-tracker-basis`,
+/// `offchain/basis` (the `&&`-chain `BinAnd` form) and `GuardSign` (the
+/// `allOf(Coll(..))` form) — now emit the oracle's `SigmaAnd` over sigma
+/// operands (`crate::isproven::reconstruct_binop`/`reconstruct_collop`,
+/// `GraphBuilding.scala:167-203`). ZERO regressions: the reconstruction fires
+/// only on a mixed Bool/Sigma logical op and leaves every already-matching tree
+/// untouched. The remaining FIVE (`basis-token`, crystalpool ×4) stay MULTI on
+/// the distinct pure-constant `getOrElse`-default global-sharing rule (M5,
+/// characterized + deferred). byte-parity 102/110 → 105/110.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
-    ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     (
         "cc",
         "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
     ),
-    ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
     ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
     ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
-    ("cc", "corpus:rosen-bridge/GuardSign.es"),
 ];
 
 /// Committed SET of `(verb, source)` labels whose P2S address differs from
@@ -372,18 +381,19 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// M5 Task 5 Fix 1a → 8, lockstep with `DC7_P2SH_MISMATCH_SET`: `note.es` and
 /// `reserve.es` graduate (their segregated bytes now match once the schedule
 /// order does).
+/// M5 Task 5b (D-C3 `HasSigmas` reconstruction) → 5, lockstep with
+/// `DC7_P2SH_MISMATCH_SET`: `basis-tracker-basis`, `offchain/basis` and
+/// `GuardSign` now segregate to oracle-identical bytes once their proposition
+/// carries the `SigmaAnd` reconstruction, so P2S matches too.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
-    ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     (
         "cc",
         "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
     ),
-    ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
     ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
     ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
-    ("cc", "corpus:rosen-bridge/GuardSign.es"),
 ];
 
 // =============================================================================
@@ -1167,14 +1177,14 @@ fn compile_seed_semantic_parity() {
     // ledger entry explaining the new pair (audit trail: lib.rs D-C3/D-C4).
     const AUDITED_ERR_PAIRS: &[(&str, &str)] = &[
         // Context-bound scripts (both sides read registers/outputs the dummy
-        // context lacks). KNOWN MASKED RESIDENTS in this bucket: the 5 D-C3
-        // corpus vectors (chaincash basis-tracker family + rosen-bridge
-        // GuardSign, all in DC7_P2SH_MISMATCH_SET) whose residual 0xCF
-        // (HasSigmas reconstruction, un-implemented — Tasks 8/9 close) is
-        // never REACHED: a context-read short-circuits first on both sides.
-        // When the reconstruction lands or the context is enriched, these
-        // flip loudly to mixed Ok/Err — anticipated, not a surprise (the
-        // D-C4 lesson; lib.rs D-C3 residual paragraph is the ledger).
+        // context lacks): a context-read short-circuits first on both sides, so
+        // they Err/Err regardless of tree shape. The three D-C3 reconstruction
+        // vectors (`basis-tracker-basis`, `offchain/basis`, `GuardSign`) landed
+        // in M5 Task 5b and now emit the oracle's `SigmaAnd` byte-for-byte — so
+        // both sides reduce the IDENTICAL tree and stay TypeError/TypeError (the
+        // predicted "flip to mixed Ok/Err" did NOT occur: the byte-match made the
+        // two reductions converge on the same context-read error, not diverge).
+        // They graduate out of DC7_P2SH_MISMATCH_SET on bytes, not on verdict.
         ("TypeError", "TypeError"),
         // D-C4 (CLOSED, M4 Task 7): `crystalpool/sell-token-for-erg.es`. The
         // fold-slot multi-arg lambda now TUPLES to the evaluable 1-arg
