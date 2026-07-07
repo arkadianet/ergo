@@ -228,9 +228,15 @@ fn assert_mismatch_set_matches(
 /// (#17) stays — it needs M5 CSE/ValDef sharing, not this fold: Scala's
 /// hash-consing turns the REPEATED point into a shared `ValDef` before
 /// `buildValue`'s fold-check runs, so the fold-check's four-`Constant` guard
-/// never fires on the oracle side either). 39 vectors, derived from a full
-/// gate run against the M4 Task-1 seed (`compile_seed.json`, 272 vectors, 80
-/// ACCEPT swept).
+/// never fires on the oracle side either) → 36 (M4 Task 4: the explicit-cast
+/// direct-constant fold graduates `arr1.exists`/`arr1.filter`/
+/// `arr1.getOrElse` (recon-targets.md vectors #61/#60/#62 — the `0.toByte`/
+/// `9.toByte`/`1.toByte` literal argument casts now fold, matching the
+/// oracle exactly); #73/#84/#85 (`bitwiseAnd`/`bitwiseOr`/`bitwiseXor` over
+/// folded-cast Byte operands) stay MULTI — the surrounding `Eq` only folds
+/// once Task 5's generic constant-folding engine lands). 36 vectors, derived
+/// from a full gate run against the M4 Task-1 seed (`compile_seed.json`, 272
+/// vectors, 80 ACCEPT swept).
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "!true"),
     ("cc", "1 < 2L"),
@@ -279,18 +285,6 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "true ^ false"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
-    (
-        "ccs",
-        "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",
-    ),
-    (
-        "ccs",
-        "sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)",
-    ),
-    (
-        "ccs",
-        "sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)",
-    ),
     ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
     ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
     ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),
@@ -307,7 +301,7 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// exactly like Scala. Because a segregated tree's bytes are equal iff its
 /// constant-inlined proposition is equal, P2S now matches iff P2SH matches —
 /// so this set has collapsed onto the D-C7 residual and stays IDENTICAL to
-/// [`DC7_P2SH_MISMATCH_SET`] (39 vectors post-Task-3: the remaining IR-shape
+/// [`DC7_P2SH_MISMATCH_SET`] (36 vectors post-Task-4: the remaining IR-shape
 /// divergences — folds, val inlining, CSE, unwraps — that reshape the
 /// proposition itself). The D-C1 segregation axis is CLOSED; what remains is
 /// the D-C7 axis.
@@ -316,11 +310,13 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// Task 2: 35 SEGREGATION-ONLY vectors graduated — the 37 P2S/byte matches are
 /// those 35 plus the 2 already-matching bare-const vectors) → 39 (M4 Task 3:
 /// the same 4 D-C2/unwrap graduations as `DC7_P2SH_MISMATCH_SET` — P2S moves
-/// in lockstep with P2SH post-Task-2). Each graduation is a vector whose
-/// proposition was already (or is now) oracle-identical, so only the
-/// header/segregation differed; the set form (not a count) confirmed it
-/// dropped the RIGHT vectors — the remainder stays converged EXACTLY onto the
-/// DC7 set, as the segregation-invariance of P2SH predicts.
+/// in lockstep with P2SH post-Task-2) → 36 (M4 Task 4: the same 3
+/// explicit-cast-fold graduations as `DC7_P2SH_MISMATCH_SET`). Each
+/// graduation is a vector whose proposition was already (or is now)
+/// oracle-identical, so only the header/segregation differed; the set form
+/// (not a count) confirmed it dropped the RIGHT vectors — the remainder
+/// stays converged EXACTLY onto the DC7 set, as the segregation-invariance
+/// of P2SH predicts.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "!true"),
     ("cc", "1 < 2L"),
@@ -369,18 +365,6 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "true ^ false"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
-    (
-        "ccs",
-        "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",
-    ),
-    (
-        "ccs",
-        "sigmaProp(arr1.filter[Byte]({(t: Byte) => t > 0.toByte}).size == 2)",
-    ),
-    (
-        "ccs",
-        "sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)",
-    ),
     ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
     ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
     ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),

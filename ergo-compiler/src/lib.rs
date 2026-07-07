@@ -831,11 +831,18 @@
 //!   `sigmaProp(true)`), non-overflowing arithmetic
 //!   (`sigmaProp((2147483647 + 0) < 0)` folds — the OVERFLOW check is the
 //!   D-C5 gate), and `== false` → `LogicalNot`;
-//! - **explicit constant-cast shape differences** — Scala folds `0.toByte`
-//!   argument casts we keep as `Downcast` nodes (methodcalls (a)), while
-//!   our typer folds some literal upcast chains Scala keeps
-//!   (`1.toByte.toLong.toBigInt`, numerics N-3 probe 34); either direction
-//!   moves the bytes;
+//! - ~~explicit constant-cast shape differences~~ **CLOSED (M4 Task 4):**
+//!   both directions now match Scala exactly — `Downcast`/`Upcast` of a
+//!   DIRECT constant folds (`0.toByte` argument casts, methodcalls (a)), and
+//!   a literal cast CHAIN (`1.toByte.toLong.toBigInt`, numerics N-3 probe
+//!   34) folds ONLY the innermost cast, leaving the outer casts as real
+//!   nodes over the folded constant — Scala's `eval` pattern-matches
+//!   `Upcast(Constant(v,_), toTpe)` against the untouched, pre-transform
+//!   AST child, so only a cast immediately adjacent to a literal ever
+//!   fires; `crate::tree::fold_direct_const_casts` implements both
+//!   directions in one non-cascading pass (verified byte-identical to the
+//!   oracle capture `10020201060100d1917e7e730005067301` for the probe-34
+//!   vector);
 //! - **`val` inlining and unused-`val` pruning** (`{ val x = HEIGHT; x > 5 }`
 //!   → bare `GT(HEIGHT, 5)`);
 //! - **CSE/ValDef sharing** of repeated subterms (`proveDHTuple(g1, g2, g1,
@@ -881,13 +888,15 @@
 //! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
 //! compensating regression a count assert would miss): the address gate
 //! (`tests/compile_semantic_parity.rs`) pins the corpus at
-//! `DC7_P2SH_MISMATCH_SET` (39 of the 80 swept ACCEPT vectors as of M4
-//! Task 3, down from 43 at Task 1/2 — Task 3's D-C2 fold + single-element
-//! `anyOf`/`allOf` unwrap graduated 4; the other 41 P2SH-match and are
-//! hard-asserted equal wherever the proposition bytes agree). The M4
-//! lowering tasks plus the M5 CSE/ValDef-sharing work close the remainder;
-//! each landed lowering removes the vectors it graduates from the set,
-//! deliberately and explicitly.
+//! `DC7_P2SH_MISMATCH_SET` (36 of the 80 swept ACCEPT vectors as of M4
+//! Task 4, down from 39 at Task 3 and 43 at Task 1/2 — Task 4's
+//! explicit-cast direct-constant fold graduated 3 (`arr1.exists`/
+//! `arr1.filter`/`arr1.getOrElse`, recon-targets.md vectors #61/#60/#62);
+//! the other 44 P2SH-match and are hard-asserted equal wherever the
+//! proposition bytes agree). The M4 lowering tasks plus the M5
+//! CSE/ValDef-sharing work close the remainder; each landed lowering
+//! removes the vectors it graduates from the set, deliberately and
+//! explicitly.
 
 pub mod ast;
 pub mod binder;
