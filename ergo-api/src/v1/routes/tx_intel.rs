@@ -368,7 +368,7 @@ fn shape_inputs(state: &V1State, inputs: InputsDto) -> Result<KeylessInputs, Box
             Reason::UnsupportedIntent,
             "raw `boxes` inputs are not supported yet",
             format!(
-                "use `select` (from_addresses) or `box_ids` inputs;                  got {} raw box(es)",
+                "use `select` (from_addresses) or `box_ids` inputs; got {} raw box(es)",
                 boxes.len()
             ),
         )),
@@ -432,7 +432,7 @@ fn shape_outputs(
                     Reason::UnsupportedIntent,
                     "`mint` outputs are not supported yet",
                     format!(
-                        "token minting ships later (v1-api-design.md §4.2);                          requested mint of {amount} to {address}"
+ "token minting ships later (v1-api-design.md §4.2); requested mint of {amount} to {address}"
                     ),
                 ))
             }
@@ -441,7 +441,7 @@ fn shape_outputs(
                     Reason::UnsupportedIntent,
                     "`burn` outputs are not supported yet",
                     format!(
-                        "token burning ships later (v1-api-design.md §4.2);                          requested burn of {} asset kind(s)",
+ "token burning ships later (v1-api-design.md §4.2); requested burn of {} asset kind(s)",
                         assets.len()
                     ),
                 ))
