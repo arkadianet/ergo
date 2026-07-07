@@ -17,6 +17,7 @@
 //! the clock or the node itself, so it is trivially unit-testable.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -208,6 +209,29 @@ pub fn spawn_depth_sampler(
             sample_into(read.as_ref(), &ring);
         }
     })
+}
+
+/// Process-once guard for the sampler. Router assembly runs once in production
+/// but many times across the test suite (each `#[tokio::test]` builds a router
+/// under a live runtime); without this guard those builds would each spawn an
+/// orphaned detached sampler. The `JoinHandle` is intentionally dropped — the
+/// single task lives for the process — so a guarded call gives exactly one
+/// sampler per process.
+static SAMPLER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Spawn the production depth sampler at most ONCE per process (idempotent
+/// across repeated router assembly). Subsequent calls are no-ops. Call only
+/// from an async context (a Tokio runtime must be current).
+pub fn spawn_depth_sampler_once(
+    read: Arc<dyn NodeReadState>,
+    ring: Arc<MempoolDepthRing>,
+    interval: Duration,
+) {
+    if SAMPLER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // The JoinHandle is deliberately dropped: the task runs for the process.
+    drop(spawn_depth_sampler(read, ring, interval));
 }
 
 #[cfg(test)]

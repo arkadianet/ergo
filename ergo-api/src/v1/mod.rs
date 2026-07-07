@@ -32,8 +32,8 @@ pub use cursor::{
 pub use error::{v1_error, Reason, V1Error, V1ErrorInner};
 pub use governor::{Governor, GovernorConfig, GovernorConfigError, GovernorState, RouteClass};
 pub use mempool_depth::{
-    sample_into, spawn_depth_sampler, MempoolDepthRing, MempoolDepthSample,
-    DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
+    sample_into, spawn_depth_sampler, spawn_depth_sampler_once, MempoolDepthRing,
+    MempoolDepthSample, DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
 };
 pub use routes::{v1_router, V1State};
 

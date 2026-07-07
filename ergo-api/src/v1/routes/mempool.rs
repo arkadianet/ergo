@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,7 @@ use super::dto::{
     mempool_tx_from_api, Collection, V1Asset, V1FeeHistogram, V1FeeHistogramBin, V1IoBox,
     V1MempoolDepthPoint, V1MempoolSummary, V1MempoolTx, V1MempoolTxDetail, V1MempoolUtilization,
 };
+use super::extract::V1Query;
 use super::{parse_id32, V1State};
 use crate::blockchain::build_indexed_box_response;
 use crate::compat::NodeChainQuery;
@@ -87,13 +88,26 @@ fn order_key(t: &ApiMempoolTransaction, order: Order) -> u64 {
     }
 }
 
-/// Keyset cursor payload: `(key, tx_id)` of the last row served, where `key` is
-/// the active order's sort value. Opaque to clients (§1.5); the field names
-/// mirror the design's `{w, t}` mempool-keyset example.
+/// Keyset cursor payload: `(order, key, tx_id)` of the last row served, where
+/// `key` is the active order's sort value and `order` pins which `?order=` the
+/// cursor was issued under. Opaque to clients (§1.5); the field names mirror the
+/// design's `{w, t}` mempool-keyset example (`o` added so a cursor from one
+/// order fails closed rather than skips/dupes when replayed against another).
 #[derive(Debug, Serialize, Deserialize)]
 struct MempoolCursor {
+    o: u8,
     w: u64,
     t: String,
+}
+
+/// Stable wire tag for an [`Order`], embedded in the cursor so a replay against
+/// a different `?order=` is rejected (`invalid_cursor`) instead of mis-seeking.
+fn order_tag(order: Order) -> u8 {
+    match order {
+        Order::Weight => 0,
+        Order::FeePerByte => 1,
+        Order::FirstSeen => 2,
+    }
 }
 
 /// Order rows into the stable total order (`key` DESC, then `tx_id` ASC), then
@@ -111,6 +125,15 @@ fn render_mempool_page(
         Ok(c) => c,
         Err(e) => return e.into_response(),
     };
+    if let Some(cur) = after.as_ref() {
+        if cur.o != order_tag(order) {
+            return v1_error(
+                Reason::InvalidCursor,
+                "pagination cursor was issued for a different order",
+                "restart from the first page (drop `cursor`) when changing `order`",
+            );
+        }
+    }
 
     rows.sort_by(|a, b| {
         order_key(b, order)
@@ -129,6 +152,7 @@ fn render_mempool_page(
     rows.truncate(limit as usize);
     let next_cursor = has_more.then(|| rows.last()).flatten().map(|last| {
         encode_cursor(&MempoolCursor {
+            o: order_tag(order),
             w: order_key(last, order),
             t: last.tx_id.clone(),
         })
@@ -200,7 +224,7 @@ pub struct SummaryQuery {
 
 /// `GET /api/v1/mempool/summary` — pool depth + capacity + derived utilization
 /// + active weight-function, plus the optional O4 depth history.
-pub async fn summary(State(state): State<V1State>, Query(q): Query<SummaryQuery>) -> Response {
+pub async fn summary(State(state): State<V1State>, V1Query(q): V1Query<SummaryQuery>) -> Response {
     let s = state.read.mempool_summary();
     let count_pct = ratio(u64::from(s.size), u64::from(s.capacity_count));
     let bytes_pct = ratio(s.total_bytes, s.capacity_bytes);
@@ -259,7 +283,10 @@ pub struct ListQuery {
 
 /// `GET /api/v1/mempool/transactions` — cursor-paginated pool listing,
 /// priority-weight descending by default (mining order).
-pub async fn transactions(State(state): State<V1State>, Query(q): Query<ListQuery>) -> Response {
+pub async fn transactions(
+    State(state): State<V1State>,
+    V1Query(q): V1Query<ListQuery>,
+) -> Response {
     let order = match parse_order(q.order.as_deref()) {
         Ok(o) => o,
         Err(e) => return *e,
@@ -439,7 +466,7 @@ fn matched_ids(txs: Vec<ergo_rest_json::types::ScalaTransaction>) -> HashSet<Str
 pub async fn by_address(
     State(state): State<V1State>,
     Path(address): Path<String>,
-    Query(q): Query<ByQuery>,
+    V1Query(q): V1Query<ByQuery>,
 ) -> Response {
     let chain = match chain(&state) {
         Ok(c) => c,
@@ -464,7 +491,7 @@ pub async fn by_address(
 pub async fn by_ergo_tree(
     State(state): State<V1State>,
     Path(ergo_tree): Path<String>,
-    Query(q): Query<ByQuery>,
+    V1Query(q): V1Query<ByQuery>,
 ) -> Response {
     let chain = match chain(&state) {
         Ok(c) => c,
@@ -489,7 +516,7 @@ pub async fn by_ergo_tree(
 pub async fn by_box_id(
     State(state): State<V1State>,
     Path(box_id): Path<String>,
-    Query(q): Query<ByQuery>,
+    V1Query(q): V1Query<ByQuery>,
 ) -> Response {
     let chain = match chain(&state) {
         Ok(c) => c,
@@ -511,7 +538,7 @@ pub async fn by_box_id(
 pub async fn by_token_id(
     State(state): State<V1State>,
     Path(token_id): Path<String>,
-    Query(q): Query<ByQuery>,
+    V1Query(q): V1Query<ByQuery>,
 ) -> Response {
     let chain = match chain(&state) {
         Ok(c) => c,
@@ -545,7 +572,7 @@ pub struct HistogramQuery {
 /// fee-per-byte bounds (design correction — see the group report).
 pub async fn fee_histogram(
     State(state): State<V1State>,
-    Query(q): Query<HistogramQuery>,
+    V1Query(q): V1Query<HistogramQuery>,
 ) -> Response {
     let chain = match chain(&state) {
         Ok(c) => c,

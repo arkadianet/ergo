@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use ergo_indexer_types::{IndexerQuery, Page as IdxPage, SortDir, TokenId};
@@ -17,12 +17,14 @@ use ergo_ser::address::{encode_address, NetworkPrefix};
 use serde::Deserialize;
 
 use super::dto::{token_from_dto, CollectionMeta, HoldersMeta, V1TokenHolder, V1TokenStats};
+use super::extract::V1Query;
 use super::{offset_from_cursor, parse_id32, OffsetCursor, V1State};
 use crate::v1::cursor::{clamp_limit, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason};
 
-/// Hard cap on boxes walked per holder/stats scan (§2.2). Above this the
-/// ranking is `scan_capped` (approximate) — never silently partial.
+/// Hard cap on UNSPENT boxes walked per holder/stats scan (§2.2). When the
+/// scan stops here with more unspent boxes pending, the ranking is
+/// `scan_capped` (approximate) — never silently partial.
 const HOLDER_SCAN_CAP: u32 = 50_000;
 /// Per-batch page size for the bounded scan.
 const SCAN_BATCH: u32 = 1_000;
@@ -109,11 +111,6 @@ fn scan_token_holders(
     token_id: &TokenId,
     network: NetworkPrefix,
 ) -> HolderScan {
-    // `capped` reflects the ACTUAL unspent scan, not `token_total_boxes` — that
-    // counts SPENT + unspent boxes, so a token with many spent but few unspent
-    // boxes was wrongly flagged capped on a COMPLETE scan (CodeRabbit #170). Set
-    // only when the loop stops at the cap with more unspent rows pending;
-    // conservative (an exactly-`cap` unspent set may over-report, never under).
     let mut capped = false;
     let mut acc: HashMap<String, u128> = HashMap::new();
     let mut circulating: u128 = 0;
@@ -122,6 +119,8 @@ fn scan_token_holders(
     loop {
         let scanned_u32 = scanned as u32;
         if scanned_u32 >= HOLDER_SCAN_CAP {
+            // Stopped at the cap with a prior full batch still pending: the
+            // unspent set exceeds what we walked, so the ranking is approximate.
             capped = true;
             break;
         }
@@ -174,7 +173,7 @@ fn scan_token_holders(
 pub async fn token_holders(
     State(state): State<V1State>,
     Path(token_hex): Path<String>,
-    Query(q): Query<HoldersQuery>,
+    V1Query(q): V1Query<HoldersQuery>,
 ) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,

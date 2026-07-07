@@ -4,13 +4,14 @@
 //! `boxes/{by-address,unspent/by-address}` (O10) — one handler
 //! ([`super::boxes`]), dual-mounted in the router, never a second copy.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use ergo_indexer_types::Page as IdxPage;
 use serde::Deserialize;
 
 use super::dto::{address_tx_summary_from_indexed, Collection, V1Asset, V1Balance, V1BalanceEntry};
+use super::extract::V1Query;
 use super::{offset_from_cursor, offset_page, parse_sort, V1State};
 use crate::blockchain::{
     address_to_tree_hash, build_indexed_tx_response, unconfirmed_balance_for_tree, BalanceInfoEntry,
@@ -106,7 +107,7 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
 pub async fn transactions(
     State(state): State<V1State>,
     Path(address): Path<String>,
-    Query(q): Query<AddressTxQuery>,
+    V1Query(q): V1Query<AddressTxQuery>,
 ) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,

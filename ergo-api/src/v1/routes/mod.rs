@@ -1,8 +1,8 @@
 //! `/api/v1/*` route groups mounted on the G2 shared primitives.
 //!
-//! This is the FIRST route-group module — the `chain/*` + `transactions/*`
-//! reads that close the highest-priority self-sufficiency gap (`v1-api-design.md`
-//! §3.5–§3.6). Everything here consumes the G2 primitives (`error` envelope +
+//! This module mounts every native read group — `chain/*`, `transactions/*`,
+//! `boxes/*`, `tokens/*`, `addresses/*`, and `mempool/*` (`v1-api-design.md`
+//! §3.5–§3.8). Everything here consumes the G2 primitives (`error` envelope +
 //! [`Reason`], `cursor` page builder, `governor`, `auth` tiers) rather than
 //! inventing parallel mechanisms; later groups copy this shape.
 //!
@@ -16,6 +16,7 @@ pub mod dto;
 mod addresses;
 mod boxes;
 mod chain;
+mod extract;
 mod mempool;
 mod tokens;
 mod transactions;
@@ -140,20 +141,21 @@ struct ListQuery {
     order: Option<String>,
 }
 
-/// A modifier / header / tx id on the wire is an unprefixed lowercase 64-char
-/// hex string. Reject anything else *before* hitting the store so a malformed
-/// id is a `400 invalid_*` (§1.4 rule 2), not a `404`.
+/// A modifier / header / tx id on the wire is an unprefixed 64-char LOWERCASE
+/// hex string — v1 is canonical-strict per the design doc (§ WS
+/// `invalid_selector`: "must be 64 lowercase hex chars"; §1.4 lowercase
+/// convention), stricter than the compat surfaces by design. Reject anything
+/// else (wrong length, non-hex, or uppercase) *before* hitting the store so a
+/// malformed id is a `400 invalid_*` (§1.4 rule 2), not a `404`.
 fn valid_modifier_id(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 fn invalid_hex() -> Response {
     v1_error(
         Reason::InvalidHex,
-        "id is not a 64-character lowercase hex string",
-        "supply an unprefixed lowercase hex modifier id",
+        "id is not a 64-character hex string",
+        "supply an unprefixed hex modifier id",
     )
 }
 
@@ -266,29 +268,24 @@ pub(super) fn offset_from_cursor(cursor: Option<&str>) -> Result<u32, Box<Respon
 /// overfetched-by-one item list: trim the sentinel, set `has_more`, and mint
 /// the next offset cursor (`start + limit`).
 pub(super) fn offset_page<T>(items: Vec<T>, start: u32, limit: u32) -> (Vec<T>, CursorPage) {
-    // Count-based detection: the caller overfetched `limit + 1`, so a page with
-    // more than `limit` items has a next page.
-    let has_more = items.len() as u64 > u64::from(limit);
-    offset_page_explicit(items, start, limit, has_more)
+    offset_page_at(items, limit, start.saturating_add(limit))
 }
 
-/// Like [`offset_page`] but with an EXPLICIT next-page signal, for routes whose
-/// next page is not the projected item count — e.g. the unspent-box overlay,
-/// where the `exclude_mempool_spent` view filter can shrink the page below
-/// `limit` even though the confirmed offset window still has a next page. Always
-/// caps `items` to `limit`.
-pub(super) fn offset_page_explicit<T>(
+/// Like [`offset_page`] but with an explicit next-page offset. Used where the
+/// window consumed a *variable* number of reader rows (e.g. an
+/// `exclude_mempool_spent` overfetch that loops until `limit + 1` survivors), so
+/// the cursor must resume past the rows actually read, not the naive
+/// `start + limit`.
+pub(super) fn offset_page_at<T>(
     mut items: Vec<T>,
-    start: u32,
     limit: u32,
-    has_more: bool,
+    next_off: u32,
 ) -> (Vec<T>, CursorPage) {
-    items.truncate(limit as usize);
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&OffsetCursor {
-            off: start.saturating_add(limit),
-        })
-    });
+    let has_more = items.len() as u64 > u64::from(limit);
+    if has_more {
+        items.truncate(limit as usize);
+    }
+    let next_cursor = has_more.then(|| encode_cursor(&OffsetCursor { off: next_off }));
     (
         items,
         CursorPage {
@@ -300,9 +297,11 @@ pub(super) fn offset_page_explicit<T>(
 }
 
 /// Build the native `/api/v1/*` product-API router: the `chain/*` +
-/// `transactions/*` reads group AND the `boxes/*` + `tokens/*` + `addresses/*`
-/// reads group, all consuming the G2 shared primitives (error envelope, cursor
-/// page builder, per-IP governor) and state-erased for merging under `/api/v1`.
+/// `transactions/*` reads group, the `boxes/*` + `tokens/*` + `addresses/*`
+/// reads group, AND the `mempool/*` group (summary, listing, `by-*` filters,
+/// single-tx detail, fee histogram, and the O1 `submit/check` aliases), all
+/// consuming the G2 shared primitives (error envelope, cursor page builder,
+/// per-IP governor) and state-erased for merging under `/api/v1`.
 ///
 /// Route classes (§2.2): the single by-id lookups (`boxes/{id}`, `tokens/{id}`)
 /// sit at `CheapRead`; every paginated / scan / range surface (and the whole

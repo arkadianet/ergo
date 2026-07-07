@@ -16,17 +16,30 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use ergo_api::compat::types::{ScalaFeeHistogramBin, ScalaInfo, ScalaMerkleProof};
 use ergo_api::compat::NodeChainQuery;
-use ergo_api::traits::{MempoolView, NodeReadState, NodeSubmit, NoopMempoolView};
+use ergo_api::traits::{MempoolView, NodeReadState, NodeSubmit, NoopMempoolView, PoolTxDetail};
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
     ApiMempoolTransactions, ApiPeer, ApiStatus, ApiSyncStatus, ApiTip, ApiTxSource,
     ApiWeightFunction, HealthStatus, SubmitError, SubmitMode, SyncStateLabel,
 };
 use ergo_api::v1::{v1_router, MempoolDepthRing, V1State};
+use ergo_indexer_types::{BoxId, TxId};
+use ergo_primitives::digest::{Digest32, ModifierId};
+use ergo_primitives::writer::VlqWriter;
 use ergo_rest_json::types::{
     ScalaBlockSection, ScalaBlockTransactions, ScalaFullBlock, ScalaHeader, ScalaTransaction,
 };
 use ergo_ser::address::{encode_address_from_tree_bytes, NetworkPrefix};
+use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
+use ergo_ser::ergo_tree::ErgoTree;
+use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+use ergo_ser::opcode::Expr;
+use ergo_ser::register::AdditionalRegisters;
+use ergo_ser::sigma_type::SigmaType;
+use ergo_ser::sigma_value::SigmaValue;
+use ergo_ser::token::Token;
+use ergo_ser::transaction::{write_transaction, Transaction};
+use std::collections::HashMap;
 use tower::ServiceExt;
 
 // ----- fixtures -----------------------------------------------------------
@@ -604,4 +617,166 @@ async fn submit_alias_without_bridge_is_submit_disabled() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["reason"].as_str(), Some("submit_disabled"));
+}
+
+// ----- cursor/order fail-closed (CodeRabbit #171 finding 4) ----------------
+
+#[tokio::test]
+async fn cursor_from_one_order_is_rejected_when_replayed_against_another() {
+    // A page-1 cursor issued under `weight` carries the order it was minted
+    // for. Replaying it against a different `?order=` must fail closed with
+    // `invalid_cursor` (not silently skip/dupe under the new sort).
+    let (_s, p1) = get(app(), "/api/v1/mempool/transactions?limit=2&order=weight").await;
+    let cursor = p1["page"]["next_cursor"].as_str().unwrap().to_string();
+
+    let (status, body) = get(
+        app(),
+        &format!("/api/v1/mempool/transactions?limit=2&order=fee_per_byte&cursor={cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["reason"].as_str(), Some("invalid_cursor"));
+
+    // Same order replays cleanly.
+    let (status, _b) = get(
+        app(),
+        &format!("/api/v1/mempool/transactions?limit=2&order=weight&cursor={cursor}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ----- populated tx-detail io resolution (CodeRabbit #171 finding 12) ------
+
+/// `MempoolView` that hands back one pooled tx's wire bytes + its pool-output
+/// overlay for a single `tx_id` (the tx-detail seam); every other accessor is
+/// an empty pool.
+struct StubMempool {
+    tx_id: TxId,
+    bytes: Arc<[u8]>,
+    pool_outputs: Arc<HashMap<BoxId, ErgoBox>>,
+}
+
+impl MempoolView for StubMempool {
+    fn is_spent_by_pool(&self, _box_id: &BoxId) -> bool {
+        false
+    }
+    fn pool_spending_tx(&self, _box_id: &BoxId) -> Option<TxId> {
+        None
+    }
+    fn pool_outputs(&self) -> Arc<HashMap<BoxId, ErgoBox>> {
+        self.pool_outputs.clone()
+    }
+    fn pool_tx_detail(&self, tx_id: &TxId) -> Option<PoolTxDetail> {
+        (tx_id == &self.tx_id).then(|| (self.bytes.clone(), self.pool_outputs.clone()))
+    }
+}
+
+fn app_with_mempool(mempool: Arc<dyn MempoolView>) -> Router {
+    let state = V1State {
+        read: Arc::new(StubRead),
+        chain: Some(Arc::new(StubChain)),
+        indexer: None,
+        submit: None,
+        mempool,
+        mempool_depth: Arc::new(MempoolDepthRing::new()),
+        network: NetworkPrefix::Mainnet,
+    };
+    v1_router(
+        state,
+        ergo_api::v1::governor::Governor::new(Default::default()),
+    )
+}
+
+/// Minimal always-true (`SBoolean` const) script tree — encodes to a valid P2S
+/// address so io projection yields a non-null address.
+fn true_tree() -> ErgoTree {
+    ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        constants: vec![],
+        body: Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
+    }
+}
+
+fn candidate(value: u64, tokens: Vec<Token>) -> ErgoBoxCandidate {
+    ErgoBoxCandidate::new(
+        value,
+        true_tree(),
+        100,
+        tokens,
+        AdditionalRegisters::empty(),
+    )
+    .unwrap()
+}
+
+fn input(box_id_fill: u8) -> Input {
+    Input {
+        box_id: Digest32::from_bytes([box_id_fill; 32]),
+        spending_proof: SpendingProof::new(vec![0xDE, 0xAD], ContextExtension::empty()).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn detail_with_populated_view_renders_real_io_boxes() {
+    // Pooled tx id_a spends box 0xA1 (resolvable via the pool overlay) and
+    // emits one output carrying a token. With a populated MempoolView the
+    // detail must render real io_box inputs/outputs, not the Noop empty case.
+    let token = Token {
+        token_id: Digest32::from_bytes([0x07; 32]),
+        amount: 42,
+    };
+    let tx = Transaction {
+        inputs: vec![input(0xA1)],
+        data_inputs: vec![],
+        output_candidates: vec![candidate(5_000_000, vec![token])],
+    };
+    let mut w = VlqWriter::new();
+    write_transaction(&mut w, &tx).unwrap();
+    let bytes: Arc<[u8]> = Arc::from(w.result());
+
+    let mut overlay: HashMap<BoxId, ErgoBox> = HashMap::new();
+    overlay.insert(
+        Digest32::from_bytes([0xA1; 32]),
+        ErgoBox {
+            candidate: candidate(3_000_000, vec![]),
+            transaction_id: ModifierId::from_bytes([0xCC; 32]),
+            index: 0,
+        },
+    );
+
+    // id_a() is "aa"*32 → raw [0xAA; 32]; StubRead returns its pool row.
+    let tx_id = TxId::from_bytes([0xAA; 32]);
+    let mempool: Arc<dyn MempoolView> = Arc::new(StubMempool {
+        tx_id,
+        bytes,
+        pool_outputs: Arc::new(overlay),
+    });
+
+    let (status, body) = get(
+        app_with_mempool(mempool),
+        &format!("/api/v1/mempool/transactions/{}", id_a()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["tx_id"].as_str(), Some(id_a().as_str()));
+
+    // Output resolves: string value + a non-null address + the token asset.
+    let outs = body["outputs"].as_array().expect("outputs array");
+    assert_eq!(outs.len(), 1);
+    assert_eq!(outs[0]["value"].as_str(), Some("5000000"));
+    assert!(outs[0]["address"].is_string(), "output address: {body}");
+    let assets = outs[0]["assets"].as_array().expect("assets array");
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["amount"].as_str(), Some("42"));
+
+    // Input A resolves via the pool overlay → real value + address.
+    let ins = body["inputs"].as_array().expect("inputs array");
+    assert_eq!(ins.len(), 1);
+    assert_eq!(ins[0]["value"].as_str(), Some("3000000"));
+    assert!(ins[0]["address"].is_string(), "input address: {body}");
 }

@@ -1224,7 +1224,9 @@ pub fn router_with_mempool_and_wallet_and_security(
     // the future `stats/mempool-depth`.
     let v1_mempool_depth = std::sync::Arc::new(crate::v1::mempool_depth::MempoolDepthRing::new());
     if tokio::runtime::Handle::try_current().is_ok() {
-        crate::v1::mempool_depth::spawn_depth_sampler(
+        // Guarded to spawn exactly one sampler per process even though router
+        // assembly can run many times (the whole test suite builds routers).
+        crate::v1::mempool_depth::spawn_depth_sampler_once(
             v1_read.clone(),
             v1_mempool_depth.clone(),
             crate::v1::mempool_depth::DEFAULT_SAMPLE_INTERVAL,

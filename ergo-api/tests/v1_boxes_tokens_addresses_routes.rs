@@ -468,3 +468,33 @@ impl NodeReadState for StubRead {
         }
     }
 }
+
+// ----- extractor rejections stay in the v1 envelope (CodeRabbit #171 #2) ---
+
+#[tokio::test]
+async fn malformed_query_param_is_v1_invalid_params_envelope() {
+    // `limit=abc` fails V1Query extraction; the failure must render the v1
+    // envelope, not axum's default plain-text 400.
+    let (status, body) = get(
+        Some(caught_up()),
+        &format!("/api/v1/boxes/by-token/{HEX_64}?limit=abc"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(reason(&body), "invalid_params");
+}
+
+#[tokio::test]
+async fn malformed_json_body_is_v1_bad_request_envelope() {
+    // A body that isn't valid JSON fails V1Json extraction on the POST
+    // by-ergo-tree route; the failure must render the v1 envelope.
+    let (status, body) = send(
+        app(Some(caught_up())),
+        Method::POST,
+        "/api/v1/boxes/by-ergo-tree",
+        Body::from("{ not json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(reason(&body), "bad_request");
+}
