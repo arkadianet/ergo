@@ -370,6 +370,7 @@ fn app(deps: Deps) -> Router {
         tx_builder: deps.tx_builder,
         mempool,
         mempool_depth: Arc::new(ergo_api::v1::MempoolDepthRing::new()),
+        emission: None,
         realtime: None,
         network: NetworkPrefix::Mainnet,
     };

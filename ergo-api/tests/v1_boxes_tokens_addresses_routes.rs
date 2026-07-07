@@ -65,6 +65,7 @@ fn app(indexer: Option<Arc<dyn IndexerQuery>>) -> Router {
         tx_builder: None,
         mempool,
         mempool_depth: Arc::new(ergo_api::v1::MempoolDepthRing::new()),
+        emission: None,
         realtime: None,
         network: NetworkPrefix::Mainnet,
     };

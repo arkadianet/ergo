@@ -97,16 +97,16 @@ pub async fn tokens_list(State(state): State<V1State>) -> Response {
 // ----- tokens/{token_id}/holders + stats (bounded scan, O3) ---------------
 
 /// Result of the bounded per-token unspent-box scan shared by holders + stats.
-struct HolderScan {
+pub(super) struct HolderScan {
     /// Aggregated `(address, amount)` pairs, sorted descending by amount then
     /// address (a stable tiebreak so the cursor page is deterministic).
-    holders: Vec<(String, u128)>,
-    scanned: u64,
-    capped: bool,
-    circulating: u128,
+    pub(super) holders: Vec<(String, u128)>,
+    pub(super) scanned: u64,
+    pub(super) capped: bool,
+    pub(super) circulating: u128,
 }
 
-fn scan_token_holders(
+pub(super) fn scan_token_holders(
     idx: &dyn IndexerQuery,
     token_id: &TokenId,
     network: NetworkPrefix,

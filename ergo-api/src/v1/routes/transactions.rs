@@ -35,7 +35,7 @@ use crate::v1::error::{v1_error, Reason};
 /// validator derives its constant from) by [`tests::fee_proposition_hex_matches_oracle`];
 /// duplicated here as a hex string rather than taking an `ergo-mempool`
 /// dependency into the API crate.
-const FEE_PROPOSITION_ERGO_TREE_HEX: &str = "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
+pub(super) const FEE_PROPOSITION_ERGO_TREE_HEX: &str = "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
 
 const REGISTER_NAMES: [&str; 6] = ["R4", "R5", "R6", "R7", "R8", "R9"];
 
@@ -120,7 +120,7 @@ pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String
 
 /// Sum output values paying the fee proposition. Output-side only, so it is
 /// computable even when some inputs are unresolved.
-fn fee_from_hex_values<S: AsRef<str>>(outputs: impl Iterator<Item = (S, u64)>) -> u64 {
+pub(super) fn fee_from_hex_values<S: AsRef<str>>(outputs: impl Iterator<Item = (S, u64)>) -> u64 {
     outputs
         .filter(|(tree, _)| tree.as_ref() == FEE_PROPOSITION_ERGO_TREE_HEX)
         .map(|(_, v)| v)

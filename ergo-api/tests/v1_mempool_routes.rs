@@ -290,6 +290,7 @@ fn app_full(
         tx_builder: None,
         mempool,
         mempool_depth: ring,
+        emission: None,
         realtime: None,
         network: NetworkPrefix::Mainnet,
     };
@@ -683,6 +684,7 @@ fn app_with_mempool(mempool: Arc<dyn MempoolView>) -> Router {
         tx_builder: None,
         mempool,
         mempool_depth: Arc::new(MempoolDepthRing::new()),
+        emission: None,
         realtime: None,
         network: NetworkPrefix::Mainnet,
     };
