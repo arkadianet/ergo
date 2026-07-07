@@ -1238,6 +1238,7 @@ mod fold;
 mod inline;
 mod isproven;
 mod lower;
+pub mod param_order;
 mod parse;
 pub mod span;
 pub mod stype;
