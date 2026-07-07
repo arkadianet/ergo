@@ -681,6 +681,7 @@ fn app_with_mempool(mempool: Arc<dyn MempoolView>) -> Router {
         submit: None,
         mempool,
         mempool_depth: Arc::new(MempoolDepthRing::new()),
+        realtime: None,
         network: NetworkPrefix::Mainnet,
     };
     v1_router(
