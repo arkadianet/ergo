@@ -1,7 +1,7 @@
 //! Type unification, substitution, and numeric upcast machinery.
 //!
 //! Port of the Scala reference (sigma-state 6.0.2, pinned worktree
-//! `/home/rkadias/coding/reference/ergo-core/sigmastate-interpreter-v6.0.2`):
+//! `ergo-core/sigmastate-interpreter-v6.0.2`):
 //!
 //! - `core/shared/src/main/scala/sigma/ast/package.scala:15-108`
 //!   (unifyTypes 12 ordered rules, unifyTypeLists TRUNCATING zip, applySubst,

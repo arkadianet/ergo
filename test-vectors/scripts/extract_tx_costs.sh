@@ -9,7 +9,7 @@ set -euo pipefail
 # Usage: ./extract_tx_costs.sh [start_height] [end_height] [output_file]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCALA_CLI="${SCALA_CLI:-/home/rkadias/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
+SCALA_CLI="${SCALA_CLI:-$HOME/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
 SCALA_SCRIPT="${SCRIPT_DIR}/scala/ComputeTransactionCosts.scala"
 
 START_HEIGHT="${1:-700000}"

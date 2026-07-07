@@ -11,7 +11,7 @@
 //! Spec: the validated spike `dev-docs/ergoscript-compiler-m5-recon/
 //! spike-scope-chain.md` (6/6 oracle predictions). All Scala citations resolve
 //! under the pinned oracle checkout
-//! `/home/rkadias/coding/reference/ergo-core/sigmastate-interpreter-v6.0.2`,
+//! `ergo-core/sigmastate-interpreter-v6.0.2`,
 //! `sc/shared/src/main/scala/sigma/compiler/ir/`.
 //!
 //! # The identity model (spike §1)

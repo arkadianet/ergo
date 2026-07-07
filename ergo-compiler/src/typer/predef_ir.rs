@@ -1,7 +1,7 @@
 //! Predefined-function environment + irBuilder lowering table.
 //!
 //! Ports the `globalFuncs` registry from `SigmaPredef.scala` (pinned v6.0.2
-//! `/home/rkadias/coding/reference/ergo-core/sigmastate-interpreter-v6.0.2/
+//! `ergo-core/sigmastate-interpreter-v6.0.2/
 //!   data/shared/src/main/scala/sigma/ast/SigmaPredef.scala`):
 //!
 //! - [`predefined_env`] — the declaration-type map (`name -> SFunc`) that

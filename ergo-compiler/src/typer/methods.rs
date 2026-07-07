@@ -1,7 +1,7 @@
 //! SMethod tables for the ErgoScript typer.
 //!
 //! Transcription of `sigma/ast/methods.scala` (sigma-state v6.0.2, pinned
-//! reference at `/home/rkadias/coding/reference/ergo-core/
+//! reference at `ergo-core/
 //!   sigmastate-interpreter-v6.0.2/data/shared/src/main/scala/sigma/ast/methods.scala`).
 //!
 //! Only the type-inference surface is reproduced here: no cost models, no

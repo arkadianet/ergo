@@ -10,7 +10,7 @@ set -euo pipefail
 # and the explorer DB at MAINNET_DB_URL.
 
 NODE_URL="${NODE_URL:-http://localhost:9053}"
-DB_URL="${MAINNET_DB_URL:-postgres://kadia:arkadias@localhost:5432/mainnet}"
+DB_URL="${MAINNET_DB_URL:-postgres://localhost-db-user:PASSWORD@localhost:5432/mainnet}"
 
 if [ $# -lt 3 ]; then
     echo "Usage: $0 <start_height> <end_height> <output_file>" >&2

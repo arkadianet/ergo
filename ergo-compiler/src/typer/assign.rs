@@ -1,7 +1,7 @@
 //! `assignType` dispatch — the structural arms of `SigmaTyper.assignType`.
 //!
 //! Port of `SigmaTyper.assignType` (pinned v6.0.2 worktree
-//! `/home/rkadias/coding/reference/ergo-core/sigmastate-interpreter-v6.0.2/
+//! `ergo-core/sigmastate-interpreter-v6.0.2/
 //!   sc/shared/src/main/scala/sigma/compiler/phases/SigmaTyper.scala:53-543`).
 //! Spec: `dev-docs/m2-recon/m2-typer.md` §1.1-1.25, §5, §6 (with the E1
 //! correction from the M2 plan — see below).

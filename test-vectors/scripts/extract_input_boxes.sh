@@ -10,7 +10,7 @@ set -euo pipefail
 # Includes serialized box bytes via Scala helper for test consumption.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCALA_CLI="${SCALA_CLI:-/home/rkadias/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
+SCALA_CLI="${SCALA_CLI:-$HOME/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
 NODE_URL="${NODE_URL:-http://localhost:9053}"
 
 if [ $# -lt 3 ]; then

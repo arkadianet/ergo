@@ -145,7 +145,7 @@ RESULTS="${RESULTS}]"
 # Now get the Scala-serialized tx bytes for each mutation
 # Pass the SAME source box ID to ensure deterministic box selection
 echo "  Getting Scala-serialized bytes (source box: $SOURCE_BOX_ID)..." >&2
-SCALA_CLI="${SCALA_CLI:-/home/rkadias/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
+SCALA_CLI="${SCALA_CLI:-$HOME/.cache/scalacli/local-repo/bin/scala-cli/scala-cli}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 $SCALA_CLI run "$SCRIPT_DIR/scala/BuildMutations.scala" -- "$SOURCE_BOX_ID" \
   2>/dev/null > "$TMPDIR/scala_mutations.jsonl"

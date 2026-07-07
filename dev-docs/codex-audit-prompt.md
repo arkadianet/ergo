@@ -31,7 +31,7 @@ full language. **M5 (CSE/ValDef sharing) is NOT done** — see §5 for the exact
 
 **Scala is the sole authority.** Two forms, both pinned to 6.0.2:
 
-1. **Pinned source checkout:** `/home/rkadias/coding/reference/ergo-core/sigmastate-interpreter-v6.0.2`.
+1. **Pinned source checkout:** `ergo-core/sigmastate-interpreter-v6.0.2`.
    ⚠️ The *plain* `sigmastate-interpreter` checkout is 6.0.3+ and **differs** — never cite it.
    Every behavioral claim in the crate's doc-comments cites this tree as `file:line`.
 
