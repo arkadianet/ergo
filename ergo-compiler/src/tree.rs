@@ -931,6 +931,24 @@ pub fn compile(
     // prunes it), and the gate must too.
     let root = crate::inline::prune_dead_vals(root);
 
+    // Dense id renumbering (M4 Task 9 review nit; `crate::inline::
+    // renumber_dense`). Inlining a single-use/const `val` erases its `ValDef`
+    // but not its id, so a `FuncValue` arg allocated AFTER the inlined `val`
+    // keeps a numbering gap our emit never closes (oracle probe: `{ val t =
+    // HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 <
+    // t})) }` — the lambda arg `b` is id 2 pre-renumber, but Scala's
+    // post-inline schedule gives it id 1). Only fires when the tree has NO
+    // surviving `ValDef`/`FunDef` (every remaining id is then a `FuncValue`
+    // arg with no sharing decision left, so pre-order first-appearance IS
+    // Scala's schedule order); a tree that keeps a `ValDef` is the M5
+    // schedule-order surface and is left untouched. Runs AFTER
+    // `prune_dead_vals` (only SURVIVING defs should block renumbering) and
+    // BEFORE the v0-data gate / lowering block below (both walk ids
+    // structurally, not by value, so running here vs. after either is
+    // equivalent; here keeps the whole Task-9 id story in one pipeline
+    // neighborhood).
+    let root = crate::inline::renumber_dense(root);
+
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
     // `VersionContext.withVersions(_, treeVersion = ergoTree.version)`
@@ -1247,6 +1265,32 @@ mod tests {
             .expect("compile");
         assert!(r.ergo_tree.constants.is_empty(), "no literal constants");
         assert_eq!(hex::encode(&r.tree_bytes), "1000d191a3e4c6a70404");
+    }
+
+    #[test]
+    fn compile_lambda_arg_id_densifies_after_val_inline_matching_oracle_bytes() {
+        // M4 Task 9 review nit (dense id renumbering; `crate::inline::
+        // renumber_dense`): `{ val t = HEIGHT + 1;
+        // sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }`
+        // inlines the single-use `val t` into the lambda body (cross-lambda
+        // inline, already correct pre-fix), but our M3 emit had allocated the
+        // lambda arg `b` id **2** (following `t`'s id 1) — surviving the
+        // inline as a permanent numbering gap. Scala's post-inline schedule
+        // gives the lambda arg id **1**. Oracle (`cc`, sigma-state 6.0.2,
+        // testnet, captured 2026-07-07,
+        // `test-vectors/ergoscript/compile/compile_seed.json`):
+        // `10010402d1aea5d90101638f8cc77201019aa37300` — note `d90101`
+        // (FuncValue, one arg, id **1**), not the pre-fix `d90102`.
+        let r = ct(
+            "{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }",
+        )
+        .expect("compile");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "10010402d1aea5d90101638f8cc77201019aa37300"
+        );
+        assert_eq!(r.p2s_address, "arcTuUnjRPq95jiYnHq6eU4AJyr8XCH9HoN");
+        assert_eq!(r.p2sh_address, "rk4vxuStzvtBhd694dpg7jJYeBp22aBZue4jw6Q");
     }
 
     #[test]

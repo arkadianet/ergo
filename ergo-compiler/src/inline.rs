@@ -40,6 +40,37 @@
 //! keeps its emit-time ids is self-consistent (`ValUse` references by id); it
 //! simply stays byte-divergent from Scala exactly where M5 is still owed.
 //!
+//! ## Dense id renumbering (M4 Task 9 review nit — [`renumber_dense`])
+//!
+//! Inlining a single-use/constant `val` removes its `ValDef` but NOT its id
+//! from the numbering: `emit` allocates ids monotonically over the PRE-inline
+//! source tree (one id per source `val`/lambda param), so an inlined `val`
+//! leaves a permanent gap in whatever ids follow it. Scala has no such gap —
+//! `processAstGraph` assigns `ValDef`/`FuncValue` ids over the POST-inline
+//! schedule graph, so a tree with nothing left to number BUT `FuncValue` args
+//! comes out dense (1, 2, …) regardless of how many source `val`s were inlined
+//! ahead of them. Oracle-probed: `{ val t = HEIGHT + 1;
+//! sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }` inlines
+//! `t` (single-use) into the lambda body, so our emit's lambda-arg `b` is left
+//! holding id **2** (it was allocated after `t`'s id **1**) while the oracle's
+//! `FuncValue` arg is id **1** (`d90101` vs our `d90102`).
+//!
+//! [`renumber_dense`] closes this gap, but **only when the tree has NO
+//! surviving `ValDef`/`FunDef` anywhere** (checked globally, not per-block):
+//! in that case every remaining id is a `FuncValue` arg, and Scala's
+//! post-inline schedule order over a `ValDef`-free graph is exactly first
+//! appearance in the tree (there is no sharing decision left to make — a
+//! `FuncValue` arg is never itself a CSE candidate). Renumbering just those ids
+//! densely in pre-order is therefore Scala-exact for this restricted shape. A
+//! tree WITH a surviving `ValDef` is left completely alone — that is still the
+//! undetermined M5 schedule-order surface (`hasManyUsagesGlobal` + hash-consing
+//! decide BOTH which nodes keep a `ValDef` AND the id order over the mixed
+//! `ValDef`/`FuncValue`-arg population), and guessing an order here would only
+//! produce a scheme M5 has to tear out. Run AFTER [`prune_dead_vals`] (so
+//! `ValDef`s pruned as dead don't count as "surviving") and, transitively,
+//! after `crate::fold::fold` (dead-`val` folds must land before pruning decides
+//! what survives) — see the pipeline slot list below.
+//!
 //! ## Why the pass is SPLIT across the fold (pipeline order, pinned by oracle
 //! probes — see `crate::tree::compile`)
 //!
@@ -66,7 +97,8 @@
 //!    AFTER the folds** (mirroring `buildNode`-then-`schedule`).
 //!
 //! Net pipeline slot: `fold_direct_const_casts` → `isProven` fusion →
-//! [`inline_vals`] → `crate::fold::fold` → [`prune_dead_vals`] → v0-data gate.
+//! [`inline_vals`] → `crate::fold::fold` → [`prune_dead_vals`] →
+//! [`renumber_dense`] → v0-data gate.
 //! Pruning before the v0 gate is required so a dead `val` holding v3-only data
 //! (`{ val unused = Coll[BigInt](); sigmaProp(true) }` → OK) is gone before the
 //! gate scans, matching the oracle's accept.
@@ -144,6 +176,101 @@ pub(crate) fn prune_dead_vals(expr: Expr) -> Expr {
         Expr::Op(IrNode { opcode, payload }) => Expr::Op(IrNode {
             opcode,
             payload: map_children(payload, prune_dead_vals),
+        }),
+        other => other,
+    }
+}
+
+/// Renumber `FuncValue` arg ids (and their `ValUse` references) densely —
+/// 1, 2, … in pre-order first-appearance order — but ONLY when `expr` contains
+/// NO surviving `ValDef`/`FunDef` anywhere. Run AFTER [`prune_dead_vals`]. See
+/// the module docs "Dense id renumbering" section for why the boundary is
+/// drawn exactly here (a tree with a surviving `ValDef` is the M5
+/// schedule-order surface and is left untouched, gap and all).
+pub(crate) fn renumber_dense(expr: Expr) -> Expr {
+    if has_surviving_def(&expr) {
+        return expr;
+    }
+    let mut order: Vec<u32> = Vec::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    collect_func_arg_order(&expr, &mut order, &mut seen);
+    if order.iter().enumerate().all(|(i, id)| *id == i as u32 + 1) {
+        return expr; // already dense (the common case — nothing was inlined ahead of a gap)
+    }
+    let map: HashMap<u32, u32> = order
+        .into_iter()
+        .enumerate()
+        .map(|(i, old)| (old, i as u32 + 1))
+        .collect();
+    remap_ids(expr, &map)
+}
+
+/// `true` iff `expr` contains a `ValDef`/`FunDef` node anywhere (not just at
+/// the top level) — the boundary check for [`renumber_dense`].
+fn has_surviving_def(expr: &Expr) -> bool {
+    if matches!(
+        expr,
+        Expr::Op(IrNode {
+            payload: Payload::ValDef { .. } | Payload::FunDef { .. },
+            ..
+        })
+    ) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(expr, &mut |c| found = found || has_surviving_def(c));
+    found
+}
+
+/// Collect each `FuncValue`'s arg ids, in the pre-order (parent-before-child,
+/// left-to-right) position its `FuncValue` node first appears — the traversal
+/// order Scala's post-inline schedule matches when no `ValDef` survives (see
+/// module docs).
+fn collect_func_arg_order(expr: &Expr, order: &mut Vec<u32>, seen: &mut HashSet<u32>) {
+    if let Expr::Op(IrNode {
+        payload: Payload::FuncValue { args, .. },
+        ..
+    }) = expr
+    {
+        for (id, _) in args {
+            if seen.insert(*id) {
+                order.push(*id);
+            }
+        }
+    }
+    for_each_child(expr, &mut |c| collect_func_arg_order(c, order, seen));
+}
+
+/// Rewrite every `FuncValue` arg id and `ValUse` id through `map` (ids absent
+/// from `map` — unreachable here since [`renumber_dense`] only runs when every
+/// remaining id IS a `FuncValue` arg — pass through unchanged).
+fn remap_ids(expr: Expr, map: &HashMap<u32, u32>) -> Expr {
+    match expr {
+        Expr::Op(IrNode {
+            opcode,
+            payload: Payload::ValUse { id },
+        }) => Expr::Op(IrNode {
+            opcode,
+            payload: Payload::ValUse {
+                id: *map.get(&id).unwrap_or(&id),
+            },
+        }),
+        Expr::Op(IrNode {
+            opcode,
+            payload: Payload::FuncValue { args, body },
+        }) => Expr::Op(IrNode {
+            opcode,
+            payload: Payload::FuncValue {
+                args: args
+                    .into_iter()
+                    .map(|(id, tpe)| (*map.get(&id).unwrap_or(&id), tpe))
+                    .collect(),
+                body: Box::new(remap_ids(*body, map)),
+            },
+        }),
+        Expr::Op(IrNode { opcode, payload }) => Expr::Op(IrNode {
+            opcode,
+            payload: map_children(payload, |c| remap_ids(c, map)),
         }),
         other => other,
     }
@@ -557,6 +684,29 @@ mod tests {
         })
     }
 
+    fn func_value(args: Vec<u32>, body: Expr) -> Expr {
+        Expr::Op(IrNode {
+            opcode: 0xD9,
+            payload: Payload::FuncValue {
+                args: args
+                    .into_iter()
+                    .map(|id| (id, Some(SigmaType::SInt)))
+                    .collect(),
+                body: Box::new(body),
+            },
+        })
+    }
+
+    fn func_value_id(expr: &Expr) -> u32 {
+        match expr {
+            Expr::Op(IrNode {
+                payload: Payload::FuncValue { args, .. },
+                ..
+            }) => args[0].0,
+            other => panic!("expected FuncValue, got {other:?}"),
+        }
+    }
+
     /// Run the full Task-9 sequence (inline then prune) the way the pipeline
     /// does, minus the intervening fold (irrelevant for these shape tests).
     fn run(e: Expr) -> Expr {
@@ -687,5 +837,54 @@ mod tests {
         assert!(live.contains(&3));
         assert!(!live.contains(&1));
         assert!(!live.contains(&2));
+    }
+
+    // ----- renumber_dense -----
+
+    #[test]
+    fn renumber_dense_closes_gap_left_by_inlined_val() {
+        // Shape mirroring the oracle probe (`{ val t = HEIGHT + 1;
+        // sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }`)
+        // AFTER `inline_vals`/`prune_dead_vals` already ran: the val (id 1)
+        // is gone, leaving the lambda arg at id 2 — a gap. No `ValDef`
+        // survives, so `renumber_dense` must close it to id 1.
+        let e = func_value(vec![2], gt(valuse(2), height()));
+        let renumbered = renumber_dense(e);
+        assert_eq!(func_value_id(&renumbered), 1);
+        assert_eq!(renumbered, func_value(vec![1], gt(valuse(1), height())));
+    }
+
+    #[test]
+    fn renumber_dense_leaves_tree_with_surviving_valdef_untouched() {
+        // A multi-use non-constant `val` KEEPS its `ValDef` (M5 surface) —
+        // renumber_dense must not touch id 7 (or the nested lambda's id 9)
+        // even though 9 is not dense relative to 7.
+        let e = block(
+            vec![valdef(7, height())],
+            gt(valuse(7), func_value(vec![9], gt(valuse(9), valuse(7)))),
+        );
+        assert_eq!(renumber_dense(e.clone()), e);
+    }
+
+    #[test]
+    fn renumber_dense_nested_lambda_density() {
+        // Two nested lambdas, both left with gapped ids by upstream inlining
+        // (5 and 9, with no surviving `ValDef` anywhere): pre-order
+        // first-appearance densifies the OUTER lambda to 1 and the INNER
+        // (nested in its body) to 2.
+        let e = func_value(vec![5], func_value(vec![9], gt(valuse(9), valuse(5))));
+        let renumbered = renumber_dense(e);
+        assert_eq!(
+            renumbered,
+            func_value(vec![1], func_value(vec![2], gt(valuse(2), valuse(1))))
+        );
+    }
+
+    #[test]
+    fn renumber_dense_already_dense_is_noop() {
+        // No gap (nothing was inlined ahead of the lambda) — the fast-path
+        // equality check short-circuits and returns the input unchanged.
+        let e = func_value(vec![1], gt(valuse(1), height()));
+        assert_eq!(renumber_dense(e.clone()), e);
     }
 }

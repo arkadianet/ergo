@@ -224,3 +224,10 @@ cc	3	{ val x = 2; sigmaProp(x + 1 == 3) }
 cc	3	{ val x = 2; sigmaProp(x.toByte < 0.toByte) }
 # ACCEPT: a dead val holding v3-only data is pruned before the v0 gate scans.
 cc	3	{ val unused = Coll[BigInt](); sigmaProp(true) }
+# M4 Task 9 review nits: (a) lock single-use-val-inlined-INTO-a-lambda-body
+# (count_valuses counts flat across FuncValue scopes; Scala schedules a
+# single-use node in the lambda sub-schedule with no ValDef — same inline);
+# (b) the Plus-overflow dead-val prune-after-fold probe (only the Downcast
+# sibling was committed).
+cc	3	{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }
+cc	3	{ val unused = 2147483647 + 1; sigmaProp(true) }

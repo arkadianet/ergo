@@ -991,7 +991,22 @@ fn compile_seed_semantic_parity() {
         // encode_p2sh and the D-C1 claim's true scope — P2SH is
         // segregation-invariant); byte-diverging propositions are the D-C7
         // family, SET-gated against `DC7_P2SH_MISMATCH_SET` below.
-        let ours_prop = proposition_bytes(&ours.ergo_tree.body);
+        //
+        // `ours.ergo_tree.body` is POST-segregation (a `ConstPlaceholder` in
+        // place of every literal once `constant_segregation` is set), so it
+        // must be re-inlined the same way `oracle_prop` is above — otherwise
+        // this print compares an inlined oracle proposition against a
+        // placeholder-bearing one of ours, which can never agree even when
+        // the ACTUAL P2SH hash (computed in `compile()` from the
+        // pre-segregation root, never from `ergo_tree.body`) matches. This is
+        // a triage-print symmetry fix only: `compile()`'s own `p2sh_address`
+        // was always computed correctly (see `tree.rs`'s `proposition_bytes`
+        // call on the pre-segregation `root`); only this test's diagnostic
+        // recomputation was asymmetric.
+        let ours_prop = proposition_bytes(&inline_placeholders(
+            &ours.ergo_tree.body,
+            &ours.ergo_tree.constants,
+        ));
         if ours_prop == oracle_prop && ours.p2sh_address != oracle_p2sh {
             divergences.push(format!(
                 "{label}: byte-equal propositions must give equal P2SH: ours={} oracle={}",
