@@ -38,20 +38,36 @@
 //! emits two un-shared copies while E6 (`HEIGHT+1` first built in the shared
 //! condition) emits one.
 //!
-//! # Scope-push sites (spike §2)
+//! # Scope-push sites (spike §2, CORRECTED for getOrElse — M5 Task 5c/R2)
 //!
-//! A hash-cons scope is pushed at EXACTLY four source shapes; the
-//! left/condition/receiver operand is evaluated in the CURRENT scope *first*:
+//! A hash-cons scope is pushed at EXACTLY three source shapes, each a *by-name*
+//! (lazy) operand; the left/condition operand is evaluated in the CURRENT scope
+//! *first*:
 //!
 //! | opcode | shape | scoped operand(s) | current-scope operand |
 //! |--------|-------|-------------------|-----------------------|
 //! | `0x95` If         | `if(c) t else e`   | **both** `t`, `e` | `c`      |
 //! | `0xED` BinAnd     | `a && b`           | **right** `b`     | `a`      |
 //! | `0xEC` BinOr      | `a \|\| b`         | **right** `b`     | `a`      |
-//! | `0xE5` OptionGetOrElse | `opt.getOrElse(d)` | the default `d` | `opt` |
 //!
 //! `0xF4` BinXor is **eager** (spike §2 last row, `GraphBuilding.scala:874-877`)
 //! — no scope; both arms in the current scope (handled by the general path).
+//!
+//! **`0xE5` OptionGetOrElse is NOT a scope-push site** — the correction the R2
+//! recon pinned from source. The spike §2 table (and the M5-Task-5 model) wrongly
+//! listed `opt.getOrElse(d)` as thunking its default `d`. In Scala 6.0.2 the
+//! default is built **eagerly, as an ordinary argument, in the ENCLOSING scope**
+//! (`GraphBuilding.scala:441` `In`, `:962` `argsV`, `:1013-1035` the getOrElse
+//! dispatch), *before* it is wrapped in a Thunk; that Thunk has an EMPTY body and
+//! merely references the already-built ref (`Thunks.scala:261,283-286` —
+//! `thunk_create` of a built ref schedules nothing, `isEmptyBody == true`). So the
+//! default is hash-consed at the enclosing scope like `opt` itself: byte-identical
+//! defaults across sibling `def`-lambdas share ONE node and hoist to a root
+//! `ValDef`. It routes through the general (all-children-current-scope) path. The
+//! distinguishing predicate is the builder's evaluation strategy (by-name ⇒
+//! thunk-local, by-value ⇒ enclosing), NOT any property of the node — the E2
+//! keystone's `HEIGHT+1` is built by-name inside its If-branch and stays
+//! thunk-local even though it is bound-var-free.
 //!
 //! # Lambdas are NOT thunks (spike §1.4 — the cannonQ correction)
 //!
@@ -80,8 +96,10 @@ const IF: u8 = 0x95;
 const BIN_AND: u8 = 0xED;
 /// `a || b` — right arm thunked (`GraphBuilding.scala:864-867`).
 const BIN_OR: u8 = 0xEC;
-/// `opt.getOrElse(d)` — default thunked (`GraphBuilding.scala:1033-1035`).
-const OPT_GET_OR_ELSE: u8 = 0xE5;
+// `0xE5` OptionGetOrElse is deliberately ABSENT (M5 Task 5c/R2): its default is
+// built EAGERLY in the enclosing scope, not a thunk (GraphBuilding.scala:441,962,
+// 1013-1035 + Thunks.scala:261,283-286 empty-body thunk), so it routes through
+// the general eager path like any other node. See the module docs.
 /// Lambda — pushes `lambdaStack`, NOT `thunkStack` (spike §1.4).
 const FUNC_VALUE: u8 = 0xD9;
 /// `{ items; result }` block — transparent; items register bindings.
@@ -202,7 +220,7 @@ enum Node {
 
 /// An index into [`Interner::scope_parents`] — a node in the SCHEDULE scope
 /// tree. Scope 0 is the root program scope; every thunk push (both `If`
-/// branches, `&&`/`||` right arm, `getOrElse` default) AND every lambda body
+/// branches, `&&`/`||` right arm) AND every lambda body
 /// opens a child scope. Distinct from the hash-cons scope stack (`scopes`,
 /// which lambdas do NOT push): identity is decided by first-build hash-cons
 /// scope, PLACEMENT by this tree (`AstGraph.schedule`, `m5-sched-chaincash.md`
@@ -226,7 +244,7 @@ struct SymInfo {
     /// membership in a materialization scope is `sym.scope == that scope`.
     scope: ScopeId,
     /// For an `Op` whose children include thunk sub-scopes (`If` → `[then,
-    /// else]`; `&&`/`||`/`getOrElse` → `[right]`), the [`ScopeId`] of each such
+    /// else]`; `&&`/`||` → `[right]`), the [`ScopeId`] of each such
     /// thunk, in child order. Empty for every other node. Lets materialization
     /// re-enter the exact scope each thunk branch was interned into (so a shared
     /// thunk-result symbol does not drag the wrong scope's members).
@@ -265,7 +283,7 @@ pub struct Interner {
 enum ScopeKind {
     /// The root program scope (scope 0).
     Root,
-    /// A thunk (`If` branch, `&&`/`||` right arm, `getOrElse` default) — a
+    /// A thunk (`If` branch, `&&`/`||` right arm) — a
     /// hash-cons identity boundary; a node built inside stays inside.
     Thunk,
     /// A lambda body, carrying the lambda's argument ids. A node built inside
@@ -340,8 +358,8 @@ impl Interner {
                     vec![t_scope, e_scope],
                 )
             }
-            BIN_AND | BIN_OR | OPT_GET_OR_ELSE if children.len() == 2 => {
-                // left/receiver in the current scope; right/default thunked.
+            BIN_AND | BIN_OR if children.len() == 2 => {
+                // left in the current scope; right arm thunked (by-name).
                 let l = self.intern(children[0]);
                 let (r, r_scope) = self.intern_scoped(children[1]);
                 self.finish_branches(
@@ -352,8 +370,10 @@ impl Interner {
                     vec![r_scope],
                 )
             }
-            // Every other opcode (incl. eager BinXor 0xF4): all children in the
-            // current scope.
+            // Every other opcode — incl. eager BinXor (0xF4) AND OptionGetOrElse
+            // (0xE5), whose default is built EAGERLY in the enclosing scope, not a
+            // thunk (M5 Task 5c/R2; GraphBuilding.scala:441,962,1013-1035) — all
+            // children in the current scope.
             _ => {
                 let mut child_syms = Vec::with_capacity(children.len());
                 for c in &children {
@@ -1080,11 +1100,12 @@ impl Interner {
         })
     }
 
-    /// Rebuild a generic opcode node. `If` branches and the `&&`/`||`/
-    /// `getOrElse` right-hand operand are their own thunk sub-scopes (re-entered
+    /// Rebuild a generic opcode node. `If` branches and the `&&`/`||`
+    /// right-hand operand are their own thunk sub-scopes (re-entered
     /// via the recorded `branch_scopes`, so a shared thunk-result symbol does not
-    /// drag the wrong scope's members); every other child is rebuilt in the
-    /// current scope. A thunk carries the SAME `def_id` (no arg, no id consumed —
+    /// drag the wrong scope's members); every other child — including a
+    /// getOrElse default, built eagerly in the enclosing scope (M5 Task 5c/R2) —
+    /// is rebuilt in the current scope. A thunk carries the SAME `def_id` (no arg, no id consumed —
     /// `ThunkDef` case, `TreeBuilding.scala:195-197`).
     fn build_op(
         &self,
@@ -1103,7 +1124,7 @@ impl Interner {
         let scoped_idx = |idx: usize| -> bool {
             match opcode {
                 IF => idx == 1 || idx == 2,
-                BIN_AND | BIN_OR | OPT_GET_OR_ELSE => idx == 1,
+                BIN_AND | BIN_OR => idx == 1,
                 _ => false,
             }
         };
@@ -1595,6 +1616,9 @@ mod tests {
     const LT: u8 = 0x8F;
     const HEIGHT_OP: u8 = 0xA3;
     const BIN_XOR: u8 = 0xF4;
+    /// `opt.getOrElse(d)` — NOT a scope-push site (M5 Task 5c/R2): its default is
+    /// built eagerly in the enclosing scope. Test-local only.
+    const OPT_GET_OR_ELSE: u8 = 0xE5;
     const TUPLE: u8 = 0x86;
     /// `Global` / `SigmaDslBuilder` singleton (P3 `IsInternalDef`).
     const GLOBAL_OP: u8 = 0xDD;
@@ -1864,20 +1888,32 @@ mod tests {
     }
 
     #[test]
-    fn option_get_or_else_default_is_scoped() {
-        // Mechanism check for the `getOrElse` scope site (spike §2 / OQ5): the
-        // receiver is interned in the current scope, the default in a pushed
-        // thunk. A subexpr built ONLY in the default is invisible to a sibling
-        // scope. Here the receiver `HEIGHT+1` (root) is shared by a default that
-        // also computes `HEIGHT+1` → one Plus (default sees root via parent
-        // chain), proving the receiver-before-thunk evaluation order.
-        let goe = op2(OPT_GET_OR_ELSE, height_plus_one(), height_plus_one());
+    fn option_get_or_else_default_is_enclosing_scope_not_thunk() {
+        // CORRECTED mechanism check (M5 Task 5c/R2): `getOrElse` does NOT thunk
+        // its default — the default is built eagerly in the ENCLOSING scope
+        // (GraphBuilding.scala:441,962,1013-1035 + Thunks.scala:261,283-286).
+        // Distinguishing test vs a thunk-push: two SIBLING getOrElse nodes with
+        // byte-identical defaults (`HEIGHT+1`) but distinct receivers. Under the
+        // (wrong) thunk model each default lands in its own sibling thunk → TWO
+        // distinct Plus symbols. Under the correct eager model both defaults are
+        // built in the shared root scope → hash-cons → ONE Plus symbol. This is
+        // the exact under-sharing that pinned buy-token-for-erg's 2 missing root
+        // ValDefs.
+        let e = Expr::Op(IrNode {
+            opcode: TUPLE,
+            payload: Payload::Tuple {
+                items: vec![
+                    op2(OPT_GET_OR_ELSE, int(0), height_plus_one()),
+                    op2(OPT_GET_OR_ELSE, int(1), height_plus_one()),
+                ],
+            },
+        });
         let mut it = Interner::new();
-        it.intern(&goe);
+        it.intern(&e);
         assert_eq!(
             count_op(&it, PLUS),
             1,
-            "receiver built in current scope is visible to the scoped default"
+            "sibling getOrElse defaults share (eager, enclosing-scope) — NOT thunk-local"
         );
     }
 

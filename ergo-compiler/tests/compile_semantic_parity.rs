@@ -329,16 +329,27 @@ fn assert_mismatch_set_matches(
 /// untouched. The remaining FIVE (`basis-token`, crystalpool ×4) stay MULTI on
 /// the distinct pure-constant `getOrElse`-default global-sharing rule (M5,
 /// characterized + deferred). byte-parity 102/110 → 105/110.
-const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
-    (
-        "cc",
-        "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
-    ),
-    ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
-    ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
-    ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
-    ("cc", "corpus:crystalpool/swap-tokens.es"),
-];
+///
+/// M5 Task 5c/R2 (getOrElse default = enclosing scope, NOT a thunk): 5 → 1. The
+/// FOUR crystalpool vectors (`buy`/`sell`/`swap-tokens`/`swap-tokens-denom`)
+/// graduate. The recon (`m5-r2-floatup.md`) corrected the single wrong premise —
+/// Scala builds a `getOrElse` default EAGERLY in the enclosing scope
+/// (`GraphBuilding.scala:441,962,1013-1035`), then wraps the already-built ref in
+/// an EMPTY-body Thunk (`Thunks.scala:261,283-286`). `cse.rs` no longer pushes a
+/// thunk scope for the `OptionGetOrElse` default, so its lambda-invariant
+/// constant compound (`sigmaProp(false)`, the default `Coll[SigmaProp](v,v)`,
+/// the swaps' `(Coll[Byte](),Coll[Byte]())` tuple) floats up via Fix-1a and
+/// hash-cons-shares into ONE root `ValDef`. buy now hoists the oracle's 15 root
+/// ValDefs (was 13); the swaps' `maxDenom` construction-order tie-break fell out
+/// with the unblocked ValDef set (no extra rule). ZERO regressions (0 ENTERED).
+/// byte-parity 105/110 → 109/110. The sole residual is `basis-token` — a DIFFERENT
+/// site (no getOrElse const-default): the oracle hoists one extra `SelectField`
+/// tuple-access ValDef we leave inline; characterized + oracle-pinned as its own
+/// residual (see `.superpowers/sdd/m5-task-5c-report.md`).
+const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[(
+    "cc",
+    "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
+)];
 
 /// Committed SET of `(verb, source)` labels whose P2S address differs from
 /// the oracle's — the D-C1 "we never segregate" family. Scala segregates every
@@ -385,16 +396,14 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// `DC7_P2SH_MISMATCH_SET`: `basis-tracker-basis`, `offchain/basis` and
 /// `GuardSign` now segregate to oracle-identical bytes once their proposition
 /// carries the `SigmaAnd` reconstruction, so P2S matches too.
-const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
-    (
-        "cc",
-        "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
-    ),
-    ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
-    ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
-    ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
-    ("cc", "corpus:crystalpool/swap-tokens.es"),
-];
+/// M5 Task 5c/R2 (getOrElse default = enclosing scope) → 1, lockstep with
+/// `DC7_P2SH_MISMATCH_SET`: the four crystalpool vectors' propositions now share
+/// the getOrElse-default constant compound exactly, so their segregated bytes
+/// (and thus P2S) match. Only `basis-token` remains.
+const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[(
+    "cc",
+    "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
+)];
 
 // =============================================================================
 // Environment builders (mirror TyperOracle.scala demo/sigmaTyperTest envs;

@@ -668,10 +668,11 @@
 //! `TypeError`/`TypeError` pair is UNCHANGED. `BinXor` is NOT reconstructed
 //! (strict op, no Scala lazy rule, SigmaProp has no XOR — the `^` forms fold to
 //! a constant). **D-C3 is now FULLY CLOSED (cancellation + reconstruction).**
-//! Residual: two `chaincash-basis` vectors (`basis-token`, `reserve` via
-//! `basis-token`) + the four crystalpool vectors stay in the mismatch set on a
-//! DISTINCT, characterized M5 rule (a pure-constant `getOrElse`-default thunk
-//! that Scala hoists to a ROOT global constant), NOT on `HasSigmas`.
+//! Residual (at Task 5b): `basis-token` + the four crystalpool vectors stay in
+//! the mismatch set on DISTINCT M5 rules, NOT on `HasSigmas`. UPDATE (M5 Task
+//! 5c/R2): the four crystalpool vectors graduated via the getOrElse-default
+//! eager-scope fix (D-C7 below); `basis-token` alone remains, on a further
+//! distinct, characterized cross-branch `SelectField`-sharing mechanism (D-C7).
 //!
 //! ### D-C4 — multi-arg lambda TUPLING (CLOSED, M4 Task 7)
 //!
@@ -1035,17 +1036,48 @@
 //! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
 //! compensating regression a count assert would miss): the address gate
 //! (`tests/compile_semantic_parity.rs`) pins the corpus at
-//! `DC7_P2SH_MISMATCH_SET` (15 of the swept ACCEPT vectors as of M4 Task 9,
-//! down from 17 at Task 5, 36 at Task 4, 39 at Task 3, 43 at Task 1/2 —
-//! Task 9's `val` inlining graduated the two PURE single-use-inline vectors
-//! `{ val x = HEIGHT; x > 5 }` and `corpus:lsp/test_contract.es`; the rest
-//! P2SH-match and are hard-asserted equal wherever the proposition bytes
-//! agree). The 15 residual are all CSE/`ValDef`-sharing MULTI (7 chaincash-
-//! basis, 5 crystalpool, `dexy/gort-dev/emission.es`, `rosen-bridge/
-//! GuardSign.es`, `proveDHTuple(g1, g2, g1, g2)`) — the M5 acceptance-
-//! benchmark set: each carries surviving multi-use `ValDef`s with schedule-
-//! order dense ids the hash-cons model must reproduce. Every landed lowering
-//! removes the vectors it graduates from the set, deliberately and explicitly.
+//! `DC7_P2SH_MISMATCH_SET` (1 vector as of M5 Task 5c/R2, down from 5 at Task
+//! 5b, 8 at Fix 1a, 10/11 at Task 4/5-Fix2, 15 at M4 Task 9, 17 at Task 5, 36
+//! at Task 4, 39 at Task 3, 43 at Task 1/2). The M5 CSE hash-cons + schedule
+//! model (Tasks 4/5a/5b/5c) graduated the whole benchmark set except one; the
+//! rest P2SH-match and are hard-asserted equal wherever the proposition bytes
+//! agree.
+//!
+//! **M5 Task 5c/R2 — getOrElse-default CSE mechanism CLOSED (5 → 1).** The R2
+//! recon (`dev-docs/ergoscript-compiler-m5-recon/m5-r2-floatup.md`) corrected the
+//! single wrong scope-model premise: `opt.getOrElse(d)` does NOT thunk its
+//! default. Scala builds the default EAGERLY as an ordinary argument in the
+//! ENCLOSING scope (`GraphBuilding.scala:441,962,1013-1035`) and then wraps the
+//! already-built ref in an EMPTY-body Thunk (`Thunks.scala:261,283-286`), so a
+//! lambda-invariant constant compound default (`sigmaProp(false)`, the
+//! `Coll[SigmaProp](v,v)` default, the swaps' `(Coll[Byte](),Coll[Byte]())`
+//! tuple) hash-cons-shares across sibling `def`-lambdas and hoists to a root
+//! `ValDef`. `cse.rs` no longer opens a thunk scope for the `OptionGetOrElse`
+//! default. This graduated the FOUR crystalpool vectors (`buy`/`sell`/
+//! `swap-tokens`/`swap-tokens-denom`) byte-exact (ZERO regressions — the E2/E6
+//! keystone is structurally untouched: If/`&&`/`||` bodies stay by-name thunks),
+//! byte-parity 105/110 → 109/110.
+//!
+//! **RESIDUAL (1, NAMED + oracle-pinned): `chaincash/offchain/basis-token.es`.**
+//! A DISTINCT, unmodelled mechanism — NOT the getOrElse case. The oracle
+//! cross-branch-shares `SELF.tokens(1)._2` (`tokenAmountIn`, a `val` written
+//! identically in the `action==0` and `action==1` if-branches, source lines 298 &
+//! 345) as ONE root `ValDef` (oracle root ValDefs 10 vs our 9); we build it
+//! thunk-locally in each branch and leave it inline. The distinguishing datum,
+//! decoded from the oracle proposition: the sibling `selfOut.tokens(1)._2`
+//! (`tokenAmountOut`) is NOT shared by the oracle either — it appears inline in
+//! both branches. The ONLY node the oracle cross-branch-shares is the one whose
+//! receiver `SELF.tokens(1)` is ALREADY a root `ValDef` (hoisted because
+//! `SELF.tokens(1)._1` = `tokenId1` uses it at root, source line 160). This
+//! cross-branch sharing of a thunk-invariant `SelectField` whose operand resolves
+//! to an already-hoisted root symbol is NOT predicted by the validated
+//! scope-chain model — which CORRECTLY keeps E2's thunk-invariant `HEIGHT+1`
+//! unshared, the keystone this fix must not break. It is a genuinely distinct
+//! Scalan mechanism (candidate: thunk-invariant code motion gated on the node's
+//! operands being root symbols) that needs its own reverse-engineering against
+//! `Thunks.scala`/`GraphBuilding` before any fix; forcing a match risks the E2
+//! keystone. Characterized, oracle-pinned, deferred — see
+//! `.superpowers/sdd/m5-task-5c-report.md`.
 //!
 //! ### MethodCall lowering catalog (M4 Task 8, recon-transforms.md §10, recon-cannonq.md Part A)
 //!
