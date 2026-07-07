@@ -26,6 +26,37 @@ use crate::span::Pos;
 use crate::stype::{is_predef_available, predef_type, SType};
 use crate::token::{tokenize, Kw, Token, TokenKind};
 
+/// Maximum combined `expr()`/`type_()` recursion depth this crate's own
+/// recursive-descent parser accepts before rejecting with
+/// [`ParseError::TooDeep`].
+///
+/// Source-text nesting depth upper-bounds every downstream structure (typed
+/// AST, emitted IR, wire body -- the M4/M5 transform passes rewrite the tree,
+/// they don't deepen it beyond source depth times a small constant), so this
+/// ONE cap -- shared by both of `parse.rs`'s structural-nesting recursion
+/// families (`expr()`'s statement/block/paren/lambda nesting AND `type_()`'s
+/// `Coll[Coll[...]]`-style type nesting, via a single [`Cursor::depth`]
+/// counter both entry points share) -- bounds the whole compile pipeline in
+/// one place, rather than adding separate counters to `emit.rs` and every
+/// M4/M5 pass individually (M6 recon §5 audit: `fold.rs`/`lower.rs`/
+/// `inline.rs`/`cse.rs`/`isproven.rs`/`tuple.rs` are all call-stack-recursive
+/// 1:1 tree walks over the already-depth-bounded typed AST -- none amplifies
+/// depth beyond what the parser already accepted, so none needs its own
+/// guard).
+///
+/// NOT oracle-pinned: the compiler's own limits are explicitly not
+/// consensus-critical (`lib.rs` D-note), unlike `ergo_ser::opcode::types::
+/// MAX_EXPR_DEPTH` (110, the CONSENSUS wire-tree depth bound the assembled
+/// tree is re-parsed against at `build_tree` time, `tree.rs`). Set
+/// conservatively ABOVE that consensus bound -- source text can legitimately
+/// nest a little deeper than the assembled/segregated tree before the
+/// transform passes fold/fuse it down -- while staying far below any real
+/// stack-overflow threshold. No vendored corpus contract (`test-vectors/
+/// ergoscript/corpus`, ~79 real deployed scripts) comes anywhere close: the
+/// deepest, `rosen-bridge/RwtRepo.es`, bottoms out around a dozen levels of
+/// structural nesting (see `corpus_deepest_contract_still_parses` below).
+const MAX_PARSE_DEPTH: usize = 128;
+
 /// Parse an ErgoScript expression (Scala `SigmaParser.apply`,
 /// SigmaParser.scala:114-117: `StatCtx.Expr ~ End`).
 ///
@@ -69,6 +100,12 @@ fn clamp_zero_progress(err: ParseError, c: &Cursor) -> ParseError {
         ParseError::Syntax { expected, .. } => ParseError::Syntax { pos: 0, expected },
         ParseError::Lexical { msg, .. } => ParseError::Lexical { pos: 0, msg },
         ParseError::Semantic { msg, .. } => ParseError::Semantic { pos: 0, msg },
+        // Unreachable in practice: `TooDeep` requires >=1 consumed token per
+        // nesting level to even reach `MAX_PARSE_DEPTH`, so `c.save() == 0`
+        // (this function's only call path) never coincides with it. Passed
+        // through unchanged rather than clamped -- the position is real, not
+        // a fastparse zero-progress artifact.
+        other @ ParseError::TooDeep { .. } => other,
     }
 }
 
@@ -108,6 +145,10 @@ struct Cursor<'a> {
     toks: Vec<Token>,
     i: usize,
     tree_version: u8,
+    /// Shared `expr()`/`type_()` structural-nesting recursion counter (see
+    /// `MAX_PARSE_DEPTH`). Incremented/decremented ONLY by the depth-guard
+    /// wrappers around those two entry points, never touched elsewhere.
+    depth: usize,
 }
 
 impl<'a> Cursor<'a> {
@@ -117,6 +158,7 @@ impl<'a> Cursor<'a> {
             toks,
             i: 0,
             tree_version,
+            depth: 0,
         }
     }
 
@@ -424,6 +466,21 @@ fn starts_type(t: &Token) -> bool {
 /// is recognised only when the `=>` token starts at offset 0 (any leading
 /// space/newline/comment pushes its start past 0 and breaks the raw match).
 fn type_(c: &mut Cursor, raw_entry: bool) -> Result<SType, ParseError> {
+    c.depth += 1;
+    if c.depth > MAX_PARSE_DEPTH {
+        let pos = c.peek().start;
+        let depth = c.depth;
+        c.depth -= 1;
+        return Err(ParseError::TooDeep { pos, depth });
+    }
+    let result = type_impl(c, raw_entry);
+    c.depth -= 1;
+    result
+}
+
+/// The guarded body of [`type_`] (renamed so every recursive call in this
+/// module goes through the depth-guarded wrapper above, not this directly).
+fn type_impl(c: &mut Cursor, raw_entry: bool) -> Result<SType, ParseError> {
     if c.at_sym_kw(Kw::FatArrow) && (!raw_entry || c.peek().start == 0) {
         c.bump();
     }
@@ -893,10 +950,29 @@ fn try_literal(t: &Token, src: &str) -> Option<Expr> {
     }
 }
 
+/// Depth-guarded entry point for [`expr_impl`] -- every recursive call in
+/// this module goes through here (not `expr_impl` directly), so the shared
+/// `Cursor::depth` counter (`MAX_PARSE_DEPTH`) bounds every nesting path:
+/// parens, blocks, `if`/`else` branches, lambda bodies, `val`/`def` right-hand
+/// sides. See `MAX_PARSE_DEPTH`'s doc for why one counter at this single
+/// choke point covers the whole pipeline.
+fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+    c.depth += 1;
+    if c.depth > MAX_PARSE_DEPTH {
+        let pos = c.peek().start;
+        let depth = c.depth;
+        c.depth -= 1;
+        return Err(ParseError::TooDeep { pos, depth });
+    }
+    let result = expr_impl(c, ctx);
+    c.depth -= 1;
+    result
+}
+
 /// `Expr` (Exprs.scala:46-75): `If | Fun | PostfixLambda`. Ordered choice by
 /// leading token: a reserved `if`, the word `def`, else the postfix/lambda layer.
 /// `parse`, `Parened` and `ArgList` all route their sub-expressions through here.
-fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
+fn expr_impl(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
     // If — `if` is a reserved keyword; once seen we commit (Exprs.scala:47-52).
     if c.at_kw(Kw::If) {
         return if_expr(c, ctx);
@@ -3929,5 +4005,87 @@ mod expr_tests {
         let src = "{ val x => 1; 2 }";
         let e = crate::parse(src, 3).expect_err("must reject");
         assert_eq!(e.line_col(src), (1, 10));
+    }
+
+    // ----- structural-nesting depth guard (M6, ParseError::TooDeep) -----
+
+    /// `n` levels of parenthesized nesting around a leaf integer, e.g.
+    /// `nested_parens(3)` = `"(((1)))"`. Each level costs exactly one extra
+    /// `expr()` call (`simple_expr` -> `parened` -> `expr_list` -> `expr`), so
+    /// this is an exact (not approximate) proxy for `Cursor::depth`: `n`
+    /// parens reach max depth `n + 1` (the outermost `parse()` call is
+    /// already depth 1 before any paren is seen).
+    fn nested_parens(n: usize) -> String {
+        let mut s = String::with_capacity(2 * n + 1);
+        s.push_str(&"(".repeat(n));
+        s.push('1');
+        s.push_str(&")".repeat(n));
+        s
+    }
+
+    #[test]
+    fn depth_guard_accepts_nesting_up_to_the_limit() {
+        // MAX_PARSE_DEPTH - 1 parens reach max depth EXACTLY MAX_PARSE_DEPTH
+        // (the outer `parse()` call is depth 1) -- must still parse; the
+        // guard only rejects depth that EXCEEDS the cap, never depth AT it.
+        let src = nested_parens(MAX_PARSE_DEPTH - 1);
+        assert!(
+            crate::parse(&src, 3).is_ok(),
+            "nesting exactly at the cap must still parse"
+        );
+    }
+
+    #[test]
+    fn depth_guard_rejects_one_past_the_limit() {
+        // MAX_PARSE_DEPTH parens reach max depth MAX_PARSE_DEPTH + 1 -- one
+        // past the cap, must reject with the exact depth that tripped it.
+        let src = nested_parens(MAX_PARSE_DEPTH);
+        let e = crate::parse(&src, 3).expect_err("nesting one past the cap must reject");
+        match e {
+            ParseError::TooDeep { depth, .. } => assert_eq!(depth, MAX_PARSE_DEPTH + 1),
+            other => panic!("expected TooDeep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depth_guard_also_bounds_nested_type_annotations() {
+        // `type_()` shares the SAME `Cursor::depth` counter as `expr()` (both
+        // are structural-nesting recursion families in this file, per
+        // `MAX_PARSE_DEPTH`'s doc) -- a pathological `Coll[Coll[...]]` type
+        // ascription is an INDEPENDENT recursion path from `expr()` (reached
+        // via `val_def`'s `(`:` ~/ Type)` ascription, not through any nested
+        // `expr()` call), so this regression proves the shared cap still
+        // catches it rather than only guarding paren/block/lambda nesting.
+        let mut ty = "Int".to_string();
+        for _ in 0..(MAX_PARSE_DEPTH + 10) {
+            ty = format!("Coll[{ty}]");
+        }
+        let src = format!("{{ val x: {ty} = 1; x }}");
+        let e = crate::parse(&src, 3).expect_err("deeply nested type ascription must reject");
+        assert!(
+            matches!(e, ParseError::TooDeep { .. }),
+            "expected TooDeep, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn corpus_deepest_contract_still_parses() {
+        // A crude bracket/brace-nesting proxy scan (string/comment aware)
+        // over the vendored ~79-contract corpus (`test-vectors/ergoscript/
+        // corpus`, see `../../ergo-compiler/tests/corpus_smoke.rs`) puts
+        // `rosen-bridge/RwtRepo.es` at the deepest structural nesting --
+        // around a dozen levels, nowhere near `MAX_PARSE_DEPTH` (128).
+        // Regression-pins that specific real deployed contract; the FULL
+        // corpus's accept/reject verdicts (all ~79 files) are re-checked
+        // post-guard by `corpus_smoke.rs`'s `corpus_verdict_parity`, which
+        // this test complements rather than duplicates.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test-vectors/ergoscript/corpus/rosen-bridge/RwtRepo.es");
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        assert!(
+            crate::parse(&src, 3).is_ok(),
+            "the corpus's deepest-nested real contract must still parse after the depth guard"
+        );
     }
 }
