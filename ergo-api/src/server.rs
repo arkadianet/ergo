@@ -575,6 +575,15 @@ pub fn router_with_mempool_and_wallet_and_security(
     // here before that move.
     let v1_script_read = read.clone();
     let v1_script_chain = compat.clone();
+    // Operator/control group inputs (`node/*`, `network/*`, `mining/*`,
+    // `voting/*` — `dev-docs/v1-api-design.md` §3.1–§3.4). Cloned up front
+    // because `admin` / `mining` are moved into the Scala-compat mounts further
+    // down; the group mounts unconditionally and gates inside each handler on
+    // the honest `*_unavailable` reason.
+    let v1_op_read = read.clone();
+    let v1_op_chain = compat.clone();
+    let v1_op_admin = admin.clone();
+    let v1_op_mining = mining.clone();
     let operator: Router = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
@@ -1350,6 +1359,22 @@ pub fn router_with_mempool_and_wallet_and_security(
         v1_auth.clone(),
     ));
     let assembled = assembled.merge(crate::v1::v1_router(v1_state.clone(), v1_governor.clone()));
+    // Operator/control group (`node/*`, `network/*`, `mining/*`, `voting/*` —
+    // §3.1–§3.4). Mixed tiers over one `OperatorState`: T0 reads share the same
+    // per-node governor (`CheapRead`); T1/T2 controls ride the v1 api-key gate
+    // (`require_tier`), T2 (shutdown, config-mutate) additionally loopback-preferred.
+    let v1_operator_state = crate::v1::OperatorState {
+        read: v1_op_read,
+        chain: v1_op_chain,
+        admin: v1_op_admin,
+        mining: v1_op_mining,
+        network,
+    };
+    let assembled = assembled.merge(crate::v1::operator_router(
+        v1_operator_state,
+        v1_governor.clone(),
+        v1_auth.clone(),
+    ));
     // `POST /api/v1/batch` (§3.18/§4.7) — a bounded read-only multiplexer over
     // the SAME `chain/*`/`boxes/*`/`tokens/*`/`addresses/*`/`mempool/*`/
     // `transactions/*`(reads)/`stats/*`/`diagnostics`/`light/*`/`protocols/*`
