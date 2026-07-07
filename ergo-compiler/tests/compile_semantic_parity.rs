@@ -346,10 +346,12 @@ fn assert_mismatch_set_matches(
 /// site (no getOrElse const-default): the oracle hoists one extra `SelectField`
 /// tuple-access ValDef we leave inline; characterized + oracle-pinned as its own
 /// residual (see `.superpowers/sdd/m5-task-5c-report.md`).
-const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[(
-    "cc",
-    "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
-)];
+/// M5 Task 5e (root freeVar schedule-order) → 0: `basis-token`'s root ValDefs
+/// now emit in Scala's `scheduleForResult`/`freeVars` order (a by-name `&&`
+/// conjunct's freeVars collected before the eager operand's — the token block
+/// before the register block), so its proposition is byte-exact. D-C7 CLOSED;
+/// byte-parity 109/110 → 110/110.
+const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[];
 
 /// Committed SET of `(verb, source)` labels whose P2S address differs from
 /// the oracle's — the D-C1 "we never segregate" family. Scala segregates every
@@ -400,10 +402,9 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[(
 /// `DC7_P2SH_MISMATCH_SET`: the four crystalpool vectors' propositions now share
 /// the getOrElse-default constant compound exactly, so their segregated bytes
 /// (and thus P2S) match. Only `basis-token` remains.
-const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[(
-    "cc",
-    "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
-)];
+/// M5 Task 5e (root schedule-order) → 0, lockstep with `DC7_P2SH_MISMATCH_SET`:
+/// `basis-token`'s segregated bytes now match once the root ValDef order does.
+const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[];
 
 // =============================================================================
 // Environment builders (mirror TyperOracle.scala demo/sigmaTyperTest envs;

@@ -671,8 +671,9 @@
 //! Residual (at Task 5b): `basis-token` + the four crystalpool vectors stay in
 //! the mismatch set on DISTINCT M5 rules, NOT on `HasSigmas`. UPDATE (M5 Task
 //! 5c/R2): the four crystalpool vectors graduated via the getOrElse-default
-//! eager-scope fix (D-C7 below); `basis-token` alone remains, on a further
-//! distinct, characterized cross-branch `SelectField`-sharing mechanism (D-C7).
+//! eager-scope fix (D-C7 below); `basis-token` alone remained, then M5 Tasks
+//! 5d+5e CLOSED it (pair-projection memo + root schedule-order, D-C7 below) →
+//! byte-parity 110/110.
 //!
 //! ### D-C4 — multi-arg lambda TUPLING (CLOSED, M4 Task 7)
 //!
@@ -1058,26 +1059,30 @@
 //! keystone is structurally untouched: If/`&&`/`||` bodies stay by-name thunks),
 //! byte-parity 105/110 → 109/110.
 //!
-//! **RESIDUAL (1, NAMED + oracle-pinned): `chaincash/offchain/basis-token.es`.**
-//! A DISTINCT, unmodelled mechanism — NOT the getOrElse case. The oracle
-//! cross-branch-shares `SELF.tokens(1)._2` (`tokenAmountIn`, a `val` written
-//! identically in the `action==0` and `action==1` if-branches, source lines 298 &
-//! 345) as ONE root `ValDef` (oracle root ValDefs 10 vs our 9); we build it
-//! thunk-locally in each branch and leave it inline. The distinguishing datum,
-//! decoded from the oracle proposition: the sibling `selfOut.tokens(1)._2`
-//! (`tokenAmountOut`) is NOT shared by the oracle either — it appears inline in
-//! both branches. The ONLY node the oracle cross-branch-shares is the one whose
-//! receiver `SELF.tokens(1)` is ALREADY a root `ValDef` (hoisted because
-//! `SELF.tokens(1)._1` = `tokenId1` uses it at root, source line 160). This
-//! cross-branch sharing of a thunk-invariant `SelectField` whose operand resolves
-//! to an already-hoisted root symbol is NOT predicted by the validated
-//! scope-chain model — which CORRECTLY keeps E2's thunk-invariant `HEIGHT+1`
-//! unshared, the keystone this fix must not break. It is a genuinely distinct
-//! Scalan mechanism (candidate: thunk-invariant code motion gated on the node's
-//! operands being root symbols) that needs its own reverse-engineering against
-//! `Thunks.scala`/`GraphBuilding` before any fix; forcing a match risks the E2
-//! keystone. Characterized, oracle-pinned, deferred — see
-//! `.superpowers/sdd/m5-task-5c-report.md`.
+//! **M5 Task 5d (pair-projection memo) + Task 5e (root schedule-order) — CLOSED
+//! `basis-token`; byte-parity 109/110 → 110/110; D-C7 is now FULLY CLOSED.**
+//! basis-token carried TWO independent divergences on one contract: (1) a
+//! missing cross-branch-shared root ValDef, and (2) a permutation of the root
+//! ValDef order.
+//! Task 5d ported Scalan's `unzipPair`/`tuplesCache` (`Tuples.scala:57-74`): a
+//! process-wide pair-projection memo keyed by the receiver SymId that eagerly
+//! interns `First`+`Second` on the first `._1`/`._2` access, so both if-branches'
+//! `SELF.tokens(1)._2` resolve to ONE shared root ValDef (the oracle's 10th)
+//! instead of two inline thunk-local copies — the sole documented bypass of thunk
+//! hash-cons isolation. E2's `HEIGHT+1` (a `Plus`, not a pair projection) is
+//! provably untouched.
+//! Task 5e then fixed the surviving root ValDef ORDER: Scala's root schedule is a
+//! post-order DFS over `node.deps` where a thunk's deps are its `freeVars` over
+//! its LOCAL-only schedule (`Thunks.scala:196-212`, `AstGraphs.scala:56-85`,
+//! `ProgramGraphs.scala:35-64`), so a by-name `&&` conjunct's freeVars are
+//! collected BEFORE the eager operand's (the token block `{F,G,H,I}` before the
+//! register block `{D,E}`). `cse.rs`'s `free_vars` was collecting a scoped
+//! (`&&`/`||`/`if`) arm's children AFTER the eager children; made it collect the
+//! scoped-arm children first. A faithful port is safe by construction: all 109
+//! already equalled Scala, so none regressed (0 ENTERED), and only the sole
+//! diverging vector changed. Both fixes are `cse.rs`-only; see
+//! `.superpowers/sdd/m5-task-5d-report.md` + `m5-task-5e-report.md` and
+//! `dev-docs/ergoscript-compiler-m5-recon/m5-root-schedule-order.md`.
 //!
 //! ### MethodCall lowering catalog (M4 Task 8, recon-transforms.md §10, recon-cannonq.md Part A)
 //!

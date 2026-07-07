@@ -1125,56 +1125,144 @@ impl Interner {
     }
 
     /// The `freeVars` of a compound (a symbol whose scope is `cscope`): the
-    /// symbols it references that live OUTSIDE `cscope` (ancestor scopes), in the
-    /// compound's own schedule (post-order) first-appearance order
-    /// (`AstGraphs.scala:56-85`). A nested sub-compound contributes ITS freeVars
-    /// (recursively), so the order is the child-schedule order the parent DFS
-    /// consumes — the F1 fact that fixes the chaincash root order.
+    /// symbols it references that live OUTSIDE `cscope` (ancestor scopes), in
+    /// Scala's `AstGraph.freeVars` order (`AstGraphs.scala:56-85`) — the
+    /// compound's own LOCAL-only post-order schedule (`Thunks.scala:196-212`
+    /// `scheduleForResult`), scanning each scheduled node's deps and collecting
+    /// those that are neither local (scheduled) nor bound vars, first-appearance.
+    ///
+    /// The crux (M5 Task 5e, `m5-root-schedule-order.md`): Scala schedules each
+    /// by-name (`ThunkDef`) operand — the `&&`/`||` right arm, an `if` branch —
+    /// as a SEPARATE post-order entry that PRECEDES the operator owning it, so its
+    /// freeVars are collected BEFORE the operator's EAGER operands'. For `a && b`
+    /// (`BinAnd(a, Thunk(b))`) Scala yields `b`'s freeVars before `a` — NOT child
+    /// (argument) order. Our interner does not reify a `ThunkDef` node when a
+    /// thunk arm resolves to an ancestor symbol (a bare `ValUse` to a hoisted
+    /// `val`, e.g. `tokenIdsPreserved`), so the reorder cannot come from the
+    /// schedule alone; it is reproduced HERE by collecting a Local node's SCOPED
+    /// (thunk-arm) children before its eager children. This is what makes
+    /// `basis-token`'s root `[token block][register block]` — the token conjunct
+    /// is the thunked `&&` right arm after the eager register conjunct — match the
+    /// Scala 6.0.2 oracle byte-for-byte.
     fn free_vars(&self, compound: SymId) -> Vec<SymId> {
         let cscope = self.syms[compound.0 as usize].scope;
-        let order = self.schedule_order(compound, cscope);
+        let schedule = self.body_schedule(compound, cscope);
         let mut out: Vec<SymId> = Vec::new();
         let mut seen: BTreeSet<SymId> = BTreeSet::new();
-        for &n in &order {
-            // Only LOCAL members contribute their deps; freeVar leaves already in
-            // `order` are collected when a member references them below.
-            if self.classify(self.syms[n.0 as usize].scope, cscope) != Rel::Local {
-                continue;
-            }
-            for &d in &self.syms[n.0 as usize].key.children {
-                self.collect_free(d, cscope, &mut out, &mut seen);
+        for &n in &schedule {
+            // The scheduled node's deps as Scala sees them: a Local member exposes
+            // its structural children (thunk-arm children FIRST — see
+            // `local_dep_order`); a Deeper nested thunk exposes its own freeVars
+            // (`ThunkDef.getDeps` override, `Thunks.scala:163`). An Outside node is
+            // never in the schedule.
+            let deps: Vec<SymId> = match self.classify(self.syms[n.0 as usize].scope, cscope) {
+                Rel::Local => self.local_dep_order(n),
+                Rel::Deeper => self.free_vars(n),
+                Rel::Outside => Vec::new(),
+            };
+            for &d in &deps {
+                // Free iff not local (scheduled) and not a bound var. A Deeper dep
+                // is itself scheduled (contributes at its own slot) so it is not a
+                // freeVar here — no inline descent (the Task-5e fix).
+                if matches!(self.syms[d.0 as usize].node, Node::Arg) {
+                    continue;
+                }
+                if self.classify(self.syms[d.0 as usize].scope, cscope) == Rel::Outside
+                    && seen.insert(d)
+                {
+                    out.push(d);
+                }
             }
         }
         out
     }
 
-    /// Collect the freeVars reachable through dep `d` of a `cscope`-local node:
-    /// an Outside dep is itself a freeVar; a Deeper sub-compound contributes its
-    /// own freeVars (those still outside `cscope`); a Local dep is a member
-    /// (scanned in its own turn), and an `isVar` is never free.
-    fn collect_free(
+    /// A Local node's children in Scala schedule-collection order: the SCOPED
+    /// (by-name `ThunkDef`) arms first, in child order, then the EAGER children,
+    /// in child order. Scala schedules a thunk arm as a node preceding its
+    /// operator, so an Outside free-var reached only through a thunk arm is
+    /// collected before the operator's eager Outside operands. Reordering the
+    /// child list here reproduces that for arms our interner resolves to an
+    /// ancestor symbol (no reified `ThunkDef` node). Deeper thunk arms are already
+    /// scheduled ahead of the node by [`body_schedule`], so this reorder only ever
+    /// changes the relative position of a node's own Outside children.
+    fn local_dep_order(&self, sym: SymId) -> Vec<SymId> {
+        let children = &self.syms[sym.0 as usize].key.children;
+        let mut ordered: Vec<SymId> = Vec::with_capacity(children.len());
+        for (idx, &c) in children.iter().enumerate() {
+            if self.is_scoped_child(sym, idx) {
+                ordered.push(c);
+            }
+        }
+        for (idx, &c) in children.iter().enumerate() {
+            if !self.is_scoped_child(sym, idx) {
+                ordered.push(c);
+            }
+        }
+        ordered
+    }
+
+    /// True iff child `idx` of `sym` is a by-name (thunked) operand — the `&&`/`||`
+    /// right arm or an `if` branch, matching the scope-push sites in
+    /// [`intern_op`](Self::intern_op) and the re-entry sites in
+    /// [`build_op`](Self::build_op). Every other operand is eager.
+    fn is_scoped_child(&self, sym: SymId, idx: usize) -> bool {
+        match &self.syms[sym.0 as usize].node {
+            Node::Op(_) => match op_of(&self.syms[sym.0 as usize].key.tag) {
+                IF => idx == 1 || idx == 2,
+                BIN_AND | BIN_OR => idx == 1,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The LOCAL-only post-order schedule of `compound` — Scala's
+    /// `scheduleForResult` (`Thunks.scala:196-212`): a `depthFirstOrderFrom` DFS
+    /// whose neighbours are filtered to `bodyIds(id) && !isVar`. Outside
+    /// (free-var) leaves and bound `Arg`s are pruned as neighbours and never
+    /// appended; a nested `Deeper` thunk IS in `bodyIds` (built in-scope) so it is
+    /// a neighbour and lands in post-order BEFORE the operator that owns it.
+    fn body_schedule(&self, compound: SymId, cscope: ScopeId) -> Vec<SymId> {
+        let mut visited: BTreeSet<SymId> = BTreeSet::new();
+        let mut out: Vec<SymId> = Vec::new();
+        self.body_sched_dfs(compound, cscope, &mut visited, &mut out);
+        out
+    }
+
+    fn body_sched_dfs(
         &self,
-        d: SymId,
+        sym: SymId,
         cscope: ScopeId,
+        visited: &mut BTreeSet<SymId>,
         out: &mut Vec<SymId>,
-        seen: &mut BTreeSet<SymId>,
     ) {
-        if matches!(self.syms[d.0 as usize].node, Node::Arg) {
+        if !visited.insert(sym) {
             return;
         }
-        match self.classify(self.syms[d.0 as usize].scope, cscope) {
-            Rel::Local => {}
-            Rel::Outside => {
-                if seen.insert(d) {
-                    out.push(d);
-                }
-            }
-            Rel::Deeper => {
-                for fv in self.free_vars(d) {
-                    self.collect_free(fv, cscope, out, seen);
-                }
-            }
+        for d in self.body_neighbours(sym, cscope) {
+            self.body_sched_dfs(d, cscope, visited, out);
         }
+        out.push(sym);
+    }
+
+    /// The in-body neighbours of `sym` for the LOCAL schedule of scope `cscope`:
+    /// `sym`'s deps filtered to `bodyIds(cscope) && !isVar` (`Thunks.scala:205`) —
+    /// only Local members and Deeper nested thunks; Outside free-vars and bound
+    /// `Arg`s are dropped so they never enter the schedule. A Local node's deps are
+    /// its structural children; a Deeper thunk's deps are its own `freeVars`.
+    fn body_neighbours(&self, sym: SymId, cscope: ScopeId) -> Vec<SymId> {
+        let raw: Vec<SymId> = match self.classify(self.syms[sym.0 as usize].scope, cscope) {
+            Rel::Local => self.syms[sym.0 as usize].key.children.clone(),
+            Rel::Deeper => self.free_vars(sym),
+            Rel::Outside => return Vec::new(),
+        };
+        raw.into_iter()
+            .filter(|&d| {
+                !matches!(self.syms[d.0 as usize].node, Node::Arg)
+                    && self.classify(self.syms[d.0 as usize].scope, cscope) != Rel::Outside
+            })
+            .collect()
     }
 
     /// Reconstruct the `Expr` for a single symbol — Scala's `buildValue`
@@ -2738,6 +2826,49 @@ aea4d9010263918cc77202017201"
             ),
         );
         assert_eq!(mat, expected);
+    }
+
+    #[test]
+    fn root_thunked_conjunct_block_emits_before_eager_block() {
+        // M5 Task 5e (basis-token): schedule-order freeVars. Two distinct
+        // multi-use root Boolean vals `x = HEIGHT>1`, `y = HEIGHT>2`, referenced
+        // ONLY inside a single if-branch — as the two operands of `x && y`, where
+        // `y` is the THUNKED right `&&` operand and `x` the EAGER left. Scala
+        // schedules the nested thunk (carrying `y`) as a post-order entry BEFORE
+        // the `BinAnd` that owns the eager `x`, so `freeVars` collects `y` before
+        // `x` → the root ValDef schedule emits `y`'s block first (dense id 1),
+        // `x`'s second. The pre-fix child-order collection emitted `x` first —
+        // this asserts the reorder end-to-end through `materialize`.
+        let e = block(
+            vec![
+                valdef(1, op2(GT, height(), int(1))), // x = HEIGHT > 1
+                valdef(2, op2(GT, height(), int(2))), // y = HEIGHT > 2
+            ],
+            op3(
+                IF,
+                op2(GT, height(), int(0)),
+                op2(BIN_AND, valuse(1), valuse(2)), // then: x && y  (y thunked)
+                op2(BIN_OR, valuse(1), valuse(2)),  // else: x || y  (2nd use → hoist)
+            ),
+        );
+        let mut it = Interner::new();
+        let root = it.intern(&e);
+        let mat = it.materialize(root);
+        let Expr::Op(IrNode {
+            opcode: BLOCK_VALUE,
+            payload: Payload::BlockValue { items, .. },
+        }) = &mat
+        else {
+            panic!("expected a root BlockValue, got {mat:?}");
+        };
+        assert_eq!(items.len(), 2, "both x and y hoist to root ValDefs");
+        // Decisive: id 1 is `y` (HEIGHT>2, the thunked conjunct), id 2 is `x`.
+        assert_eq!(
+            items[0],
+            valdef(1, op2(GT, height(), int(2))),
+            "thunked conjunct block (y) must emit before the eager block (x)"
+        );
+        assert_eq!(items[1], valdef(2, op2(GT, height(), int(1))));
     }
 
     #[test]
