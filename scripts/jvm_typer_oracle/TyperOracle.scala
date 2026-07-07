@@ -96,6 +96,7 @@ import sigma.VersionContext
 import sigma.ast._
 import sigma.ast.syntax.SValue
 import sigma.compiler.SigmaCompiler
+import sigma.compiler.SigmaTemplateCompiler
 import sigma.compiler.ir.CompiletimeIRContext
 import sigma.exceptions.CompilerException
 import sigma.serialization.ErgoTreeSerializer
@@ -114,6 +115,7 @@ object TyperOracle {
       case _               => TestnetNetworkPrefix
     }
   private val compiler = new SigmaCompiler(NET)
+  private val templateCompiler = new SigmaTemplateCompiler(NET)
 
   // Route parity for the `cc`/`cce`/`ccs` verbs (mirrors ScriptApiRoute's
   // implicit addressEncoder, which is built from the same NET prefix used to
@@ -310,6 +312,36 @@ object TyperOracle {
         }
     }
 
+  // ----- contract-template driver for `ct` (M7) -----
+  //
+  // Mirrors SigmaTemplateCompiler(NET).compile(source) (SigmaTemplateCompiler.scala:22-53):
+  // parse the @contract doc/signature, typecheck the body against the named-param
+  // TYPE env, seed one ConstantPlaceholder(index, tpe) per param (declaration order
+  // for <=4 params), then assemble a ContractTemplate. Replies with the CANONICAL
+  // ContractTemplate.serializer bytes as hex (treeVersion, name, description,
+  // constTypes, constValues, parameters, expressionTree) — the one-shot byte-exact
+  // target for the Rust twin. Wrapped in VersionContext.withVersions(V, V) exactly
+  // like the cc verb so v6 method/predef visibility matches.
+  private def contractVerb(hexStr: String): String =
+    Base16.decode(hexStr) match {
+      case scala.util.Failure(_) => "ERR not-hex"
+      case scala.util.Success(bytes) =>
+        val source = new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+        try
+          VersionContext.withVersions(V, V) {
+            val ct = templateCompiler.compile(source)
+            val out = org.ergoplatform.sdk.ContractTemplate.serializer.toBytes(ct)
+            "OK " + out.map("%02x".format(_)).mkString
+          }
+        catch {
+          case e: CompilerException =>
+            val pos = e.source match { case Some(sc) => loc(sc); case None => "0:0" }
+            "REJECT " + pos + " " + e.getClass.getSimpleName
+          case e: Throwable =>
+            "REJECT 0:0 " + e.getClass.getSimpleName
+        }
+    }
+
   def main(args: Array[String]): Unit = {
     var line = StdIn.readLine()
     while (line != null) {
@@ -322,6 +354,7 @@ object TyperOracle {
           case Array("cc",  hex) => compileVerb(Map.empty, hex)
           case Array("cce", hex) => compileVerb(demoEnv, hex)
           case Array("ccs", hex) => compileVerb(sigmaTyperEnv, hex)
+          case Array("ct",  hex) => contractVerb(hex)
           case _                 => "ERR bad-line"
         }
         println(out)
