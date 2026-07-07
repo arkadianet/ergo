@@ -188,6 +188,11 @@ enum Node {
     Func {
         args: Vec<(SymId, Option<SigmaType>)>,
         body: SymId,
+        /// The placement scope id of the lambda BODY (a `ScopeId` into
+        /// [`Interner::scope_parents`]). A lambda opens a schedule scope even
+        /// though it opens no hash-cons scope (spike §1.4): its body's local
+        /// nodes schedule INSIDE it (`Functions.scala:112-134`).
+        body_scope: ScopeId,
     },
     /// A lambda-argument placeholder (carries its original wire arg id). Never
     /// scheduled or rebuilt directly — only ever resolved to a `ValUse` through
@@ -195,34 +200,77 @@ enum Node {
     Arg,
 }
 
+/// An index into [`Interner::scope_parents`] — a node in the SCHEDULE scope
+/// tree. Scope 0 is the root program scope; every thunk push (both `If`
+/// branches, `&&`/`||` right arm, `getOrElse` default) AND every lambda body
+/// opens a child scope. Distinct from the hash-cons scope stack (`scopes`,
+/// which lambdas do NOT push): identity is decided by first-build hash-cons
+/// scope, PLACEMENT by this tree (`AstGraph.schedule`, `m5-sched-chaincash.md`
+/// §1).
+type ScopeId = usize;
+
 /// Everything recorded about one interned symbol.
 #[derive(Debug)]
 struct SymInfo {
     key: ExprKey,
     /// Bound-var (lambda arg) ids this symbol transitively depends on. Empty ⇒
-    /// lambda-invariant (floats up in Task 3); non-empty ⇒ pinned inside the
-    /// lambda whose arg id it names.
+    /// lambda-invariant; non-empty ⇒ references the lambda whose arg id it
+    /// names. Kept for introspection/tests; PLACEMENT now uses `scope` (the
+    /// scope tree captures lambda nesting directly).
     deps: BTreeSet<u32>,
     /// The rebuild template (Task 3 materialization).
     node: Node,
-    /// The hash-cons scope DEPTH this symbol was first built at (0 = global /
-    /// root; each pushed thunk scope is one deeper — lambdas do NOT push, spike
-    /// §1.4). A `ValDef` is materialized in the scope of this depth
-    /// (`TreeBuilding` `processAstGraph` per-scope schedule, spike §3).
-    scope_depth: u32,
+    /// The PLACEMENT scope this symbol was first built in — a node in the
+    /// schedule scope tree ([`ScopeId`]). A `ValDef` is materialized in exactly
+    /// this scope (Scala `processAstGraph` per-scope schedule, `m5-sched-*` §1):
+    /// membership in a materialization scope is `sym.scope == that scope`.
+    scope: ScopeId,
+    /// For an `Op` whose children include thunk sub-scopes (`If` → `[then,
+    /// else]`; `&&`/`||`/`getOrElse` → `[right]`), the [`ScopeId`] of each such
+    /// thunk, in child order. Empty for every other node. Lets materialization
+    /// re-enter the exact scope each thunk branch was interned into (so a shared
+    /// thunk-result symbol does not drag the wrong scope's members).
+    branch_scopes: Vec<ScopeId>,
 }
 
 /// The scope-chain hash-cons interner (Phase A of the spike). Owns the scope
 /// stack (index 0 = global), the dense symbol table, and the binding
 /// environment that resolves `ValUse` and lambda args.
 pub struct Interner {
-    /// Scope stack; index 0 is the global table, the last element is the
-    /// innermost open scope.
+    /// Hash-cons scope stack (IDENTITY); index 0 is the global table, the last
+    /// element is the innermost open scope. Thunks push here; lambdas do NOT.
     scopes: Vec<ScopeTable>,
-    /// Dense symbol table, indexed by `SymId.0`.
+    /// Dense symbol table, indexed by `SymId.0`. Allocation order == source
+    /// construction (nodeId) order — the live construction-order graph the
+    /// schedule DFS runs over (F2, `m5-sched-crystalpool.md` §6).
     syms: Vec<SymInfo>,
     /// `ValDef`/lambda-arg id → the symbol it binds. Lookup only.
     bindings: BTreeMap<u32, SymId>,
+    /// The SCHEDULE scope tree: `scope_parents[s]` is scope `s`'s parent (root
+    /// scope 0 has `None`). Pushed for both thunk and lambda entries.
+    scope_parents: Vec<Option<ScopeId>>,
+    /// The kind of each scope frame (parallel to `scope_parents`). Placement
+    /// walks up this stack, floating a node OUT of any enclosing lambda whose
+    /// argument it does not depend on (`m5-sched-crystalpool.md` finding 2 / the
+    /// buy/sell `getX(SELF)` apps), and stopping at the root, a thunk (an
+    /// identity boundary a node built inside never leaves), or a lambda whose arg
+    /// it does depend on.
+    scope_kinds: Vec<ScopeKind>,
+    /// The innermost open placement scope during interning.
+    cur_scope: ScopeId,
+}
+
+/// The kind of a schedule scope frame.
+#[derive(Debug)]
+enum ScopeKind {
+    /// The root program scope (scope 0).
+    Root,
+    /// A thunk (`If` branch, `&&`/`||` right arm, `getOrElse` default) — a
+    /// hash-cons identity boundary; a node built inside stays inside.
+    Thunk,
+    /// A lambda body, carrying the lambda's argument ids. A node built inside
+    /// but not depending on ANY of these args is lambda-invariant and floats up.
+    Lambda(Vec<u32>),
 }
 
 impl Default for Interner {
@@ -238,6 +286,9 @@ impl Interner {
             scopes: vec![ScopeTable::default()],
             syms: Vec::new(),
             bindings: BTreeMap::new(),
+            scope_parents: vec![None],
+            scope_kinds: vec![ScopeKind::Root],
+            cur_scope: 0,
         }
     }
 
@@ -279,24 +330,26 @@ impl Interner {
             IF if children.len() == 3 => {
                 // condition in the current scope; each branch in its own thunk.
                 let c = self.intern(children[0]);
-                let t = self.intern_scoped(children[1]);
-                let e = self.intern_scoped(children[2]);
-                self.finish(
+                let (t, t_scope) = self.intern_scoped(children[1]);
+                let (e, e_scope) = self.intern_scoped(children[2]);
+                self.finish_branches(
                     KeyTag::Op(op),
                     vec![c, t, e],
                     literal,
                     Node::Op(node.payload.clone()),
+                    vec![t_scope, e_scope],
                 )
             }
             BIN_AND | BIN_OR | OPT_GET_OR_ELSE if children.len() == 2 => {
                 // left/receiver in the current scope; right/default thunked.
                 let l = self.intern(children[0]);
-                let r = self.intern_scoped(children[1]);
-                self.finish(
+                let (r, r_scope) = self.intern_scoped(children[1]);
+                self.finish_branches(
                     KeyTag::Op(op),
                     vec![l, r],
                     literal,
                     Node::Op(node.payload.clone()),
+                    vec![r_scope],
                 )
             }
             // Every other opcode (incl. eager BinXor 0xF4): all children in the
@@ -375,7 +428,17 @@ impl Interner {
                 saved.push((*arg_id, prev));
                 arg_syms.push((arg_sym, tpe.clone()));
             }
+            // Open a SCHEDULE scope for the body (no hash-cons scope — spike
+            // §1.4). Body-local nodes are placed here; the lambda-invariant ones
+            // that resolve to ancestor symbols keep their ancestor scope.
+            let parent_scope = self.cur_scope;
+            let body_scope = self.scope_parents.len();
+            self.scope_parents.push(Some(parent_scope));
+            self.scope_kinds
+                .push(ScopeKind::Lambda(args.iter().map(|(id, _)| *id).collect()));
+            self.cur_scope = body_scope;
             let body_sym = self.intern(body);
+            self.cur_scope = parent_scope;
             for (arg_id, prev) in saved.into_iter().rev() {
                 match prev {
                     Some(p) => {
@@ -413,7 +476,9 @@ impl Interner {
                 Node::Func {
                     args: arg_syms,
                     body: body_sym,
+                    body_scope,
                 },
+                Vec::new(),
             );
         }
         self.intern_general(node)
@@ -436,14 +501,22 @@ impl Interner {
         )
     }
 
-    /// Intern `expr` inside a freshly pushed thunk scope, popping it after. The
-    /// pushed scope's parent is the scope below it — exactly Scala's
-    /// `beginScope`/`endScope` bracket (`Thunks.scala:248-253`).
-    fn intern_scoped(&mut self, expr: &Expr) -> SymId {
+    /// Intern `expr` inside a freshly pushed thunk scope, popping it after, and
+    /// return `(result symbol, the thunk's schedule [`ScopeId`])`. The pushed
+    /// hash-cons scope's parent is the scope below it (Scala's
+    /// `beginScope`/`endScope` bracket, `Thunks.scala:248-253`); the schedule
+    /// scope's parent is the current placement scope.
+    fn intern_scoped(&mut self, expr: &Expr) -> (SymId, ScopeId) {
         self.scopes.push(ScopeTable::default());
+        let parent_scope = self.cur_scope;
+        let thunk_scope = self.scope_parents.len();
+        self.scope_parents.push(Some(parent_scope));
+        self.scope_kinds.push(ScopeKind::Thunk);
+        self.cur_scope = thunk_scope;
         let sym = self.intern(expr);
+        self.cur_scope = parent_scope;
         self.scopes.pop();
-        sym
+        (sym, thunk_scope)
     }
 
     /// Build the key, look it up innermost → parent chain → global; on a hit
@@ -451,6 +524,20 @@ impl Interner {
     /// INNERMOST open scope. A new symbol's `deps` are the union of its
     /// children's `deps` (bound-var dependency flows up).
     fn finish(&mut self, tag: KeyTag, children: Vec<SymId>, literal: Vec<u8>, node: Node) -> SymId {
+        self.finish_branches(tag, children, literal, node, Vec::new())
+    }
+
+    /// [`finish`](Self::finish) for a node that owns thunk sub-scopes: the extra
+    /// `branch_scopes` are the [`ScopeId`]s of its scoped children in child
+    /// order (recorded so materialization re-enters the exact thunk scope).
+    fn finish_branches(
+        &mut self,
+        tag: KeyTag,
+        children: Vec<SymId>,
+        literal: Vec<u8>,
+        node: Node,
+        branch_scopes: Vec<ScopeId>,
+    ) -> SymId {
         let key = ExprKey {
             tag,
             children,
@@ -460,7 +547,7 @@ impl Interner {
             return sym;
         }
         let deps = self.union_child_deps(&key.children);
-        self.alloc(key, deps, true, node)
+        self.alloc(key, deps, true, node, branch_scopes)
     }
 
     /// Allocate a lambda-argument placeholder: a leaf symbol tagged with its own
@@ -474,7 +561,7 @@ impl Interner {
         };
         let mut deps = BTreeSet::new();
         deps.insert(arg_id);
-        self.alloc(key, deps, false, Node::Arg)
+        self.alloc(key, deps, false, Node::Arg, Vec::new())
     }
 
     /// Look up `key` from the innermost open scope down through the parent chain
@@ -489,10 +576,18 @@ impl Interner {
     }
 
     /// Insert a fresh symbol into `syms`; when `shared`, also register it in the
-    /// innermost open scope's table so later builds can hash-cons to it.
-    fn alloc(&mut self, key: ExprKey, deps: BTreeSet<u32>, shared: bool, node: Node) -> SymId {
+    /// innermost open scope's table so later builds can hash-cons to it. The
+    /// symbol's PLACEMENT scope is the current schedule scope (`cur_scope`).
+    fn alloc(
+        &mut self,
+        key: ExprKey,
+        deps: BTreeSet<u32>,
+        shared: bool,
+        node: Node,
+        branch_scopes: Vec<ScopeId>,
+    ) -> SymId {
         let id = SymId(self.syms.len() as u32);
-        let scope_depth = (self.scopes.len() - 1) as u32;
+        let scope = self.placement_scope(&deps);
         if shared {
             self.scopes
                 .last_mut()
@@ -504,9 +599,35 @@ impl Interner {
             key,
             deps,
             node,
-            scope_depth,
+            scope,
+            branch_scopes,
         });
         id
+    }
+
+    /// The PLACEMENT scope for a node with transitive bound-var `deps`, built at
+    /// `cur_scope`: walk up from `cur_scope`, floating OUT of every enclosing
+    /// lambda whose argument the node does not depend on (a lambda-invariant node
+    /// escapes to where it is actually shared — the buy/sell `getX(SELF)` apps,
+    /// `m5-sched-crystalpool.md` finding 2). Stop at the root, a thunk (identity
+    /// boundary), or a lambda whose arg the node depends on. This is the
+    /// deps-based lambda placement (spike §1.4) — NOT the lexical first-build
+    /// scope, which would wrongly pin an invariant app inside the lambda it
+    /// happens to appear in.
+    fn placement_scope(&self, deps: &BTreeSet<u32>) -> ScopeId {
+        let mut s = self.cur_scope;
+        loop {
+            match &self.scope_kinds[s] {
+                ScopeKind::Lambda(args) if !args.iter().any(|a| deps.contains(a)) => {
+                    match self.scope_parents[s] {
+                        Some(p) => s = p,
+                        None => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+        s
     }
 
     fn union_child_deps(&self, children: &[SymId]) -> BTreeSet<u32> {
@@ -682,13 +803,13 @@ impl Interner {
             && !self.is_const(sym)
     }
 
-    // ----- Task 3: per-scope schedule + ValDef materialization + assign-once ids -----
+    // ----- Task 3/5: per-scope schedule + ValDef materialization + assign-once ids -----
 
     /// Reconstruct an opcode `Expr` from the interned graph rooted at `root`,
     /// materializing a `ValDef`/`ValUse`/`BlockValue`/`FuncValue` tree with
     /// serial, assign-once ids — the observable of Scala's `TreeBuilding`
     /// (`buildTree`/`processAstGraph`/`buildValue`, `TreeBuilding.scala:186-191,
-    /// 498-546`, spike §3/§4/§7.1 step 3-4).
+    /// 498-546`).
     ///
     /// A symbol clearing the [`should_hoist`](Self::should_hoist) gate is emitted
     /// as ONE `ValDef` in the scope it was first built (spike §3); every
@@ -696,109 +817,192 @@ impl Interner {
     /// (or a gate-suppressed context/builder/constant) is INLINED at each use
     /// (single-use inlining falls out for free, spike §7.2 / locked decision 4).
     ///
-    /// # Scope class (Task-3 boundary)
+    /// # The schedule rule (M5 Task 5, Fix 1a/1b)
     ///
-    /// This lands the **single-ValDef class** byte-exact: the root scope emits
-    /// its hoisted symbols as dense ids `1, 2, …` in post-order-DFS schedule
-    /// order, and lambda-argument ids thread exactly per spike §4 (arg =
-    /// `defId+1`, body from `varId+1`, tuple arg = ONE id). Thunk (`If`/`&&`/
-    /// `||`/`getOrElse`) sub-scopes and lambda bodies are materialized too, but a
-    /// multi-ValDef scope's INTRA-SCOPE ORDER matching Scala's exact
-    /// `GraphUtil.depthFirstOrderFrom(deps)` (`Thunks.scala:196-212`) is the
-    /// ORACLE-NEEDED reverse-engineering loop reserved for Task 5 (spike
-    /// §7.4/OQ1). Post-order DFS is provably correct for a single-ValDef scope
-    /// (order-trivial); a multi-ValDef vector whose id-order diverges is left in
-    /// the mismatch set for Task 5, not hacked here.
+    /// Per-scope ValDef order is Scala's `GraphUtil.depthFirstOrderFrom`
+    /// (`GraphUtil.scala:43-64`): a POST-ORDER DFS from the scope's result symbol,
+    /// following each node's deps in construction/argument order, first-visit-wins,
+    /// filtered to that scope. The DFS runs over the LIVE construction-order graph
+    /// — `self.syms` is indexed in interning order (== source construction / nodeId
+    /// order) and `key.children` are in argument order, so the tie-break among
+    /// mutually-independent same-scope symbols is construction order for free (F2,
+    /// `m5-sched-crystalpool.md` §6). A nested compound (`BlockValue`/`FuncValue`
+    /// child, i.e. a symbol whose placement scope is DEEPER) is ONE node in its
+    /// parent's DFS whose ordered deps are its `freeVars` — the ancestor-scope
+    /// symbols it references, in the CHILD's schedule order (F1,
+    /// `AstGraphs.scala:56-85`; `m5-sched-chaincash.md` §1). This is what makes the
+    /// chaincash root order `[1,2,3,4,5]` (a naive descend-in-source DFS predicts
+    /// `[1,2,4,3,5]`).
     pub fn materialize(&self, root: SymId) -> Expr {
         let usage = self.flat_usage();
         let env: BTreeMap<SymId, u32> = BTreeMap::new();
+        // The root program scope is scope 0 (`scope_parents[0] == None`).
         self.process_scope(root, 0, &env, 0, &usage)
     }
 
     /// Materialize one scope (root `PGraph`, a thunk `ThunkDef`, or a lambda
-    /// body) — Scala's `processAstGraph` (`TreeBuilding.scala:498-531`). Emits a
-    /// `ValDef` for each scheduled hoisted symbol (ids threaded from `def_id`),
-    /// binds it in the env, then builds the scope result; wraps in a
-    /// `BlockValue` when any `ValDef` was emitted, applying the
-    /// `{ val idNew = id; idNew } → id` collapse (`TreeBuilding.scala:522-525`).
+    /// body) — Scala's `processAstGraph` (`TreeBuilding.scala:498-531`). Walks the
+    /// scope's `depthFirstOrderFrom` schedule; emits a `ValDef` for each MEMBER
+    /// (`sym.scope == scope`) that clears the hoist gate and is not already bound
+    /// by an ancestor (ids threaded from `def_id`), binds it in the env, then
+    /// builds the scope result; wraps in a `BlockValue` when any `ValDef` was
+    /// emitted, applying the `{ val idNew = id; idNew } → id` collapse
+    /// (`TreeBuilding.scala:522-525`).
     fn process_scope(
         &self,
         scope_root: SymId,
-        depth: u32,
+        scope: ScopeId,
         env: &BTreeMap<SymId, u32>,
         def_id: u32,
         usage: &BTreeMap<SymId, usize>,
     ) -> Expr {
-        let schedule = self.scope_schedule(scope_root, depth, env, usage);
+        let order = self.schedule_order(scope_root, scope);
         let mut cur_id = def_id;
         let mut cur_env = env.clone();
-        let mut valdefs: Vec<Expr> = Vec::with_capacity(schedule.len());
-        for s in &schedule {
+        let mut valdefs: Vec<Expr> = Vec::new();
+        for &s in &order {
+            let info = &self.syms[s.0 as usize];
+            let member = info.scope == scope
+                && !matches!(info.node, Node::Arg)
+                && self.should_hoist(s, usage)
+                && !cur_env.contains_key(&s);
+            if !member {
+                continue;
+            }
             // rhs is built with defId = curId BEFORE the increment (so a lambda
             // in the rhs takes `curId+1` as its arg id), then curId++ and
             // ValDef(curId) — `TreeBuilding.scala:510-513`.
-            let rhs = self.build_value(*s, depth, &cur_env, cur_id, usage);
+            let rhs = self.build_value(s, scope, &cur_env, cur_id, usage);
             cur_id += 1;
             valdefs.push(val_def(cur_id, rhs));
-            cur_env.insert(*s, cur_id);
+            cur_env.insert(s, cur_id);
         }
-        let rhs = self.build_value(scope_root, depth, &cur_env, cur_id, usage);
+        let rhs = self.build_value(scope_root, scope, &cur_env, cur_id, usage);
         wrap_block(valdefs, rhs)
     }
 
-    /// The scheduled (hoisted) symbols of the scope at hash-cons `depth` rooted
-    /// at `scope_root`, in post-order DFS (dependency) order — Scala's
-    /// `subG.schedule` (`AstGraph.schedule`, spike §3). A symbol is scheduled
-    /// here iff it clears the admission gate, was first built at THIS scope's
-    /// depth, is lambda-invariant (no bound-var deps — a bound-var-dependent
-    /// node belongs to the lambda body that binds it, spike §1.4), and is not
-    /// already bound by an enclosing scope.
-    ///
-    /// Post-order over the full reachable DAG yields a valid topological order
-    /// (a symbol's hoisted dependencies precede it), which is what makes the
-    /// dense id allocation in [`process_scope`](Self::process_scope) sound. For a
-    /// single-ValDef scope the order is trivial; the multi-ValDef tie-break is
-    /// Task 5 (see [`materialize`](Self::materialize)).
-    fn scope_schedule(
-        &self,
-        scope_root: SymId,
-        depth: u32,
-        env: &BTreeMap<SymId, u32>,
-        usage: &BTreeMap<SymId, usize>,
-    ) -> Vec<SymId> {
+    /// A symbol's placement relation to the materialization scope `cur`.
+    fn classify(&self, s_scope: ScopeId, cur: ScopeId) -> Rel {
+        if s_scope == cur {
+            Rel::Local
+        } else if self.scope_is_ancestor(cur, s_scope) {
+            // `cur` is a proper ancestor of `s_scope` ⇒ the symbol lives in a
+            // scope nested INSIDE `cur` (a thunk/lambda interior).
+            Rel::Deeper
+        } else {
+            // `s_scope` is an ancestor of `cur`, or an unrelated sibling scope:
+            // a `freeVar` boundary — not followed by `cur`'s DFS.
+            Rel::Outside
+        }
+    }
+
+    /// True iff `anc` is a PROPER ancestor of `node` in the schedule scope tree.
+    fn scope_is_ancestor(&self, anc: ScopeId, node: ScopeId) -> bool {
+        let mut cur = self.scope_parents[node];
+        while let Some(p) = cur {
+            if p == anc {
+                return true;
+            }
+            cur = self.scope_parents[p];
+        }
+        false
+    }
+
+    /// Full post-order DFS over scope `scope` from `scope_root` — the
+    /// `depthFirstOrderFrom` schedule, INCLUDING single-use (non-hoisted) local
+    /// nodes and the freeVar leaves (they matter for relative order and for the
+    /// freeVars of a parent). The hoisted subset is filtered by
+    /// [`process_scope`](Self::process_scope).
+    fn schedule_order(&self, scope_root: SymId, scope: ScopeId) -> Vec<SymId> {
         let mut visited: BTreeSet<SymId> = BTreeSet::new();
         let mut out: Vec<SymId> = Vec::new();
-        self.schedule_dfs(scope_root, depth, env, usage, &mut visited, &mut out);
+        self.sched_dfs(scope_root, scope, &mut visited, &mut out);
         out
     }
 
-    fn schedule_dfs(
+    fn sched_dfs(
         &self,
         sym: SymId,
-        depth: u32,
-        env: &BTreeMap<SymId, u32>,
-        usage: &BTreeMap<SymId, usize>,
+        scope: ScopeId,
         visited: &mut BTreeSet<SymId>,
         out: &mut Vec<SymId>,
     ) {
         if !visited.insert(sym) {
             return;
         }
-        // Descend into every structural child (through thunk/lambda children too)
-        // so a symbol first built at THIS depth but referenced only from a deeper
-        // scope is still found (e.g. E4's root `k`, referenced only inside the two
-        // lambda bodies).
-        for &child in &self.syms[sym.0 as usize].key.children {
-            self.schedule_dfs(child, depth, env, usage, visited, out);
+        for d in self.neighbours(sym, scope) {
+            self.sched_dfs(d, scope, visited, out);
         }
+        out.push(sym);
+    }
+
+    /// The DFS neighbours (`deps`) of `sym` as seen by scope `scope` — Scala's
+    /// `neighbours(id)` (`ProgramGraphs.scala:49-60` / `Thunks.scala:205`). A
+    /// LOCAL node exposes its structural children (construction order); a DEEPER
+    /// nested compound exposes its `freeVars` (F1); a `freeVar`/`isVar` leaf
+    /// exposes nothing.
+    fn neighbours(&self, sym: SymId, scope: ScopeId) -> Vec<SymId> {
         let info = &self.syms[sym.0 as usize];
-        let scheduled = self.should_hoist(sym, usage)
-            && info.scope_depth == depth
-            && info.deps.is_empty()
-            && !env.contains_key(&sym)
-            && !matches!(info.node, Node::Arg);
-        if scheduled {
-            out.push(sym);
+        if matches!(info.node, Node::Arg) {
+            return Vec::new();
+        }
+        match self.classify(info.scope, scope) {
+            Rel::Local => info.key.children.clone(),
+            Rel::Deeper => self.free_vars(sym),
+            Rel::Outside => Vec::new(),
+        }
+    }
+
+    /// The `freeVars` of a compound (a symbol whose scope is `cscope`): the
+    /// symbols it references that live OUTSIDE `cscope` (ancestor scopes), in the
+    /// compound's own schedule (post-order) first-appearance order
+    /// (`AstGraphs.scala:56-85`). A nested sub-compound contributes ITS freeVars
+    /// (recursively), so the order is the child-schedule order the parent DFS
+    /// consumes — the F1 fact that fixes the chaincash root order.
+    fn free_vars(&self, compound: SymId) -> Vec<SymId> {
+        let cscope = self.syms[compound.0 as usize].scope;
+        let order = self.schedule_order(compound, cscope);
+        let mut out: Vec<SymId> = Vec::new();
+        let mut seen: BTreeSet<SymId> = BTreeSet::new();
+        for &n in &order {
+            // Only LOCAL members contribute their deps; freeVar leaves already in
+            // `order` are collected when a member references them below.
+            if self.classify(self.syms[n.0 as usize].scope, cscope) != Rel::Local {
+                continue;
+            }
+            for &d in &self.syms[n.0 as usize].key.children {
+                self.collect_free(d, cscope, &mut out, &mut seen);
+            }
+        }
+        out
+    }
+
+    /// Collect the freeVars reachable through dep `d` of a `cscope`-local node:
+    /// an Outside dep is itself a freeVar; a Deeper sub-compound contributes its
+    /// own freeVars (those still outside `cscope`); a Local dep is a member
+    /// (scanned in its own turn), and an `isVar` is never free.
+    fn collect_free(
+        &self,
+        d: SymId,
+        cscope: ScopeId,
+        out: &mut Vec<SymId>,
+        seen: &mut BTreeSet<SymId>,
+    ) {
+        if matches!(self.syms[d.0 as usize].node, Node::Arg) {
+            return;
+        }
+        match self.classify(self.syms[d.0 as usize].scope, cscope) {
+            Rel::Local => {}
+            Rel::Outside => {
+                if seen.insert(d) {
+                    out.push(d);
+                }
+            }
+            Rel::Deeper => {
+                for fv in self.free_vars(d) {
+                    self.collect_free(fv, cscope, out, seen);
+                }
+            }
         }
     }
 
@@ -809,7 +1013,7 @@ impl Interner {
     fn build_value(
         &self,
         sym: SymId,
-        depth: u32,
+        scope: ScopeId,
         env: &BTreeMap<SymId, u32>,
         def_id: u32,
         usage: &BTreeMap<SymId, usize>,
@@ -831,8 +1035,12 @@ impl Interner {
                 // than panicking (never hit by well-formed emitted IR).
                 val_use(0)
             }
-            Node::Func { args, body } => self.build_func(args, *body, depth, env, def_id, usage),
-            Node::Op(_) => self.build_op(sym, depth, env, def_id, usage),
+            Node::Func {
+                args,
+                body,
+                body_scope,
+            } => self.build_func(args, *body, *body_scope, env, def_id, usage),
+            Node::Op(_) => self.build_op(sym, scope, env, def_id, usage),
         }
     }
 
@@ -840,12 +1048,16 @@ impl Interner {
     /// (`TreeBuilding.scala:186-191`). Each argument consumes ONE id starting at
     /// `def_id+1` (a tupled lambda still has a single `STuple` arg → one id, the
     /// Task-7 `+1`-not-`+2` correction, spike §4); the body is a nested
-    /// materialization scope whose ids continue from `varId+1`.
+    /// materialization scope (`body_scope`) whose ids continue from `varId+1`.
+    /// The `def_id`-by-value threading (T1) is what lets sibling lambdas reuse the
+    /// same arg id range (`m5-sched-small.md` §2.5), and building the rhs with
+    /// `def_id = id-1` makes a lambda-valued ValDef's arg id equal the ValDef id
+    /// (T2, `m5-sched-chaincash.md` §3).
     fn build_func(
         &self,
         args: &[(SymId, Option<SigmaType>)],
         body: SymId,
-        depth: u32,
+        body_scope: ScopeId,
         env: &BTreeMap<SymId, u32>,
         def_id: u32,
         usage: &BTreeMap<SymId, usize>,
@@ -858,9 +1070,7 @@ impl Interner {
             body_env.insert(*arg_sym, cur);
             wire_args.push((cur, tpe.clone()));
         }
-        // A lambda does NOT push a hash-cons thunk scope (spike §1.4), so the
-        // body materializes at the SAME `depth`; only the id counter advances.
-        let body_expr = self.process_scope(body, depth, &body_env, cur + 1, usage);
+        let body_expr = self.process_scope(body, body_scope, &body_env, cur + 1, usage);
         Expr::Op(IrNode {
             opcode: FUNC_VALUE,
             payload: Payload::FuncValue {
@@ -871,14 +1081,15 @@ impl Interner {
     }
 
     /// Rebuild a generic opcode node. `If` branches and the `&&`/`||`/
-    /// `getOrElse` right-hand operand are their own thunk sub-scopes (depth +1,
-    /// spike §2); every other child is rebuilt in the current scope. Scalar
-    /// fields come from the stored template; children from the symbol's
-    /// `key.children` (in `decompose` order).
+    /// `getOrElse` right-hand operand are their own thunk sub-scopes (re-entered
+    /// via the recorded `branch_scopes`, so a shared thunk-result symbol does not
+    /// drag the wrong scope's members); every other child is rebuilt in the
+    /// current scope. A thunk carries the SAME `def_id` (no arg, no id consumed —
+    /// `ThunkDef` case, `TreeBuilding.scala:195-197`).
     fn build_op(
         &self,
         sym: SymId,
-        depth: u32,
+        scope: ScopeId,
         env: &BTreeMap<SymId, u32>,
         def_id: u32,
         usage: &BTreeMap<SymId, usize>,
@@ -889,31 +1100,41 @@ impl Interner {
         };
         let child_syms = &info.key.children;
         let opcode = op_of(&info.key.tag);
-        // Which child indices open a thunk sub-scope (spike §2). A thunk carries
-        // the SAME `def_id` (no arg, no id consumed — `ThunkDef` case,
-        // `TreeBuilding.scala:195-197`).
-        let is_scoped = |idx: usize| -> bool {
+        let scoped_idx = |idx: usize| -> bool {
             match opcode {
                 IF => idx == 1 || idx == 2,
                 BIN_AND | BIN_OR | OPT_GET_OR_ELSE => idx == 1,
                 _ => false,
             }
         };
-        let rebuilt: Vec<Expr> = child_syms
-            .iter()
-            .enumerate()
-            .map(|(idx, &c)| {
-                if is_scoped(idx) {
-                    self.process_scope(c, depth + 1, env, def_id, usage)
-                } else {
-                    self.build_value(c, depth, env, def_id, usage)
-                }
-            })
-            .collect();
+        let mut rebuilt: Vec<Expr> = Vec::with_capacity(child_syms.len());
+        let mut next_branch = 0usize;
+        for (idx, &c) in child_syms.iter().enumerate() {
+            if scoped_idx(idx) {
+                let child_scope = info.branch_scopes[next_branch];
+                next_branch += 1;
+                rebuilt.push(self.process_scope(c, child_scope, env, def_id, usage));
+            } else {
+                rebuilt.push(self.build_value(c, scope, env, def_id, usage));
+            }
+        }
         let mut it = rebuilt.into_iter();
         let payload = recompose(template, &mut it);
         Expr::Op(IrNode { opcode, payload })
     }
+}
+
+/// A symbol's placement relation to a materialization scope (see
+/// [`Interner::classify`]).
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Rel {
+    /// Built in exactly this scope — a member (candidate ValDef).
+    Local,
+    /// Built in a scope nested inside this one — a compound; contributes its
+    /// `freeVars` to this scope's DFS.
+    Deeper,
+    /// Built in an ancestor (or unrelated) scope — a `freeVar` boundary leaf.
+    Outside,
 }
 
 /// The single subexpression-sharing pass — Scala's scope-chain hash-cons +

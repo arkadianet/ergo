@@ -299,15 +299,31 @@ fn assert_mismatch_set_matches(
 /// points are pairwise DISTINCT (a repeat means CSE shares it first, exactly as
 /// Scala hash-conses before its four-`Constant` fold-guard). byte-parity
 /// 99/110 → 100/110.
+///
+/// M5 Task 5 Fix 1a (per-scope `depthFirstOrderFrom` + freeVars-as-deps +
+/// deps-based lambda float-up): 10 → 8. `note.es` and `reserve.es` graduate —
+/// their nested-scope ValDef schedule (sibling id-range reset, lambda-arg id
+/// collision) now matches the oracle byte-for-byte. Of the 8 residual, THREE
+/// (`basis-tracker-basis`, `offchain/basis`, `GuardSign`) are now byte-identical
+/// to the oracle EXCEPT the HasSigmas `SigmaAnd`(0xea)/`SigmaPropIsProven`(0xcf)
+/// reconstruction — the CSE schedule is correct; they stay blocked on the
+/// surviving-sigma reconstruction (D-C3, Tasks 8/9), NOT on schedule order. The
+/// other FIVE (`basis-token`, crystalpool `buy`/`sell`/`swap-tokens-denom`/
+/// `swap-tokens`) need a NOT-yet-modelled rule: a PURE-CONSTANT expression
+/// (`sigmaProp(false)`, the default `Coll[SigmaProp]`, `Coll[Byte]()`) built
+/// inside a `getOrElse`-default thunk is placed at ROOT by Scala (global-constant
+/// sharing) but stays thunk-local here — so we under-share it (e.g. buy hoists
+/// 13 root ValDefs vs the oracle's 15). Characterized + oracle-pinned, deferred:
+/// it is a distinct mechanism from the validated schedule rule (the dossiers
+/// simulated over the decoded oracle tree, where those constants were already
+/// global). byte-parity 100/110 → 102/110.
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
-    ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
     (
         "cc",
         "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
     ),
     ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
-    ("cc", "corpus:chaincash-basis/chaincash/onchain/reserve.es"),
     ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
     ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
@@ -353,15 +369,16 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// → 10, lockstep with `DC7_P2SH_MISMATCH_SET`: `proveDHTuple(g1,g2,g1,g2)`'s
 /// CSE-hoisted `GroupElement` ValDef now matches, so its segregated bytes (and
 /// thus P2S) match too.
+/// M5 Task 5 Fix 1a → 8, lockstep with `DC7_P2SH_MISMATCH_SET`: `note.es` and
+/// `reserve.es` graduate (their segregated bytes now match once the schedule
+/// order does).
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
-    ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
     (
         "cc",
         "corpus:chaincash-basis/chaincash/offchain/basis-token.es",
     ),
     ("cc", "corpus:chaincash-basis/chaincash/offchain/basis.es"),
-    ("cc", "corpus:chaincash-basis/chaincash/onchain/reserve.es"),
     ("cc", "corpus:crystalpool/buy-token-for-erg.es"),
     ("cc", "corpus:crystalpool/sell-token-for-erg.es"),
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
