@@ -127,7 +127,7 @@ pub fn read_registers(r: &mut VlqReader) -> Result<AdditionalRegisters, ReadErro
         // SHeader, or SUnsignedBigInt — at ANY nesting depth (recursing
         // STuple/SColl). Version-INDEPENDENT (the JVM rejects at all ErgoTree
         // versions; the check is unconditional, not gated on isV6).
-        if type_has_v6_register_type(&tpe) {
+        if type_has_v6_only_type(&tpe) {
             return Err(ReadError::InvalidData(format!(
                 "register type {tpe:?} contains a v6 type (Option / Header / \
                  UnsignedBigInt) — rule 1019 CheckV6Type"
@@ -138,15 +138,22 @@ pub fn read_registers(r: &mut VlqReader) -> Result<AdditionalRegisters, ReadErro
     Ok(AdditionalRegisters { registers })
 }
 
-/// Scala `CheckV6Type.step` + `v6TypeCheck` (ValidationRules.scala:172-186):
-/// true when `tpe` IS — or (recursing `STuple`/`SColl`) CONTAINS — a v6.0-only
-/// type that may not appear in a register or context-var extension: `SOption`,
-/// `SHeader`, or `SUnsignedBigInt`.
-fn type_has_v6_register_type(tpe: &SigmaType) -> bool {
+/// Scala `CheckV6Type.step` + `v6TypeCheck`
+/// (`ValidationRules.scala:172-186`, rule 1019): `true` when `tpe` IS — or
+/// (recursing `STuple` items / `SColl` element) CONTAINS — a v6.0-only type
+/// that may not appear in a register **or** context-extension var value:
+/// `SOption`, `SHeader`, or `SUnsignedBigInt`. The recursion mirrors Scala's
+/// `step`: `STuple => items.foreach(step)`, `SCollection => step(elemType)`,
+/// every other leaf type => `v6TypeCheck` (reject on `isOption` /
+/// `SHeader.typeCode` / `SUnsignedBigInt.typeCode`). Shared by both the
+/// register reader (here) and `crate::input::read_context_extension` — the
+/// single Scala rule covers both surfaces (see `ContextExtension.parse`,
+/// which calls `CheckV6Type(v)` on every entry at parse).
+pub(crate) fn type_has_v6_only_type(tpe: &SigmaType) -> bool {
     match tpe {
         SigmaType::SOption(_) | SigmaType::SHeader | SigmaType::SUnsignedBigInt => true,
-        SigmaType::STuple(items) => items.iter().any(type_has_v6_register_type),
-        SigmaType::SColl(elem) => type_has_v6_register_type(elem),
+        SigmaType::STuple(items) => items.iter().any(type_has_v6_only_type),
+        SigmaType::SColl(elem) => type_has_v6_only_type(elem),
         _ => false,
     }
 }
@@ -509,22 +516,22 @@ mod tests {
     fn v6_type_check_recurses_tuple_and_coll() {
         use SigmaType::*;
         // Direct v6 types.
-        assert!(type_has_v6_register_type(&SOption(Box::new(SInt))));
-        assert!(type_has_v6_register_type(&SHeader));
-        assert!(type_has_v6_register_type(&SUnsignedBigInt));
+        assert!(type_has_v6_only_type(&SOption(Box::new(SInt))));
+        assert!(type_has_v6_only_type(&SHeader));
+        assert!(type_has_v6_only_type(&SUnsignedBigInt));
         // Nested inside Tuple / Coll (any depth).
-        assert!(type_has_v6_register_type(&STuple(vec![
+        assert!(type_has_v6_only_type(&STuple(vec![
             SInt,
             SOption(Box::new(SByte))
         ])));
-        assert!(type_has_v6_register_type(&SColl(Box::new(SUnsignedBigInt))));
-        assert!(type_has_v6_register_type(&SColl(Box::new(STuple(vec![
+        assert!(type_has_v6_only_type(&SColl(Box::new(SUnsignedBigInt))));
+        assert!(type_has_v6_only_type(&SColl(Box::new(STuple(vec![
             SByte, SHeader
         ])))));
         // Non-v6 types pass.
-        assert!(!type_has_v6_register_type(&SInt));
-        assert!(!type_has_v6_register_type(&STuple(vec![SInt, SByte])));
-        assert!(!type_has_v6_register_type(&SColl(Box::new(SByte))));
+        assert!(!type_has_v6_only_type(&SInt));
+        assert!(!type_has_v6_only_type(&STuple(vec![SInt, SByte])));
+        assert!(!type_has_v6_only_type(&SColl(Box::new(SByte))));
     }
 
     #[test]

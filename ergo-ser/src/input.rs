@@ -105,12 +105,50 @@ pub fn write_context_extension(
 /// arrived on the wire so a subsequent re-serialize (for ≤ 4 entries)
 /// reproduces the same byte sequence. For ≥ 5 entries the writer
 /// re-sorts to HAMT order, so storage order doesn't matter there.
+///
+/// # CheckV6Type gate (rule 1019) — consensus parity, parse-time
+///
+/// Scala `ContextExtension.serializer.parse` calls `CheckV6Type(v)` on
+/// EVERY decoded entry value at parse (see
+/// `sigma/interpreter/ContextExtension.scala:60`), BEFORE any script
+/// runs and regardless of whether a `getVar` ever references the var.
+/// `CheckV6Type` (rule 1019, `ValidationRules.scala:165-194`) is a
+/// registered `EnabledRule` in BOTH `ruleSpecsV5` and `ruleSpecsV6`, so
+/// it fires at every activated protocol version — it is NOT gated on
+/// v6 activation. It throws for any value whose type IS or CONTAINS
+/// (recursing tuple items / collection element) `SOption`, `SHeader`,
+/// or `SUnsignedBigInt`. We apply the identical predicate
+/// ([`crate::register::type_has_v6_only_type`], the same one the
+/// register reader uses) here, returning the same rejection class the
+/// register path returns.
+///
+/// ## Why this is byte-inert for every currently-valid transaction
+///
+/// A context-extension value carrying a v6-only type has ALWAYS been
+/// rejected by the Scala reference node at parse (rule 1019 has existed
+/// and been enabled since these types were introduced). Therefore no
+/// accepted on-chain transaction — and no transaction any honest peer
+/// will relay — carries such a value. This gate can only reject inputs
+/// Scala ALSO rejects; it adds ZERO false rejects for legal (v5-typed)
+/// context-extension values, which decode exactly as before. Direction
+/// closed: the pre-gate reader ACCEPTED these (accept-invalid, fork
+/// risk); the gate makes Rust reject-parity with Scala.
 pub fn read_context_extension(r: &mut VlqReader) -> Result<ContextExtension, ReadError> {
     let count = r.get_u8()? as usize;
     let mut values = IndexMap::with_capacity(count);
     for _ in 0..count {
         let key = r.get_u8()?;
         let (tpe, val) = read_constant(r)?;
+        // Rule 1019 CheckV6Type: reject at parse, matching Scala's
+        // per-entry `CheckV6Type(v)`. Version-independent, fires whether
+        // or not the var is later referenced by `getVar`. Identical
+        // predicate + error class to the register reader.
+        if crate::register::type_has_v6_only_type(&tpe) {
+            return Err(ReadError::InvalidData(format!(
+                "context-extension var type {tpe:?} contains a v6 type (Option / \
+                 Header / UnsignedBigInt) — rule 1019 CheckV6Type"
+            )));
+        }
         values.insert(key, (tpe, val));
     }
     Ok(ContextExtension { values })
@@ -803,5 +841,219 @@ mod tests {
             msg.contains("trailing"),
             "msg should mention trailing, got: {msg}"
         );
+    }
+
+    // ----- rule 1019 CheckV6Type on context-extension var types -----
+
+    // The gate in `read_context_extension` is exactly
+    // `if crate::register::type_has_v6_only_type(&tpe) { reject }`, so the
+    // set of rejected inputs is precisely the set of types for which that
+    // predicate is true. These tests pin (a) the predicate never fires on a
+    // legal v5 type — no reject-valid over-reach — and (b) it fires on the
+    // CheckV6Type set (Option / Header / UnsignedBigInt) at any nesting
+    // depth, matching Scala `ValidationRules.scala:172-186` `step`.
+
+    fn read_ext(bytes: &[u8]) -> Result<ContextExtension, ReadError> {
+        let mut r = VlqReader::new(bytes);
+        let ext = read_context_extension(&mut r)?;
+        assert!(r.is_empty(), "leftover bytes after context-extension parse");
+        Ok(ext)
+    }
+
+    fn ext_bytes_for(tpe: SigmaType, val: SigmaValue) -> Vec<u8> {
+        let mut ext = ContextExtension::empty();
+        ext.values.insert(1, (tpe, val));
+        let mut w = VlqWriter::new();
+        write_context_extension(&mut w, &ext).expect("write ext");
+        w.result()
+    }
+
+    // ----- reject-side over-reach guard: legal v5 types MUST still decode -----
+
+    #[test]
+    fn v6_gate_predicate_never_fires_on_legal_v5_types() {
+        // Exhaustive over-reach guard at the predicate boundary: because the
+        // gate is a pure function of `type_has_v6_only_type(&tpe)`, proving
+        // the predicate is false for every legal type proves the gate cannot
+        // reject any legal context-extension value regardless of its data.
+        use crate::register::type_has_v6_only_type as v6;
+        use SigmaType::*;
+        for tpe in [
+            SBoolean,
+            SByte,
+            SShort,
+            SInt,
+            SLong,
+            SBigInt,
+            SGroupElement,
+            SSigmaProp,
+            SAvlTree,
+            SBox,
+            SUnit,
+            SColl(Box::new(SByte)),
+            SColl(Box::new(SInt)),
+            SColl(Box::new(SGroupElement)),
+            SColl(Box::new(SColl(Box::new(SByte)))),
+            STuple(vec![SInt, SLong]),
+            STuple(vec![SColl(Box::new(SByte)), SGroupElement, SSigmaProp]),
+            SColl(Box::new(STuple(vec![SInt, SByte]))),
+        ] {
+            assert!(
+                !v6(&tpe),
+                "legal v5 type {tpe:?} must NOT be rejected by the CheckV6Type gate",
+            );
+        }
+    }
+
+    #[test]
+    fn v6_gate_accepts_v5_context_extension_values_on_decode() {
+        // Full decode-path acceptance for the v5 types that are cheap to
+        // materialise. Each round-trips writer -> reader with the gate in
+        // place, proving no reject-valid regression end to end.
+        let cases: Vec<(SigmaType, SigmaValue)> = vec![
+            (SigmaType::SInt, SigmaValue::Int(42)),
+            (SigmaType::SLong, SigmaValue::Long(-99)),
+            (SigmaType::SByte, SigmaValue::Byte(7)),
+            (SigmaType::SBoolean, SigmaValue::Boolean(true)),
+            (
+                SigmaType::SColl(Box::new(SigmaType::SByte)),
+                SigmaValue::Coll(crate::sigma_value::CollValue::Bytes(vec![0xDE, 0xAD])),
+            ),
+            (
+                SigmaType::SColl(Box::new(SigmaType::SInt)),
+                SigmaValue::Coll(crate::sigma_value::CollValue::Values(vec![
+                    SigmaValue::Int(1),
+                    SigmaValue::Int(2),
+                ])),
+            ),
+            (
+                SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SLong]),
+                SigmaValue::Tuple(vec![SigmaValue::Int(3), SigmaValue::Long(4)]),
+            ),
+        ];
+        for (tpe, val) in cases {
+            let bytes = ext_bytes_for(tpe.clone(), val);
+            let decoded = read_ext(&bytes).unwrap_or_else(|e| {
+                panic!("legal v5 context-ext {tpe:?} must decode, got error: {e:?}")
+            });
+            assert_eq!(decoded.values.len(), 1);
+        }
+    }
+
+    // ----- oracle parity: Rust-accept / Scala-reject vectors now REJECT -----
+
+    // Provenance: these four byte vectors are external oracle vectors — the
+    // Rust node previously ACCEPTED the first three while Scala 6.0.2
+    // `ContextExtension.parse` REJECTS them via `CheckV6Type(v)`
+    // (`ContextExtension.scala:60`, rule 1019). The control (SInt) is
+    // accepted by both. Bytes are the full context-extension wire form
+    // (count + key + serialized constant).
+
+    #[test]
+    fn oracle_rejects_option_some_context_ext() {
+        // SOption[SInt] Some(7): count=1, key=7, const 0x28 01 0e.
+        let err = read_ext(&[0x01, 0x07, 0x28, 0x01, 0x0e]).unwrap_err();
+        let ReadError::InvalidData(m) = err else {
+            panic!("expected InvalidData, got {err:?}")
+        };
+        assert!(m.contains("1019"), "expected rule-1019 reject, got: {m}");
+    }
+
+    #[test]
+    fn oracle_rejects_option_none_context_ext() {
+        // SOption[SInt] None: count=1, key=3, const 0x28 00.
+        let err = read_ext(&[0x01, 0x03, 0x28, 0x00]).unwrap_err();
+        let ReadError::InvalidData(m) = err else {
+            panic!("expected InvalidData, got {err:?}")
+        };
+        assert!(m.contains("1019"), "expected rule-1019 reject, got: {m}");
+    }
+
+    #[test]
+    fn oracle_rejects_unsigned_bigint_context_ext() {
+        // SUnsignedBigInt 123456789: count=1, key=9, const 0x09 04 07 5b cd 15.
+        let err = read_ext(&[0x01, 0x09, 0x09, 0x04, 0x07, 0x5b, 0xcd, 0x15]).unwrap_err();
+        let ReadError::InvalidData(m) = err else {
+            panic!("expected InvalidData, got {err:?}")
+        };
+        assert!(m.contains("1019"), "expected rule-1019 reject, got: {m}");
+    }
+
+    #[test]
+    fn oracle_accepts_sint_control_context_ext() {
+        // Negative control: SInt(42), count=1, key=1, const 0x04 54. Both
+        // Rust and Scala accept — the gate must NOT touch it.
+        let ext = read_ext(&[0x01, 0x01, 0x04, 0x54]).expect("SInt control must decode");
+        assert_eq!(ext.values.len(), 1);
+        assert_eq!(
+            ext.values.get(&1),
+            Some(&(SigmaType::SInt, SigmaValue::Int(42)))
+        );
+    }
+
+    // ----- nested-type parity: v6 type nested inside Coll / Tuple -----
+
+    #[test]
+    fn v6_gate_rejects_coll_of_unsigned_bigint() {
+        // Coll[SUnsignedBigInt] — v6 type nested one level under a
+        // collection. Scala `step` recurses `SCollection => step(elemType)`
+        // and rejects. Verify the predicate and the full decode path agree.
+        use crate::register::type_has_v6_only_type as v6;
+        let nested = SigmaType::SColl(Box::new(SigmaType::SUnsignedBigInt));
+        assert!(v6(&nested), "Coll[UnsignedBigInt] must trip the predicate");
+
+        let bytes = ext_bytes_for(
+            nested,
+            SigmaValue::Coll(crate::sigma_value::CollValue::Values(vec![
+                SigmaValue::BigInt(num_bigint::BigInt::from(123456789)),
+            ])),
+        );
+        let err = read_ext(&bytes).unwrap_err();
+        let ReadError::InvalidData(m) = err else {
+            panic!("expected InvalidData, got {err:?}")
+        };
+        assert!(m.contains("1019"), "expected rule-1019 reject, got: {m}");
+    }
+
+    #[test]
+    fn v6_gate_rejects_tuple_containing_option() {
+        // (SInt, SOption[SByte]) — v6 type nested inside a tuple item. Scala
+        // `step` recurses `STuple => items.foreach(step)` and rejects.
+        use crate::register::type_has_v6_only_type as v6;
+        let nested = SigmaType::STuple(vec![
+            SigmaType::SInt,
+            SigmaType::SOption(Box::new(SigmaType::SByte)),
+        ]);
+        assert!(v6(&nested), "(Int, Option[Byte]) must trip the predicate");
+
+        let bytes = ext_bytes_for(
+            nested,
+            SigmaValue::Tuple(vec![
+                SigmaValue::Int(1),
+                SigmaValue::Opt(Some(Box::new(SigmaValue::Byte(2)))),
+            ]),
+        );
+        let err = read_ext(&bytes).unwrap_err();
+        let ReadError::InvalidData(m) = err else {
+            panic!("expected InvalidData, got {err:?}")
+        };
+        assert!(m.contains("1019"), "expected rule-1019 reject, got: {m}");
+    }
+
+    #[test]
+    fn v6_gate_predicate_matches_scala_named_nested_types() {
+        // Pin the exact nested types the CheckV6Type `step` recursion names:
+        // a collection of a v6 type and a tuple containing SHeader.
+        use crate::register::type_has_v6_only_type as v6;
+        assert!(v6(&SigmaType::SColl(Box::new(SigmaType::SUnsignedBigInt))));
+        assert!(v6(&SigmaType::STuple(vec![
+            SigmaType::SInt,
+            SigmaType::SHeader
+        ])));
+        // Deep nesting: Coll[(Byte, Option[Int])].
+        assert!(v6(&SigmaType::SColl(Box::new(SigmaType::STuple(vec![
+            SigmaType::SByte,
+            SigmaType::SOption(Box::new(SigmaType::SInt)),
+        ])))));
     }
 }
