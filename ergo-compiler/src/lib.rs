@@ -562,6 +562,26 @@
 //! not committable as an ACCEPT vector because our representation carries no
 //! curve bytes whose output could be compared.
 //!
+//! ### D-E4 — `EnvValue::ProveDlog` closes the D-E3 gap for a REAL wallet key (M6)
+//!
+//! D-E3 above documents that the only pre-M6 env constant in the
+//! `SigmaProp`/`ProveDlog` family, `EnvValue::SigmaProp(String)`, is an opaque
+//! label with `emit` returning `UnsupportedNode` — real curve-bearing keys had
+//! no env entry point at all. M6 (dev-docs/ergoscript-compiler-m6-recon.md §3)
+//! adds `EnvValue::ProveDlog([u8; 33])`, whose `lift` arm on-curve-checks the
+//! bytes (same `decompress_to_affine_hex` policy as `GroupElement` above, D-T5:
+//! rejects off-curve AND identity) and produces `ConstPayload::ProveDlog` —
+//! the IDENTICAL shape the binder's `PK(...)` rule already produces
+//! (`binder.rs:604`) and that `emit`/`typed_print` already fully support. This
+//! is what lets `/script/p2sAddress`'s `keysToEnv`-equivalent wallet-address
+//! env builder (`ScriptApiRoute.scala:52-54` parity) inject each tracked
+//! `myPubKey_N` as a REAL, emittable SigmaProp rather than an inert opaque
+//! label — a script that actually branches on an injected key (`myPubKey_0`
+//! in a `proveDlog`/`&&`/comparison position) now compiles instead of
+//! silently failing at emit. D-E3's own gap (the opaque `SigmaProp(String)`
+//! label) is UNCHANGED and still not emittable — this is a new, separate
+//! variant, not a fix to that one.
+//!
 //! # Known M3 deviations (tree/compile layer)
 //!
 //! ### D-C1 — constant segregation (CLOSED, M4 Task 2 — the D-C1 flip)

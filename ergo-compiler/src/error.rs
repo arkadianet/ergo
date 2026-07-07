@@ -18,6 +18,19 @@ pub enum ParseError {
     /// invalid lambda, unsupported pattern/type, block-shape violations.
     #[error("{msg} (offset {pos})")]
     Semantic { pos: Pos, msg: String },
+    /// Structural-nesting depth guard tripped (`parse.rs`'s shared `expr()`/
+    /// `type_()` recursion counter, `MAX_PARSE_DEPTH`). NOT a Scala-modeled
+    /// failure class like the three above -- the reference's own
+    /// recursive-descent parser has the analogous JVM stack-overflow
+    /// exposure, it is just never REST-adjacent the way this node's
+    /// compile-on-request surface is (M6,
+    /// dev-docs/ergoscript-compiler-m6-recon.md §5). The threshold is a
+    /// conservative, non-oracle-pinned constant -- the compiler's own limits
+    /// are explicitly not consensus-critical (`lib.rs` D-note) -- so this
+    /// exists purely to bound stack use once REST exposes untrusted source
+    /// text to this parser.
+    #[error("expression/type nested too deeply (depth {depth} exceeds the parser's limit) at offset {pos}")]
+    TooDeep { pos: Pos, depth: usize },
 }
 
 impl ParseError {
@@ -25,7 +38,8 @@ impl ParseError {
         match self {
             ParseError::Syntax { pos, .. }
             | ParseError::Lexical { pos, .. }
-            | ParseError::Semantic { pos, .. } => *pos,
+            | ParseError::Semantic { pos, .. }
+            | ParseError::TooDeep { pos, .. } => *pos,
         }
     }
 

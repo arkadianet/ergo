@@ -934,10 +934,10 @@ pub fn router_with_mempool_and_wallet_and_security(
             post(crate::utils::ergo_tree_to_address_post_handler),
         )
         // `/script/*` decode endpoints (Scala ScriptApiRoute) — same
-        // `NetworkPrefix`-only state as the `/utils` address routes. The
-        // compile-requiring members (p2sAddress / p2shAddress /
-        // executeWithContext) are intentionally absent: they compile ErgoScript
-        // source, and this node ships no compiler (see `crate::utils`).
+        // `NetworkPrefix`-only state as the `/utils` address routes. The two
+        // compile-requiring members (p2sAddress / p2shAddress) mount just
+        // below as their own tuple-state sub-router (`crate::script`, M6);
+        // `executeWithContext` remains unimplemented.
         .route(
             "/script/addressToTree/:address",
             get(crate::utils::script_address_to_tree_handler),
@@ -947,6 +947,27 @@ pub fn router_with_mempool_and_wallet_and_security(
             get(crate::utils::script_address_to_bytes_handler),
         );
     let operator = operator.merge(utils_routes.with_state(network));
+
+    // `/script/p2sAddress` + `/script/p2shAddress` (Scala ScriptApiRoute's
+    // compile-requiring members, M6) — a separate tuple-state sub-router
+    // beside `utils_routes` above: these two need `Arc<dyn WalletAdmin>` in
+    // addition to `NetworkPrefix` (Scala's `keysToEnv`, `ScriptApiRoute.scala:
+    // 52-54, reads the wallet's tracked pubkeys server-side), a different
+    // state shape than the stateless decode-only routes just above. PUBLIC —
+    // Scala's `ScriptApiRoute` carries no `withAuth` (`ScriptApiRoute.scala:
+    // 38-46`), so this does NOT ride the api-key-gated `crate::wallet::
+    // router_with_security` subtree despite reading wallet state. Mirrors the
+    // `miner_stats_routes` tuple-state precedent below.
+    let script_routes: Router<(NetworkPrefix, Arc<dyn crate::wallet::WalletAdmin>)> = Router::new()
+        .route(
+            "/script/p2sAddress",
+            post(crate::script::p2s_address_handler),
+        )
+        .route(
+            "/script/p2shAddress",
+            post(crate::script::p2sh_address_handler),
+        );
+    let operator = operator.merge(script_routes.with_state((network, wallet_admin.clone())));
 
     let assembled: Router = match compat {
         Some(c) => {
