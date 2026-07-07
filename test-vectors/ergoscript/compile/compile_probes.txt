@@ -172,3 +172,8 @@ cc	3	sigmaProp((1 % 0) == 0)
 # sigmaProp(true), allOf(Coll(true,false)) → sigmaProp(false).
 cc	3	anyOf(Coll(true, false))
 cc	3	allOf(Coll(true, false))
+# M4 Task 5 review nit: the De Morgan comparison-flip (!(x<y) -> x>=y,
+# DefRewriting.scala:73-91) produced a NEW emitted shape with no oracle
+# vector — this probe pins it per locked decision 3 (writer-child-order /
+# new-shape byte check).
+cc	3	sigmaProp(!(HEIGHT < 5))
