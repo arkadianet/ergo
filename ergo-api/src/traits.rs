@@ -159,6 +159,234 @@ pub trait NodeSubmit: Send + Sync {
             ),
         })
     }
+
+    /// Non-mutating dry-run of an assembled transaction, backing
+    /// `POST /api/v1/transactions/simulate` (`v1-api-design.md` §3.6, G8).
+    ///
+    /// Unlike [`SubmitMode::CheckOnly`] — which still mutates the mempool
+    /// anti-DoS bookkeeping (mempool invariant #7) — this entrypoint MUST NOT
+    /// touch node state: it validates the tx against the current UTXO + pool
+    /// view and returns a cost / fee / conflict report only. A cleanly-invalid
+    /// tx is a *successful* simulation (`Ok(SimulateOutcome { valid: false, .. })`);
+    /// only malformed bytes or a transient node condition surface as a
+    /// [`SubmitError`].
+    ///
+    /// Default impl returns `route_disabled` so test stubs and nodes that have
+    /// not wired the read-only validator keep compiling — the endpoint then
+    /// answers the honest `route_unavailable` (503). Production wiring overrides
+    /// this with a real non-mutating validate pass.
+    async fn simulate(
+        &self,
+        _bytes: Vec<u8>,
+        _assume_height: Option<u32>,
+    ) -> Result<SimulateOutcome, SubmitError> {
+        Err(SubmitError {
+            reason: "route_disabled".to_string(),
+            detail: Some(
+                "non-mutating simulate is not wired in this NodeSubmit implementation".to_string(),
+            ),
+        })
+    }
+}
+
+/// Outcome of a non-mutating [`NodeSubmit::simulate`] dry-run — the report
+/// `POST /api/v1/transactions/simulate` renders (`v1-api-design.md` §3.6). A
+/// cleanly-invalid tx still produces an outcome (`valid = false`); the handler
+/// renders it as a 200. nanoErg amounts are raw `u64` here and stringified at
+/// the wire boundary (§1.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimulateOutcome {
+    /// Transaction id computed from the assembled bytes.
+    pub tx_id: String,
+    /// Whether the tx would be admitted against the current state.
+    pub valid: bool,
+    /// Sigma-interpreter cost the validation consumed, in block-budget units.
+    pub cost_units: u64,
+    /// The active epoch's `maxBlockCost` the cost is bounded by.
+    pub max_block_cost: u64,
+    /// Serialized size of the tx.
+    pub size_bytes: u32,
+    /// Fee paid (sum of outputs to the fee proposition), nanoErg.
+    pub fee_nano_erg: u64,
+    /// Minimum fee the node requires for a tx of this size, nanoErg.
+    pub min_fee_required_nano_erg: u64,
+    /// `fee_nano_erg >= min_fee_required_nano_erg`.
+    pub fee_sufficient: bool,
+    /// Whether any input references a box unknown to the node.
+    pub spends_unknown_inputs: bool,
+    /// Pool double-spend conflicts: an input already spent by a pooled tx.
+    pub conflicts: Vec<SimulateConflict>,
+    /// Non-fatal advisories (e.g. `non_canonical_ergo_tree`).
+    pub warnings: Vec<String>,
+}
+
+/// A single pool double-spend conflict on a simulated tx: `box_id` is already
+/// being spent by `conflicting_tx_id` in the mempool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimulateConflict {
+    /// The already-spent input box id (hex).
+    pub box_id: String,
+    /// The pooled tx spending it (hex tx id).
+    pub conflicting_tx_id: String,
+}
+
+/// Keyless transaction-builder boundary backing
+/// `POST /api/v1/transactions/build` (`v1-api-design.md` §3.6, §4.2 O7).
+///
+/// "Keyless" = the caller supplies the input universe (addresses to select
+/// from, or explicit input box ids) and an explicit change address; no secret
+/// material ever crosses this boundary, so the endpoint is T0. This is the ONE
+/// builder seam (O7): the production impl delegates to the same selection /
+/// change / fee core the keyed wallet build uses — a second builder is never
+/// forked. `V1State::tx_builder` is `None` until that core is wired, and the
+/// endpoint then answers the honest `route_unavailable` (503) rather than
+/// fabricating a coin selection.
+#[async_trait]
+pub trait NodeTxBuilder: Send + Sync {
+    async fn build_unsigned(
+        &self,
+        request: KeylessBuildRequest,
+    ) -> Result<BuiltUnsigned, TxBuildError>;
+}
+
+/// A keyless build request — the node-facing projection of the §4.2 `tx_intent`
+/// the handler shapes the wire intent into. Unwired intent shapes (mint,
+/// payment registers, raw boxes) are rejected as `unsupported_intent` up front
+/// and never reach the builder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeylessBuildRequest {
+    /// Where inputs are drawn from.
+    pub inputs: KeylessInputs,
+    /// Requested payment outputs.
+    pub outputs: Vec<KeylessOutput>,
+    /// Data-input box ids (hex).
+    pub data_input_box_ids: Vec<String>,
+    /// Fee spec.
+    pub fee: KeylessFee,
+    /// REQUIRED change address (base58) — the keyless surface never resolves a
+    /// persisted change address.
+    pub change_address: String,
+    /// Optional context height override (defaults to the node tip).
+    pub context_height: Option<u32>,
+    /// Permit dropping a non-re-emission token surplus (the EIP-27 burn stays
+    /// mandatory regardless).
+    pub allow_token_burn: bool,
+}
+
+/// The input universe for a [`KeylessBuildRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeylessInputs {
+    /// Select coins from the UTXOs of these addresses (extra-index scan).
+    Select {
+        /// Selection universe (base58 addresses).
+        from_addresses: Vec<String>,
+        /// Minimum confirmations for a candidate box; `-1` includes pool
+        /// outputs.
+        min_confirmations: i64,
+        /// Box ids to exclude from selection (hex).
+        exclude_box_ids: Vec<String>,
+        /// What the selection must cover.
+        target: KeylessTarget,
+    },
+    /// Spend exactly these input boxes (by hex id).
+    BoxIds {
+        /// The explicit input box ids (hex).
+        box_ids: Vec<String>,
+    },
+}
+
+/// What a `select` input universe must cover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeylessTarget {
+    /// Cover the outputs + fee (+ EIP-27 burn) automatically.
+    Auto,
+    /// Cover exactly this nanoErg amount.
+    Value(u64),
+}
+
+/// One requested payment output of a [`KeylessBuildRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeylessOutput {
+    /// Recipient address (base58).
+    pub address: String,
+    /// Output value, nanoErg.
+    pub value_nano_erg: u64,
+    /// Tokens carried by the output.
+    pub assets: Vec<KeylessAsset>,
+}
+
+/// A `{token_id, amount}` asset on a [`KeylessOutput`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeylessAsset {
+    /// 32-byte token id (hex).
+    pub token_id: String,
+    /// Token amount.
+    pub amount: u64,
+}
+
+/// Fee spec for a [`KeylessBuildRequest`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeylessFee {
+    /// Mempool-derived fee for the given block horizon.
+    Auto {
+        /// Target confirmation horizon (blocks).
+        target_blocks: u32,
+    },
+    /// Exactly this nanoErg fee.
+    Fixed {
+        /// Fixed fee, nanoErg.
+        value: u64,
+    },
+}
+
+/// A built keyless unsigned transaction + the selection / change / fee summary
+/// the `build` endpoint reports. nanoErg amounts are raw `u64`, stringified at
+/// the wire boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltUnsigned {
+    /// Canonical serialized bytes of the unsigned transaction.
+    pub unsigned_tx_bytes: Vec<u8>,
+    /// The transaction id (hex).
+    pub tx_id: String,
+    /// Box ids selected as inputs (request order, hex).
+    pub input_box_ids: Vec<String>,
+    /// Total nanoErg the selected inputs carry.
+    pub selected_value_nano_erg: u64,
+    /// Miner fee, nanoErg.
+    pub fee_nano_erg: u64,
+    /// `"auto"` when the fee was mempool-derived, `"fixed"` when caller-set.
+    pub fee_source: String,
+    /// Computed change outputs.
+    pub change: Vec<BuiltChange>,
+    /// Serialized size of the unsigned tx.
+    pub size_bytes: u32,
+    /// Estimated interpreter cost, block-budget units.
+    pub estimated_cost_units: u64,
+}
+
+/// One change output computed by the keyless builder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltChange {
+    /// Change recipient (the intent's change address, base58).
+    pub address: String,
+    /// Change value, nanoErg.
+    pub value_nano_erg: u64,
+    /// Change tokens.
+    pub assets: Vec<KeylessAsset>,
+}
+
+/// A keyless-build rejection. `reason` reuses the frozen submit-domain /
+/// invalid-input verbs (`insufficient_funds`, `no_inputs_found`,
+/// `invalid_address`, `invalid_token_id`, `dust_change`, `indexer_disabled`,
+/// `unsupported_intent`, `intent_too_large`, `route_disabled`,
+/// `internal_error`) so the handler maps them to the canonical v1 error
+/// `reason` with no new vocabulary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxBuildError {
+    /// Frozen reason verb (see the type doc for the accepted set).
+    pub reason: String,
+    /// Optional actionable detail.
+    pub detail: Option<String>,
 }
 
 /// Out-of-band node-administration boundary. Currently exposes only
