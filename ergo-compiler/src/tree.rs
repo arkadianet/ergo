@@ -832,6 +832,15 @@ pub fn compile(
         return Err(CompileError::Serializer { what });
     }
 
+    // Lowering block (M4 Task 3, locked decision 1): AFTER every gate/fold
+    // above, BEFORE constant segregation. D-C2 (`CreateProveDlog(Const)` /
+    // `CreateProveDHTuple(Const×4)` → bare `SigmaPropConstant`) + the
+    // single-element `anyOf`/`allOf`/`allZK`/`anyZK` unwrap
+    // (recon-transforms.md §4/§5; `crate::lower`). Must run before the P2SH
+    // proposition bytes below are computed, so the folded/unwrapped shape is
+    // what both the proposition hash and `build_tree`'s bare-root check see.
+    let root = crate::lower::lower(root);
+
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
     // hashes `toProposition(replaceConstants = isConstantSegregation)`
     // (`ErgoAddress.scala:201-204`), i.e. the constant-INLINED proposition. The
@@ -1347,10 +1356,10 @@ mod tests {
     ///  5AgXz2LADsxyCxEWvvHHpM9vKJsKbCwMjhXmVVrjH1dFtMgEupoAtSQd
     ///  rnwHaWHeaqaP7sCPFCF8VdN2Mxe72y4oLt8XKAt`
     /// (sigma-state 6.0.2, ORACLE_NETWORK=testnet, captured 2026-07-07).
-    /// NOTE the D-C2 caveat does NOT apply to bytes here: OUR unfolded
-    /// `CreateProveDlog(Const)` differs from the oracle's folded bare
-    /// constant, so only the 33-byte point INSIDE our constant — and the
-    /// evaluation — are pinned, not whole-tree bytes.
+    /// **M4 Task 3 flip:** the D-C2 fold now runs (`crate::lower`), so our
+    /// `CreateProveDlog(Const)` collapses into the SAME bare
+    /// `SigmaPropConstant` the oracle emits — full tree bytes AND both
+    /// addresses now match, not just the 33-byte point inside the constant.
     #[test]
     fn compile_provedlog_two_g_point_bytes_match_oracle_fold() {
         let mut env = ScriptEnv::new();
@@ -1364,12 +1373,15 @@ mod tests {
             EnvValue::GroupElement(GroupElement::from_bytes(bytes)),
         );
         let r = compile_testnet(&env, "proveDlog(g2)").expect("compile");
-        // The 2·G point rides inside our (unfolded) GroupElement constant.
-        let ours = hex::encode(&r.tree_bytes);
-        assert!(
-            ours.contains("02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
-            "compiled tree must carry the oracle-pinned compressed 2·G: {ours}"
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "0008cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
         );
+        assert_eq!(
+            r.p2s_address,
+            "5AgXz2LADsxyCxEWvvHHpM9vKJsKbCwMjhXmVVrjH1dFtMgEupoAtSQd"
+        );
+        assert_eq!(r.p2sh_address, "rnwHaWHeaqaP7sCPFCF8VdN2Mxe72y4oLt8XKAt");
     }
 
     #[test]
@@ -1642,42 +1654,31 @@ mod tests {
     }
 
     #[test]
-    fn compile_prove_dlog_generator_unfolded_header_and_shape_only() {
+    fn compile_prove_dlog_generator_folds_to_bare_const_matching_pk_oracle() {
         // Oracle capture, line 3: `cce proveDlog(g1)` → the SAME reply as
         // the PK line (tree `0008cd0279be...`, both addresses identical):
         // Scala's IR pipeline constant-folds CreateProveDlog(const) →
         // SigmaPropConstant at the GraphBuilding stage (task-1-report.md
-        // Concern 1; g1 = the generator = the PK test key). WE emit the
-        // unfolded `CreateProveDlog(Const)` — a NON-bare root, so it now
-        // SEGREGATES (header 0x10, the GroupElement pulled into the table, a
-        // ConstPlaceholder in the body), with DIFFERENT body bytes than the
-        // oracle's folded bare constant. Asserts header/shape only. The
-        // constant fold is an M4/M5 lowering rule (ledger note, D-C2).
+        // Concern 1; g1 = the generator = the PK test key).
+        //
+        // **M4 Task 3 flip:** `crate::lower`'s D-C2 fold now runs BEFORE
+        // `build_tree`, so our `CreateProveDlog(Const)` folds to the SAME
+        // bare `SigmaPropConstant` the oracle emits — the root is bare, so
+        // it takes `withoutSegregation` (header `0x00`, empty constants
+        // table) exactly like the PK vector, and every byte/address matches
+        // the oracle verbatim (D-C2 CLOSED).
         let r = compile_testnet(&generator_env(), "proveDlog(g1)").expect("compile");
-        assert_eq!(r.tree_bytes[0], 0x10, "non-bare root segregates");
-        // The GroupElement constant is the single segregated slot.
-        assert_eq!(r.ergo_tree.constants.len(), 1);
+        assert_eq!(r.tree_bytes[0], 0x00, "folded bare root, no segregation");
+        assert!(r.ergo_tree.constants.is_empty());
         assert!(matches!(
-            &r.ergo_tree.constants[0],
-            (SigmaType::SGroupElement, _)
+            &r.ergo_tree.body,
+            Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(_)),
+            }
         ));
-        // Body = CreateProveDlog (0xCD) over a ConstPlaceholder (slot 0).
-        match &r.ergo_tree.body {
-            Expr::Op(IrNode {
-                opcode: 0xCD,
-                payload: Payload::One(inner),
-            }) => assert!(matches!(
-                inner.as_ref(),
-                Expr::Op(IrNode {
-                    payload: Payload::ConstPlaceholder { index: 0 },
-                    ..
-                })
-            )),
-            other => panic!("expected CreateProveDlog node, got {other:?}"),
-        }
-        // NOT byte-equal to the oracle's folded bare-constant tree.
-        assert_ne!(hex::encode(&r.tree_bytes), ORACLE_PK_TREE_HEX);
-        assert_ne!(r.p2s_address, ORACLE_PK_P2S);
-        assert_ne!(r.p2sh_address, ORACLE_PK_P2SH);
+        assert_eq!(hex::encode(&r.tree_bytes), ORACLE_PK_TREE_HEX);
+        assert_eq!(r.p2s_address, ORACLE_PK_P2S);
+        assert_eq!(r.p2sh_address, ORACLE_PK_P2SH);
     }
 }

@@ -123,26 +123,24 @@ const SEMANTIC_SKIP: &[(&str, &str)] = &[
 // =============================================================================
 
 // Sources where the ORACLE tree root is a bare `SigmaPropConstant` but OURS
-// deliberately is not: Scala's GraphBuilding folds `proveDlog(<GroupElement
-// const>)` into the bare constant (lib.rs D-C2 — one instance of the D-C7
-// family); we emit the unfolded `CreateProveDlog` node. These are the ONLY
-// tolerated oracle-bare/ours-not asymmetries — any other vector where the
-// oracle root is bare and ours is not is a PK-class regression and fails
-// loudly (finding H-3: the old gate keyed the byte check on OUR OWN output
-// class, so such a regression could silently demote a vector to
-// semantic-only parity). D-C3's `allOf(Coll(proveDlog(g1)))` is also
-// oracle-bare but sits in SEMANTIC_SKIP above, so it never reaches this
-// classification. Every entry must fire — a stale entry fails the sweep.
-const ORACLE_BARE_FOLD_EXCLUSIONS: &[(&str, &str)] = &[
-    (
-        "proveDlog(g1)",
-        "D-C2: Scala folds CreateProveDlog(const) to a bare SigmaPropConstant; ours stays 0xCD",
-    ),
-    (
-        "proveDlog(g3)",
-        "D-C2: same fold over the non-generator point",
-    ),
-];
+// deliberately is not — the ONE tolerated class of oracle-bare/ours-not
+// asymmetry; any other vector where the oracle root is bare and ours is not
+// is a PK-class regression and fails loudly (finding H-3: the old gate keyed
+// the byte check on OUR OWN output class, so such a regression could
+// silently demote a vector to semantic-only parity). D-C3's
+// `allOf(Coll(proveDlog(g1)))` is also oracle-bare but sits in SEMANTIC_SKIP
+// above, so it never reaches this classification. Every entry must fire — a
+// stale entry fails the sweep.
+//
+// EMPTY as of M4 Task 3: the two prior entries (`proveDlog(g1)`,
+// `proveDlog(g3)`) existed because Scala folds `CreateProveDlog(<GroupElement
+// const>)` into a bare `SigmaPropConstant` while we emitted the unfolded
+// `0xCD` node. `crate::lower`'s D-C2 fold now runs before `build_tree`, so
+// both vectors are bare on OUR side too (D-C2 CLOSED) — they graduated into
+// the ordinary `bare_total`/`bare_match` counters below instead. Kept as a
+// mechanism (not deleted) for the next partial-fold gap this class of
+// asymmetry can recur under.
+const ORACLE_BARE_FOLD_EXCLUSIONS: &[(&str, &str)] = &[];
 
 /// `(verb, source)` label for a vector, used as the key in the SET-based
 /// parity gates below (M4 Task 1, recon-gap.md Finding 5). Corpus-sourced
@@ -223,12 +221,19 @@ fn assert_mismatch_set_matches(
 /// 1).size == 1)` re-captured under `cce` instead of `ccs` — gap F2, its
 /// `ccs`-only mismatch was an oracle-env artifact, not a real IR-transform
 /// divergence; the `cce` capture is byte-identical to ours and graduates
-/// out). 43 vectors, derived from a full gate run against the M4 Task-1 seed
-/// (`compile_seed.json`, 272 vectors, 80 ACCEPT swept).
+/// out) → 39 (M4 Task 3: the D-C2 `proveDlog(const)` fold + single-element
+/// `anyOf`/`atLeast`-Coll unwrap graduate `anyOf(Coll(HEIGHT > 5))`,
+/// `atLeast(1, Coll(proveDlog(g1)))`, `proveDlog(g1)`, `proveDlog(g3)` —
+/// recon-targets.md vectors #12/#15/#14/#29; `proveDHTuple(g1, g2, g1, g2)`
+/// (#17) stays — it needs M5 CSE/ValDef sharing, not this fold: Scala's
+/// hash-consing turns the REPEATED point into a shared `ValDef` before
+/// `buildValue`'s fold-check runs, so the fold-check's four-`Constant` guard
+/// never fires on the oracle side either). 39 vectors, derived from a full
+/// gate run against the M4 Task-1 seed (`compile_seed.json`, 272 vectors, 80
+/// ACCEPT swept).
 const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "!true"),
     ("cc", "1 < 2L"),
-    ("cc", "anyOf(Coll(HEIGHT > 5))"),
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
     (
@@ -273,10 +278,7 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "true && (1 == 1)"),
     ("cc", "true ^ false"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
-    ("cce", "atLeast(1, Coll(proveDlog(g1)))"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
-    ("cce", "proveDlog(g1)"),
-    ("cce", "proveDlog(g3)"),
     (
         "ccs",
         "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",
@@ -304,22 +306,24 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 /// POST-TASK-2 (the D-C1 flip): `compile()` now segregates non-bare roots
 /// exactly like Scala. Because a segregated tree's bytes are equal iff its
 /// constant-inlined proposition is equal, P2S now matches iff P2SH matches —
-/// so this set has collapsed onto the D-C7 residual and is now IDENTICAL to
-/// [`DC7_P2SH_MISMATCH_SET`] (43 vectors: the remaining IR-shape divergences —
-/// folds, val inlining, CSE, unwraps — that reshape the proposition itself).
-/// The D-C1 segregation axis is CLOSED; what remains is the D-C7 axis.
+/// so this set has collapsed onto the D-C7 residual and stays IDENTICAL to
+/// [`DC7_P2SH_MISMATCH_SET`] (39 vectors post-Task-3: the remaining IR-shape
+/// divergences — folds, val inlining, CSE, unwraps — that reshape the
+/// proposition itself). The D-C1 segregation axis is CLOSED; what remains is
+/// the D-C7 axis.
 ///
 /// History: 78 (M3/M4-Task-1: every non-bare-const ACCEPT vector) → 43 (M4
 /// Task 2: 35 SEGREGATION-ONLY vectors graduated — the 37 P2S/byte matches are
-/// those 35 plus the 2 already-matching bare-const vectors). Each graduation
-/// is a vector whose proposition was already oracle-identical, so only the
-/// header/segregation differed; the set form (not a count) confirmed it dropped
-/// the RIGHT 35 — the remainder converged EXACTLY onto the DC7 set, as the
-/// segregation-invariance of P2SH predicts.
+/// those 35 plus the 2 already-matching bare-const vectors) → 39 (M4 Task 3:
+/// the same 4 D-C2/unwrap graduations as `DC7_P2SH_MISMATCH_SET` — P2S moves
+/// in lockstep with P2SH post-Task-2). Each graduation is a vector whose
+/// proposition was already (or is now) oracle-identical, so only the
+/// header/segregation differed; the set form (not a count) confirmed it
+/// dropped the RIGHT vectors — the remainder stays converged EXACTLY onto the
+/// DC7 set, as the segregation-invariance of P2SH predicts.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "!true"),
     ("cc", "1 < 2L"),
-    ("cc", "anyOf(Coll(HEIGHT > 5))"),
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
     (
@@ -364,10 +368,7 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "true && (1 == 1)"),
     ("cc", "true ^ false"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
-    ("cce", "atLeast(1, Coll(proveDlog(g1)))"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
-    ("cce", "proveDlog(g1)"),
-    ("cce", "proveDlog(g3)"),
     (
         "ccs",
         "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",

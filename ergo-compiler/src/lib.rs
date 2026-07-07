@@ -580,15 +580,24 @@
 //! are equal iff its inlined proposition is), so `P2S_DC1_MISMATCH_SET` has
 //! converged EXACTLY onto `DC7_P2SH_MISMATCH_SET` (43 vectors; 35 graduated).
 //!
-//! ### D-C2 — no `CreateProveDlog(Const)` → `SigmaPropConstant` fold
+//! ### D-C2 — CLOSED (M4 Task 3): `CreateProveDlog(Const)` → `SigmaPropConstant` fold
 //!
 //! Scala's IR pipeline constant-folds `proveDlog(<GroupElement const>)` into a
 //! bare `SigmaPropConstant` at the GraphBuilding stage (oracle:
 //! `cce proveDlog(g1)` replies with the SAME tree/addresses as the equivalent
-//! `PK(...)`, task-1-report Concern 1); we emit the unfolded
-//! `CreateProveDlog(Const)` node (`0xCD`) — same header `0x00`, different body
-//! bytes, different addresses. The constant fold is an M4/M5 lowering rule —
-//! one instance of the general D-C7 no-IR-pass family below.
+//! `PK(...)`, task-1-report Concern 1; `TreeBuilding.scala:416-430`, also
+//! folding `proveDHTuple` when **all four** arguments are `Constant`s). `crate::
+//! lower` now runs this fold in the lowering block (`tree::compile`, locked
+//! decision 1: after every gate/fold, before segregation) — a folded
+//! `proveDlog(const)` root joins the bare-constant `withoutSegregation` class
+//! byte-for-byte with the oracle (recon-targets.md vectors #14/#29;
+//! `tree.rs::compile_prove_dlog_generator_folds_to_bare_const_matching_pk_oracle`,
+//! `compile_provedlog_two_g_point_bytes_match_oracle_fold`). `proveDHTuple`
+//! with a REPEATED constant argument (`proveDHTuple(g1, g2, g1, g2)`) stays
+//! unfolded on the oracle side too — Scala's hash-consing shares the repeated
+//! point into a `ValDef` before `buildValue`'s four-`Constant` fold-check runs,
+//! so that check never fires there either; this residual is M5 CSE/ValDef
+//! sharing (D-C7 below), not a D-C2 gap.
 //!
 //! ### D-C3 — residual `SigmaPropIsProven` (0xCF): compile output unevaluable
 //!
@@ -832,10 +841,14 @@
 //! - **CSE/ValDef sharing** of repeated subterms (`proveDHTuple(g1, g2, g1,
 //!   g2)` with one distinct point → a shared constant `ValDef` + four
 //!   `ValUse`s; the M5 ValDef-sharing roadmap item);
-//! - **single-element `anyOf`/`atLeast` unwrapping** (`anyOf(Coll(HEIGHT >
-//!   5))` → the bare comparison);
-//! - **`proveDlog(const)` → `SigmaPropConstant`** (= D-C2, one instance of
-//!   this family);
+//! - ~~single-element `anyOf`/`atLeast` unwrapping~~ **CLOSED (M4 Task 3):**
+//!   `anyOf(Coll(HEIGHT > 5))` → the bare comparison. Correction: only
+//!   `AllOf`/`AnyOf`/`AllZk`/`AnyZk` unwrap on `items.length == 1`
+//!   (`GraphBuilding.scala:205-208`) — `AtLeast` does NOT (recon-targets.md
+//!   vector #15, `atLeast(1, Coll(proveDlog(g1)))` keeps its `AtLeast` shape
+//!   even over a singleton `Coll`); `crate::lower` implements the fold;
+//! - ~~`proveDlog(const)` → `SigmaPropConstant`~~ **CLOSED, see D-C2 above**
+//!   (one instance of this family);
 //! - **bare-ident context/global singletons lowered to `PropertyCall`s**
 //!   (bare `LastBlockUtxoRootHash` → `PropertyCall` over `Context`; bare
 //!   `Global.groupGenerator` → `PropertyCall` over `Global`; the dot-forms
@@ -868,18 +881,20 @@
 //! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
 //! compensating regression a count assert would miss): the address gate
 //! (`tests/compile_semantic_parity.rs`) pins the corpus at
-//! `DC7_P2SH_MISMATCH_SET` (43 of the 80 swept ACCEPT vectors as of M4
-//! Task 1; the other 37 P2SH-match and are hard-asserted equal wherever the
-//! proposition bytes agree). The M4 segregation transform plus the M5
-//! lowering/ValDef-sharing work close the family; each landed lowering
-//! removes the vectors it graduates from the set, deliberately and
-//! explicitly.
+//! `DC7_P2SH_MISMATCH_SET` (39 of the 80 swept ACCEPT vectors as of M4
+//! Task 3, down from 43 at Task 1/2 — Task 3's D-C2 fold + single-element
+//! `anyOf`/`allOf` unwrap graduated 4; the other 41 P2SH-match and are
+//! hard-asserted equal wherever the proposition bytes agree). The M4
+//! lowering tasks plus the M5 CSE/ValDef-sharing work close the remainder;
+//! each landed lowering removes the vectors it graduates from the set,
+//! deliberately and explicitly.
 
 pub mod ast;
 pub mod binder;
 pub mod emit;
 pub mod env;
 pub mod error;
+mod lower;
 mod parse;
 pub mod span;
 pub mod stype;
