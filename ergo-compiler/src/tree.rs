@@ -976,6 +976,21 @@ pub fn compile(
     // what both the proposition hash and `build_tree`'s bare-root check see.
     let root = crate::lower::lower(root);
 
+    // Re-fold after lowering (NF-M4-2, M4 close-out; mirrors the double-
+    // `isProven` pattern in this pipeline). Scala runs `proveDlog(const)` /
+    // `proveDHTuple(const×4)` folding and the `Equals` equal-operand fold in the
+    // SAME `rewriteDef` FIXPOINT, so `proveDlog(g1) == proveDlog(g1)` folds to
+    // `true` in one cascade: the D-C2 fold makes both operands identical
+    // `SigmaPropConstant`s, and the still-live `Equals` rule then collapses them.
+    // Our `crate::fold::fold` runs ONCE, BEFORE `crate::lower` — at which point
+    // the operands are still `CreateProveDlog` nodes, not `Const`, so the
+    // `Const`-restricted `Equals` rule correctly declines. `crate::lower` then
+    // exposes the identical-`Const` pair, but nothing re-examines it. Presenting
+    // the lowered tree to the fold a second time closes exactly that
+    // ordering-dependent gap (it is idempotent on already-folded shapes — only a
+    // D-C2-exposed `Const == Const` / `Const != Const` has anything left to do).
+    let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
+
     // Top-level `removeIsProven` (M4 Task 6, D-C3; recon-transforms.md §3;
     // `GraphBuilding.scala:245-252`, applied at `:418` AFTER buildGraph). The
     // lowering block above (D-C2 `proveDlog(const)` fold + single-element

@@ -231,3 +231,30 @@ cc	3	{ val unused = Coll[BigInt](); sigmaProp(true) }
 # sibling was committed).
 cc	3	{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }
 cc	3	{ val unused = 2147483647 + 1; sigmaProp(true) }
+# ─── M4 close-out adversarial wave (segwriter / regression / scopes reports) ───
+# FINDING 2 (segwriter): an empty typed boolean collection passed DIRECTLY to
+# allOf/anyOf typechecks (declared elem type preserved) and the vacuous AND/OR
+# folds — allOf(empty)→sigmaProp(true), anyOf(empty)→sigmaProp(false). Was a
+# class-1 verdict divergence (we rejected "Undefined type of empty collection").
+cc	3	sigmaProp(allOf(Coll[Boolean]()))
+cc	3	sigmaProp(anyOf(Coll[Boolean]()))
+# FINDING 1 (segwriter): an all-boolean-constant Coll[Boolean] literal in a
+# value position packs to the compact 0x85 ConcreteCollectionBooleanConstant
+# form (VLQ count + LSB-first bits), so the booleans never reach the constant
+# segregation sink — matching Scala's ConcreteCollectionSerializer dispatch.
+cc	3	sigmaProp(SELF.R4[Coll[Boolean]].getOrElse(Coll(true, false)).size == 2)
+cc	3	sigmaProp(SELF.R4[Coll[Boolean]].getOrElse(Coll(true, false, true, false, true)).size > 0)
+# Control: a Coll[Int] literal stays the generic 0x83 ConcreteCollection with
+# its elements segregated individually (the 0x85 packing is boolean-only).
+cc	3	sigmaProp(SELF.R4[Coll[Int]].getOrElse(Coll(1, 2)).size == 2)
+# NF-M4-1 (regression): renumber_dense restarts FuncValue arg ids per DISJOINT
+# (sibling, non-nested) scope — two disjoint lambdas both get id 1 (Scala reuses
+# curId across disjoint scopes), not globally-dense 1, 2. Nested scopes continue.
+cc	3	{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.value > t}) && INPUTS.exists({(c: Box) => c.value > 0})) }
+cc	3	sigmaProp(Coll(1L, 2L).fold(0L, {(a: Long, c: Long) => a + c}) > 0 && OUTPUTS.exists({(b: Box) => b.value > 0}))
+cc	3	sigmaProp(OUTPUTS.exists({(a: Box) => a.value > 0}) || INPUTS.exists({(b: Box) => b.value > 1}) || OUTPUTS.exists({(c: Box) => c.value > 2}))
+# NF-M4-2 (regression): a re-fold after lowering lets the Const==Const
+# equal-operand rule see the D-C2-folded proveDlog constants —
+# proveDlog(g1) == proveDlog(g1) folds to sigmaProp(true), as Scala's single
+# rewriteDef fixpoint does.
+cce	3	sigmaProp(proveDlog(g1) == proveDlog(g1))

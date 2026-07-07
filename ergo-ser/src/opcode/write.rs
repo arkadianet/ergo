@@ -4,7 +4,7 @@ use crate::error::WriteError;
 use crate::sigma_type::{write_type, SigmaType};
 use crate::sigma_value::{write_constant, SigmaValue};
 
-use super::types::{opcode_pattern, ArgPattern, Body, Expr, Payload};
+use super::types::{opcode_pattern, ArgPattern, Body, Expr, IrNode, Payload};
 
 /// If `opcode` is a `Relation2` operator and both operands are boolean
 /// *constants*, return their values. Scala's `Relation2Serializer` then encodes
@@ -36,6 +36,39 @@ fn relation2_bool_pair(opcode: u8, a: &Expr, b: &Expr) -> Option<(bool, bool)> {
         ) => Some((*left, *right)),
         _ => None,
     }
+}
+
+/// The packed bit values if `node` is a `ConcreteCollection` (`0x83`) whose
+/// element type is `SBoolean` and whose every item is a boolean `Const` —
+/// Scala's `ConcreteCollection.isBooleanConstants` predicate (`values.scala:842`:
+/// `elementType == SBoolean && items.forall(_.isInstanceOf[Constant[_]])`),
+/// which flips `opCode` to `ConcreteCollectionBooleanConstantCode` (`0x85`).
+///
+/// An empty `Coll[Boolean]` qualifies (empty `forall` is vacuously true, and the
+/// oracle packs it as `85 00`). A collection with any NON-constant item — a
+/// `HEIGHT > 5` element, a `ValUse`, a nested `Op` — returns `None`, so it stays
+/// the generic `0x83` `ConcreteCollection` whose items segregate individually
+/// (the `Coll[Int]` / mixed-`Coll[Boolean]` control paths).
+fn concrete_bool_collection(node: &IrNode) -> Option<Vec<bool>> {
+    if node.opcode != 0x83 {
+        return None;
+    }
+    let Payload::ConcreteCollection { elem_type, items } = &node.payload else {
+        return None;
+    };
+    if *elem_type != SigmaType::SBoolean {
+        return None;
+    }
+    items
+        .iter()
+        .map(|it| match it {
+            Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(b),
+            } => Some(*b),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Constant sink for the segregation write pass — the Rust analogue of Scala's
@@ -147,8 +180,23 @@ fn write_expr_inner(
             None => write_constant(w, tpe, val)?,
         },
         Expr::Op(node) => {
-            w.put_u8(node.opcode);
-            write_payload(w, node.opcode, &node.payload, sink)?;
+            if let Some(bits) = concrete_bool_collection(node) {
+                // Scala's `ConcreteCollectionSerializer` dispatches an
+                // all-boolean-*constant* collection to
+                // `ConcreteCollectionBooleanConstantSerializer` (opcode `0x85`,
+                // bit-packed) for ANY value position — `isBooleanConstants =
+                // elementType == SBoolean && items.forall(_.isInstanceOf[Constant])`
+                // (`values.scala:842/888`; `forall` on an empty collection is
+                // vacuously true, so an empty `Coll[Boolean]` packs too). The
+                // packed bits bypass the `Expr::Const` arm entirely, so they are
+                // never segregated — exactly like the Relation2 bool-pair above,
+                // and matching the oracle's single-entry constant table.
+                w.put_u8(0x85);
+                write_payload(w, 0x85, &Payload::BoolCollection { bits }, sink)?;
+            } else {
+                w.put_u8(node.opcode);
+                write_payload(w, node.opcode, &node.payload, sink)?;
+            }
         }
         // `Expr::Unparsed` is a whole-tree body (the full original bytes,
         // including the header), re-emitted only via `write_ergo_tree`; it is
@@ -161,6 +209,26 @@ fn write_expr_inner(
         }
     }
     Ok(())
+}
+
+/// Write a DIRECT Relation2 operand, suppressing the top-level
+/// `ConcreteCollection[Boolean]` → `0x85` compaction that [`write_expr_inner`]
+/// would otherwise apply (a leading `0x85` here is the reserved packed-pair
+/// grammar — see the `Payload::Two` Relation2 arm). Only the operand's OWN node
+/// is exempt; nested bool collections (e.g. under a `SizeOf`) recurse through
+/// [`write_expr_inner`] normally and still compact where legal.
+fn write_relation2_operand(
+    w: &mut VlqWriter,
+    expr: &Expr,
+    sink: Option<&mut ConstantSink>,
+) -> Result<(), WriteError> {
+    if let Expr::Op(node) = expr {
+        if node.opcode == 0x83 && concrete_bool_collection(node).is_some() {
+            w.put_u8(0x83);
+            return write_payload(w, 0x83, &node.payload, sink);
+        }
+    }
+    write_expr_inner(w, expr, sink)
 }
 
 fn write_payload(
@@ -184,6 +252,18 @@ fn write_payload(
                 // reader (opcode/parse.rs) decodes this back to the two Consts.
                 w.put_u8(0x85);
                 w.put_u8(u8::from(left) | (u8::from(right) << 1));
+            } else if matches!(opcode_pattern(opcode), Some(ArgPattern::Relation2)) {
+                // A Relation2 operand position reserves a leading `0x85` for the
+                // packed bool-PAIR form above (`Relation2Serializer.parse` reads
+                // it as `getBits(2)`), so a top-level `ConcreteCollection[Boolean]`
+                // operand must NOT be compacted to `0x85` here — it would be
+                // misread as two loose bools. Scala never reaches this shape (it
+                // lifts/folds an all-const bool `Coll` to a `Coll` Constant before
+                // a Relation2 sees it — `Coll(true,false) == Coll(true,false)`
+                // folds to `true`); our fold doesn't lift it yet (a D-C7 residual),
+                // so we keep the self-readable generic `0x83` form here.
+                write_relation2_operand(w, a, sink.as_deref_mut())?;
+                write_relation2_operand(w, b, sink.as_deref_mut())?;
             } else {
                 write_expr_inner(w, a, sink.as_deref_mut())?;
                 write_expr_inner(w, b, sink.as_deref_mut())?;

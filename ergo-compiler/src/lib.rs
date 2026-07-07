@@ -688,15 +688,20 @@
 //! `DC7_P2SH_MISMATCH_SET` pending CSE (M5). With Task 9 landed we DO now
 //! inline the single-use `val f`, but the crystalpool contracts additionally
 //! carry repeated-subterm CSE that only M5's hash-cons model reproduces. M5 NOTE
-//! (Task-7 review): for a tupled lambda whose BODY carries an inner
-//! id-materializing binding (nested lambda or val — not present in the
-//! current corpus, whose fold bodies are flat), our tupled body ids start at
-//! tuple_id+2 where Scala's start at tuple_id+1 (we consumed two arg slots,
-//! Scala allocates one) — inner-id parity is an ADDITIONAL M5 dependency for
-//! such shapes, beyond CSE itself; under the
-//! dummy reduction context they still Err/Err (a fold-derived divide-by-zero
-//! or a context register read — verdict parity, audited in
-//! `AUDITED_ERR_PAIRS`). The reject side is UNCHANGED: a direct/aliased/inline
+//! (Task-7 review, CORRECTED at M4 close-out per the scopes adversarial
+//! re-verify): the inner-id divergence is on the SINGLE-ARG lambda body, not the
+//! tupled one. A surviving inner binding (nested lambda or `val`) inside a
+//! `.exists`/`.map`/`.filter` SINGLE-arg lambda body gets a Scala id of
+//! `param+2` where ours is `param+1` — Scala advances its GraphBuilding id
+//! counter by 2 on entering a lambda scope / materializing the binding, we
+//! advance by 1. A TUPLED (fold-callback) body, by contrast, MATCHES
+//! byte-for-byte: tupling consumes two arg slots, so both sides land the inner
+//! binding at `tuple_id+2` and converge. (The earlier note had this inverted —
+//! it claimed the tupled body diverged and the single-arg body was fine.) This
+//! `+2`-per-lambda-scope allocation is an M5 dependency for such shapes, beyond
+//! CSE itself; under the dummy reduction context they still Err/Err (a
+//! fold-derived divide-by-zero or a context register read — verdict parity,
+//! audited in `AUDITED_ERR_PAIRS`). The reject side is UNCHANGED: a direct/aliased/inline
 //! `FuncApply` with != 1 args still rejects in oracle parity (D-C5 class 2,
 //! probe-confirmed 2026-07-07 — Scala REJECTS `f(1,2)` for a val-bound
 //! multi-arg `f` with `GraphBuildingException`); tupling applies to the
@@ -923,9 +928,27 @@
 //!   pruned, and an emptied block flattens to its bare result
 //!   (`{ val x = HEIGHT; x > 5 }` → `GT(Height, 5)`;
 //!   `corpus:lsp/test_contract.es` → `GT(Height, SELF.R4[Int].get)`) — both
-//!   graduate to byte-identical. Multi-use NON-constant `val`s KEEP their
-//!   `ValDef` untouched — that residual is CSE/id-renumbering (below), NOT
-//!   this transform. The dead-code reject asymmetry (overflow / zero-arg /
+//!   graduate to byte-identical. Multi-use `val`s bound to a NON-TRIVIAL
+//!   expression KEEP their `ValDef` untouched — that residual is
+//!   CSE/id-renumbering (below), NOT this transform. CORRECTION (M4 close-out,
+//!   scopes adversarial re-verify): the earlier "multi-use NON-constant `val`s
+//!   keep their `ValDef`" phrasing over-generalized — a multi-use `val` bound to
+//!   a TRIVIAL LEAF (`val a = HEIGHT`, and likewise `Self`/`Inputs`/`Outputs`/…)
+//!   is INLINED by Scala at every use (duplication, the OPPOSITE of CSE — `{ val
+//!   a = HEIGHT; val b = a + a; b > 0 }` → `(HEIGHT + HEIGHT) > 0`, no `ValDef`),
+//!   whereas ours keeps it as a shared `ValDef`. Only multi-use vals bound to a
+//!   NON-trivial expression survive as `ValDef`s on both sides. Reproducing the
+//!   leaf inlining is a concrete, CSE-INDEPENDENT M5 inliner task (a
+//!   leaf-triviality rule), distinct from the `hasManyUsagesGlobal` hash-cons
+//!   model. Also M5 (fold-then-classify ordering, folds adversarial re-verify,
+//!   NOT CSE): a multi-use `val` whose rhs FOLDS to a constant (`val x = 1 + 1`)
+//!   is currently classified "multi-use non-constant" and KEPT, because
+//!   `inline_vals` runs before `crate::fold` and its const carve-out keys on a
+//!   LITERAL `Expr::Const` rhs — Scala's bottom-up `rewriteDef` has already
+//!   folded the rhs to `Const(2)` by bind time and inlines it. Semantically
+//!   inert (byte/P2SH-only, both reduce identically); the fix is fold-before-
+//!   classify or inline-after-fold, sequenced with the M5 inliner work. The
+//!   dead-code reject asymmetry (overflow / zero-arg /
 //!   multi-arg-apply reject in dead `val`s; nested SFunc-param lambdas in
 //!   dead `val`s ACCEPT — NF-2) is oracle-probe-pinned and committed;
 //! - **CSE/ValDef sharing** of repeated subterms AND schedule-order id

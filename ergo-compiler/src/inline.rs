@@ -57,11 +57,18 @@
 //!
 //! [`renumber_dense`] closes this gap, but **only when the tree has NO
 //! surviving `ValDef`/`FunDef` anywhere** (checked globally, not per-block):
-//! in that case every remaining id is a `FuncValue` arg, and Scala's
-//! post-inline schedule order over a `ValDef`-free graph is exactly first
-//! appearance in the tree (there is no sharing decision left to make — a
-//! `FuncValue` arg is never itself a CSE candidate). Renumbering just those ids
-//! densely in pre-order is therefore Scala-exact for this restricted shape. A
+//! in that case every remaining id is a `FuncValue` arg, and there is no sharing
+//! decision left to make (a `FuncValue` arg is never itself a CSE candidate).
+//! The renumbering is SCOPED, mirroring `processAstGraph`'s `curId`
+//! save-on-entry / restore-on-exit: a nested `FuncValue` CONTINUES from its
+//! enclosing scope's counter, while DISJOINT (sibling, non-nested)
+//! `FuncValue`s each RESTART from the same inherited value — so two top-level
+//! lambdas both come out as arg id `1` (Scala reuses ids across disjoint
+//! scopes), and a once-nested lambda as id `2` ([`assign_scoped_ids`]). NF-M4-1
+//! (M4 close-out): an earlier revision numbered every arg GLOBALLY dense in
+//! pre-order first-appearance, which coincides with Scala only for a
+//! single-scope tree — two disjoint lambdas were mis-numbered `1, 2` where the
+//! oracle reuses `1, 1`; the scoped rule is the correct generalization. A
 //! tree WITH a surviving `ValDef` is left completely alone — that is still the
 //! undetermined M5 schedule-order surface (`hasManyUsagesGlobal` + hash-consing
 //! decide BOTH which nodes keep a `ValDef` AND the id order over the mixed
@@ -191,17 +198,11 @@ pub(crate) fn renumber_dense(expr: Expr) -> Expr {
     if has_surviving_def(&expr) {
         return expr;
     }
-    let mut order: Vec<u32> = Vec::new();
-    let mut seen: HashSet<u32> = HashSet::new();
-    collect_func_arg_order(&expr, &mut order, &mut seen);
-    if order.iter().enumerate().all(|(i, id)| *id == i as u32 + 1) {
+    let mut map: HashMap<u32, u32> = HashMap::new();
+    assign_scoped_ids(&expr, 0, &mut map);
+    if map.iter().all(|(old, new)| old == new) {
         return expr; // already dense (the common case — nothing was inlined ahead of a gap)
     }
-    let map: HashMap<u32, u32> = order
-        .into_iter()
-        .enumerate()
-        .map(|(i, old)| (old, i as u32 + 1))
-        .collect();
     remap_ids(expr, &map)
 }
 
@@ -222,23 +223,35 @@ fn has_surviving_def(expr: &Expr) -> bool {
     found
 }
 
-/// Collect each `FuncValue`'s arg ids, in the pre-order (parent-before-child,
-/// left-to-right) position its `FuncValue` node first appears — the traversal
-/// order Scala's post-inline schedule matches when no `ValDef` survives (see
-/// module docs).
-fn collect_func_arg_order(expr: &Expr, order: &mut Vec<u32>, seen: &mut HashSet<u32>) {
+/// Assign each surviving `FuncValue` arg a new id via a SCOPED counter,
+/// recording `old → new` in `map`. Mirrors Scala's `processAstGraph`, whose
+/// `curId` counter is saved on scope entry and RESTORED on scope exit: a nested
+/// `FuncValue` CONTINUES from its enclosing scope's counter, while DISJOINT
+/// (sibling, non-nested) `FuncValue`s each RESTART from the same inherited value
+/// — so two top-level lambdas both get arg id `1` (id reuse across disjoint
+/// scopes), and a lambda nested one level deep gets id `2`.
+///
+/// Passing `counter` BY VALUE into each child is what makes siblings independent
+/// (each sees the parent's counter, not a preceding sibling's advances) while a
+/// `FuncValue`'s own body inherits the post-arg counter (continuation). Old ids
+/// are globally unique pre-renumber, so a single flat `old → new` map is
+/// unambiguous even though several disjoint olds may map to the same new id —
+/// each such new id only appears inside its own scope's body.
+fn assign_scoped_ids(expr: &Expr, counter: u32, map: &mut HashMap<u32, u32>) {
     if let Expr::Op(IrNode {
-        payload: Payload::FuncValue { args, .. },
+        payload: Payload::FuncValue { args, body },
         ..
     }) = expr
     {
+        let mut c = counter;
         for (id, _) in args {
-            if seen.insert(*id) {
-                order.push(*id);
-            }
+            c += 1;
+            map.insert(*id, c);
         }
+        assign_scoped_ids(body, c, map);
+    } else {
+        for_each_child(expr, &mut |child| assign_scoped_ids(child, counter, map));
     }
-    for_each_child(expr, &mut |c| collect_func_arg_order(c, order, seen));
 }
 
 /// Rewrite every `FuncValue` arg id and `ValUse` id through `map` (ids absent
@@ -877,6 +890,45 @@ mod tests {
         assert_eq!(
             renumbered,
             func_value(vec![1], func_value(vec![2], gt(valuse(2), valuse(1))))
+        );
+    }
+
+    #[test]
+    fn renumber_dense_disjoint_siblings_reuse_id_one() {
+        // NF-M4-1: two DISJOINT (sibling, non-nested) lambdas — no surviving
+        // `ValDef` — must each RESTART at id 1 (Scala reuses `curId` across
+        // disjoint scopes), NOT get globally dense `1, 2`. The `gt` node just
+        // provides a two-child parent to hang the siblings off of.
+        let e = gt(
+            func_value(vec![1], gt(valuse(1), height())),
+            func_value(vec![2], gt(valuse(2), height())),
+        );
+        let renumbered = renumber_dense(e);
+        assert_eq!(
+            renumbered,
+            gt(
+                func_value(vec![1], gt(valuse(1), height())),
+                func_value(vec![1], gt(valuse(1), height())),
+            )
+        );
+    }
+
+    #[test]
+    fn renumber_dense_nested_sibling_mix_scopes_correctly() {
+        // A nested lambda CONTINUES (id 2), while a disjoint sibling of the
+        // OUTER lambda RESTARTS (id 1) — the two rules composed. Ids gapped by
+        // upstream inlining (7 outer, 9 nested, 4 sibling).
+        let e = gt(
+            func_value(vec![7], func_value(vec![9], gt(valuse(9), valuse(7)))),
+            func_value(vec![4], gt(valuse(4), height())),
+        );
+        let renumbered = renumber_dense(e);
+        assert_eq!(
+            renumbered,
+            gt(
+                func_value(vec![1], func_value(vec![2], gt(valuse(2), valuse(1)))),
+                func_value(vec![1], gt(valuse(1), height())),
+            )
         );
     }
 

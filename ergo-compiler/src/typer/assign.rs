@@ -2115,13 +2115,34 @@ fn adapt_sigma_prop_to_boolean(
             // (cc: ConcreteCollection, SBooleanArray) -> recurse + finalize.
             (
                 TypedExpr::ConcreteCollection {
-                    items: inner_items, ..
+                    items: inner_items,
+                    elem_type: inner_elem,
+                    ..
                 },
                 Some(e),
             ) if *e == bool_array => {
                 let filled = vec![SType::SBoolean; inner_items.len()];
                 let adapted = adapt_sigma_prop_to_boolean(inner_items, &filled)?;
-                out.push(finalize_collection(adapted)?);
+                if adapted.is_empty() {
+                    // `allOf(Coll[Boolean]())` / `anyOf(Coll[Boolean]())`: an
+                    // empty typed collection has no element to infer a type from,
+                    // so `finalize_collection` (msgTypeOf over the items) would
+                    // reject with "Undefined type of empty collection". Scala's
+                    // typer instead PRESERVES the declared element type
+                    // (`SigmaTyper.assignConcreteCollection` keeps `cc.elementType`
+                    // for an empty `cc`), and the vacuous `AND`/`OR` folds
+                    // downstream (`allOf(empty) → true`, `anyOf(empty) → false`,
+                    // `crate::fold`). Mirror that: rebuild the empty collection
+                    // with its declared `elem_type` (here `SBoolean`) rather than
+                    // re-deriving it.
+                    out.push(TypedExpr::ConcreteCollection {
+                        tpe: SType::SColl(Box::new(inner_elem.clone())),
+                        items: adapted,
+                        elem_type: inner_elem,
+                    });
+                } else {
+                    out.push(finalize_collection(adapted)?);
+                }
             }
             // (it, SBoolean) where it.tpe == SSigmaProp -> SigmaPropIsProven(it).
             (it, Some(e)) if *e == SType::SBoolean && *node_tpe(&it) == SType::SSigmaProp => {
