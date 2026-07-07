@@ -1053,8 +1053,8 @@
 //! mode Scala's own production path never takes. Deleted rather than wired;
 //! see `typer/mod.rs`'s `TyperCtx` doc comment for the full reasoning.
 //!
-//! ### D-C8 — `allZK`/`anyZK`/`outerJoin` reject-valid divergence (M4 Task 8
-//! review)
+//! ### D-C8 — `allZK`/`anyZK`/`outerJoin` error-class divergence, RESOLVED
+//! (M4 Task 8 review; both sides reject — never a verdict divergence)
 //!
 //! Reviewer-caught bug: the typer accepts `allZK(Coll(proveDlog(g1)))`
 //! identically to Scala (residual `Apply(Ident 'allZK') [...]`, both sides —
