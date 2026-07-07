@@ -53,6 +53,21 @@ pub enum EnvValue {
     GroupElement(GroupElement),
     /// Opaque `SigmaProp` value (M3 scope for full parity). Platform.scala:45-47.
     SigmaProp(String),
+    /// `ProveDlog` (33-byte SEC1-compressed secp256k1 pubkey) -> a REAL,
+    /// emittable `SigmaPropConstant(ProveDlog(pk))`, unlike the opaque
+    /// [`EnvValue::SigmaProp`] label above. Added for M6
+    /// (dev-docs/ergoscript-compiler-m6-recon.md §3): Scala's `keysToEnv`
+    /// (`ScriptApiRoute.scala:52-54`) injects each wallet pubkey as
+    /// `myPubKey_N -> ProveDlog(pk)` into the `/script/p2sAddress` /
+    /// `p2shAddress` compile env, and there was no `EnvValue` variant that
+    /// lifted to a real, emittable SigmaProp constant before this — only the
+    /// opaque, non-emittable `SigmaProp(String)` label (`lib.rs` D-E3) or the
+    /// raw-curve-point (not SigmaProp-typed) `GroupElement`. The downstream
+    /// typed-AST/binder/emit plumbing for `ConstPayload::ProveDlog` already
+    /// exists end-to-end (the binder's `PK(...)` rule, `binder.rs:604`,
+    /// produces the identical shape), so this is the ONE missing env-side
+    /// entry point.
+    ProveDlog([u8; 33]),
 }
 
 // ── ScriptEnv ─────────────────────────────────────────────────────────────────
@@ -182,6 +197,20 @@ pub fn lift(v: &EnvValue) -> Result<TypedExpr, GroupElementError> {
             value: ConstPayload::SigmaProp(s.clone()),
             tpe: SType::SSigmaProp,
         },
+        // ScriptApiRoute.scala:52-54 keysToEnv — ProveDlog → a REAL, emittable
+        // SigmaPropConstant(ProveDlog(pk)). Same on-curve check as GroupElement
+        // above (D-T5 policy: rejects off-curve AND identity), mirroring
+        // `binder.rs::bind_pk`'s identical `decompress_to_affine_hex` call —
+        // both surfaces produce the exact same `ConstPayload::ProveDlog`
+        // shape, so both must reject the same malformed bytes to keep the
+        // printer's decompress-on-demand invariant (typed_print.rs) panic-free.
+        EnvValue::ProveDlog(pubkey) => {
+            decompress_to_affine_hex(pubkey)?;
+            TypedExpr::Constant {
+                value: ConstPayload::ProveDlog(*pubkey),
+                tpe: SType::SSigmaProp,
+            }
+        }
     })
 }
 
@@ -349,6 +378,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lift_prove_dlog_produces_real_sigmaprop_constant() {
+        // ScriptApiRoute.scala:52-54 keysToEnv — a wallet pubkey lifts to a
+        // REAL, emittable SigmaPropConstant(ProveDlog(pk)), unlike the opaque
+        // `SigmaProp(String)` label above.
+        let ge = generator_ge();
+        let pk = *ge.as_bytes();
+        let e = lift(&EnvValue::ProveDlog(pk)).unwrap();
+        assert_eq!(
+            e,
+            TypedExpr::Constant {
+                value: ConstPayload::ProveDlog(pk),
+                tpe: SType::SSigmaProp,
+            }
+        );
+        // Same decompressed-Ecp printer form as `binder.rs::bind_pk`'s
+        // PK("...")-sourced ProveDlog constants (typed_print.rs D-T4) — both
+        // surfaces produce the identical shape.
+        assert_eq!(
+            print_typed(&e),
+            "(ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1)))))"
+        );
+    }
+
     // ----- round-trips -----
 
     #[test]
@@ -407,6 +460,25 @@ mod tests {
         // rejected, not accepted as the group identity.
         let bytes = [0u8; 33];
         let err = lift(&EnvValue::GroupElement(GroupElement::from_bytes(bytes))).unwrap_err();
+        assert_eq!(err, GroupElementError::Identity);
+    }
+
+    #[test]
+    fn lift_off_curve_prove_dlog_rejects() {
+        // Same D-T5 on-curve check as GroupElement — x=5 has no valid y on
+        // secp256k1.
+        let mut bytes = [0u8; 33];
+        bytes[0] = 0x02;
+        bytes[32] = 0x05;
+        let err = lift(&EnvValue::ProveDlog(bytes)).unwrap_err();
+        assert_eq!(err, GroupElementError::NotOnCurve);
+    }
+
+    #[test]
+    fn lift_identity_prove_dlog_rejects() {
+        // Same D-T5 identity policy as GroupElement.
+        let bytes = [0u8; 33];
+        let err = lift(&EnvValue::ProveDlog(bytes)).unwrap_err();
         assert_eq!(err, GroupElementError::Identity);
     }
 }
