@@ -296,30 +296,29 @@ const DC7_P2SH_MISMATCH_SET: &[(&str, &str)] = &[
 ];
 
 /// Committed SET of `(verb, source)` labels whose P2S address differs from
-/// the oracle's — the D-C1 "we never segregate" family: Scala segregates
-/// every non-bare-constant root (header `0x10`, constants table +
-/// placeholders) while M3/M4-Task-1 `compile()` still always emits header
-/// `0x00`, so P2S (which embeds tree bytes verbatim, header included)
-/// diverges for every non-bare-const ACCEPT vector.
+/// the oracle's — the D-C1 "we never segregate" family. Scala segregates every
+/// non-bare-constant root (header `0x10`, constants table + placeholders); P2S
+/// embeds the tree bytes verbatim (header included), so it diverges wherever
+/// our tree bytes diverge.
 ///
-/// Wave 3 (Task-11 findings H-1/H-2) added the `p2s_dc1_mismatch` counter as
-/// non-gating telemetry only; this SET gives it the same Finding-5 treatment
-/// as DC7 up front, rather than landing a count assert first and upgrading
-/// it later. Task 2 (constant segregation / the D-C1 flip) is expected to
-/// empty this set down to the D-C7 residual only (recon-targets: P2S/byte
-/// matches 2→36 — 34 SEGREGATION-ONLY graduations + the 2 already-matching
-/// bare-const vectors) — i.e. nearly every entry here graduates in the very
-/// next task, which is exactly why the set form (not a count) matters: Task
-/// 2's commit must show the diff shrinking to (ideally) empty, not a number
-/// dropping by 34 with no way to confirm it dropped the RIGHT 34.
+/// POST-TASK-2 (the D-C1 flip): `compile()` now segregates non-bare roots
+/// exactly like Scala. Because a segregated tree's bytes are equal iff its
+/// constant-inlined proposition is equal, P2S now matches iff P2SH matches —
+/// so this set has collapsed onto the D-C7 residual and is now IDENTICAL to
+/// [`DC7_P2SH_MISMATCH_SET`] (43 vectors: the remaining IR-shape divergences —
+/// folds, val inlining, CSE, unwraps — that reshape the proposition itself).
+/// The D-C1 segregation axis is CLOSED; what remains is the D-C7 axis.
+///
+/// History: 78 (M3/M4-Task-1: every non-bare-const ACCEPT vector) → 43 (M4
+/// Task 2: 35 SEGREGATION-ONLY vectors graduated — the 37 P2S/byte matches are
+/// those 35 plus the 2 already-matching bare-const vectors). Each graduation
+/// is a vector whose proposition was already oracle-identical, so only the
+/// header/segregation differed; the set form (not a count) confirmed it dropped
+/// the RIGHT 35 — the remainder converged EXACTLY onto the DC7 set, as the
+/// segregation-invariance of P2SH predicts.
 const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "!true"),
     ("cc", "1 < 2L"),
-    ("cc", "1 == 2"),
-    ("cc", "HEIGHT > 5"),
-    ("cc", "HEIGHT>5 && HEIGHT<9"),
-    ("cc", "INPUTS.size > 1"),
-    ("cc", "allOf(Coll(HEIGHT > 5, HEIGHT < 9))"),
     ("cc", "anyOf(Coll(HEIGHT > 5))"),
     ("cc", "corpus:chaincash-basis/basis-tracker-basis.es"),
     ("cc", "corpus:chaincash-basis/chaincash/layer2-old/note.es"),
@@ -343,12 +342,8 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
     ("cc", "corpus:crystalpool/swap-tokens-denom.es"),
     ("cc", "corpus:crystalpool/swap-tokens.es"),
     ("cc", "corpus:dexy/gort-dev/emission.es"),
-    ("cc", "corpus:lsp/src/main.es"),
-    ("cc", "corpus:lsp/src/simple.es"),
     ("cc", "corpus:lsp/test_contract.es"),
-    ("cc", "corpus:lsp/test_simple.es"),
     ("cc", "corpus:rosen-bridge/GuardSign.es"),
-    ("cc", "getVar[Coll[Byte]](1).isDefined"),
     ("cc", "sigmaProp((-(0 + 2147483647) - 2) < 0)"),
     ("cc", "sigmaProp((-9223372036854775807L - 1L) < 0L)"),
     ("cc", "sigmaProp((2147483646 + 1) < 0)"),
@@ -361,40 +356,18 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
         "cc",
         "sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)",
     ),
-    ("cc", "sigmaProp((HEIGHT + 2147483647) > 0)"),
     ("cc", "sigmaProp((max(1, 2) + 1) == 3)"),
     ("cc", "sigmaProp((min(1, 2) + 1) == 2)"),
-    ("cc", "sigmaProp(5.toShort.toBytes.size == 2)"),
-    ("cc", "sigmaProp(7.toByte.toBits.size == 8)"),
-    ("cc", "sigmaProp(7.toByte.toBytes.size == 1)"),
     ("cc", "sigmaProp(Coll(1, 2).size == 2)"),
     ("cc", "sigmaProp(Coll(HEIGHT).size == 1)"),
     ("cc", "sigmaProp(Coll[UnsignedBigInt]().size == 0)"),
-    (
-        "cc",
-        "sigmaProp(Coll[UnsignedBigInt]().size.toLong == SELF.value)",
-    ),
-    ("cc", "sigmaProp(HEIGHT > 100)"),
-    ("cc", "sigmaProp(SELF.getReg[Int](0).isDefined)"),
-    ("cc", "sigmaProp(SELF.getReg[Int](5).isDefined)"),
-    ("cc", "sigmaProp(SELF.getReg[Int](9).isDefined)"),
-    ("cc", "sigmaProp(SELF.getReg[Int](HEIGHT).isDefined)"),
-    ("cc", "sigmaProp(SELF.getReg[Long](4).getOrElse(7L) == 7L)"),
-    ("cc", "sigmaProp(sigmaProp(true))"),
-    ("cc", "sigmaProp(true) && sigmaProp(false)"),
-    ("cc", "sigmaProp(true) || sigmaProp(false)"),
     ("cc", "true && (1 == 1)"),
     ("cc", "true ^ false"),
-    ("cc", "xorOf(Coll(HEIGHT > 5, HEIGHT < 9))"),
     ("cc", "{ val x = HEIGHT; x > 5 }"),
     ("cce", "atLeast(1, Coll(proveDlog(g1)))"),
-    ("cce", "col1.exists({(x:Long)=>x>1L})"),
     ("cce", "proveDHTuple(g1, g2, g1, g2)"),
     ("cce", "proveDlog(g1)"),
     ("cce", "proveDlog(g3)"),
-    ("cce", "sigmaProp(col1.slice[Long](0, 1).size == 1)"),
-    ("ccs", "c1 && c2"),
-    ("ccs", "sigmaProp(HEIGHT.toBytes.size == 4)"),
     (
         "ccs",
         "sigmaProp(arr1.exists[Byte]({(t: Byte) => t > 0.toByte}))",
@@ -407,17 +380,10 @@ const P2S_DC1_MISMATCH_SET: &[(&str, &str)] = &[
         "ccs",
         "sigmaProp(arr1.getOrElse[Byte](0, 9.toByte) == 1.toByte)",
     ),
-    ("ccs", "sigmaProp(arr1.slice[Byte](0, 1).size == 1)"),
     ("ccs", "sigmaProp(b1.bitwiseAnd(b2) == 0.toByte)"),
-    ("ccs", "sigmaProp(b1.toBytes.size == 1)"),
-    ("ccs", "sigmaProp(height1.toBytes.size == 8)"),
-    ("ccs", "sigmaProp(n1.toBytes.size > 0)"),
     ("ccs", "sigmaProp(x.bitwiseAnd(y) >= 0)"),
     ("ccs", "sigmaProp(x.bitwiseOr(y) >= 0)"),
     ("ccs", "sigmaProp(x.bitwiseXor(y) >= 0)"),
-    ("ccs", "sigmaProp(x.shiftLeft(1) == 20)"),
-    ("ccs", "sigmaProp(x.toBits.size == 32)"),
-    ("ccs", "sigmaProp(x.toBytes.size == 4)"),
 ];
 
 // =============================================================================
@@ -857,53 +823,27 @@ fn proposition_bytes(body: &Expr) -> Vec<u8> {
 /// — there was previously no single shared path, just two independent
 /// comparisons that happened to agree.
 ///
-/// TODAY (pre-Task-2; `compile()` never segregates, every tree is header
-/// `0x00`): a non-segregated ORACLE tree (the bare-`SigmaPropConstant`
-/// class — Scala's own `withoutSegregation` branch) has no placeholders, so
-/// its FULL tree bytes compare directly against ours. A segregated ORACLE
-/// tree (header `0x10`, the general case) can only be compared after
-/// INLINING its placeholders back to a flat proposition
-/// ([`inline_placeholders`] — Scala's own `Pay2SHAddress.apply(script:
-/// ErgoTree)` substitution step, `ErgoAddress.scala:201-204`) and diffing
-/// PROPOSITION bytes on both sides — this is the "existing proposition-
-/// compare path" the brief refers to.
+/// POST-TASK-2 (the D-C1 flip has landed; `compile()` now segregates every
+/// non-bare root exactly like Scala): both sides carry real placeholders and
+/// real constants tables, so the check is a DIRECT full-tree-bytes diff —
+/// `ours.tree_bytes` against the oracle's `tree_hex`. This is the true
+/// writer-child-order check locked decision 3 demands: the constants-table
+/// slot order AND the placeholder emission order (not just a flattened
+/// proposition shape) must match Scala's `ConstantStore` append order. The
+/// bare-`SigmaPropConstant` class (Scala's `withoutSegregation` branch, header
+/// `0x00`) has no placeholders on either side, so the same direct diff covers
+/// it. `oracle_tree` is no longer needed (the pre-Task-2 inline path is gone).
 ///
-/// TASK-2 EXTENSION POINT: once `build_tree` grows the segregation branch
-/// (locked decision 2) and OUR trees gain real placeholders too, the
-/// segregated arm below must STOP inlining either side and instead byte-diff
-/// `ours.tree_bytes` against the oracle's `tree_hex` directly — the actual
-/// writer-child-order check locked decision 3 demands (constants-table slot
-/// order + placeholder emission order must match Scala's `ConstantStore`
-/// append order, not just the flattened proposition shape). Every task from
-/// Task 2 onward that makes emit produce a NEW shape must run this function
-/// (in its post-Task-2 form) against at least one vector whose SEGREGATED
-/// bytes are diffed against `tree_hex`.
-fn full_bytes_match_oracle(
-    ours: &CompileResult,
-    oracle_tree: &ErgoTree,
-    oracle_bytes: &[u8],
-) -> Result<(), String> {
-    if oracle_tree.constant_segregation {
-        let oracle_prop = proposition_bytes(&inline_placeholders(
-            &oracle_tree.body,
-            &oracle_tree.constants,
-        ));
-        let ours_prop = proposition_bytes(&ours.ergo_tree.body);
-        if ours_prop == oracle_prop {
-            Ok(())
-        } else {
-            Err(format!(
-                "inlined proposition bytes diverge (segregated oracle tree; \
-                 pre-D-C1 proposition-compare path): ours={} oracle={}",
-                hex::encode(&ours_prop),
-                hex::encode(&oracle_prop),
-            ))
-        }
-    } else if ours.tree_bytes == oracle_bytes {
+/// Every task from Task 2 onward that makes emit produce a NEW shape must run
+/// this function against at least one vector whose SEGREGATED bytes are diffed
+/// against `tree_hex` — see
+/// [`inline_placeholders_reproduces_our_proposition_for_shape_identical_vectors`].
+fn full_bytes_match_oracle(ours: &CompileResult, oracle_bytes: &[u8]) -> Result<(), String> {
+    if ours.tree_bytes == oracle_bytes {
         Ok(())
     } else {
         Err(format!(
-            "full tree bytes diverge (non-segregated oracle tree): ours={} oracle={}",
+            "full tree bytes diverge (writer-child-order check): ours={} oracle={}",
             hex::encode(&ours.tree_bytes),
             hex::encode(oracle_bytes),
         ))
@@ -1030,9 +970,8 @@ fn compile_seed_semantic_parity() {
                 } else {
                     // Wired through the ONE writer-child-order comparison
                     // path (locked decision 3) — a bare-const oracle tree is
-                    // never segregated, so this reduces to the direct
-                    // tree_bytes comparison it always was.
-                    match full_bytes_match_oracle(&ours, &oracle_tree, &oracle_bytes) {
+                    // never segregated, so this is the direct tree_bytes diff.
+                    match full_bytes_match_oracle(&ours, &oracle_bytes) {
                         Ok(()) => bare_match += 1,
                         Err(e) => divergences.push(format!(
                             "{label}: bare-const SigmaProp class must be byte-identical: {e}"
@@ -1275,9 +1214,10 @@ fn inline_placeholders_reproduces_our_proposition_for_shape_identical_vectors() 
         )
         .expect("our compile accepts");
         // Routed through the ONE writer-child-order comparison path (locked
-        // decision 3) shared with the main gate's bare-const assertion.
-        full_bytes_match_oracle(&ours, &oracle_tree, &oracle_bytes)
-            .unwrap_or_else(|e| panic!("{src}: {e}"));
+        // decision 3) shared with the main gate's bare-const assertion — now a
+        // DIRECT segregated-bytes diff: OUR `sigmaProp(HEIGHT > 100)` tree is
+        // byte-identical to the oracle's segregated `tree_hex`.
+        full_bytes_match_oracle(&ours, &oracle_bytes).unwrap_or_else(|e| panic!("{src}: {e}"));
         // Both roads to the same P2SH: encode_p2sh over the inlined oracle
         // prop, and our compile()'s own address, must equal the committed
         // oracle field.

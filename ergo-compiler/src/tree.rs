@@ -7,10 +7,14 @@
 //! `ScriptApiRoute.compileSource`
 //! (`ergo/src/main/scala/org/ergoplatform/http/api/ScriptApiRoute.scala:56-67`).
 
+use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::{encode_p2s, encode_p2sh, NetworkPrefix};
 use ergo_ser::ergo_tree::{write_ergo_tree, ErgoTree};
-use ergo_ser::opcode::{write_expr, Expr, IrNode, Payload};
+use ergo_ser::error::WriteError;
+use ergo_ser::opcode::{
+    parse_expr, write_expr, write_expr_segregating, ConstantSink, Expr, IrNode, Payload,
+};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{CollValue, SigmaValue};
 
@@ -27,7 +31,8 @@ use crate::typed_print::to_term_string;
 pub struct CompileResult {
     /// Canonical wire bytes of `ergo_tree` (`write_ergo_tree` output).
     pub tree_bytes: Vec<u8>,
-    /// The assembled tree (M3: always version 0, non-segregated, no size).
+    /// The assembled tree (always version 0, no size; constant-segregated
+    /// unless the root is a bare `SigmaPropConstant` — the D-C1 flip).
     pub ergo_tree: ErgoTree,
     /// Pay-to-Script address over the FULL `tree_bytes`
     /// (`ergo_ser::address::encode_p2s`). Deliberately NOT routed through
@@ -42,7 +47,60 @@ pub struct CompileResult {
     pub p2sh_address: String,
 }
 
-/// Assemble the M3 ErgoTree around an emitted root expression.
+/// `true` when `root` is a bare `SigmaPropConstant` — the ONE class Scala's
+/// `fromProposition` routes to `withoutSegregation` (header `0x00`, inline).
+/// The check is on the ROOT node only: a `SigmaPropConstant` nested inside a
+/// larger proposition is just another constant that segregates like any other
+/// (recon-segregation.md §3, last paragraph).
+pub(crate) fn is_bare_sigma_prop_constant(root: &Expr) -> bool {
+    matches!(
+        root,
+        Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(_),
+        }
+    )
+}
+
+/// Constant segregation — Scala's `ErgoTree.withSegregation`
+/// (`ErgoTree.scala:384-398`), a literal write→re-read round trip:
+///
+/// 1. serialize `root` through [`write_expr_segregating`] with a fresh
+///    [`ConstantSink`]: every `Expr::Const` is appended to the sink (slot =
+///    first-write order, append-only, NO dedup) and a `ConstPlaceholder(index)`
+///    is written in its place — the SAME writer traversal as the plain path, so
+///    the slot order IS the serialization pre-order and the Relation2 `0x85`
+///    bool-pair compaction is bypassed for free (it never reaches the
+///    `Expr::Const` arm);
+/// 2. re-read those bytes with [`parse_expr`] to materialize the
+///    placeholder-bearing body — we do NOT hand-build the placeholder tree,
+///    mirroring Scala's `ValueSerializer.deserialize(r)` step exactly.
+///
+/// Returns `(placeholder_body, constants_table)`. A re-read failure of bytes we
+/// just wrote is an internal invariant violation (the SAME reader accepts every
+/// real chain tree), surfaced as [`WriteError::InvalidData`] rather than
+/// `.unwrap()`-ing in library code.
+fn segregate(root: &Expr) -> Result<(Expr, Vec<(SigmaType, SigmaValue)>), WriteError> {
+    let mut sink = ConstantSink::new();
+    let mut w = VlqWriter::new();
+    write_expr_segregating(&mut w, root, &mut sink)?;
+    let bytes = w.result();
+
+    let mut r = VlqReader::new(&bytes);
+    // tree_version 0: the segregation re-read is version-independent (opcode-
+    // driven); a `0x73` byte parses as ConstPlaceholder regardless.
+    let body = parse_expr(&mut r, 0, 0).map_err(|e| {
+        WriteError::InvalidData(format!("constant-segregation re-read failed: {e:?}"))
+    })?;
+    if !r.is_empty() {
+        return Err(WriteError::InvalidData(
+            "constant-segregation re-read left trailing bytes".into(),
+        ));
+    }
+    Ok((body, sink.into_constants()))
+}
+
+/// Assemble the ErgoTree around an emitted root expression.
 ///
 /// Mirrors `ErgoTree.fromProposition(header, prop)` (sigma-state 6.0.2,
 /// `core/.../sigma/ast/ErgoTree.scala:344-349`):
@@ -54,14 +112,12 @@ pub struct CompileResult {
 /// }
 /// ```
 ///
-/// At M3 we implement ONLY the `withoutSegregation` branch for EVERY root —
-/// header `0x00`, empty constants table, inline constants in the body. For a
-/// bare-constant root (e.g. `PK("...")` → `SigmaPropConstant`) this is
-/// byte-identical to Scala; for any other root Scala segregates (header
-/// `0x10`, constants pulled into the table, `ConstPlaceholder` in the body) —
-/// THAT is the M4 flip point (the constant-segregation transform), tracked in
-/// the module ledger. Both forms are valid, parseable, semantically equal
-/// trees; only the bytes (and hence the P2S address) differ.
+/// **The D-C1 flip (M4 Task 2):** a bare-constant root (e.g. `PK("...")` →
+/// `SigmaPropConstant`) takes `withoutSegregation` — header `0x00`, empty
+/// constants table, the constant itself as the body (byte-identical to Scala on
+/// both sides). EVERY other root takes `withSegregation` via [`segregate`] —
+/// header `0x10`, constants pulled into the table, `ConstPlaceholder` nodes in
+/// the body. Both forms are valid, parseable, semantically equal trees.
 ///
 /// Header provenance (route fact): the wire header always comes from
 /// `ErgoTree.defaultHeaderWithVersion(0)` — `ScriptApiRoute.compileSource`
@@ -69,13 +125,24 @@ pub struct CompileResult {
 /// parameter only gates frontend method visibility via
 /// `VersionContext.withVersions`. So `version` is fixed 0 and `has_size`
 /// false (the size bit is only required for version > 0).
-pub(crate) fn build_tree(root: Expr) -> ErgoTree {
-    ErgoTree {
-        version: 0,
-        has_size: false,
-        constant_segregation: false,
-        constants: vec![],
-        body: root,
+pub(crate) fn build_tree(root: Expr) -> Result<ErgoTree, WriteError> {
+    if is_bare_sigma_prop_constant(&root) {
+        Ok(ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: false,
+            constants: vec![],
+            body: root,
+        })
+    } else {
+        let (body, constants) = segregate(&root)?;
+        Ok(ErgoTree {
+            version: 0,
+            has_size: false,
+            constant_segregation: true,
+            constants,
+            body,
+        })
     }
 }
 
@@ -660,13 +727,13 @@ fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> 
 ///
 /// The P2SH content hash covers the PROPOSITION bytes — the serialized root
 /// expression WITHOUT the ErgoTree header/constants wrapper
-/// (`Pay2SHAddress.apply(prop)`, `ErgoAddress.scala:210-218`). At M3 trees
-/// are non-segregated, so the body already has every constant inline and no
-/// substitution step is needed. M4 NOTE: once [`build_tree`] grows the
-/// segregation branch, the proposition must be constant-INLINED first
-/// (`toProposition(replaceConstants = isConstantSegregation)`,
-/// `Pay2SHAddress.apply(script: ErgoTree)`, `ErgoAddress.scala:201-204`) —
-/// hashing a body with `ConstPlaceholder` nodes yields a wrong address.
+/// (`Pay2SHAddress.apply(prop)`, `ErgoAddress.scala:210-218`). Scala hashes
+/// `toProposition(replaceConstants = isConstantSegregation)`
+/// (`ErgoAddress.scala:201-204`) — i.e. it re-INLINES placeholders before
+/// hashing. We hash the PRE-segregation `root` (still fully inline) directly,
+/// which is byte-equal to that re-inlined proposition and cheaper. This is why
+/// P2SH is SEGREGATION-invariant (the D-C1 flip never moves it; D-C7 covers the
+/// residual IR-shape divergences that DO move it).
 ///
 /// # Task-10 verdict adjudication (the semantic-parity gate)
 ///
@@ -703,8 +770,8 @@ fn fold_overflow_check(e: &Expr) -> Result<Option<(FoldWidth, i64)>, EmitError> 
 ///
 /// let r = compile(&ScriptEnv::new(), "sigmaProp(HEIGHT > 100)", 0, NetworkPrefix::Mainnet)
 ///     .unwrap();
-/// // M3 trees are non-segregated: header byte 0x00.
-/// assert_eq!(r.tree_bytes[0], 0x00);
+/// // A non-bare root segregates: header byte 0x10 (constant-segregation bit).
+/// assert_eq!(r.tree_bytes[0], 0x10);
 /// ```
 pub fn compile(
     env: &ScriptEnv,
@@ -765,7 +832,20 @@ pub fn compile(
         return Err(CompileError::Serializer { what });
     }
 
-    let ergo_tree = build_tree(root);
+    // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
+    // hashes `toProposition(replaceConstants = isConstantSegregation)`
+    // (`ErgoAddress.scala:201-204`), i.e. the constant-INLINED proposition. The
+    // pre-segregation `root` already IS that inlined body (every constant is
+    // still inline here, no placeholders yet), so hashing it is byte-equal to
+    // Scala's re-inlining step AND cheaper than segregating then substituting
+    // back. For a bare-constant root this is the body itself — equivalent. This
+    // is why the D-C1 segregation flip leaves the P2SH address INVARIANT
+    // (recon-segregation.md §4; lib.rs D-C1/D-C7).
+    let mut pw = VlqWriter::new();
+    write_expr(&mut pw, &root, false)?;
+    let proposition_bytes = pw.result();
+
+    let ergo_tree = build_tree(root)?;
 
     let mut w = VlqWriter::new();
     write_ergo_tree(&mut w, &ergo_tree)?;
@@ -804,12 +884,6 @@ pub fn compile(
             });
         }
     }
-
-    // Proposition bytes for P2SH: root expression only, no header/constants.
-    // Non-segregated at M3, so no constant-inlining step (see the fn docs).
-    let mut pw = VlqWriter::new();
-    write_expr(&mut pw, &ergo_tree.body, false)?;
-    let proposition_bytes = pw.result();
 
     let p2s_address = encode_p2s(network, &tree_bytes);
     let p2sh_address = encode_p2sh(network, &proposition_bytes);
@@ -932,19 +1006,40 @@ mod tests {
     }
 
     #[test]
-    fn compile_sigmaprop_height_header_zero_nonsegregated() {
-        // Decision 3 (M3): EVERY tree is emitted non-segregated (header
-        // 0x00). Scala segregates non-bare-constant roots (header 0x10, see
-        // the oracle capture in the parity section) — the M4 flip point is
-        // build_tree's missing withSegregation branch.
+    fn compile_sigmaprop_height_segregated_matches_oracle_bytes() {
+        // The D-C1 flip (M4 Task 2): a non-bare root segregates. Scala's
+        // `withSegregation` header 0x10, constants table `01 04c801` (one SInt
+        // constant, value 100), body `d191a37300` = BoolToSigmaProp(GT(HEIGHT,
+        // ConstPlaceholder(0))). Oracle capture (sigma-state 6.0.2, testnet):
+        // `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300`.
         let r = ct("sigmaProp(HEIGHT > 100)").expect("compile");
-        assert_eq!(r.tree_bytes[0], 0x00);
-        assert!(!r.ergo_tree.constant_segregation);
-        assert!(r.ergo_tree.constants.is_empty());
-        // Oracle-derived expected bytes: 0x00 header + the constant-inlined
-        // proposition of the oracle capture (`100104c801d191a37300` with
-        // placeholder 7300 → constant 04c801) = 00 d1 91 a3 04c801.
-        assert_eq!(hex::encode(&r.tree_bytes), "00d191a304c801");
+        assert_eq!(r.tree_bytes[0], 0x10, "constant-segregation header");
+        assert!(r.ergo_tree.constant_segregation);
+        assert_eq!(
+            r.ergo_tree.constants,
+            vec![(SigmaType::SInt, SigmaValue::Int(100))],
+            "one segregated constant, first-write slot"
+        );
+        assert_eq!(hex::encode(&r.tree_bytes), "100104c801d191a37300");
+    }
+
+    #[test]
+    fn compile_bool_pair_compaction_survives_segregation_zero_constants() {
+        // The Relation2 `0x85` bool-pair compaction is bypassed by the
+        // constant sink (it never reaches the Expr::Const arm), so a script
+        // whose only literal constants are a compacted bool pair segregates to
+        // a header-0x10 tree with a ZERO-entry constants table. Oracle:
+        // `cc c1 && c2` (env booleans → literals → compacted) → `1000d1ed8501`.
+        let mut env = ScriptEnv::new();
+        env.insert("c1", EnvValue::Bool(true));
+        env.insert("c2", EnvValue::Bool(false));
+        let r = compile_testnet(&env, "c1 && c2").expect("compile");
+        assert_eq!(r.tree_bytes[0], 0x10, "segregated header");
+        assert!(
+            r.ergo_tree.constants.is_empty(),
+            "the compacted bool pair must NOT segregate"
+        );
+        assert_eq!(hex::encode(&r.tree_bytes), "1000d1ed8501");
     }
 
     // ----- round-trips -----
@@ -1011,6 +1106,27 @@ mod tests {
             assert_eq!(err.class(), "SerializerException", "{src}");
             assert_eq!(err.pos(), 0, "{src}");
         }
+    }
+
+    #[test]
+    fn compile_v0_data_gate_runs_before_segregation() {
+        // D-C6 pipeline-order invariant (locked decision 1): the
+        // v0-unserializable-data gate runs on the PRE-segregation root (every
+        // constant still inline), so the D-C1 flip does not change what it
+        // catches — a UnsignedBigInt-data source (a NON-bare root that WOULD
+        // otherwise segregate its UBI constant into the table) still rejects
+        // identically, BEFORE `build_tree`/`segregate` ever runs. This pins
+        // that the gate never needs to walk the post-segregation constants
+        // table instead.
+        let err = compile(
+            &ScriptEnv::new(),
+            r#"unsignedBigInt("5") == unsignedBigInt("3")"#,
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .expect_err("UBI data must reject at the pre-segregation v0 gate");
+        assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
+        assert_eq!(err.class(), "SerializerException");
     }
 
     // ----- error paths: GraphBuilding parity gates (lib.rs D-C5, wave 1) -----
@@ -1257,21 +1373,17 @@ mod tests {
     }
 
     #[test]
-    fn compile_sigmaprop_height_p2s_differs_p2sh_matches_oracle() {
-        // Honest M3 state for the segregated class: the oracle tree is
-        // `100104c801d191a37300` (header 0x10); ours is non-segregated
-        // (header 0x00, asserted in the happy-path section), so the tree
-        // bytes and the P2S address MUST differ until the M4 segregation
-        // transform lands. The semantic-equality gate is Task 10.
+    fn compile_sigmaprop_height_p2s_and_p2sh_match_oracle_after_segregation() {
+        // Post-D-C1 (M4 Task 2): the oracle tree `100104c801d191a37300`
+        // (header 0x10) and ours are now byte-identical, so the P2S address
+        // MATCHES the oracle capture — the segregation-only gap is closed for
+        // this shape-identical vector.
         let r = ct("sigmaProp(HEIGHT > 100)").expect("compile");
-        assert_ne!(r.p2s_address, ORACLE_HGT_P2S);
-        // The P2SH address, however, hashes the constant-INLINED proposition
-        // (`d191a304c801`) — exactly our non-segregated body bytes — so it
-        // must MATCH the oracle capture byte-for-byte. This is a genuine
-        // cross-representation parity gate on our proposition bytes — for
-        // this SHAPE-IDENTICAL vector only: wherever Scala's IR reshapes the
-        // proposition, the P2SH diverges too (lib.rs D-C7; counted by the
-        // wave-3 address gate in tests/compile_semantic_parity.rs).
+        assert_eq!(r.p2s_address, ORACLE_HGT_P2S);
+        // The P2SH address hashes the constant-INLINED proposition
+        // (`d191a304c801`) — segregation-invariant, so it matched before AND
+        // after the flip. Wherever Scala's IR reshapes the proposition itself,
+        // the P2SH diverges (lib.rs D-C7; wave-3 address gate).
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
     }
 
@@ -1303,7 +1415,9 @@ mod tests {
         )
         .expect("compile");
         assert_eq!(get_reg.tree_bytes, r5.tree_bytes);
-        assert_eq!(hex::encode(&get_reg.tree_bytes), "00d1e6c6a70504");
+        // Segregated header 0x10, zero-entry table (no literal constant in
+        // this register-accessor body) — byte-identical to the oracle capture.
+        assert_eq!(hex::encode(&get_reg.tree_bytes), "1000d1e6c6a70504");
         assert_eq!(
             get_reg.p2sh_address,
             "qzYN3szTjLnSbqXUA55vyCopdNpu88qJuPzmoks"
@@ -1317,7 +1431,7 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&dynamic.tree_bytes), "00d1e6dc6313a701a304");
+        assert_eq!(hex::encode(&dynamic.tree_bytes), "1000d1e6dc6313a701a304");
         assert_eq!(
             dynamic.p2sh_address,
             "q1RuFk3PeKdvEbAb6dUZqVxYDZ5i8QdWg4DkK4Z"
@@ -1340,9 +1454,14 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("both-accept residual must still compile");
+        // Self-pin (NOT an oracle vector): our tree keeps the ValUse/MethodCall
+        // where Scala eliminates the val, so our SEGREGATED bytes (header 0x10,
+        // one SInt(4) constant slot, ValDef rhs → ConstPlaceholder(0)) differ
+        // from the oracle's `1000d1e6c6a70404`. A regression guard on our own
+        // deterministic output, not a parity claim.
         assert_eq!(
             hex::encode(&r.tree_bytes),
-            "00d801d6010408d1e6dc6313a701720104"
+            "10010408d801d6017300d1e6dc6313a701720104"
         );
     }
 
@@ -1370,9 +1489,10 @@ mod tests {
         )
         .expect("compile");
         assert_eq!(annotated.tree_bytes, plain.tree_bytes);
+        // Segregated, byte-identical to the oracle capture above.
         assert_eq!(
             hex::encode(&annotated.tree_bytes),
-            "00d193b1b40e020102040004020402"
+            "10040e020102040004020402d193b1b47300730173027303"
         );
         assert_eq!(
             annotated.p2sh_address,
@@ -1396,7 +1516,10 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&bytes.tree_bytes), "00d193b10e040000000a0408");
+        assert_eq!(
+            hex::encode(&bytes.tree_bytes),
+            "10020e040000000a0408d193b173007301"
+        );
         assert_eq!(
             bytes.p2sh_address,
             "qApjfu2kT7Lr8bYG7c4UMKgYJSPD32SkbBDAQMD"
@@ -1408,7 +1531,10 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&bits.tree_bytes), "00d193b10d20000000500440");
+        assert_eq!(
+            hex::encode(&bits.tree_bytes),
+            "10020d20000000500440d193b173007301"
+        );
         assert_eq!(bits.p2sh_address, "qse65TyiDnutjxRzCP1mnCttRKWZqPrhnsvG7cg");
     }
 
@@ -1422,10 +1548,13 @@ mod tests {
         // Downcast node, D-C7 cast-shape family).
         let env = ScriptEnv::new();
         let cv3 = |src| compile(&env, src, 3, NetworkPrefix::Testnet);
+        // Self-pin (oracle folds the whole equality to sigmaProp(true) — a
+        // D-C7 divergence): our SEGREGATED bytes, header 0x10, table = folded
+        // Byte(7)/Byte(6) + the Int operand of the un-folded Downcast.
         let or = cv3("sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)").expect("compile");
-        assert_eq!(hex::encode(&or.tree_bytes), "00d19302077d040e02");
+        assert_eq!(hex::encode(&or.tree_bytes), "10020207040ed19373007d730102");
         let xor = cv3("sigmaProp((5.toByte.bitwiseXor(3.toByte)) == 6.toByte)").expect("compile");
-        assert_eq!(hex::encode(&xor.tree_bytes), "00d19302067d040c02");
+        assert_eq!(hex::encode(&xor.tree_bytes), "10020206040cd19373007d730102");
     }
 
     #[test]
@@ -1446,7 +1575,11 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&r.tree_bytes), "00d19304000400");
+        // Self-pin (oracle fully folds `== 0` to sigmaProp(true), a D-C7
+        // divergence): our segregated bytes keep the un-folded equality. The
+        // KEY F-3 invariant still holds — no v3-only elem-type code reaches the
+        // wire (the SizeOf fold removed the empty `Coll[UnsignedBigInt]()`).
+        assert_eq!(hex::encode(&r.tree_bytes), "100204000400d19373007301");
         assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
         let r = compile(
             &ScriptEnv::new(),
@@ -1455,12 +1588,16 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        assert_eq!(hex::encode(&r.tree_bytes), "00d1937e040005c1a7");
+        // Shape-identical to the oracle here (the `.size` fold matches Scala,
+        // the surrounding expression is un-foldable on BOTH sides) — so our
+        // segregated bytes are byte-identical to the oracle capture.
+        assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
         assert_eq!(r.p2sh_address, "pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9");
         // The fold covers NON-constant elements too (oracle: `cc sigmaProp(
-        // Coll(HEIGHT).size == 1)` folds — reply `10010101d17300`).
+        // Coll(HEIGHT).size == 1)` folds to sigmaProp(true); we keep the
+        // un-folded `== 1` — self-pin of our segregated bytes, D-C7).
         let r = ct("sigmaProp(Coll(HEIGHT).size == 1)").expect("compile");
-        assert_eq!(hex::encode(&r.tree_bytes), "00d19304020402");
+        assert_eq!(hex::encode(&r.tree_bytes), "100204020402d19373007301");
         // Discarded elements are still verdict-checked: the constant-fold
         // overflow gate runs BEFORE the rewrite (oracle rejects this too).
         let err = ct("sigmaProp(Coll(2147483647 + 1).size == 1)").expect_err("overflow");
@@ -1511,23 +1648,30 @@ mod tests {
         // Scala's IR pipeline constant-folds CreateProveDlog(const) →
         // SigmaPropConstant at the GraphBuilding stage (task-1-report.md
         // Concern 1; g1 = the generator = the PK test key). WE emit the
-        // unfolded `CreateProveDlog(Const)` — still non-segregated 0x00 but
-        // DIFFERENT body bytes, so this asserts header/shape only. The
-        // constant fold is an M4/M5 lowering rule (ledger note).
+        // unfolded `CreateProveDlog(Const)` — a NON-bare root, so it now
+        // SEGREGATES (header 0x10, the GroupElement pulled into the table, a
+        // ConstPlaceholder in the body), with DIFFERENT body bytes than the
+        // oracle's folded bare constant. Asserts header/shape only. The
+        // constant fold is an M4/M5 lowering rule (ledger note, D-C2).
         let r = compile_testnet(&generator_env(), "proveDlog(g1)").expect("compile");
-        assert_eq!(r.tree_bytes[0], 0x00);
-        assert!(r.ergo_tree.constants.is_empty());
-        // Body = CreateProveDlog (0xCD) over a GroupElement constant.
+        assert_eq!(r.tree_bytes[0], 0x10, "non-bare root segregates");
+        // The GroupElement constant is the single segregated slot.
+        assert_eq!(r.ergo_tree.constants.len(), 1);
+        assert!(matches!(
+            &r.ergo_tree.constants[0],
+            (SigmaType::SGroupElement, _)
+        ));
+        // Body = CreateProveDlog (0xCD) over a ConstPlaceholder (slot 0).
         match &r.ergo_tree.body {
             Expr::Op(IrNode {
                 opcode: 0xCD,
                 payload: Payload::One(inner),
             }) => assert!(matches!(
                 inner.as_ref(),
-                Expr::Const {
-                    tpe: SigmaType::SGroupElement,
+                Expr::Op(IrNode {
+                    payload: Payload::ConstPlaceholder { index: 0 },
                     ..
-                }
+                })
             )),
             other => panic!("expected CreateProveDlog node, got {other:?}"),
         }

@@ -549,25 +549,33 @@
 //!
 //! # Known M3 deviations (tree/compile layer)
 //!
-//! ### D-C1 — no constant segregation (`build_tree` = withoutSegregation only)
+//! ### D-C1 — constant segregation (CLOSED, M4 Task 2 — the D-C1 flip)
 //!
 //! Scala's `ErgoTree.fromProposition` segregates every root that is not a bare
 //! `SigmaPropConstant` (header `0x10`, constants pulled into the table,
-//! `ConstPlaceholder` in the body); `tree::build_tree` emits header `0x00`
-//! with inline constants for EVERY root. Consequence: for the segregated class
-//! the tree bytes and the P2S address DIFFER from Scala (oracle:
-//! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` vs our
-//! `00d191a304c801`) while remaining valid, parseable, semantically equal
-//! trees. The P2SH address is SEGREGATION-invariant — it hashes the
-//! constant-inlined proposition, so the D-C1 axis alone never moves it
-//! (oracle-pinned in `tree.rs` and `ergo-ser/src/address.rs` tests) — but it
-//! is NOT IR-transform-invariant: wherever Scala's GraphBuilding reshapes
-//! the proposition itself, the P2SH diverges too. That family is D-C7 below
-//! (Task-11 finding H-1 falsified this entry's earlier "P2SH is UNAFFECTED"
-//! wording, which held only for shape-identical trees). The bare-constant
-//! class (e.g. `PK(...)`) takes the same withoutSegregation branch on both
-//! sides and is byte- and address-exact. The segregation transform is the
-//! M4 flip point.
+//! `ConstPlaceholder` in the body). `tree::build_tree` NOW does the same: a
+//! bare-constant root takes `withoutSegregation` (header `0x00`, inline);
+//! every other root takes `withSegregation` via the write-time constant sink
+//! (`ergo-ser` `write_expr_segregating` + `ConstantSink`, append-only slot =
+//! first-write order, NO dedup) then a re-read to materialize the placeholder
+//! body — a literal transcription of Scala's serialize→getAll→re-read
+//! (`ErgoTree.scala:384-398`). The Relation2 `0x85` bool-pair compaction is
+//! bypassed for free (it never reaches the `Expr::Const` arm the sink lives
+//! in), so `true && (1 == 1)` segregates to a header-`0x10` tree with a
+//! ZERO-entry table, matching the oracle. Oracle-exact for
+//! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` (was our
+//! `00d191a304c801`).
+//!
+//! **The segregation axis is CLOSED.** The P2SH address is
+//! SEGREGATION-invariant — it hashes the constant-inlined proposition (we hash
+//! the pre-segregation `root` directly, byte-equal to Scala's
+//! `toProposition(replaceConstants = true)`), so the flip never moved it. What
+//! remains is the ORTHOGONAL IR-transform axis: wherever Scala's GraphBuilding
+//! reshapes the proposition itself (folds, val inlining, CSE, unwraps), BOTH
+//! the P2SH and the segregated tree bytes still diverge — that family is D-C7
+//! below. After Task 2, P2S matches iff P2SH matches (a segregated tree's bytes
+//! are equal iff its inlined proposition is), so `P2S_DC1_MISMATCH_SET` has
+//! converged EXACTLY onto `DC7_P2SH_MISMATCH_SET` (43 vectors; 35 graduated).
 //!
 //! ### D-C2 — no `CreateProveDlog(Const)` → `SigmaPropConstant` fold
 //!

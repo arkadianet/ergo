@@ -25,4 +25,4 @@ pub use types::{
     is_v5_method, is_v6_method, method_explicit_type_args_count, opcode_name, Body, Expr, IrNode,
     Payload,
 };
-pub use write::{write_body, write_expr};
+pub use write::{write_body, write_expr, write_expr_segregating, ConstantSink};
