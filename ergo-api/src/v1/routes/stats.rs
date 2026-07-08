@@ -258,6 +258,10 @@ pub struct EmissionScheduleQuery {
     step: Option<u32>,
     #[serde(default)]
     limit: Option<u32>,
+    /// Round-trips the handler's own `next_cursor` (supersedes `from_height`,
+    /// same rule as the other series endpoints).
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 /// `GET /api/v1/stats/emission-schedule` — the projected forward curve
@@ -273,7 +277,12 @@ pub async fn emission_schedule(
     };
     let limit = clamp_limit(q.limit, SERIES_DEFAULT_LIMIT, SERIES_MAX_LIMIT);
     let step = q.step.unwrap_or(1).max(1);
-    let from = q.from_height.unwrap_or(0);
+    // Cursor supersedes from_height (same rule as `resolve_window`).
+    let cursor = match decode_opt_cursor::<SeriesCursor>(q.cursor.as_deref()) {
+        Ok(c) => c,
+        Err(boxed) => return *boxed,
+    };
+    let from = cursor.map(|c| c.next_height).or(q.from_height).unwrap_or(0);
     let Some(to) = q.to_height else {
         return v1_error(
             Reason::InvalidParams,
@@ -290,6 +299,7 @@ pub async fn emission_schedule(
     }
     let mut items: Vec<SupplyPoint> = Vec::new();
     let mut h = from;
+    let mut exhausted = false;
     while (items.len() as u32) < limit && h <= to {
         let info = emission.emission_info_at(h);
         items.push(SupplyPoint {
@@ -300,9 +310,16 @@ pub async fn emission_schedule(
             remaining: info.total_remain_coins.to_string(),
             block_reward: info.miner_reward.to_string(),
         });
-        h = h.saturating_add(step);
+        let next = h.saturating_add(step);
+        if next == h {
+            // Saturated at u32::MAX — the walk cannot advance; without this
+            // break the same height repeats and the cursor never terminates.
+            exhausted = true;
+            break;
+        }
+        h = next;
     }
-    let next_height = (h <= to).then_some(h);
+    let next_height = (!exhausted && h <= to).then_some(h);
     let next_cursor = next_height.map(|next_height| encode_cursor(&SeriesCursor { next_height }));
     Json(SeriesPage {
         items,

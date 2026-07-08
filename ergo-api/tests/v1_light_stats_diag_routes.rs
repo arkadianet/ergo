@@ -355,7 +355,6 @@ struct Deps {
     read: Option<StubRead>,
     chain: Option<StubChain>,
     emission: bool,
-    indexer_off: bool,
 }
 
 fn app(deps: Deps) -> Router {
@@ -369,7 +368,6 @@ fn app(deps: Deps) -> Router {
         let e: Arc<dyn EmissionSchedule> = Arc::new(StubEmission);
         e
     });
-    let _ = deps.indexer_off;
     let state = V1State {
         read,
         chain,
@@ -578,6 +576,59 @@ async fn stats_emission_schedule_projects_forward() {
     assert_eq!(items[1]["height"], 102);
     // Projected: no timestamps.
     assert!(items[0]["timestamp_unix_ms"].is_null());
+}
+
+#[tokio::test]
+async fn stats_emission_schedule_cursor_round_trips() {
+    let deps = || Deps {
+        emission: true,
+        ..Deps::default()
+    };
+    // Page 1: limit 2 of the 100..=104 step-2 walk → 100, 102 + a cursor.
+    let (status, body) = get(
+        deps(),
+        "/api/v1/stats/emission-schedule?from_height=100&to_height=104&step=2&limit=2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(body["page"]["has_more"], serde_json::json!(true));
+    let cur = body["page"]["next_cursor"].as_str().unwrap().to_string();
+
+    // Page 2: the handler's own cursor round-trips (supersedes from_height).
+    let uri = format!("/api/v1/stats/emission-schedule?to_height=104&step=2&limit=2&cursor={cur}");
+    let (status, body) = get(deps(), &uri).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["height"], 104);
+    assert_eq!(body["page"]["has_more"], serde_json::json!(false));
+    assert!(body["page"]["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn stats_emission_schedule_saturated_walk_terminates_without_duplicates() {
+    let deps = Deps {
+        emission: true,
+        ..Deps::default()
+    };
+    // A step that saturates at u32::MAX must not repeat the height or mint a
+    // cursor that never terminates.
+    let (status, body) = get(
+        deps,
+        "/api/v1/stats/emission-schedule?from_height=4294967290&to_height=4294967295&step=3&limit=50",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let heights: Vec<u64> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["height"].as_u64().unwrap())
+        .collect();
+    assert_eq!(heights, vec![4294967290, 4294967293, 4294967295]);
+    assert_eq!(body["page"]["has_more"], serde_json::json!(false));
+    assert!(body["page"]["next_cursor"].is_null());
 }
 
 #[tokio::test]
