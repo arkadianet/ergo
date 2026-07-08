@@ -111,7 +111,16 @@ fn sigma_value_json(v: &SigmaValue) -> Value {
         SigmaValue::SigmaProp(sb) => sigma_boolean_json(sb),
         SigmaValue::AvlTree(t) => avl_tree_json(t),
         SigmaValue::OpaqueBoxBytes(bytes) => Value::String(hex::encode(bytes)),
-        SigmaValue::Header(h) => Value::String(format!("{h:?}")),
+        // Canonical serialized header bytes — Debug output is not a stable
+        // wire shape. (Defensive: consensus rejects Header-typed register /
+        // context constants at every version, so real boxes never reach this.)
+        SigmaValue::Header(h) => {
+            let mut w = ergo_primitives::writer::VlqWriter::new();
+            match ergo_ser::header::write_header(&mut w, h) {
+                Ok(()) => Value::String(hex::encode(w.result())),
+                Err(_) => Value::Null,
+            }
+        }
         SigmaValue::Coll(c) => match c {
             CollValue::Bytes(bytes) => Value::String(hex::encode(bytes)),
             CollValue::BoolBits(bits) => Value::Array(bits.iter().map(|b| json!(*b)).collect()),

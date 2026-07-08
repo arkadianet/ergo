@@ -424,6 +424,40 @@ async fn protocol_detail_unknown_is_protocol_not_found() {
 }
 
 #[tokio::test]
+async fn protocol_state_unknown_protocol_is_protocol_not_found() {
+    let (status, body) = get(Some(caught_up()), "/api/v1/protocols/nope/state").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(reason(&body), "protocol_not_found");
+}
+
+#[tokio::test]
+async fn protocol_state_mismatched_box_role_names_the_real_role() {
+    // A wrong `box_role` on a singleton protocol is a client error naming the
+    // actual role — NOT the many-instance `not_a_singleton_protocol` answer.
+    let (status, body) = get(
+        Some(caught_up()),
+        "/api/v1/protocols/sigmausd/state?box_role=nope",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(reason(&body), "invalid_params");
+    let detail = body["error"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("bank"),
+        "detail names the real role: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn protocol_state_unresolved_nft_is_state_unavailable() {
+    // The store-less caught-up handle holds no boxes, so the singleton NFT
+    // cannot resolve — the honest `state_unavailable`, not a 500.
+    let (status, body) = get(Some(caught_up()), "/api/v1/protocols/sigmausd/state").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(reason(&body), "state_unavailable");
+}
+
+#[tokio::test]
 async fn boxes_decode_sigmausd_structured_box_populates_state() {
     // The route path (`POST /boxes/decode`) drives the same decode seam as
     // `boxes/{id}?decode=true`. Synthetic SigmaUSD bank body (verified token +
@@ -449,6 +483,7 @@ async fn boxes_decode_sigmausd_structured_box_populates_state() {
     let contract = &resp["decoded"]["contract"];
     assert_eq!(contract["protocol_id"], "sigmausd");
     assert_eq!(contract["matched_by"], "identifying_token");
+    assert_eq!(contract["confidence"], "exact");
     assert_eq!(contract["state"]["reserve_nanoerg"], "1402000000000000");
     assert_eq!(contract["state"]["circulating_sigusd"], "1200345");
     assert_eq!(contract["state"]["oracle_derived_price_available"], false);

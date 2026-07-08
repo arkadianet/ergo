@@ -249,11 +249,27 @@ pub async fn protocol_state(
             && q.box_role.as_deref().is_none_or(|r| r == m.box_role)
     });
     let Some(matcher) = matcher else {
-        return v1_error(
-            Reason::NotASingletonProtocol,
-            "this protocol has no identifying-token singleton to resolve",
-            "use GET /api/v1/protocols/{id}/boxes for many-instance protocols",
-        );
+        // Distinguish a mismatched `box_role` on a singleton protocol from a
+        // true many-instance protocol with no identifying token at all.
+        let singleton = entry
+            .matchers
+            .iter()
+            .find(|m| m.kind == MatchKind::IdentifyingToken);
+        return match (q.box_role.as_deref(), singleton) {
+            (Some(role), Some(m)) => v1_error(
+                Reason::InvalidParams,
+                "no identifying-token matcher for that box_role",
+                format!(
+                    "requested box_role `{role}`; this protocol's identifying-token role is `{}`",
+                    m.box_role
+                ),
+            ),
+            _ => v1_error(
+                Reason::NotASingletonProtocol,
+                "this protocol has no identifying-token singleton to resolve",
+                "use GET /api/v1/protocols/{id}/boxes for many-instance protocols",
+            ),
+        };
     };
 
     let idx = match state.indexer() {
