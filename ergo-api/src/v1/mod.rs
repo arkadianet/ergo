@@ -22,6 +22,7 @@ pub mod governor;
 pub mod mempool_depth;
 pub mod realtime;
 pub mod routes;
+pub mod webhooks;
 
 pub use auth::{
     assess_posture, warn_startup_posture, InsecurePosture, Tier, V1AuthConfig, V1AuthState,
@@ -38,6 +39,10 @@ pub use mempool_depth::{
 };
 pub use realtime::{spawn_event_bridge, ConnLimiter, RealtimeBus, RealtimeHandle};
 pub use routes::{v1_router, V1State};
+pub use webhooks::{
+    spawn_webhook_worker, webhooks_router, WebhookEngine, WebhookSink, WebhooksHandle,
+    WebhooksState,
+};
 
 use axum::extract::ConnectInfo;
 use axum::http::Request;
