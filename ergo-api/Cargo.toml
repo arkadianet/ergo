@@ -26,6 +26,7 @@ ergo-rest-json     = { workspace = true }
 ergo-compiler      = { workspace = true }
 thiserror          = { workspace = true }
 rand               = { workspace = true }
+base64             = { workspace = true }
 
 [dev-dependencies]
 tower           = { workspace = true, features = ["util"] }

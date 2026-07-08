@@ -103,6 +103,22 @@ impl ApiSecurity {
         h.update(raw_key);
         hex::encode(h.finalize())
     }
+
+    /// Constant-time check that `presented_key` (raw `api_key` header bytes)
+    /// hashes to the configured `api_key_hash`. This is the ONE verification
+    /// primitive; both the compat gate ([`require_api_key`]) and the v1 tier
+    /// gate ([`crate::v1::auth`]) call it so there is a single api-key scheme
+    /// node-wide. The `Choice` is walked end-to-end before the bool collapse.
+    pub fn verify(&self, presented_key: &[u8]) -> bool {
+        let mut h = Blake2b256::new();
+        h.update(presented_key);
+        let computed_hex = hex::encode(h.finalize());
+        bool::from(
+            computed_hex
+                .as_bytes()
+                .ct_eq(self.api_key_hash_hex.as_bytes()),
+        )
+    }
 }
 
 type Blake2b256 = Blake2b<U32>;
@@ -121,20 +137,9 @@ pub async fn require_api_key(
     let Some(header_val) = req.headers().get(API_KEY_HEADER) else {
         return reject_invalid();
     };
-    let mut h = Blake2b256::new();
-    h.update(header_val.as_bytes());
-    let computed_hex = hex::encode(h.finalize());
-
-    // Constant-time compare on the hex strings. Lengths are both 64 by
-    // construction (`ApiSecurity::new` validates the config side;
-    // `hex::encode` of a 32-byte digest is always 64). `ct_eq` returns
-    // `Choice` — `.into()` to bool only after both sides have been
-    // walked end-to-end.
-    if bool::from(
-        computed_hex
-            .as_bytes()
-            .ct_eq(sec.api_key_hash_hex.as_bytes()),
-    ) {
+    // Single api-key scheme: delegate the Blake2b-256 + constant-time hex
+    // compare to `ApiSecurity::verify` (shared with the v1 tier gate).
+    if sec.verify(header_val.as_bytes()) {
         next.run(req).await
     } else {
         reject_invalid()
