@@ -40,7 +40,12 @@ const FEE_PROPOSITION_ERGO_TREE_HEX: &str = "1005040004000e36100204a00b08cd0279b
 const REGISTER_NAMES: [&str; 6] = ["R4", "R5", "R6", "R7", "R8", "R9"];
 
 fn parse_id32(id_hex: &str) -> Option<[u8; 32]> {
-    if id_hex.len() != 64 {
+    // Canonical ids are 64-char LOWERCASE hex. Reuse the shared validator so
+    // tx-id parsing rejects uppercase/mixed-case exactly like the chain routes
+    // (CodeRabbit #169) — a non-canonical spelling is a `400 invalid_*`, never a
+    // lookup. `hex::decode` alone would accept uppercase (same bytes), leaving
+    // the tx-id and modifier-id validators misaligned.
+    if !super::valid_modifier_id(id_hex) {
         return None;
     }
     hex::decode(id_hex).ok()?.try_into().ok()
@@ -435,6 +440,26 @@ mod tests {
         assert_eq!(submit_reason("deserialize"), Reason::Deserialize);
         // A future/unknown verb fails closed as a 400.
         assert_eq!(submit_reason("brand_new_verb"), Reason::BadRequest);
+    }
+
+    #[test]
+    fn parse_id32_accepts_lowercase_rejects_uppercase_and_bad_len() {
+        let lower = "a".repeat(64);
+        assert!(
+            parse_id32(&lower).is_some(),
+            "canonical lowercase id decodes"
+        );
+        // Uppercase / mixed case decode to identical bytes but are non-canonical
+        // — rejected, aligned with `valid_modifier_id` used by the chain routes.
+        assert!(parse_id32(&"A".repeat(64)).is_none(), "uppercase rejected");
+        assert!(
+            parse_id32(&format!("{}{}", "a".repeat(63), "B")).is_none(),
+            "mixed case rejected"
+        );
+        // Length + non-hex still rejected.
+        assert!(parse_id32(&"a".repeat(63)).is_none(), "too short");
+        assert!(parse_id32(&"a".repeat(65)).is_none(), "too long");
+        assert!(parse_id32(&"g".repeat(64)).is_none(), "non-hex");
     }
 
     #[test]
