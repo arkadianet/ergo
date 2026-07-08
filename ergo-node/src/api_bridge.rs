@@ -435,6 +435,11 @@ impl NodeReadState for SnapshotReadState {
         self.handle.load().mempool_transactions.clone()
     }
 
+    fn mempool_weight_function(&self) -> ergo_api::types::ApiWeightFunction {
+        // O(1): read the field off the snapshot without cloning the pool list.
+        self.handle.load().mempool_transactions.weight_function
+    }
+
     fn mempool_transaction(&self, tx_id_hex: &str) -> Option<ApiMempoolTransaction> {
         self.handle
             .load()

@@ -139,9 +139,9 @@ pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String
 
 /// Sum output values paying the fee proposition. Output-side only, so it is
 /// computable even when some inputs are unresolved.
-fn fee_from_hex_values<'a>(outputs: impl Iterator<Item = (&'a str, u64)>) -> u64 {
+fn fee_from_hex_values<S: AsRef<str>>(outputs: impl Iterator<Item = (S, u64)>) -> u64 {
     outputs
-        .filter(|(tree, _)| *tree == FEE_PROPOSITION_ERGO_TREE_HEX)
+        .filter(|(tree, _)| tree.as_ref() == FEE_PROPOSITION_ERGO_TREE_HEX)
         .map(|(_, v)| v)
         .sum()
 }
@@ -290,10 +290,7 @@ fn unconfirmed_tx(
     let fee = fee_from_hex_values(
         tx.output_candidates
             .iter()
-            .map(|c| (hex::encode(c.ergo_tree_bytes()), c.value))
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|(t, v)| (t.as_str(), *v)),
+            .map(|c| (hex::encode(c.ergo_tree_bytes()), c.value)),
     );
 
     let outputs = tx

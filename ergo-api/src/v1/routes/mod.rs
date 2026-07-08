@@ -1,8 +1,8 @@
 //! `/api/v1/*` route groups mounted on the G2 shared primitives.
 //!
-//! This is the FIRST route-group module — the `chain/*` + `transactions/*`
-//! reads that close the highest-priority self-sufficiency gap (`v1-api-design.md`
-//! §3.5–§3.6). Everything here consumes the G2 primitives (`error` envelope +
+//! This module mounts every native read group — `chain/*`, `transactions/*`,
+//! `boxes/*`, `tokens/*`, `addresses/*`, and `mempool/*` (`v1-api-design.md`
+//! §3.5–§3.8). Everything here consumes the G2 primitives (`error` envelope +
 //! [`Reason`], `cursor` page builder, `governor`, `auth` tiers) rather than
 //! inventing parallel mechanisms; later groups copy this shape.
 //!
@@ -16,6 +16,8 @@ pub mod dto;
 mod addresses;
 mod boxes;
 mod chain;
+mod extract;
+mod mempool;
 mod tokens;
 mod transactions;
 
@@ -53,6 +55,9 @@ pub struct V1State {
     pub submit: Option<Arc<dyn NodeSubmit>>,
     /// Mempool overlay — the unconfirmed side of `transactions/{tx_id}`.
     pub mempool: Arc<dyn MempoolView>,
+    /// Shared O4 mempool-depth sample ring — the source for
+    /// `mempool/summary?history=` and (future) `stats/mempool-depth`.
+    pub mempool_depth: Arc<crate::v1::mempool_depth::MempoolDepthRing>,
     /// Address-encoding network prefix.
     pub network: NetworkPrefix,
 }
@@ -136,9 +141,12 @@ struct ListQuery {
     order: Option<String>,
 }
 
-/// A modifier / header / tx id on the wire is an unprefixed lowercase 64-char
-/// hex string. Reject anything else *before* hitting the store so a malformed
-/// id is a `400 invalid_*` (§1.4 rule 2), not a `404`.
+/// A modifier / header / tx id on the wire is an unprefixed 64-char LOWERCASE
+/// hex string — v1 is canonical-strict per the design doc (§ WS
+/// `invalid_selector`: "must be 64 lowercase hex chars"; §1.4 lowercase
+/// convention), stricter than the compat surfaces by design. Reject anything
+/// else (wrong length, non-hex, or uppercase) *before* hitting the store so a
+/// malformed id is a `400 invalid_*` (§1.4 rule 2), not a `404`.
 fn valid_modifier_id(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
@@ -262,29 +270,24 @@ pub(super) fn offset_from_cursor(cursor: Option<&str>) -> Result<u32, Box<Respon
 /// overfetched-by-one item list: trim the sentinel, set `has_more`, and mint
 /// the next offset cursor (`start + limit`).
 pub(super) fn offset_page<T>(items: Vec<T>, start: u32, limit: u32) -> (Vec<T>, CursorPage) {
-    // Count-based detection: the caller overfetched `limit + 1`, so a page with
-    // more than `limit` items has a next page.
-    let has_more = items.len() as u64 > u64::from(limit);
-    offset_page_explicit(items, start, limit, has_more)
+    offset_page_at(items, limit, start.saturating_add(limit))
 }
 
-/// Like [`offset_page`] but with an EXPLICIT next-page signal, for routes whose
-/// next page is not the projected item count — e.g. the unspent-box overlay,
-/// where the `exclude_mempool_spent` view filter can shrink the page below
-/// `limit` even though the confirmed offset window still has a next page. Always
-/// caps `items` to `limit`.
-pub(super) fn offset_page_explicit<T>(
+/// Like [`offset_page`] but with an explicit next-page offset. Used where the
+/// window consumed a *variable* number of reader rows (e.g. an
+/// `exclude_mempool_spent` overfetch that loops until `limit + 1` survivors), so
+/// the cursor must resume past the rows actually read, not the naive
+/// `start + limit`.
+pub(super) fn offset_page_at<T>(
     mut items: Vec<T>,
-    start: u32,
     limit: u32,
-    has_more: bool,
+    next_off: u32,
 ) -> (Vec<T>, CursorPage) {
-    items.truncate(limit as usize);
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&OffsetCursor {
-            off: start.saturating_add(limit),
-        })
-    });
+    let has_more = items.len() as u64 > u64::from(limit);
+    if has_more {
+        items.truncate(limit as usize);
+    }
+    let next_cursor = has_more.then(|| encode_cursor(&OffsetCursor { off: next_off }));
     (
         items,
         CursorPage {
@@ -296,9 +299,11 @@ pub(super) fn offset_page_explicit<T>(
 }
 
 /// Build the native `/api/v1/*` product-API router: the `chain/*` +
-/// `transactions/*` reads group AND the `boxes/*` + `tokens/*` + `addresses/*`
-/// reads group, all consuming the G2 shared primitives (error envelope, cursor
-/// page builder, per-IP governor) and state-erased for merging under `/api/v1`.
+/// `transactions/*` reads group, the `boxes/*` + `tokens/*` + `addresses/*`
+/// reads group, AND the `mempool/*` group (summary, listing, `by-*` filters,
+/// single-tx detail, fee histogram, and the O1 `submit/check` aliases), all
+/// consuming the G2 shared primitives (error envelope, cursor page builder,
+/// per-IP governor) and state-erased for merging under `/api/v1`.
 ///
 /// Route classes (§2.2): the single by-id lookups (`boxes/{id}`, `tokens/{id}`)
 /// sit at `CheapRead`; every paginated / scan / range surface (and the whole
@@ -310,6 +315,13 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
     let cheap: Router<V1State> = Router::new()
         .route("/api/v1/boxes/:box_id", get(boxes::box_by_id))
         .route("/api/v1/tokens/:token_id", get(tokens::token_by_id))
+        // ----- mempool/* light point reads -----
+        .route("/api/v1/mempool/summary", get(mempool::summary))
+        .route(
+            "/api/v1/mempool/transactions/:tx_id",
+            get(mempool::transaction_by_id),
+        )
+        .route("/api/v1/mempool/fee-histogram", get(mempool::fee_histogram))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::CheapRead),
             governor_mw,
@@ -353,6 +365,25 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
         .route("/api/v1/transactions/submit", post(transactions::submit))
         .route("/api/v1/transactions/check", post(transactions::check))
+        // ----- mempool/* lists + O1 submit/check aliases -----
+        .route("/api/v1/mempool/transactions", get(mempool::transactions))
+        .route(
+            "/api/v1/mempool/by-address/:address",
+            get(mempool::by_address),
+        )
+        .route(
+            "/api/v1/mempool/by-ergo-tree/:ergo_tree",
+            get(mempool::by_ergo_tree),
+        )
+        .route("/api/v1/mempool/by-box-id/:box_id", get(mempool::by_box_id))
+        .route(
+            "/api/v1/mempool/by-token-id/:token_id",
+            get(mempool::by_token_id),
+        )
+        // O1: aliases of the canonical transactions/{submit,check} — SAME
+        // handler, second mount (no duplicated logic).
+        .route("/api/v1/mempool/submit", post(transactions::submit))
+        .route("/api/v1/mempool/check", post(transactions::check))
         // ----- boxes/* -----
         .route("/api/v1/boxes/range", get(boxes::box_range))
         .route(

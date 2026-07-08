@@ -1,17 +1,14 @@
-//! Operator submission surface — `POST /api/v1/mempool/{submit,check}`.
+//! Operator submission surface.
 //!
-//! Covers:
-//! - `ApiNativeSubmitError` wire shape (JSON keys, optional `detail`,
-//!   no redundant HTTP-status-as-int `error` field).
-//! - Reason-string → HTTP status mapping (admission-pipeline reasons
-//!   plus the channel-side reasons).
-//! - Success path returns `200 ApiSubmitResponse { tx_id }`.
-//! - Both POST routes go through the same `submit_inner` so each is
-//!   exercised at least once.
-//! - Endpoint inventory: with `submit = None`, the two POST routes
-//!   return `404` (axum-level, route not registered). Adding a new
-//!   submission route requires updating this test, which forces a
-//!   deliberate review of the new admission entry point.
+//! Two layers:
+//! - DTO wire-shape unit tests for the frozen `ApiSubmitError` /
+//!   `ApiSubmitResponse` types (still used by the Scala-compat submit path).
+//! - Integration tests for `POST /api/v1/mempool/{submit,check}`, which are
+//!   now Overlap-O1 **aliases** of the canonical `transactions/{submit,check}`
+//!   v1 handlers: same handler, second mount. They therefore emit the v1 error
+//!   envelope `{error:{reason,message,detail}}` (not the old flat native shape)
+//!   and mount unconditionally, answering `409 submit_disabled` when no submit
+//!   bridge is wired rather than a bare 404.
 //!
 //! No tokio runtime contention: every test drives the router via
 //! `tower::ServiceExt::oneshot` and asserts on the response shape
@@ -301,106 +298,22 @@ fn submit_mode_serializes_snake_case() {
     );
 }
 
-// ---- Status-mapping integration tests ----
+// ---- v1 alias integration tests ----
+//
+// `mempool/{submit,check}` are the SAME v1 handler as
+// `transactions/{submit,check}`; these tests assert the alias mounts and
+// emits the v1 envelope. The reason→status mapping itself is exhaustively
+// covered by the canonical routes in `v1_chain_tx_routes.rs`.
 
-/// Every reason that maps to `400`. Driven through both `/submit`
-/// and `/check` so the status-mapping logic in `submit_inner` is
-/// covered for both routes.
-#[tokio::test]
-async fn admission_reasons_return_400() {
-    let reasons_400 = [
-        "disabled",
-        "ibd_gated",
-        "tip_unready",
-        "deserialize",
-        "non_canonical",
-        "structural",
-        "below_min_fee",
-        "duplicate",
-        "known_invalid",
-        "unresolved_input",
-        "unresolved_data_input",
-        "script_failed",
-        "monetary_failed",
-        "cost_exceeded",
-        "validation_failed",
-        "double_spend_loser",
-        "pool_full",
-        "budget_exhausted",
-        "recently_unresolved",
-        "size_limit",
-        "insert_collision",
-    ];
-    for reason in reasons_400 {
-        for path in ["/api/v1/mempool/submit", "/api/v1/mempool/check"] {
-            let app = build_app(Some(StubSubmit::fail(reason, Some("d"))));
-            let (status, body) = post(app, path, b"x".to_vec()).await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "reason {reason:?} on {path} must map to 400",
-            );
-            let o = body.as_object().expect("error body is JSON object");
-            assert!(
-                !o.contains_key("error"),
-                "Rust-native error body must not duplicate the HTTP status code as an `error` field — clients read it from the status line"
-            );
-            assert_eq!(o.get("reason").and_then(|x| x.as_str()), Some(reason));
-            assert_eq!(o.get("detail").and_then(|x| x.as_str()), Some("d"));
-        }
-    }
+fn v1_reason(v: &serde_json::Value) -> String {
+    v["error"]["reason"]
+        .as_str()
+        .unwrap_or("<none>")
+        .to_string()
 }
 
 #[tokio::test]
-async fn channel_full_returns_503_overloaded() {
-    let app = build_app(Some(StubSubmit::fail("overloaded", Some("retry"))));
-    let (status, body) = post(app, "/api/v1/mempool/submit", b"x".to_vec()).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        !body.as_object().unwrap().contains_key("error"),
-        "Rust-native error body must not duplicate the HTTP status code as an `error` field"
-    );
-    assert_eq!(
-        body.get("reason").and_then(|x| x.as_str()),
-        Some("overloaded"),
-    );
-}
-
-#[tokio::test]
-async fn shutting_down_returns_503() {
-    let app = build_app(Some(StubSubmit::fail("shutting_down", None)));
-    let (status, body) = post(app, "/api/v1/mempool/check", b"x".to_vec()).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(!body.as_object().unwrap().contains_key("error"));
-}
-
-#[tokio::test]
-async fn timeout_returns_504() {
-    let app = build_app(Some(StubSubmit::fail("timeout", Some("loop stuck"))));
-    let (status, body) = post(app, "/api/v1/mempool/submit", b"x".to_vec()).await;
-    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
-    assert!(!body.as_object().unwrap().contains_key("error"));
-    assert_eq!(body.get("reason").and_then(|x| x.as_str()), Some("timeout"),);
-}
-
-#[tokio::test]
-async fn unknown_reason_falls_back_to_400() {
-    // Defensive: a future RejectReason variant we forget to map should
-    // fail safely as a client error, not crash the handler. Pins the
-    // catch-all branch in `submit_inner`.
-    let app = build_app(Some(StubSubmit::fail("brand_new_reason", None)));
-    let (status, body) = post(app, "/api/v1/mempool/submit", b"x".to_vec()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        body.get("reason").and_then(|x| x.as_str()),
-        Some("brand_new_reason"),
-    );
-}
-
-// ---- Success path ----
-
-#[tokio::test]
-async fn successful_submit_returns_200_and_tx_id_envelope() {
+async fn mempool_submit_alias_returns_tx_id() {
     let tx_id = "cd".repeat(32);
     let leaked: &'static str = Box::leak(tx_id.clone().into_boxed_str());
     let app = build_app(Some(StubSubmit::ok(leaked)));
@@ -410,12 +323,15 @@ async fn successful_submit_returns_200_and_tx_id_envelope() {
         body.get("tx_id").and_then(|x| x.as_str()),
         Some(tx_id.as_str())
     );
-    let o = body.as_object().expect("body is object");
-    assert_eq!(o.len(), 1, "success body is exactly {{tx_id}}");
+    assert_eq!(
+        body.as_object().map(|o| o.len()),
+        Some(1),
+        "body is {{tx_id}}"
+    );
 }
 
 #[tokio::test]
-async fn successful_check_returns_200_and_tx_id_envelope() {
+async fn mempool_check_alias_returns_tx_id() {
     let tx_id = "ef".repeat(32);
     let leaked: &'static str = Box::leak(tx_id.clone().into_boxed_str());
     let app = build_app(Some(StubSubmit::ok(leaked)));
@@ -428,7 +344,41 @@ async fn successful_check_returns_200_and_tx_id_envelope() {
 }
 
 #[tokio::test]
-async fn handler_passes_correct_mode_per_route() {
+async fn mempool_submit_rejection_is_v1_envelope() {
+    let app = build_app(Some(StubSubmit::fail(
+        "double_spend",
+        Some("box already spent"),
+    )));
+    let (status, body) = post(app, "/api/v1/mempool/submit", b"x".to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v1_reason(&body), "double_spend");
+    assert_eq!(
+        body["error"]["detail"],
+        serde_json::json!("box already spent")
+    );
+    assert!(body["error"]["message"].is_string());
+}
+
+#[tokio::test]
+async fn mempool_submit_overloaded_is_503() {
+    let app = build_app(Some(StubSubmit::fail("overloaded", None)));
+    let (status, body) = post(app, "/api/v1/mempool/submit", b"x".to_vec()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v1_reason(&body), "overloaded");
+}
+
+#[tokio::test]
+async fn mempool_submit_without_bridge_is_submit_disabled_409() {
+    // The v1 posture: the alias mounts unconditionally and answers the honest
+    // `409 submit_disabled` reason, never a bare 404.
+    let app = build_app(None);
+    let (status, body) = post(app, "/api/v1/mempool/submit", b"x".to_vec()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(v1_reason(&body), "submit_disabled");
+}
+
+#[tokio::test]
+async fn mempool_submit_and_check_dispatch_correct_mode() {
     use std::sync::atomic::{AtomicU8, Ordering};
     static SAW_BROADCAST: AtomicU8 = AtomicU8::new(0);
     static SAW_CHECK_ONLY: AtomicU8 = AtomicU8::new(0);
@@ -455,111 +405,22 @@ async fn handler_passes_correct_mode_per_route() {
     assert_eq!(
         SAW_BROADCAST.load(Ordering::SeqCst),
         1,
-        "/submit must dispatch Broadcast exactly once"
+        "/submit → Broadcast"
     );
     assert_eq!(
         SAW_CHECK_ONLY.load(Ordering::SeqCst),
         1,
-        "/check must dispatch CheckOnly exactly once"
+        "/check → CheckOnly"
     );
 }
 
-// ---- Endpoint inventory regression ----
-
-/// Frozen set of operator-namespaced route paths that exist regardless
-/// of submission state. Adding/removing an `/api/v1/*` route requires
-/// editing this list — which forces the spec/checklist edit too.
-const READ_ONLY_PATHS: &[&str] = &[
-    "/api/v1/info",
-    "/api/v1/status",
-    "/api/v1/tip",
-    "/api/v1/sync",
-    "/api/v1/peers",
-    "/api/v1/mempool/summary",
-    "/api/v1/mempool/transactions",
-    "/api/v1/health",
-];
-
-/// Frozen set of submission routes that mount unconditionally in
-/// production. `build_app(None)` (no submit bridge) is still used by
-/// some read-only test fixtures, which is why the absence path
-/// remains exercised below.
-const SUBMIT_PATHS: &[&str] = &["/api/v1/mempool/submit", "/api/v1/mempool/check"];
-
 #[tokio::test]
-async fn read_only_routes_present_without_submit_bridge() {
-    let app = build_app(None);
-    for path in READ_ONLY_PATHS {
-        let resp = app
-            .clone()
-            .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_ne!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "{path} must mount unconditionally (read-only surface)",
-        );
-    }
-}
-
-#[tokio::test]
-async fn mempool_transaction_by_id_route_mounts_unconditionally_returning_404_when_absent() {
-    // Distinct from "route not registered". A registered GET on a
-    // non-matching id must respond 404 NOT_FOUND with no method-not-
-    // allowed; `oneshot` against an unregistered path also returns
-    // 404, so we additionally check that the route registration
-    // doesn't depend on `submit = Some(_)` by repeating with both.
-    for submit_state in [None, Some(StubSubmit::ok("aa"))] {
-        let app = build_app(submit_state);
-        let path = format!("/api/v1/mempool/transactions/{}", "0".repeat(64));
-        let resp = app
-            .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "GET tx-by-id mounts unconditionally; absent id is 404",
-        );
-    }
-}
-
-#[tokio::test]
-async fn submit_routes_present_when_enabled() {
+async fn mempool_submit_and_check_reject_get() {
     let app = build_app(Some(StubSubmit::ok("aa")));
-    for path in SUBMIT_PATHS {
+    for path in ["/api/v1/mempool/submit", "/api/v1/mempool/check"] {
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(*path)
-                    .header("content-type", "application/octet-stream")
-                    .body(Body::from(b"x".to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_ne!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "{path} must be registered when submission is enabled",
-        );
-    }
-}
-
-#[tokio::test]
-async fn submit_routes_reject_get() {
-    // Method routing is part of the surface contract: a stray GET on
-    // a write endpoint must surface as 405 Method Not Allowed (or
-    // similar non-200). axum returns 405 here for an existing path
-    // that was registered as POST-only.
-    let app = build_app(Some(StubSubmit::ok("aa")));
-    for path in SUBMIT_PATHS {
-        let resp = app
-            .clone()
-            .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(

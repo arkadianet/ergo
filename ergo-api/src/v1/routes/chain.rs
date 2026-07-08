@@ -5,7 +5,7 @@
 //! the glossary-named v1 shapes in [`super::dto`] and answer the honest
 //! `chain_reader_unavailable` reason when the node has no chain reader.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -13,6 +13,7 @@ use super::dto::{
     block_from_scala, block_summary_from_scala, block_tx_from_scala, header_from_scala,
     modifier_from_scala, Collection, MerkleSide, V1BlockAdProofs, V1MerkleLevel, V1MerkleProof,
 };
+use super::extract::{V1Json, V1Query};
 use super::{
     candidate_heights, invalid_hex, parse_height, parse_order, valid_modifier_id, HeightCursor,
     ListQuery, V1State,
@@ -40,7 +41,7 @@ fn header_not_found() -> Response {
 
 /// `GET /api/v1/chain/blocks` — cursor-paginated full-history block summaries
 /// (default 25, cap 200), newest-first by default.
-pub async fn list_blocks(State(state): State<V1State>, Query(q): Query<ListQuery>) -> Response {
+pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQuery>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
         Err(e) => return *e,
@@ -129,7 +130,10 @@ pub async fn blocks_at_height(
 
 /// `POST /api/v1/chain/blocks/by-ids` — bulk full-block fetch; request order
 /// preserved, misses silently dropped, array capped at 200.
-pub async fn blocks_by_ids(State(state): State<V1State>, Json(ids): Json<Vec<String>>) -> Response {
+pub async fn blocks_by_ids(
+    State(state): State<V1State>,
+    V1Json(ids): V1Json<Vec<String>>,
+) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
         Err(e) => return *e,
@@ -141,8 +145,7 @@ pub async fn blocks_by_ids(State(state): State<V1State>, Json(ids): Json<Vec<Str
             "split the request into batches of 200 or fewer",
         );
     }
-    if let Some(bad) = ids.iter().find(|id| !valid_modifier_id(id)) {
-        let _ = bad;
+    if ids.iter().any(|id| !valid_modifier_id(id)) {
         return invalid_hex();
     }
     let tip = state.read.status().best_full_block_height;
@@ -158,7 +161,10 @@ pub async fn blocks_by_ids(State(state): State<V1State>, Json(ids): Json<Vec<Str
 
 /// `GET /api/v1/chain/headers` — cursor-paginated header objects (default
 /// 100, cap 1000), newest-first by default.
-pub async fn list_headers(State(state): State<V1State>, Query(q): Query<ListQuery>) -> Response {
+pub async fn list_headers(
+    State(state): State<V1State>,
+    V1Query(q): V1Query<ListQuery>,
+) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
         Err(e) => return *e,

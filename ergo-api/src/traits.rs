@@ -40,6 +40,14 @@ pub trait NodeReadState: Send + Sync {
     /// Snapshot-read of one pooled tx by hex tx_id. `None` if absent
     /// from the snapshot. Backs `GET /api/v1/mempool/transactions/{tx_id}`.
     fn mempool_transaction(&self, tx_id_hex: &str) -> Option<ApiMempoolTransaction>;
+    /// The active mempool priority-weight function (`cost` | `size` | `min`) —
+    /// lifted onto `GET /api/v1/mempool/summary` + `fee-histogram`. The default
+    /// reads it off the (already-materialized) `mempool_transactions()`
+    /// envelope so no implementer must change; the production
+    /// `SnapshotReadState` overrides with an O(1) snapshot field read.
+    fn mempool_weight_function(&self) -> crate::types::ApiWeightFunction {
+        self.mempool_transactions().weight_function
+    }
     fn health(&self) -> ApiHealth;
     /// Captured at boot from `NodeConfig` + the hardcoded `Mode` peer-feature.
     /// Default impl returns an empty identity so test fixtures that don't
