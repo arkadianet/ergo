@@ -18,7 +18,7 @@ use ergo_ser::opcode::{
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{CollValue, SigmaValue};
 
-use crate::emit::{emit, EmitError};
+use crate::emit::{emit_with_version, EmitError};
 use crate::env::ScriptEnv;
 use crate::stype::SType;
 use crate::typecheck::{typecheck_with_network, CompileError};
@@ -1035,13 +1035,15 @@ pub fn compile(
 ) -> Result<CompileResult, CompileError> {
     let typed = typecheck_with_network(env, source, tree_version, network)?;
 
-    // Root dispatch — ScriptApiRoute.scala:60-65.
+    // Root dispatch — ScriptApiRoute.scala:60-65. Emit under the requested
+    // `tree_version` so the GraphBuilding-parity gates reject V6-only constructs
+    // (e.g. the bare `fromBigEndianBytes` predef) under a v5 target.
     let root = match node_tpe(&typed) {
-        SType::SSigmaProp => emit(&typed)?,
+        SType::SSigmaProp => emit_with_version(&typed, tree_version)?,
         SType::SBoolean => Expr::Op(IrNode {
             // BoolToSigmaProp — Scala `script.toSigmaProp` (values.scala:58).
             opcode: 0xD1,
-            payload: Payload::One(Box::new(emit(&typed)?)),
+            payload: Payload::One(Box::new(emit_with_version(&typed, tree_version)?)),
         }),
         other => {
             return Err(CompileError::Root {
@@ -1073,23 +1075,29 @@ pub fn compile(
 
     // Post-write self-check (Task-11 wave 2; lib.rs D-C6): the bytes we are
     // about to derive ADDRESSES from must round-trip through our own
-    // version-gated reader. A failure means compile() would hand out a P2S
-    // address whose script no deserializer accepts — funds sent there are
-    // stranded (the F-3 class, adversarial-findings-constants.md). This is a
-    // DELIBERATE reject-side divergence for two oracle-probed families the
-    // ledger documents: (1) `getVar[UnsignedBigInt](1)`-style v3-only TYPE
-    // codes under the v0 header, which Scala also emits and ALSO cannot
-    // re-read (Note A — the oracle's ACCEPT verdict is itself poisoned:
-    // both products are unusable); (2) missing-fold residuals like a
-    // val-bound `Coll[UnsignedBigInt]()` under `.size`, where Scala's
-    // inline+fold keeps its wire clean and ours would not be. Reject-side
-    // safe per the crate bar: a wrong-reject surfaces a user error, a
-    // wrong-accept strands funds.
+    // deserializer. A failure means compile() would hand out a P2S address whose
+    // script no deserializer accepts — funds sent there are stranded (the F-3
+    // class, adversarial-findings-constants.md).
+    //
+    // The re-read runs under the ACTIVATED-version axis (`tree_version`), NOT the
+    // emitted header version (always 0). Scala gates V6-embeddable TYPE codes
+    // (`SUnsignedBigInt`, …) on the ACTIVATED version
+    // (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
+    // `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
+    // treeVersion)`, `ErgoTreeSerializer.scala:148-154`), so a header-v0 tree
+    // carrying a code-9 type that a `tree_version >= 3` compile produces DOES
+    // re-parse on a V6-activated network — `read_ergo_tree_with_activated_version`
+    // mirrors that. (The earlier premise that these bytes "neither side's reader
+    // re-parses → strands funds" was WRONG: the wrong-axis header-version gate in
+    // the plain reader was the only thing rejecting them; corrected here + lib.rs
+    // D-C6 item 5a.) A genuinely unrepresentable emission (a real serializer
+    // failure) still rejects reject-side-safely: a wrong-reject surfaces a user
+    // error, a wrong-accept strands funds.
     {
         use ergo_primitives::reader::VlqReader;
-        use ergo_ser::ergo_tree::read_ergo_tree;
+        use ergo_ser::ergo_tree::read_ergo_tree_with_activated_version;
         let mut r = VlqReader::new(&tree_bytes);
-        let reread = read_ergo_tree(&mut r);
+        let reread = read_ergo_tree_with_activated_version(&mut r, tree_version);
         if let Err(e) = reread {
             return Err(CompileError::Serializer {
                 what: format!(
@@ -1177,7 +1185,7 @@ mod tests {
     fn folded_root(source: &str) -> Expr {
         let typed = typecheck_with_network(&ScriptEnv::new(), source, 0, NetworkPrefix::Testnet)
             .expect("typecheck");
-        let root = emit(&typed).expect("emit");
+        let root = emit_with_version(&typed, 0).expect("emit");
         fold_direct_const_casts(root).expect("fold_direct_const_casts")
     }
 
@@ -1209,6 +1217,15 @@ mod tests {
     fn reparse(bytes: &[u8]) -> ErgoTree {
         let mut r = VlqReader::new(bytes);
         read_ergo_tree(&mut r).expect("compiled tree must reparse")
+    }
+
+    /// Reparse under a V6-activated deserializer — the axis the compile
+    /// self-check uses for a `tree_version >= 3` build (F1). Mirrors Scala
+    /// re-reading a header-v0 tree on a V6-activated network.
+    fn reparse_v6(bytes: &[u8]) -> ErgoTree {
+        let mut r = VlqReader::new(bytes);
+        ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut r, 3)
+            .expect("compiled tree must reparse under V6 activation")
     }
 
     // ----- happy path -----
@@ -2158,40 +2175,82 @@ mod tests {
     }
 
     #[test]
-    fn compile_self_unreadable_emission_rejects_serializer_class() {
-        // Post-write self-check (D-C6): compile() re-reads its own bytes and
-        // REFUSES to hand out an address for a script no deserializer
-        // accepts. One oracle-probed family (1) still flips verdict DELIBERATELY
-        // (a poisoned type code BOTH readers reject); the other (2) GRADUATED to
-        // a byte-exact accept once M4 Task 9 val-inlining landed. Historically
-        // both were documented reject-side divergences DELIBERATELY
-        // (documented reject-side divergences, NOT committed vectors):
+    fn compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle() {
+        // F1 (m5-adversarial-findings-CAPTURED.md): the post-write self-check
+        // (D-C6) re-reads compile()'s own bytes and refuses to derive an address
+        // for a script no deserializer accepts. It USED to gate V6-embeddable
+        // TYPE codes (`SUnsignedBigInt` = code 9, …) on the emitted HEADER version
+        // (always 0), and so wrongly rejected a header-v0 tree carrying code 9 —
+        // which a `tree_version >= 3` (V6-activated) compile legitimately produces
+        // and which Scala re-parses fine. Scala gates the embeddable set on the
+        // ACTIVATED version (`TypeSerializer.getEmbeddableType` →
+        // `VersionContext.isV6Activated`, `VersionContext.scala:33`; deser under
+        // `withVersions(activatedVersion, treeVersion)`,
+        // `ErgoTreeSerializer.scala:148-154`), NOT the tree header. The self-check
+        // now reads via `read_ergo_tree_with_activated_version(tree_version)` and
+        // ACCEPTS these at tv=3, byte-identical to the oracle (verified live vs
+        // sigma-state 6.0.2, ORACLE_TREE_VERSION=3, 2026-07-07). The earlier
+        // "poisoned type code / strands funds" premise was FALSE — the wrong-axis
+        // header-version gate was the only thing rejecting them.
         //
-        // (1) Note A: `cc sigmaProp(getVar[UnsignedBigInt](1).isDefined)` —
-        //     oracle ACCEPTs `1000d1e6e30109`, bytes NEITHER side's
-        //     version-gated reader re-parses (type code 9 under the v0
-        //     header). The oracle's ACCEPT is itself poisoned: funds sent to
-        //     its address are stranded on BOTH implementations.
-        let err = compile(
-            &ScriptEnv::new(),
+        // All 7 captured blast-radius shapes (bare + val-bound; every target
+        // type + Coll/tuple/Option container) accept byte-exact at tv=3:
+        for (src, want) in [
+            (
+                "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
+                "1000d1e6c6a70409",
+            ),
+            (
+                "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
+                "1000d1e6e30109",
+            ),
+            (
+                "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
+                "1000d1e6c6a70415",
+            ),
+            (
+                "sigmaProp(SELF.R4[(UnsignedBigInt,Int)].isDefined)",
+                "1000d1e6c6a7044504",
+            ),
+            (
+                "sigmaProp(SELF.R4[Option[UnsignedBigInt]].isDefined)",
+                "1000d1e6c6a7042d",
+            ),
+            (
+                "sigmaProp(getVar[Coll[UnsignedBigInt]](1).isDefined)",
+                "1000d1e6e30115",
+            ),
+            (
+                "sigmaProp(SELF.R4[(Int,UnsignedBigInt)].isDefined)",
+                "1000d1e6c6a7044009",
+            ),
+        ] {
+            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
+                .unwrap_or_else(|e| panic!("{src}: self-check must accept at tv=3: {e:?}"));
+            assert_eq!(hex::encode(&r.tree_bytes), want, "{src}");
+            // The accepted bytes must round-trip through the SAME activated-version
+            // reader (defends the self-check's own invariant).
+            assert_eq!(reparse_v6(&r.tree_bytes), r.ergo_tree, "{src}");
+        }
+
+        // At tree_version 0 these shapes reject at the PARSER on BOTH sides —
+        // `UnsignedBigInt` is not a known type name under v5 (oracle:
+        // `REJECT <pos> ParserException`; parity holds, the self-check axis is
+        // never reached). Class-exact.
+        for src in [
+            "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
             "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
-            3,
-            NetworkPrefix::Testnet,
-        )
-        .expect_err("self-unreadable emission must reject");
-        assert!(matches!(&err, CompileError::Serializer { .. }), "{err:?}");
-        assert_eq!(err.class(), "SerializerException");
-        //
-        // (2) GRADUATED (M4 Task 9): a VAL-BOUND `Coll[UnsignedBigInt]()` under
-        //     `.size` used to keep a poisoned `SizeOf(ValUse)` literal on the
-        //     wire (our self-check rejected rather than strand funds). Now
-        //     `crate::inline` inlines the single-use `val u` and
-        //     `crate::fold::fold` collapses `SizeOf(Coll[UnsignedBigInt]())` to
-        //     `Const(0)` BEFORE the v0 gate — so the v3-only UBI data never
-        //     reaches the wire, exactly like Scala's inline-then-fold. Output is
-        //     now BYTE- AND ADDRESS-IDENTICAL to the oracle
-        //     (`10010400d1937e730005c1a7`), closing this D-C6 self-check
-        //     divergence (the NF-1 val-behind closure).
+            "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
+        ] {
+            let err = compile(&ScriptEnv::new(), src, 0, NetworkPrefix::Testnet)
+                .expect_err("v6 type name must reject at tv=0");
+            assert_eq!(err.class(), "ParserException", "{src}");
+        }
+
+        // Sibling GRADUATION (M4 Task 9, unchanged by F1): a VAL-BOUND
+        // `Coll[UnsignedBigInt]()` under `.size` folds the UBI data OFF the wire
+        // before the self-check ever sees a code-9 type, so it stays byte- and
+        // address-identical to the oracle (`10010400d1937e730005c1a7`).
         let r = compile(
             &ScriptEnv::new(),
             "{ val u = Coll[UnsignedBigInt](); sigmaProp(u.size.toLong == SELF.value) }",
@@ -2200,6 +2259,46 @@ mod tests {
         )
         .expect("val-inline + SizeOf fold erases the UBI data before the v0 gate");
         assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
+    }
+
+    #[test]
+    fn compile_bare_from_big_endian_bytes_rejects_below_tv3_matching_oracle() {
+        // F2 (m5-adversarial-findings-CAPTURED.md) — accept-invalid, SEVERE:
+        // the BARE `fromBigEndianBytes[T]` predef (typer/predef_ir
+        // `global_deserialize`) builds `MethodCall(Global, m)` DIRECTLY, bypassing
+        // the version-scoped SGlobal method table the dotted `Global.<m>` form
+        // resolves against. Scala exposes `fromBigEndianBytes` on `SGlobal` ONLY at
+        // `isV3OrLaterErgoTreeVersion` (`SGlobalMethods.getMethods`,
+        // methods.scala:2001-2021, pinned v6.0.2 — the v5 SGlobal set is just
+        // {groupGenerator, xor}); GraphBuilding throws `GraphBuildingException` on
+        // the residual MethodCall under v5 activation. Before F2 we emitted a
+        // SPENDABLE address at tv 0/1/2. Now the emit-time GraphBuilding-parity
+        // gate rejects it — class-exact vs the oracle (ORACLE_TREE_VERSION=0/1/2:
+        // `REJECT 0:0 GraphBuildingException`); at tv=3 both accept, byte-identical.
+        let src = "sigmaProp(fromBigEndianBytes[Int](Coll[Byte](0.toByte)) > 0)";
+        for tv in [0u8, 1, 2] {
+            let err = compile(&ScriptEnv::new(), src, tv, NetworkPrefix::Testnet)
+                .expect_err(&format!("tv={tv}: bare fromBigEndianBytes must reject"));
+            assert!(matches!(&err, CompileError::Emit(_)), "tv={tv}: {err:?}");
+            assert_eq!(err.class(), "GraphBuildingException", "tv={tv}");
+        }
+        // tv=3: accepts, byte-identical to the oracle capture.
+        let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
+            .expect("bare fromBigEndianBytes accepts at tv=3");
+        assert_eq!(
+            hex::encode(&r.tree_bytes),
+            "100202000400d191dc6a05dd018301027300047301"
+        );
+        // The dotted `Global.fromBigEndianBytes` form stays typer-rejected at
+        // tv<3 (method not in the v5 SGlobal table) — the leak was bare-only.
+        let dotted = compile(
+            &ScriptEnv::new(),
+            "sigmaProp(Global.fromBigEndianBytes[Int](Coll[Byte](0.toByte)) > 0)",
+            0,
+            NetworkPrefix::Testnet,
+        )
+        .expect_err("dotted form must reject at tv=0");
+        assert!(matches!(&dotted, CompileError::Type(_)), "{dotted:?}");
     }
 
     #[test]

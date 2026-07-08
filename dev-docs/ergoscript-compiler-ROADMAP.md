@@ -23,9 +23,9 @@ stranded funds, so the bar is byte-parity, not semantic equivalence.
 | **M2** | Binder + typer (typed AST) | ~20% | ✅ **DONE** — oracle-parity + adversarial-clean |
 | **M3** | Emit → opcode IR → bytes → address; *semantic* parity | ~10% | ✅ **DONE** — semantic + address gate, adversarial-clean |
 | **M4** | Writer canonicalization + lowering catalog + constant segregation | ~15% | ✅ **DONE** — 95/110 byte-exact, adversarial-clean |
-| **M5** | CSE / ValDef-sharing → **full byte parity** (the hard one) | ~25% | ⬜ TODO (next) — spike DONE, model validated 6/6 |
-| **M6** | REST `/script/p2sAddress` + `/script/p2shAddress` | ~3% | ⬜ TODO |
-| **M7** | `ContractParser` (`@contract`, named params) + stdlib tail | ~7% | ⬜ TODO |
+| **M5** | CSE / ValDef-sharing → **full byte parity** (the hard one) | ~25% | ✅ **DONE — 110/110 byte-exact**, D-C7 closed (scope-chain CSE + getOrElse eager-scope + HasSigmas reconstruction + pair-projection memo + root freeVar schedule-order); adversarial pass found F1/F2 version-gate bugs (fixed, this PR); merged via PR #164 |
+| **M6** | REST `/script/p2sAddress` + `/script/p2shAddress` | ~3% | ✅ **DONE** — PR #165 (depth guard, `EnvValue::ProveDlog`, public routes per Scala parity) |
+| **M7** | `ContractParser` (`@contract`, named params) + stdlib tail | ~7% | ✅ foundation **DONE** — PR #166 (≤4-param byte-exact; 5+ param JVM-HashMap-order port DEFERRED, rejects honestly; stdlib tail descoped to the fuzz-differential backlog) |
 
 **Overall: ≈ 65% by effort** (M1–M4 shipped). The remaining fat tail is **M5** (Scalan CSE/
 ValDef byte-parity) — the M4-recon spike (`dev-docs/ergoscript-compiler-m5-recon/spike-scope-chain.md`,
