@@ -12,14 +12,13 @@ use serde::{Deserialize, Serialize};
 use ergo_ser::address::{decode_address_to_tree_bytes, encode_p2s, encode_p2sh};
 use ergo_ser::ergo_tree::ErgoTree;
 use ergo_ser::opcode::{Body, IrNode, Payload};
-use ergo_sigma::evaluator::{reduce_expr_traced_with_cost, EvalBox, ReductionContext};
-
-use ergo_primitives::cost::{CostAccumulator, JitCost};
+use ergo_sigma::evaluator::{EvalBox, EvalError};
 
 use super::{
-    bounded_reduce, build_env, compile_error_response, err, eval_error_response, parse_tree_hex,
-    render_sigma_boolean, render_sigma_value, sigma_type_name, ScriptState, TypedConstant,
-    MAX_BLOCK_COST, MAX_SOURCE_LEN,
+    bounded_reduce, bounded_reduce_traced, build_env, compile_error_response, decode_tree_hex, err,
+    eval_error_response, parse_tree_bytes, parse_tree_hex, render_sigma_boolean,
+    render_sigma_value, sigma_type_name, ScriptState, TypedConstant, MAX_BLOCK_COST,
+    MAX_SOURCE_LEN,
 };
 use crate::compat::types::ScalaOutput;
 use crate::v1::error::Reason;
@@ -241,13 +240,8 @@ pub async fn inspect(State(state): State<ScriptState>, body: V1Json<InspectBody>
 
 fn inspect_inner(state: &ScriptState, body: InspectBody) -> Result<InspectResponse, Box<Response>> {
     let tree_bytes = match (body.ergo_tree.as_deref(), body.address.as_deref()) {
-        (Some(hex_str), None) => hex::decode(hex_str.trim()).map_err(|e| {
-            err(
-                Reason::InvalidHex,
-                "ergo_tree is not valid hex",
-                format!("hex decode: {e}"),
-            )
-        })?,
+        // Cap-checked BEFORE decoding — same guard as every other hex path.
+        (Some(hex_str), None) => decode_tree_hex(hex_str)?,
         (None, Some(addr)) => decode_address_to_tree_bytes(addr, state.network).map_err(|e| {
             err(
                 Reason::InvalidAddress,
@@ -270,7 +264,7 @@ fn inspect_inner(state: &ScriptState, body: InspectBody) -> Result<InspectRespon
             ))
         }
     };
-    let tree = parse_tree_hex(&hex::encode(&tree_bytes))?;
+    let tree = parse_tree_bytes(&tree_bytes)?;
 
     let constants = tree
         .constants
@@ -653,17 +647,10 @@ fn explain_inner(
     let (eval_box, tree, height) = resolve_real_box(state, &body.box_id, body.at_height)?;
     let limit = state.config.effective_cost_limit(body.max_cost);
 
-    // Traced reduction on the SAME interpreter path, bounded by the cost
-    // governor. The trace walker adds no reduction logic — it renders the
-    // interpreter's own `TraceEntry` stream.
-    let jit_limit = JitCost::from_block_cost(limit.clamp(1, MAX_BLOCK_COST))
-        .unwrap_or_else(|_| JitCost::from_jit(10));
-    let mut cost = CostAccumulator::new(jit_limit);
-    let mut ctx = ReductionContext::minimal(height, eval_box.creation_height);
-    ctx.self_box = Some(&eval_box);
-    ctx.ergo_tree_version = tree.version;
-    let (result, entries) =
-        reduce_expr_traced_with_cost(&tree.body, &ctx, &tree.constants, &mut cost);
+    // Traced reduction on the SAME interpreter path and reduction environment
+    // as `bounded_reduce` (single owner). The trace walker adds no reduction
+    // logic — it renders the interpreter's own `TraceEntry` stream.
+    let (result, entries) = bounded_reduce_traced(&tree, height, Some(&eval_box), limit);
 
     let trace_truncated = entries.len() > MAX_TRACE_ENTRIES;
     let reduction_trace: Vec<TraceView> = entries
@@ -730,6 +717,10 @@ struct DiffSide {
     verdict: &'static str,
     reduced_to: Option<String>,
     cost: Option<u64>,
+    /// The reduction error behind a `reject` verdict (Rust side only) — kept
+    /// so a reject is distinguishable by cause, never a bare verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -785,11 +776,27 @@ async fn diff_inner(state: &ScriptState, body: DiffBody) -> Result<DiffResponse,
             verdict: "accept",
             reduced_to: Some(render_sigma_boolean(&out.reduced_to)),
             cost: Some(out.block_cost),
+            error: None,
         },
-        Err(_) => DiffSide {
+        // A resource refusal (this request's cost/depth bound) is NOT a
+        // semantic verdict — diffing it against the oracle would fabricate
+        // agreement/divergence. Answer the typed refusal (`cost_limit` /
+        // `too_deep`) exactly like execute/cost/simulate.
+        Err(e)
+            if matches!(
+                e,
+                EvalError::CostExceeded(_)
+                    | EvalError::JitCostOverflow(_)
+                    | EvalError::DepthLimitExceeded(_)
+            ) =>
+        {
+            return Err(eval_error_response(&e))
+        }
+        Err(e) => DiffSide {
             verdict: "reject",
             reduced_to: None,
             cost: None,
+            error: Some(e.to_string()),
         },
     };
 
@@ -810,6 +817,7 @@ async fn diff_inner(state: &ScriptState, body: DiffBody) -> Result<DiffResponse,
             verdict: if v.accept { "accept" } else { "reject" },
             reduced_to: v.reduced_to,
             cost: v.cost,
+            error: None,
         },
         Err(detail) => {
             return Err(err(

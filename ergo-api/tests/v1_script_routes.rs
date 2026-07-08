@@ -23,7 +23,9 @@ use ergo_api::types::{
     ApiMempoolTransactions, ApiPeer, ApiStatus, ApiSyncStatus, ApiTip, ApiWeightFunction,
     HealthStatus, SyncStateLabel,
 };
-use ergo_api::v1::{script_router, ScriptConfig, ScriptState, V1AuthConfig};
+use ergo_api::v1::{
+    script_router, OracleVerdict, ScalaOracle, ScriptConfig, ScriptState, V1AuthConfig,
+};
 use ergo_ser::address::{decode_address_to_tree_bytes, NetworkPrefix};
 use tower::ServiceExt;
 
@@ -32,13 +34,14 @@ const HEX_64: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 // ----- harness ------------------------------------------------------------
 
-fn app(with_chain: bool) -> Router {
-    let _ = with_chain; // chain reader intentionally None in these tests.
+fn app(oracle: Option<Arc<dyn ScalaOracle>>) -> Router {
     let state = ScriptState {
         read: Arc::new(StubRead),
+        // Chain reader intentionally None: the chain-backed paths answer
+        // `chain_reader_unavailable`, which is what these tests assert.
         chain: None,
         network: NetworkPrefix::Mainnet,
-        oracle: None,
+        oracle,
         config: ScriptConfig::default(),
     };
     let governor =
@@ -48,6 +51,14 @@ fn app(with_chain: bool) -> Router {
 }
 
 async fn post(uri: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    post_via(app(None), uri, body).await
+}
+
+async fn post_via(
+    router: Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let mut request = Request::builder()
         .method(Method::POST)
         .uri(uri)
@@ -58,7 +69,7 @@ async fn post(uri: &str, body: serde_json::Value) -> (StatusCode, serde_json::Va
     request
         .extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40_000))));
-    let resp = app(false).oneshot(request).await.unwrap();
+    let resp = router.oneshot(request).await.unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
@@ -196,6 +207,20 @@ async fn inspect_ergo_tree_returns_structured_view() {
     assert!(body["p2s_address"].as_str().is_some());
 }
 
+#[tokio::test]
+async fn inspect_oversized_hex_is_capped_before_decode() {
+    // One char past the cap → refused as `limit_exceeded` BEFORE any decode
+    // allocation (the same guard every other ergo_tree hex path enforces).
+    let oversized = "aa".repeat(64 * 1024) + "aa";
+    let (status, body) = post(
+        "/api/v1/script/inspect",
+        serde_json::json!({ "ergo_tree": oversized }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(reason(&body), "limit_exceeded");
+}
+
 // ----- diff (oracle unconfigured) -----------------------------------------
 
 #[tokio::test]
@@ -211,6 +236,40 @@ async fn diff_without_oracle_is_oracle_unavailable() {
     // The canonical `Reason` enum maps `oracle_unavailable` to 501.
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "body: {body}");
     assert_eq!(reason(&body), "oracle_unavailable");
+}
+
+/// Always-accepting oracle stub: lets the diff tests exercise the RUST side's
+/// classification without a Scala transport.
+struct AcceptOracle;
+#[async_trait::async_trait]
+impl ScalaOracle for AcceptOracle {
+    async fn reduce_tree(&self, _tree_bytes: &[u8], _height: u32) -> Result<OracleVerdict, String> {
+        Ok(OracleVerdict {
+            accept: true,
+            reduced_to: None,
+            cost: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn diff_cost_refusal_is_cost_limit_not_a_fabricated_verdict() {
+    // The Rust side hitting ITS request-scoped cost bound is a resource
+    // refusal, not a semantic reject — pre-fix this answered 200 with a
+    // fabricated `reject` verdict (a false divergence against an accepting
+    // oracle).
+    let (status, body) = post_via(
+        app(Some(Arc::new(AcceptOracle))),
+        "/api/v1/script/diff",
+        serde_json::json!({
+            "source": "sigmaProp(HEIGHT > 100 && HEIGHT > 101 && HEIGHT > 102 && HEIGHT > 103)",
+            "context": { "height": 200 },
+            "max_cost": 1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(reason(&body), "cost_limit");
 }
 
 // ----- simulate (chain reader unwired) ------------------------------------

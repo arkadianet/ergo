@@ -38,7 +38,10 @@ use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
-use ergo_sigma::evaluator::{reduce_expr_with_cost, EvalBox, EvalError, ReductionContext};
+use ergo_sigma::evaluator::{
+    reduce_expr_traced_with_cost, reduce_expr_with_cost, EvalBox, EvalError, ReductionContext,
+    TraceEntry,
+};
 
 use crate::compat::NodeChainQuery;
 use crate::traits::NodeReadState;
@@ -198,10 +201,10 @@ pub(crate) fn err(
     Box::new(v1_error(reason, message, detail))
 }
 
-/// Parse an unprefixed `ergo_tree` hex string to an [`ErgoTree`], enforcing the
-/// body-size cap first. A malformed tree is `400 invalid_ergo_tree` — never a
-/// panic (fragment §6).
-pub(crate) fn parse_tree_hex(hex_str: &str) -> Result<ErgoTree, Box<Response>> {
+/// Cap-check + hex-decode an `ergo_tree` input — the shared front half of
+/// [`parse_tree_hex`]. The size cap is enforced BEFORE any allocation, so an
+/// oversized body is refused without decoding it.
+pub(crate) fn decode_tree_hex(hex_str: &str) -> Result<Vec<u8>, Box<Response>> {
     let hex_str = hex_str.trim();
     if hex_str.len() > MAX_TREE_HEX_LEN {
         return Err(err(
@@ -210,14 +213,27 @@ pub(crate) fn parse_tree_hex(hex_str: &str) -> Result<ErgoTree, Box<Response>> {
             format!("ergo_tree hex is capped at {MAX_TREE_HEX_LEN} characters"),
         ));
     }
-    let bytes = hex::decode(hex_str).map_err(|e| {
+    hex::decode(hex_str).map_err(|e| {
         err(
             Reason::InvalidHex,
             "ergo_tree is not valid hex",
             format!("hex decode: {e}"),
         )
-    })?;
-    let mut reader = ergo_primitives::reader::VlqReader::new(&bytes);
+    })
+}
+
+/// Parse raw `ergo_tree` bytes to an [`ErgoTree`] under the same size cap as
+/// the hex path (so an address-derived tree cannot bypass it). A malformed
+/// tree is `400 invalid_ergo_tree` — never a panic (fragment §6).
+pub(crate) fn parse_tree_bytes(bytes: &[u8]) -> Result<ErgoTree, Box<Response>> {
+    if bytes.len() * 2 > MAX_TREE_HEX_LEN {
+        return Err(err(
+            Reason::LimitExceeded,
+            "ergo_tree exceeds the size cap",
+            format!("ergo_tree hex is capped at {MAX_TREE_HEX_LEN} characters"),
+        ));
+    }
+    let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
     read_ergo_tree(&mut reader).map_err(|e| {
         err(
             Reason::InvalidErgoTree,
@@ -225,6 +241,12 @@ pub(crate) fn parse_tree_hex(hex_str: &str) -> Result<ErgoTree, Box<Response>> {
             format!("read_ergo_tree: {e}"),
         )
     })
+}
+
+/// Parse an unprefixed `ergo_tree` hex string to an [`ErgoTree`], enforcing the
+/// body-size cap first (see [`decode_tree_hex`] / [`parse_tree_bytes`]).
+pub(crate) fn parse_tree_hex(hex_str: &str) -> Result<ErgoTree, Box<Response>> {
+    parse_tree_bytes(&decode_tree_hex(hex_str)?)
 }
 
 /// Build a compiler [`ScriptEnv`] from the request `env` map: `{name: {type,
@@ -361,13 +383,7 @@ pub(crate) fn bounded_reduce(
     self_box: Option<&EvalBox>,
     limit_block_cost: u64,
 ) -> Result<ReduceOutput, EvalError> {
-    let limit = JitCost::from_block_cost(limit_block_cost.clamp(1, MAX_BLOCK_COST))
-        .unwrap_or_else(|_| JitCost::from_jit(10));
-    let mut cost = CostAccumulator::new(limit);
-    let self_ch = self_box.map(|b| b.creation_height).unwrap_or(height);
-    let mut ctx = ReductionContext::minimal(height, self_ch);
-    ctx.self_box = self_box;
-    ctx.ergo_tree_version = tree.version;
+    let (mut cost, ctx) = reduction_env(tree, height, self_box, limit_block_cost);
     let reduced_to = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)?;
     let result = match reduced_to {
         SigmaBoolean::TrivialProp(b) => Some(b),
@@ -378,6 +394,36 @@ pub(crate) fn bounded_reduce(
         result,
         block_cost: cost.total_block_cost(),
     })
+}
+
+/// [`bounded_reduce`]'s traced sibling for `script/explain`: the SAME
+/// reduction environment (one owner — any future context or cost change lands
+/// in [`reduction_env`] once), but through the interpreter's trace walker.
+pub(crate) fn bounded_reduce_traced(
+    tree: &ErgoTree,
+    height: u32,
+    self_box: Option<&EvalBox>,
+    limit_block_cost: u64,
+) -> (Result<SigmaBoolean, EvalError>, Vec<TraceEntry>) {
+    let (mut cost, ctx) = reduction_env(tree, height, self_box, limit_block_cost);
+    reduce_expr_traced_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)
+}
+
+/// The one place the playground wires the cost accumulator + minimal
+/// reduction context, so the plain and traced reduce paths can never drift.
+fn reduction_env<'a>(
+    tree: &ErgoTree,
+    height: u32,
+    self_box: Option<&'a EvalBox>,
+    limit_block_cost: u64,
+) -> (CostAccumulator, ReductionContext<'a>) {
+    let limit = JitCost::from_block_cost(limit_block_cost.clamp(1, MAX_BLOCK_COST))
+        .unwrap_or_else(|_| JitCost::from_jit(10));
+    let self_ch = self_box.map(|b| b.creation_height).unwrap_or(height);
+    let mut ctx = ReductionContext::minimal(height, self_ch);
+    ctx.self_box = self_box;
+    ctx.ergo_tree_version = tree.version;
+    (CostAccumulator::new(limit), ctx)
 }
 
 /// Map an [`EvalError`] from the reduce path to the v1 envelope. Cost / depth
