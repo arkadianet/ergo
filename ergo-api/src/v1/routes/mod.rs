@@ -225,7 +225,11 @@ pub(super) struct GiCursor {
 /// length or non-hex) lets a handler answer the typed `invalid_*` reason before
 /// touching the store.
 pub(super) fn parse_id32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    // Canonical ids are 64-char LOWERCASE hex. Reuse `valid_modifier_id` so the
+    // shared box/token id parsing rejects uppercase/mixed-case consistently with
+    // the tx routes (CodeRabbit #170) — `hex::decode` alone accepts uppercase
+    // (identical bytes), leaving `/boxes/*` and `/tokens/*` misaligned.
+    if !valid_modifier_id(s) {
         return None;
     }
     hex::decode(s).ok()?.try_into().ok()
@@ -257,11 +261,25 @@ pub(super) fn offset_from_cursor(cursor: Option<&str>) -> Result<u32, Box<Respon
 /// Build the `page` object for an offset-aliased collection from an
 /// overfetched-by-one item list: trim the sentinel, set `has_more`, and mint
 /// the next offset cursor (`start + limit`).
-pub(super) fn offset_page<T>(mut items: Vec<T>, start: u32, limit: u32) -> (Vec<T>, CursorPage) {
+pub(super) fn offset_page<T>(items: Vec<T>, start: u32, limit: u32) -> (Vec<T>, CursorPage) {
+    // Count-based detection: the caller overfetched `limit + 1`, so a page with
+    // more than `limit` items has a next page.
     let has_more = items.len() as u64 > u64::from(limit);
-    if has_more {
-        items.truncate(limit as usize);
-    }
+    offset_page_explicit(items, start, limit, has_more)
+}
+
+/// Like [`offset_page`] but with an EXPLICIT next-page signal, for routes whose
+/// next page is not the projected item count — e.g. the unspent-box overlay,
+/// where the `exclude_mempool_spent` view filter can shrink the page below
+/// `limit` even though the confirmed offset window still has a next page. Always
+/// caps `items` to `limit`.
+pub(super) fn offset_page_explicit<T>(
+    mut items: Vec<T>,
+    start: u32,
+    limit: u32,
+    has_more: bool,
+) -> (Vec<T>, CursorPage) {
+    items.truncate(limit as usize);
     let next_cursor = has_more.then(|| {
         encode_cursor(&OffsetCursor {
             off: start.saturating_add(limit),

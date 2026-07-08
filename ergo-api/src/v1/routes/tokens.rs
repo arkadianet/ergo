@@ -109,7 +109,12 @@ fn scan_token_holders(
     token_id: &TokenId,
     network: NetworkPrefix,
 ) -> HolderScan {
-    let capped = idx.token_total_boxes(token_id) > u64::from(HOLDER_SCAN_CAP);
+    // `capped` reflects the ACTUAL unspent scan, not `token_total_boxes` — that
+    // counts SPENT + unspent boxes, so a token with many spent but few unspent
+    // boxes was wrongly flagged capped on a COMPLETE scan (CodeRabbit #170). Set
+    // only when the loop stops at the cap with more unspent rows pending;
+    // conservative (an exactly-`cap` unspent set may over-report, never under).
+    let mut capped = false;
     let mut acc: HashMap<String, u128> = HashMap::new();
     let mut circulating: u128 = 0;
     let mut scanned: u64 = 0;
@@ -117,6 +122,7 @@ fn scan_token_holders(
     loop {
         let scanned_u32 = scanned as u32;
         if scanned_u32 >= HOLDER_SCAN_CAP {
+            capped = true;
             break;
         }
         let want = SCAN_BATCH.min(HOLDER_SCAN_CAP - scanned_u32);

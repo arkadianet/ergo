@@ -133,6 +133,16 @@ pub async fn transactions(
         },
         dir,
     );
+    // Building tx summaries resolves inputs via the chain reader — but only when
+    // there ARE txs; an empty result is authoritative from the index and needs
+    // no chain. Guard the non-empty case so a missing reader is an honest
+    // `chain_reader_unavailable`, not a 500 from the downstream
+    // `build_indexed_tx_response` (CodeRabbit #170).
+    if !txs.is_empty() {
+        if let Err(e) = state.chain() {
+            return *e;
+        }
+    }
     let bstate = state.blockchain_state(idx);
     let built: Result<Vec<_>, String> = txs
         .iter()

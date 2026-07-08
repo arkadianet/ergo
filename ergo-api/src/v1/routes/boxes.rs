@@ -17,7 +17,10 @@ use ergo_ser::ergo_tree::tree_hash_from_bytes;
 use serde::Deserialize;
 
 use super::dto::{v1box_from_indexed_box, Collection, V1Box};
-use super::{offset_from_cursor, offset_page, parse_id32, parse_sort, GiCursor, V1State};
+use super::{
+    offset_from_cursor, offset_page, offset_page_explicit, parse_id32, parse_sort, GiCursor,
+    V1State,
+};
 use crate::blockchain::{
     address_to_tree_hash, pool_unspent_for_template, pool_unspent_for_token, pool_unspent_for_tree,
 };
@@ -233,6 +236,13 @@ fn render_unspent_page(
         },
         dir,
     );
+    // The offset cursor advances the CONFIRMED window, so the next-page signal
+    // is the confirmed overfetch — captured BEFORE `exclude_spent` (a pool-spent
+    // view overlay) can drop the (limit+1)th sentinel row and fool the pager into
+    // reporting no next page (CodeRabbit #170). Drop the sentinel now the signal
+    // is recorded; the display page was capped to `limit` regardless.
+    let more_confirmed = confirmed.len() as u64 > u64::from(limit);
+    confirmed.truncate(limit as usize);
     if exclude_spent {
         confirmed.retain(|b| match b.box_data.box_id() {
             Ok(id) => !state.mempool.is_spent_by_pool(&id),
@@ -253,7 +263,7 @@ fn render_unspent_page(
     };
     match project_boxes(state, merged, q.decode.unwrap_or(false)) {
         Ok(items) => {
-            let (items, page) = offset_page(items, start, limit);
+            let (items, page) = offset_page_explicit(items, start, limit, more_confirmed);
             Json(Collection { items, page }).into_response()
         }
         Err(d) => assemble_failed(d),
