@@ -332,17 +332,32 @@ pub async fn proof_for_tx(
         Ok(c) => c,
         Err(e) => return *e,
     };
-    if !valid_modifier_id(&header_id) {
+    merkle_membership_proof(chain.as_ref(), &header_id, &tx_id)
+}
+
+/// Shared Merkle membership-proof core (Overlap O2): the ONE implementation
+/// behind both `chain/proofs/{header_id}/transactions/{tx_id}` (path params,
+/// [`proof_for_tx`]) and `light/membership-proof` (query params,
+/// [`super::light::membership_proof`]). Identical proof semantics — wraps
+/// [`NodeChainQuery::proof_for_tx`](crate::compat::NodeChainQuery::proof_for_tx),
+/// validating both ids and mapping the `None` return (header unknown OR tx not
+/// in that block) to the honest `tx_not_in_block` 404.
+pub(super) fn merkle_membership_proof(
+    chain: &dyn crate::compat::NodeChainQuery,
+    header_id: &str,
+    tx_id: &str,
+) -> Response {
+    if !valid_modifier_id(header_id) {
         return invalid_hex();
     }
-    if !valid_modifier_id(&tx_id) {
+    if !valid_modifier_id(tx_id) {
         return v1_error(
             Reason::InvalidTxId,
             "tx_id is not a 64-character lowercase hex string",
             "supply an unprefixed lowercase hex transaction id",
         );
     }
-    match chain.proof_for_tx(&header_id, &tx_id) {
+    match chain.proof_for_tx(header_id, tx_id) {
         Some(mp) => {
             let levels = mp
                 .levels
@@ -356,7 +371,11 @@ pub async fn proof_for_tx(
                     },
                 })
                 .collect();
-            Json(V1MerkleProof { tx_id, levels }).into_response()
+            Json(V1MerkleProof {
+                tx_id: tx_id.to_string(),
+                levels,
+            })
+            .into_response()
         }
         // Header unknown OR tx not in that block — a real 404.
         None => v1_error(

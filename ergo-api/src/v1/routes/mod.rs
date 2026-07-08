@@ -17,8 +17,11 @@ mod addresses;
 mod boxes;
 mod chain;
 mod decode;
+mod diagnostics;
 pub(crate) mod extract;
+mod light;
 mod mempool;
+mod stats;
 mod tokens;
 pub(crate) mod transactions;
 mod tx_intel;
@@ -66,6 +69,11 @@ pub struct V1State {
     /// Shared O4 mempool-depth sample ring — the source for
     /// `mempool/summary?history=` and (future) `stats/mempool-depth`.
     pub mempool_depth: Arc<crate::v1::mempool_depth::MempoolDepthRing>,
+    /// Per-height emission schedule — backs `stats/supply` (realized curve) and
+    /// `stats/emission-schedule` (projected). `None` on a node wired without the
+    /// schedule view → both series answer the honest `state_unavailable` (§1.4)
+    /// rather than fabricate a supply curve.
+    pub emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
     /// Real-time subscriptions (`WS /api/v1/ws`) — the shared `RealtimeBus` +
     /// connection limiter. `None` ⇒ the WS route answers `realtime_disabled`
     /// (never a bare 404), per the subsystem-off rule (§4.1).
@@ -113,6 +121,19 @@ impl V1State {
                 format!("halt reason: {reason:?}"),
             ))),
         }
+    }
+
+    /// The per-height emission schedule, or `503 state_unavailable` when the
+    /// node was wired without it. Backs the two `stats/*` supply series
+    /// (`stats/supply`, `stats/emission-schedule`).
+    fn emission(&self) -> Result<&Arc<dyn crate::emission::EmissionSchedule>, Box<Response>> {
+        self.emission.as_ref().ok_or_else(|| {
+            Box::new(v1_error(
+                Reason::StateUnavailable,
+                "the emission schedule is not wired on this node",
+                "supply/emission series require the EmissionSchedule view",
+            ))
+        })
     }
 
     /// A `blockchain::BlockchainState` view over the same deps — lets the
@@ -340,6 +361,27 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/protocols/:protocol_id",
             get(decode::protocol_by_id),
         )
+        // ----- light/* capability advertisement (trivial) -----
+        .route("/api/v1/light/status", get(light::status))
+        // ----- diagnostics/* (§3.15) — snapshot re-projections, all cheap -----
+        .route("/api/v1/diagnostics", get(diagnostics::composite))
+        .route(
+            "/api/v1/diagnostics/chain-position",
+            get(diagnostics::chain_position),
+        )
+        .route("/api/v1/diagnostics/fork-risk", get(diagnostics::fork_risk))
+        .route(
+            "/api/v1/diagnostics/tip-health",
+            get(diagnostics::tip_health),
+        )
+        .route(
+            "/api/v1/diagnostics/peer-quality",
+            get(diagnostics::peer_quality),
+        )
+        .route(
+            "/api/v1/diagnostics/candidate-build",
+            get(diagnostics::candidate_build),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::CheapRead),
             governor_mw,
@@ -472,6 +514,27 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/addresses/:address/unspent",
             get(boxes::boxes_unspent_by_address),
         )
+        // ----- light/* trustless-sync proofs (§3.13) -----
+        .route("/api/v1/light/bootstrap-proof", get(light::bootstrap_proof))
+        .route(
+            "/api/v1/light/headers-interlinks",
+            get(light::headers_interlinks),
+        )
+        // O2: dual mount of the chain/proofs membership-proof core (query params).
+        .route(
+            "/api/v1/light/membership-proof",
+            get(light::membership_proof),
+        )
+        // ----- stats/* time-series analytics (§3.14) -----
+        .route("/api/v1/stats/supply", get(stats::supply))
+        .route(
+            "/api/v1/stats/emission-schedule",
+            get(stats::emission_schedule),
+        )
+        .route("/api/v1/stats/difficulty", get(stats::difficulty))
+        .route("/api/v1/stats/fees", get(stats::fees))
+        .route("/api/v1/stats/mempool-depth", get(stats::mempool_depth))
+        .route("/api/v1/stats/holders", get(stats::holders))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::HeavyRead),
             governor_mw,

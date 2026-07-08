@@ -565,6 +565,8 @@ pub fn router_with_mempool_and_wallet_and_security(
     let v1_read = read.clone();
     let v1_chain = compat.clone();
     let v1_indexer = indexer.clone();
+    // Per-height emission schedule for the `stats/*` supply series (§3.14).
+    let v1_emission = emission.clone();
     let v1_submit = submit.clone();
     let v1_mempool = mempool.clone();
     // Same up-front-clone rationale for the `script/*` group (§5): `compat` is
@@ -1304,6 +1306,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         tx_builder: None,
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
+        emission: v1_emission,
         realtime: Some(v1_realtime),
         network,
     };
