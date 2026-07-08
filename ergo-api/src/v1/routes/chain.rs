@@ -18,7 +18,7 @@ use super::{
     candidate_heights, invalid_hex, parse_height, parse_order, valid_modifier_id, HeightCursor,
     ListQuery, V1State,
 };
-use crate::v1::cursor::{clamp_limit, decode_opt_cursor, Page};
+use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason};
 
 fn block_not_found() -> Response {
@@ -34,6 +34,40 @@ fn header_not_found() -> Response {
         Reason::HeaderNotFound,
         "no header with that id",
         "the id is well-formed but unknown to this node",
+    )
+}
+
+/// Page assembly for the height-walk lists: `has_more`/`next_cursor` derive
+/// from the height window scanned, NOT the collected row count — a height
+/// whose row is missing (e.g. a pruned block body) must yield a short page
+/// that keeps advancing, never a false end-of-listing. The overfetched
+/// (limit+1)-th height is probed with `has_header`: headers are dense on a
+/// synced chain, so header presence there is exactly "another candidate row
+/// exists". Returns the window length (how many leading heights to render)
+/// plus the finished `Page`.
+fn height_window_page(
+    heights: &[u32],
+    limit: u32,
+    has_header: impl Fn(u32) -> bool,
+) -> (usize, Page) {
+    let window_len = heights.len().min(limit as usize);
+    let next_cursor = heights[window_len..]
+        .iter()
+        .any(|&h| has_header(h))
+        .then(|| {
+            heights[..window_len]
+                .last()
+                .map(|&h| encode_cursor(&HeightCursor { h }))
+        })
+        .flatten();
+    let has_more = next_cursor.is_some();
+    (
+        window_len,
+        Page {
+            limit,
+            next_cursor,
+            has_more,
+        },
     )
 }
 
@@ -57,15 +91,18 @@ pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQ
     let limit = clamp_limit(q.limit, 25, 200);
     let tip = state.read.status().best_full_block_height;
 
+    let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
+    let (window_len, page) = height_window_page(&heights, limit, |h| {
+        !chain.header_ids_at_height(h).is_empty()
+    });
     let mut items = Vec::new();
-    for h in candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1) {
+    for &h in &heights[..window_len] {
         if let Some(id) = chain.header_ids_at_height(h).into_iter().next() {
             if let Some(fb) = chain.full_block_by_id(&id) {
                 items.push(block_summary_from_scala(state.network, &fb));
             }
         }
     }
-    let (items, page) = Page::from_overfetch(items, limit, |s| HeightCursor { h: s.base.height });
     Json(Collection { items, page }).into_response()
 }
 
@@ -180,15 +217,18 @@ pub async fn list_headers(
     let limit = clamp_limit(q.limit, 100, 1000);
     let tip = state.read.status().best_header_height;
 
+    let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
+    let (window_len, page) = height_window_page(&heights, limit, |h| {
+        !chain.header_ids_at_height(h).is_empty()
+    });
     let mut items = Vec::new();
-    for h in candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1) {
+    for &h in &heights[..window_len] {
         if let Some(id) = chain.header_ids_at_height(h).into_iter().next() {
             if let Some(hdr) = chain.header_by_id(&id) {
                 items.push(header_from_scala(state.network, &hdr));
             }
         }
     }
-    let (items, page) = Page::from_overfetch(items, limit, |h| HeightCursor { h: h.base.height });
     Json(Collection { items, page }).into_response()
 }
 
@@ -324,5 +364,65 @@ pub async fn proof_for_tx(
             "no membership proof: unknown block or tx not in it",
             "verify the header id and that the tx is included in that block",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v1::cursor::decode_cursor;
+
+    // ----- happy path -----
+
+    #[test]
+    fn height_window_page_full_window_pages_from_height_math() {
+        let heights = [10, 9, 8, 7];
+        let (window_len, page) = height_window_page(&heights, 3, |_| true);
+        assert_eq!(window_len, 3);
+        assert!(page.has_more);
+        let cur: HeightCursor = decode_cursor(page.next_cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(cur.h, 8, "cursor is the last SCANNED height");
+    }
+
+    #[test]
+    fn height_window_page_short_supply_ends_listing() {
+        // Fewer candidate heights than the limit — nothing beyond the window.
+        let heights = [3, 2, 1];
+        let (window_len, page) = height_window_page(&heights, 25, |_| true);
+        assert_eq!(window_len, 3);
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn height_window_page_missing_row_in_window_still_advances() {
+        // A pruned body inside the window must not end the listing: the page
+        // math never looks at the collected row count, only the height domain.
+        let heights = [10, 9, 8, 7];
+        let (window_len, page) = height_window_page(&heights, 3, |h| h != 9);
+        assert_eq!(window_len, 3);
+        assert!(page.has_more, "a header exists beyond the window");
+        let cur: HeightCursor = decode_cursor(page.next_cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(cur.h, 8);
+    }
+
+    #[test]
+    fn height_window_page_headerless_probe_ends_listing() {
+        // The overfetched height has no header (nothing was ever there) —
+        // the listing honestly ends.
+        let heights = [10, 9, 8, 7];
+        let (_, page) = height_window_page(&heights, 3, |h| h != 7);
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn height_window_page_empty_heights_is_empty_last_page() {
+        let (window_len, page) = height_window_page(&[], 25, |_| true);
+        assert_eq!(window_len, 0);
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
     }
 }

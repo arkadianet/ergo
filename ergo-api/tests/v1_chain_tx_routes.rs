@@ -284,6 +284,28 @@ impl NodeChainQuery for StubChain {
     }
 }
 
+/// Headers dense at every height `1..=HEIGHT` (per-height synthetic ids), but
+/// a body only at `HEIGHT` — models a node whose older block bodies are
+/// pruned/missing while the header chain stays complete.
+struct PrunedChain;
+impl NodeChainQuery for PrunedChain {
+    fn info(&self) -> ergo_api::compat::types::ScalaInfo {
+        unreachable!("chain.info() is not on the v1 read path")
+    }
+    fn header_ids_at_height(&self, height: u32) -> Vec<String> {
+        if height == HEIGHT {
+            vec![block_id()]
+        } else if (1..=HEIGHT).contains(&height) {
+            vec![format!("{height:064x}")]
+        } else {
+            Vec::new()
+        }
+    }
+    fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
+        (header_id_hex == block_id()).then(|| scala_full_block(true))
+    }
+}
+
 struct StubSubmit {
     result: Result<String, SubmitError>,
 }
@@ -492,6 +514,35 @@ async fn list_blocks_returns_collection_envelope() {
     assert_eq!(item["transaction_count"].as_u64(), Some(1));
     assert!(item.get("delivered_by").is_some()); // present, null
     assert!(item["delivered_by"].is_null());
+}
+
+#[tokio::test]
+async fn list_blocks_pruned_bodies_keep_paging_until_headers_end() {
+    let pruned = || Deps {
+        chain: Some(Arc::new(PrunedChain)),
+        ..Deps::default()
+    };
+    // Page 1 (desc from tip=5, limit=2): heights [5,4]; only 5 has a body.
+    // Pre-fix, the short page flipped has_more=false and ended the listing.
+    let (status, body) = get(pruned(), "/api/v1/chain/blocks?limit=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["page"]["has_more"], serde_json::json!(true));
+    let cur = body["page"]["next_cursor"].as_str().unwrap().to_string();
+
+    // Page 2: heights [3,2] — headers only; the page is empty but advances.
+    let uri = format!("/api/v1/chain/blocks?limit=2&cursor={cur}");
+    let (_, body) = get(pruned(), &uri).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+    assert_eq!(body["page"]["has_more"], serde_json::json!(true));
+    let cur = body["page"]["next_cursor"].as_str().unwrap().to_string();
+
+    // Page 3: height [1], nothing beyond → the listing honestly ends.
+    let uri = format!("/api/v1/chain/blocks?limit=2&cursor={cur}");
+    let (_, body) = get(pruned(), &uri).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+    assert_eq!(body["page"]["has_more"], serde_json::json!(false));
+    assert!(body["page"]["next_cursor"].is_null());
 }
 
 #[tokio::test]
