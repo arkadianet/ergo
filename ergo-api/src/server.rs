@@ -252,14 +252,25 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> JoinHandle<()> {
+    let bind_addr = listener.local_addr().ok();
+    // v1 boot-warn (§2.1): loudly flag a network-reachable T1/T2 surface under
+    // a weak/default (or absent) api_key. Called once here, right after the
+    // bind address is known and before serving — the documented startup seam.
+    if let Some(addr) = bind_addr {
+        crate::v1::warn_startup_posture(security.as_deref(), addr);
+    }
     let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
-    let actual = listener
-        .local_addr()
+    let actual = bind_addr
         .map(|a| a.to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+        .unwrap_or_else(|| "<unknown>".to_string());
     info!(addr = %actual, "api listening");
     tokio::spawn(async move {
-        let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // `into_make_service_with_connect_info` installs `ConnectInfo<SocketAddr>`
+        // so the v1 governor / auth tier can read the real peer IP for per-IP
+        // rate-bucketing and the loopback exemption (v1 `client_ip`). Absent it,
+        // the governor buckets every caller under one shared "unknown" key.
+        let make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+        let server = axum::serve(listener, make_service).with_graceful_shutdown(async move {
             // RecvError → caller dropped the sender, also a shutdown
             // signal. Either way, we exit the accept loop and let
             // in-flight handlers complete.
@@ -547,6 +558,16 @@ pub fn router_with_mempool_and_wallet_and_security(
         emission_scripts,
         utxo_reads_supported,
     } = ctx;
+    // Native `/api/v1/*` product-API route group inputs (chain/* + transactions/*
+    // reads). Cloned up front because the compat / submit handles are moved into
+    // the Scala-compat match further down; the v1 group mounts unconditionally
+    // and gates inside each handler on the honest `*_unavailable` / `*_disabled`
+    // reason (`dev-docs/v1-api-design.md` §3.5–§3.6).
+    let v1_read = read.clone();
+    let v1_chain = compat.clone();
+    let v1_indexer = indexer.clone();
+    let v1_submit = submit.clone();
+    let v1_mempool = mempool.clone();
     let operator: Router = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
@@ -1201,6 +1222,24 @@ pub fn router_with_mempool_and_wallet_and_security(
         wallet_admin,
         security,
     ));
+
+    // Native `/api/v1/*` product API — the `chain/*` + `transactions/*` reads
+    // group, the first consumer of the G2 shared primitives (error envelope,
+    // cursor page builder, rate/cost governor). All routes are T0 (public),
+    // fronted by the per-IP governor at route-class `HeavyRead`. The shared
+    // governor is one per node, so later route groups reuse the same per-IP
+    // budget (`dev-docs/v1-api-design.md` §2.2).
+    let v1_state = crate::v1::V1State {
+        read: v1_read,
+        chain: v1_chain,
+        indexer: v1_indexer,
+        submit: v1_submit,
+        mempool: v1_mempool,
+        network,
+    };
+    let v1_governor = crate::v1::governor::Governor::new(Default::default())
+        .expect("default GovernorConfig is valid");
+    let assembled = assembled.merge(crate::v1::v1_router(v1_state, v1_governor));
 
     // tower-http TraceLayer wraps every request in an INFO span carrying a
     // monotonic request id + method + path. Handler logs ride that span as

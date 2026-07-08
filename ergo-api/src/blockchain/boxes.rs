@@ -122,7 +122,7 @@ fn render_indexed_box(network: NetworkPrefix, b: &IndexedErgoBox) -> Response {
     }
 }
 
-pub(super) fn build_indexed_box_response(
+pub(crate) fn build_indexed_box_response(
     network: NetworkPrefix,
     b: &IndexedErgoBox,
 ) -> Result<IndexedErgoBoxResponse, String> {

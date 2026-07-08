@@ -57,7 +57,7 @@ pub use blocks::{
     block_by_header_id_handler, blocks_by_header_ids_handler, IndexedBlockTransactionsResponse,
     IndexedFullBlockResponse,
 };
-use boxes::build_indexed_box_response;
+pub(crate) use boxes::build_indexed_box_response;
 pub use boxes::{
     box_by_id_handler, box_by_index_handler, AssetEntry, IndexedErgoBoxResponse, SpendingProofEntry,
 };
@@ -80,7 +80,7 @@ pub use tokens::{
     boxes_by_token_id_handler, boxes_unspent_by_token_id_handler, token_by_id_handler,
     tokens_by_ids_handler, IndexedTokenResponse,
 };
-use transactions::build_indexed_tx_response;
+pub(crate) use transactions::build_indexed_tx_response;
 pub use transactions::{
     tx_by_id_handler, tx_by_index_handler, tx_detail_handler, DataInputEntry,
     IndexedErgoTransactionResponse,
