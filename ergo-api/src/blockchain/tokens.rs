@@ -213,7 +213,7 @@ fn render_unspent_by_token_id(
 /// `pool_unspent_for_tree`. A pool box with multiple tokens may be
 /// returned by multiple distinct token-id queries (each token surfaces
 /// the box once).
-fn pool_unspent_for_token(
+pub(crate) fn pool_unspent_for_token(
     mempool: &dyn MempoolView,
     token_id: &TokenId,
     exclude_spent: bool,

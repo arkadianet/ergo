@@ -13,7 +13,10 @@
 
 pub mod dto;
 
+mod addresses;
+mod boxes;
 mod chain;
+mod tokens;
 mod transactions;
 
 use std::sync::Arc;
@@ -23,12 +26,13 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use ergo_indexer_types::IndexerQuery;
+use ergo_indexer_types::{IndexerQuery, IndexerStatus};
 use ergo_ser::address::NetworkPrefix;
 use serde::{Deserialize, Serialize};
 
 use crate::compat::NodeChainQuery;
 use crate::traits::{MempoolView, NodeReadState, NodeSubmit};
+use crate::v1::cursor::{decode_opt_cursor, encode_cursor, Page as CursorPage};
 use crate::v1::error::{v1_error, Reason};
 use crate::v1::governor::{governor_mw, Governor, RouteClass};
 
@@ -65,6 +69,47 @@ impl V1State {
                 "chain reads require the live-store NodeChainQuery bridge",
             ))
         })
+    }
+
+    /// The extra-index reader, gated to `CaughtUp` per the §3.7 mounting rule:
+    /// `None` → `409 indexer_disabled`, `Syncing` → `503 indexer_syncing`,
+    /// `Halted` → `503 indexer_halted`. v1 mounts unconditionally and answers
+    /// the honest reason instead of the compat bare-404 when the index is off.
+    fn indexer(&self) -> Result<&Arc<dyn IndexerQuery>, Box<Response>> {
+        let idx = self.indexer.as_ref().ok_or_else(|| {
+            Box::new(v1_error(
+                Reason::IndexerDisabled,
+                "box/token/address queries require the extra index",
+                "start the node with [indexer] enabled = true",
+            ))
+        })?;
+        match idx.status() {
+            IndexerStatus::CaughtUp => Ok(idx),
+            IndexerStatus::Syncing => Err(Box::new(v1_error(
+                Reason::IndexerSyncing,
+                "the extra index is still syncing",
+                "retry once GET /api/v1/indexer/status reports caught up",
+            ))),
+            IndexerStatus::Halted(reason) => Err(Box::new(v1_error(
+                Reason::IndexerHalted,
+                "the extra index is halted",
+                format!("halt reason: {reason:?}"),
+            ))),
+        }
+    }
+
+    /// A `blockchain::BlockchainState` view over the same deps — lets the
+    /// `addresses/{address}/transactions` handler reuse the shared
+    /// `build_indexed_tx_response` builder (so confirmation math never drifts).
+    fn blockchain_state(&self, idx: &Arc<dyn IndexerQuery>) -> crate::blockchain::BlockchainState {
+        crate::blockchain::BlockchainState {
+            read: self.read.clone(),
+            indexer: idx.clone(),
+            network: self.network,
+            chain: self.chain.clone(),
+            mempool: self.mempool.clone(),
+            chain_params: None,
+        }
     }
 }
 
@@ -159,15 +204,119 @@ fn candidate_heights(cursor_h: Option<u32>, order: Order, tip: u32, n: u32) -> V
     v
 }
 
-/// Build the `chain/*` + `transactions/*` reads router, governor-bounded and
-/// state-erased for merging under `/api/v1` in the server.
+// ----- shared box/token/address helpers -----------------------------------
+
+/// Offset-alias opaque cursor for the indexed collections (§0.2 / §1.5). A thin
+/// shim over the offset-based `IndexerQuery`; opaque to clients so a Phase-2
+/// stable-seek key can replace it without a wire break.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct OffsetCursor {
+    pub off: u32,
+}
+
+/// Global-index cursor for `boxes/range` — genuinely stable/monotonic
+/// (append-only global index), not an offset alias.
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct GiCursor {
+    pub gi: u64,
+}
+
+/// Parse an unprefixed 64-char hex id to its 32 raw bytes. `None` (wrong
+/// length or non-hex) lets a handler answer the typed `invalid_*` reason before
+/// touching the store.
+pub(super) fn parse_id32(s: &str) -> Option<[u8; 32]> {
+    // Canonical ids are 64-char LOWERCASE hex. Reuse `valid_modifier_id` so the
+    // shared box/token id parsing rejects uppercase/mixed-case consistently with
+    // the tx routes (CodeRabbit #170) — `hex::decode` alone accepts uppercase
+    // (identical bytes), leaving `/boxes/*` and `/tokens/*` misaligned.
+    if !valid_modifier_id(s) {
+        return None;
+    }
+    hex::decode(s).ok()?.try_into().ok()
+}
+
+/// `?sort=asc|desc` (default `desc`). A malformed value is
+/// `400 invalid_sort_direction` (§1.4).
+pub(super) fn parse_sort(raw: Option<&str>) -> Result<ergo_indexer_types::SortDir, Box<Response>> {
+    use ergo_indexer_types::SortDir;
+    match raw {
+        None | Some("desc") => Ok(SortDir::Desc),
+        Some("asc") => Ok(SortDir::Asc),
+        Some(_) => Err(Box::new(v1_error(
+            Reason::InvalidSortDirection,
+            "sort must be `desc` or `asc`",
+            "omit `sort` for the default newest-first (desc)",
+        ))),
+    }
+}
+
+/// Decode the opaque offset cursor to its start offset (`0` for the first
+/// page); tamper answers `400 invalid_cursor`.
+pub(super) fn offset_from_cursor(cursor: Option<&str>) -> Result<u32, Box<Response>> {
+    Ok(decode_opt_cursor::<OffsetCursor>(cursor)?
+        .map(|c| c.off)
+        .unwrap_or(0))
+}
+
+/// Build the `page` object for an offset-aliased collection from an
+/// overfetched-by-one item list: trim the sentinel, set `has_more`, and mint
+/// the next offset cursor (`start + limit`).
+pub(super) fn offset_page<T>(items: Vec<T>, start: u32, limit: u32) -> (Vec<T>, CursorPage) {
+    // Count-based detection: the caller overfetched `limit + 1`, so a page with
+    // more than `limit` items has a next page.
+    let has_more = items.len() as u64 > u64::from(limit);
+    offset_page_explicit(items, start, limit, has_more)
+}
+
+/// Like [`offset_page`] but with an EXPLICIT next-page signal, for routes whose
+/// next page is not the projected item count — e.g. the unspent-box overlay,
+/// where the `exclude_mempool_spent` view filter can shrink the page below
+/// `limit` even though the confirmed offset window still has a next page. Always
+/// caps `items` to `limit`.
+pub(super) fn offset_page_explicit<T>(
+    mut items: Vec<T>,
+    start: u32,
+    limit: u32,
+    has_more: bool,
+) -> (Vec<T>, CursorPage) {
+    items.truncate(limit as usize);
+    let next_cursor = has_more.then(|| {
+        encode_cursor(&OffsetCursor {
+            off: start.saturating_add(limit),
+        })
+    });
+    (
+        items,
+        CursorPage {
+            limit,
+            next_cursor,
+            has_more,
+        },
+    )
+}
+
+/// Build the native `/api/v1/*` product-API router: the `chain/*` +
+/// `transactions/*` reads group AND the `boxes/*` + `tokens/*` + `addresses/*`
+/// reads group, all consuming the G2 shared primitives (error envelope, cursor
+/// page builder, per-IP governor) and state-erased for merging under `/api/v1`.
 ///
-/// All routes are **T0**: the shared [`Governor`] (one per node, so later
-/// groups share the same per-IP budget) fronts them at route-class
-/// `HeavyRead` — full-block payloads and paginated walks are the heavier read
-/// surface (§2.2). No tier gate: T0 is bounded by the governor, not by auth.
+/// Route classes (§2.2): the single by-id lookups (`boxes/{id}`, `tokens/{id}`)
+/// sit at `CheapRead`; every paginated / scan / range surface (and the whole
+/// chain+tx group) sits at `HeavyRead`. The shared [`Governor`] is one per node
+/// so all classes draw on the same per-IP budget. No tier gate: T0 is bounded
+/// by the governor, not by auth.
 pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
-    let router: Router<V1State> = Router::new()
+    // Cheap point reads — a single by-id lookup.
+    let cheap: Router<V1State> = Router::new()
+        .route("/api/v1/boxes/:box_id", get(boxes::box_by_id))
+        .route("/api/v1/tokens/:token_id", get(tokens::token_by_id))
+        .route_layer(axum::middleware::from_fn_with_state(
+            governor.state(RouteClass::CheapRead),
+            governor_mw,
+        ));
+
+    // Heavy reads — full-block payloads, paginated / scan / range surfaces.
+    let heavy: Router<V1State> = Router::new()
         // ----- chain/blocks -----
         .route("/api/v1/chain/blocks", get(chain::list_blocks))
         .route("/api/v1/chain/blocks/by-ids", post(chain::blocks_by_ids))
@@ -203,12 +352,69 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         // ----- transactions reads + submit -----
         .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
         .route("/api/v1/transactions/submit", post(transactions::submit))
-        .route("/api/v1/transactions/check", post(transactions::check));
-
-    router
+        .route("/api/v1/transactions/check", post(transactions::check))
+        // ----- boxes/* -----
+        .route("/api/v1/boxes/range", get(boxes::box_range))
+        .route(
+            "/api/v1/boxes/by-address/:address",
+            get(boxes::boxes_by_address),
+        )
+        .route(
+            "/api/v1/boxes/unspent/by-address/:address",
+            get(boxes::boxes_unspent_by_address),
+        )
+        .route(
+            "/api/v1/boxes/by-ergo-tree",
+            post(boxes::boxes_by_ergo_tree),
+        )
+        .route(
+            "/api/v1/boxes/unspent/by-ergo-tree",
+            post(boxes::boxes_unspent_by_ergo_tree),
+        )
+        .route(
+            "/api/v1/boxes/by-template/:template_hash",
+            get(boxes::boxes_by_template),
+        )
+        .route(
+            "/api/v1/boxes/unspent/by-template/:template_hash",
+            get(boxes::boxes_unspent_by_template),
+        )
+        .route(
+            "/api/v1/boxes/by-token/:token_id",
+            get(boxes::boxes_by_token),
+        )
+        .route(
+            "/api/v1/boxes/unspent/by-token/:token_id",
+            get(boxes::boxes_unspent_by_token),
+        )
+        // ----- tokens/* -----
+        .route("/api/v1/tokens", get(tokens::tokens_list))
+        .route(
+            "/api/v1/tokens/:token_id/holders",
+            get(tokens::token_holders),
+        )
+        .route("/api/v1/tokens/:token_id/stats", get(tokens::token_stats))
+        // ----- addresses/* (O9; boxes/unspent are dual mounts of boxes::*) -----
+        .route(
+            "/api/v1/addresses/:address/balance",
+            get(addresses::balance),
+        )
+        .route(
+            "/api/v1/addresses/:address/transactions",
+            get(addresses::transactions),
+        )
+        .route(
+            "/api/v1/addresses/:address/boxes",
+            get(boxes::boxes_by_address),
+        )
+        .route(
+            "/api/v1/addresses/:address/unspent",
+            get(boxes::boxes_unspent_by_address),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::HeavyRead),
             governor_mw,
-        ))
-        .with_state(state)
+        ));
+
+    heavy.merge(cheap).with_state(state)
 }

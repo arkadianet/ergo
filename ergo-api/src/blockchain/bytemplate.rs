@@ -146,7 +146,7 @@ fn render_unspent_by_template_hash(
 /// skipped — Scala's `IndexedContractTemplate` only records template
 /// hashes for parseable trees, so a wrapped pool output can never match
 /// any queried template anyway.
-fn pool_unspent_for_template(
+pub(crate) fn pool_unspent_for_template(
     mempool: &dyn MempoolView,
     template_hash: &TemplateHash,
     exclude_spent: bool,
