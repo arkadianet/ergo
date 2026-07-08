@@ -239,18 +239,47 @@ impl Governor {
 
         if map.len() > self.config.max_tracked_ips {
             let cutoff = self.config.idle_prune_after;
-            // Recompute each bucket's virtual refill (same logic as the live
-            // charge above) BEFORE the predicate: an idle bucket's stored
-            // `tokens` is stale, so without this an idle-but-drained bucket
-            // looks non-full forever and `max_tracked_ips` never bounds the
-            // table. Drop a bucket only once it is idle past the cutoff AND
-            // has virtually refilled to full (a fresh entry also starts full,
-            // so nothing is lost).
+            // Virtual token count: stored tokens plus the refill accrued while
+            // idle (capped at burst) — the SAME recompute the live charge does.
+            // An idle bucket's stored `tokens` is stale, so the passes below must
+            // use this, never `b.tokens` directly.
+            let virtual_tokens = |b: &Bucket| {
+                let idle = now.saturating_duration_since(b.last).as_secs_f64();
+                (b.tokens + idle * refill).min(burst)
+            };
+            // Pass 1 (lossless): drop a bucket only once it is idle past the
+            // cutoff AND has virtually refilled to full — a fresh entry also
+            // starts at `burst`, so nothing is lost. A drained bucket keeps its
+            // outstanding deficit (dropping it would refund the penalty).
             map.retain(|_, b| {
                 let idle = now.saturating_duration_since(b.last);
-                let refilled = (b.tokens + idle.as_secs_f64() * refill).min(burst);
-                refilled < burst || idle < cutoff
+                virtual_tokens(b) < burst || idle < cutoff
             });
+            // Pass 2 (hard bound): pass 1 cannot shrink a table full of ACTIVE
+            // peers (all `idle < cutoff`), so on its own `max_tracked_ips` never
+            // bounds memory — a flood of distinct live IPs (trivial over IPv6)
+            // grows the map without limit (a memory-exhaustion DoS). Evict the
+            // LEAST-throttled buckets (highest virtual tokens) down to the cap: a
+            // near-full bucket sheds ~no enforcement when evicted (recreated at
+            // `burst`), while a drained/throttled bucket keeps its penalty.
+            // Losing perfect per-IP tracking for the least-penalized IPs is the
+            // correct trade against unbounded memory. Only a fresh insert can
+            // exceed the cap, so in steady state this evicts at most one bucket
+            // per charge.
+            while map.len() > self.config.max_tracked_ips {
+                let Some(victim) = map
+                    .iter()
+                    .max_by(|(_, a), (_, b)| {
+                        virtual_tokens(a)
+                            .partial_cmp(&virtual_tokens(b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(&ip, _)| ip)
+                else {
+                    break;
+                };
+                map.remove(&victim);
+            }
         }
         outcome
     }
@@ -615,6 +644,63 @@ mod tests {
         assert!(allowed(gov.charge_at(ip(2), 1.0, t1)));
         let map = gov.buckets.lock().expect("mutex");
         assert!(map.contains_key(&ip(1)), "non-full idle bucket is kept");
+    }
+
+    // ----- hard bound under active-peer flood (#168 review) -----
+
+    #[test]
+    fn active_peer_flood_stays_within_max_tracked_ips() {
+        // Regression: the idle-only prune could not bound the table under a
+        // flood of DISTINCT, ACTIVE peers (all idle < cutoff), so
+        // `max_tracked_ips` was not a real cap — an unbounded-memory DoS. The
+        // hard eviction pass must hold the map at/under the cap.
+        let gov = Governor::new(GovernorConfig {
+            refill_per_sec: 1.0,
+            burst: 5.0,
+            exempt_loopback: false,
+            max_tracked_ips: 4,
+            idle_prune_after: Duration::from_secs(600),
+            ..GovernorConfig::default()
+        })
+        .expect("valid governor config");
+        let t0 = Instant::now();
+        // 50 distinct IPs, all charged at the same instant ⇒ all active, none
+        // idle. Pre-fix this grew the table to 50; post-fix it stays ≤ 4.
+        for n in 0..50u8 {
+            let _ = gov.charge_at(ip(n), 1.0, t0);
+        }
+        let map = gov.buckets.lock().expect("mutex");
+        assert!(
+            map.len() <= 4,
+            "active-peer flood must stay within max_tracked_ips=4, got {}",
+            map.len()
+        );
+    }
+
+    #[test]
+    fn hard_eviction_sheds_the_least_throttled_bucket() {
+        // Under memory pressure the evictor sheds the LEAST-throttled bucket: a
+        // drained (throttled) IP keeps its penalty; a near-full IP is dropped
+        // (recreated at `burst`, so ~no enforcement is lost). Both charged at
+        // t0 (idle=0), so virtual tokens = stored tokens.
+        let gov = Governor::new(GovernorConfig {
+            refill_per_sec: 1.0,
+            burst: 10.0,
+            exempt_loopback: false,
+            max_tracked_ips: 1,
+            idle_prune_after: Duration::from_secs(600),
+            ..GovernorConfig::default()
+        })
+        .expect("valid governor config");
+        let t0 = Instant::now();
+        // ip(1): drained to 0 (throttled). ip(2): fresh, near-full. Over cap=1
+        // ⇒ the fuller ip(2) is evicted, the throttled ip(1) is kept.
+        assert!(allowed(gov.charge_at(ip(1), 10.0, t0)));
+        let _ = gov.charge_at(ip(2), 1.0, t0);
+        let map = gov.buckets.lock().expect("mutex");
+        assert!(map.contains_key(&ip(1)), "throttled bucket must survive");
+        assert!(!map.contains_key(&ip(2)), "least-throttled bucket evicted");
+        assert_eq!(map.len(), 1, "table held at the cap");
     }
 
     // ----- proxy loopback-trust withdrawal -----
