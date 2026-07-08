@@ -1261,24 +1261,30 @@ pub fn router_with_mempool_and_wallet_and_security(
     // registrations are lost on restart until a durable `*-db` store lands
     // (documented in the webhooks module docs).
     let v1_webhooks_engine = std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default()));
+    let mut v1_webhooks_handle = Some(crate::v1::WebhooksHandle {
+        engine: v1_webhooks_engine.clone(),
+        bus: v1_realtime.bus.clone(),
+        url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
+    });
     if tokio::runtime::Handle::try_current().is_ok() {
-        let webhook_sink: std::sync::Arc<dyn crate::v1::WebhookSink> = std::sync::Arc::new(
-            crate::v1::ReqwestSink::new()
-                .expect("reqwest client builds with the rustls-tls backend"),
-        );
-        crate::v1::spawn_webhook_worker_once(
-            v1_realtime.bus.clone(),
-            v1_webhooks_engine.clone(),
-            webhook_sink,
-            crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
-        );
+        match crate::v1::ReqwestSink::new() {
+            Ok(sink) => crate::v1::spawn_webhook_worker_once(
+                v1_realtime.bus.clone(),
+                v1_webhooks_engine,
+                std::sync::Arc::new(sink),
+                crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
+            ),
+            Err(error) => {
+                // Webhooks are auxiliary — a sink build failure must not take
+                // the node down. Without a sink, registrations would accept
+                // but never deliver, so answer `webhooks_disabled` instead.
+                tracing::error!(%error, "webhook HTTP sink failed to build; webhooks disabled");
+                v1_webhooks_handle = None;
+            }
+        }
     }
     let v1_webhooks_state = crate::v1::WebhooksState {
-        handle: Some(crate::v1::WebhooksHandle {
-            engine: v1_webhooks_engine,
-            bus: v1_realtime.bus.clone(),
-            url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
-        }),
+        handle: v1_webhooks_handle,
         network,
     };
     let v1_state = crate::v1::V1State {

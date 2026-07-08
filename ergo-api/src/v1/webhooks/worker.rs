@@ -172,8 +172,9 @@ pub struct ReqwestSink {
 impl ReqwestSink {
     /// Build the shared client once (constructed at server start, not per
     /// request). Fails only if the TLS backend cannot initialize (e.g. no
-    /// usable root store) — a startup-time error the caller should treat as
-    /// fatal, not a per-delivery condition.
+    /// usable root store) — a startup-time condition; the server seam reacts
+    /// by disabling the webhook subsystem (`webhooks_disabled`) rather than
+    /// taking the node down.
     pub fn new() -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .connect_timeout(SINK_REQUEST_TIMEOUT)
@@ -201,8 +202,12 @@ impl WebhookSink for ReqwestSink {
                 }
             }
             // Connect / TLS / timeout / mid-transfer failure — no response to
-            // grade, so there is no HTTP status to report.
-            Err(_) => DeliveryOutcome::TransportError,
+            // grade, so there is no HTTP status to report. The outcome enum
+            // can't carry the cause, so log it here (DNS vs TLS vs timeout).
+            Err(error) => {
+                tracing::warn!(url = %req.url, %error, "webhook delivery transport error");
+                DeliveryOutcome::TransportError
+            }
         }
     }
 }
