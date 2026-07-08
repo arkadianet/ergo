@@ -254,8 +254,9 @@ impl RealtimeBus {
         let latest_seq = g.next_seq - 1;
         let gap = match g.backfill.front() {
             // Oldest retained event is newer than the first event the client
-            // still needs → the window rolled past `since`.
-            Some(front) => front.seq > since + 1,
+            // still needs → the window rolled past `since`. Saturating: the
+            // client controls `since`, so `u64::MAX` must not overflow.
+            Some(front) => front.seq > since.saturating_add(1),
             // Nothing retained but the cursor has advanced past `since`.
             None => latest_seq > since,
         };
@@ -487,6 +488,17 @@ mod tests {
         }
         let page = bus.backfill(&keyset(&["blocks"]), 1, 100);
         assert!(page.gap, "since predates the window → gap");
+    }
+
+    #[test]
+    fn backfill_since_u64_max_no_overflow_no_gap() {
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        bus.publish(blk(0));
+        // A client-supplied `since` of u64::MAX must not overflow the gap
+        // check; it is ahead of everything retained, so no gap, no events.
+        let page = bus.backfill(&keyset(&["blocks"]), u64::MAX, 100);
+        assert!(!page.gap);
+        assert!(page.events.is_empty());
     }
 
     // ----- connection limiter -----
