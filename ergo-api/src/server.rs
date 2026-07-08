@@ -1254,9 +1254,9 @@ pub fn router_with_mempool_and_wallet_and_security(
     // The registry + delivery-log + retry/backoff/HMAC state machine are wired
     // here; the concrete outbound HTTP(S) sink is a deferred dependency decision
     // (the node's lock ships no HTTP client / TLS stack), so no delivery worker
-    // is spawned yet — registration + the delivery log are live and correct,
-    // deliveries enqueue and are queryable as `pending` until a `WebhookSink`
-    // lands. Persistence is in-memory this PR: registrations are lost on restart
+    // is spawned yet — registrations are stored and queryable, but NO pending
+    // deliveries are created until a `WebhookSink` + worker are wired in.
+    // Persistence is in-memory this PR: registrations are lost on restart
     // until a durable `*-db` store lands (both deferrals are documented).
     let v1_webhooks_state = crate::v1::WebhooksState {
         handle: Some(crate::v1::WebhooksHandle {

@@ -32,8 +32,8 @@
 //!    stack, so a real HTTPS client is a deliberate dependency decision left as
 //!    a follow-up. The engine + worker + retry discipline are complete and
 //!    tested against an injected in-process sink; no worker is spawned in
-//!    production until a sink is wired, so deliveries enqueue and are queryable
-//!    (`pending`) without leaking in-flight state.
+//!    production until a sink is wired, so registrations are stored and
+//!    queryable but no pending deliveries are created yet.
 
 pub mod engine;
 pub mod model;
