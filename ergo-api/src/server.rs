@@ -1251,19 +1251,40 @@ pub fn router_with_mempool_and_wallet_and_security(
     }
     // Webhooks (§4.1) — the durable, retried, signed sibling of WS. An internal
     // subscriber to the SAME `RealtimeBus` (one event source, one global seq).
-    // The registry + delivery-log + retry/backoff/HMAC state machine are wired
-    // here; the concrete outbound HTTP(S) sink is a deferred dependency decision
-    // (the node's lock ships no HTTP client / TLS stack), so no delivery worker
-    // is spawned yet — registrations are stored and queryable, but NO pending
-    // deliveries are created until a `WebhookSink` + worker are wired in.
-    // Persistence is in-memory this PR: registrations are lost on restart
-    // until a durable `*-db` store lands (both deferrals are documented).
+    // The registry + delivery-log + retry/backoff/HMAC state machine, and the
+    // production `ReqwestSink` (rustls-TLS only — no system OpenSSL, see
+    // `ergo-api/Cargo.toml`), are constructed here; the delivery worker is
+    // spawned exactly once per process (guarded to a live Tokio runtime, same
+    // idiom as the O4 depth sampler / realtime-bridge feeder above), so
+    // registered webhooks now actually deliver. Persistence is the one
+    // remaining deferral: the registry + delivery log are in-memory, so
+    // registrations are lost on restart until a durable `*-db` store lands
+    // (documented in the webhooks module docs).
+    let v1_webhooks_engine = std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default()));
+    let mut v1_webhooks_handle = Some(crate::v1::WebhooksHandle {
+        engine: v1_webhooks_engine.clone(),
+        bus: v1_realtime.bus.clone(),
+        url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
+    });
+    if tokio::runtime::Handle::try_current().is_ok() {
+        match crate::v1::ReqwestSink::new() {
+            Ok(sink) => crate::v1::spawn_webhook_worker_once(
+                v1_realtime.bus.clone(),
+                v1_webhooks_engine,
+                std::sync::Arc::new(sink),
+                crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
+            ),
+            Err(error) => {
+                // Webhooks are auxiliary — a sink build failure must not take
+                // the node down. Without a sink, registrations would accept
+                // but never deliver, so answer `webhooks_disabled` instead.
+                tracing::error!(%error, "webhook HTTP sink failed to build; webhooks disabled");
+                v1_webhooks_handle = None;
+            }
+        }
+    }
     let v1_webhooks_state = crate::v1::WebhooksState {
-        handle: Some(crate::v1::WebhooksHandle {
-            engine: std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default())),
-            bus: v1_realtime.bus.clone(),
-            url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
-        }),
+        handle: v1_webhooks_handle,
         network,
     };
     let v1_state = crate::v1::V1State {

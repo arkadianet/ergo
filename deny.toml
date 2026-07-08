@@ -25,6 +25,14 @@ allow = [
     "MPL-2.0",
 ]
 
+# Per-crate license exceptions — scoped, not global allows.
+exceptions = [
+    # webpki-roots ships the Mozilla CA root-store *data* (pulled in by
+    # reqwest's rustls-tls backend); CDLA-Permissive-2.0 is a permissive
+    # data-only license.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
+
 [bans]
 # Reject multiple major-version copies of the same crate where it's
 # avoidable. `warn` rather than `deny` so transitive duplicates

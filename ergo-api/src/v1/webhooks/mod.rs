@@ -23,17 +23,17 @@
 //! channel vocabulary ([`parse_channel`](crate::v1::realtime::parse_channel)),
 //! the same `channel_unavailable` liveness gate for not-yet-live classes.
 //!
-//! **Two honest deferrals (see the PR report):**
-//! 1. **Persistence** — the registry + delivery log are bounded and in-memory;
-//!    registrations are LOST on node restart until a `*-db` schema lands
-//!    (CLAUDE.md §2). No schema is invented here.
-//! 2. **Concrete network transport** — the outbound HTTP(S) client is injected
-//!    via [`WebhookSink`]. The node's lock ships no HTTP client and no TLS
-//!    stack, so a real HTTPS client is a deliberate dependency decision left as
-//!    a follow-up. The engine + worker + retry discipline are complete and
-//!    tested against an injected in-process sink; no worker is spawned in
-//!    production until a sink is wired, so registrations are stored and
-//!    queryable but no pending deliveries are created yet.
+//! **Live delivery.** The production sink ([`worker::ReqwestSink`], rustls-TLS
+//! only — no system OpenSSL, see `ergo-api/Cargo.toml`) is wired at the server
+//! seam and spawned exactly once per process, guarded to a live Tokio runtime
+//! (same idiom as the O4 depth sampler / realtime-bridge feeder). Registered
+//! webhooks now actually POST to their operator-configured URL under the
+//! engine's at-least-once, exponential-backoff, HMAC-signed discipline.
+//!
+//! **One remaining honest deferral (see the PR report): persistence.** The
+//! registry + delivery log are bounded and in-memory; registrations are LOST
+//! on node restart until a `*-db` schema lands (CLAUDE.md §2). No schema is
+//! invented here.
 
 pub mod engine;
 pub mod model;
@@ -45,4 +45,6 @@ pub use engine::{
 };
 pub use model::{sign_body, Subscription, UrlPolicy};
 pub use routes::{webhooks_router, WebhooksHandle, WebhooksState};
-pub use worker::{spawn_webhook_worker, WebhookSink, DEFAULT_WORKER_TICK};
+pub use worker::{
+    spawn_webhook_worker, spawn_webhook_worker_once, ReqwestSink, WebhookSink, DEFAULT_WORKER_TICK,
+};
