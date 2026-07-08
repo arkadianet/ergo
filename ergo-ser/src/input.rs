@@ -100,6 +100,43 @@ pub fn write_context_extension(
     Ok(())
 }
 
+/// Read the ContextExtension entry-count byte with Scala's SIGNED semantics.
+///
+/// Consensus parity (sigma-state 6.0.2): Scala
+/// `ContextExtension.serializer.parse`
+/// (`data/.../sigma/interpreter/ContextExtension.scala:53-55`) reads this count
+/// with `r.getByte()` — a SIGNED byte (`core/.../CoreByteReader.scala:43-46`) —
+/// and rejects any negative value
+/// (`if (extSize < 0) error("Negative amount of context extension values: ...")`
+/// → `SerializerException`) BEFORE reading a single entry. A wire count byte in
+/// `0x80..=0xFF` decodes to `-128..=-1` and is rejected. Rust historically read
+/// it UNSIGNED (`get_u8() as usize`, range `0..=255`) and went on to read that
+/// many entries, ACCEPTING inputs Scala rejects — a fork-dangerous
+/// accept-invalid divergence, live at every height and protocol version (the
+/// guard is un-versioned on both sides).
+///
+/// The fix rejects `raw > 127` (equivalently `raw as i8 < 0`) here, matching
+/// Scala's signed reject exactly, and rejecting BEFORE any entry is read.
+///
+/// Consensus safety — byte-inert for every currently-valid transaction: Scala
+/// has ALWAYS rejected a count above 127, and its serializer refuses to even
+/// WRITE one (`if (size > Byte.MaxValue) error`, ContextExtension.scala:47), so
+/// no canonical-chain block and no honestly-relayed transaction can carry a
+/// context extension with more than 127 entries. This change therefore adds
+/// zero false rejects; it only closes the accept-invalid direction (Rust used
+/// to accept counts `128..=255`, Scala rejects them). Counts `0..=127` decode
+/// exactly as before.
+fn read_extension_count(r: &mut VlqReader) -> Result<usize, ReadError> {
+    let raw = r.get_u8()?;
+    if raw > 0x7f {
+        return Err(ReadError::InvalidData(format!(
+            "negative context-extension value count: {} (Scala reads the count as a signed byte and rejects the high bit)",
+            raw as i8
+        )));
+    }
+    Ok(raw as usize)
+}
+
 /// Decode the wire form produced by [`write_context_extension`].
 /// Insertion order = wire order: IndexMap preserves the order keys
 /// arrived on the wire so a subsequent re-serialize (for ≤ 4 entries)
@@ -134,7 +171,7 @@ pub fn write_context_extension(
 /// closed: the pre-gate reader ACCEPTED these (accept-invalid, fork
 /// risk); the gate makes Rust reject-parity with Scala.
 pub fn read_context_extension(r: &mut VlqReader) -> Result<ContextExtension, ReadError> {
-    let count = r.get_u8()? as usize;
+    let count = read_extension_count(r)?;
     let mut values = IndexMap::with_capacity(count);
     for _ in 0..count {
         let key = r.get_u8()?;
@@ -165,7 +202,7 @@ pub fn split_context_extension_bytes(
     extension_bytes: &[u8],
 ) -> Result<Vec<(u8, Vec<u8>)>, ReadError> {
     let mut r = VlqReader::new(extension_bytes);
-    let count = r.get_u8()? as usize;
+    let count = read_extension_count(&mut r)?;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let key = r.get_u8()?;
@@ -1055,5 +1092,165 @@ mod tests {
             SigmaType::SByte,
             SigmaType::SOption(Box::new(SigmaType::SInt)),
         ])))));
+    }
+
+    // ----- oracle parity -----
+    //
+    // The ATTACK/CONTROL verdicts below come from the sigma-state 6.0.2
+    // Scala reference (scripts/jvm_serde_oracle, surface `transaction`),
+    // recorded in dev-docs/context-ext-count-signedness-recon.md. They are
+    // EXTERNAL oracle verdicts, not self-oracles: Scala's
+    // ContextExtension.serializer.parse reads the count with a SIGNED
+    // getByte() and rejects the high bit before reading any entry.
+
+    #[test]
+    fn context_extension_count_127_boundary_accepts_and_round_trips() {
+        // 127 = Byte.MaxValue, the largest count Scala's signed count byte
+        // permits. Must decode and round-trip exactly as before the fix — a
+        // false reject here would strand valid txs (reject-valid regression).
+        let mut ext = ContextExtension::empty();
+        for key in 0u8..127 {
+            ext.values
+                .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+        }
+        assert_eq!(ext.values.len(), 127, "test setup: 127 entries");
+        let bytes = serialize_ext(&ext);
+        assert_eq!(bytes[0], 0x7f, "count byte must be 127 (0x7f)");
+        let mut r = VlqReader::new(&bytes);
+        let decoded = read_context_extension(&mut r).unwrap();
+        assert!(r.is_empty(), "127 entries must consume all bytes");
+        assert_eq!(decoded.values.len(), 127);
+    }
+
+    #[test]
+    fn context_extension_low_counts_still_accept() {
+        // Counts 0, 1, 2, 3 (all below the high bit) decode unchanged.
+        for n in 0u8..=3 {
+            let mut ext = ContextExtension::empty();
+            for key in 0..n {
+                ext.values
+                    .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+            }
+            let bytes = serialize_ext(&ext);
+            assert_eq!(bytes[0], n, "count byte");
+            let mut r = VlqReader::new(&bytes);
+            let decoded = read_context_extension(&mut r).unwrap();
+            assert!(r.is_empty());
+            assert_eq!(decoded.values.len(), n as usize);
+        }
+    }
+
+    #[test]
+    fn context_extension_count_128_boundary_rejects_negative_signed() {
+        // 128 sets the high bit: Scala's getByte() reads -128 and rejects
+        // ("Negative amount of context extension values: -128"). Rust used to
+        // accept it (get_u8() -> 128, read 128 entries). Post-fix Rust must
+        // reject AT the count byte, before reading any entry.
+        let mut ext = ContextExtension::empty();
+        for key in 0u8..128 {
+            ext.values
+                .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+        }
+        assert_eq!(ext.values.len(), 128, "test setup: 128 entries");
+        let bytes = serialize_ext(&ext);
+        assert_eq!(
+            bytes[0], 0x80,
+            "count byte must be 128 (0x80, high bit set)"
+        );
+        let mut r = VlqReader::new(&bytes);
+        let err = read_context_extension(&mut r).unwrap_err();
+        match &err {
+            ReadError::InvalidData(msg) => {
+                assert!(
+                    msg.contains("negative context-extension value count"),
+                    "got: {msg}"
+                );
+                assert!(msg.contains("-128"), "must name signed -128, got: {msg}");
+            }
+            other => panic!("expected InvalidData reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_context_extension_bytes_count_127_accepts_128_rejects() {
+        // The verbatim-bytes JSON path mirrors the same count read; it must
+        // agree with read_context_extension at the boundary.
+        let mut ext127 = ContextExtension::empty();
+        for key in 0u8..127 {
+            ext127
+                .values
+                .insert(key, (SigmaType::SInt, SigmaValue::Int(0)));
+        }
+        let bytes127 = serialize_ext(&ext127);
+        assert_eq!(bytes127[0], 0x7f);
+        let entries = split_context_extension_bytes(&bytes127).unwrap();
+        assert_eq!(entries.len(), 127, "127 must split cleanly");
+
+        let mut ext128 = ContextExtension::empty();
+        for key in 0u8..128 {
+            ext128
+                .values
+                .insert(key, (SigmaType::SInt, SigmaValue::Int(0)));
+        }
+        let bytes128 = serialize_ext(&ext128);
+        assert_eq!(bytes128[0], 0x80);
+        let err = split_context_extension_bytes(&bytes128).unwrap_err();
+        match &err {
+            ReadError::InvalidData(msg) => assert!(
+                msg.contains("negative context-extension value count"),
+                "got: {msg}"
+            ),
+            other => panic!("expected InvalidData reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_extension_oracle_control_count_2_accepts() {
+        // Recon NEGATIVE CONTROL: extension bytes `02 00 0400 01 0402`
+        // (count=2, {0 -> Int(0), 1 -> Int(1)}). Scala oracle verdict: ACCEPT,
+        // re-serialized byte-identical. Rust must ACCEPT and round-trip.
+        let wire = [0x02u8, 0x00, 0x04, 0x00, 0x01, 0x04, 0x02];
+        let mut r = VlqReader::new(&wire);
+        let ext = read_context_extension(&mut r).unwrap();
+        assert!(r.is_empty(), "control must consume all bytes");
+        assert_eq!(ext.values.len(), 2);
+        assert_eq!(
+            ext.values.get(&0),
+            Some(&(SigmaType::SInt, SigmaValue::Int(0)))
+        );
+        assert_eq!(
+            ext.values.get(&1),
+            Some(&(SigmaType::SInt, SigmaValue::Int(1)))
+        );
+        let mut w = VlqWriter::new();
+        write_context_extension(&mut w, &ext).unwrap();
+        assert_eq!(w.result(), wire, "<=4 entries re-serialize byte-identical");
+    }
+
+    #[test]
+    fn context_extension_oracle_attack_count_128_rejects() {
+        // Recon ATTACK: count byte 0x80 (=128) followed by 128 well-formed
+        // SInt entries (enough bytes that pre-fix Rust parsed them all and
+        // returned Ok — the accept-invalid divergence). Scala oracle verdict:
+        // REJECT (SerializerException, "Negative amount of context extension
+        // values: -128"). Post-fix Rust must REJECT at the count byte.
+        let mut wire = vec![0x80u8];
+        for key in 0u8..128 {
+            wire.push(key); // entry key
+            wire.push(0x04); // SInt type code
+            wire.push(0x00); // zigzag(0) = value 0
+        }
+        let mut r = VlqReader::new(&wire);
+        let err = read_context_extension(&mut r).unwrap_err();
+        match &err {
+            ReadError::InvalidData(msg) => {
+                assert!(
+                    msg.contains("negative context-extension value count"),
+                    "got: {msg}"
+                );
+                assert!(msg.contains("-128"), "must name signed -128, got: {msg}");
+            }
+            other => panic!("expected InvalidData reject, got {other:?}"),
+        }
     }
 }
