@@ -58,6 +58,10 @@ pub struct V1State {
     /// Shared O4 mempool-depth sample ring — the source for
     /// `mempool/summary?history=` and (future) `stats/mempool-depth`.
     pub mempool_depth: Arc<crate::v1::mempool_depth::MempoolDepthRing>,
+    /// Real-time subscriptions (`WS /api/v1/ws`) — the shared `RealtimeBus` +
+    /// connection limiter. `None` ⇒ the WS route answers `realtime_disabled`
+    /// (never a bare 404), per the subsystem-off rule (§4.1).
+    pub realtime: Option<crate::v1::realtime::RealtimeHandle>,
     /// Address-encoding network prefix.
     pub network: NetworkPrefix,
 }
@@ -447,5 +451,13 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             governor_mw,
         ));
 
-    heavy.merge(cheap).with_state(state)
+    // Real-time subscriptions (§3.16 / §4.1). The WS upgrade is a long-lived
+    // socket, not a per-request read, so it is NOT fronted by the token-bucket
+    // governor route-class; its cost is bounded by the connection limiter
+    // (per-IP / global caps, checked pre-upgrade) and the per-socket control-op
+    // rate limit + bounded send queue inside the handler.
+    let realtime: Router<V1State> =
+        Router::new().route("/api/v1/ws", get(crate::v1::realtime::ws_handler));
+
+    heavy.merge(cheap).merge(realtime).with_state(state)
 }
