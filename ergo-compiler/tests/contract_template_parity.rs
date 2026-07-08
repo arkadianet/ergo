@@ -8,15 +8,12 @@
 //! `ORACLE_TREE_VERSION=3`, `ORACLE_NETWORK=testnet`).
 //!
 //! Gate:
-//! - oracle `OK <hex>`, ≤4 params → our `ContractTemplate::serialize()` MUST be
-//!   byte-identical to `<hex>` (the M7 deliverable);
-//! - oracle `OK <hex>`, ≥5 params → our `compile_contract` MUST REJECT with
-//!   [`ergo_compiler::ContractError::TooManyParamsForOrdering`] — the
-//!   deliberately-deferred JVM-HashMap placeholder-order case
-//!   (`TODO(M7-hashmap-order)`): flagged, never mis-emitted;
+//! - oracle `OK <hex>` → our `ContractTemplate::serialize()` MUST be
+//!   byte-identical to `<hex>` (the M7 deliverable) — for ≤4 params (declaration
+//!   order) AND ≥5 params (Scala 2.12 `HashTrieMap` placeholder-iteration order);
 //! - oracle `REJECT …` → our `compile_contract` MUST also reject (class advisory).
 
-use ergo_compiler::{compile_contract, ContractError, NetworkPrefix};
+use ergo_compiler::{compile_contract, NetworkPrefix};
 use serde_json::Value;
 
 const SEED: &str = include_str!("../../test-vectors/ergoscript/contract/contract_seed.json");
@@ -33,7 +30,7 @@ fn contract_template_seed_byte_parity() {
     assert!(!vectors.is_empty(), "seed must carry vectors");
 
     let mut byte_exact = 0usize;
-    let mut deferred = 0usize;
+    let mut byte_exact_ge5 = 0usize;
     let mut rejects = 0usize;
     let mut failures: Vec<String> = Vec::new();
 
@@ -49,15 +46,14 @@ fn contract_template_seed_byte_parity() {
                     let ours = to_hex(&ct.serialize());
                     if ours == hex {
                         byte_exact += 1;
+                        if ct.parameters.len() > 4 {
+                            byte_exact_ge5 += 1;
+                        }
                     } else {
                         failures.push(format!(
                             "[{name}] byte mismatch\n     ours: {ours}\n   oracle: {hex}"
                         ));
                     }
-                }
-                Err(ContractError::TooManyParamsForOrdering { count, .. }) if count > 4 => {
-                    // Deferred ≥5-param case: oracle accepts, we honestly flag.
-                    deferred += 1;
                 }
                 Err(e) => failures.push(format!(
                     "[{name}] oracle ACCEPT but compile_contract rejected: {e:?}"
@@ -80,12 +76,15 @@ fn contract_template_seed_byte_parity() {
         "contract-template parity failures:\n{}",
         failures.join("\n")
     );
-    // Positive coverage floor: the byte-exact class is the milestone deliverable,
-    // and both the deferral and reject paths must actually be exercised.
+    // Positive coverage floor: the byte-exact class is the milestone deliverable;
+    // the ≥5-param HashTrieMap-order path and the reject path must be exercised.
     assert!(
         byte_exact >= 8,
         "expected >=8 byte-exact vectors, got {byte_exact}"
     );
-    assert!(deferred >= 1, "the >=5-param deferral must be exercised");
+    assert!(
+        byte_exact_ge5 >= 3,
+        "the ≥5-param HashTrieMap-order path must be byte-exact (got {byte_exact_ge5})"
+    );
     assert!(rejects >= 1, "a reject vector must be exercised");
 }

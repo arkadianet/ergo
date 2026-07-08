@@ -6,27 +6,26 @@
 //! ([`crate::tree::graph_build`]) with one `ConstantPlaceholder(index, tpe)`
 //! seeded per param → a [`ContractTemplate`] metadata record.
 //!
-//! ## Placeholder-index assignment — declaration order, ≤4 params only
+//! ## Placeholder-index assignment — map iteration order
 //! Scala builds `parEnv = params.map(p => p.name -> p.tpe).toMap`
 //! (SigmaTemplateCompiler.scala:28) then, in `compileTyped`,
 //! `placeholdersEnv = env.collect{…}.zipWithIndex.map{ (name,t),i =>
-//! name -> ConstantPlaceholder(i, t) }.toMap` (SigmaCompiler.scala:88-92). For
-//! **≤4** entries Scala's immutable `Map` is a `Map1..Map4` that preserves
-//! INSERTION order, so `zipWithIndex` assigns `index = declaration position` —
-//! byte-exact against declaration order (M7 recon §3; the M5 adversarial
-//! `m5-adversarial-findings-CAPTURED.md` "M7 param-ordering" verdict).
+//! name -> ConstantPlaceholder(i, t) }.toMap` (SigmaCompiler.scala:88-92). The
+//! placeholder index each param receives is thus its position in the immutable
+//! `Map`'s ITERATION order, which is serialized into the `expressionTree` bytes.
 //!
-//! For **≥5** params the `.toMap` upgrades to a JVM `HashMap` whose iteration
-//! order is `improve(String.hashCode)` bucket order, NOT declaration order — the
-//! placeholder index a body reference resolves to then diverges from the param's
-//! declared position and leaks into the `expressionTree` bytes. Reproducing that
-//! requires a JVM-`HashMap`-iteration-order port (target Scala 2.12).
+//! For **≤4** entries Scala's immutable `Map` is a `Map1..Map4` that preserves
+//! INSERTION order, so `index = declaration position` — byte-exact against
+//! declaration order (M7 recon §3). For **≥5** params the `.toMap` upgrades to a
+//! JVM `HashMap` whose iteration order is `improve(String.hashCode)` bucket
+//! order, NOT declaration order — reproduced here via
+//! [`crate::param_order::iteration_order_2_12`] (Scala 2.12 `HashTrieMap` walk,
+//! the version the `ct` oracle and ergo-appkit pin; recon §5).
 //!
-//! TODO(M7-hashmap-order): port the `improve`/bucket iteration order for ≥5
-//! params. Until then [`compile_contract`] REJECTS a ≥5-param template with
-//! [`ContractError::TooManyParamsForOrdering`] rather than emit a
-//! silently-wrong tree (`constTypes`/`parameters` stay declaration-ordered
-//! regardless — only the body's placeholder indices are at risk).
+//! CRUCIAL: `constTypes`/`constValues`/`parameters` (and each
+//! `Parameter.constantIndex`) walk `parsed.signature.params` DIRECTLY, so they
+//! stay declaration-ordered regardless (mirror `assemble`). ONLY the body's
+//! `ConstantPlaceholder` substitution follows the map order.
 
 use std::collections::HashMap;
 
@@ -45,8 +44,9 @@ use crate::typecheck::{typecheck_contract_body, CompileError};
 use crate::typed::{node_tpe, ConstPayload};
 
 /// Scala's `Map1..Map4` preserve insertion order; `.toMap` upgrades to a
-/// hash map at this many entries (M7 recon §3). At or above it, placeholder
-/// index assignment is HashMap-iteration-order, not declaration order.
+/// hash map ABOVE this many entries (M7 recon §3). At or below it, placeholder
+/// index assignment is declaration order; above it, Scala 2.12 `HashTrieMap`
+/// iteration order ([`crate::param_order::iteration_order_2_12`]).
 pub const MAX_DECLARATION_ORDER_PARAMS: usize = 4;
 
 /// A contract-template parameter record (`org.ergoplatform.sdk.Parameter`,
@@ -82,15 +82,6 @@ pub enum ContractError {
     /// Parse/typecheck/emit failure in the underlying pipeline.
     #[error(transparent)]
     Compile(#[from] CompileError),
-    /// ≥5 params — the placeholder-index order is JVM-`HashMap` iteration order,
-    /// not declaration order, and the port is deferred
-    /// (TODO(M7-hashmap-order)). Rejected rather than mis-emitted.
-    #[error(
-        "contract has {count} parameters; byte-exact placeholder ordering for \
-         >{max} params requires the deferred JVM-HashMap iteration-order port \
-         (TODO(M7-hashmap-order))"
-    )]
-    TooManyParamsForOrdering { count: usize, max: usize },
     /// Two `@contract` parameters share the same name. Scala's
     /// `ContractTemplate.validate()` `require(!paramNames.contains(p.name), ...)`
     /// (ContractTemplate.scala:116-117) throws `IllegalArgumentException` — a
@@ -110,14 +101,6 @@ pub fn compile_contract(
     let parsed = parse_contract(source, tree_version).map_err(CompileError::Parse)?;
     let params = &parsed.signature.params;
 
-    // ≥5 params → deferred HashMap-order port; reject, do not mis-emit.
-    if params.len() > MAX_DECLARATION_ORDER_PARAMS {
-        return Err(ContractError::TooManyParamsForOrdering {
-            count: params.len(),
-            max: MAX_DECLARATION_ORDER_PARAMS,
-        });
-    }
-
     // parEnv = params.map(p => p.name -> p.tpe) (SigmaTemplateCompiler.scala:28).
     let type_params: Vec<(String, SType)> = params
         .iter()
@@ -127,13 +110,28 @@ pub fn compile_contract(
     // typecheck(env, body) with the param TYPE env (SigmaCompiler.scala:74-78).
     let typed = typecheck_contract_body(&parsed.body, &type_params, tree_version, network)?;
 
-    // placeholdersEnv: name -> ConstantPlaceholder(index) in DECLARATION order
-    // (≤4 params; SigmaCompiler.scala:88-92 with Map1..Map4 insertion order).
-    let placeholders: HashMap<String, u32> = params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.name.clone(), i as u32))
-        .collect();
+    // placeholdersEnv: name -> ConstantPlaceholder(index) at the param's position
+    // in the immutable `Map`'s ITERATION order (SigmaCompiler.scala:88-92). For
+    // ≤4 params `Map1..Map4` preserve insertion order (index = declaration
+    // position); for ≥5 the `.toMap` hash map iterates in Scala 2.12
+    // `HashTrieMap` order. Only this substitution follows the map order —
+    // `constTypes`/`parameters` below stay declaration-ordered.
+    let placeholders: HashMap<String, u32> = if params.len() <= MAX_DECLARATION_ORDER_PARAMS {
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.clone(), i as u32))
+            .collect()
+    } else {
+        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        crate::param_order::iteration_order_2_12(&names)
+            .into_iter()
+            .enumerate()
+            .map(|(placeholder_idx, decl_idx)| {
+                (params[decl_idx].name.clone(), placeholder_idx as u32)
+            })
+            .collect()
+    };
 
     // Root dispatch + placeholder-aware emit, then the SHARED graph-building
     // pipeline (identical to `compile`). `expr.toSigmaProp`
@@ -370,20 +368,22 @@ mod tests {
     // ----- error paths -----
 
     #[test]
-    fn five_params_deferred_not_mis_emitted() {
-        // ≥5 params: JVM-HashMap placeholder-order port deferred
-        // (TODO(M7-hashmap-order)) — MUST be a distinct, honest reject.
-        let err = compile_contract(
+    fn five_params_compiles_with_hashmap_placeholder_order() {
+        // ≥5 params: placeholder indices follow the Scala 2.12 HashTrieMap
+        // iteration order, no longer rejected. `parameters` stay declaration-
+        // ordered; byte-exactness vs the oracle is the parity gate's job.
+        let ct = cc(
             "/* */\n@contract def g5(a: Int, b: Int, c: Int, d: Int, e: Int) \
              = sigmaProp(a + b + c + d + e > 0)",
-            3,
-            NetworkPrefix::Testnet,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            ContractError::TooManyParamsForOrdering { count: 5, max: 4 }
-        ));
+        );
+        assert_eq!(ct.const_types.len(), 5);
+        assert_eq!(ct.parameters.len(), 5);
+        // Declaration order preserved in the parameters list + constant indices.
+        let names: Vec<&str> = ct.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d", "e"]);
+        for (i, p) in ct.parameters.iter().enumerate() {
+            assert_eq!(p.constant_index, i as u32);
+        }
     }
 
     #[test]
