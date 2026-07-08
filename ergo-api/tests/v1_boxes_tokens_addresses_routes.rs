@@ -375,6 +375,140 @@ async fn addresses_unspent_is_dual_mount_of_boxes_unspent_by_address() {
     assert_eq!(b1, b2);
 }
 
+// ----- semantic decode / protocol registry (§4.3) -------------------------
+
+// SigmaUSD v2 identifying tokens (grounded vs mainnet token metadata).
+const SIGUSD_BANK_NFT: &str = "7d672d1def471720ca5b1dd6a56b48a83db78f5510c2a48800a5e2588f43c9e5";
+
+#[tokio::test]
+async fn protocols_list_advertises_registry_capabilities() {
+    let (status, body) = get(None, "/api/v1/protocols").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_page_envelope(&body);
+    // SigmaUSD is present and fully decodable.
+    let sigusd = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["protocol_id"] == "sigmausd")
+        .expect("sigmausd registered");
+    assert_eq!(sigusd["decodable"], serde_json::json!(true));
+    assert_eq!(sigusd["family"], "bank");
+    // Stubs are advertised but honestly not decodable (no fabricated support).
+    let spectrum = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["protocol_id"] == "spectrum")
+        .expect("spectrum registered as a stub");
+    assert_eq!(spectrum["decodable"], serde_json::json!(false));
+    assert_eq!(spectrum["matcher_count"], serde_json::json!(0));
+}
+
+#[tokio::test]
+async fn protocol_detail_exposes_matchers_for_client_precompute() {
+    let (status, body) = get(None, "/api/v1/protocols/sigmausd").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["protocol_id"], "sigmausd");
+    let matchers = body["matchers"].as_array().unwrap();
+    assert!(matchers
+        .iter()
+        .any(|m| m["kind"] == "identifying_token" && m["key"] == SIGUSD_BANK_NFT));
+}
+
+#[tokio::test]
+async fn protocol_detail_unknown_is_protocol_not_found() {
+    let (status, body) = get(None, "/api/v1/protocols/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(reason(&body), "protocol_not_found");
+}
+
+#[tokio::test]
+async fn protocol_state_unknown_protocol_is_protocol_not_found() {
+    let (status, body) = get(Some(caught_up()), "/api/v1/protocols/nope/state").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(reason(&body), "protocol_not_found");
+}
+
+#[tokio::test]
+async fn protocol_state_mismatched_box_role_names_the_real_role() {
+    // A wrong `box_role` on a singleton protocol is a client error naming the
+    // actual role — NOT the many-instance `not_a_singleton_protocol` answer.
+    let (status, body) = get(
+        Some(caught_up()),
+        "/api/v1/protocols/sigmausd/state?box_role=nope",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(reason(&body), "invalid_params");
+    let detail = body["error"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("bank"),
+        "detail names the real role: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn protocol_state_unresolved_nft_is_state_unavailable() {
+    // The store-less caught-up handle holds no boxes, so the singleton NFT
+    // cannot resolve — the honest `state_unavailable`, not a 500.
+    let (status, body) = get(Some(caught_up()), "/api/v1/protocols/sigmausd/state").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(reason(&body), "state_unavailable");
+}
+
+#[tokio::test]
+async fn boxes_decode_sigmausd_structured_box_populates_state() {
+    // The route path (`POST /boxes/decode`) drives the same decode seam as
+    // `boxes/{id}?decode=true`. Synthetic SigmaUSD bank body (verified token +
+    // register layout; numbers chosen) → decoded contract state.
+    let body = serde_json::json!({
+        "ergo_tree": "0008cd02a7955281885bf0f0ca4a48678848c4a9d301d5cabd2d3428f77c2b1d9761b6e6",
+        "value": "1402000000000000",
+        "assets": [
+            { "token_id": SIGUSD_BANK_NFT, "amount": "1" },
+            { "token_id": "03faf2cb329f2e90d6d23b58d91bbb6c046aa143261cc21f52fbe2824bfcbf04", "amount": "9000000000" }
+        ],
+        // R4 = SLong(1200345), R5 = SLong(9930021) — real zig-zag VLQ encoding.
+        "registers": { "R4": "05b2c39201", "R5": "05ca94bc09" }
+    });
+    let (status, resp) = send(
+        app(None),
+        Method::POST,
+        "/api/v1/boxes/decode",
+        Body::from(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resp: {resp}");
+    let contract = &resp["decoded"]["contract"];
+    assert_eq!(contract["protocol_id"], "sigmausd");
+    assert_eq!(contract["matched_by"], "identifying_token");
+    assert_eq!(contract["confidence"], "exact");
+    assert_eq!(contract["state"]["reserve_nanoerg"], "1402000000000000");
+    assert_eq!(contract["state"]["circulating_sigusd"], "1200345");
+    assert_eq!(contract["state"]["oracle_derived_price_available"], false);
+}
+
+#[tokio::test]
+async fn boxes_decode_unrecognized_box_is_honest_null_contract() {
+    let body = serde_json::json!({
+        "ergo_tree": "0008cd02a7955281885bf0f0ca4a48678848c4a9d301d5cabd2d3428f77c2b1d9761b6e6",
+        "value": "1000000",
+        "assets": [],
+        "registers": {}
+    });
+    let (status, resp) = send(
+        app(None),
+        Method::POST,
+        "/api/v1/boxes/decode",
+        Body::from(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resp["decoded"]["contract"].is_null());
+    assert!(resp["decoded"]["registers"].is_object());
+}
+
 // ----- stub read state ----------------------------------------------------
 
 struct StubRead;

@@ -17,6 +17,7 @@
 
 pub mod auth;
 pub mod cursor;
+pub mod decode;
 pub mod error;
 pub mod governor;
 pub mod mempool_depth;
@@ -32,6 +33,7 @@ pub use cursor::{
     clamp_limit, decode_cursor, decode_opt_cursor, encode_cursor, CursorError, CursorPayload, Page,
     CURSOR_VERSION, DEFAULT_LIMIT, MAX_LIMIT,
 };
+pub use decode::{decode_box, entry_by_id, ProtocolEntry, REGISTRY};
 pub use error::{v1_error, Reason, V1Error, V1ErrorInner};
 pub use governor::{Governor, GovernorConfig, GovernorConfigError, GovernorState, RouteClass};
 pub use mempool_depth::{
