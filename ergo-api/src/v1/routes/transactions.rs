@@ -23,9 +23,9 @@ use ergo_ser::transaction::{read_transaction, transaction_id};
 use serde_json::json;
 
 use super::dto::{confirmations, unix_ms_to_iso, V1Asset, V1Box, V1Tx};
-use super::V1State;
+use super::{parse_id32, V1State};
 use crate::blockchain::{
-    build_indexed_box_response, build_indexed_tx_response, BlockchainState, IndexedErgoBoxResponse,
+    build_indexed_box_response, build_indexed_tx_response, IndexedErgoBoxResponse,
 };
 use crate::types::{SubmitError, SubmitMode};
 use crate::v1::error::{v1_error, Reason};
@@ -38,18 +38,6 @@ use crate::v1::error::{v1_error, Reason};
 const FEE_PROPOSITION_ERGO_TREE_HEX: &str = "1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304";
 
 const REGISTER_NAMES: [&str; 6] = ["R4", "R5", "R6", "R7", "R8", "R9"];
-
-fn parse_id32(id_hex: &str) -> Option<[u8; 32]> {
-    // Canonical ids are 64-char LOWERCASE hex. Reuse the shared validator so
-    // tx-id parsing rejects uppercase/mixed-case exactly like the chain routes
-    // (CodeRabbit #169) — a non-canonical spelling is a `400 invalid_*`, never a
-    // lookup. `hex::decode` alone would accept uppercase (same bytes), leaving
-    // the tx-id and modifier-id validators misaligned.
-    if !super::valid_modifier_id(id_hex) {
-        return None;
-    }
-    hex::decode(id_hex).ok()?.try_into().ok()
-}
 
 fn invalid_tx_id() -> Response {
     v1_error(
@@ -97,14 +85,7 @@ pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String
 
     // Confirmed path: extra-index wins over a same-id pool entry.
     if let Some(itx) = indexer.tx_by_id(&tx_id) {
-        let bstate = BlockchainState {
-            read: state.read.clone(),
-            indexer: indexer.clone(),
-            network: state.network,
-            chain: state.chain.clone(),
-            mempool: state.mempool.clone(),
-            chain_params: None,
-        };
+        let bstate = state.blockchain_state(&indexer);
         return match build_indexed_tx_response(&bstate, &itx) {
             Ok(resp) => {
                 let best = state.read.status().best_full_block_height;

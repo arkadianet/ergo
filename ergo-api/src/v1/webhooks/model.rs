@@ -322,19 +322,23 @@ pub fn validate_url(url: &str, policy: &UrlPolicy) -> Result<(), UrlReject> {
         return Err(UrlReject::ForbiddenTarget);
     }
     let scheme = scheme.to_ascii_lowercase();
-    match scheme.as_str() {
-        "https" => {}
-        "http" => {
-            if policy.require_https && !policy.allow_loopback {
-                return Err(UrlReject::Insecure);
-            }
-        }
+    let is_http = match scheme.as_str() {
+        "https" => false,
+        "http" => true,
         _ => return Err(UrlReject::Malformed),
-    }
+    };
 
     let host = host_of(authority);
     if host.is_empty() {
         return Err(UrlReject::Malformed);
+    }
+
+    // Plaintext HTTP is only ever excused for loopback dev targets — the
+    // loopback opt-in must not waive `require_https` for public hosts.
+    let loopback_host = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if is_http && policy.require_https && !(loopback_host && policy.allow_loopback) {
+        return Err(UrlReject::Insecure);
     }
 
     // Literal-host SSRF checks.
@@ -467,6 +471,22 @@ mod tests {
             validate_url("http://dapp.example/hook", &UrlPolicy::default()),
             Err(UrlReject::Insecure)
         );
+    }
+
+    #[test]
+    fn url_http_public_still_insecure_when_loopback_opted_in() {
+        let p = UrlPolicy {
+            require_https: true,
+            allow_loopback: true,
+            allow_private: false,
+        };
+        // The loopback opt-in excuses plaintext only for loopback targets.
+        assert_eq!(
+            validate_url("http://dapp.example/hook", &p),
+            Err(UrlReject::Insecure)
+        );
+        assert!(validate_url("http://127.0.0.1:9099/h", &p).is_ok());
+        assert!(validate_url("http://localhost:9099/h", &p).is_ok());
     }
 
     #[test]

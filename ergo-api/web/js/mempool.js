@@ -44,8 +44,10 @@ function srcNode(t) {
 
 const COLS = [
   { key: 'tx_id', label: 'TX ID', render: txidNode, sort: (r) => r.tx_id },
-  { key: 'fee', label: 'Fee ERG', width: 78, align: 'right', render: (r) => erg(r.fee_nano_erg), sort: (r) => r.fee_nano_erg },
-  { key: 'feeb', label: 'Fee/B', width: 54, align: 'right', render: (r) => num(r.fee_per_byte_nano_erg), sort: (r) => r.fee_per_byte_nano_erg },
+  // v1 amounts are base-10 strings (§1.1) — erg() takes the string exactly
+  // (BigInt); sorting/stats coerce with Number().
+  { key: 'fee', label: 'Fee ERG', width: 78, align: 'right', render: (r) => erg(r.fee), sort: (r) => Number(r.fee) },
+  { key: 'feeb', label: 'Fee/B', width: 54, align: 'right', render: (r) => num(Number(r.fee_per_byte)), sort: (r) => Number(r.fee_per_byte) },
   { key: 'size', label: 'Size', width: 50, align: 'right', render: (r) => num(r.size_bytes), sort: (r) => r.size_bytes },
   { key: 'io', label: 'In/Out', width: 54, align: 'right', render: (r) => `${r.input_count}/${r.output_count}`, sort: (r) => r.input_count },
   { key: 'src', label: 'Source', width: 116, render: srcNode, sort: srcText },
@@ -194,10 +196,10 @@ export async function onSlow() {
     setW('[data-bytefill]', bytePct);
     set('[data-reval]', num(summary.revalidation_pending));
   }
-  set('[data-weight]', weightLabel(txWrap && txWrap.weight_function));
+  set('[data-weight]', weightLabel(summary && summary.weight_function));
 
   // fee distribution
-  const feeb = txs.map((t) => Number(t.fee_per_byte_nano_erg)).filter((v) => Number.isFinite(v));
+  const feeb = txs.map((t) => Number(t.fee_per_byte)).filter((v) => Number.isFinite(v));
   const curveHost = root.querySelector('[data-curve]');
   curveHost.replaceChildren();
   if (feeb.length) {

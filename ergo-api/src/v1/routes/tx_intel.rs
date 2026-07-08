@@ -33,7 +33,6 @@ use ergo_ser::address::decode_address_to_tree_bytes;
 use super::dto::unix_ms_to_iso;
 use super::extract::{V1Json, V1Query};
 use super::V1State;
-use crate::blockchain::BlockchainState;
 use crate::traits::{
     BuiltUnsigned, KeylessAsset, KeylessBuildRequest, KeylessFee, KeylessInputs, KeylessOutput,
     KeylessTarget, SimulateOutcome,
@@ -67,9 +66,11 @@ fn invalid_tx_id() -> Response {
     )
 }
 
-/// An unprefixed 64-char hex id (tx / box / token).
+/// An unprefixed 64-char LOWERCASE hex id (tx / box / token) — the shared v1
+/// modifier-id contract, so intent-shaping rejects uppercase/mixed-case
+/// exactly like every other v1 id surface.
 fn is_id64(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    super::valid_modifier_id(s)
 }
 
 /// A boxed v1 error — the intent-shaping helpers return `Result<_, Box<Response>>`
@@ -818,14 +819,7 @@ pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>)
     if let Some(indexer) = state.indexer.as_ref() {
         if matches!(indexer.status(), IndexerStatus::CaughtUp) {
             if let Some(itx) = indexer.tx_by_id(&tx_id) {
-                let bstate = BlockchainState {
-                    read: state.read.clone(),
-                    indexer: indexer.clone(),
-                    network: state.network,
-                    chain: state.chain.clone(),
-                    mempool: state.mempool.clone(),
-                    chain_params: None,
-                };
+                let bstate = state.blockchain_state(indexer);
                 return match crate::blockchain::build_indexed_tx_response(&bstate, &itx) {
                     Ok(resp) => Json(StatusResponse {
                         tx_id: resp.id,
@@ -947,10 +941,12 @@ mod tests {
     }
 
     #[test]
-    fn is_id64_accepts_only_64_hex() {
+    fn is_id64_accepts_only_64_lowercase_hex() {
         assert!(is_id64(&"a".repeat(64)));
         assert!(!is_id64(&"a".repeat(63)));
         assert!(!is_id64(&"g".repeat(64)));
+        // Uppercase is non-canonical — same contract as `valid_modifier_id`.
+        assert!(!is_id64(&"A".repeat(64)));
     }
 
     // ----- error paths -----

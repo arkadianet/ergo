@@ -16,7 +16,7 @@ pub mod dto;
 mod addresses;
 mod boxes;
 mod chain;
-mod extract;
+pub(crate) mod extract;
 mod mempool;
 mod tokens;
 pub(crate) mod transactions;

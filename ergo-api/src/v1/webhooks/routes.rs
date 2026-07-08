@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -28,6 +28,7 @@ use crate::v1::cursor::{
 };
 use crate::v1::error::{v1_error, Reason};
 use crate::v1::realtime::{parse_channel, RealtimeBus};
+use crate::v1::routes::extract::{V1Json, V1Query};
 
 /// The webhook subsystem handle threaded into [`WebhooksState`]: the store
 /// (engine) + the event source (bus, for channel-liveness at registration) +
@@ -221,7 +222,7 @@ async fn register(
 }
 
 /// `GET /api/v1/webhooks` — list subscriptions (T1), cursor-paginated.
-async fn list(State(state): State<WebhooksState>, Query(q): Query<ListQuery>) -> Response {
+async fn list(State(state): State<WebhooksState>, V1Query(q): V1Query<ListQuery>) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -278,7 +279,7 @@ async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> R
 async fn patch_active(
     State(state): State<WebhooksState>,
     Path(id): Path<String>,
-    Json(body): Json<PatchRequest>,
+    V1Json(body): V1Json<PatchRequest>,
 ) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
@@ -295,7 +296,7 @@ async fn patch_active(
 async fn deliveries(
     State(state): State<WebhooksState>,
     Path(id): Path<String>,
-    Query(q): Query<ListQuery>,
+    V1Query(q): V1Query<ListQuery>,
 ) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
