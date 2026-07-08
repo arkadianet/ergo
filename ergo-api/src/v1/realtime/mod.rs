@@ -33,7 +33,7 @@ use std::sync::Arc;
 pub use bus::{BackfillPage, BusSubscription, ConnGuard, ConnLimiter, RealtimeBus, RealtimeEvent};
 pub use model::{parse_channel, ChannelClass, ParsedChannel, RealtimeEventBody};
 pub use protocol::{ClientFrame, ServerFrame, Session};
-pub use ws::{spawn_event_bridge, ws_handler, DEFAULT_BRIDGE_INTERVAL};
+pub use ws::{spawn_event_bridge, spawn_event_bridge_once, ws_handler, DEFAULT_BRIDGE_INTERVAL};
 
 /// The shared realtime handle threaded through [`V1State`](crate::v1::V1State):
 /// the fan-out bus plus the connection limiter. Absent (`None`) ⇒ the

@@ -1238,12 +1238,13 @@ pub fn router_with_mempool_and_wallet_and_security(
     }
     // Real-time subscriptions (§4.1). The `RealtimeBus` is constructed once and
     // shared like the O4 depth ring. It is fed by the coarse-ring bridge task
-    // (production only — same live-runtime guard as the depth sampler so
-    // non-async test router builds never spawn it). Phase-1 feeds only the
-    // `blocks` channel; the fine-grained taps are a node-internals follow-up.
+    // (production only — same live-runtime + once-per-process guards as the
+    // depth sampler so non-async test router builds never spawn it and repeated
+    // router assembly never stacks pollers). Phase-1 feeds only the `blocks`
+    // channel; the fine-grained taps are a node-internals follow-up.
     let v1_realtime = crate::v1::RealtimeHandle::blocks_only();
     if tokio::runtime::Handle::try_current().is_ok() {
-        crate::v1::spawn_event_bridge(
+        crate::v1::spawn_event_bridge_once(
             v1_read.clone(),
             v1_realtime.bus.clone(),
             crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
@@ -1292,6 +1293,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         chain: v1_chain,
         indexer: v1_indexer,
         submit: v1_submit,
+        // Keyless build stays honest-unavailable (route_unavailable) until the
+        // extracted keyless TxBuilder core (§4.2 O7) is wired in ergo-node.
+        tx_builder: None,
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
         realtime: Some(v1_realtime),

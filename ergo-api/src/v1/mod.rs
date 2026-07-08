@@ -37,7 +37,9 @@ pub use mempool_depth::{
     sample_into, spawn_depth_sampler, spawn_depth_sampler_once, MempoolDepthRing,
     MempoolDepthSample, DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
 };
-pub use realtime::{spawn_event_bridge, ConnLimiter, RealtimeBus, RealtimeHandle};
+pub use realtime::{
+    spawn_event_bridge, spawn_event_bridge_once, ConnLimiter, RealtimeBus, RealtimeHandle,
+};
 pub use routes::{v1_router, V1State};
 pub use webhooks::{
     spawn_webhook_worker, spawn_webhook_worker_once, webhooks_router, ReqwestSink, WebhookEngine,

@@ -16,10 +16,11 @@ pub mod dto;
 mod addresses;
 mod boxes;
 mod chain;
-mod extract;
+pub(crate) mod extract;
 mod mempool;
 mod tokens;
-mod transactions;
+pub(crate) mod transactions;
+mod tx_intel;
 
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ use ergo_ser::address::NetworkPrefix;
 use serde::{Deserialize, Serialize};
 
 use crate::compat::NodeChainQuery;
-use crate::traits::{MempoolView, NodeReadState, NodeSubmit};
+use crate::traits::{MempoolView, NodeReadState, NodeSubmit, NodeTxBuilder};
 use crate::v1::cursor::{decode_opt_cursor, encode_cursor, Page as CursorPage};
 use crate::v1::error::{v1_error, Reason};
 use crate::v1::governor::{governor_mw, Governor, RouteClass};
@@ -51,8 +52,14 @@ pub struct V1State {
     pub chain: Option<Arc<dyn NodeChainQuery>>,
     /// Extra-index reader — the confirmed side of `transactions/{tx_id}`.
     pub indexer: Option<Arc<dyn IndexerQuery>>,
-    /// Submit bridge — `transactions/{submit,check}`.
+    /// Submit bridge — `transactions/{submit,check}` + the non-mutating
+    /// `transactions/simulate` (G8; `NodeSubmit::simulate`).
     pub submit: Option<Arc<dyn NodeSubmit>>,
+    /// Keyless transaction builder — backs `POST /transactions/build`
+    /// (`v1-api-design.md` §4.2 O7). `None` until the extracted keyless core is
+    /// wired; the endpoint then answers the honest `route_unavailable` rather
+    /// than fabricating a coin selection.
+    pub tx_builder: Option<Arc<dyn NodeTxBuilder>>,
     /// Mempool overlay — the unconfirmed side of `transactions/{tx_id}`.
     pub mempool: Arc<dyn MempoolView>,
     /// Shared O4 mempool-depth sample ring — the source for
@@ -369,6 +376,12 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
         .route("/api/v1/transactions/submit", post(transactions::submit))
         .route("/api/v1/transactions/check", post(transactions::check))
+        // ----- transactions/* intelligence reads (§3.6 Phase-2) -----
+        .route(
+            "/api/v1/transactions/fee-estimate",
+            get(tx_intel::fee_estimate),
+        )
+        .route("/api/v1/transactions/:tx_id/status", get(tx_intel::status))
         // ----- mempool/* lists + O1 submit/check aliases -----
         .route("/api/v1/mempool/transactions", get(mempool::transactions))
         .route(
@@ -451,6 +464,17 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             governor_mw,
         ));
 
+    // Compute — attacker-influenced coin selection / validation (§2.2). The
+    // heavier `tx_intent` build + the non-mutating simulate sit here so the
+    // load-bearing bound is the cost governor's `Compute` weight, not auth.
+    let compute: Router<V1State> = Router::new()
+        .route("/api/v1/transactions/build", post(tx_intel::build))
+        .route("/api/v1/transactions/simulate", post(tx_intel::simulate))
+        .route_layer(axum::middleware::from_fn_with_state(
+            governor.state(RouteClass::Compute),
+            governor_mw,
+        ));
+
     // Real-time subscriptions (§3.16 / §4.1). The WS upgrade is a long-lived
     // socket, not a per-request read, so it is NOT fronted by the token-bucket
     // governor route-class; its cost is bounded by the connection limiter
@@ -459,5 +483,9 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
     let realtime: Router<V1State> =
         Router::new().route("/api/v1/ws", get(crate::v1::realtime::ws_handler));
 
-    heavy.merge(cheap).merge(realtime).with_state(state)
+    heavy
+        .merge(cheap)
+        .merge(compute)
+        .merge(realtime)
+        .with_state(state)
 }
