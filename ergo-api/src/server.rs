@@ -567,6 +567,12 @@ pub fn router_with_mempool_and_wallet_and_security(
     let v1_indexer = indexer.clone();
     let v1_submit = submit.clone();
     let v1_mempool = mempool.clone();
+    // Same up-front-clone rationale for the `script/*` group (§5): `compat` is
+    // moved into the Scala-compat `match` further down, so the chain reader for
+    // `simulate`/`explain` box lookups (and the tip-height reader) are captured
+    // here before that move.
+    let v1_script_read = read.clone();
+    let v1_script_chain = compat.clone();
     let operator: Router = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
@@ -1303,6 +1309,24 @@ pub fn router_with_mempool_and_wallet_and_security(
     };
     let v1_governor = crate::v1::governor::Governor::new(Default::default())
         .expect("default GovernorConfig is valid");
+    // The `script/*` playground (§5) shares the one per-node governor (bounded
+    // at the `Compute` class — the load-bearing anti-DoS control, D2) and the
+    // one v1 auth config (so `[api.script] require_api_key` can flip the group
+    // to T1). Clone both before they move into the reads router / webhooks
+    // router below. The Scala oracle for `script/diff` is unconfigured here, so
+    // `diff` answers `oracle_unavailable` until a transport is wired (D3).
+    let script_state = crate::v1::script::ScriptState {
+        read: v1_script_read,
+        chain: v1_script_chain,
+        network,
+        oracle: None,
+        config: crate::v1::script::ScriptConfig::default(),
+    };
+    let assembled = assembled.merge(crate::v1::script::script_router(
+        script_state,
+        v1_governor.clone(),
+        v1_auth.clone(),
+    ));
     let assembled = assembled.merge(crate::v1::v1_router(v1_state, v1_governor));
     // Mount the T1 `webhooks/*` router under the operator api-key gate.
     let assembled = assembled.merge(crate::v1::webhooks_router(v1_webhooks_state, v1_auth));
