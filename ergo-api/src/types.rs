@@ -144,7 +144,11 @@ pub enum ApiHistoryMode {
 
 /// Single-call dashboard view: collapses sync + tip + peer count.
 /// Polled at 1 Hz by the UI header strip.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Default)]
+///
+/// Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+/// `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
+/// on every added field.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct ApiStatus {
     pub sync_state: SyncStateLabel,
     pub peer_count: u32,
@@ -383,10 +387,11 @@ pub enum ApiHeaderAvailability {
     Sparse,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema, Default)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStateLabel {
-    /// No connected peers.
+    /// No connected peers. The `Default` — matches the pre-first-publish
+    /// snapshot (`SnapshotPublisher` empty state).
     #[default]
     Disconnected,
     /// Catching up — header chain not yet near tip, or block-application

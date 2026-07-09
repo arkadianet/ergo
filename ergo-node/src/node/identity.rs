@@ -336,8 +336,9 @@ pub fn classify_node_mode(inputs: &IdentityInputs) -> NodeMode {
             // reorg into the pruned region would need section
             // bytes the wallet replay path can't reconstruct.
             // Mirror that rejection here.
-            let floor = (inputs.keep_versions + ergo_state::store::SAFETY_MARGIN) as i32;
-            if n < floor {
+            let floor =
+                i64::from(inputs.keep_versions) + i64::from(ergo_state::store::SAFETY_MARGIN);
+            if i64::from(n) < floor {
                 return NodeMode::Invalid {
                     reason: "blocks_to_keep is below the rollback-window floor",
                 };
@@ -652,13 +653,13 @@ pub(crate) fn validate_runtime_mode_support(config: &NodeConfig) -> Result<(), N
              ({}). Negative sentinels other than -1 are wire-only states, not \
              config values.",
             config.blocks_to_keep,
-            (config.keep_versions + ergo_state::store::SAFETY_MARGIN) as i32,
+            i64::from(config.keep_versions) + i64::from(ergo_state::store::SAFETY_MARGIN),
         )
         .into());
     }
     if config.blocks_to_keep > 0 {
-        let floor = (config.keep_versions + ergo_state::store::SAFETY_MARGIN) as i32;
-        if config.blocks_to_keep < floor {
+        let floor = i64::from(config.keep_versions) + i64::from(ergo_state::store::SAFETY_MARGIN);
+        if i64::from(config.blocks_to_keep) < floor {
             return Err(format!(
                 "NodeConfig.blocks_to_keep = {} is below the rollback-window floor \
                  ({} = keep_versions {} + SAFETY_MARGIN {}). Pruning must retain at \

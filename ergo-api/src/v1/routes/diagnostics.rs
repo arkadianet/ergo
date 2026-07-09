@@ -187,11 +187,12 @@ pub struct ForkRisk {
     /// reward pk is not exposed at the API layer, so it cannot be attributed.
     pub self_mined_fraction_pct: Option<String>,
     pub rejecting_block: bool,
-    /// `null`: the deep-reorg wedge is only a `debug!` today (WARGAMES 4a);
-    /// no snapshot field carries it yet (ASSUMED-new).
+    /// Whether the terminal deep-fork wedge is active — the best-header
+    /// chain forks below the rollback window (`ApiStatus.sync_wedged`).
     pub fork_too_deep: Option<bool>,
     pub best_header_vs_full_gap: u32,
-    /// `null`: same ASSUMED-new deep-reorg state.
+    /// Whether recovery requires a resync. Today this is exactly the
+    /// wedge condition: a wedged node cannot reorg without one.
     pub resync_required: Option<bool>,
     pub unknown: Vec<String>,
 }
@@ -200,6 +201,7 @@ fn fork_risk_of(state: &V1State, chain_pos: &ChainPosition) -> ForkRisk {
     let health = state.read.health();
     let identity = state.read.identity();
     let sync = state.read.sync();
+    let wedged = state.read.status().sync_wedged.is_some();
     // Wedged counts as forking: the node IS stranded on a branch the
     // network abandoned (that is what made the reorg too deep to serve).
     let rejecting_block = matches!(
@@ -219,14 +221,11 @@ fn fork_risk_of(state: &V1State, chain_pos: &ChainPosition) -> ForkRisk {
         lone_producer,
         self_mined_fraction_pct: None,
         rejecting_block,
-        fork_too_deep: None,
+        fork_too_deep: Some(wedged),
         best_header_vs_full_gap: sync.gap,
-        resync_required: None,
+        resync_required: Some(wedged),
         unknown: vec![
             "self_mined_fraction_pct: node reward pk not exposed at the API layer".to_string(),
-            "fork_too_deep/resync_required: deep-reorg wedge state is ASSUMED-new (only a \
-             debug! log today)"
-                .to_string(),
         ],
     }
 }

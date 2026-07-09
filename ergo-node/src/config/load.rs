@@ -378,8 +378,11 @@ impl NodeConfig {
         // Mode 6 (`blocks_to_keep = 0`) is exempt — it's headers-only
         // and never applies full blocks.
         if blocks_to_keep > 0 {
-            let floor = (keep_versions + ergo_state::store::SAFETY_MARGIN) as i32;
-            if blocks_to_keep < floor {
+            // i64 math: `keep_versions` is unbounded operator input, so a
+            // u32 add can overflow and an `as i32` cast can wrap negative —
+            // silently disabling this floor for huge windows.
+            let floor = i64::from(keep_versions) + i64::from(ergo_state::store::SAFETY_MARGIN);
+            if i64::from(blocks_to_keep) < floor {
                 return Err(format!(
                     "[node] blocks_to_keep = {blocks_to_keep} is below the rollback-window \
                      floor ({floor} = keep_versions {keep_versions} + SAFETY_MARGIN {}). \

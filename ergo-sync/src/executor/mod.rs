@@ -1773,6 +1773,12 @@ impl SyncExecutor {
                 return Ok(ReorgOutcome::TooDeep);
             }
         };
+        // A reachable fork point means the wedge condition no longer holds —
+        // clear it HERE, not only after a successful rollback, so a prior
+        // TooDeep wedge can't persist through a transient `rollback_to`
+        // failure below (the Err return would otherwise keep /health wedged
+        // while the chain is in fact recoverable again).
+        self.clear_deep_fork_wedge();
         // Capture identity fields before any mutation so the `_failed`
         // event below carries pre-attempt values, not rebuilt-state
         // values. `fork_id` is the common-ancestor header at
@@ -1781,7 +1787,6 @@ impl SyncExecutor {
         let old_height = store.chain_state_meta().best_full_block_height;
         let old_id = store.chain_state_meta().best_full_block_id;
         if fork_height == old_height {
-            self.clear_deep_fork_wedge();
             return Ok(ReorgOutcome::NotNeeded);
         }
         let depth = old_height.saturating_sub(fork_height);
@@ -1849,7 +1854,6 @@ impl SyncExecutor {
             depth,
             "full-block reorg completed",
         );
-        self.clear_deep_fork_wedge();
         Ok(ReorgOutcome::Performed)
     }
 

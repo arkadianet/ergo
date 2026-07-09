@@ -2257,6 +2257,10 @@ components:
       description: |-
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
+
+        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
+        on every added field.
       required:
       - sync_state
       - peer_count

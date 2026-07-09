@@ -974,6 +974,21 @@ fn keep_versions_raised_raises_blocks_to_keep_floor() {
 }
 
 #[test]
+fn keep_versions_huge_value_floor_does_not_overflow() {
+    // u32::MAX + SAFETY_MARGIN overflows u32, and an `as i32` cast of the
+    // sum would wrap NEGATIVE — silently disabling the floor (or panicking
+    // in debug builds). The i64 floor math must instead reject any
+    // blocks_to_keep as below the (astronomical) floor.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node]\nblocks_to_keep = 1024\nkeep_versions = 4294967295\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("huge window must raise the floor, not wrap it");
+    assert!(err.contains("rollback-window floor"), "error: {err}");
+}
+
+#[test]
 fn keep_versions_lowered_lowers_blocks_to_keep_floor() {
     // Symmetric guard against a boot-brick: a LOWERED window lowers the
     // floor, so a blocks_to_keep below the default floor loads (and the
