@@ -1362,7 +1362,9 @@ pub fn router_with_mempool_and_wallet_and_security(
     // Operator/control group (`node/*`, `network/*`, `mining/*`, `voting/*` —
     // §3.1–§3.4). Mixed tiers over one `OperatorState`: T0 reads share the same
     // per-node governor (`CheapRead`); T1/T2 controls ride the v1 api-key gate
-    // (`require_tier`), T2 (shutdown, config-mutate) additionally loopback-preferred.
+    // (`require_tier`), T2 (config-mutate) additionally loopback-preferred.
+    // `node/shutdown` is NOT on this router's T2 gate — it stays on the frozen
+    // compat admin mount (see the T2 note in `operator_router`).
     let v1_operator_state = crate::v1::OperatorState {
         read: v1_op_read,
         chain: v1_op_chain,
