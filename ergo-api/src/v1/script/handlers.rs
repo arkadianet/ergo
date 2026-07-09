@@ -22,7 +22,7 @@ use super::{
     MAX_SOURCE_LEN,
 };
 use crate::compat::types::ScalaOutput;
-use crate::v1::error::Reason;
+use crate::v1::error::{Reason, V1Error};
 use crate::v1::routes::extract::V1Json;
 
 // A trace entry cap: the one place a response array is bounded in lieu of
@@ -155,6 +155,15 @@ struct CompileResponse {
 /// `POST /script/compile` — ErgoScript source → tree / address / typed-AST.
 /// A thin adapter over [`ergo_compiler::compile`]; a compile error is the v1
 /// envelope with the error position / phase / Scala class in `detail`.
+#[utoipa::path(
+    post, path = "/api/v1/script/compile", tag = "script",
+    request_body = CompileBody,
+    responses(
+        (status = 200, description = "Compiled tree + addresses + typed AST", body = CompileResponse),
+        (status = 400, description = "Compile error (position/phase/Scala class in detail)", body = V1Error),
+        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+    ),
+)]
 pub async fn compile(State(state): State<ScriptState>, body: V1Json<CompileBody>) -> Response {
     let V1Json(body) = body;
     match compile_inner(&state, body) {
@@ -237,6 +246,14 @@ struct InspectResponse {
 
 /// `POST /script/inspect` — decompile an `ergo_tree` (hex) or `address` into a
 /// structured typed view. Pure parse; no eval, no chain read.
+#[utoipa::path(
+    post, path = "/api/v1/script/inspect", tag = "script",
+    request_body = InspectBody,
+    responses(
+        (status = 200, description = "Structured typed decompilation", body = InspectResponse),
+        (status = 400, description = "Invalid ergo_tree/address, or neither/both supplied", body = V1Error),
+    ),
+)]
 pub async fn inspect(State(state): State<ScriptState>, body: V1Json<InspectBody>) -> Response {
     let V1Json(body) = body;
     match inspect_inner(&state, body) {
@@ -408,6 +425,15 @@ struct ExecuteResponse {
 /// `POST /script/execute` — reduce a tree/source against a context on the exact
 /// block-validation path, **bounded by the cost governor** (D2). A script that
 /// would exceed the per-request cost cap answers `400 cost_limit`, never hangs.
+#[utoipa::path(
+    post, path = "/api/v1/script/execute", tag = "script",
+    request_body = ExecuteBody,
+    responses(
+        (status = 200, description = "Reduction result + cost", body = ExecuteResponse),
+        (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+    ),
+)]
 pub async fn execute(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
     let V1Json(body) = body;
     match execute_inner(&state, body) {
@@ -461,6 +487,15 @@ struct CostBreakdownEntry {
 /// `POST /script/cost` — the total reduce cost under a bounded accumulator.
 /// Same request shape as `execute`; reuses the SAME bounded reduce primitive
 /// (compose, don't reimplement the cost accounting — fragment §4.4).
+#[utoipa::path(
+    post, path = "/api/v1/script/cost", tag = "script",
+    request_body = ExecuteBody,
+    responses(
+        (status = 200, description = "Total reduce cost (breakdown empty until cost-trace is wired)", body = CostResponse),
+        (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+    ),
+)]
 pub async fn cost(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
     let V1Json(body) = body;
     match cost_inner(&state, body) {
@@ -521,6 +556,16 @@ struct SimulateResponse {
 /// `POST /script/simulate` — resolve a REAL on-chain box and reduce its guard
 /// against real chain state. `box_id` missing ⇒ `box_not_found`; the chain
 /// reader unwired ⇒ `chain_reader_unavailable` (never a bare 404).
+#[utoipa::path(
+    post, path = "/api/v1/script/simulate", tag = "script",
+    request_body = SimulateBody,
+    responses(
+        (status = 200, description = "Spendability against the real resolved box (single-box scope — no tx/proof verified)", body = SimulateResponse),
+        (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 404, description = "No unspent box with that id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn simulate(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
     match simulate_inner(&state, body) {
@@ -653,6 +698,16 @@ struct ExplainResponse {
 /// diagnosis: the reduction trace and a best-effort human line. The mechanical
 /// fields ship in the node; the `human_diagnosis` is explicitly
 /// non-authoritative (fragment §7-D3).
+#[utoipa::path(
+    post, path = "/api/v1/script/explain", tag = "script",
+    request_body = SimulateBody,
+    responses(
+        (status = 200, description = "Reduction trace + human_diagnosis (non-authoritative)", body = ExplainResponse),
+        (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 404, description = "No unspent box with that id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn explain(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
     match explain_inner(&state, body) {
@@ -777,6 +832,15 @@ struct DiffResponse {
 /// verdict. **Unconfigured oracle ⇒ `oracle_unavailable`** (D3 residual; the
 /// oracle is never required to exist). The Rust side runs under the same
 /// bounded cost governor as `execute`.
+#[utoipa::path(
+    post, path = "/api/v1/script/diff", tag = "script",
+    request_body = DiffBody,
+    responses(
+        (status = 200, description = "Rust vs Scala-oracle verdict comparison", body = DiffResponse),
+        (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 501, description = "No Scala reference oracle configured on this node", body = V1Error),
+    ),
+)]
 pub async fn diff(State(state): State<ScriptState>, body: V1Json<DiffBody>) -> Response {
     let V1Json(body) = body;
     match diff_inner(&state, body).await {

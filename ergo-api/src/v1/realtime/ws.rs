@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use ergo_ser::address::NetworkPrefix;
 
 use crate::traits::NodeReadState;
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::routes::V1State;
 
 use super::bus::RealtimeBus;
@@ -56,6 +56,20 @@ fn session_id() -> String {
 /// `GET /api/v1/ws` handler. Rejects before upgrade with the standard v1 error
 /// envelope when the subsystem is off (`realtime_disabled`) or a connection cap
 /// is hit (`connection_limit`, HTTP 429).
+///
+/// **Not a plain REST read.** A successful call performs the WebSocket
+/// upgrade handshake (HTTP 101) and hands off to the long-lived [`Session`]
+/// protocol (subscribe/unsubscribe/resume/ping, `v1-api-design.md` §4.1) — not
+/// representable as an OpenAPI response body. Only the pre-upgrade rejection
+/// paths are documented below.
+#[utoipa::path(
+    get, path = "/api/v1/ws", tag = "realtime",
+    responses(
+        (status = 101, description = "Switching Protocols — WebSocket session established"),
+        (status = 409, description = "Real-time subsystem disabled on this node", body = V1Error),
+        (status = 429, description = "Connection cap reached", body = V1Error),
+    ),
+)]
 pub async fn ws_handler(
     State(state): State<V1State>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
