@@ -14,17 +14,15 @@ use axum::Json;
 use ergo_indexer_types::types::IndexedErgoBox;
 use ergo_indexer_types::{BoxId, Page as IdxPage, SortDir, TemplateHash, TokenId, TreeHash};
 use ergo_ser::ergo_tree::tree_hash_from_bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::dto::{v1box_from_indexed_box, Collection, V1Box};
 use super::extract::{V1Json, V1Query};
-use super::{
-    offset_from_cursor, offset_page, offset_page_at, parse_id32, parse_sort, GiCursor, V1State,
-};
+use super::{offset_from_cursor, offset_page, parse_id32, parse_sort, GiCursor, V1State};
 use crate::blockchain::{
     address_to_tree_hash, pool_unspent_for_template, pool_unspent_for_token, pool_unspent_for_tree,
 };
-use crate::v1::cursor::{clamp_limit, decode_opt_cursor, Page};
+use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason};
 
 /// Default page size and hard cap for this group (§2.2 — a deliberate
@@ -206,6 +204,17 @@ fn render_box_page(
     }
 }
 
+/// Two-axis resume cursor for the unspent listings with the pool overlay:
+/// `c` = the confirmed reader offset, `p` = overlay (pool) rows already
+/// emitted. BOTH must advance or a page the overlay alone fills would repeat
+/// forever (the overlay livelock); `p` indexes the volatile pool snapshot —
+/// the same documented offset-alias drift the overlay always carried (§1.5).
+#[derive(Debug, Serialize, Deserialize)]
+struct UnspentCursor {
+    c: u32,
+    p: u32,
+}
+
 /// Reject `sort=asc` on the listings whose reader has ONE fixed (DESC-keyed)
 /// order — accepting it and answering desc data would silently mislabel the
 /// result. `desc`/absent passes; malformed values keep the shared
@@ -270,9 +279,11 @@ fn confirmed_survivors<T>(
 /// The unspent variants: confirmed page (overfetched to fill past
 /// `exclude_mempool_spent` drops) + the optional pool-output overlay, merged in
 /// the Scala order, then **re-capped to `limit`** (v1 fixes the compat quirk
-/// where `include_unconfirmed=true` could exceed `limit`). The offset cursor
-/// advances the confirmed window by the rows actually consumed; the overlay is
-/// an offset-alias drift documented at the codec (§1.5).
+/// where `include_unconfirmed=true` could exceed `limit`). The two-axis
+/// [`UnspentCursor`] advances the confirmed window AND the overlay window by
+/// exactly the rows the page emitted — no repeats when the overlay fills a
+/// page, no confirmed skips when it pushes rows out; the overlay axis is an
+/// offset into the volatile pool snapshot (documented drift, §1.5).
 fn render_unspent_page(
     state: &V1State,
     q: &UnspentQuery,
@@ -283,15 +294,17 @@ fn render_unspent_page(
         Ok(d) => d,
         Err(e) => return *e,
     };
-    let start = match offset_from_cursor(q.cursor.as_deref()) {
-        Ok(o) => o,
+    let (c_start, p_start) = match decode_opt_cursor::<UnspentCursor>(q.cursor.as_deref()) {
+        Ok(Some(cur)) => (cur.c, cur.p),
+        Ok(None) => (0, 0),
         Err(e) => return *e,
     };
     let limit = clamp_limit(q.limit, DEFAULT_LIMIT, MAX_LIMIT);
+    let limit_us = limit as usize;
     let include_unconfirmed = q.include_unconfirmed.unwrap_or(false);
     let exclude_spent = q.exclude_mempool_spent.unwrap_or(false);
 
-    let confirmed = confirmed_survivors(start, limit, dir, fetch_confirmed, |b| {
+    let confirmed = confirmed_survivors(c_start, limit, dir, fetch_confirmed, |b| {
         match b.box_data.box_id() {
             // Short-circuits when `exclude_spent` is false: every row is kept
             // and `is_spent_by_pool` is never consulted.
@@ -301,34 +314,59 @@ fn render_unspent_page(
             Err(_) => true,
         }
     });
-    let unconfirmed = if include_unconfirmed {
+    // The overlay resumes past the `p` rows earlier pages already emitted, so
+    // an overlay bigger than one page pages THROUGH rather than repeating.
+    let pool_rows: Vec<IndexedErgoBox> = if include_unconfirmed {
         pool(exclude_spent)
+            .into_iter()
+            .skip(p_start as usize)
+            .collect()
     } else {
         Vec::new()
     };
-    // The cursor resumes just past the last confirmed row the truncated
-    // response actually EMITS — pool overlay rows occupying the front of a
-    // DESC page must not advance the confirmed window (that would skip the
-    // confirmed rows the re-cap pushed out).
-    let emitted_total = (unconfirmed.len() + confirmed.len()).min(limit as usize);
-    let confirmed_emitted = match dir {
-        SortDir::Desc => emitted_total.saturating_sub(unconfirmed.len()),
-        SortDir::Asc => confirmed.len().min(limit as usize),
+
+    // How many of each side the re-capped page actually emits — the cursor
+    // advances EXACTLY past those rows on both axes (no skips, no repeats).
+    let total = pool_rows.len() + confirmed.len();
+    let has_more = total > limit_us;
+    let emitted_total = total.min(limit_us);
+    let (pool_emitted, confirmed_emitted) = match dir {
+        // Scala parity: DESC → unconfirmed first; ASC → confirmed first.
+        SortDir::Desc => {
+            let pe = pool_rows.len().min(limit_us);
+            (pe, emitted_total - pe)
+        }
+        SortDir::Asc => {
+            let ce = confirmed.len().min(limit_us);
+            (emitted_total - ce, ce)
+        }
     };
-    let confirmed_next_off = confirmed_emitted
+    let next_c = confirmed_emitted
         .checked_sub(1)
         .and_then(|i| confirmed.get(i))
         .map(|(_, off_after)| *off_after)
-        .unwrap_or(start);
-    // Scala parity: DESC → unconfirmed first; ASC → confirmed first.
+        .unwrap_or(c_start);
+    let next_p = p_start.saturating_add(pool_emitted as u32);
+
     let confirmed_rows = confirmed.into_iter().map(|(b, _)| b);
-    let merged: Vec<IndexedErgoBox> = match dir {
-        SortDir::Desc => unconfirmed.into_iter().chain(confirmed_rows).collect(),
-        SortDir::Asc => confirmed_rows.chain(unconfirmed).collect(),
+    let mut merged: Vec<IndexedErgoBox> = match dir {
+        SortDir::Desc => pool_rows.into_iter().chain(confirmed_rows).collect(),
+        SortDir::Asc => confirmed_rows.chain(pool_rows).collect(),
     };
+    merged.truncate(limit_us);
     match project_boxes(state, merged, q.decode.unwrap_or(false)) {
         Ok(items) => {
-            let (items, page) = offset_page_at(items, limit, confirmed_next_off);
+            let next_cursor = has_more.then(|| {
+                encode_cursor(&UnspentCursor {
+                    c: next_c,
+                    p: next_p,
+                })
+            });
+            let page = Page {
+                limit,
+                has_more: next_cursor.is_some(),
+                next_cursor,
+            };
             Json(Collection { items, page }).into_response()
         }
         Err(d) => assemble_failed(d),

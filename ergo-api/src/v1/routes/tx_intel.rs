@@ -806,8 +806,9 @@ struct PoolStatus {
     pool_size: u32,
     ahead_of_you_bytes: u64,
     fee_competitiveness_pct: f64,
-    /// `null` when the node has no pool wait-time oracle wired — a missing
-    /// estimate must not read as "next block".
+    /// OMITTED when the node has no pool wait-time oracle wired (same
+    /// absent-field convention as this response's other optionals) — a
+    /// missing estimate must not read as "next block".
     #[serde(skip_serializing_if = "Option::is_none")]
     eta_blocks: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
