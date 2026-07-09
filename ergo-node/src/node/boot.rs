@@ -347,28 +347,39 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // verification, and the serving peer's own best-header pointer
     // never rewound). Malformed entries are rejected at boot so a
     // typo'd ban list fails loudly instead of silently not banning.
-    if let Ok(list) = std::env::var("ERGO_BAN_HEADERS") {
-        for tok in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
-            let bytes = hex::decode(tok).map_err(|e| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("ERGO_BAN_HEADERS entry {tok:?} is not hex: {e}"),
-                )) as NodeError
-            })?;
-            let id: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "ERGO_BAN_HEADERS entry {tok:?} is {} bytes, expected 32",
-                        bytes.len()
-                    ),
-                )) as NodeError
-            })?;
-            store.mark_session_invalid(id);
-            warn!(
-                header_id = tok,
-                "ERGO_BAN_HEADERS: header banned for this session"
-            );
+    match std::env::var("ERGO_BAN_HEADERS") {
+        Ok(list) => {
+            for tok in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                let bytes = hex::decode(tok).map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("ERGO_BAN_HEADERS entry {tok:?} is not hex: {e}"),
+                    )) as NodeError
+                })?;
+                let id: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "ERGO_BAN_HEADERS entry {tok:?} is {} bytes, expected 32",
+                            bytes.len()
+                        ),
+                    )) as NodeError
+                })?;
+                store.mark_session_invalid(id);
+                warn!(
+                    header_id = tok,
+                    "ERGO_BAN_HEADERS: header banned for this session"
+                );
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        // A set-but-non-UTF-8 value must not read as "not set" — that would
+        // silently skip every ban, the exact failure this list fails loudly on.
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ERGO_BAN_HEADERS is set but not valid UTF-8",
+            )) as NodeError);
         }
     }
 
