@@ -5,6 +5,7 @@
 //! box routes is wired in `dto.rs` (the O6 seam); this file is the registry's
 //! own surface. All T0, all bounded (fragment §7).
 
+use utoipa::ToSchema;
 use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
@@ -24,7 +25,7 @@ use crate::v1::error::{v1_error, Reason};
 // ----- discovery: GET /protocols, GET /protocols/{id} ---------------------
 
 /// A `GET /protocols` list item — the registry capability advertisement.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ProtocolListItem {
     protocol_id: &'static str,
     name: &'static str,
@@ -74,7 +75,7 @@ pub async fn list_protocols(State(_state): State<V1State>) -> Response {
 
 /// One matcher, projected for `GET /protocols/{id}` so an integrator can
 /// pre-compute keys client-side.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct MatcherView {
     kind: &'static str,
     key: &'static str,
@@ -82,7 +83,7 @@ struct MatcherView {
 }
 
 /// `GET /api/v1/protocols/{id}` detail body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ProtocolDetail {
     protocol_id: &'static str,
     name: &'static str,
@@ -133,7 +134,7 @@ pub async fn protocol_by_id(
 // ----- POST /boxes/decode (stateless, off-chain) --------------------------
 
 /// An asset on an off-chain box (`amount` a string per the glossary).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AssetIn {
     token_id: String,
     amount: String,
@@ -146,7 +147,7 @@ pub struct AssetIn {
 /// tree-boundary-dependent for non-size-delimited contract trees (the exact
 /// trees these protocols use), so a bytes path would be unreliable — the
 /// structured form is complete and honest.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct DecodeBoxBody {
     ergo_tree: String,
     value: String,
@@ -158,7 +159,7 @@ pub struct DecodeBoxBody {
 
 /// The `POST /boxes/decode` response: the derived address + the shared `decoded`
 /// object (identical shape to `boxes/{id}?decode=true`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct DecodeBoxResponse {
     address: Option<String>,
     decoded: Value,
@@ -209,14 +210,14 @@ pub async fn decode_off_chain_box(
 
 // ----- GET /protocols/{id}/state (singleton one-shot) ---------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct StateQuery {
     #[serde(default)]
     box_role: Option<String>,
 }
 
 /// `GET /api/v1/protocols/{id}/state` response — the canonical singleton state.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ProtocolStateResponse {
     protocol_id: &'static str,
     box_role: &'static str,

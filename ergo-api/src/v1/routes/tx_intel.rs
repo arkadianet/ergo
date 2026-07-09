@@ -21,6 +21,7 @@
 //! `build`/`simulate` sit at the governor's `Compute` class (they run coin
 //! selection / validation); `fee-estimate`/`status` sit at `HeavyRead`.
 
+use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -95,7 +96,7 @@ fn parse_amount(s: &str, what: &str) -> Result<u64, Box<Response>> {
 //  POST /transactions/build
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BuildBody {
     inputs: InputsDto,
@@ -111,7 +112,7 @@ pub struct BuildBody {
     allow_token_burn: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum InputsDto {
     Select {
@@ -136,7 +137,7 @@ fn default_min_conf() -> i64 {
     1
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum OutputDto {
     Payment {
@@ -156,20 +157,20 @@ enum OutputDto {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AssetDto {
     token_id: String,
     amount: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum DataInputsDto {
     BoxIds { box_ids: Vec<String> },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum FeeDto {
     Auto {
@@ -185,33 +186,33 @@ fn default_target_blocks() -> u32 {
     3
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct ContextDto {
     height: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireBytes {
     #[serde(rename = "type")]
     kind: &'static str,
     bytes: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireAsset {
     token_id: String,
     amount: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireChange {
     address: String,
     value: String,
     assets: Vec<WireAsset>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct BuildSummary {
     input_box_ids: Vec<String>,
     selected_value: String,
@@ -222,7 +223,7 @@ struct BuildSummary {
     estimated_cost_units: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct BuildResponse {
     unsigned_tx: WireBytes,
     tx_id: String,
@@ -582,7 +583,7 @@ fn map_build_error(reason: &str, detail: Option<String>) -> Box<Response> {
 //  POST /transactions/simulate
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimulateBody {
     tx: TxReprDto,
@@ -590,25 +591,25 @@ pub struct SimulateBody {
     assume_context: Option<AssumeContextDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum TxReprDto {
     Bytes { bytes: String },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AssumeContextDto {
     height: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireConflict {
     box_id: String,
     conflicting_tx_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SimulateResponse {
     valid: bool,
     tx_id: String,
@@ -694,7 +695,7 @@ fn render_sim(o: SimulateOutcome) -> SimulateResponse {
 //  GET /transactions/fee-estimate
 // ==========================================================================
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct FeeEstimateQuery {
     #[serde(default)]
     target_blocks: Option<u32>,
@@ -702,14 +703,14 @@ pub struct FeeEstimateQuery {
     tx_size_bytes: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct FeeTier {
     target_blocks: u32,
     fee_per_byte: String,
     recommended_fee: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct FeeEstimateResponse {
     target_blocks: u32,
     tx_size_bytes: u32,
@@ -797,7 +798,7 @@ fn tier_minutes(target_blocks: u32, interval_ms: u64) -> u32 {
 //  GET /transactions/{tx_id}/status
 // ==========================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PoolStatus {
     priority_weight: String,
     fee: String,
@@ -816,7 +817,7 @@ struct PoolStatus {
     parents_in_pool: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct StatusResponse {
     tx_id: String,
     state: &'static str,

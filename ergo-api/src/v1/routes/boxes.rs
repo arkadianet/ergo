@@ -8,6 +8,7 @@
 //! (`pool_unspent_for_*`) into the v1 envelope + cursor, gating every read on
 //! the extra index (`indexer_disabled` / `_syncing` / `_halted`).
 
+use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -23,7 +24,7 @@ use crate::blockchain::{
     address_to_tree_hash, pool_unspent_for_template, pool_unspent_for_token, pool_unspent_for_tree,
 };
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// Default page size and hard cap for this group (§2.2 — a deliberate
 /// tightening vs the compat `MAX_ITEMS = 16384`).
@@ -36,13 +37,13 @@ const RANGE_MAX_LIMIT: u32 = 2000;
 
 // ----- query payloads -----------------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct SingleBoxQuery {
     #[serde(default)]
     decode: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct BoxListQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -54,7 +55,7 @@ pub struct BoxListQuery {
     decode: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct UnspentQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -70,7 +71,7 @@ pub struct UnspentQuery {
     exclude_mempool_spent: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct RangeQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -80,7 +81,7 @@ pub struct RangeQuery {
 
 /// POST body for the by-ergo-tree routes (a tree is too long for a path
 /// segment — Scala made the same call).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ErgoTreeBody {
     ergo_tree: String,
 }
@@ -209,7 +210,7 @@ fn render_box_page(
 /// emitted. BOTH must advance or a page the overlay alone fills would repeat
 /// forever (the overlay livelock); `p` indexes the volatile pool snapshot —
 /// the same documented offset-alias drift the overlay always carried (§1.5).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct UnspentCursor {
     c: u32,
     p: u32,
@@ -377,6 +378,20 @@ fn render_unspent_page(
 
 /// `GET /api/v1/boxes/{box_id}` — a single box. `404 box_not_found` on miss (a
 /// real absent resource, not a disabled subsystem).
+#[utoipa::path(
+    get, path = "/api/v1/boxes/{box_id}", tag = "boxes",
+    params(
+        ("box_id" = String, Path, description = "64-char lowercase hex box id"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode the box contract"),
+    ),
+    responses(
+        (status = 200, description = "The box", body = V1Box),
+        (status = 400, description = "Malformed box id", body = V1Error),
+        (status = 404, description = "No box with that id", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn box_by_id(
     State(state): State<V1State>,
     Path(box_id_hex): Path<String>,
@@ -407,6 +422,22 @@ pub async fn box_by_id(
 /// `GET /api/v1/boxes/by-address/{address}` (also mounted at
 /// `addresses/{address}/boxes`) — full history (spent + unspent). v1 drops the
 /// Scala `.reverse` DESC-page quirk: strict requested-sort order.
+#[utoipa::path(
+    get, path = "/api/v1/boxes/by-address/{address}", tag = "boxes",
+    params(
+        ("address" = String, Path, description = "Base58 address"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+    ),
+    responses(
+        (status = 200, description = "Boxes at this address (full history)", body = Collection<V1Box>),
+        (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_by_address(
     State(state): State<V1State>,
     Path(address): Path<String>,
@@ -432,6 +463,24 @@ pub async fn boxes_by_address(
 
 /// `GET /api/v1/boxes/unspent/by-address/{address}` (also mounted at
 /// `addresses/{address}/unspent`).
+#[utoipa::path(
+    get, path = "/api/v1/boxes/unspent/by-address/{address}", tag = "boxes",
+    params(
+        ("address" = String, Path, description = "Base58 address"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+        ("include_unconfirmed" = Option<bool>, Query, description = "Merge in unspent mempool outputs"),
+        ("exclude_mempool_spent" = Option<bool>, Query, description = "Drop confirmed boxes already spent in the mempool"),
+    ),
+    responses(
+        (status = 200, description = "Unspent boxes at this address", body = Collection<V1Box>),
+        (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_unspent_by_address(
     State(state): State<V1State>,
     Path(address): Path<String>,
@@ -456,6 +505,22 @@ pub async fn boxes_unspent_by_address(
 // ----- boxes/by-ergo-tree (+ unspent) -------------------------------------
 
 /// `POST /api/v1/boxes/by-ergo-tree` — body `{ "ergo_tree": "<hex>" }`.
+#[utoipa::path(
+    post, path = "/api/v1/boxes/by-ergo-tree", tag = "boxes",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+    ),
+    request_body = ErgoTreeBody,
+    responses(
+        (status = 200, description = "Boxes for this ErgoTree (full history)", body = Collection<V1Box>),
+        (status = 400, description = "Invalid ergo_tree/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_by_ergo_tree(
     State(state): State<V1State>,
     V1Query(q): V1Query<BoxListQuery>,
@@ -480,6 +545,24 @@ pub async fn boxes_by_ergo_tree(
 }
 
 /// `POST /api/v1/boxes/unspent/by-ergo-tree`.
+#[utoipa::path(
+    post, path = "/api/v1/boxes/unspent/by-ergo-tree", tag = "boxes",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+        ("include_unconfirmed" = Option<bool>, Query, description = "Merge in unspent mempool outputs"),
+        ("exclude_mempool_spent" = Option<bool>, Query, description = "Drop confirmed boxes already spent in the mempool"),
+    ),
+    request_body = ErgoTreeBody,
+    responses(
+        (status = 200, description = "Unspent boxes for this ErgoTree", body = Collection<V1Box>),
+        (status = 400, description = "Invalid ergo_tree/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_unspent_by_ergo_tree(
     State(state): State<V1State>,
     V1Query(q): V1Query<UnspentQuery>,
@@ -505,6 +588,22 @@ pub async fn boxes_unspent_by_ergo_tree(
 
 /// `GET /api/v1/boxes/by-template/{template_hash}`. Unknown template → `200`
 /// empty page (Scala parity), never 404.
+#[utoipa::path(
+    get, path = "/api/v1/boxes/by-template/{template_hash}", tag = "boxes",
+    params(
+        ("template_hash" = String, Path, description = "64-char lowercase hex blake2b256 template hash"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "Only `desc` (fixed reader order) is supported"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+    ),
+    responses(
+        (status = 200, description = "Boxes matching this template (empty page if unknown)", body = Collection<V1Box>),
+        (status = 400, description = "Invalid template_hash/cursor, or sort=asc (unsupported)", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_by_template(
     State(state): State<V1State>,
     Path(hash_hex): Path<String>,
@@ -534,6 +633,24 @@ pub async fn boxes_by_template(
 }
 
 /// `GET /api/v1/boxes/unspent/by-template/{template_hash}`.
+#[utoipa::path(
+    get, path = "/api/v1/boxes/unspent/by-template/{template_hash}", tag = "boxes",
+    params(
+        ("template_hash" = String, Path, description = "64-char lowercase hex blake2b256 template hash"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+        ("include_unconfirmed" = Option<bool>, Query, description = "Merge in unspent mempool outputs"),
+        ("exclude_mempool_spent" = Option<bool>, Query, description = "Drop confirmed boxes already spent in the mempool"),
+    ),
+    responses(
+        (status = 200, description = "Unspent boxes matching this template (empty page if unknown)", body = Collection<V1Box>),
+        (status = 400, description = "Invalid template_hash/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_unspent_by_template(
     State(state): State<V1State>,
     Path(hash_hex): Path<String>,
@@ -558,6 +675,22 @@ pub async fn boxes_unspent_by_template(
 // ----- boxes/by-token (+ unspent) -----------------------------------------
 
 /// `GET /api/v1/boxes/by-token/{token_id}`. Unknown token → `200` empty page.
+#[utoipa::path(
+    get, path = "/api/v1/boxes/by-token/{token_id}", tag = "boxes",
+    params(
+        ("token_id" = String, Path, description = "64-char lowercase hex token id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "Only `desc` (fixed reader order) is supported"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+    ),
+    responses(
+        (status = 200, description = "Boxes carrying this token (empty page if unknown)", body = Collection<V1Box>),
+        (status = 400, description = "Invalid token_id/cursor, or sort=asc (unsupported)", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_by_token(
     State(state): State<V1State>,
     Path(token_hex): Path<String>,
@@ -586,6 +719,24 @@ pub async fn boxes_by_token(
 }
 
 /// `GET /api/v1/boxes/unspent/by-token/{token_id}`.
+#[utoipa::path(
+    get, path = "/api/v1/boxes/unspent/by-token/{token_id}", tag = "boxes",
+    params(
+        ("token_id" = String, Path, description = "64-char lowercase hex token id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("decode" = Option<bool>, Query, description = "Semantic-decode each box's contract"),
+        ("include_unconfirmed" = Option<bool>, Query, description = "Merge in unspent mempool outputs"),
+        ("exclude_mempool_spent" = Option<bool>, Query, description = "Drop confirmed boxes already spent in the mempool"),
+    ),
+    responses(
+        (status = 200, description = "Unspent boxes carrying this token (empty page if unknown)", body = Collection<V1Box>),
+        (status = 400, description = "Invalid token_id/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn boxes_unspent_by_token(
     State(state): State<V1State>,
     Path(token_hex): Path<String>,
@@ -611,6 +762,19 @@ pub async fn boxes_unspent_by_token(
 
 /// `GET /api/v1/boxes/range` — bare box-id list over a global-index range.
 /// Cursor `{gi}` is genuinely stable (append-only global index).
+#[utoipa::path(
+    get, path = "/api/v1/boxes/range", tag = "boxes",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 2000)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Box ids in global-index order", body = Collection<String>),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn box_range(State(state): State<V1State>, V1Query(q): V1Query<RangeQuery>) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,

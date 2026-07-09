@@ -5,6 +5,7 @@
 //! `status` (T0) composes existing snapshot reads. `candidate-with-txs` has no
 //! trait seam yet (§3.3 #5), so it answers the honest `route_unavailable`.
 
+use utoipa::ToSchema;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -61,7 +62,7 @@ fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
 
 /// `?window=<u32>` for `miner-stats` (default 720 ≈ 1 day at 120s; clamp
 /// `[1, 16384]`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub(super) struct WindowQuery {
     window: Option<u32>,
 }
@@ -125,7 +126,7 @@ pub(super) async fn miner_stats(
 /// `last_template_*` / `template_seq` fields require the mining bridge to cache
 /// its last-published template metadata; that seam is not wired yet, so they are
 /// emitted as `null` (honest) rather than fabricated.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct MiningStatus {
     mining_enabled: bool,
     synced: bool,
@@ -155,7 +156,7 @@ pub(super) async fn status(State(s): State<OperatorState>) -> Response {
 }
 
 /// `?longpoll=<hex msg>` for `candidate` (getblocktemplate-style bounded block).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub(super) struct CandidateQuery {
     longpoll: Option<String>,
 }
@@ -211,13 +212,13 @@ pub(super) async fn solution(State(s): State<OperatorState>, body: axum::body::B
 /// Fresh snake_case reward-address DTO (§3.3 #3 — the compat
 /// `RewardAddressResponse` is hard-renamed camelCase + pinned by a unit test, so
 /// a new DTO is required).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct RewardAddress {
     reward_address: String,
 }
 
 /// Fresh snake_case reward-pubkey DTO (§3.3 #4 — same rationale).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct RewardPubkey {
     reward_pubkey: String,
 }

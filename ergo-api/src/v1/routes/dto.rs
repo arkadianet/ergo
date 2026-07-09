@@ -13,6 +13,7 @@
 //! and of `IndexedErgoBoxResponse` (`crate::blockchain`). The compat shapes stay
 //! camelCase and frozen; v1 wraps, never mutates them.
 
+use utoipa::ToSchema;
 use std::collections::BTreeMap;
 
 use ergo_indexer_types::types::IndexedErgoBox;
@@ -66,7 +67,7 @@ pub(crate) fn unix_ms_to_iso(ms: u64) -> String {
 /// A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
 /// every list, even single-page ones (a block's tx list, header-ids at a
 /// height): those carry `page.has_more = false`, `page.next_cursor = null`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Collection<T> {
     pub items: Vec<T>,
     pub page: Page,
@@ -92,7 +93,7 @@ impl<T> Collection<T> {
 
 /// Glossary-renamed header fields shared by the standalone header object,
 /// the full block, and a block summary (`serde(flatten)`ed into each).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1HeaderBase {
     pub header_id: String,
     pub height: u32,
@@ -118,7 +119,7 @@ pub struct V1HeaderBase {
 }
 
 /// Standalone header object (`GET /chain/headers/{header_id}` etc.).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Header {
     #[serde(flatten)]
     pub base: V1HeaderBase,
@@ -126,7 +127,7 @@ pub struct V1Header {
 }
 
 /// One item of the `GET /chain/blocks` list — a block summary.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1BlockSummary {
     #[serde(flatten)]
     pub base: V1HeaderBase,
@@ -138,7 +139,7 @@ pub struct V1BlockSummary {
 }
 
 /// Full block (`GET /chain/blocks/{header_id}`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Block {
     #[serde(flatten)]
     pub base: V1HeaderBase,
@@ -149,20 +150,20 @@ pub struct V1Block {
     pub ad_proofs: Option<V1AdProofs>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Extension {
     pub digest: String,
     pub fields: Vec<[String; 2]>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1AdProofs {
     pub proof_bytes: String,
     pub digest: String,
 }
 
 /// `GET /chain/proofs/{header_id}` — the block's AD-proofs section.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1BlockAdProofs {
     pub header_id: String,
     pub proof_bytes: String,
@@ -172,7 +173,7 @@ pub struct V1BlockAdProofs {
 
 /// `GET /chain/modifiers/{modifier_id}` — v1 adds the explicit `kind`
 /// discriminant the untagged Scala `BlockSection` lacks (§3.5).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum V1Modifier {
     Header(Box<V1Header>),
@@ -182,7 +183,7 @@ pub enum V1Modifier {
 }
 
 /// The block-transactions section as a modifier `data` payload.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1BlockTransactions {
     pub header_id: String,
     pub transactions: Vec<V1BlockTx>,
@@ -191,19 +192,19 @@ pub struct V1BlockTransactions {
 
 /// `GET /chain/proofs/{header_id}/transactions/{tx_id}` — Merkle membership
 /// proof. Side byte `0/1` rendered as `"left"/"right"` strings (§3.5).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MerkleProof {
     pub tx_id: String,
     pub levels: Vec<V1MerkleLevel>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MerkleLevel {
     pub sibling: String,
     pub side: MerkleSide,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Clone, Copy, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MerkleSide {
     Left,
@@ -212,7 +213,7 @@ pub enum MerkleSide {
 
 // ----- transactions + boxes (§3.6, §3.7) ----------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Asset {
     pub token_id: String,
     pub amount: String,
@@ -232,7 +233,7 @@ pub struct V1Asset {
 /// The `boxes/*` group owns the final canonical box shape (coherence Part B /
 /// coordination flag #2); this is the transactions-group projection it must
 /// match when it lands.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Box {
     pub box_id: String,
     pub value: Option<String>,
@@ -259,7 +260,7 @@ pub struct V1Box {
 }
 
 /// Spending-proof reference on a block-embedded transaction input.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1SpendingProof {
     pub proof_bytes: String,
     pub extension: BTreeMap<String, String>,
@@ -267,7 +268,7 @@ pub struct V1SpendingProof {
 
 /// A block-embedded transaction input — a *reference* to a spent box, not a
 /// resolved box (the block does not carry the spent box's body).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1SpendInput {
     pub box_id: String,
     pub spending_proof: V1SpendingProof,
@@ -275,7 +276,7 @@ pub struct V1SpendInput {
 
 /// A transaction as embedded in a block (`GET /chain/blocks/*`): inputs are
 /// spend-references, outputs are the block's own output boxes.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1BlockTx {
     pub tx_id: String,
     pub inputs: Vec<V1SpendInput>,
@@ -287,7 +288,7 @@ pub struct V1BlockTx {
 /// A single transaction read (`GET /api/v1/transactions/{tx_id}`): inputs and
 /// outputs are resolved box objects; on-chain metadata is `null` when the tx
 /// is still in the mempool (`confirmed = false`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Tx {
     pub tx_id: String,
     pub confirmed: bool,
@@ -513,7 +514,7 @@ pub(crate) fn modifier_from_scala(
 /// (coherence Part D): `{items, page, meta}`. Used by `tokens/{id}/holders`,
 /// whose `as_of_height` / `scanned_boxes` / `scan_capped` belong under `meta`,
 /// never as ad-hoc top-level siblings.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CollectionMeta<T, M> {
     pub items: Vec<T>,
     pub page: Page,
@@ -522,7 +523,7 @@ pub struct CollectionMeta<T, M> {
 
 /// The v1 token object (`v1-api-design.md` §3.7). `box_id` is the *minting*
 /// box; `emission_amount` is the string-restrung ever-minted figure.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Token {
     pub token_id: String,
     pub box_id: String,
@@ -533,7 +534,7 @@ pub struct V1Token {
 }
 
 /// One row of `tokens/{token_id}/holders`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1TokenHolder {
     pub address: String,
     pub amount: String,
@@ -543,7 +544,7 @@ pub struct V1TokenHolder {
 /// collection `meta` (Part D). `scan_capped` is set honestly when the token's
 /// total unspent-box count exceeds the bounded scan cap — an approximate
 /// ranking, never a silently-partial one.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HoldersMeta {
     pub as_of_height: u64,
     pub scanned_boxes: u64,
@@ -553,7 +554,7 @@ pub struct HoldersMeta {
 /// `tokens/{token_id}/stats` — bare object (not a collection). `box_count` is
 /// exact/cheap; `circulating_supply` / `holder_count` come from the same
 /// bounded scan as `/holders` and inherit its `scan_capped` honesty flag.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1TokenStats {
     pub token_id: String,
     pub emission_amount: String,
@@ -565,7 +566,7 @@ pub struct V1TokenStats {
 
 /// One confirmed/unconfirmed side of an `addresses/{address}/balance`. The
 /// nanoERG leaf is `value` (glossary C.2), a decimal string.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1BalanceEntry {
     pub value: String,
     pub assets: Vec<V1Asset>,
@@ -574,7 +575,7 @@ pub struct V1BalanceEntry {
 /// `addresses/{address}/balance`. `unconfirmed` is strictly additive (Scala
 /// parity): pool outputs paying the address add here; pool spends do NOT
 /// subtract from `confirmed`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1Balance {
     pub address: String,
     pub confirmed: V1BalanceEntry,
@@ -586,7 +587,7 @@ pub struct V1Balance {
 /// `input_count`/`output_count`, coherence Part B/C), projected DOWN from
 /// [`IndexedErgoTransactionResponse`] so the confirmation math never re-derives
 /// (a second drift site).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1AddressTxSummary {
     pub tx_id: String,
     pub header_id: String,
@@ -717,7 +718,7 @@ pub(crate) fn address_tx_summary_from_indexed(
 /// the priority weight become strings (§1.1); `first_seen` follows the §1.2 flat
 /// `*_unix_ms` + `*_iso` timestamp rule (superseding the fragment's nested
 /// `first_seen:{}` shape).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolTx {
     pub tx_id: String,
     pub fee: String,
@@ -773,7 +774,7 @@ pub(crate) fn mempool_tx_from_api(t: &ApiMempoolTransaction) -> V1MempoolTx {
 /// nullable: a spent input may not resolve against the extra index or the
 /// pool-output overlay, and `null` ≠ `[]` (an unresolved box is not a box with
 /// no assets) per the §1.1 honesty rule.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1IoBox {
     pub box_id: Option<String>,
     pub address: Option<String>,
@@ -783,7 +784,7 @@ pub struct V1IoBox {
 
 /// The v1 `mempool/transactions/{tx_id}` bare object (§3.8): the `mempool_tx`
 /// row (flattened) plus its resolved `io_box` inputs/outputs.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolTxDetail {
     #[serde(flatten)]
     pub tx: V1MempoolTx,
@@ -794,7 +795,7 @@ pub struct V1MempoolTxDetail {
 
 /// Derived pool-utilization fractions on [`V1MempoolSummary`] (0.0 when the
 /// matching capacity is unset — never a divide-by-zero).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolUtilization {
     pub count_pct: f64,
     pub bytes_pct: f64,
@@ -803,7 +804,7 @@ pub struct V1MempoolUtilization {
 /// The v1 `mempool/summary` bare object (§3.8): capacity counters + derived
 /// `utilization` + active `weight_function`, plus the OPTIONAL O4 depth
 /// `history` (present only when `?history=<n>` is requested).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolSummary {
     pub size: u32,
     pub total_bytes: u64,
@@ -820,7 +821,7 @@ pub struct V1MempoolSummary {
 /// §3.14). The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
 /// the future `stats/mempool-depth` endpoint reuses this SAME type over the SAME
 /// ring (Overlap O4).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolDepthPoint {
     pub timestamp_unix_ms: u64,
     pub timestamp_iso: String,
@@ -852,7 +853,7 @@ impl V1MempoolDepthPoint {
 /// the frozen `pool_fee_histogram` hook is a WAIT-TIME histogram carrying only
 /// `{n_txns, total_fee}` per bin, so the band is honestly `null` until a
 /// fee-keyed histogram hook exists (design correction — see the group report).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1FeeHistogramBin {
     pub index: u32,
     pub n_txns: u32,
@@ -863,7 +864,7 @@ pub struct V1FeeHistogramBin {
 
 /// The v1 `mempool/fee-histogram` bare object (§3.8): active `weight_function`,
 /// the `max_wait_ms` horizon the bins span, and the per-bin counts.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct V1FeeHistogram {
     pub weight_function: ApiWeightFunction,
     pub max_wait_ms: u64,

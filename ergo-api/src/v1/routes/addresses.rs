@@ -4,6 +4,7 @@
 //! `boxes/{by-address,unspent/by-address}` (O10) — one handler
 //! ([`super::boxes`]), dual-mounted in the router, never a second copy.
 
+use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -17,12 +18,13 @@ use crate::blockchain::{
     address_to_tree_hash, build_indexed_tx_response, unconfirmed_balance_for_tree, BalanceInfoEntry,
 };
 use crate::v1::cursor::clamp_limit;
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::dto::V1AddressTxSummary;
 
 const DEFAULT_LIMIT: u32 = 20;
 const MAX_LIMIT: u32 = 500;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct AddressTxQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -61,6 +63,16 @@ fn balance_entry_from_info(e: BalanceInfoEntry) -> V1BalanceEntry {
 /// `GET /api/v1/addresses/{address}/balance`. `unconfirmed` is strictly
 /// additive (Scala parity) — pool outputs add; pool spends do NOT subtract from
 /// `confirmed`.
+#[utoipa::path(
+    get, path = "/api/v1/addresses/{address}/balance", tag = "addresses",
+    params(("address" = String, Path, description = "Base58 address")),
+    responses(
+        (status = 200, description = "Confirmed + unconfirmed balance", body = V1Balance),
+        (status = 400, description = "Invalid address", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,
@@ -104,6 +116,21 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
 /// `GET /api/v1/addresses/{address}/transactions` — a small tx summary
 /// projected DOWN from the shared indexed-tx builder (never re-derives the
 /// confirmation math).
+#[utoipa::path(
+    get, path = "/api/v1/addresses/{address}/transactions", tag = "addresses",
+    params(
+        ("address" = String, Path, description = "Base58 address"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("sort" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+    ),
+    responses(
+        (status = 200, description = "Address transaction history", body = Collection<V1AddressTxSummary>),
+        (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Chain reader unavailable, or extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn transactions(
     State(state): State<V1State>,
     Path(address): Path<String>,

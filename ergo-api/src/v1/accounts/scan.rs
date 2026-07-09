@@ -10,6 +10,7 @@
 //! camelCase → snake_case, the `{items, page}` cursor envelope, and the nested
 //! `{error:{reason,…}}` family. The compat `/scan/*` router is untouched.
 
+use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -39,7 +40,7 @@ const SCAN_LIST_MAX_LIMIT: u32 = 500;
 /// `POST /api/v1/scan/scans` request — register a scan. `tracking_rule` stays an
 /// opaque JSON value for Phase-1 (`ergo-api` deliberately does not depend on the
 /// `ScanningPredicate` schema); a typed tagged union is Phase-2.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScanRegisterRequest {
     name: String,
@@ -51,7 +52,7 @@ pub struct ScanRegisterRequest {
 }
 
 /// A registered scan, snake_case (`v1-api-design.md` §3.10).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ScanView {
     scan_id: u16,
     name: String,
@@ -75,7 +76,7 @@ impl From<ScanDto> for ScanView {
 /// A box tracked by a scan (unspent surface). `spent_by` is always `null` here
 /// (the `/unspent` endpoint) — carried only for shape parity with a future
 /// `/spent` surface. `value` is a decimal string (§1.1).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ScanBoxView {
     box_id: String,
     value: String,
@@ -86,7 +87,7 @@ struct ScanBoxView {
 }
 
 /// `?limit=&cursor=` for the scan-list / scan-transactions collections.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
@@ -94,7 +95,7 @@ pub struct ListQuery {
 
 /// `?limit=&cursor=&min_confirmations=&…` for `/unspent`. The confirmation /
 /// inclusion-height bounds are ported verbatim from `ScanBoxFilter`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ScanBoxQuery {
     limit: Option<u32>,
     cursor: Option<String>,
@@ -106,7 +107,7 @@ pub struct ScanBoxQuery {
 
 /// `POST /api/v1/scan/scans/{scan_id}/boxes` request — attach a box (opaque
 /// `ErgoBox` JSON parsed in `ergo-node`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AttachBoxRequest {
     #[serde(rename = "box")]
@@ -114,7 +115,7 @@ pub struct AttachBoxRequest {
 }
 
 /// Cursor for the scan list — ascending `scan_id`, resume after the last seen.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct ScanIdCursor {
     after: u16,
 }
@@ -122,7 +123,7 @@ struct ScanIdCursor {
 /// Opaque offset cursor for the box / transaction collections, whose underlying
 /// trait calls are offset/limit paged. Opaque so a keyset seek can replace it
 /// without a wire break (§1.5).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,
 }

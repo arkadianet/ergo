@@ -2,6 +2,7 @@
 //! reduce / compile / parse facade in [`super`] (locked decision D3). No
 //! handler owns reduction, cost, or compile logic.
 
+use utoipa::ToSchema;
 use std::collections::BTreeMap;
 
 use axum::extract::State;
@@ -130,7 +131,7 @@ fn self_box_from_ctx(
 //  POST /api/v1/script/compile   (fragment §4.7)
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompileBody {
     source: String,
@@ -140,7 +141,7 @@ pub struct CompileBody {
     env: Option<BTreeMap<String, TypedConstant>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CompileResponse {
     ergo_tree: String,
     tree_bytes: String,
@@ -205,7 +206,7 @@ fn compile_inner(state: &ScriptState, body: CompileBody) -> Result<CompileRespon
 //  POST /api/v1/script/inspect   (fragment §4.2)
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectBody {
     #[serde(default)]
@@ -214,7 +215,7 @@ pub struct InspectBody {
     address: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ConstantView {
     index: usize,
     #[serde(rename = "type")]
@@ -222,7 +223,7 @@ struct ConstantView {
     value: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct InspectResponse {
     ergo_tree_version: u8,
     has_size: bool,
@@ -357,7 +358,7 @@ fn count_payload(node: &IrNode) -> usize {
 //  POST /api/v1/script/execute   (fragment §4.3)  — cost governor MANDATORY
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteBody {
     #[serde(default)]
@@ -376,7 +377,7 @@ pub struct ExecuteBody {
     max_cost: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextDto {
     #[serde(default)]
@@ -385,7 +386,7 @@ pub struct ContextDto {
     self_box: Option<SelfBoxDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SelfBoxDto {
     #[serde(default)]
@@ -396,7 +397,7 @@ pub struct SelfBoxDto {
     creation_height: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ExecuteResponse {
     reduced_to: String,
     result: Option<bool>,
@@ -441,7 +442,7 @@ fn execute_inner(state: &ScriptState, body: ExecuteBody) -> Result<ExecuteRespon
 //  POST /api/v1/script/cost   (fragment §4.4)  — cost governor MANDATORY
 // ==========================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CostResponse {
     total_cost: u64,
     within_block_limit: bool,
@@ -451,7 +452,7 @@ struct CostResponse {
     breakdown: Vec<CostBreakdownEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CostBreakdownEntry {
     op: String,
     cost: u64,
@@ -493,7 +494,7 @@ fn cost_inner(state: &ScriptState, body: ExecuteBody) -> Result<CostResponse, Bo
 //  POST /api/v1/script/simulate   (fragment §4.5)  — node-only differentiator
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimulateBody {
     box_id: String,
@@ -503,7 +504,7 @@ pub struct SimulateBody {
     max_cost: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SimulateResponse {
     spendable: bool,
     reduced_to: String,
@@ -632,13 +633,13 @@ fn eval_box_from_scala(o: &ScalaOutput) -> Result<EvalBox, Box<Response>> {
 //  POST /api/v1/script/explain   (fragment §4.6)  — the debugger
 // ==========================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct TraceView {
     label: String,
     value: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ExplainResponse {
     spendable: bool,
     reduced_to: Option<String>,
@@ -729,7 +730,7 @@ fn explain_inner(
 //  POST /api/v1/script/diff   (fragment §4.8)  — opt-in Scala oracle
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiffBody {
     #[serde(default)]
@@ -746,7 +747,7 @@ pub struct DiffBody {
     max_cost: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct DiffSide {
     verdict: &'static str,
     reduced_to: Option<String>,
@@ -757,14 +758,14 @@ struct DiffSide {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct Divergence {
     field: &'static str,
     rust: String,
     scala: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct DiffResponse {
     rust: DiffSide,
     scala: DiffSide,

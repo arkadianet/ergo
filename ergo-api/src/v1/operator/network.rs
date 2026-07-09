@@ -5,6 +5,7 @@
 //! writes have no node-side seam yet (§3.2 #7/#8 — the peer manager exposes no
 //! externally-triggered ban), so they answer the honest `route_unavailable`.
 
+use utoipa::ToSchema;
 use std::net::SocketAddr;
 
 use axum::{
@@ -53,7 +54,7 @@ pub(super) async fn connected(
 /// One blacklisted-peer entry (§3.2 #3). `addr` is the clean canonical
 /// `ip[:port]` — the compat path keeps the ugly Java `InetAddress.toString()`
 /// `hostname/ip` double-form for byte-parity; v1 strips it.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct BlacklistedPeer {
     addr: String,
 }
@@ -93,7 +94,7 @@ pub(super) async fn blacklisted(
 /// One per-peer sync-info entry (§3.2 #4). `peer_height` (not bare `height`)
 /// disambiguates whose height; `status` is the lowercased Scala
 /// `PeerChainStatus` set (`equal|younger|older|fork|unknown|nonsense`).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct SyncInfoEntry {
     addr: String,
     peer_height: u32,
@@ -124,7 +125,7 @@ pub(super) async fn sync_info(
 
 /// The `network/track-info` aggregate counters (§3.2 #5). Bare object, not a
 /// collection.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct TrackInfo {
     num_requested: u32,
     num_received: u32,

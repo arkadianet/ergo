@@ -4,6 +4,7 @@
 //! [`NodeAdmin::request_shutdown`](crate::traits::NodeAdmin). `config` GET/PATCH
 //! has no node-side trait seam yet, so it answers the honest `route_unavailable`.
 
+use utoipa::ToSchema;
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -66,7 +67,7 @@ pub(super) async fn health(State(s): State<OperatorState>) -> Response {
 /// read, distinct from `info`. `activated_protocol_version` is the currently
 /// active block-format version — sourced from the same snapshot's votes view
 /// (`ApiVotes.block_version`), the one place the node already surfaces it.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct NodeVersion {
     software_version: String,
     api_versions: Vec<&'static str>,

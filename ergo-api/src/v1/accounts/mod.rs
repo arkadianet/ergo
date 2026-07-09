@@ -30,6 +30,7 @@
 
 mod scan;
 
+use utoipa::ToSchema;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -206,7 +207,7 @@ fn seam(what: &str, detail: &str) -> Response {
 // ==========================================================================
 
 /// `POST /api/v1/accounts/watch` request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct WatchRequest {
     address: String,
@@ -215,13 +216,13 @@ struct WatchRequest {
 }
 
 /// `?limit=&cursor=` for the watch list.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 struct WatchListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ScanIdCursor {
     after: u16,
 }
@@ -323,7 +324,7 @@ async fn watch_delete(State(state): State<AccountsState>, Path(scan_id): Path<u1
 // ==========================================================================
 
 /// `POST /api/v1/accounts/private-key` request. T2 (admin + loopback-preferred).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct PrivateKeyRequest {
     address: String,

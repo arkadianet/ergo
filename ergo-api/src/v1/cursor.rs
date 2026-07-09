@@ -21,6 +21,7 @@
 //! sets `has_more`, and mints `next_cursor` from the last *kept* row. This
 //! works with or without a total-count method — v1's envelope has no `total`.
 
+use utoipa::ToSchema;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -141,7 +142,7 @@ pub fn clamp_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
 /// The `page` object of a v1 collection envelope (`v1-api-design.md` §1.3 /
 /// §1.5): `{ limit, next_cursor, has_more }`. `next_cursor` is `null` exactly
 /// when `has_more` is false.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct Page {
     /// The effective (clamped) page size that produced these items.
     pub limit: u32,

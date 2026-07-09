@@ -16,6 +16,7 @@
 //! shares the ONE `mempool_tx` shape and the keyset `(priority_weight, tx_id)`
 //! cursor.
 
+use utoipa::ToSchema;
 use std::collections::HashSet;
 
 use axum::extract::{Path, State};
@@ -39,7 +40,7 @@ use crate::blockchain::build_indexed_box_response;
 use crate::compat::NodeChainQuery;
 use crate::types::ApiMempoolTransaction;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 // ----- caps (§2.2) --------------------------------------------------------
 
@@ -95,7 +96,7 @@ fn order_key(t: &ApiMempoolTransaction, order: Order) -> u64 {
 /// `{w, t}` mempool-keyset example (`o`/`s` added so a cursor replayed against
 /// a different order or a different view fails closed instead of mid-stream
 /// seeking it).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct MempoolCursor {
     o: u8,
     s: String,
@@ -239,7 +240,7 @@ fn chain(state: &V1State) -> Result<&std::sync::Arc<dyn NodeChainQuery>, Box<Res
 
 // ----- GET /mempool/summary -----------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct SummaryQuery {
     /// Number of trailing O4 depth samples to include as `history`
     /// (oldest-first). Absent/`0` ⇒ the field is omitted.
@@ -249,6 +250,13 @@ pub struct SummaryQuery {
 
 /// `GET /api/v1/mempool/summary` — pool depth + capacity + derived utilization
 /// + active weight-function, plus the optional O4 depth history.
+#[utoipa::path(
+    get, path = "/api/v1/mempool/summary", tag = "mempool",
+    params(("history" = Option<u32>, Query, description = "Trailing depth samples to include (oldest-first); omitted/0 = field omitted")),
+    responses(
+        (status = 200, description = "Pool summary + derived utilization", body = V1MempoolSummary),
+    ),
+)]
 pub async fn summary(State(state): State<V1State>, V1Query(q): V1Query<SummaryQuery>) -> Response {
     let s = state.read.mempool_summary();
     let count_pct = ratio(u64::from(s.size), u64::from(s.capacity_count));
@@ -296,7 +304,7 @@ fn ratio(used: u64, cap: u64) -> f64 {
 
 // ----- GET /mempool/transactions ------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ListQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -308,6 +316,18 @@ pub struct ListQuery {
 
 /// `GET /api/v1/mempool/transactions` — cursor-paginated pool listing,
 /// priority-weight descending by default (mining order).
+#[utoipa::path(
+    get, path = "/api/v1/mempool/transactions", tag = "mempool",
+    params(
+        ("order" = Option<String>, Query, description = "`weight` (default), `fee_per_byte`, or `first_seen`"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 200)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Pooled transactions", body = Collection<V1MempoolTx>),
+        (status = 400, description = "Invalid order/cursor", body = V1Error),
+    ),
+)]
 pub async fn transactions(
     State(state): State<V1State>,
     V1Query(q): V1Query<ListQuery>,
@@ -332,6 +352,15 @@ pub async fn transactions(
 /// `GET /api/v1/mempool/transactions/{tx_id}` — one pooled tx: the `mempool_tx`
 /// row plus resolved `io_box` inputs/outputs (best-effort, from the extra index
 /// + the pool-output overlay). `404 tx_not_found` when not pooled.
+#[utoipa::path(
+    get, path = "/api/v1/mempool/transactions/{tx_id}", tag = "mempool",
+    params(("tx_id" = String, Path, description = "64-char lowercase hex transaction id")),
+    responses(
+        (status = 200, description = "Pooled tx + resolved io_box inputs/outputs", body = V1MempoolTxDetail),
+        (status = 400, description = "Malformed tx id", body = V1Error),
+        (status = 404, description = "Not in this node's mempool", body = V1Error),
+    ),
+)]
 pub async fn transaction_by_id(
     State(state): State<V1State>,
     Path(tx_id_hex): Path<String>,
@@ -470,7 +499,7 @@ fn io_box_from_ergo_box(net: NetworkPrefix, b: &ErgoBox) -> Result<V1IoBox, Stri
 
 // ----- GET /mempool/by-* --------------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ByQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -495,6 +524,19 @@ fn matched_ids(txs: Vec<ergo_rest_json::types::ScalaTransaction>) -> HashSet<Str
 /// `GET /api/v1/mempool/by-address/{address}` — pooled txs paying a P2PK/P2S
 /// address (output side). The address decodes to its ergo_tree; P2S addresses
 /// map through the same ergo_tree path.
+#[utoipa::path(
+    get, path = "/api/v1/mempool/by-address/{address}", tag = "mempool",
+    params(
+        ("address" = String, Path, description = "Base58 address"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 100)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Pooled txs paying this address", body = Collection<V1MempoolTx>),
+        (status = 400, description = "Invalid address/cursor", body = V1Error),
+        (status = 409, description = "Mempool filtering not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn by_address(
     State(state): State<V1State>,
     Path(address): Path<String>,
@@ -520,6 +562,19 @@ pub async fn by_address(
 
 /// `GET /api/v1/mempool/by-ergo-tree/{ergo_tree}` — pooled txs paying the given
 /// ergo_tree (output side). The tree is unprefixed wire hex.
+#[utoipa::path(
+    get, path = "/api/v1/mempool/by-ergo-tree/{ergo_tree}", tag = "mempool",
+    params(
+        ("ergo_tree" = String, Path, description = "Unprefixed hex ErgoTree"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 100)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Pooled txs paying this ErgoTree", body = Collection<V1MempoolTx>),
+        (status = 400, description = "Invalid ergo_tree/cursor", body = V1Error),
+        (status = 409, description = "Mempool filtering not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn by_ergo_tree(
     State(state): State<V1State>,
     Path(ergo_tree): Path<String>,
@@ -550,6 +605,19 @@ pub async fn by_ergo_tree(
 
 /// `GET /api/v1/mempool/by-box-id/{box_id}` — pooled tx(s) that SPEND the given
 /// box (input side): the pending-spend / double-spend question (0..n rows).
+#[utoipa::path(
+    get, path = "/api/v1/mempool/by-box-id/{box_id}", tag = "mempool",
+    params(
+        ("box_id" = String, Path, description = "64-char lowercase hex box id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 100)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Pooled txs spending this box (0..n — double-spend candidates)", body = Collection<V1MempoolTx>),
+        (status = 400, description = "Invalid box_id/cursor", body = V1Error),
+        (status = 409, description = "Mempool filtering not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn by_box_id(
     State(state): State<V1State>,
     Path(box_id): Path<String>,
@@ -572,6 +640,19 @@ pub async fn by_box_id(
 
 /// `GET /api/v1/mempool/by-token-id/{token_id}` — pooled txs that reference the
 /// given token id (output side).
+#[utoipa::path(
+    get, path = "/api/v1/mempool/by-token-id/{token_id}", tag = "mempool",
+    params(
+        ("token_id" = String, Path, description = "64-char lowercase hex token id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 100)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Pooled txs referencing this token", body = Collection<V1MempoolTx>),
+        (status = 400, description = "Invalid token_id/cursor", body = V1Error),
+        (status = 409, description = "Mempool filtering not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn by_token_id(
     State(state): State<V1State>,
     Path(token_id): Path<String>,
@@ -594,7 +675,7 @@ pub async fn by_token_id(
 
 // ----- GET /mempool/fee-histogram -----------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct HistogramQuery {
     #[serde(default)]
     bins: Option<u32>,
@@ -607,6 +688,17 @@ pub struct HistogramQuery {
 /// (`{index, n_txns, total_fee}` per bin). The `fee_per_byte_min/max` band is
 /// honestly `null`: the frozen hook is wait-time-keyed and carries no per-bin
 /// fee-per-byte bounds (design correction — see the group report).
+#[utoipa::path(
+    get, path = "/api/v1/mempool/fee-histogram", tag = "mempool",
+    params(
+        ("bins" = Option<u32>, Query, description = "Number of bins (default 12, cap 64)"),
+        ("max_wait_ms" = Option<u64>, Query, description = "Wait-time horizon the bins span; 0 (default) = whole pool"),
+    ),
+    responses(
+        (status = 200, description = "Wait-time fee histogram", body = V1FeeHistogram),
+        (status = 409, description = "Mempool filtering not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn fee_histogram(
     State(state): State<V1State>,
     V1Query(q): V1Query<HistogramQuery>,

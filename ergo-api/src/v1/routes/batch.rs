@@ -50,6 +50,7 @@
 //! route actually exists to gate — building it now would be untested,
 //! unreachable machinery.
 
+use utoipa::ToSchema;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -95,12 +96,12 @@ const UNKNOWN_IP: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 // ----- wire types -----------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct BatchRequest {
     requests: Vec<BatchItemRequest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct BatchItemRequest {
     #[serde(default)]
     id: Option<String>,
@@ -112,7 +113,7 @@ struct BatchItemRequest {
     body: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct BatchItemResult {
     id: String,
     status: &'static str,
@@ -153,7 +154,7 @@ impl BatchItemResult {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct BatchResponse {
     items: Vec<BatchItemResult>,
 }

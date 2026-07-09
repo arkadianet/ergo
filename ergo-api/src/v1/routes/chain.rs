@@ -11,7 +11,8 @@ use axum::Json;
 
 use super::dto::{
     block_from_scala, block_summary_from_scala, block_tx_from_scala, header_from_scala,
-    modifier_from_scala, Collection, MerkleSide, V1BlockAdProofs, V1MerkleLevel, V1MerkleProof,
+    modifier_from_scala, Collection, MerkleSide, V1Block, V1BlockAdProofs, V1BlockSummary,
+    V1BlockTransactions, V1BlockTx, V1Header, V1MerkleLevel, V1MerkleProof, V1Modifier,
 };
 use super::extract::{V1Json, V1Query};
 use super::{
@@ -19,6 +20,7 @@ use super::{
     ListQuery, V1State,
 };
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
+use crate::v1::error::V1Error;
 use crate::v1::error::{v1_error, Reason};
 
 fn block_not_found() -> Response {
@@ -75,6 +77,19 @@ fn height_window_page(
 
 /// `GET /api/v1/chain/blocks` — cursor-paginated full-history block summaries
 /// (default 25, cap 200), newest-first by default.
+#[utoipa::path(
+    get, path = "/api/v1/chain/blocks", tag = "chain",
+    params(
+        ("order" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 25, cap 200)"),
+    ),
+    responses(
+        (status = 200, description = "Block summaries", body = Collection<V1BlockSummary>),
+        (status = 400, description = "Invalid order/cursor/limit", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQuery>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -107,6 +122,16 @@ pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQ
 }
 
 /// `GET /api/v1/chain/blocks/{header_id}` — single full block.
+#[utoipa::path(
+    get, path = "/api/v1/chain/blocks/{header_id}", tag = "chain",
+    params(("header_id" = String, Path, description = "64-char lowercase hex header id")),
+    responses(
+        (status = 200, description = "Full block", body = V1Block),
+        (status = 400, description = "Malformed header id", body = V1Error),
+        (status = 404, description = "No block with that header id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -124,6 +149,16 @@ pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -
 
 /// `GET /api/v1/chain/blocks/{header_id}/transactions` — the block's tx
 /// section (single-page collection; a block never spans pages).
+#[utoipa::path(
+    get, path = "/api/v1/chain/blocks/{header_id}/transactions", tag = "chain",
+    params(("header_id" = String, Path, description = "64-char lowercase hex header id")),
+    responses(
+        (status = 200, description = "Block transactions (single page)", body = Collection<V1BlockTx>),
+        (status = 400, description = "Malformed header id", body = V1Error),
+        (status = 404, description = "No block with that header id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -149,6 +184,15 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
 
 /// `GET /api/v1/chain/blocks/at-height/{height}` — header ids at a height
 /// (canonical chain only; single-page collection).
+#[utoipa::path(
+    get, path = "/api/v1/chain/blocks/at-height/{height}", tag = "chain",
+    params(("height" = u32, Path, description = "Block height")),
+    responses(
+        (status = 200, description = "Header ids at height (single page)", body = Collection<String>),
+        (status = 400, description = "Height is not a non-negative integer", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn blocks_at_height(
     State(state): State<V1State>,
     Path(height): Path<String>,
@@ -167,6 +211,15 @@ pub async fn blocks_at_height(
 
 /// `POST /api/v1/chain/blocks/by-ids` — bulk full-block fetch; request order
 /// preserved, misses silently dropped, array capped at 200.
+#[utoipa::path(
+    post, path = "/api/v1/chain/blocks/by-ids", tag = "chain",
+    request_body(content = Vec<String>, description = "Header ids to fetch, at most 200"),
+    responses(
+        (status = 200, description = "Full blocks found (single page, misses dropped)", body = Collection<V1Block>),
+        (status = 400, description = "Malformed id or more than 200 ids", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn blocks_by_ids(
     State(state): State<V1State>,
     V1Json(ids): V1Json<Vec<String>>,
@@ -198,6 +251,19 @@ pub async fn blocks_by_ids(
 
 /// `GET /api/v1/chain/headers` — cursor-paginated header objects (default
 /// 100, cap 1000), newest-first by default.
+#[utoipa::path(
+    get, path = "/api/v1/chain/headers", tag = "chain",
+    params(
+        ("order" = Option<String>, Query, description = "`desc` (default) or `asc`"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 1000)"),
+    ),
+    responses(
+        (status = 200, description = "Header objects", body = Collection<V1Header>),
+        (status = 400, description = "Invalid order/cursor/limit", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn list_headers(
     State(state): State<V1State>,
     V1Query(q): V1Query<ListQuery>,
@@ -233,6 +299,16 @@ pub async fn list_headers(
 }
 
 /// `GET /api/v1/chain/headers/{header_id}` — single header object.
+#[utoipa::path(
+    get, path = "/api/v1/chain/headers/{header_id}", tag = "chain",
+    params(("header_id" = String, Path, description = "64-char lowercase hex header id")),
+    responses(
+        (status = 200, description = "Header object", body = V1Header),
+        (status = 400, description = "Malformed header id", body = V1Error),
+        (status = 404, description = "No header with that id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn header_by_id(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -249,6 +325,15 @@ pub async fn header_by_id(State(state): State<V1State>, Path(id): Path<String>) 
 
 /// `GET /api/v1/chain/headers/at-height/{height}` — full header objects at a
 /// height (single-page collection).
+#[utoipa::path(
+    get, path = "/api/v1/chain/headers/at-height/{height}", tag = "chain",
+    params(("height" = u32, Path, description = "Block height")),
+    responses(
+        (status = 200, description = "Header objects at height (single page)", body = Collection<V1Header>),
+        (status = 400, description = "Height is not a non-negative integer", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn headers_at_height(
     State(state): State<V1State>,
     Path(height): Path<String>,
@@ -275,6 +360,16 @@ pub async fn headers_at_height(
 /// `GET /api/v1/chain/modifiers/{modifier_id}` — generic-by-id lookup across
 /// headers + the three non-header block sections, tagged with an explicit
 /// `kind` discriminant.
+#[utoipa::path(
+    get, path = "/api/v1/chain/modifiers/{modifier_id}", tag = "chain",
+    params(("modifier_id" = String, Path, description = "64-char lowercase hex modifier id")),
+    responses(
+        (status = 200, description = "The modifier, tagged by kind", body = V1Modifier),
+        (status = 400, description = "Malformed modifier id", body = V1Error),
+        (status = 404, description = "No modifier with that id (block_not_found)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn modifier_by_id(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -295,6 +390,16 @@ pub async fn modifier_by_id(State(state): State<V1State>, Path(id): Path<String>
 /// `GET /api/v1/chain/proofs/{header_id}` — the block's AD-proofs section.
 /// Distinguishes "block unknown" (`block_not_found`) from "block known, proof
 /// section absent / pruned" (`ad_proofs_unavailable`).
+#[utoipa::path(
+    get, path = "/api/v1/chain/proofs/{header_id}", tag = "chain",
+    params(("header_id" = String, Path, description = "64-char lowercase hex header id")),
+    responses(
+        (status = 200, description = "AD-proofs section", body = V1BlockAdProofs),
+        (status = 400, description = "Malformed header id", body = V1Error),
+        (status = 404, description = "No block with that header id", body = V1Error),
+        (status = 503, description = "AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -324,6 +429,19 @@ pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String
 
 /// `GET /api/v1/chain/proofs/{header_id}/transactions/{tx_id}` — Merkle
 /// membership proof; side byte `0/1` rendered as `"left"/"right"`.
+#[utoipa::path(
+    get, path = "/api/v1/chain/proofs/{header_id}/transactions/{tx_id}", tag = "chain",
+    params(
+        ("header_id" = String, Path, description = "64-char lowercase hex header id"),
+        ("tx_id" = String, Path, description = "64-char lowercase hex transaction id"),
+    ),
+    responses(
+        (status = 200, description = "Merkle membership proof", body = V1MerkleProof),
+        (status = 400, description = "Malformed header or tx id", body = V1Error),
+        (status = 404, description = "No block, or tx not in that block", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn proof_for_tx(
     State(state): State<V1State>,
     Path((header_id, tx_id)): Path<(String, String)>,

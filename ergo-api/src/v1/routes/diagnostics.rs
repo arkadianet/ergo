@@ -16,6 +16,7 @@
 //! reported as `null` (unknown), **never a fabricated green**. The `unknown`
 //! vector on each signal names those gaps explicitly.
 
+use utoipa::ToSchema;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -97,7 +98,7 @@ fn fold_peers(peers: &[ApiPeer], self_full_height: u32) -> PeerFold {
 
 // ----- C2 chain-position --------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ChainPosition {
     /// `majority | behind | ahead_suspicious | isolated | unknown`.
     pub status: String,
@@ -173,7 +174,7 @@ pub async fn chain_position(State(state): State<V1State>) -> Response {
 
 // ----- C3 fork-risk -------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ForkRisk {
     /// `none | watch | forking`.
     pub status: String,
@@ -232,7 +233,7 @@ pub async fn fork_risk(State(state): State<V1State>) -> Response {
 
 // ----- C4 tip-health ------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TipHealth {
     /// `advancing | slow | stuck`.
     pub status: String,
@@ -286,7 +287,7 @@ pub async fn tip_health(State(state): State<V1State>) -> Response {
 
 // ----- C5 peer-quality ----------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PeerRow {
     pub addr: String,
     pub score: i32,
@@ -298,7 +299,7 @@ pub struct PeerRow {
     pub delivery_failures: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PeerQualitySummary {
     /// `healthy | thin | degraded`.
     pub status: String,
@@ -318,7 +319,7 @@ pub struct PeerQualitySummary {
     pub unknown: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PeerQuality {
     pub summary: PeerQualitySummary,
     pub worst_peers: Vec<PeerRow>,
@@ -391,7 +392,7 @@ pub async fn peer_quality(State(state): State<V1State>) -> Response {
 
 // ----- C6 candidate-build -------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CandidateBuild {
     /// `unknown | disabled` today (`ok | slow | stalled` once the build-latency
     /// telemetry is plumbed — without it a health verdict would be fabricated).
@@ -446,7 +447,7 @@ pub async fn candidate_build(State(state): State<V1State>) -> Response {
 
 // ----- C1 composite -------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Diagnostics {
     /// Worst of the sub-verdicts: `ok | degraded | critical`.
     pub verdict: String,

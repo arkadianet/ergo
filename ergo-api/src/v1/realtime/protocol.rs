@@ -9,6 +9,7 @@
 //! reads — so the whole protocol is unit-testable without a live socket
 //! ([`super::ws`] is the thin axum adapter over it).
 
+use utoipa::ToSchema;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -33,7 +34,7 @@ pub const CONTROL_WINDOW: Duration = Duration::from_secs(10);
 pub const MAX_CONTROL_OPS: usize = 20;
 
 /// The server-advertised limits, echoed in the `welcome` frame.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 pub struct Limits {
     /// Max subscribed channels per socket.
     pub max_channels: usize,
@@ -137,7 +138,7 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameParseError> {
 }
 
 /// A server → client frame (§2.4). `type`-tagged, snake_case.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
     /// Sent once on open.

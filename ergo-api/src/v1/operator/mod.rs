@@ -30,6 +30,7 @@ mod network;
 mod node;
 mod voting;
 
+use utoipa::ToSchema;
 use std::sync::Arc;
 
 use axum::{
@@ -114,7 +115,7 @@ impl OperatorState {
 }
 
 /// `?limit=&cursor=` query for the bounded operator list endpoints.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub(super) struct ListQuery {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
@@ -124,7 +125,7 @@ pub(super) struct ListQuery {
 /// sync-info, operator-votes). These lists are node-bounded (well under a few
 /// hundred entries), so an offset alias is stable enough; opaque to clients so a
 /// keyset seek can replace it without a wire break (§1.5).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,
 }

@@ -15,6 +15,7 @@
 //! `membership-proof` handler is Overlap O2: it delegates to the SAME core as
 //! `chain/proofs/{id}/transactions/{tx_id}` (see [`super::chain`]).
 
+use utoipa::ToSchema;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -54,7 +55,7 @@ const HEADERS_MAX_LIMIT: u32 = 512;
 /// re-skin of [`ScalaHeader`] carrying the fields a light client checks (PoW
 /// `n_bits`, `difficulty`, the `parent_id` link). No consensus bytes are
 /// re-encoded — this is a field rename over the already-decoded prover output.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightHeader {
     pub header_id: String,
     pub height: u32,
@@ -86,7 +87,7 @@ impl LightHeader {
 }
 
 /// One index entry of a batch-Merkle interlinks proof.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightBatchIndex {
     pub index: u32,
     pub digest: String,
@@ -95,13 +96,13 @@ pub struct LightBatchIndex {
 /// One sibling of a batch-Merkle interlinks path. `digest: null` is the
 /// odd-trailing empty sibling (the compat encoder serializes it as the empty
 /// string; we surface it honestly as `null`). `side` is the lowercase enum.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightBatchElement {
     pub digest: Option<String>,
     pub side: LightSide,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Clone, Copy, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LightSide {
     Left,
@@ -109,7 +110,7 @@ pub enum LightSide {
 }
 
 /// Batch-Merkle proof tying a header's interlinks to its extension digest.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightBatchMerkleProof {
     pub indices: Vec<LightBatchIndex>,
     pub proofs: Vec<LightBatchElement>,
@@ -148,7 +149,7 @@ impl LightBatchMerkleProof {
 }
 
 /// A header + its interlinks vector + the batch-Merkle proof binding them.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightPopowHeader {
     pub header: LightHeader,
     /// Base16 header ids, genesis first (KMZ17 reverse-level order).
@@ -167,7 +168,7 @@ impl LightPopowHeader {
 }
 
 /// Echo of the resolved proof parameters (so the client knows what it got).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightProofParams {
     pub m: u32,
     pub k: u32,
@@ -177,7 +178,7 @@ pub struct LightProofParams {
 /// The `bootstrap-proof` body — a snake_case re-skin of [`ScalaNipopowProof`].
 /// `prefix`/`suffix_head`/`suffix` mirror the compat `prefix`/`suffixHead`/
 /// `suffixTail`, renamed for the light-client glossary.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightPopowProof {
     pub prefix: Vec<LightPopowHeader>,
     pub suffix_head: LightPopowHeader,
@@ -202,7 +203,7 @@ impl LightPopowProof {
 
 // ----- GET /light/bootstrap-proof -----------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct BootstrapQuery {
     #[serde(default)]
     m: Option<u32>,
@@ -294,12 +295,12 @@ pub async fn bootstrap_proof(
 
 /// Opaque forward cursor for `headers-interlinks`: the next height to serve.
 /// Genuinely stable under a growing chain (never an offset).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct NextHeightCursor {
     next_height: u32,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct HeadersQuery {
     #[serde(default)]
     from_height: Option<u32>,
@@ -310,7 +311,7 @@ pub struct HeadersQuery {
 }
 
 /// The collection envelope for `headers-interlinks`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightHeadersPage {
     pub items: Vec<LightPopowHeader>,
     pub page: Page,
@@ -401,7 +402,7 @@ pub async fn headers_interlinks(
 
 // ----- GET /light/membership-proof (O2 dual mount) ------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct MembershipQuery {
     #[serde(default)]
     header_id: Option<String>,
@@ -444,7 +445,7 @@ pub async fn membership_proof(
 
 /// The `light/status` capability advertisement — never a 404. A wallet reads
 /// this to pick a node that can serve it trustless-sync proofs.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightStatus {
     pub nipopow_bootstrap: bool,
     pub serves_bootstrap_proof: bool,

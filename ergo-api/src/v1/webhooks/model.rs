@@ -19,6 +19,7 @@
 //! constant-time compares (`X-Ergo-Signature` header, §3.4). Signing uses the
 //! proven `hmac` + `sha2` workspace crates (CLAUDE.md §2 — never hand-rolled).
 
+use utoipa::ToSchema;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use hmac::{Mac, SimpleHmac};
@@ -32,7 +33,7 @@ use crate::v1::routes::dto::unix_ms_to_iso;
 pub const SIGNATURE_PREFIX: &str = "sha256=";
 
 /// Live delivery-health of a subscription (§3.2 `delivery.last_status`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookHealth {
     /// Last delivery succeeded (or none attempted yet).
@@ -44,7 +45,7 @@ pub enum WebhookHealth {
 }
 
 /// Status of one delivery attempt-group (§3.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     /// Enqueued, not yet attempted.
@@ -65,7 +66,7 @@ impl DeliveryStatus {
 }
 
 /// The reason a subscription was auto-disabled (§3.3). `None` while active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoDisabledReason {
     /// `consecutive_failures` crossed `MAX_CONSECUTIVE_FAILURES`.

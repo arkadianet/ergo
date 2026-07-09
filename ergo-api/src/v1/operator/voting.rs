@@ -4,6 +4,7 @@
 //! which moves to the T1 `operator-votes` read. The operator write (T1) reuses
 //! [`NodeAdmin::set_voting_targets`](crate::traits::NodeAdmin).
 
+use utoipa::ToSchema;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -18,7 +19,7 @@ use crate::v1::error::{v1_error, Reason};
 
 /// A votable parameter + bounds, snake_case (reshape of the camelCase
 /// `ApiVotableParam`).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct VotableParam {
     id: u8,
     name: String,
@@ -32,7 +33,7 @@ struct VotableParam {
 /// The public `voting/votes` body — ONLY the public half (§3.4 #1). The
 /// operator's own `configured_votes` is dropped here and served (gated) at
 /// `operator-votes`.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct PublicVotes {
     block_height: u32,
     block_version: u8,
@@ -66,7 +67,7 @@ pub(super) async fn votes(State(s): State<OperatorState>) -> Response {
 }
 
 /// A single parameter change across an epoch boundary, snake_case.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ParamChange {
     id: u8,
     name: String,
@@ -76,7 +77,7 @@ struct ParamChange {
 }
 
 /// One epoch boundary at which the active parameters changed, snake_case.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct VoteChange {
     height: u32,
     params: Vec<ParamChange>,
@@ -84,7 +85,7 @@ struct VoteChange {
 
 /// The `voting/history` body, snake_case (reshape of the camelCase
 /// `ApiVotesHistory`).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct VotesHistory {
     epoch_length: u32,
     current_height: u32,
@@ -139,7 +140,7 @@ pub(super) async fn candidate(State(_s): State<OperatorState>) -> Response {
 
 /// One configured operator vote, snake_case (reshape of the camelCase
 /// `ApiConfiguredVote`).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ConfiguredVote {
     parameter_id: u8,
     name: String,
@@ -168,7 +169,7 @@ pub(super) async fn operator_votes_get(
 }
 
 /// One desired vote in a `POST /voting/operator-votes` body, snake_case.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct VoteTarget {
     parameter_id: u8,
     target: i64,
@@ -176,7 +177,7 @@ struct VoteTarget {
 
 /// `POST /api/v1/voting/operator-votes` body — the FULL desired set (REPLACES;
 /// an empty list clears all votes), snake_case.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct SetVotesRequest {
     votes: Vec<VoteTarget>,
 }

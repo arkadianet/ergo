@@ -21,6 +21,7 @@
 //! handler answers the honest `*_unavailable` / `*_disabled` reason (§1.4)
 //! rather than fabricate a series.
 
+use utoipa::ToSchema;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -55,13 +56,13 @@ const HOLDERS_MAX_LIMIT: u32 = 1_000;
 
 /// Height-keyed opaque cursor: the next height to emit (ascending). Stable
 /// under a growing chain (never an offset).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct SeriesCursor {
     next_height: u32,
 }
 
 /// The shared `stats/*` query (all series except `emission-schedule`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct SeriesQuery {
     #[serde(default)]
     from_height: Option<u32>,
@@ -167,7 +168,7 @@ fn series_response<T: Serialize>(items: Vec<T>, w: &Window) -> Response {
     .into_response()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SeriesPage<T> {
     items: Vec<T>,
     page: Page,
@@ -176,7 +177,7 @@ struct SeriesPage<T> {
 // ----- stats/supply (B1) --------------------------------------------------
 
 /// One realized-supply point.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SupplyPoint {
     pub height: u32,
     pub timestamp_unix_ms: Option<u64>,
@@ -248,7 +249,7 @@ fn timestamps_for(
 
 // ----- stats/emission-schedule (B2) ---------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct EmissionScheduleQuery {
     #[serde(default)]
     from_height: Option<u32>,
@@ -334,7 +335,7 @@ pub async fn emission_schedule(
 
 // ----- stats/difficulty (B3, O8 canonical) --------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DifficultyPoint {
     pub height: u32,
     pub timestamp_unix_ms: u64,
@@ -396,7 +397,7 @@ pub async fn difficulty(
 
 // ----- stats/fees (B4) ----------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct FeesPoint {
     pub height: u32,
     pub timestamp_unix_ms: u64,
@@ -478,7 +479,7 @@ fn percentile(sorted: &[u64], p: u32) -> u64 {
 
 // ----- stats/mempool-depth (B5, O4 ring) ----------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct DepthQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -544,7 +545,7 @@ pub async fn mempool_depth(
 
 // ----- stats/holders (B6, O3 scan) ----------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct HoldersQuery {
     #[serde(default)]
     token_id: Option<String>,
@@ -556,14 +557,14 @@ pub struct HoldersQuery {
     include_metrics: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HolderRow {
     pub address: String,
     pub amount: String,
     pub share_pct: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HolderMetrics {
     pub holder_count: u64,
     pub top10_share_pct: String,

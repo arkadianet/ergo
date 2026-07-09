@@ -8,6 +8,7 @@
 //! wired, so a node without the webhook store answers `webhooks_disabled`
 //! (409) — never a bare 404 (§4 subsystem-off rule).
 
+use utoipa::ToSchema;
 use std::sync::Arc;
 
 use axum::{
@@ -70,7 +71,7 @@ impl WebhooksState {
 }
 
 /// `POST /api/v1/webhooks` body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct RegisterRequest {
     url: String,
     channels: Vec<String>,
@@ -81,20 +82,20 @@ struct RegisterRequest {
 }
 
 /// `PATCH /api/v1/webhooks/{id}` body (pause / resume).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct PatchRequest {
     active: bool,
 }
 
 /// Cursor + limit query for the paginated list endpoints.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
 }
 
 /// Opaque offset cursor for the webhook + delivery lists.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: usize,
 }
