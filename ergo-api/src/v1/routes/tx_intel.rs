@@ -38,7 +38,7 @@ use crate::traits::{
     BuiltUnsigned, KeylessAsset, KeylessBuildRequest, KeylessFee, KeylessInputs, KeylessOutput,
     KeylessTarget, SimulateOutcome,
 };
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 // ----- caps (§2.2 tx-intelligence row) ------------------------------------
 
@@ -232,6 +232,19 @@ struct BuildResponse {
 
 /// `POST /api/v1/transactions/build` — keyless `tx_intent` → unsigned tx. T0:
 /// no secret material crosses this boundary (explicit inputs + change address).
+#[utoipa::path(
+    post, path = "/api/v1/transactions/build", tag = "transactions",
+    request_body = BuildBody,
+    responses(
+        (status = 200, description = "Unsigned tx + summary", body = BuildResponse),
+        (status = 400, description = "Invalid intent (bad address/amount/too many inputs)", body = V1Error),
+        (status = 404, description = "No spendable inputs found", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 422, description = "Well-formed but not-yet-supported intent (mint/burn/registers/raw boxes)", body = V1Error),
+        (status = 500, description = "Build failed", body = V1Error),
+        (status = 503, description = "Keyless builder not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn build(State(state): State<V1State>, body: V1Json<BuildBody>) -> Response {
     let V1Json(body) = body;
     match build_inner(&state, body).await {
@@ -626,6 +639,18 @@ struct SimulateResponse {
 
 /// `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
 /// + cost + conflicts, NO broadcast and NO mempool mutation (G8).
+#[utoipa::path(
+    post, path = "/api/v1/transactions/simulate", tag = "transactions",
+    request_body = SimulateBody,
+    responses(
+        (status = 200, description = "Simulation outcome (valid:false is a normal result, not an error)", body = SimulateResponse),
+        (status = 400, description = "Malformed tx bytes, or a malformed/transient admission rejection", body = V1Error),
+        (status = 413, description = "Assembled tx exceeds the simulate body cap", body = V1Error),
+        (status = 409, description = "Simulation not wired on this node", body = V1Error),
+        (status = 503, description = "Node overloaded or shutting down", body = V1Error),
+        (status = 504, description = "Simulation timed out", body = V1Error),
+    ),
+)]
 pub async fn simulate(State(state): State<V1State>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
     let TxReprDto::Bytes { bytes } = body.tx;
@@ -724,6 +749,18 @@ struct FeeEstimateResponse {
 /// `GET /api/v1/transactions/fee-estimate?target_blocks=1|3|10&tx_size_bytes=` —
 /// mempool-derived fee tiers (nanoERG-per-byte as strings). Backed by the chain
 /// reader's `pool_recommended_fee`; honest `mempool_view_disabled` if unwired.
+#[utoipa::path(
+    get, path = "/api/v1/transactions/fee-estimate", tag = "transactions",
+    params(
+        ("target_blocks" = Option<u32>, Query, description = "1, 3 (default), or 10"),
+        ("tx_size_bytes" = Option<u32>, Query, description = "Assumed tx size in bytes (default 200)"),
+    ),
+    responses(
+        (status = 200, description = "Fee tiers for the requested + standard horizons", body = FeeEstimateResponse),
+        (status = 400, description = "Invalid target_blocks/tx_size_bytes", body = V1Error),
+        (status = 409, description = "Fee estimation not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn fee_estimate(
     State(state): State<V1State>,
     V1Query(q): V1Query<FeeEstimateQuery>,
@@ -838,6 +875,14 @@ struct StatusResponse {
 /// `GET /api/v1/transactions/{tx_id}/status` — lifecycle + ETA. Confirmed
 /// (extra-index) wins over pooled; a well-formed unknown id is a 200
 /// `state:"unknown"` (a legitimate polled answer), only a malformed id is a 400.
+#[utoipa::path(
+    get, path = "/api/v1/transactions/{tx_id}/status", tag = "transactions",
+    params(("tx_id" = String, Path, description = "64-char lowercase hex transaction id")),
+    responses(
+        (status = 200, description = "Lifecycle status: confirmed / pending / unknown", body = StatusResponse),
+        (status = 400, description = "Malformed tx id", body = V1Error),
+    ),
+)]
 pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>) -> Response {
     let Some(raw) = super::parse_id32(&tx_id_hex) else {
         return invalid_tx_id();

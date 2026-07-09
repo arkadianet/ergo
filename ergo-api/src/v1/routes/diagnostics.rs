@@ -165,6 +165,10 @@ fn chain_position_of(state: &V1State, fold: &PeerFold) -> ChainPosition {
 }
 
 /// `GET /api/v1/diagnostics/chain-position`.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/chain-position", tag = "diagnostics",
+    responses((status = 200, description = "Position vs peers: majority/behind/ahead_suspicious/isolated/unknown", body = ChainPosition)),
+)]
 pub async fn chain_position(State(state): State<V1State>) -> Response {
     let peers = state.read.peers();
     let self_full = state.read.sync().best_full_block_height;
@@ -223,6 +227,10 @@ fn fork_risk_of(state: &V1State, chain_pos: &ChainPosition) -> ForkRisk {
 }
 
 /// `GET /api/v1/diagnostics/fork-risk`.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/fork-risk", tag = "diagnostics",
+    responses((status = 200, description = "Fork-risk verdict: none/watch/forking", body = ForkRisk)),
+)]
 pub async fn fork_risk(State(state): State<V1State>) -> Response {
     let peers = state.read.peers();
     let self_full = state.read.sync().best_full_block_height;
@@ -281,6 +289,10 @@ fn tip_health_of(state: &V1State) -> TipHealth {
 }
 
 /// `GET /api/v1/diagnostics/tip-health`.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/tip-health", tag = "diagnostics",
+    responses((status = 200, description = "Tip progress verdict: advancing/slow/stuck", body = TipHealth)),
+)]
 pub async fn tip_health(State(state): State<V1State>) -> Response {
     Json(tip_health_of(&state)).into_response()
 }
@@ -383,6 +395,10 @@ fn peer_quality_of(peers: &[ApiPeer], fold: &PeerFold) -> PeerQuality {
 }
 
 /// `GET /api/v1/diagnostics/peer-quality`.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/peer-quality", tag = "diagnostics",
+    responses((status = 200, description = "Peer-set verdict + worst-scoring peers: healthy/thin/degraded", body = PeerQuality)),
+)]
 pub async fn peer_quality(State(state): State<V1State>) -> Response {
     let peers = state.read.peers();
     let self_full = state.read.sync().best_full_block_height;
@@ -441,6 +457,10 @@ fn candidate_build_of(state: &V1State) -> CandidateBuild {
 }
 
 /// `GET /api/v1/diagnostics/candidate-build`.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/candidate-build", tag = "diagnostics",
+    responses((status = 200, description = "Mining candidate-build health (unknown/disabled until latency telemetry is plumbed)", body = CandidateBuild)),
+)]
 pub async fn candidate_build(State(state): State<V1State>) -> Response {
     Json(candidate_build_of(&state)).into_response()
 }
@@ -480,6 +500,10 @@ fn verdict_str(worst: u8) -> &'static str {
 }
 
 /// `GET /api/v1/diagnostics` — the one-call operator health verdict.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics", tag = "diagnostics",
+    responses((status = 200, description = "Composite verdict (worst of every sub-signal): ok/degraded/critical", body = Diagnostics)),
+)]
 pub async fn composite(State(state): State<V1State>) -> Response {
     let peers = state.read.peers();
     let self_full = state.read.sync().best_full_block_height;
