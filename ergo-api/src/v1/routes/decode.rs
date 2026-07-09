@@ -267,6 +267,7 @@ pub(crate) struct ProtocolStateResponse {
         (status = 400, description = "box_role does not match this protocol's identifying-token role", body = V1Error),
         (status = 404, description = "No protocol with that id, or the protocol has no singleton to resolve", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Registry data bug (bad identifying-token key), or box assembly failed", body = V1Error),
         (status = 503, description = "No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted", body = V1Error),
     ),
 )]

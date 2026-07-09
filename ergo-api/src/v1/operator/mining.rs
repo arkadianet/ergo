@@ -217,6 +217,7 @@ pub(crate) async fn candidate(
         (status = 200, description = "Accepted"),
         (status = 400, description = "Malformed solution body, or invalid PoW / stale candidate", body = V1Error),
         (status = 409, description = "Mining disabled on this node", body = V1Error),
+        (status = 503, description = "Mining subsystem cannot answer right now", body = V1Error),
     ),
     security(("ApiKeyAuth" = [])),
 )]

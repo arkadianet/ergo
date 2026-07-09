@@ -128,6 +128,7 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
         (status = 200, description = "Address transaction history", body = Collection<V1AddressTxSummary>),
         (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Failed to assemble the address transaction summary", body = V1Error),
         (status = 503, description = "Chain reader unavailable, or extra index syncing/halted", body = V1Error),
     ),
 )]

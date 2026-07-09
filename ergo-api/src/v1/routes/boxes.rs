@@ -389,6 +389,7 @@ fn render_unspent_page(
         (status = 400, description = "Malformed box id", body = V1Error),
         (status = 404, description = "No box with that id", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Failed to assemble the box response", body = V1Error),
         (status = 503, description = "Extra index syncing/halted", body = V1Error),
     ),
 )]

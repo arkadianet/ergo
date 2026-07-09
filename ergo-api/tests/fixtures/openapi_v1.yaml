@@ -366,6 +366,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Failed to assemble the address transaction summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Chain reader unavailable, or extra index syncing/halted
           content:
@@ -401,6 +407,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '413':
           description: Too many items, or summed weight/body size exceeds the batch cap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limit exceeded for this client
           content:
             application/json:
               schema:
@@ -1089,6 +1101,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '409':
           description: Extra index disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Failed to assemble the box response
           content:
             application/json:
               schema:
@@ -2317,6 +2335,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Mining subsystem cannot answer right now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
       security:
       - ApiKeyAuth: []
   /api/v1/mining/status:
@@ -2840,6 +2864,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '409':
           description: Extra index disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Registry data bug (bad identifying-token key), or box assembly failed
           content:
             application/json:
               schema:
@@ -4283,6 +4313,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Failed to assemble the transaction response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Extra index syncing/halted
           content:
@@ -4314,6 +4350,12 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
         '400':
           description: Malformed tx id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Failed to assemble the confirmed transaction status
           content:
             application/json:
               schema:
@@ -4624,6 +4666,12 @@ paths:
           content:
             application/json:
               schema: {}
+        '400':
+          description: Request body is not valid JSON for this endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '404':
           description: No webhook with that id
           content:

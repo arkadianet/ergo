@@ -60,6 +60,7 @@ fn invalid_tx_id() -> Response {
         (status = 400, description = "Malformed tx id", body = V1Error),
         (status = 404, description = "Unknown, confirmed or pooled", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Failed to assemble the transaction response", body = V1Error),
         (status = 503, description = "Extra index syncing/halted", body = V1Error),
     ),
 )]

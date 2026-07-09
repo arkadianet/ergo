@@ -874,6 +874,7 @@ async fn dispatch_one(dispatch: &Router, id: String, item: BatchItemRequest) -> 
         (status = 200, description = "Per-item results (partial-failure semantics — a structurally valid batch is always 200)", body = BatchResponse),
         (status = 400, description = "Malformed/empty batch, or a target not on the allow-list (forbidden_target)", body = V1Error),
         (status = 413, description = "Too many items, or summed weight/body size exceeds the batch cap", body = V1Error),
+        (status = 429, description = "Rate limit exceeded for this client", body = V1Error),
     ),
 )]
 pub(crate) async fn batch_handler(State(state): State<BatchState>, req: Request<Body>) -> Response {

@@ -881,6 +881,7 @@ pub(crate) struct StatusResponse {
     responses(
         (status = 200, description = "Lifecycle status: confirmed / pending / unknown", body = StatusResponse),
         (status = 400, description = "Malformed tx id", body = V1Error),
+        (status = 500, description = "Failed to assemble the confirmed transaction status", body = V1Error),
     ),
 )]
 pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>) -> Response {

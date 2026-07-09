@@ -343,6 +343,7 @@ pub(crate) async fn delete(State(state): State<WebhooksState>, Path(id): Path<St
     request_body = PatchRequest,
     responses(
         (status = 200, description = "Updated subscription", body = serde_json::Value),
+        (status = 400, description = "Request body is not valid JSON for this endpoint", body = V1Error),
         (status = 404, description = "No webhook with that id", body = V1Error),
         (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
     ),
