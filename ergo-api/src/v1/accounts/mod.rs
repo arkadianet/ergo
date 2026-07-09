@@ -44,7 +44,7 @@ use ergo_ser::address::{decode_address_to_tree_bytes, NetworkPrefix};
 
 use crate::v1::auth::{require_tier, Tier, V1AuthConfig};
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::governor::{governor_mw, Governor, RouteClass};
 use crate::v1::routes::extract::{V1Json, V1Query};
 use crate::wallet::admin_advanced::GetPrivateKeyRequest;
@@ -230,6 +230,16 @@ struct ScanIdCursor {
 /// `POST /api/v1/accounts/watch` — register a watch-only address as an
 /// `equals(R1, <script>)` scan (`scan_p2s_rule`), tracked but never spendable.
 /// T1. Reuses the scan primitive; no second tracking mechanism.
+#[utoipa::path(
+    post, path = "/api/v1/accounts/watch", tag = "accounts",
+    request_body = WatchRequest,
+    responses(
+        (status = 200, description = "Registered — `{ address, scan_id, label }`", body = serde_json::Value),
+        (status = 400, description = "Invalid address", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 async fn watch_register(
     State(state): State<AccountsState>,
     body: V1Json<WatchRequest>,
@@ -261,6 +271,18 @@ async fn watch_register(
 /// The scan registry stores no watch label / originating address, so those are
 /// `null` here (Phase-2 durable watch registry); `tracking_rule` is the opaque
 /// predicate the scan was registered with.
+#[utoipa::path(
+    get, path = "/api/v1/accounts/watch", tag = "accounts",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Watch-only scans — `{ items, page }` (address/label always null; Phase-2 durable registry)", body = serde_json::Value),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+)]
 async fn watch_list(State(state): State<AccountsState>, q: V1Query<WatchListQuery>) -> Response {
     let V1Query(q) = q;
     let limit = clamp_limit(q.limit, 50, 500);
@@ -307,6 +329,16 @@ async fn watch_list(State(state): State<AccountsState>, q: V1Query<WatchListQuer
 }
 
 /// `DELETE /api/v1/accounts/watch/{scan_id}` — deregister a watch-only scan. T1.
+#[utoipa::path(
+    delete, path = "/api/v1/accounts/watch/{scan_id}", tag = "accounts",
+    params(("scan_id" = u16, Path, description = "Registered watch-only scan id")),
+    responses(
+        (status = 200, description = "Deregistered — `{ scan_id }`", body = serde_json::Value),
+        (status = 404, description = "No watch-only scan with that id", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 async fn watch_delete(State(state): State<AccountsState>, Path(scan_id): Path<u16>) -> Response {
     match state.admin.deregister_scan(scan_id).await {
         Ok(()) => Json(json!({ "scan_id": scan_id })).into_response(),
@@ -340,6 +372,16 @@ struct PrivateKeyRequest {
 /// The T2 gate (admin api-key + loopback-preferred) is enforced by the
 /// route_layer BEFORE this handler runs — a secret scalar is unreachable at
 /// T0/T1 and, under hard-deny, from any non-loopback caller.
+#[utoipa::path(
+    post, path = "/api/v1/accounts/private-key", tag = "accounts",
+    request_body = PrivateKeyRequest,
+    responses(
+        (status = 200, description = "Raw secp256k1 scalar — `{ private_key }` (Cache-Control: no-store)", body = serde_json::Value),
+        (status = 400, description = "Invalid address", body = V1Error),
+        (status = 409, description = "Missing acknowledgement, wallet uninitialized/locked, or sensitive-op disabled by config", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 async fn private_key(
     State(state): State<AccountsState>,
     body: V1Json<PrivateKeyRequest>,
@@ -381,6 +423,18 @@ async fn private_key(
 
 /// Any named-account route (`v1-api-design.md` §3.11). Net-new subsystem with
 /// no `account_id` model in the wallet layer today → honest `route_unavailable`.
+/// Representative mount for the whole named-accounts family — every method on
+/// `/api/v1/accounts`, `/api/v1/accounts/{account_id}`,
+/// `/api/v1/accounts/{account_id}/balance`, and
+/// `/api/v1/accounts/{account_id}/addresses` shares this SAME handler and
+/// answers identically.
+#[utoipa::path(
+    get, path = "/api/v1/accounts", tag = "accounts",
+    responses(
+        (status = 503, description = "Named-accounts subsystem not wired on this node (same answer on every named-accounts route/method)", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 async fn accounts_seam() -> Response {
     seam(
         "named-accounts",
@@ -392,7 +446,19 @@ async fn accounts_seam() -> Response {
 /// Any PSBT-session route (`v1-api-design.md` §3.11). The commitment/hint math
 /// exists (`generate_commitments`/`extract_hints`) but the durable session +
 /// threshold state + a hints-bag sign variant do not → honest
-/// `route_unavailable`, never a faked partial signature.
+/// `route_unavailable`, never a faked partial signature. Representative mount
+/// for the whole PSBT family — every method on `/api/v1/transactions-psbt`,
+/// `/api/v1/transactions-psbt/{psbt_id}`,
+/// `/api/v1/transactions-psbt/{psbt_id}/contributions`, and
+/// `/api/v1/transactions-psbt/{psbt_id}/finalize` shares this SAME handler and
+/// answers identically.
+#[utoipa::path(
+    post, path = "/api/v1/transactions-psbt", tag = "accounts",
+    responses(
+        (status = 503, description = "PSBT-session subsystem not wired on this node (same answer on every psbt route/method)", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 async fn psbt_seam() -> Response {
     seam(
         "psbt-session",
