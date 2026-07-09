@@ -542,3 +542,207 @@ async fn private_key_export_reaches_handler_only_from_loopback_admin() {
     assert_eq!(st, StatusCode::OK, "acked loopback admin: {v}");
     assert_eq!(v["private_key"], "de".repeat(32));
 }
+
+// ----- route smoke coverage: wiring + tier gating (CodeRabbit #185) --------
+
+#[tokio::test]
+async fn scan_deregister_with_key_deletes_then_404s() {
+    let a = app(false);
+    let (st, v) = json_of(
+        a.clone(),
+        req(
+            Method::POST,
+            "/api/v1/scan/scans",
+            Some(KEY),
+            Body::from(r#"{"name":"temp","tracking_rule":{"predicate":"equals"}}"#),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "register: {v}");
+    let id = v["scan_id"].as_u64().unwrap();
+
+    let uri = format!("/api/v1/scan/scans/{id}");
+    let st = status_of(
+        a.clone(),
+        req(Method::DELETE, &uri, Some(KEY), Body::empty(), Some(REMOTE)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // NOTE: the mock is per-app (each `app()` is fresh), so re-deleting the
+    // synthetic-only id against a fresh app 404s.
+    let (st, v) = json_of(
+        app(false),
+        req(Method::DELETE, &uri, Some(KEY), Body::empty(), Some(REMOTE)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "re-delete: {v}");
+}
+
+#[tokio::test]
+async fn scan_unspent_with_key_lists_boxes_and_accepts_full_limit() {
+    // Regression: the overfetch-by-one probe used to push a valid large
+    // `?limit` past the ScanBoxFilter 1..=2500 validator bound → 400.
+    let (st, v) = json_of(
+        app(false),
+        req(
+            Method::GET,
+            "/api/v1/scan/scans/7/unspent?limit=2500",
+            Some(KEY),
+            Body::empty(),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "unspent: {v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    assert_eq!(v["items"][0]["box_id"], "ab".repeat(32));
+}
+
+#[tokio::test]
+async fn scan_transactions_with_key_is_page() {
+    let (st, v) = json_of(
+        app(false),
+        req(
+            Method::GET,
+            "/api/v1/scan/scans/7/transactions",
+            Some(KEY),
+            Body::empty(),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "transactions: {v}");
+    assert!(v["items"].is_array());
+}
+
+#[tokio::test]
+async fn scan_attach_and_detach_box_dispatch_to_admin() {
+    let a = app(false);
+    let (st, v) = json_of(
+        a.clone(),
+        req(
+            Method::POST,
+            "/api/v1/scan/scans/7/boxes",
+            Some(KEY),
+            Body::from(r#"{"box":{"value":1}}"#),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "attach: {v}");
+    assert_eq!(v["box_id"], "cd".repeat(32));
+
+    let uri = format!("/api/v1/scan/scans/7/boxes/{}", "ab".repeat(32));
+    let (st, v) = json_of(
+        a,
+        req(Method::DELETE, &uri, Some(KEY), Body::empty(), Some(REMOTE)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "detach: {v}");
+    assert_eq!(v["scan_id"], 7);
+}
+
+#[tokio::test]
+async fn scan_writes_without_key_are_401() {
+    for (method, uri) in [
+        (Method::DELETE, "/api/v1/scan/scans/7".to_string()),
+        (Method::GET, "/api/v1/scan/scans/7/unspent".to_string()),
+        (Method::GET, "/api/v1/scan/scans/7/transactions".to_string()),
+        (Method::POST, "/api/v1/scan/scans/7/boxes".to_string()),
+        (
+            Method::DELETE,
+            format!("/api/v1/scan/scans/7/boxes/{}", "ab".repeat(32)),
+        ),
+        (Method::DELETE, "/api/v1/accounts/watch/7".to_string()),
+    ] {
+        let st = status_of(
+            app(false),
+            req(method.clone(), &uri, None, Body::empty(), Some(REMOTE)),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+#[tokio::test]
+async fn watch_delete_with_key_removes_registered_scan() {
+    let a = app(false);
+    let (st, v) = json_of(
+        a.clone(),
+        req(
+            Method::POST,
+            "/api/v1/scan/scans",
+            Some(KEY),
+            Body::from(r#"{"name":"w","tracking_rule":{},"wallet_interaction":"off"}"#),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "register: {v}");
+    let uri = format!("/api/v1/accounts/watch/{}", v["scan_id"]);
+    let (st, v) = json_of(
+        a,
+        req(Method::DELETE, &uri, Some(KEY), Body::empty(), Some(REMOTE)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "watch delete: {v}");
+}
+
+// ----- T0 watch unspent is scoped to watch-only scans ----------------------
+
+#[tokio::test]
+async fn watch_unspent_serves_watch_only_scan_publicly() {
+    // Scan 7 is the mock's watch-only scan — public (no key) read works.
+    let (st, v) = json_of(
+        app(false),
+        req(
+            Method::GET,
+            "/api/v1/accounts/watch/7/unspent",
+            None,
+            Body::empty(),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "watch unspent: {v}");
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn watch_unspent_hides_wallet_interacting_scans() {
+    // Regression: the public T0 mount used the unscoped handler, exposing
+    // operator (wallet-interacting) scans without a key.
+    let a = app(false);
+    let (st, v) = json_of(
+        a.clone(),
+        req(
+            Method::POST,
+            "/api/v1/scan/scans",
+            Some(KEY),
+            Body::from(r#"{"name":"op","tracking_rule":{}}"#),
+            Some(REMOTE),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "register: {v}");
+    let id = v["scan_id"].as_u64().unwrap(); // wallet_interaction defaults "shared"
+
+    let uri = format!("/api/v1/accounts/watch/{id}/unspent");
+    let (st, v) = json_of(
+        a.clone(),
+        req(Method::GET, &uri, None, Body::empty(), Some(REMOTE)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "public read must hide it: {v}");
+    assert_eq!(v["error"]["reason"], "scan_not_found");
+
+    // The T1 api-key mount still serves the same scan.
+    let uri = format!("/api/v1/scan/scans/{id}/unspent");
+    let st = status_of(
+        a,
+        req(Method::GET, &uri, Some(KEY), Body::empty(), Some(REMOTE)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+}

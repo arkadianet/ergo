@@ -25,9 +25,12 @@ use crate::wallet::types;
 
 /// Default page size for the scan collections.
 const SCAN_DEFAULT_LIMIT: u32 = 50;
-/// The `ScanBoxFilter` hard cap on `limit` (`scan.rs`), preserved verbatim in
-/// the cursor redesign: a `limit` above this is still `400 bad_request`.
-const SCAN_BOX_MAX_LIMIT: u32 = 2500;
+/// Page cap for the scan box collections: ONE BELOW the `ScanBoxFilter`
+/// validator's hard 1..=2500 bound, so the overfetch-by-one probe
+/// (`limit + 1`) always fits it — at 2500 the probe itself was rejected,
+/// turning a valid `?limit=2500` into a 400. A larger `?limit` clamps here
+/// (§1.5 clamp semantics, same as every other v1 collection).
+const SCAN_BOX_MAX_LIMIT: u32 = 2499;
 /// Cap for the scan-list / scan-transactions collections.
 const SCAN_LIST_MAX_LIMIT: u32 = 500;
 
@@ -199,6 +202,29 @@ pub async fn deregister(State(state): State<AccountsState>, Path(scan_id): Path<
         Err(crate::wallet::WalletAdminError::BadRequest(_)) => scan_not_found(scan_id),
         Err(e) => map_wallet_err(e),
     }
+}
+
+/// `GET /api/v1/accounts/watch/{scan_id}/unspent` — the T0 (public) mount of
+/// the unspent read, scoped to WATCH-ONLY scans exactly like `watch_list`
+/// (`wallet_interaction = "off"`): a wallet-interacting operator scan answers
+/// `scan_not_found` here, so the public route can never read it — only the T1
+/// api-key mount (`scan/scans/{id}/unspent`) can.
+pub async fn watch_unspent(
+    State(state): State<AccountsState>,
+    Path(scan_id): Path<u16>,
+    q: V1Query<ScanBoxQuery>,
+) -> Response {
+    let scans = match state.admin.list_scans().await {
+        Ok(s) => s,
+        Err(e) => return map_wallet_err(e),
+    };
+    let is_watch_only = scans
+        .iter()
+        .any(|s| s.scan_id == scan_id && s.wallet_interaction.eq_ignore_ascii_case("off"));
+    if !is_watch_only {
+        return scan_not_found(scan_id);
+    }
+    unspent(State(state), Path(scan_id), q).await
 }
 
 /// `GET /api/v1/scan/scans/{scan_id}/unspent` — unspent boxes tracked by a scan.

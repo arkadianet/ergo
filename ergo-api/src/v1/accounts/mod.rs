@@ -419,7 +419,9 @@ pub fn accounts_router(
         .route("/api/v1/accounts/watch", get(watch_list))
         .route(
             "/api/v1/accounts/watch/:scan_id/unspent",
-            get(scan::unspent),
+            // Watch-only-scoped: a wallet-interacting scan is `scan_not_found`
+            // on this PUBLIC mount (the unscoped read stays on the T1 mount).
+            get(scan::watch_unspent),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::CheapRead),
