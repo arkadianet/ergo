@@ -14,36 +14,62 @@ use axum::{
 use serde::Serialize;
 
 use super::OperatorState;
-use crate::types::HealthStatus;
-use crate::v1::error::{v1_error, Reason};
+use crate::types::{
+    ApiHealth, ApiHost, ApiIdentity, ApiInfo, ApiStatus, ApiSyncStatus, ApiTip, HealthStatus,
+};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// `GET /api/v1/node/info` — T0. Bare `ApiInfo` (reused verbatim, §3.1).
+#[utoipa::path(
+    get, path = "/api/v1/node/info", tag = "node",
+    responses((status = 200, description = "Node info", body = ApiInfo)),
+)]
 pub(super) async fn info(State(s): State<OperatorState>) -> Response {
     Json(s.read.info()).into_response()
 }
 
 /// `GET /api/v1/node/status` — T0. Bare `ApiStatus` (reused verbatim).
+#[utoipa::path(
+    get, path = "/api/v1/node/status", tag = "node",
+    responses((status = 200, description = "Dashboard status snapshot", body = ApiStatus)),
+)]
 pub(super) async fn status(State(s): State<OperatorState>) -> Response {
     Json(s.read.status()).into_response()
 }
 
 /// `GET /api/v1/node/sync` — T0. Bare `ApiSyncStatus` (reused verbatim).
+#[utoipa::path(
+    get, path = "/api/v1/node/sync", tag = "node",
+    responses((status = 200, description = "Sync status", body = ApiSyncStatus)),
+)]
 pub(super) async fn sync(State(s): State<OperatorState>) -> Response {
     Json(s.read.sync()).into_response()
 }
 
 /// `GET /api/v1/node/tip` — T0. Bare `ApiTip` (reused verbatim).
+#[utoipa::path(
+    get, path = "/api/v1/node/tip", tag = "node",
+    responses((status = 200, description = "Chain tip", body = ApiTip)),
+)]
 pub(super) async fn tip(State(s): State<OperatorState>) -> Response {
     Json(s.read.tip()).into_response()
 }
 
 /// `GET /api/v1/node/identity` — T0. Bare `ApiIdentity` (reused verbatim).
+#[utoipa::path(
+    get, path = "/api/v1/node/identity", tag = "node",
+    responses((status = 200, description = "Node identity", body = ApiIdentity)),
+)]
 pub(super) async fn identity(State(s): State<OperatorState>) -> Response {
     Json(s.read.identity()).into_response()
 }
 
 /// `GET /api/v1/node/host` — T0. Bare `ApiHost` (reused verbatim). Fold of the
 /// pre-existing flat `/api/v1/host` (design gap G1) into the `node/*` group.
+#[utoipa::path(
+    get, path = "/api/v1/node/host", tag = "node",
+    responses((status = 200, description = "Host info", body = ApiHost)),
+)]
 pub(super) async fn host(State(s): State<OperatorState>) -> Response {
     Json(s.read.host()).into_response()
 }
@@ -51,6 +77,13 @@ pub(super) async fn host(State(s): State<OperatorState>) -> Response {
 /// `GET /api/v1/node/health` — T0, dual status. `200` when `status = ok`; `503`
 /// for `stalled|disconnected|rejecting`, WITH the full typed body (§3.1 — never
 /// a bare error). Same mapping as the compat `health_handler`.
+#[utoipa::path(
+    get, path = "/api/v1/node/health", tag = "node",
+    responses(
+        (status = 200, description = "Healthy", body = ApiHealth),
+        (status = 503, description = "Stalled, disconnected, or rejecting a block", body = ApiHealth),
+    ),
+)]
 pub(super) async fn health(State(s): State<OperatorState>) -> Response {
     let h = s.read.health();
     let code = match h.status {
@@ -76,6 +109,10 @@ struct NodeVersion {
 
 /// `GET /api/v1/node/version` — T0. Composed from existing snapshot reads
 /// (`info().version` + `votes().block_version`); no new read path.
+#[utoipa::path(
+    get, path = "/api/v1/node/version", tag = "node",
+    responses((status = 200, description = "Version + activated protocol version", body = NodeVersion)),
+)]
 pub(super) async fn version(State(s): State<OperatorState>) -> Response {
     Json(NodeVersion {
         software_version: s.read.info().version,
@@ -89,6 +126,11 @@ pub(super) async fn version(State(s): State<OperatorState>) -> Response {
 /// yet (§3.1 #8, Phase-2 ASSUMED-new), so this answers the honest
 /// `route_unavailable` (503) rather than fabricating or half-projecting a config
 /// tree. Gated at `Tier::Operator` so the closed shape is still auth-bounded.
+#[utoipa::path(
+    get, path = "/api/v1/node/config", tag = "node",
+    responses((status = 503, description = "Effective-config read not wired on this node", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
 pub(super) async fn config_get(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
@@ -101,6 +143,11 @@ pub(super) async fn config_get(State(_s): State<OperatorState>) -> Response {
 /// of `node/config`, so it sits at `Tier::Admin` (loopback-preferred). No
 /// `apply_config_patch` seam exists yet, so it answers `route_unavailable`
 /// rather than exposing a mutation that isn't safely backed.
+#[utoipa::path(
+    patch, path = "/api/v1/node/config", tag = "node",
+    responses((status = 503, description = "Config mutation not wired on this node", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
 pub(super) async fn config_patch(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,

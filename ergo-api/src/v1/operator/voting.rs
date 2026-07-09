@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{offset_collection, ListQuery, OperatorState};
 use crate::traits::VotingControlError;
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::dto::Collection;
 
 /// A votable parameter + bounds, snake_case (reshape of the camelCase
 /// `ApiVotableParam`).
@@ -43,6 +44,10 @@ struct PublicVotes {
 
 /// `GET /api/v1/voting/votes` — T0. Public votable-parameter descriptor only;
 /// `configured_votes` is NOT exposed here (moved to the T1 `operator-votes`).
+#[utoipa::path(
+    get, path = "/api/v1/voting/votes", tag = "voting",
+    responses((status = 200, description = "Public votable-parameter descriptor (no configured_votes — see operator-votes)", body = PublicVotes)),
+)]
 pub(super) async fn votes(State(s): State<OperatorState>) -> Response {
     let v = s.read.votes();
     Json(PublicVotes {
@@ -95,6 +100,13 @@ struct VotesHistory {
 /// `GET /api/v1/voting/history` — T0. Bare-object reshape of
 /// [`NodeChainQuery::votes_history`](crate::compat::NodeChainQuery).
 /// `503 chain_reader_unavailable` with no chain reader.
+#[utoipa::path(
+    get, path = "/api/v1/voting/history", tag = "voting",
+    responses(
+        (status = 200, description = "Per-epoch parameter changes", body = VotesHistory),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub(super) async fn history(State(s): State<OperatorState>) -> Response {
     let chain = match s.chain() {
         Ok(c) => c,
@@ -130,6 +142,10 @@ pub(super) async fn history(State(s): State<OperatorState>) -> Response {
 /// preview (§3.4 #3) has no projection in `ergo-api` and needs a read threaded
 /// through the candidate-builder crate; until then it answers the honest
 /// `route_unavailable` rather than fabricating vote bytes.
+#[utoipa::path(
+    get, path = "/api/v1/voting/candidate", tag = "voting",
+    responses((status = 503, description = "Next-block vote-byte preview not wired on this node", body = V1Error)),
+)]
 pub(super) async fn candidate(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
@@ -150,6 +166,18 @@ struct ConfiguredVote {
 /// `GET /api/v1/voting/operator-votes` — T1. The operator-private half split off
 /// `ApiVotes.configured_votes` (finding 5), now gated. Collection envelope
 /// (bounded, ≤ ~9 entries).
+#[utoipa::path(
+    get, path = "/api/v1/voting/operator-votes", tag = "voting",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 100)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "The operator's configured votes", body = Collection<ConfiguredVote>),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub(super) async fn operator_votes_get(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
@@ -186,6 +214,17 @@ struct SetVotesRequest {
 /// [`NodeAdmin::set_voting_targets`]. REPLACES the configured set. `204` on
 /// success; `400 not_votable` / `400 out_of_range` / `409 mining_disabled`
 /// (reason re-spelled from the dot-form `mining.disabled` per §1.4 rule 7).
+#[utoipa::path(
+    post, path = "/api/v1/voting/operator-votes", tag = "voting",
+    request_body = SetVotesRequest,
+    responses(
+        (status = 204, description = "Replaced — the configured set now exactly matches the request"),
+        (status = 400, description = "Malformed body, non-votable parameter id, or target outside its bounds", body = V1Error),
+        (status = 409, description = "Mining disabled on this node", body = V1Error),
+        (status = 503, description = "Admin control bridge not wired on this node", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub(super) async fn operator_votes_set(
     State(s): State<OperatorState>,
     body: axum::body::Bytes,
