@@ -21,6 +21,7 @@ pub mod decode;
 pub mod error;
 pub mod governor;
 pub mod mempool_depth;
+pub mod operator;
 pub mod realtime;
 pub mod routes;
 pub mod script;
@@ -40,6 +41,7 @@ pub use mempool_depth::{
     sample_into, spawn_depth_sampler, spawn_depth_sampler_once, MempoolDepthRing,
     MempoolDepthSample, DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
 };
+pub use operator::{operator_router, OperatorState};
 pub use realtime::{
     spawn_event_bridge, spawn_event_bridge_once, ConnLimiter, RealtimeBus, RealtimeHandle,
 };
