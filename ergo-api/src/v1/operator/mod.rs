@@ -25,12 +25,13 @@
 //! forced-tx candidate, next-block vote preview), the endpoint mounts and
 //! answers the honest `route_unavailable` (§1.4) rather than a bare 404.
 
-mod mining;
-mod network;
-mod node;
-mod voting;
+pub(crate) mod mining;
+pub(crate) mod network;
+pub(crate) mod node;
+pub(crate) mod voting;
 
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     response::{IntoResponse, Response},
@@ -114,8 +115,8 @@ impl OperatorState {
 }
 
 /// `?limit=&cursor=` query for the bounded operator list endpoints.
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct ListQuery {
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct ListQuery {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
 }
@@ -124,7 +125,7 @@ pub(super) struct ListQuery {
 /// sync-info, operator-votes). These lists are node-bounded (well under a few
 /// hundred entries), so an offset alias is stable enough; opaque to clients so a
 /// keyset seek can replace it without a wire break (§1.5).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,
 }

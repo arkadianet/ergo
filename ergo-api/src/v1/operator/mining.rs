@@ -14,11 +14,12 @@ use axum::{
 use ergo_rest_json::mining::AutolykosSolutionJson;
 use ergo_ser::address::encode_p2pk_from_pubkey;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::OperatorState;
 use crate::mining::MiningApiError;
 use crate::types::{ApiMinerStat, ApiMinerStats, SyncStateLabel};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// Map a [`MiningApiError`] onto the §1.4 v1 error envelope. `unavailable`
 /// picks the endpoint-appropriate 503 reason (`candidate_unavailable` for the
@@ -61,8 +62,8 @@ fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
 
 /// `?window=<u32>` for `miner-stats` (default 720 ≈ 1 day at 120s; clamp
 /// `[1, 16384]`).
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct WindowQuery {
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct WindowQuery {
     window: Option<u32>,
 }
 
@@ -70,7 +71,15 @@ pub(super) struct WindowQuery {
 /// snake_case; the only compat violation was the `minerStats` camelCase path).
 /// Folds [`NodeChainQuery::last_headers`](crate::compat::NodeChainQuery) by
 /// miner pk, same logic as the compat `miner_stats_handler`.
-pub(super) async fn miner_stats(
+#[utoipa::path(
+    get, path = "/api/v1/mining/miner-stats", tag = "mining",
+    params(("window" = Option<u32>, Query, description = "Trailing headers to fold (default 720, clamped 1..=16384)")),
+    responses(
+        (status = 200, description = "Miner attribution over the trailing window", body = ApiMinerStats),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
+pub(crate) async fn miner_stats(
     State(s): State<OperatorState>,
     Query(q): Query<WindowQuery>,
 ) -> Response {
@@ -125,8 +134,8 @@ pub(super) async fn miner_stats(
 /// `last_template_*` / `template_seq` fields require the mining bridge to cache
 /// its last-published template metadata; that seam is not wired yet, so they are
 /// emitted as `null` (honest) rather than fabricated.
-#[derive(Serialize)]
-struct MiningStatus {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct MiningStatus {
     mining_enabled: bool,
     synced: bool,
     longpoll_supported: bool,
@@ -139,7 +148,11 @@ struct MiningStatus {
 /// `GET /api/v1/mining/status` — T0. Composed from existing snapshot reads
 /// (`identity().mining` + `status().sync_state`); never triggers a `candidate()`
 /// build just to health-check.
-pub(super) async fn status(State(s): State<OperatorState>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/mining/status", tag = "mining",
+    responses((status = 200, description = "Mining capability + template freshness (nulls until the template-cache seam is wired)", body = MiningStatus)),
+)]
+pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     let mining_enabled = s.read.identity().mining;
     let synced = s.read.status().sync_state == SyncStateLabel::AtTip;
     Json(MiningStatus {
@@ -155,8 +168,8 @@ pub(super) async fn status(State(s): State<OperatorState>) -> Response {
 }
 
 /// `?longpoll=<hex msg>` for `candidate` (getblocktemplate-style bounded block).
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct CandidateQuery {
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct CandidateQuery {
     longpoll: Option<String>,
 }
 
@@ -165,7 +178,17 @@ pub(super) struct CandidateQuery {
 /// already snake_case + Scala-parity). `503 candidate_unavailable` when no
 /// candidate can be built. This CLOSES the finding-3 gap: the flat compat
 /// `/mining/candidate` mounts ungated; this v1 path is api_key-gated.
-pub(super) async fn candidate(
+#[utoipa::path(
+    get, path = "/api/v1/mining/candidate", tag = "mining",
+    params(("longpoll" = Option<String>, Query, description = "getblocktemplate-style longpoll id — block until the candidate changes from this msg")),
+    responses(
+        (status = 200, description = "Work message (WorkMessageJson — Scala-parity shape)", body = serde_json::Value),
+        (status = 409, description = "Mining disabled on this node", body = V1Error),
+        (status = 503, description = "No candidate could be built (not synced or generation race)", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn candidate(
     State(s): State<OperatorState>,
     Query(q): Query<CandidateQuery>,
 ) -> Response {
@@ -187,7 +210,18 @@ pub(super) async fn candidate(
 /// `POST /api/v1/mining/solution` — T1. Reuses [`NodeMining::submit_solution`].
 /// Body = `AutolykosSolutionJson`. `200` empty on accept. Same auth-gate closure
 /// as [`candidate`].
-pub(super) async fn solution(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
+#[utoipa::path(
+    post, path = "/api/v1/mining/solution", tag = "mining",
+    request_body(content = serde_json::Value, description = "AutolykosSolutionJson — Scala-parity shape"),
+    responses(
+        (status = 200, description = "Accepted"),
+        (status = 400, description = "Malformed solution body, or invalid PoW / stale candidate", body = V1Error),
+        (status = 409, description = "Mining disabled on this node", body = V1Error),
+        (status = 503, description = "Mining subsystem cannot answer right now", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn solution(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
     let mining = match s.mining() {
         Ok(m) => m,
         Err(e) => return *e,
@@ -211,21 +245,30 @@ pub(super) async fn solution(State(s): State<OperatorState>, body: axum::body::B
 /// Fresh snake_case reward-address DTO (§3.3 #3 — the compat
 /// `RewardAddressResponse` is hard-renamed camelCase + pinned by a unit test, so
 /// a new DTO is required).
-#[derive(Serialize)]
-struct RewardAddress {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RewardAddress {
     reward_address: String,
 }
 
 /// Fresh snake_case reward-pubkey DTO (§3.3 #4 — same rationale).
-#[derive(Serialize)]
-struct RewardPubkey {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RewardPubkey {
     reward_pubkey: String,
 }
 
 /// `GET /api/v1/mining/reward-address` — T1. Reuses
 /// [`NodeMining::reward_address`] into a fresh snake_case DTO.
 /// `503 reward_unavailable` while the wallet-resolved key isn't ready.
-pub(super) async fn reward_address(State(s): State<OperatorState>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/mining/reward-address", tag = "mining",
+    responses(
+        (status = 200, description = "Miner reward address", body = RewardAddress),
+        (status = 409, description = "Mining disabled on this node", body = V1Error),
+        (status = 503, description = "Wallet-resolved reward key not yet ready", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn reward_address(State(s): State<OperatorState>) -> Response {
     let mining = match s.mining() {
         Ok(m) => m,
         Err(e) => return *e,
@@ -238,7 +281,16 @@ pub(super) async fn reward_address(State(s): State<OperatorState>) -> Response {
 
 /// `GET /api/v1/mining/reward-pubkey` — T1. Reuses [`NodeMining::reward_pubkey`]
 /// into a fresh snake_case DTO.
-pub(super) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/mining/reward-pubkey", tag = "mining",
+    responses(
+        (status = 200, description = "Miner reward pubkey", body = RewardPubkey),
+        (status = 409, description = "Mining disabled on this node", body = V1Error),
+        (status = 503, description = "Wallet-resolved reward key not yet ready", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
     let mining = match s.mining() {
         Ok(m) => m,
         Err(e) => return *e,
@@ -253,7 +305,12 @@ pub(super) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
 /// is documented (§3.3 #5) but no `NodeMining::candidate_with_txs` seam exists,
 /// so this answers the honest `route_unavailable` rather than silently ignoring
 /// the forced-tx set. Still gated at `Tier::Operator`.
-pub(super) async fn candidate_with_txs(State(_s): State<OperatorState>) -> Response {
+#[utoipa::path(
+    post, path = "/api/v1/mining/candidate-with-txs", tag = "mining",
+    responses((status = 503, description = "Forced-transaction candidate building not wired on this node", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn candidate_with_txs(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "forced-transaction candidate building is not wired on this node",

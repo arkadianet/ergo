@@ -28,9 +28,10 @@
 //! machinery (scan trait methods, `scan_p2s_rule`, `get_private_key`); nothing
 //! here reimplements scan matching or key derivation.
 
-mod scan;
+pub(crate) mod scan;
 
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -43,7 +44,7 @@ use ergo_ser::address::{decode_address_to_tree_bytes, NetworkPrefix};
 
 use crate::v1::auth::{require_tier, Tier, V1AuthConfig};
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::governor::{governor_mw, Governor, RouteClass};
 use crate::v1::routes::extract::{V1Json, V1Query};
 use crate::wallet::admin_advanced::GetPrivateKeyRequest;
@@ -206,22 +207,22 @@ fn seam(what: &str, detail: &str) -> Response {
 // ==========================================================================
 
 /// `POST /api/v1/accounts/watch` request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct WatchRequest {
+pub(crate) struct WatchRequest {
     address: String,
     #[serde(default)]
     label: Option<String>,
 }
 
 /// `?limit=&cursor=` for the watch list.
-#[derive(Debug, Default, Deserialize)]
-struct WatchListQuery {
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct WatchListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ScanIdCursor {
     after: u16,
 }
@@ -229,7 +230,17 @@ struct ScanIdCursor {
 /// `POST /api/v1/accounts/watch` — register a watch-only address as an
 /// `equals(R1, <script>)` scan (`scan_p2s_rule`), tracked but never spendable.
 /// T1. Reuses the scan primitive; no second tracking mechanism.
-async fn watch_register(
+#[utoipa::path(
+    post, path = "/api/v1/accounts/watch", tag = "accounts",
+    request_body = WatchRequest,
+    responses(
+        (status = 200, description = "Registered — `{ address, scan_id, label }`", body = serde_json::Value),
+        (status = 400, description = "Invalid address", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn watch_register(
     State(state): State<AccountsState>,
     body: V1Json<WatchRequest>,
 ) -> Response {
@@ -260,7 +271,22 @@ async fn watch_register(
 /// The scan registry stores no watch label / originating address, so those are
 /// `null` here (Phase-2 durable watch registry); `tracking_rule` is the opaque
 /// predicate the scan was registered with.
-async fn watch_list(State(state): State<AccountsState>, q: V1Query<WatchListQuery>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/accounts/watch", tag = "accounts",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Watch-only scans — `{ items, page }` (address/label always null; Phase-2 durable registry)", body = serde_json::Value),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+)]
+pub(crate) async fn watch_list(
+    State(state): State<AccountsState>,
+    q: V1Query<WatchListQuery>,
+) -> Response {
     let V1Query(q) = q;
     let limit = clamp_limit(q.limit, 50, 500);
     let after = match decode_opt_cursor::<ScanIdCursor>(q.cursor.as_deref()) {
@@ -306,7 +332,20 @@ async fn watch_list(State(state): State<AccountsState>, q: V1Query<WatchListQuer
 }
 
 /// `DELETE /api/v1/accounts/watch/{scan_id}` — deregister a watch-only scan. T1.
-async fn watch_delete(State(state): State<AccountsState>, Path(scan_id): Path<u16>) -> Response {
+#[utoipa::path(
+    delete, path = "/api/v1/accounts/watch/{scan_id}", tag = "accounts",
+    params(("scan_id" = u16, Path, description = "Registered watch-only scan id")),
+    responses(
+        (status = 200, description = "Deregistered — `{ scan_id }`", body = serde_json::Value),
+        (status = 404, description = "No watch-only scan with that id", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn watch_delete(
+    State(state): State<AccountsState>,
+    Path(scan_id): Path<u16>,
+) -> Response {
     match state.admin.deregister_scan(scan_id).await {
         Ok(()) => Json(json!({ "scan_id": scan_id })).into_response(),
         Err(WalletAdminError::BadRequest(_)) => v1_error(
@@ -323,9 +362,9 @@ async fn watch_delete(State(state): State<AccountsState>, Path(scan_id): Path<u1
 // ==========================================================================
 
 /// `POST /api/v1/accounts/private-key` request. T2 (admin + loopback-preferred).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct PrivateKeyRequest {
+pub(crate) struct PrivateKeyRequest {
     address: String,
     #[serde(default)]
     acknowledge: bool,
@@ -339,7 +378,17 @@ struct PrivateKeyRequest {
 /// The T2 gate (admin api-key + loopback-preferred) is enforced by the
 /// route_layer BEFORE this handler runs — a secret scalar is unreachable at
 /// T0/T1 and, under hard-deny, from any non-loopback caller.
-async fn private_key(
+#[utoipa::path(
+    post, path = "/api/v1/accounts/private-key", tag = "accounts",
+    request_body = PrivateKeyRequest,
+    responses(
+        (status = 200, description = "Raw secp256k1 scalar — `{ private_key }` (Cache-Control: no-store)", body = serde_json::Value),
+        (status = 400, description = "Invalid address", body = V1Error),
+        (status = 409, description = "Missing acknowledgement, wallet uninitialized/locked, or sensitive-op disabled by config", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn private_key(
     State(state): State<AccountsState>,
     body: V1Json<PrivateKeyRequest>,
 ) -> Response {
@@ -380,7 +429,19 @@ async fn private_key(
 
 /// Any named-account route (`v1-api-design.md` §3.11). Net-new subsystem with
 /// no `account_id` model in the wallet layer today → honest `route_unavailable`.
-async fn accounts_seam() -> Response {
+/// Representative mount for the whole named-accounts family — every method on
+/// `/api/v1/accounts`, `/api/v1/accounts/{account_id}`,
+/// `/api/v1/accounts/{account_id}/balance`, and
+/// `/api/v1/accounts/{account_id}/addresses` shares this SAME handler and
+/// answers identically.
+#[utoipa::path(
+    get, path = "/api/v1/accounts", tag = "accounts",
+    responses(
+        (status = 503, description = "Named-accounts subsystem not wired on this node (same answer on every named-accounts route/method)", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn accounts_seam() -> Response {
     seam(
         "named-accounts",
         "accounts are a label over a BIP-44 derivation subtree; the durable \
@@ -391,8 +452,20 @@ async fn accounts_seam() -> Response {
 /// Any PSBT-session route (`v1-api-design.md` §3.11). The commitment/hint math
 /// exists (`generate_commitments`/`extract_hints`) but the durable session +
 /// threshold state + a hints-bag sign variant do not → honest
-/// `route_unavailable`, never a faked partial signature.
-async fn psbt_seam() -> Response {
+/// `route_unavailable`, never a faked partial signature. Representative mount
+/// for the whole PSBT family — every method on `/api/v1/transactions-psbt`,
+/// `/api/v1/transactions-psbt/{psbt_id}`,
+/// `/api/v1/transactions-psbt/{psbt_id}/contributions`, and
+/// `/api/v1/transactions-psbt/{psbt_id}/finalize` shares this SAME handler and
+/// answers identically.
+#[utoipa::path(
+    post, path = "/api/v1/transactions-psbt", tag = "accounts",
+    responses(
+        (status = 503, description = "PSBT-session subsystem not wired on this node (same answer on every psbt route/method)", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn psbt_seam() -> Response {
     seam(
         "psbt-session",
         "PSBT-like partial signing needs a durable session store and a \

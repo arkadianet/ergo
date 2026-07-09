@@ -27,8 +27,8 @@ use super::{parse_id32, V1State};
 use crate::blockchain::{
     build_indexed_box_response, build_indexed_tx_response, IndexedErgoBoxResponse,
 };
-use crate::types::{SubmitError, SubmitMode};
-use crate::v1::error::{v1_error, Reason};
+use crate::types::{RawTransactionBytes, SubmitError, SubmitMode};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// Fee-proposition ErgoTree, canonical wire hex. Oracle-pinned against
 /// `test-vectors/mainnet/fee_proposition.hex` (the same fixture the mempool
@@ -52,6 +52,18 @@ fn invalid_tx_id() -> Response {
 /// `GET /api/v1/transactions/{tx_id}` — one transaction, confirmed (indexer)
 /// first then the mempool overlay. The single source of truth for "is this
 /// on-chain yet" (`confirmed`).
+#[utoipa::path(
+    get, path = "/api/v1/transactions/{tx_id}", tag = "transactions",
+    params(("tx_id" = String, Path, description = "64-char lowercase hex transaction id")),
+    responses(
+        (status = 200, description = "Transaction (confirmed or pooled)", body = V1Tx),
+        (status = 400, description = "Malformed tx id", body = V1Error),
+        (status = 404, description = "Unknown, confirmed or pooled", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Failed to assemble the transaction response", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String>) -> Response {
     let Some(raw) = parse_id32(&tx_id_hex) else {
         return invalid_tx_id();
@@ -334,12 +346,36 @@ fn unconfirmed_tx(
 // ----- POST /transactions/{submit,check} ---------------------------------
 
 /// `POST /api/v1/transactions/submit` — broadcast raw tx bytes into the pool.
+/// Also mounted at `POST /api/v1/mempool/submit` (Overlap O1 — same handler,
+/// documented alias, not a second implementation).
+#[utoipa::path(
+    post, path = "/api/v1/transactions/submit", tag = "transactions",
+    request_body = RawTransactionBytes,
+    responses(
+        (status = 200, description = "Admitted — `{ tx_id }`", body = serde_json::Value),
+        (status = 400, description = "Rejected by admission (deserialize/non_canonical/double_spend/...)", body = V1Error),
+        (status = 409, description = "Submission not wired on this node", body = V1Error),
+        (status = 503, description = "Node overloaded or shutting down", body = V1Error),
+        (status = 504, description = "Admission timed out", body = V1Error),
+    ),
+)]
 pub async fn submit(State(state): State<V1State>, body: Bytes) -> Response {
     submit_inner(state, body, SubmitMode::Broadcast).await
 }
 
 /// `POST /api/v1/transactions/check` — validate raw tx bytes without
-/// broadcasting.
+/// broadcasting. Also mounted at `POST /api/v1/mempool/check` (Overlap O1).
+#[utoipa::path(
+    post, path = "/api/v1/transactions/check", tag = "transactions",
+    request_body = RawTransactionBytes,
+    responses(
+        (status = 200, description = "Would be admitted — `{ tx_id }`", body = serde_json::Value),
+        (status = 400, description = "Would be rejected by admission", body = V1Error),
+        (status = 409, description = "Submission not wired on this node", body = V1Error),
+        (status = 503, description = "Node overloaded or shutting down", body = V1Error),
+        (status = 504, description = "Admission timed out", body = V1Error),
+    ),
+)]
 pub async fn check(State(state): State<V1State>, body: Bytes) -> Response {
     submit_inner(state, body, SubmitMode::CheckOnly).await
 }

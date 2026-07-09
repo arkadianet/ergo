@@ -25,6 +25,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::dto::{unix_ms_to_iso, CollectionMeta, V1MempoolDepthPoint};
 use super::extract::V1Query;
@@ -32,7 +33,7 @@ use super::tokens::scan_token_holders;
 use super::transactions::fee_from_hex_values;
 use super::{parse_id32, V1State};
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 use ergo_indexer_types::TokenId;
 
 /// Default points per series (~1 day at a 120 s block interval).
@@ -55,13 +56,13 @@ const HOLDERS_MAX_LIMIT: u32 = 1_000;
 
 /// Height-keyed opaque cursor: the next height to emit (ascending). Stable
 /// under a growing chain (never an offset).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct SeriesCursor {
     next_height: u32,
 }
 
 /// The shared `stats/*` query (all series except `emission-schedule`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct SeriesQuery {
     #[serde(default)]
     from_height: Option<u32>,
@@ -167,8 +168,8 @@ fn series_response<T: Serialize>(items: Vec<T>, w: &Window) -> Response {
     .into_response()
 }
 
-#[derive(Debug, Serialize)]
-struct SeriesPage<T> {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct SeriesPage<T> {
     items: Vec<T>,
     page: Page,
 }
@@ -176,7 +177,7 @@ struct SeriesPage<T> {
 // ----- stats/supply (B1) --------------------------------------------------
 
 /// One realized-supply point.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SupplyPoint {
     pub height: u32,
     pub timestamp_unix_ms: Option<u64>,
@@ -189,6 +190,21 @@ pub struct SupplyPoint {
 /// `GET /api/v1/stats/supply` — realized circulating + remaining ERG over
 /// height (the emission curve). Emission is pure arithmetic; timestamps come
 /// from the header fold.
+#[utoipa::path(
+    get, path = "/api/v1/stats/supply", tag = "stats",
+    params(
+        ("from_height" = Option<u32>, Query, description = "Start height"),
+        ("to_height" = Option<u32>, Query, description = "End height (default tip)"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 720, cap 16384)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("resolution" = Option<String>, Query, description = "`block` (default), `hour`, or `day`"),
+    ),
+    responses(
+        (status = 200, description = "Supply series (timestamps null without a chain reader)", body = SeriesPage<SupplyPoint>),
+        (status = 400, description = "Invalid resolution/cursor", body = V1Error),
+        (status = 503, description = "Emission schedule not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn supply(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>) -> Response {
     let emission = match state.emission() {
         Ok(e) => e,
@@ -248,7 +264,7 @@ fn timestamps_for(
 
 // ----- stats/emission-schedule (B2) ---------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct EmissionScheduleQuery {
     #[serde(default)]
     from_height: Option<u32>,
@@ -267,6 +283,21 @@ pub struct EmissionScheduleQuery {
 /// `GET /api/v1/stats/emission-schedule` — the projected forward curve
 /// (heights may exceed the tip). Pure schedule math, no chain read, so no
 /// timestamps.
+#[utoipa::path(
+    get, path = "/api/v1/stats/emission-schedule", tag = "stats",
+    params(
+        ("from_height" = Option<u32>, Query, description = "Start height (default 0)"),
+        ("to_height" = u32, Query, description = "End height — required, may exceed the tip"),
+        ("step" = Option<u32>, Query, description = "Height stride (default 1)"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 720, cap 16384)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Projected emission-schedule series", body = SeriesPage<SupplyPoint>),
+        (status = 400, description = "Missing to_height, or to_height < from_height", body = V1Error),
+        (status = 503, description = "Emission schedule not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn emission_schedule(
     State(state): State<V1State>,
     V1Query(q): V1Query<EmissionScheduleQuery>,
@@ -334,7 +365,7 @@ pub async fn emission_schedule(
 
 // ----- stats/difficulty (B3, O8 canonical) --------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DifficultyPoint {
     pub height: u32,
     pub timestamp_unix_ms: u64,
@@ -347,6 +378,21 @@ pub struct DifficultyPoint {
 /// `GET /api/v1/stats/difficulty` — per-block difficulty series (O8 canonical
 /// home; supersedes the legacy bare-array `difficulty/history`). `hashrate` is
 /// a server derivation (`difficulty / target_block_interval_s`).
+#[utoipa::path(
+    get, path = "/api/v1/stats/difficulty", tag = "stats",
+    params(
+        ("from_height" = Option<u32>, Query, description = "Start height"),
+        ("to_height" = Option<u32>, Query, description = "End height (default tip)"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 720, cap 16384)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("resolution" = Option<String>, Query, description = "`block` (default), `hour`, or `day`"),
+    ),
+    responses(
+        (status = 200, description = "Difficulty series with derived hashrate", body = SeriesPage<DifficultyPoint>),
+        (status = 400, description = "Invalid resolution/cursor", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn difficulty(
     State(state): State<V1State>,
     V1Query(q): V1Query<SeriesQuery>,
@@ -396,7 +442,7 @@ pub async fn difficulty(
 
 // ----- stats/fees (B4) ----------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct FeesPoint {
     pub height: u32,
     pub timestamp_unix_ms: u64,
@@ -413,6 +459,21 @@ pub struct FeesPoint {
 /// Fees are summed output-side over the fee-proposition outputs (the same
 /// honest, input-free approach as `transactions/{id}`), so no input resolution
 /// is needed. The per-point cost is a full-block read, so the cap is tighter.
+#[utoipa::path(
+    get, path = "/api/v1/stats/fees", tag = "stats",
+    params(
+        ("from_height" = Option<u32>, Query, description = "Start height"),
+        ("to_height" = Option<u32>, Query, description = "End height (default tip)"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 720, cap 1024)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("resolution" = Option<String>, Query, description = "`block` (default), `hour`, or `day`"),
+    ),
+    responses(
+        (status = 200, description = "Per-block fee statistics series", body = SeriesPage<FeesPoint>),
+        (status = 400, description = "Invalid resolution/cursor", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>) -> Response {
     let chain = match state.chain() {
         Ok(c) => c,
@@ -478,7 +539,7 @@ fn percentile(sorted: &[u64], p: u32) -> u64 {
 
 // ----- stats/mempool-depth (B5, O4 ring) ----------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct DepthQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -488,6 +549,13 @@ pub struct DepthQuery {
 /// O4 sample ring the mempool group built (Overlap O4). When the ring has not
 /// yet recorded a sample, one live point is synthesized from the current
 /// summary so the series is never empty on a fresh node.
+#[utoipa::path(
+    get, path = "/api/v1/stats/mempool-depth", tag = "stats",
+    params(("limit" = Option<u32>, Query, description = "Page size (default 720, capped at the depth ring size)")),
+    responses(
+        (status = 200, description = "Mempool depth series (single page, never empty)", body = SeriesPage<V1MempoolDepthPoint>),
+    ),
+)]
 pub async fn mempool_depth(
     State(state): State<V1State>,
     V1Query(q): V1Query<DepthQuery>,
@@ -544,7 +612,7 @@ pub async fn mempool_depth(
 
 // ----- stats/holders (B6, O3 scan) ----------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct HoldersQuery {
     #[serde(default)]
     token_id: Option<String>,
@@ -556,14 +624,14 @@ pub struct HoldersQuery {
     include_metrics: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HolderRow {
     pub address: String,
     pub amount: String,
     pub share_pct: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HolderMetrics {
     pub holder_count: u64,
     pub top10_share_pct: String,
@@ -578,6 +646,22 @@ pub struct HolderMetrics {
 /// metrics. **Overlap O3:** reuses the ONE bounded holder-aggregation scan from
 /// `tokens/{id}/holders` (`scan_token_holders`); this surface adds `share_pct`
 /// per holder and the `gini` / `top10_share_pct` concentration metrics.
+#[utoipa::path(
+    get, path = "/api/v1/stats/holders", tag = "stats",
+    params(
+        ("token_id" = String, Query, description = "64-char lowercase hex token id — required"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 1000)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("include_metrics" = Option<bool>, Query, description = "Include gini/top10_share_pct (default true)"),
+    ),
+    responses(
+        (status = 200, description = "Holder distribution + concentration metrics", body = CollectionMeta<HolderRow, HolderMetrics>),
+        (status = 400, description = "Missing/malformed token_id, or invalid cursor", body = V1Error),
+        (status = 404, description = "No token with that id", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQuery>) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,

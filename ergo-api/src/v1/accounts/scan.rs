@@ -15,10 +15,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use utoipa::ToSchema;
 
 use super::{map_wallet_err, AccountsState};
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::dto::Collection;
 use crate::v1::routes::extract::{V1Json, V1Query};
 use crate::wallet::scan::{ScanBoxFilter, ScanDto, ScanRequestDto};
 use crate::wallet::types;
@@ -39,7 +41,7 @@ const SCAN_LIST_MAX_LIMIT: u32 = 500;
 /// `POST /api/v1/scan/scans` request — register a scan. `tracking_rule` stays an
 /// opaque JSON value for Phase-1 (`ergo-api` deliberately does not depend on the
 /// `ScanningPredicate` schema); a typed tagged union is Phase-2.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScanRegisterRequest {
     name: String,
@@ -51,8 +53,8 @@ pub struct ScanRegisterRequest {
 }
 
 /// A registered scan, snake_case (`v1-api-design.md` §3.10).
-#[derive(Debug, Serialize)]
-struct ScanView {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ScanView {
     scan_id: u16,
     name: String,
     tracking_rule: serde_json::Value,
@@ -75,8 +77,8 @@ impl From<ScanDto> for ScanView {
 /// A box tracked by a scan (unspent surface). `spent_by` is always `null` here
 /// (the `/unspent` endpoint) — carried only for shape parity with a future
 /// `/spent` surface. `value` is a decimal string (§1.1).
-#[derive(Debug, Serialize)]
-struct ScanBoxView {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ScanBoxView {
     box_id: String,
     value: String,
     inclusion_height: Option<u32>,
@@ -86,7 +88,7 @@ struct ScanBoxView {
 }
 
 /// `?limit=&cursor=` for the scan-list / scan-transactions collections.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
@@ -94,7 +96,7 @@ pub struct ListQuery {
 
 /// `?limit=&cursor=&min_confirmations=&…` for `/unspent`. The confirmation /
 /// inclusion-height bounds are ported verbatim from `ScanBoxFilter`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ScanBoxQuery {
     limit: Option<u32>,
     cursor: Option<String>,
@@ -106,7 +108,7 @@ pub struct ScanBoxQuery {
 
 /// `POST /api/v1/scan/scans/{scan_id}/boxes` request — attach a box (opaque
 /// `ErgoBox` JSON parsed in `ergo-node`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AttachBoxRequest {
     #[serde(rename = "box")]
@@ -114,7 +116,7 @@ pub struct AttachBoxRequest {
 }
 
 /// Cursor for the scan list — ascending `scan_id`, resume after the last seen.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct ScanIdCursor {
     after: u16,
 }
@@ -122,7 +124,7 @@ struct ScanIdCursor {
 /// Opaque offset cursor for the box / transaction collections, whose underlying
 /// trait calls are offset/limit paged. Opaque so a keyset seek can replace it
 /// without a wire break (§1.5).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,
 }
@@ -130,6 +132,16 @@ struct OffsetCursor {
 // ----- handlers -----------------------------------------------------------
 
 /// `POST /api/v1/scan/scans` — register a scan, returning its allocated id.
+#[utoipa::path(
+    post, path = "/api/v1/scan/scans", tag = "scan",
+    request_body = ScanRegisterRequest,
+    responses(
+        (status = 201, description = "Registered — `{ scan_id }`", body = serde_json::Value),
+        (status = 400, description = "Invalid tracking_rule/wallet_interaction", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn register(
     State(state): State<AccountsState>,
     body: V1Json<ScanRegisterRequest>,
@@ -153,6 +165,19 @@ pub async fn register(
 
 /// `GET /api/v1/scan/scans?limit=&cursor=` — every registered scan, ascending
 /// by `scan_id`, cursor-paginated on that natural key.
+#[utoipa::path(
+    get, path = "/api/v1/scan/scans", tag = "scan",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Registered scans — `{ items, page }`", body = serde_json::Value),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn list(State(state): State<AccountsState>, q: V1Query<ListQuery>) -> Response {
     let V1Query(q) = q;
     let limit = clamp_limit(q.limit, SCAN_DEFAULT_LIMIT, SCAN_LIST_MAX_LIMIT);
@@ -181,6 +206,16 @@ pub async fn list(State(state): State<AccountsState>, q: V1Query<ListQuery>) -> 
 /// `GET /api/v1/scan/scans/{scan_id}` — a single scan (filters `list_scans`).
 /// A missing id is `404 scan_not_found` (a GET must 404 on absence, never the
 /// compat 400).
+#[utoipa::path(
+    get, path = "/api/v1/scan/scans/{scan_id}", tag = "scan",
+    params(("scan_id" = u16, Path, description = "Registered scan id")),
+    responses(
+        (status = 200, description = "The scan", body = ScanView),
+        (status = 404, description = "No scan with that id", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn get_one(State(state): State<AccountsState>, Path(scan_id): Path<u16>) -> Response {
     let scans = match state.admin.list_scans().await {
         Ok(s) => s,
@@ -195,6 +230,16 @@ pub async fn get_one(State(state): State<AccountsState>, Path(scan_id): Path<u16
 /// `DELETE /api/v1/scan/scans/{scan_id}` — deregister a scan. The trait treats a
 /// missing id as `bad_request`; this surface maps that to `404 scan_not_found`
 /// so a DELETE of an absent scan reads as "gone", not "malformed".
+#[utoipa::path(
+    delete, path = "/api/v1/scan/scans/{scan_id}", tag = "scan",
+    params(("scan_id" = u16, Path, description = "Registered scan id")),
+    responses(
+        (status = 200, description = "Deregistered — `{ scan_id }`", body = serde_json::Value),
+        (status = 404, description = "No scan with that id", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn deregister(State(state): State<AccountsState>, Path(scan_id): Path<u16>) -> Response {
     match state.admin.deregister_scan(scan_id).await {
         Ok(()) => Json(json!({ "scan_id": scan_id })).into_response(),
@@ -209,6 +254,24 @@ pub async fn deregister(State(state): State<AccountsState>, Path(scan_id): Path<
 /// (`wallet_interaction = "off"`): a wallet-interacting operator scan answers
 /// `scan_not_found` here, so the public route can never read it — only the T1
 /// api-key mount (`scan/scans/{id}/unspent`) can.
+#[utoipa::path(
+    get, path = "/api/v1/accounts/watch/{scan_id}/unspent", tag = "scan",
+    params(
+        ("scan_id" = u16, Path, description = "Registered WATCH-ONLY scan id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 2499)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("min_confirmations" = Option<i32>, Query, description = "Minimum confirmations"),
+        ("max_confirmations" = Option<i32>, Query, description = "Maximum confirmations (-1 = unbounded)"),
+        ("min_inclusion_height" = Option<i32>, Query, description = "Minimum inclusion height"),
+        ("max_inclusion_height" = Option<i32>, Query, description = "Maximum inclusion height (-1 = unbounded)"),
+    ),
+    responses(
+        (status = 200, description = "Unspent boxes tracked by this watch-only scan", body = Collection<ScanBoxView>),
+        (status = 400, description = "Invalid filter bounds/cursor", body = V1Error),
+        (status = 404, description = "No watch-only scan with that id", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+)]
 pub async fn watch_unspent(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
@@ -228,6 +291,24 @@ pub async fn watch_unspent(
 }
 
 /// `GET /api/v1/scan/scans/{scan_id}/unspent` — unspent boxes tracked by a scan.
+#[utoipa::path(
+    get, path = "/api/v1/scan/scans/{scan_id}/unspent", tag = "scan",
+    params(
+        ("scan_id" = u16, Path, description = "Registered scan id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 2499)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("min_confirmations" = Option<i32>, Query, description = "Minimum confirmations"),
+        ("max_confirmations" = Option<i32>, Query, description = "Maximum confirmations (-1 = unbounded)"),
+        ("min_inclusion_height" = Option<i32>, Query, description = "Minimum inclusion height"),
+        ("max_inclusion_height" = Option<i32>, Query, description = "Maximum inclusion height (-1 = unbounded)"),
+    ),
+    responses(
+        (status = 200, description = "Unspent boxes tracked by this scan", body = Collection<ScanBoxView>),
+        (status = 400, description = "Invalid filter bounds/cursor", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn unspent(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
@@ -272,6 +353,20 @@ pub async fn unspent(
 /// `GET /api/v1/scan/scans/{scan_id}/transactions` — wallet transactions tagged
 /// with this scan id. An unknown/deregistered id is an empty page, not 404
 /// (trait contract). Item = the wallet tx summary + `scan_ids`.
+#[utoipa::path(
+    get, path = "/api/v1/scan/scans/{scan_id}/transactions", tag = "scan",
+    params(
+        ("scan_id" = u16, Path, description = "Registered scan id (unknown/deregistered id → empty page)"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Wallet transactions tagged with this scan id — `{ items, page }`", body = serde_json::Value),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn transactions(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
@@ -313,6 +408,17 @@ pub async fn transactions(
 }
 
 /// `POST /api/v1/scan/scans/{scan_id}/boxes` — manually attach a box.
+#[utoipa::path(
+    post, path = "/api/v1/scan/scans/{scan_id}/boxes", tag = "scan",
+    params(("scan_id" = u16, Path, description = "Registered scan id")),
+    request_body = AttachBoxRequest,
+    responses(
+        (status = 200, description = "Attached — `{ box_id }`", body = serde_json::Value),
+        (status = 400, description = "Malformed box JSON", body = V1Error),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn attach_box(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
@@ -327,6 +433,18 @@ pub async fn attach_box(
 
 /// `DELETE /api/v1/scan/scans/{scan_id}/boxes/{box_id}` — stop tracking a box
 /// (200, idempotent-friendly).
+#[utoipa::path(
+    delete, path = "/api/v1/scan/scans/{scan_id}/boxes/{box_id}", tag = "scan",
+    params(
+        ("scan_id" = u16, Path, description = "Registered scan id"),
+        ("box_id" = String, Path, description = "64-char lowercase hex box id"),
+    ),
+    responses(
+        (status = 200, description = "Untracked (idempotent) — `{ scan_id, box_id }`", body = serde_json::Value),
+        (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
 pub async fn detach_box(
     State(state): State<AccountsState>,
     Path((scan_id, box_id)): Path<(u16, String)>,

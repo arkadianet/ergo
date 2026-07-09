@@ -26,6 +26,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use ergo_indexer_types::{IndexerStatus, TxId};
 use ergo_ser::address::decode_address_to_tree_bytes;
@@ -37,7 +38,7 @@ use crate::traits::{
     BuiltUnsigned, KeylessAsset, KeylessBuildRequest, KeylessFee, KeylessInputs, KeylessOutput,
     KeylessTarget, SimulateOutcome,
 };
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 // ----- caps (§2.2 tx-intelligence row) ------------------------------------
 
@@ -95,7 +96,7 @@ fn parse_amount(s: &str, what: &str) -> Result<u64, Box<Response>> {
 //  POST /transactions/build
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BuildBody {
     inputs: InputsDto,
@@ -111,7 +112,7 @@ pub struct BuildBody {
     allow_token_burn: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum InputsDto {
     Select {
@@ -136,7 +137,7 @@ fn default_min_conf() -> i64 {
     1
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum OutputDto {
     Payment {
@@ -156,20 +157,20 @@ enum OutputDto {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AssetDto {
     token_id: String,
     amount: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum DataInputsDto {
     BoxIds { box_ids: Vec<String> },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum FeeDto {
     Auto {
@@ -185,33 +186,33 @@ fn default_target_blocks() -> u32 {
     3
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct ContextDto {
     height: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireBytes {
     #[serde(rename = "type")]
     kind: &'static str,
     bytes: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireAsset {
     token_id: String,
     amount: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireChange {
     address: String,
     value: String,
     assets: Vec<WireAsset>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct BuildSummary {
     input_box_ids: Vec<String>,
     selected_value: String,
@@ -222,8 +223,8 @@ struct BuildSummary {
     estimated_cost_units: u64,
 }
 
-#[derive(Debug, Serialize)]
-struct BuildResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct BuildResponse {
     unsigned_tx: WireBytes,
     tx_id: String,
     summary: BuildSummary,
@@ -231,6 +232,19 @@ struct BuildResponse {
 
 /// `POST /api/v1/transactions/build` — keyless `tx_intent` → unsigned tx. T0:
 /// no secret material crosses this boundary (explicit inputs + change address).
+#[utoipa::path(
+    post, path = "/api/v1/transactions/build", tag = "transactions",
+    request_body = BuildBody,
+    responses(
+        (status = 200, description = "Unsigned tx + summary", body = BuildResponse),
+        (status = 400, description = "Invalid intent (bad address/amount/too many inputs)", body = V1Error),
+        (status = 404, description = "No spendable inputs found", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 422, description = "Well-formed but not-yet-supported intent (mint/burn/registers/raw boxes)", body = V1Error),
+        (status = 500, description = "Build failed", body = V1Error),
+        (status = 503, description = "Keyless builder not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn build(State(state): State<V1State>, body: V1Json<BuildBody>) -> Response {
     let V1Json(body) = body;
     match build_inner(&state, body).await {
@@ -582,7 +596,7 @@ fn map_build_error(reason: &str, detail: Option<String>) -> Box<Response> {
 //  POST /transactions/simulate
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimulateBody {
     tx: TxReprDto,
@@ -590,26 +604,26 @@ pub struct SimulateBody {
     assume_context: Option<AssumeContextDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum TxReprDto {
     Bytes { bytes: String },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AssumeContextDto {
     height: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WireConflict {
     box_id: String,
     conflicting_tx_id: String,
 }
 
-#[derive(Debug, Serialize)]
-struct SimulateResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct SimulateResponse {
     valid: bool,
     tx_id: String,
     cost_units: u64,
@@ -625,6 +639,18 @@ struct SimulateResponse {
 
 /// `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
 /// + cost + conflicts, NO broadcast and NO mempool mutation (G8).
+#[utoipa::path(
+    post, path = "/api/v1/transactions/simulate", tag = "transactions",
+    request_body = SimulateBody,
+    responses(
+        (status = 200, description = "Simulation outcome (valid:false is a normal result, not an error)", body = SimulateResponse),
+        (status = 400, description = "Malformed tx bytes, or a malformed/transient admission rejection", body = V1Error),
+        (status = 413, description = "Assembled tx exceeds the simulate body cap", body = V1Error),
+        (status = 409, description = "Simulation not wired on this node", body = V1Error),
+        (status = 503, description = "Node overloaded or shutting down", body = V1Error),
+        (status = 504, description = "Simulation timed out", body = V1Error),
+    ),
+)]
 pub async fn simulate(State(state): State<V1State>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
     let TxReprDto::Bytes { bytes } = body.tx;
@@ -694,7 +720,7 @@ fn render_sim(o: SimulateOutcome) -> SimulateResponse {
 //  GET /transactions/fee-estimate
 // ==========================================================================
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct FeeEstimateQuery {
     #[serde(default)]
     target_blocks: Option<u32>,
@@ -702,15 +728,15 @@ pub struct FeeEstimateQuery {
     tx_size_bytes: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct FeeTier {
     target_blocks: u32,
     fee_per_byte: String,
     recommended_fee: String,
 }
 
-#[derive(Debug, Serialize)]
-struct FeeEstimateResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct FeeEstimateResponse {
     target_blocks: u32,
     tx_size_bytes: u32,
     recommended_fee: String,
@@ -723,6 +749,18 @@ struct FeeEstimateResponse {
 /// `GET /api/v1/transactions/fee-estimate?target_blocks=1|3|10&tx_size_bytes=` —
 /// mempool-derived fee tiers (nanoERG-per-byte as strings). Backed by the chain
 /// reader's `pool_recommended_fee`; honest `mempool_view_disabled` if unwired.
+#[utoipa::path(
+    get, path = "/api/v1/transactions/fee-estimate", tag = "transactions",
+    params(
+        ("target_blocks" = Option<u32>, Query, description = "1, 3 (default), or 10"),
+        ("tx_size_bytes" = Option<u32>, Query, description = "Assumed tx size in bytes (default 200)"),
+    ),
+    responses(
+        (status = 200, description = "Fee tiers for the requested + standard horizons", body = FeeEstimateResponse),
+        (status = 400, description = "Invalid target_blocks/tx_size_bytes", body = V1Error),
+        (status = 409, description = "Fee estimation not wired on this node", body = V1Error),
+    ),
+)]
 pub async fn fee_estimate(
     State(state): State<V1State>,
     V1Query(q): V1Query<FeeEstimateQuery>,
@@ -797,7 +835,7 @@ fn tier_minutes(target_blocks: u32, interval_ms: u64) -> u32 {
 //  GET /transactions/{tx_id}/status
 // ==========================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PoolStatus {
     priority_weight: String,
     fee: String,
@@ -816,8 +854,8 @@ struct PoolStatus {
     parents_in_pool: u32,
 }
 
-#[derive(Debug, Serialize)]
-struct StatusResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct StatusResponse {
     tx_id: String,
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -837,6 +875,15 @@ struct StatusResponse {
 /// `GET /api/v1/transactions/{tx_id}/status` — lifecycle + ETA. Confirmed
 /// (extra-index) wins over pooled; a well-formed unknown id is a 200
 /// `state:"unknown"` (a legitimate polled answer), only a malformed id is a 400.
+#[utoipa::path(
+    get, path = "/api/v1/transactions/{tx_id}/status", tag = "transactions",
+    params(("tx_id" = String, Path, description = "64-char lowercase hex transaction id")),
+    responses(
+        (status = 200, description = "Lifecycle status: confirmed / pending / unknown", body = StatusResponse),
+        (status = 400, description = "Malformed tx id", body = V1Error),
+        (status = 500, description = "Failed to assemble the confirmed transaction status", body = V1Error),
+    ),
+)]
 pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>) -> Response {
     let Some(raw) = super::parse_id32(&tx_id_hex) else {
         return invalid_tx_id();

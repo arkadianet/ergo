@@ -22,6 +22,7 @@ pub mod decode;
 pub mod error;
 pub mod governor;
 pub mod mempool_depth;
+pub mod openapi;
 pub mod operator;
 pub mod realtime;
 pub mod routes;

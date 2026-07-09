@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en" class="theme-dark">
+<head>
+<meta charset="utf-8">
+<title>ergo-rust-node — v1 API Swagger</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- Theme tokens so the page chrome matches the dashboard. Swagger-UI's own
+     widget keeps its default skin (deeper theming is out of scope). -->
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css" integrity="sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn" crossorigin="anonymous">
+<style>
+  body { margin: 0; background: var(--bg); }
+  .ergo-banner {
+    background: color-mix(in srgb, var(--blue) 12%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--blue) 40%, transparent);
+    color: var(--tx);
+    padding: var(--space-3) var(--space-5);
+    font-family: var(--mono);
+    font-size: var(--fs-small);
+    line-height: 1.5;
+  }
+  .ergo-banner strong { font-weight: 600; }
+  .ergo-banner a { color: var(--blue); }
+  .ergo-banner code { background: var(--s2); border-radius: var(--radius-sm); padding: 0 4px; }
+</style>
+<script>
+  // Apply the operator's saved theme/density (set on the dashboard) so this
+  // page matches. /swagger/v1 carries no CSP, so an inline bootstrap is OK.
+  try {
+    var p = JSON.parse(localStorage.getItem('ergo.prefs') || '{}');
+    var cls = 'theme-' + (p.theme || 'dark');
+    if (p.density === 'compact') cls += ' density-compact';
+    document.documentElement.className = cls;
+  } catch (e) { /* default theme-dark */ }
+</script>
+</head>
+<body>
+<div class="ergo-banner">
+  <strong>v1 API:</strong> the product REST surface — chain/boxes/tokens/
+  addresses/mempool/transactions reads, tx-intelligence, the script
+  playground, semantic decode, light-client proofs, stats, diagnostics,
+  webhooks, real-time subscriptions, scan/accounts, and node operator
+  controls (<code>v1-api-design.md</code>). Distinct from the older
+  <a href="/swagger/native">native surface</a> (wallet/mining/votes) this
+  spec does not include. Set your <code>api_key</code> on the
+  <a href="/">dashboard</a> (the Authorize chip) to pre-authorize the T1/T2
+  endpoints below. See <a href="/swagger">/swagger</a> for the Scala-parity
+  spec, or <a href="/">/</a> for the live dashboard.
+</div>
+<div id="swagger-ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" integrity="sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep" crossorigin="anonymous"></script>
+<script>
+window.onload = () => {
+  window.ui = SwaggerUIBundle({
+    url: "/api-docs/openapi-v1.yaml",
+    dom_id: "#swagger-ui",
+    deepLinking: true,
+    presets: [SwaggerUIBundle.presets.apis],
+    layout: "BaseLayout",
+    // Carry the api_key the operator set on the dashboard (Authorize chip, kept
+    // in this origin's sessionStorage) into Swagger's ApiKeyAuth scheme so gated
+    // endpoints show authorized without re-entry. Deliberately NOT
+    // persistAuthorization — that would write the secret to localStorage;
+    // re-applying from sessionStorage keeps it session-scoped.
+    onComplete: () => {
+      try {
+        const key = sessionStorage.getItem("ergo.apikey");
+        if (key) window.ui.preauthorizeApiKey("ApiKeyAuth", key);
+      } catch (_) {
+        /* sessionStorage may be blocked; operator can still Authorize manually */
+      }
+    },
+  });
+};
+</script>
+</body>
+</html>

@@ -13,23 +13,24 @@
 
 pub mod dto;
 
-mod addresses;
-mod batch;
-mod boxes;
-mod chain;
-mod decode;
-mod diagnostics;
+pub(crate) mod addresses;
+pub(crate) mod batch;
+pub(crate) mod boxes;
+pub(crate) mod chain;
+pub(crate) mod decode;
+pub(crate) mod diagnostics;
 pub(crate) mod extract;
-mod light;
-mod mempool;
-mod stats;
-mod tokens;
+pub(crate) mod light;
+pub(crate) mod mempool;
+pub(crate) mod stats;
+pub(crate) mod tokens;
 pub(crate) mod transactions;
-mod tx_intel;
+pub(crate) mod tx_intel;
 
 pub use batch::batch_router;
 
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     response::Response,
@@ -164,14 +165,14 @@ enum Order {
 /// Height-keyed opaque cursor payload (`{"h": <height>}`) for the chain
 /// list endpoints. Opaque to clients; the field is an implementation detail
 /// (§1.5).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct HeightCursor {
     h: u32,
 }
 
 /// Common `?limit=&cursor=&order=` query for the chain list endpoints.
-#[derive(Debug, Deserialize)]
-struct ListQuery {
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
     order: Option<String>,
@@ -253,14 +254,14 @@ fn candidate_heights(cursor_h: Option<u32>, order: Order, tip: u32, n: u32) -> V
 /// Offset-alias opaque cursor for the indexed collections (§0.2 / §1.5). A thin
 /// shim over the offset-based `IndexerQuery`; opaque to clients so a Phase-2
 /// stable-seek key can replace it without a wire break.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub(super) struct OffsetCursor {
     pub off: u32,
 }
 
 /// Global-index cursor for `boxes/range` — genuinely stable/monotonic
 /// (append-only global index), not an offset alias.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub(super) struct GiCursor {
     pub gi: u64,
 }

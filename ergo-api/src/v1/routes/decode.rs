@@ -6,6 +6,7 @@
 //! own surface. All T0, all bounded (fragment §7).
 
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -19,13 +20,13 @@ use super::dto::{v1box_from_indexed_box, Collection};
 use super::extract::{V1Json, V1Query};
 use super::{parse_id32, V1State};
 use crate::v1::decode::registry::{entry_by_id, MatchKind, ProtocolEntry, REGISTRY};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 // ----- discovery: GET /protocols, GET /protocols/{id} ---------------------
 
 /// A `GET /protocols` list item — the registry capability advertisement.
-#[derive(Debug, Serialize)]
-struct ProtocolListItem {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ProtocolListItem {
     protocol_id: &'static str,
     name: &'static str,
     family: &'static str,
@@ -67,6 +68,12 @@ fn list_item(entry: &'static ProtocolEntry) -> ProtocolListItem {
 /// `GET /api/v1/protocols` — the registry listing (discoverability: a client
 /// learns exactly what this node can decode). Static registry → a trivial
 /// single page. No indexer dependency; the cheapest possible T0.
+#[utoipa::path(
+    get, path = "/api/v1/protocols", tag = "decode",
+    responses(
+        (status = 200, description = "Registered protocols (single page)", body = Collection<ProtocolListItem>),
+    ),
+)]
 pub async fn list_protocols(State(_state): State<V1State>) -> Response {
     let items: Vec<ProtocolListItem> = REGISTRY.iter().map(list_item).collect();
     Json(Collection::single_page(items)).into_response()
@@ -74,7 +81,7 @@ pub async fn list_protocols(State(_state): State<V1State>) -> Response {
 
 /// One matcher, projected for `GET /protocols/{id}` so an integrator can
 /// pre-compute keys client-side.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct MatcherView {
     kind: &'static str,
     key: &'static str,
@@ -82,8 +89,8 @@ struct MatcherView {
 }
 
 /// `GET /api/v1/protocols/{id}` detail body.
-#[derive(Debug, Serialize)]
-struct ProtocolDetail {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ProtocolDetail {
     protocol_id: &'static str,
     name: &'static str,
     family: &'static str,
@@ -97,6 +104,14 @@ struct ProtocolDetail {
 /// `GET /api/v1/protocols/{protocol_id}` — one registry entry incl. its
 /// matchers. Unknown id → `404 protocol_not_found` (a genuinely absent
 /// resource, not a disabled subsystem).
+#[utoipa::path(
+    get, path = "/api/v1/protocols/{protocol_id}", tag = "decode",
+    params(("protocol_id" = String, Path, description = "Registry protocol id")),
+    responses(
+        (status = 200, description = "Protocol detail incl. matchers", body = ProtocolDetail),
+        (status = 404, description = "No protocol with that id", body = V1Error),
+    ),
+)]
 pub async fn protocol_by_id(
     State(_state): State<V1State>,
     Path(protocol_id): Path<String>,
@@ -133,7 +148,7 @@ pub async fn protocol_by_id(
 // ----- POST /boxes/decode (stateless, off-chain) --------------------------
 
 /// An asset on an off-chain box (`amount` a string per the glossary).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AssetIn {
     token_id: String,
     amount: String,
@@ -146,7 +161,7 @@ pub struct AssetIn {
 /// tree-boundary-dependent for non-size-delimited contract trees (the exact
 /// trees these protocols use), so a bytes path would be unreliable — the
 /// structured form is complete and honest.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct DecodeBoxBody {
     ergo_tree: String,
     value: String,
@@ -158,8 +173,8 @@ pub struct DecodeBoxBody {
 
 /// The `POST /boxes/decode` response: the derived address + the shared `decoded`
 /// object (identical shape to `boxes/{id}?decode=true`).
-#[derive(Debug, Serialize)]
-struct DecodeBoxResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct DecodeBoxResponse {
     address: Option<String>,
     decoded: Value,
 }
@@ -174,6 +189,14 @@ fn invalid_amount(detail: impl Into<String>) -> Response {
 
 /// `POST /api/v1/boxes/decode` — decode an off-chain / not-yet-submitted box.
 /// Stateless: works even when the indexer is disabled. Pure CPU, body-capped.
+#[utoipa::path(
+    post, path = "/api/v1/boxes/decode", tag = "decode",
+    request_body = DecodeBoxBody,
+    responses(
+        (status = 200, description = "Derived address + decoded contract (null if unmatched)", body = DecodeBoxResponse),
+        (status = 400, description = "Invalid ergo_tree/value/asset amount", body = V1Error),
+    ),
+)]
 pub async fn decode_off_chain_box(
     State(state): State<V1State>,
     V1Json(body): V1Json<DecodeBoxBody>,
@@ -209,15 +232,15 @@ pub async fn decode_off_chain_box(
 
 // ----- GET /protocols/{id}/state (singleton one-shot) ---------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct StateQuery {
     #[serde(default)]
     box_role: Option<String>,
 }
 
 /// `GET /api/v1/protocols/{id}/state` response — the canonical singleton state.
-#[derive(Debug, Serialize)]
-struct ProtocolStateResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ProtocolStateResponse {
     protocol_id: &'static str,
     box_role: &'static str,
     box_id: String,
@@ -233,6 +256,21 @@ struct ProtocolStateResponse {
 /// holding the protocol's identifying NFT and return its decoded state (the
 /// "give me SigmaUSD reserves right now" one-shot). Requires an
 /// `identifying_token` matcher.
+#[utoipa::path(
+    get, path = "/api/v1/protocols/{protocol_id}/state", tag = "decode",
+    params(
+        ("protocol_id" = String, Path, description = "Registry protocol id"),
+        ("box_role" = Option<String>, Query, description = "Disambiguate when the protocol has more than one singleton role"),
+    ),
+    responses(
+        (status = 200, description = "Singleton box + decoded contract state", body = ProtocolStateResponse),
+        (status = 400, description = "box_role does not match this protocol's identifying-token role", body = V1Error),
+        (status = 404, description = "No protocol with that id, or the protocol has no singleton to resolve", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Registry data bug (bad identifying-token key), or box assembly failed", body = V1Error),
+        (status = 503, description = "No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn protocol_state(
     State(state): State<V1State>,
     Path(protocol_id): Path<String>,

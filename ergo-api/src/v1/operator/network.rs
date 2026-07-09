@@ -6,6 +6,7 @@
 //! externally-triggered ban), so they answer the honest `route_unavailable`.
 
 use std::net::SocketAddr;
+use utoipa::ToSchema;
 
 use axum::{
     extract::{Path, Query, State},
@@ -17,8 +18,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::{offset_collection, ListQuery, OperatorState};
-use crate::types::ApiPeerState;
-use crate::v1::error::{v1_error, Reason};
+use crate::types::{ApiPeer, ApiPeerState};
+use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::dto::Collection;
 
 /// Default/hard page size for the peer list (§3.2 #1 — node-bounded, so the
 /// default is generous and `has_more:false` in the common case).
@@ -30,14 +32,36 @@ const NET_MAX_LIMIT: u32 = 500;
 
 /// `GET /api/v1/network/peers` — T0. Collection of `ApiPeer` (reused verbatim,
 /// already snake_case) — a superset view (every tracked entry, any state).
-pub(super) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQuery>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/network/peers", tag = "network",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 256, cap 1024)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Every tracked peer (any state)", body = Collection<ApiPeer>),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+    ),
+)]
+pub(crate) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQuery>) -> Response {
     offset_collection(s.read.peers(), &q, PEERS_DEFAULT_LIMIT, PEERS_MAX_LIMIT)
 }
 
 /// `GET /api/v1/network/connected` — T0. Server-side filter of the same
 /// `peers()` data down to handshake-complete (`state == active`) peers (§3.2
 /// #2) — no new trait method.
-pub(super) async fn connected(
+#[utoipa::path(
+    get, path = "/api/v1/network/connected", tag = "network",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 256, cap 1024)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Handshake-complete peers only", body = Collection<ApiPeer>),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+    ),
+)]
+pub(crate) async fn connected(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -53,8 +77,8 @@ pub(super) async fn connected(
 /// One blacklisted-peer entry (§3.2 #3). `addr` is the clean canonical
 /// `ip[:port]` — the compat path keeps the ugly Java `InetAddress.toString()`
 /// `hostname/ip` double-form for byte-parity; v1 strips it.
-#[derive(Serialize)]
-struct BlacklistedPeer {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct BlacklistedPeer {
     addr: String,
 }
 
@@ -71,7 +95,19 @@ fn clean_blacklist_addr(raw: &str) -> String {
 /// over [`NodeChainQuery::peers_blacklisted`](crate::compat::NodeChainQuery),
 /// addresses cleaned to canonical form. `503 chain_reader_unavailable` when no
 /// chain reader is wired.
-pub(super) async fn blacklisted(
+#[utoipa::path(
+    get, path = "/api/v1/network/blacklisted", tag = "network",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Blacklisted peer addresses", body = Collection<BlacklistedPeer>),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
+pub(crate) async fn blacklisted(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -93,8 +129,8 @@ pub(super) async fn blacklisted(
 /// One per-peer sync-info entry (§3.2 #4). `peer_height` (not bare `height`)
 /// disambiguates whose height; `status` is the lowercased Scala
 /// `PeerChainStatus` set (`equal|younger|older|fork|unknown|nonsense`).
-#[derive(Serialize)]
-struct SyncInfoEntry {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SyncInfoEntry {
     addr: String,
     peer_height: u32,
     status: String,
@@ -102,7 +138,19 @@ struct SyncInfoEntry {
 
 /// `GET /api/v1/network/sync-info` — T0. Collection reshape of
 /// [`NodeChainQuery::peers_sync_info`](crate::compat::NodeChainQuery).
-pub(super) async fn sync_info(
+#[utoipa::path(
+    get, path = "/api/v1/network/sync-info", tag = "network",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Per-peer sync status", body = Collection<SyncInfoEntry>),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
+pub(crate) async fn sync_info(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -124,8 +172,8 @@ pub(super) async fn sync_info(
 
 /// The `network/track-info` aggregate counters (§3.2 #5). Bare object, not a
 /// collection.
-#[derive(Serialize)]
-struct TrackInfo {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TrackInfo {
     num_requested: u32,
     num_received: u32,
     num_failed: u32,
@@ -133,7 +181,14 @@ struct TrackInfo {
 
 /// `GET /api/v1/network/track-info` — T0. Bare-object reshape of
 /// [`NodeChainQuery::peers_track_info`](crate::compat::NodeChainQuery).
-pub(super) async fn track_info(State(s): State<OperatorState>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/network/track-info", tag = "network",
+    responses(
+        (status = 200, description = "Aggregate modifier-tracking counters", body = TrackInfo),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
+pub(crate) async fn track_info(State(s): State<OperatorState>) -> Response {
     let chain = match s.chain() {
         Ok(c) => c,
         Err(e) => return *e,
@@ -153,7 +208,17 @@ pub(super) async fn track_info(State(s): State<OperatorState>) -> Response {
 /// Preserves the saner-than-Scala divergences (IPv6 accepted, unresolvable host
 /// → 400 not 500, out-of-range port → 400). `503 route_unavailable` with no
 /// admin bridge.
-pub(super) async fn connect(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
+#[utoipa::path(
+    post, path = "/api/v1/network/connect", tag = "network",
+    request_body(content = String, description = "JSON string \"host:port\" to dial"),
+    responses(
+        (status = 200, description = "Dial accepted (fire-and-forget) — literal \"OK\"", body = String),
+        (status = 400, description = "Malformed body, or host:port did not parse/resolve", body = V1Error),
+        (status = 503, description = "Admin control bridge not wired on this node", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn connect(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
     let admin = match s.admin() {
         Ok(a) => a,
         Err(e) => return *e,
@@ -198,7 +263,12 @@ pub(super) async fn connect(State(s): State<OperatorState>, body: axum::body::By
 /// `POST /api/v1/network/blacklist` — T1, seam-deferred. No manual-ban write
 /// path exists on the peer manager yet (§3.2 #7), so this answers the honest
 /// `route_unavailable` rather than pretending to ban.
-pub(super) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
+#[utoipa::path(
+    post, path = "/api/v1/network/blacklist", tag = "network",
+    responses((status = 503, description = "Manual peer blacklisting not wired on this node", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "manual peer blacklisting is not wired on this node",
@@ -208,7 +278,13 @@ pub(super) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
 
 /// `DELETE /api/v1/network/blacklist/{addr}` — T1, seam-deferred (same gap as
 /// [`blacklist_add`]).
-pub(super) async fn blacklist_remove(
+#[utoipa::path(
+    delete, path = "/api/v1/network/blacklist/{addr}", tag = "network",
+    params(("addr" = String, Path, description = "Peer address to un-blacklist")),
+    responses((status = 503, description = "Manual peer un-blacklisting not wired on this node", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn blacklist_remove(
     State(_s): State<OperatorState>,
     Path(_addr): Path<String>,
 ) -> Response {

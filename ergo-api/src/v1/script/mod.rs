@@ -26,12 +26,13 @@
 //! SAME [`ergo_compiler::compile`] facade and never proxies or enriches the
 //! compat route.
 
-mod handlers;
+pub(crate) mod handlers;
 
 use std::sync::Arc;
 
 use axum::routing::post;
 use axum::Router;
+use utoipa::ToSchema;
 
 use ergo_compiler::{CompileError, EnvValue, NetworkPrefix, ScriptEnv};
 use ergo_primitives::cost::{CostAccumulator, JitCost};
@@ -269,7 +270,7 @@ pub(crate) fn build_env(
 /// A typed constant on the wire: `{ "type": "<sigma type>", "value": "<string>" }`
 /// (fragment §4.1). Scalars are decimal strings, byte collections / group
 /// elements are hex, booleans are `"true"`/`"false"`.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, ToSchema)]
 pub struct TypedConstant {
     /// Lowercase-or-Scala sigma type name (`SInt`, `SLong`, `Coll[Byte]`, …).
     #[serde(rename = "type")]

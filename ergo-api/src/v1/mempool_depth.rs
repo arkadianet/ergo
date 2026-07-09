@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use utoipa::ToSchema;
 
 use serde::Serialize;
 
@@ -38,7 +39,7 @@ pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 /// fee-per-byte (nanoERG/byte), or `0` on an empty pool. Amounts stay `u64`
 /// here (the raw store); the wire projection restringifies per the §1.1
 /// convention.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct MempoolDepthSample {
     /// Monotonic sample sequence (starts at 1, never reused) — lets a future
     /// `?since=<seq>` incremental read resume without gaps/dupes.

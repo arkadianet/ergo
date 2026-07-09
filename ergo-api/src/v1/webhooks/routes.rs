@@ -9,6 +9,7 @@
 //! (409) — never a bare 404 (§4 subsystem-off rule).
 
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     extract::{Path, State},
@@ -26,7 +27,7 @@ use crate::v1::auth::{require_tier, Tier, V1AuthConfig};
 use crate::v1::cursor::{
     clamp_limit, decode_opt_cursor, encode_cursor, Page, DEFAULT_LIMIT, MAX_LIMIT,
 };
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::realtime::{parse_channel, RealtimeBus};
 use crate::v1::routes::extract::{V1Json, V1Query};
 
@@ -70,8 +71,8 @@ impl WebhooksState {
 }
 
 /// `POST /api/v1/webhooks` body.
-#[derive(Debug, Deserialize)]
-struct RegisterRequest {
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct RegisterRequest {
     url: String,
     channels: Vec<String>,
     #[serde(default)]
@@ -81,20 +82,20 @@ struct RegisterRequest {
 }
 
 /// `PATCH /api/v1/webhooks/{id}` body (pause / resume).
-#[derive(Debug, Deserialize)]
-struct PatchRequest {
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct PatchRequest {
     active: bool,
 }
 
 /// Cursor + limit query for the paginated list endpoints.
-#[derive(Debug, Deserialize)]
-struct ListQuery {
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
 }
 
 /// Opaque offset cursor for the webhook + delivery lists.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: usize,
 }
@@ -127,7 +128,19 @@ fn url_reject_response(rej: UrlReject) -> Response {
 
 /// `POST /api/v1/webhooks` — register a subscription (T1). Returns 201 with the
 /// subscription **and** the secret echoed exactly once.
-async fn register(
+#[utoipa::path(
+    post, path = "/api/v1/webhooks", tag = "webhooks",
+    request_body = RegisterRequest,
+    responses(
+        (status = 201, description = "Registered — subscription + secret (echoed only here)", body = serde_json::Value),
+        (status = 400, description = "Malformed body, empty channels/secret, invalid channel selector, or insecure/malformed/forbidden-target url", body = V1Error),
+        (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
+        (status = 429, description = "Maximum number of webhooks already registered, or too many channels for one webhook", body = V1Error),
+        (status = 503, description = "Named channel has no live feed on this node", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn register(
     State(state): State<WebhooksState>,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
@@ -234,7 +247,23 @@ async fn register(
 }
 
 /// `GET /api/v1/webhooks` — list subscriptions (T1), cursor-paginated.
-async fn list(State(state): State<WebhooksState>, V1Query(q): V1Query<ListQuery>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/webhooks", tag = "webhooks",
+    params(
+        ("limit" = Option<u32>, Query, description = "Page size"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Registered webhooks (never the secret) — `{ items, page }`", body = serde_json::Value),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn list(
+    State(state): State<WebhooksState>,
+    V1Query(q): V1Query<ListQuery>,
+) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -263,7 +292,17 @@ async fn list(State(state): State<WebhooksState>, V1Query(q): V1Query<ListQuery>
 }
 
 /// `GET /api/v1/webhooks/{webhook_id}` — one subscription (T1). Never the secret.
-async fn detail(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
+#[utoipa::path(
+    get, path = "/api/v1/webhooks/{webhook_id}", tag = "webhooks",
+    params(("webhook_id" = String, Path, description = "Registered webhook id")),
+    responses(
+        (status = 200, description = "The subscription (never the secret)", body = serde_json::Value),
+        (status = 404, description = "No webhook with that id", body = V1Error),
+        (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn detail(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -275,7 +314,17 @@ async fn detail(State(state): State<WebhooksState>, Path(id): Path<String>) -> R
 }
 
 /// `DELETE /api/v1/webhooks/{webhook_id}` — deregister (T1).
-async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
+#[utoipa::path(
+    delete, path = "/api/v1/webhooks/{webhook_id}", tag = "webhooks",
+    params(("webhook_id" = String, Path, description = "Registered webhook id")),
+    responses(
+        (status = 200, description = "Deregistered — `{ webhook_id, deleted }`", body = serde_json::Value),
+        (status = 404, description = "No webhook with that id", body = V1Error),
+        (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -288,7 +337,19 @@ async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> R
 }
 
 /// `PATCH /api/v1/webhooks/{webhook_id}` — pause / resume (T1).
-async fn patch_active(
+#[utoipa::path(
+    patch, path = "/api/v1/webhooks/{webhook_id}", tag = "webhooks",
+    params(("webhook_id" = String, Path, description = "Registered webhook id")),
+    request_body = PatchRequest,
+    responses(
+        (status = 200, description = "Updated subscription", body = serde_json::Value),
+        (status = 400, description = "Request body is not valid JSON for this endpoint", body = V1Error),
+        (status = 404, description = "No webhook with that id", body = V1Error),
+        (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn patch_active(
     State(state): State<WebhooksState>,
     Path(id): Path<String>,
     V1Json(body): V1Json<PatchRequest>,
@@ -305,7 +366,22 @@ async fn patch_active(
 
 /// `GET /api/v1/webhooks/{webhook_id}/deliveries` — delivery-status log (T1),
 /// cursor-paginated, newest-first.
-async fn deliveries(
+#[utoipa::path(
+    get, path = "/api/v1/webhooks/{webhook_id}/deliveries", tag = "webhooks",
+    params(
+        ("webhook_id" = String, Path, description = "Registered webhook id"),
+        ("limit" = Option<u32>, Query, description = "Page size"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Delivery log, newest-first — `{ items, page }`", body = serde_json::Value),
+        (status = 400, description = "Invalid cursor", body = V1Error),
+        (status = 404, description = "No webhook with that id", body = V1Error),
+        (status = 409, description = "Webhooks subsystem disabled", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn deliveries(
     State(state): State<WebhooksState>,
     Path(id): Path<String>,
     V1Query(q): V1Query<ListQuery>,

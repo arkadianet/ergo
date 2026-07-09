@@ -52,6 +52,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     body::{to_bytes, Body},
@@ -95,12 +96,12 @@ const UNKNOWN_IP: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 // ----- wire types -----------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct BatchRequest {
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct BatchRequest {
     requests: Vec<BatchItemRequest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct BatchItemRequest {
     #[serde(default)]
     id: Option<String>,
@@ -112,7 +113,7 @@ struct BatchItemRequest {
     body: Option<Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct BatchItemResult {
     id: String,
     status: &'static str,
@@ -153,8 +154,8 @@ impl BatchItemResult {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct BatchResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct BatchResponse {
     items: Vec<BatchItemResult>,
 }
 
@@ -762,7 +763,7 @@ fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
 /// classification table, and the shared node-wide [`Governor`] batch draws
 /// its one upfront charge from.
 #[derive(Clone)]
-struct BatchState {
+pub(crate) struct BatchState {
     dispatch: Router,
     table: Arc<[AllowedRoute]>,
     governor: Arc<Governor>,
@@ -866,7 +867,17 @@ async fn dispatch_one(dispatch: &Router, id: String, item: BatchItemRequest) -> 
 
 /// `POST /api/v1/batch` handler. Reads `api_key`-free (T0) — every entry on
 /// today's allow-list is T0 (see module docs on mixed-tier deferral).
-async fn batch_handler(State(state): State<BatchState>, req: Request<Body>) -> Response {
+#[utoipa::path(
+    post, path = "/api/v1/batch", tag = "batch",
+    request_body = BatchRequest,
+    responses(
+        (status = 200, description = "Per-item results (partial-failure semantics — a structurally valid batch is always 200)", body = BatchResponse),
+        (status = 400, description = "Malformed/empty batch, or a target not on the allow-list (forbidden_target)", body = V1Error),
+        (status = 413, description = "Too many items, or summed weight/body size exceeds the batch cap", body = V1Error),
+        (status = 429, description = "Rate limit exceeded for this client", body = V1Error),
+    ),
+)]
+pub(crate) async fn batch_handler(State(state): State<BatchState>, req: Request<Body>) -> Response {
     let ip = client_ip(&req).unwrap_or(UNKNOWN_IP);
     let exempt = state.governor.exempt_loopback(&req);
 

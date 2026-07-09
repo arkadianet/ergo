@@ -3,6 +3,7 @@
 //! handler owns reduction, cost, or compile logic.
 
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -21,7 +22,7 @@ use super::{
     MAX_SOURCE_LEN,
 };
 use crate::compat::types::ScalaOutput;
-use crate::v1::error::Reason;
+use crate::v1::error::{Reason, V1Error};
 use crate::v1::routes::extract::V1Json;
 
 // A trace entry cap: the one place a response array is bounded in lieu of
@@ -130,7 +131,7 @@ fn self_box_from_ctx(
 //  POST /api/v1/script/compile   (fragment §4.7)
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompileBody {
     source: String,
@@ -140,8 +141,8 @@ pub struct CompileBody {
     env: Option<BTreeMap<String, TypedConstant>>,
 }
 
-#[derive(Debug, Serialize)]
-struct CompileResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct CompileResponse {
     ergo_tree: String,
     tree_bytes: String,
     p2s_address: String,
@@ -154,6 +155,15 @@ struct CompileResponse {
 /// `POST /script/compile` — ErgoScript source → tree / address / typed-AST.
 /// A thin adapter over [`ergo_compiler::compile`]; a compile error is the v1
 /// envelope with the error position / phase / Scala class in `detail`.
+#[utoipa::path(
+    post, path = "/api/v1/script/compile", tag = "script",
+    request_body = CompileBody,
+    responses(
+        (status = 200, description = "Compiled tree + addresses + typed AST", body = CompileResponse),
+        (status = 400, description = "Compile error (position/phase/Scala class in detail)", body = V1Error),
+        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+    ),
+)]
 pub async fn compile(State(state): State<ScriptState>, body: V1Json<CompileBody>) -> Response {
     let V1Json(body) = body;
     match compile_inner(&state, body) {
@@ -205,7 +215,7 @@ fn compile_inner(state: &ScriptState, body: CompileBody) -> Result<CompileRespon
 //  POST /api/v1/script/inspect   (fragment §4.2)
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectBody {
     #[serde(default)]
@@ -214,7 +224,7 @@ pub struct InspectBody {
     address: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ConstantView {
     index: usize,
     #[serde(rename = "type")]
@@ -222,8 +232,8 @@ struct ConstantView {
     value: String,
 }
 
-#[derive(Debug, Serialize)]
-struct InspectResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct InspectResponse {
     ergo_tree_version: u8,
     has_size: bool,
     constant_segregation: bool,
@@ -236,6 +246,14 @@ struct InspectResponse {
 
 /// `POST /script/inspect` — decompile an `ergo_tree` (hex) or `address` into a
 /// structured typed view. Pure parse; no eval, no chain read.
+#[utoipa::path(
+    post, path = "/api/v1/script/inspect", tag = "script",
+    request_body = InspectBody,
+    responses(
+        (status = 200, description = "Structured typed decompilation", body = InspectResponse),
+        (status = 400, description = "Invalid ergo_tree/address, or neither/both supplied", body = V1Error),
+    ),
+)]
 pub async fn inspect(State(state): State<ScriptState>, body: V1Json<InspectBody>) -> Response {
     let V1Json(body) = body;
     match inspect_inner(&state, body) {
@@ -357,7 +375,7 @@ fn count_payload(node: &IrNode) -> usize {
 //  POST /api/v1/script/execute   (fragment §4.3)  — cost governor MANDATORY
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteBody {
     #[serde(default)]
@@ -376,7 +394,7 @@ pub struct ExecuteBody {
     max_cost: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextDto {
     #[serde(default)]
@@ -385,7 +403,7 @@ pub struct ContextDto {
     self_box: Option<SelfBoxDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SelfBoxDto {
     #[serde(default)]
@@ -396,8 +414,8 @@ pub struct SelfBoxDto {
     creation_height: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-struct ExecuteResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ExecuteResponse {
     reduced_to: String,
     result: Option<bool>,
     cost: u64,
@@ -407,6 +425,15 @@ struct ExecuteResponse {
 /// `POST /script/execute` — reduce a tree/source against a context on the exact
 /// block-validation path, **bounded by the cost governor** (D2). A script that
 /// would exceed the per-request cost cap answers `400 cost_limit`, never hangs.
+#[utoipa::path(
+    post, path = "/api/v1/script/execute", tag = "script",
+    request_body = ExecuteBody,
+    responses(
+        (status = 200, description = "Reduction result + cost", body = ExecuteResponse),
+        (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+    ),
+)]
 pub async fn execute(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
     let V1Json(body) = body;
     match execute_inner(&state, body) {
@@ -441,8 +468,8 @@ fn execute_inner(state: &ScriptState, body: ExecuteBody) -> Result<ExecuteRespon
 //  POST /api/v1/script/cost   (fragment §4.4)  — cost governor MANDATORY
 // ==========================================================================
 
-#[derive(Debug, Serialize)]
-struct CostResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct CostResponse {
     total_cost: u64,
     within_block_limit: bool,
     /// A per-opcode `breakdown` is gated on the interpreter's `cost-trace`
@@ -451,7 +478,7 @@ struct CostResponse {
     breakdown: Vec<CostBreakdownEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CostBreakdownEntry {
     op: String,
     cost: u64,
@@ -460,6 +487,15 @@ struct CostBreakdownEntry {
 /// `POST /script/cost` — the total reduce cost under a bounded accumulator.
 /// Same request shape as `execute`; reuses the SAME bounded reduce primitive
 /// (compose, don't reimplement the cost accounting — fragment §4.4).
+#[utoipa::path(
+    post, path = "/api/v1/script/cost", tag = "script",
+    request_body = ExecuteBody,
+    responses(
+        (status = 200, description = "Total reduce cost (breakdown empty until cost-trace is wired)", body = CostResponse),
+        (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+    ),
+)]
 pub async fn cost(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
     let V1Json(body) = body;
     match cost_inner(&state, body) {
@@ -493,7 +529,7 @@ fn cost_inner(state: &ScriptState, body: ExecuteBody) -> Result<CostResponse, Bo
 //  POST /api/v1/script/simulate   (fragment §4.5)  — node-only differentiator
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimulateBody {
     box_id: String,
@@ -503,7 +539,7 @@ pub struct SimulateBody {
     max_cost: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SimulateResponse {
     spendable: bool,
     reduced_to: String,
@@ -520,6 +556,16 @@ struct SimulateResponse {
 /// `POST /script/simulate` — resolve a REAL on-chain box and reduce its guard
 /// against real chain state. `box_id` missing ⇒ `box_not_found`; the chain
 /// reader unwired ⇒ `chain_reader_unavailable` (never a bare 404).
+#[utoipa::path(
+    post, path = "/api/v1/script/simulate", tag = "script",
+    request_body = SimulateBody,
+    responses(
+        (status = 200, description = "Spendability against the real resolved box (single-box scope — no tx/proof verified)", body = SimulateResponse),
+        (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 404, description = "No unspent box with that id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn simulate(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
     match simulate_inner(&state, body) {
@@ -632,14 +678,14 @@ fn eval_box_from_scala(o: &ScalaOutput) -> Result<EvalBox, Box<Response>> {
 //  POST /api/v1/script/explain   (fragment §4.6)  — the debugger
 // ==========================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct TraceView {
     label: String,
     value: String,
 }
 
-#[derive(Debug, Serialize)]
-struct ExplainResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ExplainResponse {
     spendable: bool,
     reduced_to: Option<String>,
     reduction_trace: Vec<TraceView>,
@@ -652,6 +698,16 @@ struct ExplainResponse {
 /// diagnosis: the reduction trace and a best-effort human line. The mechanical
 /// fields ship in the node; the `human_diagnosis` is explicitly
 /// non-authoritative (fragment §7-D3).
+#[utoipa::path(
+    post, path = "/api/v1/script/explain", tag = "script",
+    request_body = SimulateBody,
+    responses(
+        (status = 200, description = "Reduction trace + human_diagnosis (non-authoritative)", body = ExplainResponse),
+        (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 404, description = "No unspent box with that id", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn explain(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
     match explain_inner(&state, body) {
@@ -729,7 +785,7 @@ fn explain_inner(
 //  POST /api/v1/script/diff   (fragment §4.8)  — opt-in Scala oracle
 // ==========================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiffBody {
     #[serde(default)]
@@ -746,7 +802,7 @@ pub struct DiffBody {
     max_cost: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct DiffSide {
     verdict: &'static str,
     reduced_to: Option<String>,
@@ -757,15 +813,15 @@ struct DiffSide {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct Divergence {
     field: &'static str,
     rust: String,
     scala: String,
 }
 
-#[derive(Debug, Serialize)]
-struct DiffResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct DiffResponse {
     rust: DiffSide,
     scala: DiffSide,
     agree: bool,
@@ -776,6 +832,15 @@ struct DiffResponse {
 /// verdict. **Unconfigured oracle ⇒ `oracle_unavailable`** (D3 residual; the
 /// oracle is never required to exist). The Rust side runs under the same
 /// bounded cost governor as `execute`.
+#[utoipa::path(
+    post, path = "/api/v1/script/diff", tag = "script",
+    request_body = DiffBody,
+    responses(
+        (status = 200, description = "Rust vs Scala-oracle verdict comparison", body = DiffResponse),
+        (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 501, description = "No Scala reference oracle configured on this node", body = V1Error),
+    ),
+)]
 pub async fn diff(State(state): State<ScriptState>, body: V1Json<DiffBody>) -> Response {
     let V1Json(body) = body;
     match diff_inner(&state, body).await {

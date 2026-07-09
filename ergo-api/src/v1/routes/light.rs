@@ -19,12 +19,14 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::dto::unix_ms_to_iso;
 use super::extract::V1Query;
 use super::{valid_modifier_id, V1State};
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::dto::V1MerkleProof;
 use ergo_rest_json::types::{
     ScalaBatchMerkleProof, ScalaHeader, ScalaNipopowProof, ScalaPopowHeader,
 };
@@ -54,7 +56,7 @@ const HEADERS_MAX_LIMIT: u32 = 512;
 /// re-skin of [`ScalaHeader`] carrying the fields a light client checks (PoW
 /// `n_bits`, `difficulty`, the `parent_id` link). No consensus bytes are
 /// re-encoded — this is a field rename over the already-decoded prover output.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightHeader {
     pub header_id: String,
     pub height: u32,
@@ -86,7 +88,7 @@ impl LightHeader {
 }
 
 /// One index entry of a batch-Merkle interlinks proof.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightBatchIndex {
     pub index: u32,
     pub digest: String,
@@ -95,13 +97,13 @@ pub struct LightBatchIndex {
 /// One sibling of a batch-Merkle interlinks path. `digest: null` is the
 /// odd-trailing empty sibling (the compat encoder serializes it as the empty
 /// string; we surface it honestly as `null`). `side` is the lowercase enum.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightBatchElement {
     pub digest: Option<String>,
     pub side: LightSide,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Clone, Copy, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LightSide {
     Left,
@@ -109,7 +111,7 @@ pub enum LightSide {
 }
 
 /// Batch-Merkle proof tying a header's interlinks to its extension digest.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightBatchMerkleProof {
     pub indices: Vec<LightBatchIndex>,
     pub proofs: Vec<LightBatchElement>,
@@ -148,7 +150,7 @@ impl LightBatchMerkleProof {
 }
 
 /// A header + its interlinks vector + the batch-Merkle proof binding them.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightPopowHeader {
     pub header: LightHeader,
     /// Base16 header ids, genesis first (KMZ17 reverse-level order).
@@ -167,7 +169,7 @@ impl LightPopowHeader {
 }
 
 /// Echo of the resolved proof parameters (so the client knows what it got).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightProofParams {
     pub m: u32,
     pub k: u32,
@@ -177,7 +179,7 @@ pub struct LightProofParams {
 /// The `bootstrap-proof` body — a snake_case re-skin of [`ScalaNipopowProof`].
 /// `prefix`/`suffix_head`/`suffix` mirror the compat `prefix`/`suffixHead`/
 /// `suffixTail`, renamed for the light-client glossary.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightPopowProof {
     pub prefix: Vec<LightPopowHeader>,
     pub suffix_head: LightPopowHeader,
@@ -202,7 +204,7 @@ impl LightPopowProof {
 
 // ----- GET /light/bootstrap-proof -----------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct BootstrapQuery {
     #[serde(default)]
     m: Option<u32>,
@@ -216,6 +218,21 @@ pub struct BootstrapQuery {
 /// `GET /api/v1/light/bootstrap-proof` — the NiPoPoW suffix proof for
 /// from-scratch trustless sync. Heaviest T0 read in the group: `m` is capped,
 /// and the serialized proof is subject to a response-byte ceiling.
+#[utoipa::path(
+    get, path = "/api/v1/light/bootstrap-proof", tag = "light",
+    params(
+        ("m" = Option<u32>, Query, description = "Min-superchain prefix param (default 6, cap 100)"),
+        ("k" = Option<u32>, Query, description = "Suffix/unstable-head param (default 6, cap 100)"),
+        ("at" = Option<String>, Query, description = "Anchor header id (64-char hex); default = tip"),
+    ),
+    responses(
+        (status = 200, description = "NiPoPoW bootstrap proof", body = LightPopowProof),
+        (status = 400, description = "m/k out of range, or `at` is not a valid header id", body = V1Error),
+        (status = 413, description = "Serialized proof exceeds the response-byte ceiling", body = V1Error),
+        (status = 500, description = "Proof failed to serialize", body = V1Error),
+        (status = 503, description = "This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn bootstrap_proof(
     State(state): State<V1State>,
     V1Query(q): V1Query<BootstrapQuery>,
@@ -294,12 +311,12 @@ pub async fn bootstrap_proof(
 
 /// Opaque forward cursor for `headers-interlinks`: the next height to serve.
 /// Genuinely stable under a growing chain (never an offset).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct NextHeightCursor {
     next_height: u32,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct HeadersQuery {
     #[serde(default)]
     from_height: Option<u32>,
@@ -310,7 +327,7 @@ pub struct HeadersQuery {
 }
 
 /// The collection envelope for `headers-interlinks`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightHeadersPage {
     pub items: Vec<LightPopowHeader>,
     pub page: Page,
@@ -319,6 +336,19 @@ pub struct LightHeadersPage {
 /// `GET /api/v1/light/headers-interlinks` — cursor-paginated headers each
 /// carrying its interlink vector + batch-Merkle proof, so a verified light
 /// client extends its suffix forward without re-bootstrapping.
+#[utoipa::path(
+    get, path = "/api/v1/light/headers-interlinks", tag = "light",
+    params(
+        ("from_height" = Option<u32>, Query, description = "Start height; required unless `cursor` is supplied"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 128, cap 512)"),
+        ("cursor" = Option<String>, Query, description = "Opaque forward cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Headers + interlinks + batch-Merkle proofs (empty page past tip)", body = LightHeadersPage),
+        (status = 400, description = "Missing from_height/cursor, or invalid cursor", body = V1Error),
+        (status = 503, description = "Interlink data not retained on this node (pruned), or chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn headers_interlinks(
     State(state): State<V1State>,
     V1Query(q): V1Query<HeadersQuery>,
@@ -401,7 +431,7 @@ pub async fn headers_interlinks(
 
 // ----- GET /light/membership-proof (O2 dual mount) ------------------------
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct MembershipQuery {
     #[serde(default)]
     header_id: Option<String>,
@@ -415,6 +445,19 @@ pub struct MembershipQuery {
 /// ([`super::chain::merkle_membership_proof`]) — identical proof semantics,
 /// one implementation; this mount only differs in reading the two ids from
 /// the query string instead of the path.
+#[utoipa::path(
+    get, path = "/api/v1/light/membership-proof", tag = "light",
+    params(
+        ("header_id" = String, Query, description = "64-char lowercase hex header id"),
+        ("tx_id" = String, Query, description = "64-char lowercase hex transaction id"),
+    ),
+    responses(
+        (status = 200, description = "Merkle membership proof (same core as chain/proofs/{header_id}/transactions/{tx_id})", body = V1MerkleProof),
+        (status = 400, description = "Missing/malformed header_id or tx_id", body = V1Error),
+        (status = 404, description = "No block, or tx not in that block", body = V1Error),
+        (status = 503, description = "Chain reader unavailable", body = V1Error),
+    ),
+)]
 pub async fn membership_proof(
     State(state): State<V1State>,
     V1Query(q): V1Query<MembershipQuery>,
@@ -444,7 +487,7 @@ pub async fn membership_proof(
 
 /// The `light/status` capability advertisement — never a 404. A wallet reads
 /// this to pick a node that can serve it trustless-sync proofs.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LightStatus {
     pub nipopow_bootstrap: bool,
     pub serves_bootstrap_proof: bool,
@@ -457,6 +500,12 @@ pub struct LightStatus {
 /// `GET /api/v1/light/status`. `serves_*` are derived from whether the node
 /// wires a chain reader at all (the prover hooks live on it); a node without
 /// one honestly advertises `false` rather than 404.
+#[utoipa::path(
+    get, path = "/api/v1/light/status", tag = "light",
+    responses(
+        (status = 200, description = "Light-client serving capability advertisement", body = LightStatus),
+    ),
+)]
 pub async fn status(State(state): State<V1State>) -> Response {
     let identity = state.read.identity();
     let has_chain = state.chain.is_some();

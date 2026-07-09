@@ -23,6 +23,7 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::error::{v1_error, Reason};
 use axum::response::Response;
@@ -141,7 +142,7 @@ pub fn clamp_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
 /// The `page` object of a v1 collection envelope (`v1-api-design.md` §1.3 /
 /// §1.5): `{ limit, next_cursor, has_more }`. `next_cursor` is `null` exactly
 /// when `has_more` is false.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct Page {
     /// The effective (clamped) page size that produced these items.
     pub limit: u32,

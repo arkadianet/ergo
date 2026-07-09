@@ -8,6 +8,7 @@
 //! honest `state_unavailable` instead of faking data.
 
 use std::collections::HashMap;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -16,11 +17,13 @@ use ergo_indexer_types::{IndexerQuery, Page as IdxPage, SortDir, TokenId};
 use ergo_ser::address::{encode_address, NetworkPrefix};
 use serde::Deserialize;
 
-use super::dto::{token_from_dto, CollectionMeta, HoldersMeta, V1TokenHolder, V1TokenStats};
+use super::dto::{
+    token_from_dto, CollectionMeta, HoldersMeta, V1Token, V1TokenHolder, V1TokenStats,
+};
 use super::extract::V1Query;
 use super::{offset_from_cursor, parse_id32, OffsetCursor, V1State};
 use crate::v1::cursor::{clamp_limit, encode_cursor, Page};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// Hard cap on UNSPENT boxes walked per holder/stats scan (§2.2). When the
 /// scan stops here with more unspent boxes pending, the ranking is
@@ -31,7 +34,7 @@ const SCAN_BATCH: u32 = 1_000;
 const HOLDERS_DEFAULT_LIMIT: u32 = 50;
 const HOLDERS_MAX_LIMIT: u32 = 500;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct HoldersQuery {
     #[serde(default)]
     limit: Option<u32>,
@@ -58,6 +61,17 @@ fn token_not_found() -> Response {
 // ----- tokens/{token_id} (cheap) ------------------------------------------
 
 /// `GET /api/v1/tokens/{token_id}` — bare token object. `404` on miss.
+#[utoipa::path(
+    get, path = "/api/v1/tokens/{token_id}", tag = "tokens",
+    params(("token_id" = String, Path, description = "64-char lowercase hex token id")),
+    responses(
+        (status = 200, description = "The token", body = V1Token),
+        (status = 400, description = "Malformed token id", body = V1Error),
+        (status = 404, description = "No token with that id", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn token_by_id(State(state): State<V1State>, Path(token_hex): Path<String>) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,
@@ -80,6 +94,13 @@ pub async fn token_by_id(State(state): State<V1State>, Path(token_hex): Path<Str
 /// way to enumerate every token in mint order today. Answers `503
 /// state_unavailable` (never fabricated data) once the index is confirmed
 /// present-but-disabled by the gate.
+#[utoipa::path(
+    get, path = "/api/v1/tokens", tag = "tokens",
+    responses(
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Mint-order enumeration not available on this node (design gap), or extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn tokens_list(State(state): State<V1State>) -> Response {
     // Gate first so a disabled index reads `indexer_disabled`, not the
     // capability gap.
@@ -173,6 +194,20 @@ pub(super) fn scan_token_holders(
 }
 
 /// `GET /api/v1/tokens/{token_id}/holders` — `{items, page, meta}` (Part D).
+#[utoipa::path(
+    get, path = "/api/v1/tokens/{token_id}/holders", tag = "tokens",
+    params(
+        ("token_id" = String, Path, description = "64-char lowercase hex token id"),
+        ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),
+        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+    ),
+    responses(
+        (status = 200, description = "Holder ranking + scan meta (scan_capped honesty flag)", body = CollectionMeta<V1TokenHolder, HoldersMeta>),
+        (status = 400, description = "Malformed token id/cursor", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn token_holders(
     State(state): State<V1State>,
     Path(token_hex): Path<String>,
@@ -227,6 +262,17 @@ pub async fn token_holders(
 
 /// `GET /api/v1/tokens/{token_id}/stats` — bare object; shares the holders
 /// scan. `404 token_not_found` when the mint record is unknown.
+#[utoipa::path(
+    get, path = "/api/v1/tokens/{token_id}/stats", tag = "tokens",
+    params(("token_id" = String, Path, description = "64-char lowercase hex token id")),
+    responses(
+        (status = 200, description = "Token stats (holder_count/circulating_supply inherit scan_capped honesty)", body = V1TokenStats),
+        (status = 400, description = "Malformed token id", body = V1Error),
+        (status = 404, description = "No token with that id", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+    ),
+)]
 pub async fn token_stats(State(state): State<V1State>, Path(token_hex): Path<String>) -> Response {
     let idx = match state.indexer() {
         Ok(i) => i,

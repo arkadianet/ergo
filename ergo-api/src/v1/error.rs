@@ -32,6 +32,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Canonical machine-readable error reason (`v1-api-design.md` §1.4;
 /// coherence Part A). Serialized as `lowercase_snake_case`; the string is a
@@ -43,7 +44,7 @@ use serde::Serialize;
 /// (409, config-off), `<thing>_unavailable` (503, transient). The frozen
 /// tx/submit bare verbs (`deserialize`, `non_canonical`, …) are kept as-is
 /// because `server::map_submit_error` already emits them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Reason {
@@ -325,7 +326,7 @@ impl Reason {
 }
 
 /// Inner object of the v1 error envelope (`v1-api-design.md` §1.3).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct V1ErrorInner {
     /// Stable machine-readable enum a client switches on.
     pub reason: Reason,
@@ -341,7 +342,7 @@ pub struct V1ErrorInner {
 /// Prefer returning `Result<T, V1Error>` from a handler and `?`-ing the
 /// error path; [`IntoResponse`] renders the envelope with the correct
 /// status. [`v1_error`] is the free-function form for inline early returns.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct V1Error {
     /// The single `error` key holding the machine/human/actionable triple.
     pub error: V1ErrorInner,
