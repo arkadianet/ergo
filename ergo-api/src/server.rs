@@ -2268,6 +2268,9 @@ ergo_node_snapshot_age_ms {snap_age}
 # HELP ergo_node_block_apply_errors_total Block-apply rejections since node start.
 # TYPE ergo_node_block_apply_errors_total counter
 ergo_node_block_apply_errors_total {apply_errs}
+# HELP ergo_node_sync_wedged Terminal deep-fork wedge (1 = resync required).
+# TYPE ergo_node_sync_wedged gauge
+ergo_node_sync_wedged {wedged}
 # HELP ergo_node_mempool_tx_requested_total Unconfirmed-tx ids requested from peers since node start.
 # TYPE ergo_node_mempool_tx_requested_total counter
 ergo_node_mempool_tx_requested_total {tx_requested}
@@ -2311,6 +2314,7 @@ ergo_node_last_apply_age_ms {last_apply_age_ms}
         revalidating = mempool.revalidation_pending,
         snap_age = status.snapshot_age_ms,
         apply_errs = status.block_apply_errors_total,
+        wedged = u8::from(status.sync_wedged.is_some()),
         tx_requested = status.mempool_tx_requested_total,
         peer_tx_admitted = status.mempool_peer_tx_admitted_total,
         peer_tx_rejected = status.mempool_peer_tx_rejected_total,
@@ -2462,11 +2466,13 @@ async fn health_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response 
     let h = read.health();
     let status = match h.status {
         HealthStatus::Ok => StatusCode::OK,
-        // `Rejecting` (an outstanding block-apply rejection) is a page-worthy
-        // not-healthy condition, same 503 as Stalled/Disconnected.
-        HealthStatus::Stalled | HealthStatus::Disconnected | HealthStatus::Rejecting => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        // `Rejecting` (an outstanding block-apply rejection) and `Wedged`
+        // (terminal deep-fork wedge) are page-worthy not-healthy conditions,
+        // same 503 as Stalled/Disconnected.
+        HealthStatus::Stalled
+        | HealthStatus::Disconnected
+        | HealthStatus::Rejecting
+        | HealthStatus::Wedged => StatusCode::SERVICE_UNAVAILABLE,
     };
     let body = serde_json::to_vec(&h).unwrap_or_else(|_| b"{}".to_vec());
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()

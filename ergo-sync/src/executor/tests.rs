@@ -120,7 +120,7 @@ fn full_chain_fork_point_detects_best_header_branch_switch() {
     let store = ergo_state::StateBackendKind::Utxo(store);
     assert_eq!(
         executor.full_chain_fork_point(&store).unwrap(),
-        Some((1, h1))
+        ForkPoint::Found(1, h1)
     );
 }
 
@@ -176,8 +176,8 @@ fn record_block_apply_error_retains_latest_and_counts() {
 /// past that), so proposing the genesis fork would hand the executor a
 /// `target_height` whose `rollback_to` is doomed (`StateError::ReorgTooDeep`)
 /// and which it would re-attempt — and re-fail — every tick. The capped walk
-/// declines (`Ok(None)`) instead of walking to genesis and returning
-/// `Some((0, [0; 32]))`.
+/// declines with `ForkPoint::TooDeep` instead of walking to genesis and
+/// returning `Found(0, [0; 32])`.
 #[test]
 fn full_chain_fork_point_caps_at_rollback_window() {
     use ergo_state::store::ROLLBACK_WINDOW;
@@ -233,7 +233,126 @@ fn full_chain_fork_point_caps_at_rollback_window() {
         DifficultyParams::mainnet(),
     );
     let store = ergo_state::StateBackendKind::Utxo(store);
-    assert_eq!(executor.full_chain_fork_point(&store).unwrap(), None);
+    assert_eq!(
+        executor.full_chain_fork_point(&store).unwrap(),
+        ForkPoint::TooDeep {
+            // Guard fires when `original_height - height > window`, i.e. the
+            // first height MORE than a full window below the 202-tip: 1.
+            scanned_to: 1,
+            max_depth: ROLLBACK_WINDOW,
+        }
+    );
+}
+
+/// The terminal decline is not just an absent fork point — it must set the
+/// operator-visible wedge (with the stuck tip's identity) and clear it the
+/// moment the chains agree again. This is the surface /health, /status and
+/// the event feed read; without it the stall is invisible except as a
+/// per-second parent-mismatch warn (the exact failure mode of the testnet
+/// 431,366 bystander wedge at height 434,471).
+#[test]
+fn too_deep_fork_sets_wedge_and_reagreement_clears_it() {
+    use ergo_state::store::ROLLBACK_WINDOW;
+
+    let mut store = open_initialized_store();
+    let depth = ROLLBACK_WINDOW + 2;
+
+    // Branch A applied as full blocks; branch B header-only, forking at
+    // genesis, promoted to best-header — same topology as the caps test.
+    let mut parent = [0u8; 32];
+    for h in 1..depth {
+        parent = apply_empty_block(&mut store, h, parent);
+    }
+    let tip_parent = parent;
+    let full_tip = apply_empty_block(&mut store, depth, tip_parent);
+    let b_id = |h: u32| {
+        let mut idb = [0xB0u8; 32];
+        idb[0] = (h >> 8) as u8;
+        idb[1] = h as u8;
+        idb
+    };
+    let mut b_parent = [0u8; 32];
+    for h in 1..=depth {
+        let this = b_id(h);
+        let new_best = (h == depth).then(|| (depth, vec![0xFFu8; 8]));
+        store
+            .store_validated_header(
+                &this,
+                &[0xB0; 8],
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: b_parent,
+                    height: h,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: h as u64,
+                },
+                new_best,
+            )
+            .unwrap();
+        b_parent = this;
+    }
+
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(1);
+    let mut store = ergo_state::StateBackendKind::Utxo(store);
+
+    assert!(executor.deep_fork_wedge().is_none());
+    assert_eq!(
+        executor
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .unwrap(),
+        ReorgOutcome::TooDeep
+    );
+    let w = executor.deep_fork_wedge().expect("wedge recorded");
+    assert_eq!(w.best_full_id, full_tip);
+    assert_eq!(w.best_full_height, depth);
+    assert_eq!(w.scanned_to_height, 1);
+    assert_eq!(w.max_rollback_depth, ROLLBACK_WINDOW);
+    let since = w.since;
+
+    // Re-detection on the SAME stuck tip refreshes nothing: `since` keeps
+    // aging honestly (mirrors the block-apply-error dedup contract).
+    assert_eq!(
+        executor
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .unwrap(),
+        ReorgOutcome::TooDeep
+    );
+    assert_eq!(executor.deep_fork_wedge().unwrap().since, since);
+
+    // The best-header chain returns to the applied chain (branch A tip
+    // promoted back): the wedge clears on the next reorg check.
+    if let ergo_state::StateBackendKind::Utxo(ref mut s) = store {
+        s.store_validated_header(
+            &full_tip,
+            &[0xA0; 8],
+            // Meta must round-trip the REAL branch-A linkage: the best-chain
+            // index rewrite walks parent pointers from the promoted tip, so a
+            // synthetic parent here would strand the walk on a missing row.
+            &ergo_state::chain::HeaderMeta {
+                parent_id: tip_parent,
+                height: depth,
+                cumulative_score: vec![0xFF, 0xFF],
+                pow_validity: 1,
+                timestamp: 1_700_000_000 + depth as u64,
+            },
+            Some((depth, vec![0xFF, 0xFF])),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        executor
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .unwrap(),
+        ReorgOutcome::NotNeeded
+    );
+    assert!(
+        executor.deep_fork_wedge().is_none(),
+        "wedge must clear when the best-header chain is reachable again"
+    );
 }
 
 #[test]
@@ -284,9 +403,12 @@ fn full_chain_reorg_rolls_back_without_marking_new_branch_invalid() {
     coordinator.sync_state_mut().add_pending_block(2, h2b);
 
     let mut store = ergo_state::StateBackendKind::Utxo(store);
-    assert!(executor
-        .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
-        .unwrap());
+    assert_eq!(
+        executor
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .unwrap(),
+        ReorgOutcome::Performed
+    );
 
     let cs = store.chain_state_meta();
     assert_eq!(cs.best_full_block_height, 1);

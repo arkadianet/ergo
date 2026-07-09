@@ -215,6 +215,7 @@ impl NodeSnapshot {
                 snapshot_age_ms: 0,
                 last_block_apply_error: None,
                 block_apply_errors_total: 0,
+                sync_wedged: None,
                 mempool_tx_requested_total: 0,
                 mempool_peer_tx_admitted_total: 0,
                 mempool_peer_tx_rejected_total: 0,
@@ -495,6 +496,11 @@ pub struct SnapshotParts<'a> {
     /// OBS-1: monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     pub block_apply_errors_total: u64,
+    /// Terminal deep-fork wedge projected to the API DTO (age computed at
+    /// publish time from the executor's `Instant`), or `None`. Drives
+    /// `ApiStatus.sync_wedged` and the `HealthStatus::Wedged` overlay in
+    /// `build_snapshot`.
+    pub sync_wedged: Option<ergo_api::types::ApiSyncWedged>,
     /// P2: monotonic count of unconfirmed-tx ids requested from peers, for
     /// the `ergo_node_mempool_tx_requested_total` Prometheus counter.
     pub mempool_tx_requested_total: u64,
@@ -543,6 +549,9 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
     // health below (a node refusing blocks its peers accept is not healthy,
     // however it looks on the sync axis).
     let rejecting = p.last_block_apply_error.is_some();
+    // Terminal deep-fork wedge: strictly worse than Rejecting (nothing can
+    // ever apply again without a resync), so it wins the overlay.
+    let wedged = p.sync_wedged.is_some();
     let status = ApiStatus {
         sync_state,
         peer_count: p.peer_count,
@@ -554,6 +563,7 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         bootstrap: p.bootstrap.clone(),
         last_block_apply_error: p.last_block_apply_error.clone(),
         block_apply_errors_total: p.block_apply_errors_total,
+        sync_wedged: p.sync_wedged.clone(),
         mempool_tx_requested_total: p.mempool_tx_requested_total,
         mempool_peer_tx_admitted_total: p.mempool_peer_tx_admitted_total,
         mempool_peer_tx_rejected_total: p.mempool_peer_tx_rejected_total,
@@ -597,7 +607,9 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         revalidation_pending: p.mempool_revalidation_pending,
     };
 
-    let health_status = if rejecting {
+    let health_status = if wedged {
+        HealthStatus::Wedged
+    } else if rejecting {
         HealthStatus::Rejecting
     } else {
         match sync_state {
@@ -981,6 +993,7 @@ mod tests {
             snapshot_manifests: Vec::new(),
             last_block_apply_error: None,
             block_apply_errors_total: 0,
+            sync_wedged: None,
             mempool_tx_requested_total: 0,
             mempool_peer_tx_admitted_total: 0,
             mempool_peer_tx_rejected_total: 0,
@@ -1235,6 +1248,48 @@ mod tests {
         let snap2 = publisher2.handle().load_full();
         assert!(snap2.status.last_block_apply_error.is_none());
         assert_ne!(snap2.health.status, HealthStatus::Rejecting);
+    }
+
+    /// The terminal deep-fork wedge threads from `SnapshotParts` through
+    /// `build_snapshot` onto `status.sync_wedged` AND overrides health to
+    /// `Wedged` — winning even over an outstanding `Rejecting` (nothing can
+    /// ever apply again without a resync, which is strictly worse).
+    #[test]
+    fn build_snapshot_surfaces_sync_wedge_and_health() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.last_block_apply_error = Some(ergo_api::types::ApiBlockApplyError {
+            block_id: "ab".repeat(32),
+            height: 1234,
+            reason: "tx invalid".to_string(),
+            age_ms: 42,
+        });
+        parts.sync_wedged = Some(ergo_api::types::ApiSyncWedged {
+            stuck_block_id: "b7".repeat(32),
+            stuck_height: 434_471,
+            fork_below_height: 434_271,
+            max_rollback_depth: 200,
+            age_ms: 1_000,
+        });
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+        let w = snap
+            .status
+            .sync_wedged
+            .as_ref()
+            .expect("wedge surfaced on status");
+        assert_eq!(w.stuck_height, 434_471);
+        assert_eq!(w.max_rollback_depth, 200);
+        assert_eq!(snap.health.status, HealthStatus::Wedged);
+
+        // Not wedged: None on status, health never Wedged.
+        let mut publisher2 =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        publisher2.publish(make_parts(500, 500, &[]));
+        let snap2 = publisher2.handle().load_full();
+        assert!(snap2.status.sync_wedged.is_none());
+        assert_ne!(snap2.health.status, HealthStatus::Wedged);
     }
 
     /// P2: the three mempool-tx-gossip observability counters travel from

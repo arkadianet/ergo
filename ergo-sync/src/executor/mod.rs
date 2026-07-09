@@ -165,6 +165,11 @@ const DRAIN_WATERMARK: usize = 64;
 /// but not so low that healthy bodies (which arrive in well under 1.5 s) get
 /// needlessly duplicated.
 const HOL_HEDGE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Re-warn interval for the terminal deep-fork wedge (see
+/// [`SyncExecutor::note_deep_fork_wedge`]). Long enough not to flood a
+/// tailed log, short enough that the explanation is always within the
+/// last screenful of a stalled node's output.
+const DEEP_FORK_REWARN: std::time::Duration = std::time::Duration::from_secs(600);
 /// Cap on total buffered orphan headers. Sized for Step D's
 /// anchor-spacing scheduler: with `ANCHOR_SPACING = 4_000` and
 /// `MAX_ANCHOR_AHEAD = 60_000`, up to ~14 peers can hold
@@ -273,6 +278,19 @@ pub struct SyncExecutor {
     block_apply_error_count: u64,
     /// Live apply-phase gauges shared with the API `/metrics` bridge.
     apply_phase: std::sync::Arc<crate::ApplyPhaseMetrics>,
+    /// Terminal deep-fork wedge: the best-header chain forks below the state
+    /// backend's rollback horizon, so this node cannot reorg onto it and can
+    /// never apply another block — only a resync recovers. Set when the
+    /// fork-point walk declines with [`ForkPoint::TooDeep`], cleared the
+    /// moment the chains agree again or a reorg performs. Surfaced via
+    /// /health (`HealthStatus::Wedged`), /status (`sync_wedged`) and the
+    /// operator event feed. Session-scoped (re-detected within one tick
+    /// after a restart).
+    deep_fork_wedge: Option<DeepForkWedge>,
+    /// Last wedge warning emission, rate-limiting the re-warn: the wedge is
+    /// re-detected every tick, and warning every tick would bury the one log
+    /// line that explains the stall.
+    deep_fork_wedge_last_warn: Option<Instant>,
 }
 
 /// A block this node rejected during apply. `at` is an `Instant` so callers
@@ -284,6 +302,51 @@ pub struct LastBlockApplyError {
     pub height: u32,
     pub reason: String,
     pub at: Instant,
+}
+
+/// Terminal deep-fork wedge descriptor (see the field on [`SyncExecutor`]).
+/// `since` is an `Instant` so callers compute `age_ms` at read time.
+#[derive(Clone, Debug)]
+pub struct DeepForkWedge {
+    /// The stuck full-block tip (on the abandoned branch).
+    pub best_full_id: [u8; 32],
+    pub best_full_height: u32,
+    /// Lowest height the fork-point walk examined before hitting the
+    /// horizon — the best-header chain still disagreed there.
+    pub scanned_to_height: u32,
+    /// The backend's undo-retention window the fork exceeded.
+    pub max_rollback_depth: u32,
+    pub since: Instant,
+}
+
+/// Outcome of [`SyncExecutor::full_chain_fork_point`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkPoint {
+    /// The best-header chain leaves the applied full chain at this
+    /// `(height, header_id)` — roll back to it and re-apply.
+    Found(u32, [u8; 32]),
+    /// The applied full chain lies on the best-header chain (or there is
+    /// nothing to compare yet) — no reorg needed.
+    NotForked,
+    /// The best-header chain forks deeper below the full tip than the state
+    /// backend can roll back (undo log pruned): the reorg is impossible and
+    /// the node is wedged until a resync.
+    TooDeep {
+        /// Lowest height examined; the chains still disagreed there.
+        scanned_to: u32,
+        max_depth: u32,
+    },
+}
+
+/// Outcome of [`SyncExecutor::rollback_full_chain_to_best_header`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReorgOutcome {
+    /// A rollback to the fork point was performed — re-drive block apply.
+    Performed,
+    /// The full chain already lies on the best-header chain.
+    NotNeeded,
+    /// Declined: the fork is below the rollback horizon (wedge recorded).
+    TooDeep,
 }
 
 impl SyncExecutor {
@@ -367,6 +430,8 @@ impl SyncExecutor {
             last_block_apply_error: None,
             block_apply_error_count: 0,
             apply_phase: std::sync::Arc::new(crate::ApplyPhaseMetrics::default()),
+            deep_fork_wedge: None,
+            deep_fork_wedge_last_warn: None,
         }
     }
 
@@ -441,6 +506,70 @@ impl SyncExecutor {
             at: Instant::now(),
         });
         self.block_apply_error_count += 1;
+    }
+
+    /// The active deep-fork wedge, if any (see [`DeepForkWedge`]).
+    pub fn deep_fork_wedge(&self) -> Option<&DeepForkWedge> {
+        self.deep_fork_wedge.as_ref()
+    }
+
+    /// Record (or refresh) the deep-fork wedge and emit the operator
+    /// warning, rate-limited to once per [`DEEP_FORK_REWARN`] — the wedge is
+    /// re-detected every tick, and a per-tick warn would bury the one line
+    /// that explains the stall. A wedge on a NEW stuck tip warns
+    /// immediately and restarts the `since` clock; the same stuck tip keeps
+    /// its original `since` so `age_ms` ages honestly.
+    fn note_deep_fork_wedge(
+        &mut self,
+        store: &ergo_state::StateBackendKind,
+        scanned_to: u32,
+        max_depth: u32,
+    ) {
+        let cs = store.chain_state_meta();
+        let same_tip = self
+            .deep_fork_wedge
+            .as_ref()
+            .is_some_and(|w| w.best_full_id == cs.best_full_block_id);
+        if !same_tip {
+            self.deep_fork_wedge = Some(DeepForkWedge {
+                best_full_id: cs.best_full_block_id,
+                best_full_height: cs.best_full_block_height,
+                scanned_to_height: scanned_to,
+                max_rollback_depth: max_depth,
+                since: Instant::now(),
+            });
+            self.deep_fork_wedge_last_warn = None;
+        }
+        let due = self
+            .deep_fork_wedge_last_warn
+            .is_none_or(|at| at.elapsed() >= DEEP_FORK_REWARN);
+        if due {
+            warn!(
+                event = "full_chain_fork_too_deep",
+                best_full_height = cs.best_full_block_height,
+                best_full_id = %hex::encode(cs.best_full_block_id),
+                scanned_to,
+                max_rollback_depth = max_depth,
+                "best-header chain forks deeper than the rollback window: this \
+                 node cannot reorg onto it and will not apply further blocks — \
+                 recovery requires a resync (wipe the data dir and sync fresh)",
+            );
+            self.deep_fork_wedge_last_warn = Some(Instant::now());
+        }
+    }
+
+    /// Clear the deep-fork wedge (the chains agree again, or a reorg
+    /// performed). Logs the recovery transition once.
+    fn clear_deep_fork_wedge(&mut self) {
+        if let Some(w) = self.deep_fork_wedge.take() {
+            info!(
+                event = "full_chain_fork_wedge_cleared",
+                best_full_height = w.best_full_height,
+                best_full_id = %hex::encode(w.best_full_id),
+                "deep-fork wedge cleared — the best-header chain is reachable again",
+            );
+            self.deep_fork_wedge_last_warn = None;
+        }
     }
 
     /// Clear the `recovery_done` latch so the next sync_tick re-runs
@@ -1140,11 +1269,13 @@ impl SyncExecutor {
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
         match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-            Ok(true) => {
+            Ok(ReorgOutcome::Performed) => {
                 self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
                 return Vec::new();
             }
-            Ok(false) => {}
+            Ok(ReorgOutcome::NotNeeded) => {}
+            // Wedged: nothing at or above the stuck tip can assemble/apply.
+            Ok(ReorgOutcome::TooDeep) => return Vec::new(),
             Err(e) => {
                 warn!(error = %e, "full-block reorg check failed");
                 return Vec::new();
@@ -1219,10 +1350,10 @@ impl SyncExecutor {
             ) => {
                 guard.failure();
                 match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-                    Ok(true) => {
+                    Ok(ReorgOutcome::Performed) => {
                         self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
                     }
-                    Ok(false) => {}
+                    Ok(ReorgOutcome::NotNeeded | ReorgOutcome::TooDeep) => {}
                     Err(e) => warn!(error = %e, "full-block reorg failed"),
                 }
                 Vec::new()
@@ -1357,11 +1488,15 @@ impl SyncExecutor {
         let mut progressed = false;
         loop {
             match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-                Ok(true) => {
+                Ok(ReorgOutcome::Performed) => {
                     progressed = true;
                     continue;
                 }
-                Ok(false) => {}
+                Ok(ReorgOutcome::NotNeeded) => {}
+                // Terminal wedge: the rate-limited `full_chain_fork_too_deep`
+                // warn already explains the stall — bail before the selection
+                // below re-derives it as a per-tick parent-mismatch warn.
+                Ok(ReorgOutcome::TooDeep) => break,
                 Err(e) => {
                     warn!(error = %e, "full-block reorg failed");
                     break;
@@ -1410,11 +1545,11 @@ impl SyncExecutor {
             };
             if parent_id != store.chain_state_meta().best_full_block_id {
                 match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-                    Ok(true) => {
+                    Ok(ReorgOutcome::Performed) => {
                         progressed = true;
                         continue;
                     }
-                    Ok(false) => {
+                    Ok(ReorgOutcome::NotNeeded) => {
                         warn!(
                             height = next,
                             parent_id = %hex::encode(parent_id),
@@ -1423,6 +1558,9 @@ impl SyncExecutor {
                         );
                         break;
                     }
+                    // Terminal wedge: explained by the rate-limited
+                    // `full_chain_fork_too_deep` warn, not a per-tick line.
+                    Ok(ReorgOutcome::TooDeep) => break,
                     Err(e) => {
                         warn!(error = %e, "full-block reorg failed");
                         break;
@@ -1474,11 +1612,11 @@ impl SyncExecutor {
                 ) => {
                     guard.failure();
                     match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-                        Ok(true) => {
+                        Ok(ReorgOutcome::Performed) => {
                             progressed = true;
                             continue;
                         }
-                        Ok(false) => break,
+                        Ok(ReorgOutcome::NotNeeded | ReorgOutcome::TooDeep) => break,
                         Err(e) => {
                             warn!(error = %e, "full-block reorg failed");
                             break;
@@ -1617,9 +1755,23 @@ impl SyncExecutor {
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
-    ) -> StorageResult<bool> {
-        let Some((fork_height, fork_id)) = self.full_chain_fork_point(store)? else {
-            return Ok(false);
+    ) -> StorageResult<ReorgOutcome> {
+        let (fork_height, fork_id) = match self.full_chain_fork_point(store)? {
+            ForkPoint::Found(h, id) => (h, id),
+            ForkPoint::NotForked => {
+                self.clear_deep_fork_wedge();
+                return Ok(ReorgOutcome::NotNeeded);
+            }
+            ForkPoint::TooDeep {
+                scanned_to,
+                max_depth,
+            } => {
+                // Terminal: the undo log below the fork is pruned, so this
+                // reorg can never succeed — record the wedge and warn
+                // (rate-limited) so the stall is explained, not just visible.
+                self.note_deep_fork_wedge(store, scanned_to, max_depth);
+                return Ok(ReorgOutcome::TooDeep);
+            }
         };
         // Capture identity fields before any mutation so the `_failed`
         // event below carries pre-attempt values, not rebuilt-state
@@ -1629,7 +1781,8 @@ impl SyncExecutor {
         let old_height = store.chain_state_meta().best_full_block_height;
         let old_id = store.chain_state_meta().best_full_block_id;
         if fork_height == old_height {
-            return Ok(false);
+            self.clear_deep_fork_wedge();
+            return Ok(ReorgOutcome::NotNeeded);
         }
         let depth = old_height.saturating_sub(fork_height);
         let old_id_hex = hex::encode(old_id);
@@ -1696,17 +1849,18 @@ impl SyncExecutor {
             depth,
             "full-block reorg completed",
         );
-        Ok(true)
+        self.clear_deep_fork_wedge();
+        Ok(ReorgOutcome::Performed)
     }
 
     fn full_chain_fork_point(
         &self,
         store: &ergo_state::StateBackendKind,
-    ) -> StorageResult<Option<(u32, [u8; 32])>> {
+    ) -> StorageResult<ForkPoint> {
         let cs = store.chain_state_meta();
         let original_height = cs.best_full_block_height;
         if original_height == 0 {
-            return Ok(None);
+            return Ok(ForkPoint::NotForked);
         }
 
         // RD-02 — the deepest reorg the active backend can serve. The UTXO
@@ -1721,38 +1875,36 @@ impl SyncExecutor {
             // Never propose a fork point the state layer cannot roll back to.
             // Beyond the backend's rollback depth the resulting `target_height`
             // would make `rollback_to` doomed (`StateError::ReorgTooDeep`), so
-            // stop the descent and decline the reorg (`None`) instead of
+            // stop the descent and decline the reorg (`TooDeep`) instead of
             // walking to genesis and handing the executor an unrollbackable
             // target it would re-attempt — and re-fail — every tick. Scala
             // parity: `FullBlockProcessor` never caches a non-best block deeper
             // than `keepVersions = 200`, so it never attempts such a reorg. A
             // UTXO node this far behind must resync (snapshot / NiPoPoW), which
-            // it cannot do by rolling its pruned undo log back.
+            // it cannot do by rolling its pruned undo log back. The caller
+            // records the wedge and owns the operator-facing warn
+            // (`note_deep_fork_wedge`); this `&self` walk stays silent.
             if let Some(max_depth) = max_rollback_depth {
                 if original_height - height > max_depth {
-                    debug!(
-                        event = "full_chain_fork_too_deep",
-                        original_height,
-                        scanned_to = height,
-                        max = max_depth,
-                        "best-header fork deeper than backend rollback depth — declining reorg",
-                    );
-                    return Ok(None);
+                    return Ok(ForkPoint::TooDeep {
+                        scanned_to: height,
+                        max_depth,
+                    });
                 }
             }
             if height == 0 {
-                return Ok(Some((0, [0u8; 32])));
+                return Ok(ForkPoint::Found(0, [0u8; 32]));
             }
 
             match store.get_header_id_at_height(height)? {
                 Some(best_id) if best_id == full_id => {
                     if height == original_height {
-                        return Ok(None);
+                        return Ok(ForkPoint::NotForked);
                     }
-                    return Ok(Some((height, full_id)));
+                    return Ok(ForkPoint::Found(height, full_id));
                 }
                 Some(_) => {}
-                None => return Ok(None),
+                None => return Ok(ForkPoint::NotForked),
             }
 
             let meta = store.get_header_meta(&full_id)?.ok_or_else(|| {

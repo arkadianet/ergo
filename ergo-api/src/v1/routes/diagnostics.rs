@@ -200,7 +200,12 @@ fn fork_risk_of(state: &V1State, chain_pos: &ChainPosition) -> ForkRisk {
     let health = state.read.health();
     let identity = state.read.identity();
     let sync = state.read.sync();
-    let rejecting_block = matches!(health.status, HealthStatus::Rejecting);
+    // Wedged counts as forking: the node IS stranded on a branch the
+    // network abandoned (that is what made the reorg too deep to serve).
+    let rejecting_block = matches!(
+        health.status,
+        HealthStatus::Rejecting | HealthStatus::Wedged
+    );
     let lone_producer = identity.mining && chain_pos.status == "ahead_suspicious";
     let status = if rejecting_block || lone_producer {
         "forking".to_string()
