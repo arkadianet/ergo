@@ -207,8 +207,8 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 // `UndoMissing` — the testnet 431,366 bystander wedge
                 // shredded 201 index heights exactly this way while the
                 // chain state (correctly) never moved.
-                let state_reorged = tip.height > 0
-                    && self.chain.header_id_at(tip.height) == Some(tip.header_id);
+                let state_reorged =
+                    tip.height > 0 && self.chain.header_id_at(tip.height) == Some(tip.header_id);
                 if !state_reorged {
                     if !self.hold_logged {
                         tracing::warn!(
