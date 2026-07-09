@@ -16,6 +16,11 @@
 //! driver loop turns those outcomes into a long-running task — backing
 //! off on section-missing (5 × 1 s), tight-looping while behind, and
 //! idling on `Idle`.
+//!
+//! Rollback is gated on the STATE layer having reorged (its committed
+//! tip lying on the canonical header chain), not on the raw header-chain
+//! flip — see the gate in [`IndexerTask::step`] for why chasing the flip
+//! alone can unwind the index off the end of its pruned undo log.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -105,6 +110,11 @@ pub struct IndexerTask<C: IndexerChainSource> {
     /// never-set flag (e.g. for `step`-only tests); `run` overwrites it with the
     /// real cancel handle before the first poll.
     cancel: Arc<AtomicBool>,
+    /// Warn-once latch for the deferred-rollback hold (see the gate in
+    /// [`IndexerTask::step`]): the hold re-evaluates every poll, so an
+    /// unlatched warn would fire once per second for the (potentially
+    /// unbounded) life of a deep-fork wedge.
+    hold_logged: bool,
 }
 
 impl<C: IndexerChainSource> IndexerTask<C> {
@@ -114,6 +124,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             chain,
             scratch: BlockApplyScratch::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            hold_logged: false,
         }
     }
 
@@ -179,13 +190,43 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                     });
                 }
             };
-            match self.chain.header_id_at(our_h) {
-                None => return self.do_rollback(&store, &meta, prev_id),
-                Some(id) if id != prev_id => {
-                    return self.do_rollback(&store, &meta, prev_id);
+            let diverged = match self.chain.header_id_at(our_h) {
+                None => true,
+                Some(id) => id != prev_id,
+            };
+            if diverged {
+                // Rollback gate: the trigger above keys off the best-HEADER
+                // chain index, which flips the moment a heavier branch wins
+                // the header race — before (or even WITHOUT) the state layer
+                // reorging onto it. Only unwind once the state's committed
+                // tip itself lies on the canonical chain (i.e. the state
+                // already rolled back; the fork point is then within our
+                // undo window because we never indexed past the state).
+                // Chasing the raw header flip instead can unwind the index
+                // straight off the end of its pruned undo log and halt on
+                // `UndoMissing` — the testnet 431,366 bystander wedge
+                // shredded 201 index heights exactly this way while the
+                // chain state (correctly) never moved.
+                let state_reorged = tip.height > 0
+                    && self.chain.header_id_at(tip.height) == Some(tip.header_id);
+                if !state_reorged {
+                    if !self.hold_logged {
+                        tracing::warn!(
+                            indexed_height = meta.indexed_height,
+                            state_tip_height = tip.height,
+                            "indexer rollback deferred: best-header chain moved but \
+                             the chain state has not reorged onto it (reorg in \
+                             progress, or a deep-fork wedge) — holding the index \
+                             instead of unwinding it",
+                        );
+                        self.hold_logged = true;
+                    }
+                    return IndexerPoll::Idle;
                 }
-                Some(_) => {}
+                self.hold_logged = false;
+                return self.do_rollback(&store, &meta, prev_id);
             }
+            self.hold_logged = false;
         }
 
         let next_height = meta.indexed_height + 1;

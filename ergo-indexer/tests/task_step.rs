@@ -283,6 +283,51 @@ fn step_rolls_back_when_canonical_diverges_at_our_height() {
     assert_eq!(meta.indexed_header_id, None);
 }
 
+/// The rollback trigger keys off the best-HEADER chain index, which flips
+/// before (or even without) the state layer reorging. When the state's
+/// committed tip is NOT on the canonical chain — a reorg in progress, or a
+/// deep-fork wedge where the state can never follow — the indexer must HOLD
+/// instead of unwinding: chasing the raw flip is what shredded 201 index
+/// heights and halted on UndoMissing in the testnet 431,366 bystander wedge.
+#[test]
+fn step_holds_rollback_while_state_tip_off_canonical() {
+    let (handle, _tmp) = open_handle();
+
+    let header_a = Digest32::from_bytes([0x11; 32]);
+    let block_a = genesis_block(header_a);
+    apply_via_handle(&handle, &block_a);
+
+    // Canonical headers flipped to B, but the STATE tip still sits on A —
+    // the state has not (or cannot) reorg.
+    let header_b = Digest32::from_bytes([0x22; 32]);
+    let chain = Arc::new(ScriptedChain::new());
+    chain.put_canonical(1, header_b);
+    chain.set_tip(1, header_a);
+    chain.put_block(block_a.clone());
+
+    let mut task = IndexerTask::new(handle.clone(), Arc::clone(&chain));
+    for _ in 0..3 {
+        match task.step() {
+            IndexerPoll::Idle => {}
+            other => panic!("expected Idle hold, got {other:?}"),
+        }
+    }
+    let store = handle.store().unwrap();
+    let meta = store.read_meta().unwrap();
+    assert_eq!(meta.indexed_height, 1, "index must not unwind on a hold");
+    assert_eq!(meta.indexed_header_id, Some(header_a));
+
+    // The state reorgs (tip now on canonical B): the hold releases and the
+    // deferred rollback proceeds.
+    chain.set_tip(1, header_b);
+    match task.step() {
+        IndexerPoll::RolledBack(1) => {}
+        other => panic!("expected RolledBack(1) after state reorg, got {other:?}"),
+    }
+    let meta = store.read_meta().unwrap();
+    assert_eq!(meta.indexed_height, 0);
+}
+
 #[test]
 fn step_rolls_back_when_chain_truncates_below_indexed_tip() {
     let (handle, _tmp) = open_handle();
