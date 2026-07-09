@@ -573,16 +573,30 @@ fn rebuild_filter_into(subs: &HashMap<String, Subscription>, filter: &RwLock<Has
     *filter.write().unwrap_or_else(|e| e.into_inner()) = union;
 }
 
-/// Push a delivery onto the bounded ring, evicting the oldest (and its dedupe
-/// entry) when full.
+/// Push a delivery onto the bounded ring. When full, evict the oldest
+/// TERMINAL (delivered/failed) entry — an open (pending/retrying) delivery is
+/// an unsent obligation and must not be dropped to make room. If every entry
+/// is still open (a saturated backlog), the NEW delivery is dropped instead:
+/// its dedupe entry is removed so a later event burst can re-enqueue it once
+/// the ring drains.
 fn push_bounded(
     deliveries: &mut VecDeque<Delivery>,
     dedupe: &mut HashSet<(String, u64)>,
     delivery: Delivery,
 ) {
     if deliveries.len() >= DELIVERY_RING_CAP {
-        if let Some(old) = deliveries.pop_front() {
-            dedupe.remove(&(old.webhook_id, old.event_seq));
+        match deliveries.iter().position(|d| !d.status.is_open()) {
+            Some(i) => {
+                if let Some(old) = deliveries.remove(i) {
+                    dedupe.remove(&(old.webhook_id, old.event_seq));
+                }
+            }
+            None => {
+                // Ring saturated with unsent work — reject the newcomer
+                // rather than silently dropping an open delivery.
+                dedupe.remove(&(delivery.webhook_id, delivery.event_seq));
+                return;
+            }
         }
     }
     deliveries.push_back(delivery);

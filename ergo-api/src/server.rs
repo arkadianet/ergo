@@ -1234,7 +1234,14 @@ pub fn router_with_mempool_and_wallet_and_security(
     // (production only — guarded on a live Tokio runtime so non-async test
     // router builds never spawn a task), read by `mempool/summary?history=` and
     // the future `stats/mempool-depth`.
-    let v1_mempool_depth = std::sync::Arc::new(crate::v1::mempool_depth::MempoolDepthRing::new());
+    // Shared once per process for the same reason as the realtime bus /
+    // webhook engine below: the `_once` sampler feeds the FIRST ring only.
+    static V1_MEMPOOL_DEPTH: std::sync::OnceLock<
+        std::sync::Arc<crate::v1::mempool_depth::MempoolDepthRing>,
+    > = std::sync::OnceLock::new();
+    let v1_mempool_depth = V1_MEMPOOL_DEPTH
+        .get_or_init(|| std::sync::Arc::new(crate::v1::mempool_depth::MempoolDepthRing::new()))
+        .clone();
     if tokio::runtime::Handle::try_current().is_ok() {
         // Guarded to spawn exactly one sampler per process even though router
         // assembly can run many times (the whole test suite builds routers).
@@ -1250,7 +1257,17 @@ pub fn router_with_mempool_and_wallet_and_security(
     // depth sampler so non-async test router builds never spawn it and repeated
     // router assembly never stacks pollers). Phase-1 feeds only the `blocks`
     // channel; the fine-grained taps are a node-internals follow-up.
-    let v1_realtime = crate::v1::RealtimeHandle::blocks_only();
+    // Process singletons: the `*_once` workers below bind the FIRST bus/engine
+    // they see, so every router assembly must share those exact instances — a
+    // per-assembly bus/engine would leave later routers holding handles no
+    // worker feeds (registrations that never deliver, subscriptions that never
+    // fire).
+    static V1_REALTIME: std::sync::OnceLock<crate::v1::RealtimeHandle> = std::sync::OnceLock::new();
+    static V1_WEBHOOKS_ENGINE: std::sync::OnceLock<std::sync::Arc<crate::v1::WebhookEngine>> =
+        std::sync::OnceLock::new();
+    let v1_realtime = V1_REALTIME
+        .get_or_init(crate::v1::RealtimeHandle::blocks_only)
+        .clone();
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::v1::spawn_event_bridge_once(
             v1_read.clone(),
@@ -1269,7 +1286,9 @@ pub fn router_with_mempool_and_wallet_and_security(
     // remaining deferral: the registry + delivery log are in-memory, so
     // registrations are lost on restart until a durable `*-db` store lands
     // (documented in the webhooks module docs).
-    let v1_webhooks_engine = std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default()));
+    let v1_webhooks_engine = V1_WEBHOOKS_ENGINE
+        .get_or_init(|| std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default())))
+        .clone();
     let mut v1_webhooks_handle = Some(crate::v1::WebhooksHandle {
         engine: v1_webhooks_engine.clone(),
         bus: v1_realtime.bus.clone(),
@@ -1330,7 +1349,14 @@ pub fn router_with_mempool_and_wallet_and_security(
         v1_governor.clone(),
         v1_auth.clone(),
     ));
-    let assembled = assembled.merge(crate::v1::v1_router(v1_state, v1_governor));
+    let assembled = assembled.merge(crate::v1::v1_router(v1_state.clone(), v1_governor.clone()));
+    // `POST /api/v1/batch` (§3.18/§4.7) — a bounded read-only multiplexer over
+    // the SAME `chain/*`/`boxes/*`/`tokens/*`/`addresses/*`/`mempool/*`/
+    // `transactions/*`(reads)/`stats/*`/`diagnostics`/`light/*`/`protocols/*`
+    // handlers just mounted above, dispatched in-process (never HTTP-to-
+    // itself) through a second, restricted router built from the same
+    // `V1State` + the same shared per-node governor.
+    let assembled = assembled.merge(crate::v1::batch_router(v1_state, v1_governor));
     // Mount the T1 `webhooks/*` router under the operator api-key gate.
     let assembled = assembled.merge(crate::v1::webhooks_router(v1_webhooks_state, v1_auth));
 

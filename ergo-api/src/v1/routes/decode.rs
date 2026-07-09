@@ -18,7 +18,6 @@ use serde_json::Value;
 use super::dto::{v1box_from_indexed_box, Collection};
 use super::extract::{V1Json, V1Query};
 use super::{parse_id32, V1State};
-use crate::v1::decode::decode_box;
 use crate::v1::decode::registry::{entry_by_id, MatchKind, ProtocolEntry, REGISTRY};
 use crate::v1::error::{v1_error, Reason};
 
@@ -191,8 +190,9 @@ pub async fn decode_off_chain_box(
         }
     }
     // The tree must be hex; a parse-level tree failure is a malformed request.
-    let address = match hex::decode(body.ergo_tree.trim()) {
-        Ok(bytes) => encode_address_from_tree_bytes(state.network, &bytes).ok(),
+    // Decoded ONCE — the same bytes derive the address and feed the decode seam.
+    let tree_bytes = match hex::decode(body.ergo_tree.trim()) {
+        Ok(bytes) => bytes,
         Err(e) => {
             return v1_error(
                 Reason::InvalidErgoTree,
@@ -201,7 +201,9 @@ pub async fn decode_off_chain_box(
             )
         }
     };
-    let decoded = decode_box(&body.ergo_tree, value, &tokens, &body.registers);
+    let address = encode_address_from_tree_bytes(state.network, &tree_bytes).ok();
+    let decoded =
+        crate::v1::decode::decode_box_bytes(Some(&tree_bytes), value, &tokens, &body.registers);
     Json(DecodeBoxResponse { address, decoded }).into_response()
 }
 

@@ -88,14 +88,17 @@ fn order_key(t: &ApiMempoolTransaction, order: Order) -> u64 {
     }
 }
 
-/// Keyset cursor payload: `(order, key, tx_id)` of the last row served, where
-/// `key` is the active order's sort value and `order` pins which `?order=` the
-/// cursor was issued under. Opaque to clients (§1.5); the field names mirror the
-/// design's `{w, t}` mempool-keyset example (`o` added so a cursor from one
-/// order fails closed rather than skips/dupes when replayed against another).
+/// Keyset cursor payload: `(order, scope, key, tx_id)` of the last row served,
+/// where `key` is the active order's sort value, `order` pins which `?order=`
+/// the cursor was issued under, and `scope` pins which collection/filter
+/// minted it. Opaque to clients (§1.5); the field names mirror the design's
+/// `{w, t}` mempool-keyset example (`o`/`s` added so a cursor replayed against
+/// a different order or a different view fails closed instead of mid-stream
+/// seeking it).
 #[derive(Debug, Serialize, Deserialize)]
 struct MempoolCursor {
     o: u8,
+    s: String,
     w: u64,
     t: String,
 }
@@ -110,6 +113,19 @@ fn order_tag(order: Order) -> u8 {
     }
 }
 
+/// Short collection-scope tag (route family + filter key, hashed) baked into
+/// the cursor so a cursor minted by one view cannot be replayed against
+/// another (`invalid_cursor`), including the same `by-*` route with a
+/// different filter value.
+fn scope_tag(kind: &str, key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(kind.as_bytes());
+    h.update([0u8]);
+    h.update(key.as_bytes());
+    hex::encode(&h.finalize()[..8])
+}
+
 /// Order rows into the stable total order (`key` DESC, then `tx_id` ASC), then
 /// keyset-paginate them from `cursor` with an overfetch-by-one page, and render
 /// the `mempool_tx` collection. `rows` is the full candidate set (already
@@ -120,6 +136,7 @@ fn render_mempool_page(
     order: Order,
     limit: u32,
     cursor: Option<&str>,
+    scope: String,
 ) -> Response {
     let after = match decode_opt_cursor::<MempoolCursor>(cursor) {
         Ok(c) => c,
@@ -131,6 +148,13 @@ fn render_mempool_page(
                 Reason::InvalidCursor,
                 "pagination cursor was issued for a different order",
                 "restart from the first page (drop `cursor`) when changing `order`",
+            );
+        }
+        if cur.s != scope {
+            return v1_error(
+                Reason::InvalidCursor,
+                "pagination cursor was issued for a different mempool view",
+                "restart from the first page (drop `cursor`) when changing route or filter",
             );
         }
     }
@@ -153,6 +177,7 @@ fn render_mempool_page(
     let next_cursor = has_more.then(|| rows.last()).flatten().map(|last| {
         encode_cursor(&MempoolCursor {
             o: order_tag(order),
+            s: scope.clone(),
             w: order_key(last, order),
             t: last.tx_id.clone(),
         })
@@ -293,7 +318,13 @@ pub async fn transactions(
     };
     let limit = clamp_limit(q.limit, LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT);
     let rows = state.read.mempool_transactions().transactions;
-    render_mempool_page(rows, order, limit, q.cursor.as_deref())
+    render_mempool_page(
+        rows,
+        order,
+        limit,
+        q.cursor.as_deref(),
+        scope_tag("transactions", ""),
+    )
 }
 
 // ----- GET /mempool/transactions/{tx_id} ----------------------------------
@@ -448,12 +479,13 @@ pub struct ByQuery {
 }
 
 /// Shared tail for the `by-*` views: filter the rich list to `matched`, then
-/// render the keyset page in priority-weight order.
-fn render_by(state: &V1State, matched: HashSet<String>, q: &ByQuery) -> Response {
+/// render the keyset page in priority-weight order. `scope` is the minting
+/// view's [`scope_tag`] (route family + filter value).
+fn render_by(state: &V1State, matched: HashSet<String>, q: &ByQuery, scope: String) -> Response {
     let limit = clamp_limit(q.limit, BY_DEFAULT_LIMIT, BY_MAX_LIMIT);
     let all = state.read.mempool_transactions().transactions;
     let rows = rehydrate(all, &matched);
-    render_mempool_page(rows, Order::Weight, limit, q.cursor.as_deref())
+    render_mempool_page(rows, Order::Weight, limit, q.cursor.as_deref(), scope)
 }
 
 fn matched_ids(txs: Vec<ergo_rest_json::types::ScalaTransaction>) -> HashSet<String> {
@@ -483,7 +515,7 @@ pub async fn by_address(
         }
     };
     let matched = matched_ids(chain.pool_txs_by_ergo_tree(&tree_bytes));
-    render_by(&state, matched, &q)
+    render_by(&state, matched, &q, scope_tag("by-address", &address))
 }
 
 /// `GET /api/v1/mempool/by-ergo-tree/{ergo_tree}` — pooled txs paying the given
@@ -508,7 +540,12 @@ pub async fn by_ergo_tree(
         }
     };
     let matched = matched_ids(chain.pool_txs_by_ergo_tree(&tree_bytes));
-    render_by(&state, matched, &q)
+    render_by(
+        &state,
+        matched,
+        &q,
+        scope_tag("by-ergo-tree", ergo_tree.trim()),
+    )
 }
 
 /// `GET /api/v1/mempool/by-box-id/{box_id}` — pooled tx(s) that SPEND the given
@@ -530,7 +567,7 @@ pub async fn by_box_id(
         );
     };
     let matched = matched_ids(chain.pool_txs_by_box_id(&raw));
-    render_by(&state, matched, &q)
+    render_by(&state, matched, &q, scope_tag("by-box-id", &box_id))
 }
 
 /// `GET /api/v1/mempool/by-token-id/{token_id}` — pooled txs that reference the
@@ -552,7 +589,7 @@ pub async fn by_token_id(
         );
     };
     let matched = matched_ids(chain.pool_txs_by_token_id(&raw));
-    render_by(&state, matched, &q)
+    render_by(&state, matched, &q, scope_tag("by-token-id", &token_id))
 }
 
 // ----- GET /mempool/fee-histogram -----------------------------------------

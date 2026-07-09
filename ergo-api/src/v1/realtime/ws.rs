@@ -218,6 +218,21 @@ async fn handle_text(
     bus: &Arc<RealtimeBus>,
     text: &str,
 ) -> Result<(), axum::Error> {
+    // Control-frame rate limit (§2.6) — every inbound text frame counts,
+    // BEFORE parsing, so malformed/unknown frames cannot bypass the limiter
+    // (each otherwise still costs a parse + error response).
+    if !session.record_control_op(Instant::now()) {
+        return send_frame(
+            socket,
+            &super::protocol::ServerFrame::Error {
+                id: None,
+                reason: Reason::RateLimited,
+                message: "too many control frames; slow down".into(),
+            },
+        )
+        .await;
+    }
+
     let frame = match parse_client_frame(text) {
         Ok(f) => f,
         Err(FrameParseError::UnknownOp) => {
@@ -244,19 +259,6 @@ async fn handle_text(
         }
     };
 
-    // Control-frame rate limit (§2.6) — every op counts.
-    if !session.record_control_op(Instant::now()) {
-        return send_frame(
-            socket,
-            &super::protocol::ServerFrame::Error {
-                id: None,
-                reason: Reason::RateLimited,
-                message: "too many control frames; slow down".into(),
-            },
-        )
-        .await;
-    }
-
     match frame {
         ClientFrame::Subscribe { id, channels } => {
             let frames = session.handle_subscribe(id, channels, |c| bus.is_live(c));
@@ -274,10 +276,12 @@ async fn handle_text(
             // Register the channels first (same validation/liveness as subscribe).
             let sub_frames = session.handle_subscribe(id.clone(), channels, |c| bus.is_live(c));
             send_all(socket, &sub_frames).await?;
-            // Then replay matching retained events, or signal a gap.
+            // Then replay matching retained events, or signal a gap. A page
+            // cut off by RESUME_MAX is NOT a complete catch-up — the client
+            // must resync rather than believe it is caught up.
             let filter = session.snapshot_filter();
             let page = bus.backfill(&filter, since, RESUME_MAX);
-            if page.gap {
+            if page.gap || page.truncated {
                 send_frame(
                     socket,
                     &super::protocol::ServerFrame::Resync {

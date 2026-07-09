@@ -25,5 +25,5 @@ pub mod service;
 pub mod value;
 
 pub use registry::{entry_by_id, ProtocolEntry, REGISTRY};
-pub use service::decode_box;
+pub use service::{decode_box, decode_box_bytes};
 pub use value::decode_value;

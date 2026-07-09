@@ -14,17 +14,15 @@ use axum::Json;
 use ergo_indexer_types::types::IndexedErgoBox;
 use ergo_indexer_types::{BoxId, Page as IdxPage, SortDir, TemplateHash, TokenId, TreeHash};
 use ergo_ser::ergo_tree::tree_hash_from_bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::dto::{v1box_from_indexed_box, Collection, V1Box};
 use super::extract::{V1Json, V1Query};
-use super::{
-    offset_from_cursor, offset_page, offset_page_at, parse_id32, parse_sort, GiCursor, V1State,
-};
+use super::{offset_from_cursor, offset_page, parse_id32, parse_sort, GiCursor, V1State};
 use crate::blockchain::{
     address_to_tree_hash, pool_unspent_for_template, pool_unspent_for_token, pool_unspent_for_tree,
 };
-use crate::v1::cursor::{clamp_limit, decode_opt_cursor, Page};
+use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason};
 
 /// Default page size and hard cap for this group (§2.2 — a deliberate
@@ -206,26 +204,49 @@ fn render_box_page(
     }
 }
 
+/// Two-axis resume cursor for the unspent listings with the pool overlay:
+/// `c` = the confirmed reader offset, `p` = overlay (pool) rows already
+/// emitted. BOTH must advance or a page the overlay alone fills would repeat
+/// forever (the overlay livelock); `p` indexes the volatile pool snapshot —
+/// the same documented offset-alias drift the overlay always carried (§1.5).
+#[derive(Debug, Serialize, Deserialize)]
+struct UnspentCursor {
+    c: u32,
+    p: u32,
+}
+
+/// Reject `sort=asc` on the listings whose reader has ONE fixed (DESC-keyed)
+/// order — accepting it and answering desc data would silently mislabel the
+/// result. `desc`/absent passes; malformed values keep the shared
+/// `invalid_sort_direction` answer.
+fn reject_asc_fixed_order(sort: Option<&str>) -> Result<(), Box<Response>> {
+    match parse_sort(sort)? {
+        SortDir::Desc => Ok(()),
+        SortDir::Asc => Err(Box::new(v1_error(
+            Reason::InvalidParams,
+            "this listing only supports sort=desc",
+            "the by-template / by-token box index is stored newest-first; `asc` is not available",
+        ))),
+    }
+}
+
 /// Overfetch confirmed unspent boxes until `limit + 1` rows SURVIVE the `keep`
-/// filter (or the reader is exhausted), returning the survivors plus the reader
-/// offset the next page must resume from. Filtering after a single overfetch
-/// would let `exclude_mempool_spent` underfill the window and mis-compute
-/// `has_more`; looping fills the page, and threading the consumed offset keeps
-/// the cursor from skipping or re-showing rows. With no filter this is exactly
-/// one `limit + 1` fetch resuming at `start + limit` (the prior behavior).
+/// filter (or the reader is exhausted). Each survivor is returned WITH the
+/// reader offset just past it, so the caller can mint the resume cursor from
+/// the last survivor it actually emits — not from rows that were fetched but
+/// truncated away (e.g. by the unconfirmed overlay re-capping the merged
+/// page). Filtering after a single overfetch would let `exclude_mempool_spent`
+/// underfill the window and mis-compute `has_more`; looping fills the page.
 fn confirmed_survivors<T>(
     start: u32,
     limit: u32,
     dir: SortDir,
     fetch: impl Fn(IdxPage, SortDir) -> Vec<T>,
     keep: impl Fn(&T) -> bool,
-) -> (Vec<T>, u32) {
+) -> Vec<(T, u32)> {
     let target = limit as usize + 1;
-    let mut survivors: Vec<T> = Vec::with_capacity(target);
+    let mut survivors: Vec<(T, u32)> = Vec::with_capacity(target);
     let mut read_off = start;
-    // Reader offset just past the `limit`-th survivor — where the next page
-    // resumes. `None` until (and unless) we reach `limit` survivors.
-    let mut off_after_limit: Option<u32> = None;
     loop {
         let batch = fetch(
             IdxPage {
@@ -240,14 +261,10 @@ fn confirmed_survivors<T>(
         }
         for (i, b) in batch.into_iter().enumerate() {
             if keep(&b) {
-                survivors.push(b);
-                if survivors.len() == limit as usize {
-                    off_after_limit = Some(read_off.saturating_add(i as u32).saturating_add(1));
-                }
+                let off_after = read_off.saturating_add(i as u32).saturating_add(1);
+                survivors.push((b, off_after));
                 if survivors.len() >= target {
-                    let next = off_after_limit
-                        .unwrap_or_else(|| read_off.saturating_add(i as u32).saturating_add(1));
-                    return (survivors, next);
+                    return survivors;
                 }
             }
         }
@@ -256,15 +273,17 @@ fn confirmed_survivors<T>(
             break; // reader exhausted
         }
     }
-    (survivors, off_after_limit.unwrap_or(read_off))
+    survivors
 }
 
 /// The unspent variants: confirmed page (overfetched to fill past
 /// `exclude_mempool_spent` drops) + the optional pool-output overlay, merged in
 /// the Scala order, then **re-capped to `limit`** (v1 fixes the compat quirk
-/// where `include_unconfirmed=true` could exceed `limit`). The offset cursor
-/// advances the confirmed window by the rows actually consumed; the overlay is
-/// an offset-alias drift documented at the codec (§1.5).
+/// where `include_unconfirmed=true` could exceed `limit`). The two-axis
+/// [`UnspentCursor`] advances the confirmed window AND the overlay window by
+/// exactly the rows the page emitted — no repeats when the overlay fills a
+/// page, no confirmed skips when it pushes rows out; the overlay axis is an
+/// offset into the volatile pool snapshot (documented drift, §1.5).
 fn render_unspent_page(
     state: &V1State,
     q: &UnspentQuery,
@@ -275,38 +294,79 @@ fn render_unspent_page(
         Ok(d) => d,
         Err(e) => return *e,
     };
-    let start = match offset_from_cursor(q.cursor.as_deref()) {
-        Ok(o) => o,
+    let (c_start, p_start) = match decode_opt_cursor::<UnspentCursor>(q.cursor.as_deref()) {
+        Ok(Some(cur)) => (cur.c, cur.p),
+        Ok(None) => (0, 0),
         Err(e) => return *e,
     };
     let limit = clamp_limit(q.limit, DEFAULT_LIMIT, MAX_LIMIT);
+    let limit_us = limit as usize;
     let include_unconfirmed = q.include_unconfirmed.unwrap_or(false);
     let exclude_spent = q.exclude_mempool_spent.unwrap_or(false);
 
-    let (confirmed, confirmed_next_off) =
-        confirmed_survivors(start, limit, dir, fetch_confirmed, |b| {
-            match b.box_data.box_id() {
-                // Short-circuits when `exclude_spent` is false: every row is kept
-                // and `is_spent_by_pool` is never consulted.
-                Ok(id) => !exclude_spent || !state.mempool.is_spent_by_pool(&id),
-                // Keep an un-canonicalizable row so the downstream projection
-                // surfaces the same 500 rather than silently dropping it.
-                Err(_) => true,
-            }
-        });
-    let unconfirmed = if include_unconfirmed {
+    let confirmed = confirmed_survivors(c_start, limit, dir, fetch_confirmed, |b| {
+        match b.box_data.box_id() {
+            // Short-circuits when `exclude_spent` is false: every row is kept
+            // and `is_spent_by_pool` is never consulted.
+            Ok(id) => !exclude_spent || !state.mempool.is_spent_by_pool(&id),
+            // Keep an un-canonicalizable row so the downstream projection
+            // surfaces the same 500 rather than silently dropping it.
+            Err(_) => true,
+        }
+    });
+    // The overlay resumes past the `p` rows earlier pages already emitted, so
+    // an overlay bigger than one page pages THROUGH rather than repeating.
+    let pool_rows: Vec<IndexedErgoBox> = if include_unconfirmed {
         pool(exclude_spent)
+            .into_iter()
+            .skip(p_start as usize)
+            .collect()
     } else {
         Vec::new()
     };
-    // Scala parity: DESC → unconfirmed first; ASC → confirmed first.
-    let merged: Vec<IndexedErgoBox> = match dir {
-        SortDir::Desc => unconfirmed.into_iter().chain(confirmed).collect(),
-        SortDir::Asc => confirmed.into_iter().chain(unconfirmed).collect(),
+
+    // How many of each side the re-capped page actually emits — the cursor
+    // advances EXACTLY past those rows on both axes (no skips, no repeats).
+    let total = pool_rows.len() + confirmed.len();
+    let has_more = total > limit_us;
+    let emitted_total = total.min(limit_us);
+    let (pool_emitted, confirmed_emitted) = match dir {
+        // Scala parity: DESC → unconfirmed first; ASC → confirmed first.
+        SortDir::Desc => {
+            let pe = pool_rows.len().min(limit_us);
+            (pe, emitted_total - pe)
+        }
+        SortDir::Asc => {
+            let ce = confirmed.len().min(limit_us);
+            (emitted_total - ce, ce)
+        }
     };
+    let next_c = confirmed_emitted
+        .checked_sub(1)
+        .and_then(|i| confirmed.get(i))
+        .map(|(_, off_after)| *off_after)
+        .unwrap_or(c_start);
+    let next_p = p_start.saturating_add(pool_emitted as u32);
+
+    let confirmed_rows = confirmed.into_iter().map(|(b, _)| b);
+    let mut merged: Vec<IndexedErgoBox> = match dir {
+        SortDir::Desc => pool_rows.into_iter().chain(confirmed_rows).collect(),
+        SortDir::Asc => confirmed_rows.chain(pool_rows).collect(),
+    };
+    merged.truncate(limit_us);
     match project_boxes(state, merged, q.decode.unwrap_or(false)) {
         Ok(items) => {
-            let (items, page) = offset_page_at(items, limit, confirmed_next_off);
+            let next_cursor = has_more.then(|| {
+                encode_cursor(&UnspentCursor {
+                    c: next_c,
+                    p: next_p,
+                })
+            });
+            let page = Page {
+                limit,
+                has_more: next_cursor.is_some(),
+                next_cursor,
+            };
             Json(Collection { items, page }).into_response()
         }
         Err(d) => assemble_failed(d),
@@ -458,8 +518,11 @@ pub async fn boxes_by_template(
         return invalid_template_hash();
     };
     let th = TemplateHash::from_bytes(raw);
-    // `template_boxes_paged` has no sort side; `sort` is still validated for a
-    // uniform error surface, then the DESC-keyed reader window is used.
+    // `template_boxes_paged` has ONE fixed (DESC-keyed) order — an honest 400
+    // for `sort=asc` rather than silently answering desc data labeled asc.
+    if let Err(e) = reject_asc_fixed_order(q.sort.as_deref()) {
+        return *e;
+    }
     render_box_page(
         &state,
         q.limit,
@@ -508,6 +571,10 @@ pub async fn boxes_by_token(
         return invalid_token_id();
     };
     let tid = TokenId::from_bytes(raw);
+    // Same fixed-order contract as `boxes_by_template`.
+    if let Err(e) = reject_asc_fixed_order(q.sort.as_deref()) {
+        return *e;
+    }
     render_box_page(
         &state,
         q.limit,
@@ -593,20 +660,25 @@ mod tests {
 
     // ----- happy path -----
 
+    fn rows_of(survivors: &[(u32, u32)]) -> Vec<u32> {
+        survivors.iter().map(|(v, _)| *v).collect()
+    }
+
     #[test]
     fn confirmed_survivors_no_filter_reads_one_overfetch_window() {
-        // limit=3, no filter: exactly limit+1 survivors, cursor resumes at
-        // start+limit — identical to the pre-fix single-fetch behavior.
-        let (rows, next) = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), |_| true);
-        assert_eq!(rows, vec![0, 1, 2, 3]);
-        assert_eq!(next, 3);
+        // limit=3, no filter: exactly limit+1 survivors, each carrying the
+        // reader offset just past it.
+        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), |_| true);
+        assert_eq!(rows_of(&rows), vec![0, 1, 2, 3]);
+        // The limit-th (3rd) survivor sat at reader offset 2 → resumes at 3.
+        assert_eq!(rows[2].1, 3);
     }
 
     #[test]
     fn confirmed_survivors_start_offset_advances_by_limit() {
-        let (rows, next) = confirmed_survivors(10, 2, SortDir::Asc, windowed_reader(100), |_| true);
-        assert_eq!(rows, vec![10, 11, 12]);
-        assert_eq!(next, 12);
+        let rows = confirmed_survivors(10, 2, SortDir::Asc, windowed_reader(100), |_| true);
+        assert_eq!(rows_of(&rows), vec![10, 11, 12]);
+        assert_eq!(rows[1].1, 12);
     }
 
     // ----- error paths / underfill regression -----
@@ -615,25 +687,27 @@ mod tests {
     fn confirmed_survivors_filter_overfetches_until_page_fills() {
         // Keep only evens (simulating exclude_mempool_spent dropping half). A
         // single limit+1 fetch would underfill; the loop keeps reading until
-        // limit+1 survivors exist, and the cursor resumes PAST the rows read to
-        // reach the limit-th survivor (no dupes, no underfill).
+        // limit+1 survivors exist, each with the offset PAST the rows read to
+        // reach it (no dupes, no underfill).
         let keep_even = |v: &u32| v.is_multiple_of(2);
-        let (rows, next) = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), keep_even);
+        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), keep_even);
         // limit+1 = 4 survivors: 0,2,4,6.
-        assert_eq!(rows, vec![0, 2, 4, 6]);
-        // 3rd survivor (value 4) sat at reader offset 4, so the next page
-        // resumes at offset 5 — the row after it.
-        assert_eq!(next, 5);
+        assert_eq!(rows_of(&rows), vec![0, 2, 4, 6]);
+        // 3rd survivor (value 4) sat at reader offset 4 → resumes at offset 5.
+        assert_eq!(rows[2].1, 5);
+        // If the overlay pushes a row out and only 2 survivors are emitted,
+        // the cursor from the 2nd survivor resumes at offset 3 (after value 2)
+        // — the row-loss regression the per-survivor offsets exist to prevent.
+        assert_eq!(rows[1].1, 3);
     }
 
     #[test]
-    fn confirmed_survivors_exhaustion_yields_short_page_and_end_cursor() {
-        // Only 2 evens in 0..5 within reach past filtering short of limit+1.
+    fn confirmed_survivors_exhaustion_yields_short_page() {
+        // Only 3 evens in 0..5 — short of limit+1; every survivor still
+        // carries its own resume offset.
         let keep_even = |v: &u32| v.is_multiple_of(2);
-        let (rows, next) = confirmed_survivors(0, 10, SortDir::Asc, windowed_reader(5), keep_even);
-        assert_eq!(rows, vec![0, 2, 4]);
-        // Never reached `limit` survivors → cursor points past the exhausted
-        // reader (has_more will be false downstream since rows <= limit).
-        assert_eq!(next, 5);
+        let rows = confirmed_survivors(0, 10, SortDir::Asc, windowed_reader(5), keep_even);
+        assert_eq!(rows_of(&rows), vec![0, 2, 4]);
+        assert_eq!(rows[2].1, 5);
     }
 }

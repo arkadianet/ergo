@@ -308,6 +308,22 @@ fn shape_inputs(state: &V1State, inputs: InputsDto) -> Result<KeylessInputs, Box
                     format!("from_addresses is capped at {MAX_INPUTS}"),
                 ));
             }
+            if exclude_box_ids.len() > MAX_INPUTS {
+                return Err(err(
+                    Reason::IntentTooLarge,
+                    "too many excluded box ids",
+                    format!("exclude_box_ids is capped at {MAX_INPUTS}"),
+                ));
+            }
+            // `-1` is the documented include-pool sentinel; anything below it
+            // is meaningless, never a valid depth.
+            if min_confirmations < -1 {
+                return Err(err(
+                    Reason::InvalidParams,
+                    "min_confirmations must be >= -1",
+                    "-1 includes pool outputs; 0+ is a confirmed depth",
+                ));
+            }
             for addr in &from_addresses {
                 decode_address_to_tree_bytes(addr, state.network).map_err(|e| {
                     err(
@@ -457,6 +473,13 @@ fn shape_data_inputs(data_inputs: Option<DataInputsDto>) -> Result<Vec<String>, 
         None => Vec::new(),
         Some(DataInputsDto::BoxIds { box_ids }) => box_ids,
     };
+    if ids.len() > MAX_INPUTS {
+        return Err(err(
+            Reason::IntentTooLarge,
+            "too many data-input box ids",
+            format!("data_inputs box_ids is capped at {MAX_INPUTS}"),
+        ));
+    }
     for id in &ids {
         if !is_id64(id) {
             return Err(err(
@@ -783,8 +806,13 @@ struct PoolStatus {
     pool_size: u32,
     ahead_of_you_bytes: u64,
     fee_competitiveness_pct: f64,
-    eta_blocks: u32,
-    eta_ms: u64,
+    /// OMITTED when the node has no pool wait-time oracle wired (same
+    /// absent-field convention as this response's other optionals) — a
+    /// missing estimate must not read as "next block".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_blocks: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_ms: Option<u64>,
     parents_in_pool: u32,
 }
 
@@ -890,14 +918,14 @@ fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> S
     };
 
     let interval_ms = state.read.info().target_block_interval_ms.max(1);
+    // No wait-time oracle (chain reader unwired) → an honest null, never a
+    // fabricated one-block estimate.
     let eta_ms = state
         .chain
         .as_ref()
-        .map(|c| c.pool_expected_wait_time_ms(row.fee_nano_erg, row.size_bytes))
-        .unwrap_or(0);
-    let eta_blocks = (eta_ms.div_ceil(interval_ms))
-        .max(1)
-        .min(u64::from(u32::MAX)) as u32;
+        .map(|c| c.pool_expected_wait_time_ms(row.fee_nano_erg, row.size_bytes));
+    let eta_blocks =
+        eta_ms.map(|ms| (ms.div_ceil(interval_ms)).max(1).min(u64::from(u32::MAX)) as u32);
 
     StatusResponse {
         tx_id: row.tx_id.clone(),
