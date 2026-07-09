@@ -5,8 +5,8 @@
 //! writes have no node-side seam yet (§3.2 #7/#8 — the peer manager exposes no
 //! externally-triggered ban), so they answer the honest `route_unavailable`.
 
-use utoipa::ToSchema;
 use std::net::SocketAddr;
+use utoipa::ToSchema;
 
 use axum::{
     extract::{Path, Query, State},
@@ -43,7 +43,7 @@ const NET_MAX_LIMIT: u32 = 500;
         (status = 400, description = "Invalid cursor", body = V1Error),
     ),
 )]
-pub(super) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQuery>) -> Response {
+pub(crate) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQuery>) -> Response {
     offset_collection(s.read.peers(), &q, PEERS_DEFAULT_LIMIT, PEERS_MAX_LIMIT)
 }
 
@@ -61,7 +61,7 @@ pub(super) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQu
         (status = 400, description = "Invalid cursor", body = V1Error),
     ),
 )]
-pub(super) async fn connected(
+pub(crate) async fn connected(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -78,7 +78,7 @@ pub(super) async fn connected(
 /// `ip[:port]` — the compat path keeps the ugly Java `InetAddress.toString()`
 /// `hostname/ip` double-form for byte-parity; v1 strips it.
 #[derive(Serialize, ToSchema)]
-struct BlacklistedPeer {
+pub(crate) struct BlacklistedPeer {
     addr: String,
 }
 
@@ -107,7 +107,7 @@ fn clean_blacklist_addr(raw: &str) -> String {
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
-pub(super) async fn blacklisted(
+pub(crate) async fn blacklisted(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -130,7 +130,7 @@ pub(super) async fn blacklisted(
 /// disambiguates whose height; `status` is the lowercased Scala
 /// `PeerChainStatus` set (`equal|younger|older|fork|unknown|nonsense`).
 #[derive(Serialize, ToSchema)]
-struct SyncInfoEntry {
+pub(crate) struct SyncInfoEntry {
     addr: String,
     peer_height: u32,
     status: String,
@@ -150,7 +150,7 @@ struct SyncInfoEntry {
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
-pub(super) async fn sync_info(
+pub(crate) async fn sync_info(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -173,7 +173,7 @@ pub(super) async fn sync_info(
 /// The `network/track-info` aggregate counters (§3.2 #5). Bare object, not a
 /// collection.
 #[derive(Serialize, ToSchema)]
-struct TrackInfo {
+pub(crate) struct TrackInfo {
     num_requested: u32,
     num_received: u32,
     num_failed: u32,
@@ -188,7 +188,7 @@ struct TrackInfo {
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
-pub(super) async fn track_info(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn track_info(State(s): State<OperatorState>) -> Response {
     let chain = match s.chain() {
         Ok(c) => c,
         Err(e) => return *e,
@@ -218,7 +218,7 @@ pub(super) async fn track_info(State(s): State<OperatorState>) -> Response {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn connect(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
+pub(crate) async fn connect(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
     let admin = match s.admin() {
         Ok(a) => a,
         Err(e) => return *e,
@@ -268,7 +268,7 @@ pub(super) async fn connect(State(s): State<OperatorState>, body: axum::body::By
     responses((status = 503, description = "Manual peer blacklisting not wired on this node", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
+pub(crate) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "manual peer blacklisting is not wired on this node",
@@ -284,7 +284,7 @@ pub(super) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
     responses((status = 503, description = "Manual peer un-blacklisting not wired on this node", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn blacklist_remove(
+pub(crate) async fn blacklist_remove(
     State(_s): State<OperatorState>,
     Path(_addr): Path<String>,
 ) -> Response {

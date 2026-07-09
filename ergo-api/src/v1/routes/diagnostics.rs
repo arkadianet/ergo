@@ -16,11 +16,11 @@
 //! reported as `null` (unknown), **never a fabricated green**. The `unknown`
 //! vector on each signal names those gaps explicitly.
 
-use utoipa::ToSchema;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::V1State;
 use crate::types::{ApiPeer, ApiPeerDirection, ApiPeerState, HealthStatus};

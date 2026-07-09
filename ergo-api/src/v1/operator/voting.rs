@@ -4,7 +4,6 @@
 //! which moves to the T1 `operator-votes` read. The operator write (T1) reuses
 //! [`NodeAdmin::set_voting_targets`](crate::traits::NodeAdmin).
 
-use utoipa::ToSchema;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -12,6 +11,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{offset_collection, ListQuery, OperatorState};
 use crate::traits::VotingControlError;
@@ -35,7 +35,7 @@ struct VotableParam {
 /// operator's own `configured_votes` is dropped here and served (gated) at
 /// `operator-votes`.
 #[derive(Serialize, ToSchema)]
-struct PublicVotes {
+pub(crate) struct PublicVotes {
     block_height: u32,
     block_version: u8,
     epoch_start_height: u32,
@@ -48,7 +48,7 @@ struct PublicVotes {
     get, path = "/api/v1/voting/votes", tag = "voting",
     responses((status = 200, description = "Public votable-parameter descriptor (no configured_votes — see operator-votes)", body = PublicVotes)),
 )]
-pub(super) async fn votes(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn votes(State(s): State<OperatorState>) -> Response {
     let v = s.read.votes();
     Json(PublicVotes {
         block_height: v.block_height,
@@ -91,7 +91,7 @@ struct VoteChange {
 /// The `voting/history` body, snake_case (reshape of the camelCase
 /// `ApiVotesHistory`).
 #[derive(Serialize, ToSchema)]
-struct VotesHistory {
+pub(crate) struct VotesHistory {
     epoch_length: u32,
     current_height: u32,
     changes: Vec<VoteChange>,
@@ -107,7 +107,7 @@ struct VotesHistory {
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
-pub(super) async fn history(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
     let chain = match s.chain() {
         Ok(c) => c,
         Err(e) => return *e,
@@ -146,7 +146,7 @@ pub(super) async fn history(State(s): State<OperatorState>) -> Response {
     get, path = "/api/v1/voting/candidate", tag = "voting",
     responses((status = 503, description = "Next-block vote-byte preview not wired on this node", body = V1Error)),
 )]
-pub(super) async fn candidate(State(_s): State<OperatorState>) -> Response {
+pub(crate) async fn candidate(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "the next-block vote preview is not wired on this node",
@@ -157,7 +157,7 @@ pub(super) async fn candidate(State(_s): State<OperatorState>) -> Response {
 /// One configured operator vote, snake_case (reshape of the camelCase
 /// `ApiConfiguredVote`).
 #[derive(Serialize, ToSchema)]
-struct ConfiguredVote {
+pub(crate) struct ConfiguredVote {
     parameter_id: u8,
     name: String,
     target: i64,
@@ -178,7 +178,7 @@ struct ConfiguredVote {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn operator_votes_get(
+pub(crate) async fn operator_votes_get(
     State(s): State<OperatorState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
@@ -206,7 +206,7 @@ struct VoteTarget {
 /// `POST /api/v1/voting/operator-votes` body — the FULL desired set (REPLACES;
 /// an empty list clears all votes), snake_case.
 #[derive(Debug, Deserialize, ToSchema)]
-struct SetVotesRequest {
+pub(crate) struct SetVotesRequest {
     votes: Vec<VoteTarget>,
 }
 
@@ -225,7 +225,7 @@ struct SetVotesRequest {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn operator_votes_set(
+pub(crate) async fn operator_votes_set(
     State(s): State<OperatorState>,
     body: axum::body::Bytes,
 ) -> Response {

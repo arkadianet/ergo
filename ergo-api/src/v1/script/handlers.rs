@@ -2,8 +2,8 @@
 //! reduce / compile / parse facade in [`super`] (locked decision D3). No
 //! handler owns reduction, cost, or compile logic.
 
-use utoipa::ToSchema;
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -142,7 +142,7 @@ pub struct CompileBody {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct CompileResponse {
+pub(crate) struct CompileResponse {
     ergo_tree: String,
     tree_bytes: String,
     p2s_address: String,
@@ -233,7 +233,7 @@ struct ConstantView {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct InspectResponse {
+pub(crate) struct InspectResponse {
     ergo_tree_version: u8,
     has_size: bool,
     constant_segregation: bool,
@@ -415,7 +415,7 @@ pub struct SelfBoxDto {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct ExecuteResponse {
+pub(crate) struct ExecuteResponse {
     reduced_to: String,
     result: Option<bool>,
     cost: u64,
@@ -469,7 +469,7 @@ fn execute_inner(state: &ScriptState, body: ExecuteBody) -> Result<ExecuteRespon
 // ==========================================================================
 
 #[derive(Debug, Serialize, ToSchema)]
-struct CostResponse {
+pub(crate) struct CostResponse {
     total_cost: u64,
     within_block_limit: bool,
     /// A per-opcode `breakdown` is gated on the interpreter's `cost-trace`
@@ -685,7 +685,7 @@ struct TraceView {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct ExplainResponse {
+pub(crate) struct ExplainResponse {
     spendable: bool,
     reduced_to: Option<String>,
     reduction_trace: Vec<TraceView>,
@@ -821,7 +821,7 @@ struct Divergence {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct DiffResponse {
+pub(crate) struct DiffResponse {
     rust: DiffSide,
     scala: DiffSide,
     agree: bool,

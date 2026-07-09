@@ -8,7 +8,6 @@
 //! (`pool_unspent_for_*`) into the v1 envelope + cursor, gating every read on
 //! the extra index (`indexer_disabled` / `_syncing` / `_halted`).
 
-use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -16,6 +15,7 @@ use ergo_indexer_types::types::IndexedErgoBox;
 use ergo_indexer_types::{BoxId, Page as IdxPage, SortDir, TemplateHash, TokenId, TreeHash};
 use ergo_ser::ergo_tree::tree_hash_from_bytes;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::dto::{v1box_from_indexed_box, Collection, V1Box};
 use super::extract::{V1Json, V1Query};

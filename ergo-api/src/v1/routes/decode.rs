@@ -5,8 +5,8 @@
 //! box routes is wired in `dto.rs` (the O6 seam); this file is the registry's
 //! own surface. All T0, all bounded (fragment §7).
 
-use utoipa::ToSchema;
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -26,7 +26,7 @@ use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// A `GET /protocols` list item — the registry capability advertisement.
 #[derive(Debug, Serialize, ToSchema)]
-struct ProtocolListItem {
+pub(crate) struct ProtocolListItem {
     protocol_id: &'static str,
     name: &'static str,
     family: &'static str,
@@ -90,7 +90,7 @@ struct MatcherView {
 
 /// `GET /api/v1/protocols/{id}` detail body.
 #[derive(Debug, Serialize, ToSchema)]
-struct ProtocolDetail {
+pub(crate) struct ProtocolDetail {
     protocol_id: &'static str,
     name: &'static str,
     family: &'static str,
@@ -174,7 +174,7 @@ pub struct DecodeBoxBody {
 /// The `POST /boxes/decode` response: the derived address + the shared `decoded`
 /// object (identical shape to `boxes/{id}?decode=true`).
 #[derive(Debug, Serialize, ToSchema)]
-struct DecodeBoxResponse {
+pub(crate) struct DecodeBoxResponse {
     address: Option<String>,
     decoded: Value,
 }
@@ -240,7 +240,7 @@ pub struct StateQuery {
 
 /// `GET /api/v1/protocols/{id}/state` response — the canonical singleton state.
 #[derive(Debug, Serialize, ToSchema)]
-struct ProtocolStateResponse {
+pub(crate) struct ProtocolStateResponse {
     protocol_id: &'static str,
     box_role: &'static str,
     box_id: String,

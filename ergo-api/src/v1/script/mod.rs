@@ -26,7 +26,7 @@
 //! SAME [`ergo_compiler::compile`] facade and never proxies or enriches the
 //! compat route.
 
-mod handlers;
+pub(crate) mod handlers;
 
 use std::sync::Arc;
 

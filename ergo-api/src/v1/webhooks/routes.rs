@@ -8,8 +8,8 @@
 //! wired, so a node without the webhook store answers `webhooks_disabled`
 //! (409) — never a bare 404 (§4 subsystem-off rule).
 
-use utoipa::ToSchema;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     extract::{Path, State},
@@ -72,7 +72,7 @@ impl WebhooksState {
 
 /// `POST /api/v1/webhooks` body.
 #[derive(Debug, Deserialize, ToSchema)]
-struct RegisterRequest {
+pub(crate) struct RegisterRequest {
     url: String,
     channels: Vec<String>,
     #[serde(default)]
@@ -83,13 +83,13 @@ struct RegisterRequest {
 
 /// `PATCH /api/v1/webhooks/{id}` body (pause / resume).
 #[derive(Debug, Deserialize, ToSchema)]
-struct PatchRequest {
+pub(crate) struct PatchRequest {
     active: bool,
 }
 
 /// Cursor + limit query for the paginated list endpoints.
 #[derive(Debug, Deserialize, ToSchema)]
-struct ListQuery {
+pub(crate) struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
 }
@@ -140,7 +140,7 @@ fn url_reject_response(rej: UrlReject) -> Response {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn register(
+pub(crate) async fn register(
     State(state): State<WebhooksState>,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
@@ -260,7 +260,10 @@ async fn register(
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn list(State(state): State<WebhooksState>, V1Query(q): V1Query<ListQuery>) -> Response {
+pub(crate) async fn list(
+    State(state): State<WebhooksState>,
+    V1Query(q): V1Query<ListQuery>,
+) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -299,7 +302,7 @@ async fn list(State(state): State<WebhooksState>, V1Query(q): V1Query<ListQuery>
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn detail(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn detail(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -321,7 +324,7 @@ async fn detail(State(state): State<WebhooksState>, Path(id): Path<String>) -> R
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
+pub(crate) async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> Response {
     let handle = match state.handle() {
         Ok(h) => h,
         Err(e) => return *e,
@@ -345,7 +348,7 @@ async fn delete(State(state): State<WebhooksState>, Path(id): Path<String>) -> R
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn patch_active(
+pub(crate) async fn patch_active(
     State(state): State<WebhooksState>,
     Path(id): Path<String>,
     V1Json(body): V1Json<PatchRequest>,
@@ -377,7 +380,7 @@ async fn patch_active(
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn deliveries(
+pub(crate) async fn deliveries(
     State(state): State<WebhooksState>,
     Path(id): Path<String>,
     V1Query(q): V1Query<ListQuery>,

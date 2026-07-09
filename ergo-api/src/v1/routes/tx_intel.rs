@@ -21,12 +21,12 @@
 //! `build`/`simulate` sit at the governor's `Compute` class (they run coin
 //! selection / validation); `fee-estimate`/`status` sit at `HeavyRead`.
 
-use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use ergo_indexer_types::{IndexerStatus, TxId};
 use ergo_ser::address::decode_address_to_tree_bytes;
@@ -224,7 +224,7 @@ struct BuildSummary {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct BuildResponse {
+pub(crate) struct BuildResponse {
     unsigned_tx: WireBytes,
     tx_id: String,
     summary: BuildSummary,
@@ -623,7 +623,7 @@ struct WireConflict {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct SimulateResponse {
+pub(crate) struct SimulateResponse {
     valid: bool,
     tx_id: String,
     cost_units: u64,
@@ -736,7 +736,7 @@ struct FeeTier {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct FeeEstimateResponse {
+pub(crate) struct FeeEstimateResponse {
     target_blocks: u32,
     tx_size_bytes: u32,
     recommended_fee: String,
@@ -855,7 +855,7 @@ struct PoolStatus {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct StatusResponse {
+pub(crate) struct StatusResponse {
     tx_id: String,
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]

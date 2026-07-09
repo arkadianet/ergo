@@ -15,11 +15,11 @@
 //! `membership-proof` handler is Overlap O2: it delegates to the SAME core as
 //! `chain/proofs/{id}/transactions/{tx_id}` (see [`super::chain`]).
 
-use utoipa::ToSchema;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::dto::unix_ms_to_iso;
 use super::extract::V1Query;

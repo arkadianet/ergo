@@ -12,7 +12,7 @@ use axum::Json;
 use super::dto::{
     block_from_scala, block_summary_from_scala, block_tx_from_scala, header_from_scala,
     modifier_from_scala, Collection, MerkleSide, V1Block, V1BlockAdProofs, V1BlockSummary,
-    V1BlockTransactions, V1BlockTx, V1Header, V1MerkleLevel, V1MerkleProof, V1Modifier,
+    V1BlockTx, V1Header, V1MerkleLevel, V1MerkleProof, V1Modifier,
 };
 use super::extract::{V1Json, V1Query};
 use super::{

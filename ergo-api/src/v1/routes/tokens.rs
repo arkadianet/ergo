@@ -7,8 +7,8 @@
 //! enumeration index that does not exist yet (design G3), so it answers an
 //! honest `state_unavailable` instead of faking data.
 
-use utoipa::ToSchema;
 use std::collections::HashMap;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};

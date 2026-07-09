@@ -9,10 +9,10 @@
 //! reads — so the whole protocol is unit-testable without a live socket
 //! ([`super::ws`] is the thin axum adapter over it).
 
-use utoipa::ToSchema;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use utoipa::ToSchema;
 
 use serde::Serialize;
 

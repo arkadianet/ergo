@@ -5,7 +5,6 @@
 //! `status` (T0) composes existing snapshot reads. `candidate-with-txs` has no
 //! trait seam yet (§3.3 #5), so it answers the honest `route_unavailable`.
 
-use utoipa::ToSchema;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -15,6 +14,7 @@ use axum::{
 use ergo_rest_json::mining::AutolykosSolutionJson;
 use ergo_ser::address::encode_p2pk_from_pubkey;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::OperatorState;
 use crate::mining::MiningApiError;
@@ -63,7 +63,7 @@ fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
 /// `?window=<u32>` for `miner-stats` (default 720 ≈ 1 day at 120s; clamp
 /// `[1, 16384]`).
 #[derive(Debug, Default, Deserialize, ToSchema)]
-pub(super) struct WindowQuery {
+pub(crate) struct WindowQuery {
     window: Option<u32>,
 }
 
@@ -79,7 +79,7 @@ pub(super) struct WindowQuery {
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
-pub(super) async fn miner_stats(
+pub(crate) async fn miner_stats(
     State(s): State<OperatorState>,
     Query(q): Query<WindowQuery>,
 ) -> Response {
@@ -135,7 +135,7 @@ pub(super) async fn miner_stats(
 /// its last-published template metadata; that seam is not wired yet, so they are
 /// emitted as `null` (honest) rather than fabricated.
 #[derive(Serialize, ToSchema)]
-struct MiningStatus {
+pub(crate) struct MiningStatus {
     mining_enabled: bool,
     synced: bool,
     longpoll_supported: bool,
@@ -152,7 +152,7 @@ struct MiningStatus {
     get, path = "/api/v1/mining/status", tag = "mining",
     responses((status = 200, description = "Mining capability + template freshness (nulls until the template-cache seam is wired)", body = MiningStatus)),
 )]
-pub(super) async fn status(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     let mining_enabled = s.read.identity().mining;
     let synced = s.read.status().sync_state == SyncStateLabel::AtTip;
     Json(MiningStatus {
@@ -169,7 +169,7 @@ pub(super) async fn status(State(s): State<OperatorState>) -> Response {
 
 /// `?longpoll=<hex msg>` for `candidate` (getblocktemplate-style bounded block).
 #[derive(Debug, Default, Deserialize, ToSchema)]
-pub(super) struct CandidateQuery {
+pub(crate) struct CandidateQuery {
     longpoll: Option<String>,
 }
 
@@ -188,7 +188,7 @@ pub(super) struct CandidateQuery {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn candidate(
+pub(crate) async fn candidate(
     State(s): State<OperatorState>,
     Query(q): Query<CandidateQuery>,
 ) -> Response {
@@ -220,7 +220,7 @@ pub(super) async fn candidate(
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn solution(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
+pub(crate) async fn solution(State(s): State<OperatorState>, body: axum::body::Bytes) -> Response {
     let mining = match s.mining() {
         Ok(m) => m,
         Err(e) => return *e,
@@ -245,13 +245,13 @@ pub(super) async fn solution(State(s): State<OperatorState>, body: axum::body::B
 /// `RewardAddressResponse` is hard-renamed camelCase + pinned by a unit test, so
 /// a new DTO is required).
 #[derive(Serialize, ToSchema)]
-struct RewardAddress {
+pub(crate) struct RewardAddress {
     reward_address: String,
 }
 
 /// Fresh snake_case reward-pubkey DTO (§3.3 #4 — same rationale).
 #[derive(Serialize, ToSchema)]
-struct RewardPubkey {
+pub(crate) struct RewardPubkey {
     reward_pubkey: String,
 }
 
@@ -267,7 +267,7 @@ struct RewardPubkey {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn reward_address(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn reward_address(State(s): State<OperatorState>) -> Response {
     let mining = match s.mining() {
         Ok(m) => m,
         Err(e) => return *e,
@@ -289,7 +289,7 @@ pub(super) async fn reward_address(State(s): State<OperatorState>) -> Response {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
     let mining = match s.mining() {
         Ok(m) => m,
         Err(e) => return *e,
@@ -309,7 +309,7 @@ pub(super) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
     responses((status = 503, description = "Forced-transaction candidate building not wired on this node", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn candidate_with_txs(State(_s): State<OperatorState>) -> Response {
+pub(crate) async fn candidate_with_txs(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "forced-transaction candidate building is not wired on this node",

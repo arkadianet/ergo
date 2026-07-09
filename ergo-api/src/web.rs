@@ -8,6 +8,7 @@
 pub const INDEX_HTML: &str = include_str!("../web/index.html");
 pub const SWAGGER_HTML: &str = include_str!("../web/swagger.html");
 pub const NATIVE_SWAGGER_HTML: &str = include_str!("../web/swagger-native.html");
+pub const V1_SWAGGER_HTML: &str = include_str!("../web/swagger-v1.html");
 pub const OPENAPI_YAML: &str = include_str!("../web/openapi.yaml");
 pub const TOKENS_CSS: &str = include_str!("../web/tokens.css");
 pub const COMPONENTS_CSS: &str = include_str!("../web/components.css");

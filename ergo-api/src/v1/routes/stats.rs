@@ -21,11 +21,11 @@
 //! handler answers the honest `*_unavailable` / `*_disabled` reason (§1.4)
 //! rather than fabricate a series.
 
-use utoipa::ToSchema;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::dto::{unix_ms_to_iso, CollectionMeta, V1MempoolDepthPoint};
 use super::extract::V1Query;
@@ -169,7 +169,7 @@ fn series_response<T: Serialize>(items: Vec<T>, w: &Window) -> Response {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct SeriesPage<T> {
+pub(crate) struct SeriesPage<T> {
     items: Vec<T>,
     page: Page,
 }

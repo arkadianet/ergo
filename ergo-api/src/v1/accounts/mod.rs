@@ -28,10 +28,10 @@
 //! machinery (scan trait methods, `scan_p2s_rule`, `get_private_key`); nothing
 //! here reimplements scan matching or key derivation.
 
-mod scan;
+pub(crate) mod scan;
 
-use utoipa::ToSchema;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -209,7 +209,7 @@ fn seam(what: &str, detail: &str) -> Response {
 /// `POST /api/v1/accounts/watch` request.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct WatchRequest {
+pub(crate) struct WatchRequest {
     address: String,
     #[serde(default)]
     label: Option<String>,
@@ -217,7 +217,7 @@ struct WatchRequest {
 
 /// `?limit=&cursor=` for the watch list.
 #[derive(Debug, Default, Deserialize, ToSchema)]
-struct WatchListQuery {
+pub(crate) struct WatchListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
 }
@@ -240,7 +240,7 @@ struct ScanIdCursor {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn watch_register(
+pub(crate) async fn watch_register(
     State(state): State<AccountsState>,
     body: V1Json<WatchRequest>,
 ) -> Response {
@@ -283,7 +283,10 @@ async fn watch_register(
         (status = 409, description = "Wallet uninitialized or locked", body = V1Error),
     ),
 )]
-async fn watch_list(State(state): State<AccountsState>, q: V1Query<WatchListQuery>) -> Response {
+pub(crate) async fn watch_list(
+    State(state): State<AccountsState>,
+    q: V1Query<WatchListQuery>,
+) -> Response {
     let V1Query(q) = q;
     let limit = clamp_limit(q.limit, 50, 500);
     let after = match decode_opt_cursor::<ScanIdCursor>(q.cursor.as_deref()) {
@@ -339,7 +342,10 @@ async fn watch_list(State(state): State<AccountsState>, q: V1Query<WatchListQuer
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn watch_delete(State(state): State<AccountsState>, Path(scan_id): Path<u16>) -> Response {
+pub(crate) async fn watch_delete(
+    State(state): State<AccountsState>,
+    Path(scan_id): Path<u16>,
+) -> Response {
     match state.admin.deregister_scan(scan_id).await {
         Ok(()) => Json(json!({ "scan_id": scan_id })).into_response(),
         Err(WalletAdminError::BadRequest(_)) => v1_error(
@@ -358,7 +364,7 @@ async fn watch_delete(State(state): State<AccountsState>, Path(scan_id): Path<u1
 /// `POST /api/v1/accounts/private-key` request. T2 (admin + loopback-preferred).
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct PrivateKeyRequest {
+pub(crate) struct PrivateKeyRequest {
     address: String,
     #[serde(default)]
     acknowledge: bool,
@@ -382,7 +388,7 @@ struct PrivateKeyRequest {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn private_key(
+pub(crate) async fn private_key(
     State(state): State<AccountsState>,
     body: V1Json<PrivateKeyRequest>,
 ) -> Response {
@@ -435,7 +441,7 @@ async fn private_key(
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn accounts_seam() -> Response {
+pub(crate) async fn accounts_seam() -> Response {
     seam(
         "named-accounts",
         "accounts are a label over a BIP-44 derivation subtree; the durable \
@@ -459,7 +465,7 @@ async fn accounts_seam() -> Response {
     ),
     security(("ApiKeyAuth" = [])),
 )]
-async fn psbt_seam() -> Response {
+pub(crate) async fn psbt_seam() -> Response {
     seam(
         "psbt-session",
         "PSBT-like partial signing needs a durable session store and a \

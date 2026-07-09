@@ -13,24 +13,24 @@
 
 pub mod dto;
 
-mod addresses;
-mod batch;
-mod boxes;
-mod chain;
-mod decode;
-mod diagnostics;
+pub(crate) mod addresses;
+pub(crate) mod batch;
+pub(crate) mod boxes;
+pub(crate) mod chain;
+pub(crate) mod decode;
+pub(crate) mod diagnostics;
 pub(crate) mod extract;
-mod light;
-mod mempool;
-mod stats;
-mod tokens;
+pub(crate) mod light;
+pub(crate) mod mempool;
+pub(crate) mod stats;
+pub(crate) mod tokens;
 pub(crate) mod transactions;
-mod tx_intel;
+pub(crate) mod tx_intel;
 
 pub use batch::batch_router;
 
-use utoipa::ToSchema;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     response::Response,
@@ -172,7 +172,7 @@ struct HeightCursor {
 
 /// Common `?limit=&cursor=&order=` query for the chain list endpoints.
 #[derive(Debug, Deserialize, ToSchema)]
-struct ListQuery {
+pub(crate) struct ListQuery {
     limit: Option<u32>,
     cursor: Option<String>,
     order: Option<String>,

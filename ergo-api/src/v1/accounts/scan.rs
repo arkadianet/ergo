@@ -10,12 +10,12 @@
 //! camelCase → snake_case, the `{items, page}` cursor envelope, and the nested
 //! `{error:{reason,…}}` family. The compat `/scan/*` router is untouched.
 
-use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use utoipa::ToSchema;
 
 use super::{map_wallet_err, AccountsState};
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
@@ -54,7 +54,7 @@ pub struct ScanRegisterRequest {
 
 /// A registered scan, snake_case (`v1-api-design.md` §3.10).
 #[derive(Debug, Serialize, ToSchema)]
-struct ScanView {
+pub(crate) struct ScanView {
     scan_id: u16,
     name: String,
     tracking_rule: serde_json::Value,
@@ -78,7 +78,7 @@ impl From<ScanDto> for ScanView {
 /// (the `/unspent` endpoint) — carried only for shape parity with a future
 /// `/spent` surface. `value` is a decimal string (§1.1).
 #[derive(Debug, Serialize, ToSchema)]
-struct ScanBoxView {
+pub(crate) struct ScanBoxView {
     box_id: String,
     value: String,
     inclusion_height: Option<u32>,

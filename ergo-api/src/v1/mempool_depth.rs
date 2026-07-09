@@ -16,12 +16,12 @@
 //! ([`spawn_depth_sampler`] in production; tests push directly) and never reads
 //! the clock or the node itself, so it is trivially unit-testable.
 
-use utoipa::ToSchema;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use utoipa::ToSchema;
 
 use serde::Serialize;
 

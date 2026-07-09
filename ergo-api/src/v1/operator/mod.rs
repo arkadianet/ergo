@@ -25,13 +25,13 @@
 //! forced-tx candidate, next-block vote preview), the endpoint mounts and
 //! answers the honest `route_unavailable` (§1.4) rather than a bare 404.
 
-mod mining;
-mod network;
-mod node;
-mod voting;
+pub(crate) mod mining;
+pub(crate) mod network;
+pub(crate) mod node;
+pub(crate) mod voting;
 
-use utoipa::ToSchema;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     response::{IntoResponse, Response},
@@ -116,7 +116,7 @@ impl OperatorState {
 
 /// `?limit=&cursor=` query for the bounded operator list endpoints.
 #[derive(Debug, Default, Deserialize, ToSchema)]
-pub(super) struct ListQuery {
+pub(crate) struct ListQuery {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
 }

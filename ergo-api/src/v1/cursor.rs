@@ -21,9 +21,9 @@
 //! sets `has_more`, and mints `next_cursor` from the last *kept* row. This
 //! works with or without a total-count method — v1's envelope has no `total`.
 
-use utoipa::ToSchema;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::error::{v1_error, Reason};
 use axum::response::Response;

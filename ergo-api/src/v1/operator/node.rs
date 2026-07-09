@@ -4,7 +4,6 @@
 //! [`NodeAdmin::request_shutdown`](crate::traits::NodeAdmin). `config` GET/PATCH
 //! has no node-side trait seam yet, so it answers the honest `route_unavailable`.
 
-use utoipa::ToSchema;
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -12,6 +11,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::OperatorState;
 use crate::types::{
@@ -24,7 +24,7 @@ use crate::v1::error::{v1_error, Reason, V1Error};
     get, path = "/api/v1/node/info", tag = "node",
     responses((status = 200, description = "Node info", body = ApiInfo)),
 )]
-pub(super) async fn info(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn info(State(s): State<OperatorState>) -> Response {
     Json(s.read.info()).into_response()
 }
 
@@ -33,7 +33,7 @@ pub(super) async fn info(State(s): State<OperatorState>) -> Response {
     get, path = "/api/v1/node/status", tag = "node",
     responses((status = 200, description = "Dashboard status snapshot", body = ApiStatus)),
 )]
-pub(super) async fn status(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     Json(s.read.status()).into_response()
 }
 
@@ -42,7 +42,7 @@ pub(super) async fn status(State(s): State<OperatorState>) -> Response {
     get, path = "/api/v1/node/sync", tag = "node",
     responses((status = 200, description = "Sync status", body = ApiSyncStatus)),
 )]
-pub(super) async fn sync(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn sync(State(s): State<OperatorState>) -> Response {
     Json(s.read.sync()).into_response()
 }
 
@@ -51,7 +51,7 @@ pub(super) async fn sync(State(s): State<OperatorState>) -> Response {
     get, path = "/api/v1/node/tip", tag = "node",
     responses((status = 200, description = "Chain tip", body = ApiTip)),
 )]
-pub(super) async fn tip(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn tip(State(s): State<OperatorState>) -> Response {
     Json(s.read.tip()).into_response()
 }
 
@@ -60,7 +60,7 @@ pub(super) async fn tip(State(s): State<OperatorState>) -> Response {
     get, path = "/api/v1/node/identity", tag = "node",
     responses((status = 200, description = "Node identity", body = ApiIdentity)),
 )]
-pub(super) async fn identity(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn identity(State(s): State<OperatorState>) -> Response {
     Json(s.read.identity()).into_response()
 }
 
@@ -70,7 +70,7 @@ pub(super) async fn identity(State(s): State<OperatorState>) -> Response {
     get, path = "/api/v1/node/host", tag = "node",
     responses((status = 200, description = "Host info", body = ApiHost)),
 )]
-pub(super) async fn host(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn host(State(s): State<OperatorState>) -> Response {
     Json(s.read.host()).into_response()
 }
 
@@ -84,7 +84,7 @@ pub(super) async fn host(State(s): State<OperatorState>) -> Response {
         (status = 503, description = "Stalled, disconnected, or rejecting a block", body = ApiHealth),
     ),
 )]
-pub(super) async fn health(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn health(State(s): State<OperatorState>) -> Response {
     let h = s.read.health();
     let code = match h.status {
         HealthStatus::Ok => StatusCode::OK,
@@ -101,7 +101,7 @@ pub(super) async fn health(State(s): State<OperatorState>) -> Response {
 /// active block-format version — sourced from the same snapshot's votes view
 /// (`ApiVotes.block_version`), the one place the node already surfaces it.
 #[derive(Serialize, ToSchema)]
-struct NodeVersion {
+pub(crate) struct NodeVersion {
     software_version: String,
     api_versions: Vec<&'static str>,
     activated_protocol_version: u8,
@@ -113,7 +113,7 @@ struct NodeVersion {
     get, path = "/api/v1/node/version", tag = "node",
     responses((status = 200, description = "Version + activated protocol version", body = NodeVersion)),
 )]
-pub(super) async fn version(State(s): State<OperatorState>) -> Response {
+pub(crate) async fn version(State(s): State<OperatorState>) -> Response {
     Json(NodeVersion {
         software_version: s.read.info().version,
         api_versions: vec!["v1"],
@@ -131,7 +131,7 @@ pub(super) async fn version(State(s): State<OperatorState>) -> Response {
     responses((status = 503, description = "Effective-config read not wired on this node", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn config_get(State(_s): State<OperatorState>) -> Response {
+pub(crate) async fn config_get(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "effective-config read is not wired on this node",
@@ -148,7 +148,7 @@ pub(super) async fn config_get(State(_s): State<OperatorState>) -> Response {
     responses((status = 503, description = "Config mutation not wired on this node", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]
-pub(super) async fn config_patch(State(_s): State<OperatorState>) -> Response {
+pub(crate) async fn config_patch(State(_s): State<OperatorState>) -> Response {
     v1_error(
         Reason::RouteUnavailable,
         "config mutation is not wired on this node",

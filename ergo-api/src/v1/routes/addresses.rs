@@ -4,12 +4,12 @@
 //! `boxes/{by-address,unspent/by-address}` (O10) — one handler
 //! ([`super::boxes`]), dual-mounted in the router, never a second copy.
 
-use utoipa::ToSchema;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use ergo_indexer_types::Page as IdxPage;
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 use super::dto::{address_tx_summary_from_indexed, Collection, V1Asset, V1Balance, V1BalanceEntry};
 use super::extract::V1Query;

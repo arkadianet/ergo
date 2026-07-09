@@ -96,6 +96,7 @@ use crate::web::{
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
     JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
     JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
+    V1_SWAGGER_HTML,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
@@ -612,9 +613,12 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
+        .route("/swagger/v1", get(swagger_v1))
         .route("/api-docs/openapi.yaml", get(openapi_yaml))
         .route("/api-docs/openapi-native.yaml", get(openapi_native_yaml))
         .route("/api-docs/openapi-native.json", get(openapi_native_json))
+        .route("/api-docs/openapi-v1.yaml", get(openapi_v1_yaml_handler))
+        .route("/api-docs/openapi-v1.json", get(openapi_v1_json))
         .route("/api/v1/info", get(info_handler))
         .route("/api/v1/identity", get(identity_handler))
         .route("/api/v1/host", get(host_handler))
@@ -1541,6 +1545,10 @@ async fn swagger_native() -> Html<&'static str> {
     Html(NATIVE_SWAGGER_HTML)
 }
 
+async fn swagger_v1() -> Html<&'static str> {
+    Html(V1_SWAGGER_HTML)
+}
+
 async fn openapi_yaml() -> Response {
     ([(header::CONTENT_TYPE, "application/yaml")], OPENAPI_YAML).into_response()
 }
@@ -1560,6 +1568,27 @@ async fn openapi_native_yaml() -> Response {
 /// Rust-native `/api/v1/*` OpenAPI spec as JSON.
 async fn openapi_native_json() -> Response {
     (StatusCode::OK, Json(NativeOpenApi::openapi())).into_response()
+}
+
+/// The v1 product-API OpenAPI spec as YAML, generated from
+/// [`crate::v1::openapi::V1OpenApi`]. A separate document from
+/// [`openapi_native_yaml`] above — see that derive's module docs for why.
+async fn openapi_v1_yaml_handler() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/yaml")],
+        crate::v1::openapi::v1_openapi_yaml(),
+    )
+        .into_response()
+}
+
+/// The v1 product-API OpenAPI spec as JSON.
+async fn openapi_v1_json() -> Response {
+    (
+        StatusCode::OK,
+        Json(crate::v1::openapi::V1OpenApi::openapi()),
+    )
+        .into_response()
 }
 
 async fn jetbrains_mono_woff2() -> Response {

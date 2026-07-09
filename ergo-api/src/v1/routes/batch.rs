@@ -50,9 +50,9 @@
 //! route actually exists to gate — building it now would be untested,
 //! unreachable machinery.
 
-use utoipa::ToSchema;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use axum::{
     body::{to_bytes, Body},
@@ -97,7 +97,7 @@ const UNKNOWN_IP: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 // ----- wire types -----------------------------------------------------------
 
 #[derive(Debug, Deserialize, ToSchema)]
-struct BatchRequest {
+pub(crate) struct BatchRequest {
     requests: Vec<BatchItemRequest>,
 }
 
@@ -155,7 +155,7 @@ impl BatchItemResult {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct BatchResponse {
+pub(crate) struct BatchResponse {
     items: Vec<BatchItemResult>,
 }
 
@@ -763,7 +763,7 @@ fn allowed_routes() -> (Router<V1State>, Vec<AllowedRoute>) {
 /// classification table, and the shared node-wide [`Governor`] batch draws
 /// its one upfront charge from.
 #[derive(Clone)]
-struct BatchState {
+pub(crate) struct BatchState {
     dispatch: Router,
     table: Arc<[AllowedRoute]>,
     governor: Arc<Governor>,
@@ -876,7 +876,7 @@ async fn dispatch_one(dispatch: &Router, id: String, item: BatchItemRequest) -> 
         (status = 413, description = "Too many items, or summed weight/body size exceeds the batch cap", body = V1Error),
     ),
 )]
-async fn batch_handler(State(state): State<BatchState>, req: Request<Body>) -> Response {
+pub(crate) async fn batch_handler(State(state): State<BatchState>, req: Request<Body>) -> Response {
     let ip = client_ip(&req).unwrap_or(UNKNOWN_IP);
     let exempt = state.governor.exempt_loopback(&req);
 

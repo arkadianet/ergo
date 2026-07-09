@@ -16,8 +16,8 @@
 //! shares the ONE `mempool_tx` shape and the keyset `(priority_weight, tx_id)`
 //! cursor.
 
-use utoipa::ToSchema;
 use std::collections::HashSet;
+use utoipa::ToSchema;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};

@@ -13,8 +13,8 @@
 //! and of `IndexedErgoBoxResponse` (`crate::blockchain`). The compat shapes stay
 //! camelCase and frozen; v1 wraps, never mutates them.
 
-use utoipa::ToSchema;
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
 
 use ergo_indexer_types::types::IndexedErgoBox;
 use ergo_indexer_types::IndexedTokenDto;

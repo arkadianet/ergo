@@ -19,8 +19,8 @@
 //! constant-time compares (`X-Ergo-Signature` header, §3.4). Signing uses the
 //! proven `hmac` + `sha2` workspace crates (CLAUDE.md §2 — never hand-rolled).
 
-use utoipa::ToSchema;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use utoipa::ToSchema;
 
 use hmac::{Mac, SimpleHmac};
 use serde::Serialize;
