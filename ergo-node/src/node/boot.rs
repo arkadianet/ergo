@@ -337,6 +337,52 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         "current chain state",
     );
 
+    // Operator escape hatch: `ERGO_BAN_HEADERS` (comma-separated hex-32
+    // header ids) pre-marks headers session-invalid so `header_proc`
+    // refuses them on arrival. Session-scoped (in-memory, gone on
+    // restart without the env) and opt-in — exists for incident
+    // recovery where a peer keeps gossiping the tip of a known-invalid
+    // branch that this node must not adopt (e.g. testnet 431,367,
+    // block `66bfa980…`: header is PoW-valid, body fails script
+    // verification, and the serving peer's own best-header pointer
+    // never rewound). Malformed entries are rejected at boot so a
+    // typo'd ban list fails loudly instead of silently not banning.
+    match std::env::var("ERGO_BAN_HEADERS") {
+        Ok(list) => {
+            for tok in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                let bytes = hex::decode(tok).map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("ERGO_BAN_HEADERS entry {tok:?} is not hex: {e}"),
+                    )) as NodeError
+                })?;
+                let id: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "ERGO_BAN_HEADERS entry {tok:?} is {} bytes, expected 32",
+                            bytes.len()
+                        ),
+                    )) as NodeError
+                })?;
+                store.mark_session_invalid(id);
+                warn!(
+                    header_id = tok,
+                    "ERGO_BAN_HEADERS: header banned for this session"
+                );
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        // A set-but-non-UTF-8 value must not read as "not set" — that would
+        // silently skip every ban, the exact failure this list fails loudly on.
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ERGO_BAN_HEADERS is set but not valid UTF-8",
+            )) as NodeError);
+        }
+    }
+
     // 2. Initialize genesis if needed (use genesis_committed flag, not height)
     if !store.genesis_committed() {
         info!("initializing genesis state");
@@ -590,6 +636,20 @@ async fn run_inner_with_backend(
             .block_timing
             .header_freshness_threshold_ms(),
     );
+    // Operator escape hatch (sibling of ERGO_BAN_HEADERS): force the
+    // headers-chain-synced latch at boot so block downloads start even
+    // when every header on the target chain is stale. Needed when a
+    // halted network is re-driven from a checkpoint: nobody has mined
+    // for days, so the freshness edge in `check_headers_synced` can
+    // never fire, and the caught-up-to-peers fallback needs peers that
+    // agree with our tip — unavailable while peers sit on an abandoned
+    // branch (testnet 431,366 recovery). Session-scoped and opt-in;
+    // blocks are still fully validated — this only affects WHEN
+    // download begins, never WHAT is accepted.
+    if std::env::var_os("ERGO_ASSUME_HEADERS_SYNCED").is_some() {
+        coordinator.sync_state_mut().mark_headers_chain_synced();
+        warn!("ERGO_ASSUME_HEADERS_SYNCED: headers-chain-synced latch forced for this session");
+    }
     // Mode 2 / Mode 4 boot gate: when configured for UTXO
     // bootstrap AND the install has never run on this store,
     // suppress the section-download pipeline (same gates as
