@@ -38,7 +38,7 @@ base64             = { workspace = true }
 # `native-tls`/system OpenSSL, which this consensus node must never depend on
 # (CLAUDE.md §2, crypto: proven crates only). Only the features actually used
 # are enabled; the signed body is already a `String`, so `json` is not needed.
-reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest            = { workspace = true, features = ["rustls-tls"] }
 # `POST /api/v1/batch` (§3.18/§4.7) dispatches each sub-request in-process
 # against a restricted `Router` via `tower::util::ServiceExt::oneshot` — the
 # established "never HTTP-to-itself" idiom for a router-internal multiplex.
@@ -50,8 +50,8 @@ bs58            = { workspace = true }
 # WS transport integration test for `/api/v1/ws`: a real client over a real
 # upgrade (the axum `ws` feature already pulls tokio-tungstenite 0.24 into the
 # lock; these are dev-only so the production build is untouched).
-tokio-tungstenite = "0.24"
-futures-util      = "0.3"
+tokio-tungstenite = { workspace = true }
+futures-util      = { workspace = true }
 tokio             = { workspace = true, features = ["rt", "macros", "net", "sync", "rt-multi-thread"] }
 # Tests need IndexerHandle to fixture the trait surface — kept dev-only
 # so the production build of ergo-api never pulls in redb or ergo-state.

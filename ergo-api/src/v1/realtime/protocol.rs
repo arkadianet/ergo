@@ -228,6 +228,11 @@ pub struct Session {
     limits: Limits,
     network: ergo_ser::address::NetworkPrefix,
     op_times: VecDeque<Instant>,
+    /// Highest event `seq` already rendered to this socket. Both delivery
+    /// paths (resume replay + the live queue) pass through [`Self::on_event`],
+    /// so this watermark makes an event published between subscribe-activation
+    /// and the backfill snapshot render exactly once.
+    last_event_seq: u64,
 }
 
 impl Session {
@@ -244,6 +249,7 @@ impl Session {
             limits: Limits::default(),
             network,
             op_times: VecDeque::new(),
+            last_event_seq: 0,
         }
     }
 
@@ -411,6 +417,13 @@ impl Session {
     /// subscribed channel (§2.2). A terminal channel (`box:`/`tx:`) is removed
     /// after firing and gets a trailing `unsubscribed reason:"fulfilled"`.
     pub fn on_event(&mut self, event: &RealtimeEvent) -> Vec<ServerFrame> {
+        // Dedupe across the replay/live seam: an event published between
+        // subscribe-activation and the backfill snapshot arrives on BOTH
+        // paths; the seq watermark renders it exactly once.
+        if event.seq <= self.last_event_seq {
+            return Vec::new();
+        }
+        self.last_event_seq = event.seq;
         let mut matched: Vec<String> = event
             .routes
             .iter()

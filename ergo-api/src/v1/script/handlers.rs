@@ -104,14 +104,20 @@ fn self_box_from_ctx(
         })?,
         None => Vec::new(),
     };
+    // Parsed as u64 first (the documented wire type — no negatives), then
+    // bounded to the box-value domain (a Scala Long).
     let value = match sb.value.as_deref() {
-        Some(v) => v.parse::<i64>().map_err(|_| {
-            err(
-                Reason::InvalidParams,
-                "context.self.value must be a decimal nanoERG string",
-                "value is a u64 encoded as a base-10 string",
-            )
-        })?,
+        Some(v) => v
+            .parse::<u64>()
+            .ok()
+            .and_then(|v| i64::try_from(v).ok())
+            .ok_or_else(|| {
+                err(
+                    Reason::InvalidParams,
+                    "context.self.value must be a decimal nanoERG string",
+                    "value is a non-negative u64 (within i64 range) encoded as a base-10 string",
+                )
+            })?,
         None => 0,
     };
     let creation_height = sb.creation_height.unwrap_or(height);
@@ -586,8 +592,22 @@ fn eval_box_from_scala(o: &ScalaOutput) -> Result<EvalBox, Box<Response>> {
             format!("hex decode: {e}"),
         )
     })?;
-    let id = parse_id32(&o.box_id).unwrap_or([0u8; 32]);
-    let transaction_id = parse_id32(&o.transaction_id).unwrap_or([0u8; 32]);
+    // A malformed id from the resolved box is a data error the script could
+    // observe (SELF.id) — never silently zero-filled.
+    let id = parse_id32(&o.box_id).ok_or_else(|| {
+        err(
+            Reason::InvalidBoxId,
+            "the resolved box has a malformed box id",
+            "box ids are 64-char hex",
+        )
+    })?;
+    let transaction_id = parse_id32(&o.transaction_id).ok_or_else(|| {
+        err(
+            Reason::InvalidTxId,
+            "the resolved box has a malformed transaction id",
+            "transaction ids are 64-char hex",
+        )
+    })?;
     let mut tokens = Vec::with_capacity(o.assets.len());
     for a in &o.assets {
         let tid = parse_id32(&a.token_id).ok_or_else(|| {
@@ -673,6 +693,20 @@ fn explain_inner(
                     .to_string()
             };
             (!trivial_false, Some(render_sigma_boolean(&sb)), diag)
+        }
+        // A resource refusal (this request's cost/depth bound) is NOT a
+        // spendability diagnosis — answer the typed `cost_limit`/`too_deep`
+        // refusal exactly like execute/cost/simulate/diff (shared v1 reduce
+        // contract), never a 200 "errored during reduction".
+        Err(e)
+            if matches!(
+                e,
+                EvalError::CostExceeded(_)
+                    | EvalError::JitCostOverflow(_)
+                    | EvalError::DepthLimitExceeded(_)
+            ) =>
+        {
+            return Err(eval_error_response(&e))
         }
         Err(e) => (
             false,

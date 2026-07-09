@@ -185,7 +185,13 @@ fn template_matches(template: &str, path: &str) -> bool {
     loop {
         match (t.next(), p.next()) {
             (Some(ts), Some(ps)) => {
-                if !ts.starts_with(':') && ts != ps {
+                if ts.starts_with(':') {
+                    // A wildcard binds a real segment — never the empty
+                    // segment a trailing slash produces.
+                    if ps.is_empty() {
+                        return false;
+                    }
+                } else if ts != ps {
                     return false;
                 }
             }
@@ -195,13 +201,24 @@ fn template_matches(template: &str, path: &str) -> bool {
     }
 }
 
-/// The [`RouteClass`] of the first allow-list entry matching `(method,
-/// path)`, or `None` when nothing matches — the single point where "may this
-/// batch item ever be dispatched" is decided.
+/// Literal-segment count — the specificity key for [`classify`]. Two
+/// templates matching the same path have the same segment count, so the one
+/// with more literals (fewer wildcards) is strictly more specific.
+fn specificity(template: &str) -> usize {
+    template.split('/').filter(|s| !s.starts_with(':')).count()
+}
+
+/// The [`RouteClass`] of the MOST-SPECIFIC allow-list entry matching
+/// `(method, path)`, or `None` when nothing matches — the single point where
+/// "may this batch item ever be dispatched" is decided. Most-specific (not
+/// first-match) mirrors axum's own literal-beats-wildcard routing, so the
+/// class charged is the class of the handler that actually runs (e.g.
+/// `/boxes/range` must not be charged as `/boxes/:box_id`).
 fn classify(table: &[AllowedRoute], method: &Method, path: &str) -> Option<RouteClass> {
     table
         .iter()
-        .find(|r| r.method == *method && template_matches(r.template, path))
+        .filter(|r| r.method == *method && template_matches(r.template, path))
+        .max_by_key(|r| specificity(r.template))
         .map(|r| r.class)
 }
 
@@ -1011,7 +1028,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_prefers_the_most_specific_template() {
+        // Table order must not matter: the wildcard entry precedes the
+        // literal, yet the literal (more specific) wins — mirroring axum's
+        // literal-beats-wildcard dispatch, so `/boxes/range` is charged as
+        // itself, never as `/boxes/:box_id`.
+        let table = vec![
+            route(Method::GET, "/api/v1/boxes/:box_id", RouteClass::CheapRead),
+            route(Method::GET, "/api/v1/boxes/range", RouteClass::HeavyRead),
+        ];
+        assert_eq!(
+            classify(&table, &Method::GET, "/api/v1/boxes/range"),
+            Some(RouteClass::HeavyRead)
+        );
+        assert_eq!(
+            classify(&table, &Method::GET, "/api/v1/boxes/6a2d"),
+            Some(RouteClass::CheapRead)
+        );
+    }
+
     // ----- error paths -----
+
+    #[test]
+    fn template_matches_rejects_empty_wildcard_segment() {
+        // A trailing slash must not satisfy a wildcard.
+        assert!(!template_matches("/api/v1/boxes/:box_id", "/api/v1/boxes/"));
+    }
 
     #[test]
     fn template_matches_rejects_wrong_segment_count() {

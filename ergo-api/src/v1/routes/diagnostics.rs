@@ -393,7 +393,8 @@ pub async fn peer_quality(State(state): State<V1State>) -> Response {
 
 #[derive(Debug, Serialize)]
 pub struct CandidateBuild {
-    /// `ok | slow | stalled | disabled`.
+    /// `unknown | disabled` today (`ok | slow | stalled` once the build-latency
+    /// telemetry is plumbed — without it a health verdict would be fabricated).
     pub status: String,
     pub mining_enabled: bool,
     /// `null`: base-cache flag not plumbed to the API layer.
@@ -412,10 +413,11 @@ pub struct CandidateBuild {
 
 fn candidate_build_of(state: &V1State) -> CandidateBuild {
     let mining_enabled = state.read.identity().mining;
-    // With no latency ring plumbed, we can only honestly report enabled/disabled
-    // — never a fake "slow"/"ok" latency verdict.
+    // With no latency ring plumbed, we can only honestly report
+    // enabled-but-unmeasured / disabled — never a fake "ok" (or "slow")
+    // latency verdict. `unknown` is severity-neutral in the composite.
     let status = if mining_enabled {
-        "ok".to_string()
+        "unknown".to_string()
     } else {
         "disabled".to_string()
     };

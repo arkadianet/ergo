@@ -119,9 +119,12 @@ pub(super) fn scan_token_holders(
     loop {
         let scanned_u32 = scanned as u32;
         if scanned_u32 >= HOLDER_SCAN_CAP {
-            // Stopped at the cap with a prior full batch still pending: the
-            // unspent set exceeds what we walked, so the ranking is approximate.
-            capped = true;
+            // At the cap: probe ONE extra row before declaring the ranking
+            // approximate — an unspent set of exactly HOLDER_SCAN_CAP rows is
+            // a complete scan, not a truncated one.
+            let probe =
+                idx.token_unspent_paged(token_id, IdxPage { offset, limit: 1 }, SortDir::Asc);
+            capped = !probe.is_empty();
             break;
         }
         let want = SCAN_BATCH.min(HOLDER_SCAN_CAP - scanned_u32);

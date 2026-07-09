@@ -71,17 +71,35 @@ pub fn decode_box(
     tokens: &[(String, u64)],
     registers_hex: &BTreeMap<String, String>,
 ) -> Value {
+    decode_box_bytes(
+        hex::decode(ergo_tree_hex.trim()).ok().as_deref(),
+        value,
+        tokens,
+        registers_hex,
+    )
+}
+
+/// [`decode_box`] over pre-decoded tree bytes — for callers that already hold
+/// them (e.g. the off-chain route, which decodes once for the address), so the
+/// hex is never decoded twice. `None` = the tree was not decodable hex; the
+/// register/token decode still runs.
+pub fn decode_box_bytes(
+    tree_bytes: Option<&[u8]>,
+    value: u64,
+    tokens: &[(String, u64)],
+    registers_hex: &BTreeMap<String, String>,
+) -> Value {
     let parsed = parse_registers(registers_hex);
     let registers_json = typed_registers(&parsed);
 
     // Contract keys: hash the tree bytes. A tree that fails to hash (malformed /
     // soft-fork-wrapped) simply yields no hash key — token matching still works.
-    let (template_hex, tree_hex) = match hex::decode(ergo_tree_hex.trim()) {
-        Ok(bytes) => (
-            template_hash_from_bytes(&bytes).ok().map(hex::encode),
-            tree_hash_from_bytes(&bytes).ok().map(hex::encode),
+    let (template_hex, tree_hex) = match tree_bytes {
+        Some(bytes) => (
+            template_hash_from_bytes(bytes).ok().map(hex::encode),
+            tree_hash_from_bytes(bytes).ok().map(hex::encode),
         ),
-        Err(_) => (None, None),
+        None => (None, None),
     };
     let token_ids: Vec<&str> = tokens.iter().map(|(id, _)| id.as_str()).collect();
 

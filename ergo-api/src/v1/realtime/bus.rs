@@ -90,6 +90,9 @@ pub struct BackfillPage {
     /// `true` when `since` predates the retained window — the client must treat
     /// its state as cold and re-read via REST.
     pub gap: bool,
+    /// `true` when more matching events remain beyond the request limit — the
+    /// page is NOT the full catch-up and the caller must not treat it as one.
+    pub truncated: bool,
     /// The current global cursor at the time of the read.
     pub latest_seq: u64,
 }
@@ -260,16 +263,23 @@ impl RealtimeBus {
             // Nothing retained but the cursor has advanced past `since`.
             None => latest_seq > since,
         };
-        let events = g
+        // Overfetch by one so a page that exactly fills the limit is
+        // distinguishable from one that was cut off.
+        let mut events: Vec<_> = g
             .backfill
             .iter()
             .filter(|e| e.seq > since && e.matches(filter))
-            .take(limit)
+            .take(limit + 1)
             .cloned()
             .collect();
+        let truncated = events.len() > limit;
+        if truncated {
+            events.truncate(limit);
+        }
         BackfillPage {
             events,
             gap,
+            truncated,
             latest_seq,
         }
     }

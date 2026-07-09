@@ -192,8 +192,20 @@ async fn register(
         keys.push(parsed.key);
     }
 
-    // Generated-if-absent secret; echoed once on the response.
-    let secret = Some(req.secret.unwrap_or_else(generate_secret));
+    // Generated-if-absent secret; echoed once on the response. An
+    // operator-supplied empty/whitespace secret would report `secret_set`
+    // with nothing usable to sign against — reject it.
+    let secret = match req.secret {
+        Some(s) if s.trim().is_empty() => {
+            return v1_error(
+                Reason::BadRequest,
+                "secret must not be empty",
+                "omit `secret` to have one generated, or supply a non-blank value",
+            );
+        }
+        Some(s) => Some(s),
+        None => Some(generate_secret()),
+    };
     let min_conf = req.confirmations.unwrap_or(1);
 
     match handle.engine.register(

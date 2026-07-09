@@ -219,7 +219,9 @@ fn check_key(config: &V1AuthConfig, req: &axum::http::Request<Body>) -> KeyOutco
 /// Why a node's exposure posture is insecure (input to the boot-warn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsecurePosture {
-    /// Network-reachable bind with NO api-key configured — T1/T2 are open.
+    /// Network-reachable bind with NO api-key configured — T1/T2 FAIL CLOSED
+    /// (`no_key_configured`, unusable) until a key is set; flagged so the
+    /// operator learns why those routes reject rather than discovering it live.
     NoKeyNetworkReachable,
     /// Network-reachable bind whose api-key hashes a known weak/default secret.
     WeakDefaultKey,
@@ -260,9 +262,9 @@ pub fn warn_startup_posture(security: Option<&ApiSecurity>, bind: SocketAddr) {
         Some(InsecurePosture::NoKeyNetworkReachable) => warn!(
             target: "ergo_api::v1::auth",
             %bind,
-            "INSECURE: the API is network-reachable with NO api_key configured — \
-             T1 (operator) and T2 (admin) routes are OPEN. Configure [api] api_key_hash \
-             or bind to loopback."
+            "the API is network-reachable with NO api_key configured — T1 (operator) \
+             and T2 (admin) routes FAIL CLOSED (`no_key_configured`, unusable) until \
+             [api] api_key_hash is set or the bind moves to loopback."
         ),
         Some(InsecurePosture::WeakDefaultKey) => warn!(
             target: "ergo_api::v1::auth",

@@ -119,8 +119,8 @@ pub enum GovernorConfigError {
     /// `burst` must be finite and strictly positive.
     #[error("burst must be finite and > 0, got {0}")]
     Burst(f64),
-    /// A route-class weight must be finite and non-negative.
-    #[error("{class} weight must be finite and >= 0, got {value}")]
+    /// A route-class weight must be finite and strictly positive.
+    #[error("{class} weight must be finite and > 0, got {value}")]
     Weight {
         /// The offending route class.
         class: &'static str,
@@ -132,8 +132,10 @@ pub enum GovernorConfigError {
 impl GovernorConfig {
     /// Validate the knobs at the constructor boundary (`v1-api-design.md`
     /// §2.2). Rejects a non-finite/non-positive `refill_per_sec` or `burst`
-    /// and any non-finite/negative route weight, so [`Governor::charge_at`]
-    /// never operates on config that would corrupt the token bucket.
+    /// and any non-finite/non-positive route weight (a zero weight would make
+    /// its whole route class unmetered — every charge costs 0), so
+    /// [`Governor::charge_at`] never operates on config that would corrupt or
+    /// bypass the token bucket.
     pub fn validate(&self) -> Result<(), GovernorConfigError> {
         if !self.refill_per_sec.is_finite() || self.refill_per_sec <= 0.0 {
             return Err(GovernorConfigError::Refill(self.refill_per_sec));
@@ -146,7 +148,7 @@ impl GovernorConfig {
             ("heavy", self.heavy_weight),
             ("compute", self.compute_weight),
         ] {
-            if !value.is_finite() || value < 0.0 {
+            if !value.is_finite() || value <= 0.0 {
                 return Err(GovernorConfigError::Weight { class, value });
             }
         }
