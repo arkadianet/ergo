@@ -26,6 +26,7 @@ pub const JS_SPARKLINE: &str = include_str!("../web/js/sparkline.js");
 pub const JS_CHART: &str = include_str!("../web/js/chart.js");
 pub const JS_OVERVIEW: &str = include_str!("../web/js/overview.js");
 pub const JS_EXPLORER: &str = include_str!("../web/js/explorer.js");
+pub const JS_TOKEN_META: &str = include_str!("../web/js/token-meta.js");
 pub const JS_PEERS: &str = include_str!("../web/js/peers.js");
 pub const JS_MEMPOOL: &str = include_str!("../web/js/mempool.js");
 pub const JS_VOTING: &str = include_str!("../web/js/voting.js");

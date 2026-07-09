@@ -14,6 +14,8 @@
 import { api } from './api-client.js';
 import { subscribe, promptAuthorize } from './auth.js';
 import { erg, num, truncMiddle, nanoErgFromDecimal } from './format.js';
+import { copyBtn } from './table.js';
+import { fetchTokenMeta, tokenName, tokenAmt, getDecimals, decimalize, maxDecimalString, parseTokenAmount } from './token-meta.js';
 
 let root = null;
 let authUnsub = null;
@@ -32,6 +34,10 @@ let onboardRendered = false;
 let sendRendered = false;
 let keysRendered = false;
 let unlockRendered = false;
+// Last-fetched wallet token balances ({tokenId, amount}), so the send form's
+// token picker can offer "what you actually have" instead of a blank hex
+// field. Refreshed every refreshBalances() poll tick.
+let myAssets = [];
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const EXT_WARNING =
@@ -193,6 +199,7 @@ function scrubSecrets() {
   if (pre) pre.textContent = '';
   mnemonicGateOpen = false;
   onboardRendered = sendRendered = keysRendered = unlockRendered = false;
+  myAssets = [];
   // Drop memoised panes so a re-entry rebuilds them fresh (no lingering
   // password / mnemonic / send draft in a detached-but-retained input).
   for (const sel of ['[data-onboard-body]', '[data-send-body]', '[data-keys-body]']) {
@@ -224,8 +231,12 @@ function renderStatusPanel(s) {
     body.append(kvWrap);
   }
 
-  const changeAddr = el('div', { class: 'v v--hash', text: truncMiddle(s.changeAddress || '', 10, 8) || '—' });
-  if (s.changeAddress) changeAddr.title = s.changeAddress;
+  const changeAddrText = el('span', { text: truncMiddle(s.changeAddress || '', 10, 8) || '—' });
+  const changeAddr = el('div', { class: 'v v--hash', style: 'display:flex;align-items:center;justify-content:flex-end;gap:6px' }, changeAddrText);
+  if (s.changeAddress) {
+    changeAddr.title = s.changeAddress;
+    changeAddr.append(copyBtn(s.changeAddress));
+  }
   const kv = el('div', { class: 'kv' });
   kv.append(
     el('div', { class: 'k', text: 'initialized' }),
@@ -332,17 +343,24 @@ async function refreshBalances() {
   right.textContent = `height ${num(b.height)}`;
   body.replaceChildren(kvRows([['confirmed', `${erg(b.balance)} ERG`, 'v--green']]));
   const assets = b.assets || [];
+  myAssets = assets;
+  // Best-effort name/decimals resolution (needs the extra index; a syncing
+  // or absent index just leaves ids/raw amounts, same as the explorer).
+  await fetchTokenMeta(assets.map((a) => a.tokenId));
   if (assets.length) {
     const tokKv = el('div', { class: 'kv' });
     for (const a of assets) {
-      const id = el('div', { class: 'k v--hash', text: truncMiddle(a.tokenId, 10, 8) });
-      id.title = a.tokenId;
-      tokKv.append(id, el('div', { class: 'v', text: num(a.amount) }));
+      const name = tokenName(a.tokenId);
+      const label = el('span', { class: name ? '' : 'v--hash', text: name || truncMiddle(a.tokenId, 10, 8) });
+      label.title = a.tokenId;
+      const kCell = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, label, copyBtn(a.tokenId));
+      tokKv.append(kCell, el('div', { class: 'v', text: tokenAmt(a.tokenId, a.amount) }));
     }
     body.append(el('div', { class: 'muted', text: `tokens (${assets.length})` }), tokKv);
   } else {
     body.append(el('div', { class: 'muted', text: 'no tokens' }));
   }
+  syncTokenSelects();
   body.append(
     el(
       'div',
@@ -668,22 +686,86 @@ function recipientRow() {
   );
 }
 
+// Sentinel select value for "I want to send a token not in my own balance
+// list" (a fresh receive the balances poll hasn't caught up to yet, etc.) —
+// reveals the plain hex fallback input instead of forcing a paste-only flow
+// on everyone.
+const CUSTOM_TOKEN = '__custom__';
+
+function tokenOptionLabel(a) {
+  const name = tokenName(a.tokenId) || truncMiddle(a.tokenId, 8, 6);
+  return `${name} · avail ${tokenAmt(a.tokenId, a.amount)}`;
+}
+
+// Rebuild a token <select>'s options from the current wallet balance
+// snapshot (myAssets), preserving the selection if it's still valid. Called
+// once per tokenRow() and again every refreshBalances() tick so a send form
+// left open across a poll picks up newly-seen tokens/updated "avail" labels.
+function rebuildTokenSelect(select) {
+  const prev = select.value;
+  select.replaceChildren(
+    el('option', { value: '', text: myAssets.length ? 'select a token…' : 'no tokens found — paste an id below' }),
+  );
+  for (const a of myAssets) select.append(el('option', { value: a.tokenId, text: tokenOptionLabel(a) }));
+  select.append(el('option', { value: CUSTOM_TOKEN, text: 'Other (paste token id)…' }));
+  if (Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
+}
+
+function syncTokenSelects() {
+  for (const select of root.querySelectorAll('[data-t-select]')) rebuildTokenSelect(select);
+}
+
+function fillMaxAmount(select, amtInput) {
+  if (select.value === '' || select.value === CUSTOM_TOKEN) return;
+  const a = myAssets.find((x) => x.tokenId === select.value);
+  if (!a) return;
+  amtInput.value = maxDecimalString(a.amount, getDecimals(a.tokenId));
+}
+
 function tokenRow() {
-  const id = el('input', { class: 'input w-t-id', 'data-t-id': true, placeholder: 'tokenId (hex)', autocomplete: 'off', spellcheck: 'false' });
-  const amt = el('input', { class: 'input w-t-amt', 'data-t-amt': true, placeholder: 'amount', inputmode: 'numeric', autocomplete: 'off' });
+  const select = el('select', { class: 'select w-t-id', 'data-t-select': true });
+  rebuildTokenSelect(select);
+  const customId = el('input', {
+    class: 'input w-t-id',
+    'data-t-id': true,
+    placeholder: 'tokenId (hex)',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    hidden: true,
+  });
+  const amt = el('input', { class: 'input w-t-amt', 'data-t-amt': true, placeholder: 'amount', inputmode: 'decimal', autocomplete: 'off' });
+  const maxBtn = el('button', { class: 'btn btn--sm', type: 'button', text: 'max', title: 'Fill the full available balance', onclick: () => fillMaxAmount(select, amt) });
   const rm = el('button', { class: 'btn btn--sm', type: 'button', text: '×', onclick: (ev) => ev.target.closest('[data-token]').remove() });
-  return el('div', { class: 'w-token w-row', 'data-token': true }, id, amt, rm);
+  select.addEventListener('change', () => {
+    const custom = select.value === CUSTOM_TOKEN;
+    customId.hidden = !custom;
+    if (custom) customId.focus();
+  });
+  // An empty wallet has nothing to pick from — skip straight to the plain
+  // hex field instead of making the user click through a dropdown that only
+  // offers "Other".
+  if (!myAssets.length) {
+    select.value = CUSTOM_TOKEN;
+    customId.hidden = false;
+  }
+  return el('div', { class: 'w-token w-row', 'data-token': true }, select, customId, amt, maxBtn, rm);
 }
 
 // Parse recipient rows into the /wallet/payment/send body. Amounts are parsed
-// with exact BigInt arithmetic and rejected if they exceed the safe JSON
-// integer range (the wire format is a JSON number), so nothing is silently
-// corrupted by float math.
+// with exact BigInt arithmetic (decimal-aware per-token, via each token's
+// resolved EIP-4 decimals) and rejected if they exceed the safe JSON integer
+// range (the wire format is a JSON number), so nothing is silently corrupted
+// by float math.
 function collectRequests() {
   const recipients = Array.from(root.querySelectorAll('[data-recipient]'));
   if (!recipients.length) return { error: 'Add at least one recipient.' };
   const requests = [];
   let totalNano = 0n;
+  // Requested total per tokenId across the WHOLE send (every recipient), so
+  // a user splitting one token across several recipients still gets an
+  // honest over-balance warning instead of finding out only after a server
+  // round trip.
+  const tokenTotals = new Map();
   for (const [i, row] of recipients.entries()) {
     const address = row.querySelector('[data-r-addr]').value.trim();
     const ergStr = row.querySelector('[data-r-value]').value.trim();
@@ -699,17 +781,38 @@ function collectRequests() {
     totalNano += value;
     const assets = [];
     for (const [j, t] of Array.from(row.querySelectorAll('[data-token]')).entries()) {
-      const tokenId = t.querySelector('[data-t-id]').value.trim();
+      const select = t.querySelector('[data-t-select]');
+      const custom = t.querySelector('[data-t-id]');
+      const tokenId = (select.value === CUSTOM_TOKEN ? custom.value : select.value).trim();
       const amtStr = t.querySelector('[data-t-amt]').value.trim();
       if (!tokenId && !amtStr) continue;
-      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId is required.` };
-      if (!/^\d+$/.test(amtStr)) return { error: `Recipient ${i + 1}, token ${j + 1}: amount must be a positive integer.` };
-      const amount = BigInt(amtStr);
+      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: select a token or paste a token id.` };
+      if (!/^[0-9a-fA-F]{64}$/.test(tokenId)) return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId must be a 64-char hex id.` };
+      const decimals = getDecimals(tokenId);
+      let amount;
+      try {
+        amount = parseTokenAmount(amtStr, decimals);
+      } catch (e) {
+        return { error: `Recipient ${i + 1}, token ${j + 1}: ${e.message}.` };
+      }
       if (amount <= 0n) return { error: `Recipient ${i + 1}, token ${j + 1}: amount must be greater than 0.` };
       if (amount > MAX_SAFE) return { error: `Recipient ${i + 1}, token ${j + 1}: amount is too large to submit safely.` };
+      tokenTotals.set(tokenId, (tokenTotals.get(tokenId) || 0n) + amount);
       assets.push({ tokenId, amount: Number(amount) });
     }
     requests.push({ address, value: Number(value), assets });
+  }
+  // Best-effort over-balance check against the last-known wallet snapshot —
+  // a UX nicety, not a security boundary (the server has the true balance).
+  for (const [tokenId, total] of tokenTotals) {
+    const owned = myAssets.find((a) => a.tokenId === tokenId);
+    if (owned && Number.isSafeInteger(owned.amount) && total > BigInt(owned.amount)) {
+      const d = getDecimals(tokenId);
+      const label = tokenName(tokenId) || truncMiddle(tokenId, 8, 6);
+      return {
+        error: `${label}: requesting ${d > 0 ? decimalize(Number(total), d) : total.toString()}, but the wallet holds only ${tokenAmt(tokenId, owned.amount)}.`,
+      };
+    }
   }
   return { requests, totalNano };
 }
@@ -728,7 +831,8 @@ function onReviewSend() {
 function showConfirm(requests, totalNano) {
   const lines = el('div', { class: 'kv' });
   for (const req of requests) {
-    const k = el('div', { class: 'k v--hash', text: truncMiddle(req.address, 10, 8) });
+    const addrText = el('span', { class: 'v--hash', text: truncMiddle(req.address, 10, 8) });
+    const k = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, addrText, copyBtn(req.address));
     k.title = req.address;
     const tokNote = req.assets.length ? ` + ${req.assets.length} token${req.assets.length > 1 ? 's' : ''}` : '';
     lines.append(k, el('div', { class: 'v', text: `${erg(req.value)} ERG${tokNote}` }));

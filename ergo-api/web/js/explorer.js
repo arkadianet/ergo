@@ -22,6 +22,7 @@ import { api, getJson } from './api-client.js';
 import { makeTable, copyBtn } from './table.js';
 import { erg, num, bytes, dur, truncMiddle } from './format.js';
 import { minerNode, pkToAddress, fetchOwnPk, poolLabel } from './miners.js';
+import { fetchTokenMeta, tokenName, tokenAmt, decimalize, amt, saneDecimals } from './token-meta.js';
 
 let root = null;
 let body = null;
@@ -111,104 +112,21 @@ function spentPill(spentTxId) {
 }
 
 // Token amounts arrive as bare JSON numbers (u64 on the wire) — anything past
-// 2^53 already lost precision at JSON.parse. Flag it instead of silently
-// rounding. (Emitting u64 as strings server-side, as difficulty already is,
-// is the real fix — tracked as a follow-up since it changes the API contract.)
-function amt(v) {
-  if (v == null) return '—';
-  return Number.isSafeInteger(v) ? num(v) : `≈${num(v)}`;
-}
-
-// ---- EIP-4 token metadata (name + decimals) ----
+// 2^53 already lost precision at JSON.parse. `amt` (from token-meta.js) flags
+// it instead of silently rounding. (Emitting u64 as strings server-side, as
+// difficulty already is, is the real fix — tracked as a follow-up since it
+// changes the API contract.)
 //
-// Asset lists on the wire carry only {tokenId, amount}; without the mint
-// box's EIP-4 registers a 2-decimal token renders "100" for 1.00. Cache
-// metadata per token id (session-lifetime — mint metadata is immutable) and
-// decimal-adjust amounts wherever assets render. Lookups need the
-// extra-index; on a syncing/absent index amounts stay raw.
-const tokenMeta = new Map(); // tokenId → {name, decimals}
-
-// Unicode bidi/zero-width formatting controls: stripped from DISPLAY names so
-// a hostile mint can't reorder or invisibly pad the label. The raw name stays
-// reachable on the token detail view.
-const BIDI_CONTROLS = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
-
-// EIP-4 decimals is attacker-controlled mint data decoded from a register —
-// a huge value would turn 10**d / padStart(d+1) into a RangeError or a giant
-// allocation at render time. u64 amounts have ≤ 20 digits, so clamp to
-// [0, 19]; anything outside renders raw.
-function saneDecimals(d) {
-  return Number.isInteger(d) && d > 0 && d <= 19 ? d : 0;
-}
-
-// Read-only POST (the batch token route). Deliberately NOT api-client's
-// postJson: that helper is for gated writes — it attaches the api_key and
-// reports 2xx as key-valid, which an ungated read would false-confirm.
-async function postReadJson(path, bodyVal) {
-  try {
-    const r = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(bodyVal),
-    });
-    return r.ok ? await r.json() : null;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchTokenMeta(ids) {
-  if (!indexerReady()) return;
-  const misses = [...new Set(ids)].filter((id) => id && !tokenMeta.has(id));
-  if (!misses.length) return;
-  // One batched lookup (POST /blockchain/tokens) instead of a per-token
-  // fan-out — a 100-asset tx costs one request. Only SUCCESSFUL lookups are
-  // cached, so a transient failure retries on the next view instead of
-  // pinning raw amounts for the whole session.
-  const got = await postReadJson('/blockchain/tokens', misses);
-  if (!Array.isArray(got)) return;
-  for (const t of got) {
-    if (t?.id) {
-      tokenMeta.set(t.id, {
-        name: (t.name || '').replace(BIDI_CONTROLS, ''),
-        decimals: saneDecimals(t.decimals),
-      });
-    }
-  }
-}
-
-// Integer-exact decimal shift (string math via BigInt) for safe integers;
-// unsafe magnitudes fall back to an approximate float shift, marked ≈.
-function decimalize(amount, d) {
-  if (amount == null) return '—';
-  if (!Number.isSafeInteger(amount)) return `≈${num(amount / 10 ** d)}`;
-  const neg = amount < 0;
-  const s = BigInt(Math.abs(amount))
-    .toString()
-    .padStart(d + 1, '0');
-  const whole = num(Number(s.slice(0, s.length - d)));
-  const frac = s.slice(s.length - d).replace(/0+$/, '');
-  return `${neg ? '-' : ''}${whole}${frac ? `.${frac}` : ''}`;
-}
-
-// Cache-driven amount display: decimal-adjusted when the token's EIP-4
-// decimals are known and non-zero, raw otherwise.
-function tokenAmt(tid, amount) {
-  const m = tokenMeta.get(tid);
-  return m && m.decimals > 0 ? decimalize(amount, m.decimals) : amt(amount);
-}
+// EIP-4 name/decimals resolution (fetchTokenMeta/decimalize/tokenAmt/
+// saneDecimals) lives in token-meta.js, shared with wallet.js. Lookups need
+// the extra-index; on a syncing/absent index amounts stay raw — callers pass
+// indexerReady() as fetchTokenMeta's `enabled` arg.
 
 // Link label for a token: its (attacker-controlled, textContent-only) EIP-4
 // name when known, else the truncated id. The full id always rides the
 // title attribute so a name that MIMICS an id can't hide the real one.
 function tokenLink(tid) {
-  const m = tokenMeta.get(tid);
-  // Code-point-safe truncation: a bare String.slice counts UTF-16 units and
-  // can bisect a surrogate pair (emoji / astral chars) into a lone "�".
-  // Array.from splits by code points, so pairs stay intact; ZWJ-composed
-  // clusters can't be split either — BIDI_CONTROLS already strips ZWJ.
-  const name = m?.name?.trim() ? Array.from(m.name.trim()).slice(0, 32).join('') : '';
-  const a = link(`token/${tid}`, name || truncMiddle(tid, 6, 6));
+  const a = link(`token/${tid}`, tokenName(tid) || truncMiddle(tid, 6, 6));
   a.title = tid;
   return a;
 }
@@ -681,7 +599,7 @@ async function renderTx(id, mySeq) {
   const ioTokenIds = [...(io.inputs || []), ...(io.outputs || [])].flatMap((b) =>
     (b.assets || b.tokens || []).map((t) => t.tokenId || t.token_id),
   );
-  await fetchTokenMeta(ioTokenIds);
+  await fetchTokenMeta(ioTokenIds, indexerReady());
   if (mySeq !== seq) return;
   const inputs = io.inputs || [];
   const outputs = io.outputs || [];
@@ -711,7 +629,7 @@ async function renderBox(id, mySeq) {
   const b = await getJson(`/blockchain/box/byId/${id}`);
   if (mySeq !== seq) return;
   if (!b) return notFoundGated('box', mySeq);
-  await fetchTokenMeta((b.assets || []).map((a) => a.tokenId));
+  await fetchTokenMeta((b.assets || []).map((a) => a.tokenId), indexerReady());
   if (mySeq !== seq) return;
   body.replaceChildren();
 
@@ -764,7 +682,7 @@ async function renderAddress(addr, mySeq) {
   const bal = await getJson(`/blockchain/balanceForAddress/${encodeURIComponent(addr)}`);
   if (mySeq !== seq) return;
   if (!bal) return notFoundGated('address', mySeq, 'invalid for this network');
-  await fetchTokenMeta((bal.confirmed?.tokens || []).map((t) => t.tokenId));
+  await fetchTokenMeta((bal.confirmed?.tokens || []).map((t) => t.tokenId), indexerReady());
   if (mySeq !== seq) return;
   body.replaceChildren();
 
