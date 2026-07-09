@@ -301,6 +301,9 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // BEFORE `enable_persist_pipeline` below — the pipeline worker
     // captures the value at spawn time.
     store.set_blocks_to_keep(config.blocks_to_keep);
+    // Undo-retention window (`[node] keep_versions`, Scala keepVersions
+    // parity). Same pre-pipeline ordering requirement as blocks_to_keep.
+    store.set_rollback_window(config.keep_versions);
     // NiPoPoW prover reads the network's difficulty schedule (epoch
     // lengths + use_last_epochs) — override the mainnet open-default
     // so a testnet store proves with testnet epochs.

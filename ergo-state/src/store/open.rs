@@ -298,6 +298,7 @@ impl StateStore {
             // `[node] blocks_to_keep`. Tests opt in by calling the
             // setter explicitly.
             blocks_to_keep: -1,
+            rollback_window: ROLLBACK_WINDOW,
         };
         store.backfill_header_chain_index_if_needed()?;
         store.reconcile_voted_params()?;

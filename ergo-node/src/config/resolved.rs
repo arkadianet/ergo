@@ -97,6 +97,11 @@ pub struct NodeConfig {
     /// at least `max(N, ROLLBACK_WINDOW)` blocks below tip. Mirrors
     /// Scala `ergo.node.blocksToKeep`.
     pub blocks_to_keep: i32,
+    /// `[node] keep_versions` — undo-retention window (max serviceable
+    /// reorg depth), Scala `keepVersions` parity. Always >= 1 (load
+    /// rejects 0). Wired into BOTH the state store and the indexer store
+    /// at boot so the indexer can follow any reorg the state performs.
+    pub keep_versions: u32,
     /// State backend kind. Default `Utxo`. `Digest` selects the
     /// AD-proof-driven backend (Modes 5/6 of the roadmap).
     pub state_type: StateType,

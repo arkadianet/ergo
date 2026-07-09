@@ -58,6 +58,11 @@ pub struct IndexerStore {
     db: Arc<Database>,
     #[allow(dead_code)] // read by future debug/log helpers
     path: PathBuf,
+    /// Undo-retention window (max serviceable rollback depth). Defaults to
+    /// [`ROLLBACK_WINDOW`] at `open`; node boot overrides it with the SAME
+    /// `[node] keep_versions` value wired into the state store, so the
+    /// indexer can always follow any reorg the state layer performs.
+    rollback_window: u64,
 }
 
 /// Mutually-consistent health read (see [`IndexerStore::health_snapshot`]):
@@ -122,6 +127,7 @@ impl IndexerStore {
                     Self {
                         db: Arc::new(db),
                         path: path.to_path_buf(),
+                        rollback_window: ROLLBACK_WINDOW,
                     },
                     OpenOutcome::Resumed,
                 ))
@@ -162,7 +168,22 @@ impl IndexerStore {
         Ok(Self {
             db: Arc::new(db),
             path: path.to_path_buf(),
+            rollback_window: ROLLBACK_WINDOW,
         })
+    }
+
+    /// Override the undo-retention window captured at `open`
+    /// ([`ROLLBACK_WINDOW`]). Node boot wires this with the same
+    /// `[node] keep_versions` value as the state store; keeping the two
+    /// windows equal guarantees the indexer can follow any reorg the
+    /// state layer performs. Prospective only.
+    pub fn set_rollback_window(&mut self, window: u64) {
+        self.rollback_window = window;
+    }
+
+    /// The undo-retention window (max serviceable rollback depth).
+    pub fn rollback_window(&self) -> u64 {
+        self.rollback_window
     }
 
     /// Cumulative count of redb cache evictions for the indexer DB.
@@ -611,7 +632,7 @@ impl IndexerStore {
         let write_txn = self.begin_write()?;
         meta::write_meta(&write_txn, meta)?;
         undo::write_undo(&write_txn, undo_height, undo)?;
-        undo::prune_below_window(&write_txn, undo_height)?;
+        undo::prune_below_window(&write_txn, undo_height, self.rollback_window)?;
         write_txn.commit()?;
         Ok(())
     }

@@ -175,6 +175,22 @@ impl NodeConfig {
                  use -1 (archive) or a non-negative N (pruned suffix length)",
             ));
         }
+        // [node] keep_versions — undo-retention window / max serviceable
+        // reorg depth (mirrors Scala `ergo.node.keepVersions`). Default 200.
+        // 0 would mean "a store that can never roll back" (Scala allows it;
+        // we refuse — every reorg would wedge the node). Prospective only:
+        // raising it does not resurrect undo entries a previous run pruned.
+        let keep_versions = toml_cfg
+            .node
+            .keep_versions
+            .unwrap_or(ergo_state::store::ROLLBACK_WINDOW);
+        if keep_versions == 0 {
+            return Err("[node] keep_versions = 0 is invalid: the state store \
+                 could never roll back, so ANY reorg would permanently wedge \
+                 the node. Use >= 1 (default 200, matching the Scala \
+                 reference node's keepVersions)."
+                .to_string());
+        }
         // [node] state_type — default utxo. Parsed before R1 + activation
         // gates so both can reference the resolved enum.
         let state_type = match toml_cfg.node.state_type.as_deref() {
@@ -362,16 +378,14 @@ impl NodeConfig {
         // Mode 6 (`blocks_to_keep = 0`) is exempt — it's headers-only
         // and never applies full blocks.
         if blocks_to_keep > 0 {
-            let floor =
-                (ergo_state::store::ROLLBACK_WINDOW + ergo_state::store::SAFETY_MARGIN) as i32;
+            let floor = (keep_versions + ergo_state::store::SAFETY_MARGIN) as i32;
             if blocks_to_keep < floor {
                 return Err(format!(
                     "[node] blocks_to_keep = {blocks_to_keep} is below the rollback-window \
-                     floor ({floor} = ROLLBACK_WINDOW {} + SAFETY_MARGIN {}). \
+                     floor ({floor} = keep_versions {keep_versions} + SAFETY_MARGIN {}). \
                      Pruning must retain at least the reorg-resolver's worst-case rollback \
                      depth so a reorg never needs evicted section bytes; the wallet replay \
                      path would otherwise fail with RollbackBelowPruningSentinel.",
-                    ergo_state::store::ROLLBACK_WINDOW,
                     ergo_state::store::SAFETY_MARGIN,
                 ));
             }
@@ -664,6 +678,10 @@ impl NodeConfig {
             enabled: ti.enabled.unwrap_or(idx_def.enabled),
             poll_idle_ms: ti.poll_idle_ms.unwrap_or(idx_def.poll_idle_ms),
             db_filename: ti.db_filename.clone().unwrap_or(idx_def.db_filename),
+            // Mirrors `[node] keep_versions`: the indexer must be able to
+            // follow any reorg the state store performs, so the two undo
+            // windows stay equal by construction (no separate knob).
+            rollback_window: keep_versions as u64,
         };
         if indexer_config.poll_idle_ms == 0 {
             return Err("[indexer] poll_idle_ms must be >= 1".into());
@@ -823,6 +841,7 @@ impl NodeConfig {
             agent_name,
             node_name,
             blocks_to_keep,
+            keep_versions,
             state_type,
             verify_transactions,
             utxo_bootstrap,

@@ -59,6 +59,11 @@ pub struct IdentityInputs {
     pub state_type: crate::config::StateType,
     pub verify_transactions: bool,
     pub blocks_to_keep: i32,
+    /// Configured undo-retention window (`[node] keep_versions`); the
+    /// pruning floor below is keyed to IT, not the compile-time default,
+    /// so raising or lowering the window can't strand a loader-accepted
+    /// `blocks_to_keep` at this defensive re-check.
+    pub keep_versions: u32,
     pub utxo_bootstrap: bool,
     pub nipopow_bootstrap: bool,
     pub mining_enabled: bool,
@@ -73,6 +78,7 @@ impl IdentityInputs {
             state_type: config.state_type,
             verify_transactions: config.verify_transactions,
             blocks_to_keep: config.blocks_to_keep,
+            keep_versions: config.keep_versions,
             utxo_bootstrap: config.utxo_bootstrap,
             nipopow_bootstrap: config.nipopow_bootstrap,
             mining_enabled: config.mining_config.enabled,
@@ -330,8 +336,7 @@ pub fn classify_node_mode(inputs: &IdentityInputs) -> NodeMode {
             // reorg into the pruned region would need section
             // bytes the wallet replay path can't reconstruct.
             // Mirror that rejection here.
-            let floor =
-                (ergo_state::store::ROLLBACK_WINDOW + ergo_state::store::SAFETY_MARGIN) as i32;
+            let floor = (inputs.keep_versions + ergo_state::store::SAFETY_MARGIN) as i32;
             if n < floor {
                 return NodeMode::Invalid {
                     reason: "blocks_to_keep is below the rollback-window floor",
@@ -643,24 +648,24 @@ pub(crate) fn validate_runtime_mode_support(config: &NodeConfig) -> Result<(), N
     if config.blocks_to_keep < -1 {
         return Err(format!(
             "NodeConfig.blocks_to_keep = {} is invalid. Valid values: -1 (archive), \
-             0 (canonical Mode 6 only), or >= ROLLBACK_WINDOW + SAFETY_MARGIN \
+             0 (canonical Mode 6 only), or >= keep_versions + SAFETY_MARGIN \
              ({}). Negative sentinels other than -1 are wire-only states, not \
              config values.",
             config.blocks_to_keep,
-            (ergo_state::store::ROLLBACK_WINDOW + ergo_state::store::SAFETY_MARGIN) as i32,
+            (config.keep_versions + ergo_state::store::SAFETY_MARGIN) as i32,
         )
         .into());
     }
     if config.blocks_to_keep > 0 {
-        let floor = (ergo_state::store::ROLLBACK_WINDOW + ergo_state::store::SAFETY_MARGIN) as i32;
+        let floor = (config.keep_versions + ergo_state::store::SAFETY_MARGIN) as i32;
         if config.blocks_to_keep < floor {
             return Err(format!(
                 "NodeConfig.blocks_to_keep = {} is below the rollback-window floor \
-                 ({} = ROLLBACK_WINDOW {} + SAFETY_MARGIN {}). Pruning must retain at \
+                 ({} = keep_versions {} + SAFETY_MARGIN {}). Pruning must retain at \
                  least the reorg-resolver's worst-case rollback depth.",
                 config.blocks_to_keep,
                 floor,
-                ergo_state::store::ROLLBACK_WINDOW,
+                config.keep_versions,
                 ergo_state::store::SAFETY_MARGIN,
             )
             .into());

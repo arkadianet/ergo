@@ -919,6 +919,76 @@ fn blocks_to_keep_above_rollback_floor_accepted() {
     assert_eq!(cfg.blocks_to_keep, 1024);
 }
 
+// ----- keep_versions (rollback window, Scala keepVersions parity) -----
+
+#[test]
+fn keep_versions_defaults_to_rollback_window() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.keep_versions, ergo_state::store::ROLLBACK_WINDOW);
+    assert_eq!(
+        cfg.indexer_config.rollback_window,
+        ergo_state::store::ROLLBACK_WINDOW as u64,
+        "indexer window mirrors keep_versions by construction",
+    );
+}
+
+#[test]
+fn keep_versions_custom_value_threads_to_both_windows() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node]\nkeep_versions = 2000\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.keep_versions, 2000);
+    assert_eq!(cfg.indexer_config.rollback_window, 2000);
+}
+
+#[test]
+fn keep_versions_zero_rejected() {
+    // Scala allows keepVersions = 0 (a store that can never roll back);
+    // we refuse — any reorg would permanently wedge the node.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node]\nkeep_versions = 0\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("keep_versions = 0 must reject");
+    assert!(err.contains("keep_versions = 0"), "error: {err}");
+}
+
+#[test]
+fn keep_versions_raised_raises_blocks_to_keep_floor() {
+    // The pruning floor is keyed to the CONFIGURED window, not the
+    // compile-time default: blocks_to_keep = 1024 passes the default
+    // floor (200 + margin) but must reject under keep_versions = 2000.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node]\nblocks_to_keep = 1024\nkeep_versions = 2000\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("floor must track raised window");
+    assert!(err.contains("rollback-window floor"), "error: {err}");
+}
+
+#[test]
+fn keep_versions_lowered_lowers_blocks_to_keep_floor() {
+    // Symmetric guard against a boot-brick: a LOWERED window lowers the
+    // floor, so a blocks_to_keep below the default floor loads (and the
+    // downstream identity re-check must agree — it reads the same
+    // configured value, not the const).
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node]\nblocks_to_keep = 100\nkeep_versions = 50\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("lowered window must lower the floor");
+    assert_eq!(cfg.keep_versions, 50);
+    assert_eq!(cfg.blocks_to_keep, 100);
+}
+
 #[test]
 fn blocks_to_keep_minus_two_rejected() {
     // The wire sentinel `-2` (UTXOSetBootstrapped) is reserved for

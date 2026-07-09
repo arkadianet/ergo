@@ -126,20 +126,23 @@ pub(crate) fn read_undo(
 }
 
 /// Retention rule: prune `INDEXER_UNDO[k]` for all `k <
-/// current_height - ROLLBACK_WINDOW`. Strictly less than — pruning at
+/// current_height - window`. Strictly less than — pruning at
 /// `≤` would drop the deepest supported rollback target.
 ///
-/// `ROLLBACK_WINDOW = 200` mirrors `ergo-state/src/store.rs:403`.
+/// The default `ROLLBACK_WINDOW = 200` mirrors the state store's
+/// `ergo_state::store::ROLLBACK_WINDOW`; callers pass the store's
+/// configured window ([`crate::IndexerStore::set_rollback_window`]).
 pub const ROLLBACK_WINDOW: u64 = 200;
 
 pub(crate) fn prune_below_window(
     write_txn: &WriteTransaction,
     current_height: u64,
+    window: u64,
 ) -> Result<(), IndexerError> {
-    if current_height <= ROLLBACK_WINDOW {
+    if current_height <= window {
         return Ok(());
     }
-    let cutoff = current_height - ROLLBACK_WINDOW;
+    let cutoff = current_height - window;
     let mut table = write_txn.open_table(INDEXER_UNDO)?;
     table.retain(|k, _| k >= cutoff)?;
     Ok(())

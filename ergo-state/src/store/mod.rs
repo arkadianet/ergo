@@ -604,7 +604,12 @@ pub(crate) struct ScanMatchRecord {
 /// same write transaction that writes undo_log, chain_index, and state_meta.
 ///
 /// On crash recovery: read state_meta → load tree from avl_nodes → resume.
-/// Rollback window: undo entries older than this are pruned on forward apply.
+/// DEFAULT rollback window: undo entries older than this are pruned on
+/// forward apply, so it caps the deepest reorg the UTXO store can serve.
+/// Mirrors the Scala reference node's `keepVersions` default (200).
+/// Operator-configurable via `[node] keep_versions` -> the per-store
+/// [`StateStore::set_rollback_window`]; this const is the open-time default
+/// and the value every test that doesn't override sees.
 pub const ROLLBACK_WINDOW: u32 = 200;
 
 /// Point-in-time read-only instrumentation gauges for a [`StateStore`].
@@ -708,6 +713,13 @@ pub struct StateStore {
     /// write_txn. Boot wires this from `[node] blocks_to_keep` via
     /// `set_blocks_to_keep`; tests use the setter directly.
     blocks_to_keep: i32,
+    /// Undo-retention window (max serviceable reorg depth). Defaults to
+    /// [`ROLLBACK_WINDOW`] at `open`; boot overrides from
+    /// `[node] keep_versions` via [`Self::set_rollback_window`] (same
+    /// wiring shape as `set_blocks_to_keep`). Read by the forward-apply
+    /// prune seams, the `rollback_to` depth guard, and the tx-diff LCA
+    /// walk caps.
+    rollback_window: u32,
 }
 
 impl StateStore {
@@ -1736,6 +1748,21 @@ impl StateStore {
     /// reorg-resolver can never need a pruned block.
     pub fn set_blocks_to_keep(&mut self, blocks_to_keep: i32) {
         self.blocks_to_keep = blocks_to_keep;
+    }
+
+    /// Override the undo-retention window captured at `open`
+    /// ([`ROLLBACK_WINDOW`]). Boot wires this from `[node] keep_versions`
+    /// BEFORE the persist pipeline spawns, mirroring `set_blocks_to_keep`;
+    /// config load rejects `0` (a store that can never roll back), so the
+    /// value here is always >= 1. Prospective only: undo entries already
+    /// pruned by a smaller previous window stay gone.
+    pub fn set_rollback_window(&mut self, window: u32) {
+        self.rollback_window = window;
+    }
+
+    /// The undo-retention window (max serviceable reorg depth).
+    pub fn rollback_window(&self) -> u32 {
+        self.rollback_window
     }
 
     /// Override the difficulty schedule captured at `open` (mainnet
@@ -4555,8 +4582,8 @@ impl StateStore {
             true
         };
 
-        let prune_below = if height > ROLLBACK_WINDOW {
-            Some(height - ROLLBACK_WINDOW)
+        let prune_below = if height > self.rollback_window {
+            Some(height - self.rollback_window)
         } else {
             None
         };
@@ -4708,8 +4735,8 @@ impl StateStore {
 
         let t0 = std::time::Instant::now();
         let mut pruned = 0u32;
-        if height > ROLLBACK_WINDOW {
-            let prune_below = height - ROLLBACK_WINDOW;
+        if height > self.rollback_window {
+            let prune_below = height - self.rollback_window;
             let prune_upper = (prune_below + 1).to_be_bytes();
             let mut undo_table = write_txn.open_table(UNDO_LOG)?;
             let mut to_delete: Vec<Vec<u8>> = Vec::new();

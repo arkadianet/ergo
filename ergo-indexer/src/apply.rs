@@ -605,7 +605,7 @@ pub fn apply_block_with_scratch(
         meta_io::set_secondary_repair_pending(&write_txn)?;
     }
     undo_io::write_undo(&write_txn, block_height_u64, &undo)?;
-    undo_io::prune_below_window(&write_txn, block_height_u64)?;
+    undo_io::prune_below_window(&write_txn, block_height_u64, store.rollback_window())?;
 
     write_txn.commit()?;
 
