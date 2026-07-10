@@ -31,6 +31,9 @@ const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting'
 const renderers = { overview, explorer, peers, mempool, mining, voting, wallet };
 const mounted = new Set();
 let current = null;
+const INFO_REFRESH_MS = 30_000;
+let cachedInfo = null;
+let lastInfoAt = 0;
 // Holds the section name whose onSlow() is in flight, so a 4 s tick can't
 // overlap a still-running slow fetch for the same section; a navigation to a
 // different section is not blocked (the names differ).
@@ -55,12 +58,19 @@ function tickClock() {
 
 async function fast() {
   if (document.visibilityState === 'hidden') return;
-  const [status, info] = await Promise.all([api.status(), api.info()]);
+  const now = Date.now();
+  const needInfo = !cachedInfo || now - lastInfoAt >= INFO_REFRESH_MS;
+  const [status, info] = await Promise.all([api.status(), needInfo ? api.info() : Promise.resolve(cachedInfo)]);
+  if (needInfo) {
+    lastInfoAt = now;
+    if (info) cachedInfo = info;
+  }
   setConn(!!status);
   const net = document.getElementById('side-net');
-  if (net && info) net.textContent = `${info.network ?? ''} · v${info.version ?? ''}`;
+  const infoForRender = cachedInfo || info;
+  if (net && infoForRender) net.textContent = `${infoForRender.network ?? ''} · v${infoForRender.version ?? ''}`;
   const r = current && renderers[current];
-  if (r && r.onFast) r.onFast({ status, info });
+  if (r && r.onFast) r.onFast({ status, info: infoForRender });
 }
 
 async function slow() {

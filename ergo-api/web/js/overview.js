@@ -9,11 +9,17 @@ import { subscribe, promptAuthorize } from './auth.js';
 import { minerNode, fetchOwnPk, ownPkHex } from './miners.js';
 
 const HISTORY_LEN = 60;
+const HTTP_TIP_FALLBACK_MS = 30_000;
+const WS_STALE_MS = 35_000;
 const hist = { blockTimes: [], mempool: [], height: [], difficulty: [] };
 const state = {
   status: null,
   info: null,
   tip: null,
+  wsHeight: null,
+  wsLastEventAt: 0,
+  httpHeight: null,
+  httpHeightAt: 0,
   identity: null,
   peerDist: null,
   lastBlockMs: null,
@@ -21,6 +27,13 @@ const state = {
 };
 let root = null;
 let viewMode = localStorage.getItem('ergo.ovview') || 'cockpit';
+const blocksWs = {
+  socket: null,
+  retryTimer: null,
+  retryMs: 1000,
+  connected: false,
+  stopped: true,
+};
 
 // ---- domain formatters ----
 function parseDiff(s) {
@@ -62,6 +75,95 @@ const KPI = [
 function setText(sel, t) {
   const e = root && root.querySelector(sel);
   if (e) e.textContent = t;
+}
+
+function wsUrl() {
+  const u = new URL('/api/v1/ws', window.location.href);
+  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+  return u;
+}
+
+function wsHeightFresh(now = Date.now()) {
+  return state.wsHeight != null && (blocksWs.connected || now - state.wsLastEventAt < WS_STALE_MS);
+}
+
+function noteHttpHeight(status) {
+  const h = status?.best_full_block_height;
+  if (h == null) return;
+  const now = Date.now();
+  if (state.httpHeight == null || now - state.httpHeightAt >= HTTP_TIP_FALLBACK_MS) {
+    state.httpHeight = h;
+    state.httpHeightAt = now;
+  }
+}
+
+function displayHeight() {
+  return wsHeightFresh() ? state.wsHeight : state.httpHeight ?? state.status?.best_full_block_height ?? null;
+}
+
+function scheduleBlocksReconnect() {
+  if (blocksWs.stopped || blocksWs.retryTimer || !root) return;
+  const delay = blocksWs.retryMs;
+  blocksWs.retryTimer = setTimeout(() => {
+    blocksWs.retryTimer = null;
+    connectBlocksWs();
+  }, delay);
+  blocksWs.retryMs = Math.min(30_000, blocksWs.retryMs * 2);
+}
+
+function handleBlocksFrame(frame) {
+  if (frame.type !== 'event' || frame.channel !== 'blocks') return;
+  if (frame.event !== 'block_applied' && frame.event !== 'reorg') return;
+  const h = frame.height ?? frame.data?.height;
+  if (h == null) return;
+  state.wsHeight = h;
+  state.wsLastEventAt = Date.now();
+  push(hist.height, h);
+  onFast({ status: state.status, info: state.info });
+}
+
+function connectBlocksWs() {
+  if (blocksWs.stopped || blocksWs.socket || typeof WebSocket === 'undefined') return;
+  const ws = new WebSocket(wsUrl());
+  blocksWs.socket = ws;
+  ws.addEventListener('open', () => {
+    blocksWs.connected = true;
+    blocksWs.retryMs = 1000;
+    ws.send(JSON.stringify({ op: 'subscribe', id: 'overview-blocks', channels: ['blocks'] }));
+  });
+  ws.addEventListener('message', (ev) => {
+    try {
+      handleBlocksFrame(JSON.parse(ev.data));
+    } catch {
+      /* ignore malformed frames */
+    }
+  });
+  ws.addEventListener('close', () => {
+    if (blocksWs.socket === ws) blocksWs.socket = null;
+    blocksWs.connected = false;
+    scheduleBlocksReconnect();
+  });
+  ws.addEventListener('error', () => {
+    ws.close();
+  });
+}
+
+function startBlocksWs() {
+  if (blocksWs.socket || blocksWs.retryTimer) return;
+  blocksWs.stopped = false;
+  connectBlocksWs();
+}
+
+function stopBlocksWs() {
+  blocksWs.stopped = true;
+  blocksWs.connected = false;
+  if (blocksWs.retryTimer) {
+    clearTimeout(blocksWs.retryTimer);
+    blocksWs.retryTimer = null;
+  }
+  const ws = blocksWs.socket;
+  blocksWs.socket = null;
+  if (ws) ws.close();
 }
 
 export function mount(el) {
@@ -126,6 +228,16 @@ export function mount(el) {
   // the cached copy first so a re-entry doesn't flash empty.
   if (state.identity) renderIdentity();
   else fetchIdentity();
+  startBlocksWs();
+}
+
+export function onShow() {
+  startBlocksWs();
+  if (state.status) onFast({ status: state.status, info: state.info });
+}
+
+export function onHide() {
+  stopBlocksWs();
 }
 
 // ---- node identity strip (static, fetched once on mount) ----
@@ -189,8 +301,10 @@ export function onFast({ status, info }) {
   const tip = state.tip;
   if (!root) return;
 
-  const blkH = s?.best_full_block_height ?? null;
-  const hdrH = s?.best_header_height ?? null;
+  noteHttpHeight(s);
+  const blkH = displayHeight();
+  const rawHdrH = s?.best_header_height ?? null;
+  const hdrH = rawHdrH != null || blkH != null ? Math.max(rawHdrH ?? blkH, blkH ?? rawHdrH) : null;
   setText('[data-k="height"]', num(blkH));
   setText(
     '[data-s="height"]',
