@@ -991,8 +991,15 @@ async function doSend(requests) {
     setSendEnabled(true);
     showSendMsg('ok', `Submitted. txId: ${txId || ''}`);
   } else {
+    // Prefer `detail` (e.g. "transaction rejected: output N: box size …") over the
+    // opaque `reason` code (`bad_request`) — same pattern as retrieve-rewards.
     const reason = res.reason || `send failed (${res.status})`;
-    showSendMsg('err', reason === 'wallet_locked' ? 'Wallet is locked — unlock it above and try again. Your draft is preserved.' : `Send failed: ${reason}`);
+    const detail = res.data && res.data.detail;
+    if (reason === 'wallet_locked') {
+      showSendMsg('err', 'Wallet is locked — unlock it above and try again. Your draft is preserved.');
+    } else {
+      showSendMsg('err', `Send failed: ${detail || reason}`);
+    }
     if (btn) btn.disabled = false;
   }
 }
