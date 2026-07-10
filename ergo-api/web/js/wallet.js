@@ -38,6 +38,10 @@ let unlockRendered = false;
 // token picker can offer "what you actually have" instead of a blank hex
 // field. Refreshed every refreshBalances() poll tick.
 let myAssets = [];
+// True after the latest refreshBalances() has awaited fetchTokenMeta for
+// myAssets. Available panels must not list tokens until this is true so
+// names/decimals render instead of hex/raw.
+let tokenMetaReady = false;
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const EXT_WARNING =
@@ -200,6 +204,7 @@ function scrubSecrets() {
   mnemonicGateOpen = false;
   onboardRendered = sendRendered = keysRendered = unlockRendered = false;
   myAssets = [];
+  tokenMetaReady = false;
   // Drop memoised panes so a re-entry rebuilds them fresh (no lingering
   // password / mnemonic / send draft in a detached-but-retained input).
   for (const sel of ['[data-onboard-body]', '[data-send-body]', '[data-keys-body]']) {
@@ -327,6 +332,9 @@ function lockedNotes() {
   q('[data-balances-right]').textContent = '';
   q('[data-addresses-right]').textContent = '';
   q('[data-keys-panel]').hidden = true;
+  myAssets = [];
+  tokenMetaReady = false;
+  syncTokenPickers();
 }
 
 async function refreshBalances() {
@@ -337,6 +345,9 @@ async function refreshBalances() {
   if (!res.ok) {
     right.textContent = '';
     body.replaceChildren(el('div', { class: 'muted', text: res.reason || `balances unavailable (${res.status})` }));
+    myAssets = [];
+    tokenMetaReady = false;
+    syncTokenPickers();
     return;
   }
   const b = res.data;
@@ -344,9 +355,11 @@ async function refreshBalances() {
   body.replaceChildren(kvRows([['confirmed', `${erg(b.balance)} ERG`, 'v--green']]));
   const assets = b.assets || [];
   myAssets = assets;
+  tokenMetaReady = false;
   // Best-effort name/decimals resolution (needs the extra index; a syncing
   // or absent index just leaves ids/raw amounts, same as the explorer).
   await fetchTokenMeta(assets.map((a) => a.tokenId));
+  tokenMetaReady = true;
   if (assets.length) {
     const tokKv = el('div', { class: 'kv' });
     for (const a of assets) {
@@ -360,7 +373,7 @@ async function refreshBalances() {
   } else {
     body.append(el('div', { class: 'muted', text: 'no tokens' }));
   }
-  syncTokenSelects();
+  syncTokenPickers();
   body.append(
     el(
       'div',
@@ -671,84 +684,170 @@ function buildSendForm() {
 }
 
 function recipientRow() {
-  const addr = el('input', { class: 'input w-r-addr', 'data-r-addr': true, placeholder: 'recipient address (9…)', autocomplete: 'off', spellcheck: 'false' });
-  const value = el('input', { class: 'input w-r-value', 'data-r-value': true, placeholder: 'amount (ERG)', inputmode: 'decimal', autocomplete: 'off' });
-  const tokens = el('div', { class: 'w-tokens' });
-  const addTok = el('button', { class: 'btn btn--sm', type: 'button', text: '+ token', onclick: () => tokens.append(tokenRow()) });
-  const remove = el('button', { class: 'btn btn--sm', type: 'button', text: 'remove recipient', onclick: (ev) => ev.target.closest('[data-recipient]').remove() });
+  const addr = el('input', {
+    class: 'input w-r-addr',
+    'data-r-addr': true,
+    placeholder: 'recipient address (9…)',
+    autocomplete: 'off',
+    spellcheck: 'false',
+  });
+  const value = el('input', {
+    class: 'input w-r-value',
+    'data-r-value': true,
+    placeholder: 'amount (ERG)',
+    inputmode: 'decimal',
+    autocomplete: 'off',
+  });
+  const sending = el('div', { class: 'w-tokens', 'data-tokens-sending': true });
+  const available = el('div', { class: 'w-token-avail', 'data-tokens-available': true, hidden: true });
+  const addTok = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    'data-add-token': true,
+    text: 'Add token',
+    onclick: (ev) => {
+      const recipient = ev.target.closest('[data-recipient]');
+      const panel = recipient.querySelector('[data-tokens-available]');
+      const open = panel.hidden;
+      panel.hidden = !open;
+      if (open) rebuildAvailablePanel(recipient);
+    },
+  });
+  const remove = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    text: 'remove recipient',
+    onclick: (ev) => ev.target.closest('[data-recipient]').remove(),
+  });
   return el(
     'div',
     { class: 'w-recipient', 'data-recipient': true },
     el('div', { class: 'w-row' }, addr, remove),
     el('div', { class: 'w-row' }, value),
-    tokens,
+    sending,
     el('div', { class: 'w-row' }, addTok),
+    available,
   );
 }
 
-// Sentinel select value for "I want to send a token not in my own balance
-// list" (a fresh receive the balances poll hasn't caught up to yet, etc.) —
-// reveals the plain hex fallback input instead of forcing a paste-only flow
-// on everyone.
-const CUSTOM_TOKEN = '__custom__';
-
-function tokenOptionLabel(a) {
-  const name = tokenName(a.tokenId) || truncMiddle(a.tokenId, 8, 6);
-  return `${name} · avail ${tokenAmt(a.tokenId, a.amount)}`;
+function tokenDisplayName(tokenId) {
+  return tokenName(tokenId) || truncMiddle(tokenId, 8, 6);
 }
 
-// Rebuild a token <select>'s options from the current wallet balance
-// snapshot (myAssets), preserving the selection if it's still valid. Called
-// once per tokenRow() and again every refreshBalances() tick so a send form
-// left open across a poll picks up newly-seen tokens/updated "avail" labels.
-function rebuildTokenSelect(select) {
-  const prev = select.value;
-  select.replaceChildren(
-    el('option', { value: '', text: myAssets.length ? 'select a token…' : 'no tokens found — paste an id below' }),
+function sendingLabel(tokenId) {
+  const name = tokenName(tokenId);
+  const shortId = truncMiddle(tokenId, 8, 6);
+  return name ? `${name} · ${shortId}` : shortId;
+}
+
+function availableLabel(a) {
+  return `${tokenDisplayName(a.tokenId)} · avail ${tokenAmt(a.tokenId, a.amount)}`;
+}
+
+function allocatedIds(recipientEl) {
+  return new Set(
+    Array.from(recipientEl.querySelectorAll('[data-token][data-token-id]')).map((n) => n.getAttribute('data-token-id')),
   );
-  for (const a of myAssets) select.append(el('option', { value: a.tokenId, text: tokenOptionLabel(a) }));
-  select.append(el('option', { value: CUSTOM_TOKEN, text: 'Other (paste token id)…' }));
-  if (Array.from(select.options).some((o) => o.value === prev)) select.value = prev;
 }
 
-function syncTokenSelects() {
-  for (const select of root.querySelectorAll('[data-t-select]')) rebuildTokenSelect(select);
+function availableAssetsFor(recipientEl) {
+  const skip = allocatedIds(recipientEl);
+  return myAssets.filter((a) => a.tokenId && !skip.has(a.tokenId));
 }
 
-function fillMaxAmount(select, amtInput) {
-  if (select.value === '' || select.value === CUSTOM_TOKEN) return;
-  const a = myAssets.find((x) => x.tokenId === select.value);
-  if (!a) return;
-  amtInput.value = maxDecimalString(a.amount, getDecimals(a.tokenId));
-}
-
-function tokenRow() {
-  const select = el('select', { class: 'select w-t-id', 'data-t-select': true });
-  rebuildTokenSelect(select);
-  const customId = el('input', {
-    class: 'input w-t-id',
-    'data-t-id': true,
-    placeholder: 'tokenId (hex)',
-    autocomplete: 'off',
-    spellcheck: 'false',
-    hidden: true,
-  });
-  const amt = el('input', { class: 'input w-t-amt', 'data-t-amt': true, placeholder: 'amount', inputmode: 'decimal', autocomplete: 'off' });
-  const maxBtn = el('button', { class: 'btn btn--sm', type: 'button', text: 'max', title: 'Fill the full available balance', onclick: () => fillMaxAmount(select, amt) });
-  const rm = el('button', { class: 'btn btn--sm', type: 'button', text: '×', onclick: (ev) => ev.target.closest('[data-token]').remove() });
-  select.addEventListener('change', () => {
-    const custom = select.value === CUSTOM_TOKEN;
-    customId.hidden = !custom;
-    if (custom) customId.focus();
-  });
-  // An empty wallet has nothing to pick from — skip straight to the plain
-  // hex field instead of making the user click through a dropdown that only
-  // offers "Other".
-  if (!myAssets.length) {
-    select.value = CUSTOM_TOKEN;
-    customId.hidden = false;
+function rebuildAvailablePanel(recipientEl) {
+  const panel = recipientEl.querySelector('[data-tokens-available]');
+  if (!panel || panel.hidden) return;
+  panel.replaceChildren();
+  if (!tokenMetaReady) {
+    panel.append(el('div', { class: 'muted', text: 'Loading token names…' }));
+    return;
   }
-  return el('div', { class: 'w-token w-row', 'data-token': true }, select, customId, amt, maxBtn, rm);
+  if (!myAssets.length) {
+    panel.append(el('div', { class: 'muted', text: 'No tokens in this wallet' }));
+    return;
+  }
+  const list = availableAssetsFor(recipientEl);
+  if (!list.length) {
+    panel.append(el('div', { class: 'muted', text: 'All tokens already added to this recipient' }));
+    return;
+  }
+  for (const a of list) {
+    panel.append(
+      el('button', {
+        class: 'btn btn--sm w-token-avail__row',
+        type: 'button',
+        'data-avail-token': a.tokenId,
+        text: availableLabel(a),
+        title: a.tokenId,
+        onclick: () => allocateToken(recipientEl, a.tokenId),
+      }),
+    );
+  }
+}
+
+function allocateToken(recipientEl, tokenId) {
+  if (allocatedIds(recipientEl).has(tokenId)) return;
+  recipientEl.querySelector('[data-tokens-sending]').append(allocatedTokenRow(tokenId));
+  const panel = recipientEl.querySelector('[data-tokens-available]');
+  panel.hidden = true;
+}
+
+function fillMaxForToken(tokenId, amtInput) {
+  const a = myAssets.find((x) => x.tokenId === tokenId);
+  if (!a) return;
+  amtInput.value = maxDecimalString(a.amount, getDecimals(tokenId));
+}
+
+function markStaleIfNeeded(row, tokenId) {
+  const stale = row.querySelector('.w-token__stale');
+  const gone = !myAssets.some((a) => a.tokenId === tokenId);
+  if (stale) stale.hidden = !gone;
+}
+
+function allocatedTokenRow(tokenId) {
+  const label = el('span', { class: 'w-token__label', text: sendingLabel(tokenId), title: tokenId });
+  const stale = el('span', { class: 'muted w-token__stale', hidden: true, text: 'no longer in wallet balance' });
+  const amt = el('input', {
+    class: 'input w-t-amt',
+    'data-t-amt': true,
+    placeholder: 'amount',
+    inputmode: 'decimal',
+    autocomplete: 'off',
+  });
+  const maxBtn = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    text: 'max',
+    title: 'Fill the full available balance',
+    onclick: () => fillMaxForToken(tokenId, amt),
+  });
+  const rm = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    text: '×',
+    onclick: (ev) => {
+      const recipient = ev.target.closest('[data-recipient]');
+      ev.target.closest('[data-token]').remove();
+      rebuildAvailablePanel(recipient);
+    },
+  });
+  const row = el('div', { class: 'w-token w-row', 'data-token': true, 'data-token-id': tokenId }, label, stale, amt, maxBtn, rm);
+  markStaleIfNeeded(row, tokenId);
+  return row;
+}
+
+function syncTokenPickers() {
+  if (!root) return;
+  for (const recipient of root.querySelectorAll('[data-recipient]')) {
+    rebuildAvailablePanel(recipient);
+    for (const row of recipient.querySelectorAll('[data-token][data-token-id]')) {
+      const tokenId = row.getAttribute('data-token-id');
+      markStaleIfNeeded(row, tokenId);
+      const label = row.querySelector('.w-token__label');
+      if (label && tokenMetaReady) label.textContent = sendingLabel(tokenId);
+    }
+  }
 }
 
 // Parse recipient rows into the /wallet/payment/send body. Amounts are parsed
@@ -781,13 +880,13 @@ function collectRequests() {
     totalNano += value;
     const assets = [];
     for (const [j, t] of Array.from(row.querySelectorAll('[data-token]')).entries()) {
-      const select = t.querySelector('[data-t-select]');
-      const custom = t.querySelector('[data-t-id]');
-      const tokenId = (select.value === CUSTOM_TOKEN ? custom.value : select.value).trim();
+      const tokenId = (t.getAttribute('data-token-id') || '').trim();
       const amtStr = t.querySelector('[data-t-amt]').value.trim();
       if (!tokenId && !amtStr) continue;
-      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: select a token or paste a token id.` };
-      if (!/^[0-9a-fA-F]{64}$/.test(tokenId)) return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId must be a 64-char hex id.` };
+      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: token is required.` };
+      if (!/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+        return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId must be a 64-char hex id.` };
+      }
       const decimals = getDecimals(tokenId);
       let amount;
       try {
@@ -796,7 +895,9 @@ function collectRequests() {
         return { error: `Recipient ${i + 1}, token ${j + 1}: ${e.message}.` };
       }
       if (amount <= 0n) return { error: `Recipient ${i + 1}, token ${j + 1}: amount must be greater than 0.` };
-      if (amount > MAX_SAFE) return { error: `Recipient ${i + 1}, token ${j + 1}: amount is too large to submit safely.` };
+      if (amount > MAX_SAFE) {
+        return { error: `Recipient ${i + 1}, token ${j + 1}: amount is too large to submit safely.` };
+      }
       tokenTotals.set(tokenId, (tokenTotals.get(tokenId) || 0n) + amount);
       assets.push({ tokenId, amount: Number(amount) });
     }
@@ -834,8 +935,20 @@ function showConfirm(requests, totalNano) {
     const addrText = el('span', { class: 'v--hash', text: truncMiddle(req.address, 10, 8) });
     const k = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, addrText, copyBtn(req.address));
     k.title = req.address;
-    const tokNote = req.assets.length ? ` + ${req.assets.length} token${req.assets.length > 1 ? 's' : ''}` : '';
-    lines.append(k, el('div', { class: 'v', text: `${erg(req.value)} ERG${tokNote}` }));
+    const valueCell = el('div', { class: 'v' }, el('div', { text: `${erg(req.value)} ERG` }));
+    if (req.assets.length) {
+      const assetList = el('ul', { class: 'w-confirm-assets' });
+      for (const a of req.assets) {
+        assetList.append(
+          el('li', {
+            text: `${sendingLabel(a.tokenId)} · ${tokenAmt(a.tokenId, a.amount)}`,
+            title: a.tokenId,
+          }),
+        );
+      }
+      valueCell.append(assetList);
+    }
+    lines.append(k, valueCell);
   }
   const dlg = el('dialog', { class: 'dialog' });
   const form = el(
