@@ -122,11 +122,14 @@ function spentPill(spentTxId) {
 // the extra-index; on a syncing/absent index amounts stay raw — callers pass
 // indexerReady() as fetchTokenMeta's `enabled` arg.
 
-// Link label for a token: its (attacker-controlled, textContent-only) EIP-4
-// name when known, else the truncated id. The full id always rides the
-// title attribute so a name that MIMICS an id can't hide the real one.
+// Link label for a token: EIP-4 name plus a truncated id fingerprint when a
+// name is known (names are attacker-controlled and non-unique; the fingerprint
+// keeps the real id visible without relying on the title tooltip). Unnamed
+// tokens show the truncated id alone. The full id always rides `title`.
 function tokenLink(tid) {
-  const a = link(`token/${tid}`, tokenName(tid) || truncMiddle(tid, 6, 6));
+  const shortId = truncMiddle(tid, 6, 6);
+  const name = tokenName(tid);
+  const a = link(`token/${tid}`, name ? `${name} · ${shortId}` : shortId);
   a.title = tid;
   return a;
 }
