@@ -975,7 +975,13 @@ fn build_events_projection(
                     ev.txs = Some(txs);
                     ev.size_bytes = Some(size_bytes);
                 }
-                K::Reorg { height, header_id } => {
+                K::Reorg {
+                    height,
+                    header_id,
+                    depth,
+                    dropped_header_ids,
+                } => {
+                    let _ = (depth, dropped_header_ids);
                     ev.kind = "reorg".into();
                     ev.height = Some(height);
                     ev.header_id = Some(header_id);

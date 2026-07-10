@@ -10,7 +10,7 @@
 //! client can resume with `?since=<seq>` without missing or duplicating
 //! entries (gaps mean eviction — the client shows "…" and moves on).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 /// One operator-visible event.
 #[derive(Debug, Clone)]
@@ -34,11 +34,13 @@ pub(crate) enum FeedEventKind {
         txs: u32,
         size_bytes: u64,
     },
-    /// The best-chain tip id changed without the height advancing —
-    /// a reorg happened (depth approximated by the height delta).
+    /// The best-chain tip changed across a fork. Dropped ids are best-effort
+    /// names from the last committed 32-block tail, not a full fork walk.
     Reorg {
         height: u32,
         header_id: String,
+        depth: u32,
+        dropped_header_ids: Vec<String>,
     },
     PeerConnected {
         addr: String,
@@ -62,6 +64,7 @@ pub(crate) struct FeedPrev {
     pub(crate) primed: bool,
     pub(crate) tip_height: u32,
     pub(crate) tip_id: String,
+    pub(crate) recent: Vec<(u32, String)>,
     pub(crate) peers: std::collections::HashSet<String>,
     pub(crate) indexer_status: Option<String>,
 }
@@ -71,6 +74,7 @@ pub(crate) struct FeedPrev {
 /// the feed is an operator glanceable, not an audit log.
 const MAX_BLOCK_EVENTS_PER_TICK: usize = 4;
 const MAX_PEER_EVENTS_PER_TICK: usize = 16;
+const RECENT_BLOCKS_CAP: usize = 32;
 
 /// One tick's worth of observations, all already collected on the
 /// snapshot-emit hot path — deriving events costs set-diffs only.
@@ -84,6 +88,42 @@ pub(crate) struct FeedObservation<'a> {
     pub(crate) peers: Vec<String>,
     /// Extra-index status label + optional halt detail; `None` = disabled.
     pub(crate) indexer_status: Option<(String, Option<String>)>,
+}
+
+fn recent_tail(recent: &[(u32, String, u32, u64)]) -> Vec<(u32, String)> {
+    recent
+        .iter()
+        .take(RECENT_BLOCKS_CAP)
+        .map(|(height, id, ..)| (*height, id.clone()))
+        .collect()
+}
+
+fn dropped_header_ids(prev: &FeedPrev, recent: &[(u32, String, u32, u64)]) -> Vec<String> {
+    let now: HashSet<&str> = recent.iter().map(|(_, id, ..)| id.as_str()).collect();
+    let mut dropped = Vec::new();
+
+    // Oldest-first gives stable API/WS payloads. This is intentionally capped
+    // to the committed tail; deeper orphan names require a real fork walk.
+    for (_, id) in prev.recent.iter().rev() {
+        if !now.contains(id.as_str()) && !dropped.iter().any(|d| d == id) {
+            dropped.push(id.clone());
+            if dropped.len() == RECENT_BLOCKS_CAP {
+                break;
+            }
+        }
+    }
+
+    if !prev.tip_id.is_empty()
+        && !now.contains(prev.tip_id.as_str())
+        && !dropped.iter().any(|id| id == &prev.tip_id)
+    {
+        if dropped.len() == RECENT_BLOCKS_CAP {
+            dropped.remove(0);
+        }
+        dropped.push(prev.tip_id.clone());
+    }
+
+    dropped
 }
 
 /// Diff `obs` against `prev`, appending derived events to `ring`, then
@@ -108,11 +148,15 @@ pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: 
             if !prev.tip_id.is_empty() {
                 if let Some((_, id, ..)) = obs.recent.iter().find(|(h, ..)| *h == prev.tip_height) {
                     if *id != prev.tip_id {
+                        let dropped_header_ids = dropped_header_ids(prev, obs.recent);
+                        let depth = dropped_header_ids.len() as u32;
                         ring.push(
                             obs.unix_ms,
                             FeedEventKind::Reorg {
                                 height: prev.tip_height,
                                 header_id: id.clone(),
+                                depth,
+                                dropped_header_ids,
                             },
                         );
                     }
@@ -141,11 +185,15 @@ pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: 
             }
         } else if !obs.tip_id.is_empty() && obs.tip_id != prev.tip_id {
             // Same-or-lower height with a different tip id = reorg.
+            let dropped_header_ids = dropped_header_ids(prev, obs.recent);
+            let depth = dropped_header_ids.len() as u32;
             ring.push(
                 obs.unix_ms,
                 FeedEventKind::Reorg {
                     height: obs.tip_height,
                     header_id: obs.tip_id.clone(),
+                    depth,
+                    dropped_header_ids,
                 },
             );
         }
@@ -192,6 +240,7 @@ pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: 
         prev.indexer_status = obs.indexer_status.as_ref().map(|(s, _)| s.clone());
     }
     prev.tip_height = obs.tip_height;
+    prev.recent = recent_tail(obs.recent);
     if !obs.tip_id.is_empty() {
         prev.tip_id = obs.tip_id;
     }
@@ -389,6 +438,34 @@ mod tests {
         assert_eq!(prev.tip_id, "bb");
     }
 
+    #[test]
+    fn reorg_same_height_lists_replaced_tip_as_dropped() {
+        let mut ring = EventFeedRing::new();
+        let mut prev = FeedPrev::default();
+        let r0 = [blk(10, "A"), blk(9, "X")];
+        derive_events(&mut ring, &mut prev, obs((10, "A"), &r0, &[], None));
+
+        let r1 = [blk(10, "B"), blk(9, "X")];
+        derive_events(&mut ring, &mut prev, obs((10, "B"), &r1, &[], None));
+
+        let events = ring.latest(usize::MAX);
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            FeedEventKind::Reorg {
+                height,
+                header_id,
+                depth,
+                dropped_header_ids,
+            } => {
+                assert_eq!(*height, 10);
+                assert_eq!(header_id, "B");
+                assert_eq!(*depth, 1);
+                assert_eq!(dropped_header_ids.as_slice(), ["A".to_string()]);
+            }
+            other => panic!("expected reorg, got {other:?}"),
+        }
+    }
+
     /// A reorg that ALSO advances the height surfaces as reorg + the
     /// replacement blocks — detectable because the committed tail shows a
     /// different id at our previous tip height.
@@ -402,6 +479,35 @@ mod tests {
         let r1 = [blk(101, "b101"), blk(100, "a-prime")];
         derive_events(&mut ring, &mut prev, obs((101, "b101"), &r1, &[], None));
         assert_eq!(kinds(&ring), vec!["reorg:100", "block:101"]);
+    }
+
+    #[test]
+    fn reorg_advance_with_replacement_lists_orphans_from_prev_recent() {
+        let mut ring = EventFeedRing::new();
+        let mut prev = FeedPrev::default();
+        let r0 = [blk(10, "A"), blk(9, "P")];
+        derive_events(&mut ring, &mut prev, obs((10, "A"), &r0, &[], None));
+
+        let r1 = [blk(11, "C"), blk(10, "B"), blk(9, "P")];
+        derive_events(&mut ring, &mut prev, obs((11, "C"), &r1, &[], None));
+
+        let events = ring.latest(usize::MAX);
+        assert_eq!(events.len(), 2);
+        match &events[0].kind {
+            FeedEventKind::Reorg {
+                height,
+                header_id,
+                depth,
+                dropped_header_ids,
+            } => {
+                assert_eq!(*height, 10);
+                assert_eq!(header_id, "B");
+                assert_eq!(*depth, 1);
+                assert_eq!(dropped_header_ids.as_slice(), ["A".to_string()]);
+            }
+            other => panic!("expected reorg first, got {other:?}"),
+        }
+        assert_eq!(kinds(&ring), vec!["reorg:10", "block:11"]);
     }
 
     /// Peer set diffs emit deterministically (sorted) and honor the cap.
