@@ -36,7 +36,7 @@ mod web;
 pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
-    bind, router_with_wallet, serve, serve_on, serve_on_with_mempool,
+    bind, realtime_handle, router_with_wallet, serve, serve_on, serve_on_with_mempool,
     serve_on_with_mempool_and_wallet_and_security, ServerCtx,
 };
 pub use traits::{

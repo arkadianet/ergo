@@ -979,7 +979,7 @@ async fn run_inner_with_backend(
                 weight_fn.name(),
             ))
         })?;
-    let mempool = Mempool::new(config.mempool_config.clone(), weight_fn);
+    let mut mempool = Mempool::new(config.mempool_config.clone(), weight_fn);
     let mempool_notifier = MempoolNotifier::new();
     let throttle = ThroughputLimiter::with_defaults();
     info!(
@@ -1207,6 +1207,17 @@ async fn run_inner_with_backend(
                 // lock-free `arc_swap.load()` per snapshot, so the
                 // overlay adds no contention with the main loop.
                 let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
+                // Realtime WS bridge (A2): the same process-wide bus the
+                // router feeds the `blocks` coarse-ring bridge into. Wiring
+                // it as a `MempoolObserver` lets admit/evict publish
+                // `tx_accepted`/`tx_dropped` on the `mempool` channel
+                // directly from the admission hot path, bypassing the
+                // coarse ring (which only carries block/reorg/peer events).
+                mempool.set_observer(Some(Arc::new(
+                    crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
+                        ergo_api::realtime_handle().bus,
+                    ),
+                )));
                 let mut admin = crate::api_bridge::ShutdownAdmin::new(
                     shutdown_notify.clone(),
                     Some(peer_connect_tx.clone()),

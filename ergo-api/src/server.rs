@@ -160,6 +160,24 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<(SocketAddr, tokio::net::
     Ok((actual, listener))
 }
 
+/// The process-wide realtime handle (WS fan-out bus + connection limiter).
+/// Constructed once, on first call, and shared for the life of the
+/// process — same singleton the router uses internally to feed the
+/// `blocks` coarse-ring bridge, so a caller reaching for it before or
+/// after router assembly gets the identical `Arc<RealtimeBus>`.
+///
+/// This is the seam `ergo-node` uses to publish mempool `tx_accepted` /
+/// `tx_dropped` events directly (bypassing the coarse ring, which only
+/// carries block/reorg/peer events): grab the bus here, wrap it in an
+/// adapter that implements `ergo_mempool::MempoolObserver`, and hand it to
+/// `Mempool::set_observer`.
+pub fn realtime_handle() -> crate::v1::RealtimeHandle {
+    static V1_REALTIME: std::sync::OnceLock<crate::v1::RealtimeHandle> = std::sync::OnceLock::new();
+    V1_REALTIME
+        .get_or_init(crate::v1::RealtimeHandle::blocks_and_mempool)
+        .clone()
+}
+
 /// Start serving on a pre-bound `listener`. Spawns the axum task and
 /// returns its join handle.
 ///
@@ -1280,12 +1298,9 @@ pub fn router_with_mempool_and_wallet_and_security(
     // per-assembly bus/engine would leave later routers holding handles no
     // worker feeds (registrations that never deliver, subscriptions that never
     // fire).
-    static V1_REALTIME: std::sync::OnceLock<crate::v1::RealtimeHandle> = std::sync::OnceLock::new();
     static V1_WEBHOOKS_ENGINE: std::sync::OnceLock<std::sync::Arc<crate::v1::WebhookEngine>> =
         std::sync::OnceLock::new();
-    let v1_realtime = V1_REALTIME
-        .get_or_init(crate::v1::RealtimeHandle::blocks_and_mempool)
-        .clone();
+    let v1_realtime = realtime_handle();
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::v1::spawn_event_bridge_once(
             v1_read.clone(),
