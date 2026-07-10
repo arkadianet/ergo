@@ -832,6 +832,10 @@ function allocatedTokenRow(tokenId) {
       rebuildAvailablePanel(recipient);
     },
   });
+  // Single-unit holdings (NFTs / amount === 1): there is nothing to choose —
+  // prefill max so the operator only confirms, not types "1".
+  const held = myAssets.find((x) => x.tokenId === tokenId);
+  if (held && held.amount === 1) fillMaxForToken(tokenId, amt);
   const row = el('div', { class: 'w-token w-row', 'data-token': true, 'data-token-id': tokenId }, label, stale, amt, maxBtn, rm);
   markStaleIfNeeded(row, tokenId);
   return row;
