@@ -14,6 +14,8 @@
 import { api } from './api-client.js';
 import { subscribe, promptAuthorize } from './auth.js';
 import { erg, num, truncMiddle, nanoErgFromDecimal } from './format.js';
+import { copyBtn } from './table.js';
+import { fetchTokenMeta, tokenName, tokenAmt, getDecimals, decimalize, maxDecimalString, parseTokenAmount } from './token-meta.js';
 
 let root = null;
 let authUnsub = null;
@@ -32,6 +34,14 @@ let onboardRendered = false;
 let sendRendered = false;
 let keysRendered = false;
 let unlockRendered = false;
+// Last-fetched wallet token balances ({tokenId, amount}), so the send form's
+// token picker can offer "what you actually have" instead of a blank hex
+// field. Refreshed every refreshBalances() poll tick.
+let myAssets = [];
+// True after the latest refreshBalances() has awaited fetchTokenMeta for
+// myAssets. Available panels must not list tokens until this is true so
+// names/decimals render instead of hex/raw.
+let tokenMetaReady = false;
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const EXT_WARNING =
@@ -193,6 +203,8 @@ function scrubSecrets() {
   if (pre) pre.textContent = '';
   mnemonicGateOpen = false;
   onboardRendered = sendRendered = keysRendered = unlockRendered = false;
+  myAssets = [];
+  tokenMetaReady = false;
   // Drop memoised panes so a re-entry rebuilds them fresh (no lingering
   // password / mnemonic / send draft in a detached-but-retained input).
   for (const sel of ['[data-onboard-body]', '[data-send-body]', '[data-keys-body]']) {
@@ -224,8 +236,12 @@ function renderStatusPanel(s) {
     body.append(kvWrap);
   }
 
-  const changeAddr = el('div', { class: 'v v--hash', text: truncMiddle(s.changeAddress || '', 10, 8) || '—' });
-  if (s.changeAddress) changeAddr.title = s.changeAddress;
+  const changeAddrText = el('span', { text: truncMiddle(s.changeAddress || '', 10, 8) || '—' });
+  const changeAddr = el('div', { class: 'v v--hash', style: 'display:flex;align-items:center;justify-content:flex-end;gap:6px' }, changeAddrText);
+  if (s.changeAddress) {
+    changeAddr.title = s.changeAddress;
+    changeAddr.append(copyBtn(s.changeAddress));
+  }
   const kv = el('div', { class: 'kv' });
   kv.append(
     el('div', { class: 'k', text: 'initialized' }),
@@ -316,6 +332,9 @@ function lockedNotes() {
   q('[data-balances-right]').textContent = '';
   q('[data-addresses-right]').textContent = '';
   q('[data-keys-panel]').hidden = true;
+  myAssets = [];
+  tokenMetaReady = false;
+  syncTokenPickers();
 }
 
 async function refreshBalances() {
@@ -326,23 +345,35 @@ async function refreshBalances() {
   if (!res.ok) {
     right.textContent = '';
     body.replaceChildren(el('div', { class: 'muted', text: res.reason || `balances unavailable (${res.status})` }));
+    myAssets = [];
+    tokenMetaReady = false;
+    syncTokenPickers();
     return;
   }
   const b = res.data;
   right.textContent = `height ${num(b.height)}`;
   body.replaceChildren(kvRows([['confirmed', `${erg(b.balance)} ERG`, 'v--green']]));
   const assets = b.assets || [];
+  myAssets = assets;
+  tokenMetaReady = false;
+  // Best-effort name/decimals resolution (needs the extra index; a syncing
+  // or absent index just leaves ids/raw amounts, same as the explorer).
+  await fetchTokenMeta(assets.map((a) => a.tokenId));
+  tokenMetaReady = true;
   if (assets.length) {
     const tokKv = el('div', { class: 'kv' });
     for (const a of assets) {
-      const id = el('div', { class: 'k v--hash', text: truncMiddle(a.tokenId, 10, 8) });
-      id.title = a.tokenId;
-      tokKv.append(id, el('div', { class: 'v', text: num(a.amount) }));
+      const name = tokenName(a.tokenId);
+      const label = el('span', { class: name ? '' : 'v--hash', text: name || truncMiddle(a.tokenId, 10, 8) });
+      label.title = a.tokenId;
+      const kCell = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, label, copyBtn(a.tokenId));
+      tokKv.append(kCell, el('div', { class: 'v', text: tokenAmt(a.tokenId, a.amount) }));
     }
     body.append(el('div', { class: 'muted', text: `tokens (${assets.length})` }), tokKv);
   } else {
     body.append(el('div', { class: 'muted', text: 'no tokens' }));
   }
+  syncTokenPickers();
   body.append(
     el(
       'div',
@@ -653,37 +684,191 @@ function buildSendForm() {
 }
 
 function recipientRow() {
-  const addr = el('input', { class: 'input w-r-addr', 'data-r-addr': true, placeholder: 'recipient address (9…)', autocomplete: 'off', spellcheck: 'false' });
-  const value = el('input', { class: 'input w-r-value', 'data-r-value': true, placeholder: 'amount (ERG)', inputmode: 'decimal', autocomplete: 'off' });
-  const tokens = el('div', { class: 'w-tokens' });
-  const addTok = el('button', { class: 'btn btn--sm', type: 'button', text: '+ token', onclick: () => tokens.append(tokenRow()) });
-  const remove = el('button', { class: 'btn btn--sm', type: 'button', text: 'remove recipient', onclick: (ev) => ev.target.closest('[data-recipient]').remove() });
+  const addr = el('input', {
+    class: 'input w-r-addr',
+    'data-r-addr': true,
+    placeholder: 'recipient address (9…)',
+    autocomplete: 'off',
+    spellcheck: 'false',
+  });
+  const value = el('input', {
+    class: 'input w-r-value',
+    'data-r-value': true,
+    placeholder: 'amount (ERG)',
+    inputmode: 'decimal',
+    autocomplete: 'off',
+  });
+  const sending = el('div', { class: 'w-tokens', 'data-tokens-sending': true });
+  const available = el('div', { class: 'w-token-avail', 'data-tokens-available': true, hidden: true });
+  const addTok = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    'data-add-token': true,
+    text: 'Add token',
+    onclick: (ev) => {
+      const recipient = ev.target.closest('[data-recipient]');
+      const panel = recipient.querySelector('[data-tokens-available]');
+      const open = panel.hidden;
+      panel.hidden = !open;
+      if (open) rebuildAvailablePanel(recipient);
+    },
+  });
+  const remove = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    text: 'remove recipient',
+    onclick: (ev) => ev.target.closest('[data-recipient]').remove(),
+  });
   return el(
     'div',
     { class: 'w-recipient', 'data-recipient': true },
     el('div', { class: 'w-row' }, addr, remove),
     el('div', { class: 'w-row' }, value),
-    tokens,
+    sending,
     el('div', { class: 'w-row' }, addTok),
+    available,
   );
 }
 
-function tokenRow() {
-  const id = el('input', { class: 'input w-t-id', 'data-t-id': true, placeholder: 'tokenId (hex)', autocomplete: 'off', spellcheck: 'false' });
-  const amt = el('input', { class: 'input w-t-amt', 'data-t-amt': true, placeholder: 'amount', inputmode: 'numeric', autocomplete: 'off' });
-  const rm = el('button', { class: 'btn btn--sm', type: 'button', text: '×', onclick: (ev) => ev.target.closest('[data-token]').remove() });
-  return el('div', { class: 'w-token w-row', 'data-token': true }, id, amt, rm);
+function tokenDisplayName(tokenId) {
+  return tokenName(tokenId) || truncMiddle(tokenId, 8, 6);
+}
+
+function sendingLabel(tokenId) {
+  const name = tokenName(tokenId);
+  const shortId = truncMiddle(tokenId, 8, 6);
+  return name ? `${name} · ${shortId}` : shortId;
+}
+
+function availableLabel(a) {
+  return `${tokenDisplayName(a.tokenId)} · avail ${tokenAmt(a.tokenId, a.amount)}`;
+}
+
+function allocatedIds(recipientEl) {
+  return new Set(
+    Array.from(recipientEl.querySelectorAll('[data-token][data-token-id]')).map((n) => n.getAttribute('data-token-id')),
+  );
+}
+
+function availableAssetsFor(recipientEl) {
+  const skip = allocatedIds(recipientEl);
+  return myAssets.filter((a) => a.tokenId && !skip.has(a.tokenId));
+}
+
+function rebuildAvailablePanel(recipientEl) {
+  const panel = recipientEl.querySelector('[data-tokens-available]');
+  if (!panel || panel.hidden) return;
+  panel.replaceChildren();
+  if (!tokenMetaReady) {
+    panel.append(el('div', { class: 'muted', text: 'Loading token names…' }));
+    return;
+  }
+  if (!myAssets.length) {
+    panel.append(el('div', { class: 'muted', text: 'No tokens in this wallet' }));
+    return;
+  }
+  const list = availableAssetsFor(recipientEl);
+  if (!list.length) {
+    panel.append(el('div', { class: 'muted', text: 'All tokens already added to this recipient' }));
+    return;
+  }
+  for (const a of list) {
+    panel.append(
+      el('button', {
+        class: 'btn btn--sm w-token-avail__row',
+        type: 'button',
+        'data-avail-token': a.tokenId,
+        text: availableLabel(a),
+        title: a.tokenId,
+        onclick: () => allocateToken(recipientEl, a.tokenId),
+      }),
+    );
+  }
+}
+
+function allocateToken(recipientEl, tokenId) {
+  if (allocatedIds(recipientEl).has(tokenId)) return;
+  recipientEl.querySelector('[data-tokens-sending]').append(allocatedTokenRow(tokenId));
+  const panel = recipientEl.querySelector('[data-tokens-available]');
+  panel.hidden = true;
+}
+
+function fillMaxForToken(tokenId, amtInput) {
+  const a = myAssets.find((x) => x.tokenId === tokenId);
+  if (!a) return;
+  amtInput.value = maxDecimalString(a.amount, getDecimals(tokenId));
+}
+
+function markStaleIfNeeded(row, tokenId) {
+  const stale = row.querySelector('.w-token__stale');
+  const gone = !myAssets.some((a) => a.tokenId === tokenId);
+  if (stale) stale.hidden = !gone;
+}
+
+function allocatedTokenRow(tokenId) {
+  const label = el('span', { class: 'w-token__label', text: sendingLabel(tokenId), title: tokenId });
+  const stale = el('span', { class: 'muted w-token__stale', hidden: true, text: 'no longer in wallet balance' });
+  const amt = el('input', {
+    class: 'input w-t-amt',
+    'data-t-amt': true,
+    placeholder: 'amount',
+    inputmode: 'decimal',
+    autocomplete: 'off',
+  });
+  const maxBtn = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    text: 'max',
+    title: 'Fill the full available balance',
+    onclick: () => fillMaxForToken(tokenId, amt),
+  });
+  const rm = el('button', {
+    class: 'btn btn--sm',
+    type: 'button',
+    text: '×',
+    onclick: (ev) => {
+      const recipient = ev.target.closest('[data-recipient]');
+      ev.target.closest('[data-token]').remove();
+      rebuildAvailablePanel(recipient);
+    },
+  });
+  // Single-unit holdings (NFTs / amount === 1): there is nothing to choose —
+  // prefill max so the operator only confirms, not types "1".
+  const held = myAssets.find((x) => x.tokenId === tokenId);
+  if (held && held.amount === 1) fillMaxForToken(tokenId, amt);
+  const row = el('div', { class: 'w-token w-row', 'data-token': true, 'data-token-id': tokenId }, label, stale, amt, maxBtn, rm);
+  markStaleIfNeeded(row, tokenId);
+  return row;
+}
+
+function syncTokenPickers() {
+  if (!root) return;
+  for (const recipient of root.querySelectorAll('[data-recipient]')) {
+    rebuildAvailablePanel(recipient);
+    for (const row of recipient.querySelectorAll('[data-token][data-token-id]')) {
+      const tokenId = row.getAttribute('data-token-id');
+      markStaleIfNeeded(row, tokenId);
+      const label = row.querySelector('.w-token__label');
+      if (label && tokenMetaReady) label.textContent = sendingLabel(tokenId);
+    }
+  }
 }
 
 // Parse recipient rows into the /wallet/payment/send body. Amounts are parsed
-// with exact BigInt arithmetic and rejected if they exceed the safe JSON
-// integer range (the wire format is a JSON number), so nothing is silently
-// corrupted by float math.
+// with exact BigInt arithmetic (decimal-aware per-token, via each token's
+// resolved EIP-4 decimals) and rejected if they exceed the safe JSON integer
+// range (the wire format is a JSON number), so nothing is silently corrupted
+// by float math.
 function collectRequests() {
   const recipients = Array.from(root.querySelectorAll('[data-recipient]'));
   if (!recipients.length) return { error: 'Add at least one recipient.' };
   const requests = [];
   let totalNano = 0n;
+  // Requested total per tokenId across the WHOLE send (every recipient), so
+  // a user splitting one token across several recipients still gets an
+  // honest over-balance warning instead of finding out only after a server
+  // round trip.
+  const tokenTotals = new Map();
   for (const [i, row] of recipients.entries()) {
     const address = row.querySelector('[data-r-addr]').value.trim();
     const ergStr = row.querySelector('[data-r-value]').value.trim();
@@ -699,17 +884,40 @@ function collectRequests() {
     totalNano += value;
     const assets = [];
     for (const [j, t] of Array.from(row.querySelectorAll('[data-token]')).entries()) {
-      const tokenId = t.querySelector('[data-t-id]').value.trim();
+      const tokenId = (t.getAttribute('data-token-id') || '').trim();
       const amtStr = t.querySelector('[data-t-amt]').value.trim();
       if (!tokenId && !amtStr) continue;
-      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId is required.` };
-      if (!/^\d+$/.test(amtStr)) return { error: `Recipient ${i + 1}, token ${j + 1}: amount must be a positive integer.` };
-      const amount = BigInt(amtStr);
+      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: token is required.` };
+      if (!/^[0-9a-fA-F]{64}$/.test(tokenId)) {
+        return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId must be a 64-char hex id.` };
+      }
+      const decimals = getDecimals(tokenId);
+      let amount;
+      try {
+        amount = parseTokenAmount(amtStr, decimals);
+      } catch (e) {
+        return { error: `Recipient ${i + 1}, token ${j + 1}: ${e.message}.` };
+      }
       if (amount <= 0n) return { error: `Recipient ${i + 1}, token ${j + 1}: amount must be greater than 0.` };
-      if (amount > MAX_SAFE) return { error: `Recipient ${i + 1}, token ${j + 1}: amount is too large to submit safely.` };
+      if (amount > MAX_SAFE) {
+        return { error: `Recipient ${i + 1}, token ${j + 1}: amount is too large to submit safely.` };
+      }
+      tokenTotals.set(tokenId, (tokenTotals.get(tokenId) || 0n) + amount);
       assets.push({ tokenId, amount: Number(amount) });
     }
     requests.push({ address, value: Number(value), assets });
+  }
+  // Best-effort over-balance check against the last-known wallet snapshot —
+  // a UX nicety, not a security boundary (the server has the true balance).
+  for (const [tokenId, total] of tokenTotals) {
+    const owned = myAssets.find((a) => a.tokenId === tokenId);
+    if (owned && Number.isSafeInteger(owned.amount) && total > BigInt(owned.amount)) {
+      const d = getDecimals(tokenId);
+      const label = tokenName(tokenId) || truncMiddle(tokenId, 8, 6);
+      return {
+        error: `${label}: requesting ${d > 0 ? decimalize(Number(total), d) : total.toString()}, but the wallet holds only ${tokenAmt(tokenId, owned.amount)}.`,
+      };
+    }
   }
   return { requests, totalNano };
 }
@@ -728,10 +936,23 @@ function onReviewSend() {
 function showConfirm(requests, totalNano) {
   const lines = el('div', { class: 'kv' });
   for (const req of requests) {
-    const k = el('div', { class: 'k v--hash', text: truncMiddle(req.address, 10, 8) });
+    const addrText = el('span', { class: 'v--hash', text: truncMiddle(req.address, 10, 8) });
+    const k = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, addrText, copyBtn(req.address));
     k.title = req.address;
-    const tokNote = req.assets.length ? ` + ${req.assets.length} token${req.assets.length > 1 ? 's' : ''}` : '';
-    lines.append(k, el('div', { class: 'v', text: `${erg(req.value)} ERG${tokNote}` }));
+    const valueCell = el('div', { class: 'v' }, el('div', { text: `${erg(req.value)} ERG` }));
+    if (req.assets.length) {
+      const assetList = el('ul', { class: 'w-confirm-assets' });
+      for (const a of req.assets) {
+        assetList.append(
+          el('li', {
+            text: `${sendingLabel(a.tokenId)} · ${tokenAmt(a.tokenId, a.amount)}`,
+            title: a.tokenId,
+          }),
+        );
+      }
+      valueCell.append(assetList);
+    }
+    lines.append(k, valueCell);
   }
   const dlg = el('dialog', { class: 'dialog' });
   const form = el(
@@ -774,8 +995,15 @@ async function doSend(requests) {
     setSendEnabled(true);
     showSendMsg('ok', `Submitted. txId: ${txId || ''}`);
   } else {
+    // Prefer `detail` (e.g. "transaction rejected: output N: box size …") over the
+    // opaque `reason` code (`bad_request`) — same pattern as retrieve-rewards.
     const reason = res.reason || `send failed (${res.status})`;
-    showSendMsg('err', reason === 'wallet_locked' ? 'Wallet is locked — unlock it above and try again. Your draft is preserved.' : `Send failed: ${reason}`);
+    const detail = res.data && res.data.detail;
+    if (reason === 'wallet_locked') {
+      showSendMsg('err', 'Wallet is locked — unlock it above and try again. Your draft is preserved.');
+    } else {
+      showSendMsg('err', `Send failed: ${detail || reason}`);
+    }
     if (btn) btn.disabled = false;
   }
 }

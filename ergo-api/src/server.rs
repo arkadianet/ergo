@@ -95,8 +95,8 @@ use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
     JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
-    JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS,
-    V1_SWAGGER_HTML,
+    JS_TOKEN_META, JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML,
+    TOKENS_CSS, V1_SWAGGER_HTML,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
@@ -605,6 +605,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/chart.js", get(|| async { js(JS_CHART) }))
         .route("/js/overview.js", get(|| async { js(JS_OVERVIEW) }))
         .route("/js/explorer.js", get(|| async { js(JS_EXPLORER) }))
+        .route("/js/token-meta.js", get(|| async { js(JS_TOKEN_META) }))
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
