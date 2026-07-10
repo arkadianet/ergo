@@ -24,8 +24,15 @@ fn event(seq: u64, kind: &str) -> ApiNodeEvent {
         seq,
         unix_ms: 1_000 + seq,
         kind: kind.to_string(),
-        height: (kind == "blockApplied").then_some(100 + seq as u32),
-        header_id: (kind == "blockApplied").then(|| format!("{seq:064x}")),
+        height: matches!(kind, "blockApplied" | "reorg").then_some(100 + seq as u32),
+        header_id: matches!(kind, "blockApplied" | "reorg").then(|| format!("{seq:064x}")),
+        depth: (kind == "reorg").then_some(2),
+        dropped_header_ids: (kind == "reorg").then(|| {
+            vec![
+                format!("old-{seq}"),
+                format!("old-{}", seq.saturating_sub(1)),
+            ]
+        }),
         txs: (kind == "blockApplied").then_some(3),
         size_bytes: (kind == "blockApplied").then_some(4_096),
         addr: (kind == "peerConnected").then(|| "10.0.0.9:9030".to_string()),

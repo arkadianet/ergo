@@ -1937,7 +1937,9 @@ components:
         One operator event for `GET /api/v1/events` — flat shape with optional
         per-kind fields so the feed renders without a type registry. `kind` is
         one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-        `indexerStatus`.
+        `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
+        best-effort from the node's 32-block committed tail; deeper orphan ids are
+        not fabricated.
       required:
       - seq
       - unixMs
@@ -1947,10 +1949,22 @@ components:
           type:
           - string
           - 'null'
+        depth:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
         detail:
           type:
           - string
           - 'null'
+        droppedHeaderIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
         headerId:
           type:
           - string

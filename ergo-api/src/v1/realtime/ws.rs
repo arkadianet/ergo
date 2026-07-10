@@ -356,15 +356,12 @@ fn project_tick(
                 ));
             }
             "reorg" => {
-                // The coarse ring names only the new tip; depth and the dropped
-                // branch are not derivable here (best-effort guarantee —
-                // fine-grained retractions need the node-internal tap).
                 bus.publish(super::model::RealtimeEventBody::reorg(
                     ev.unix_ms,
                     ev.height.unwrap_or(0),
                     ev.header_id.clone().unwrap_or_default(),
-                    0,
-                    Vec::new(),
+                    ev.depth.unwrap_or(0),
+                    ev.dropped_header_ids.clone().unwrap_or_default(),
                 ));
             }
             _ => {}
@@ -429,6 +426,8 @@ mod tests {
             kind: "blockApplied".into(),
             height: Some(height),
             header_id: Some(format!("h{height}")),
+            depth: None,
+            dropped_header_ids: None,
             txs: Some(2),
             size_bytes: Some(1234),
             addr: None,
@@ -443,6 +442,8 @@ mod tests {
             kind: "reorg".into(),
             height: Some(height),
             header_id: Some(format!("r{height}")),
+            depth: Some(2),
+            dropped_header_ids: Some(vec![format!("old-{height}"), format!("old-{}", height - 1)]),
             txs: None,
             size_bytes: None,
             addr: None,
@@ -549,6 +550,11 @@ mod tests {
         assert_eq!(ev.event, "reorg");
         assert_eq!(ev.data["height"], 200);
         assert_eq!(ev.data["header_id"], "r200");
+        assert_eq!(ev.data["depth"], 2);
+        assert_eq!(
+            ev.data["dropped_header_ids"],
+            serde_json::json!(["old-200", "old-199"])
+        );
     }
 
     // ----- end-to-end spawn (drives the async task) -----

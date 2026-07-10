@@ -957,6 +957,8 @@ fn build_events_projection(
                 kind: String::new(),
                 height: None,
                 header_id: None,
+                depth: None,
+                dropped_header_ids: None,
                 txs: None,
                 size_bytes: None,
                 addr: None,
@@ -981,10 +983,11 @@ fn build_events_projection(
                     depth,
                     dropped_header_ids,
                 } => {
-                    let _ = (depth, dropped_header_ids);
                     ev.kind = "reorg".into();
                     ev.height = Some(height);
                     ev.header_id = Some(header_id);
+                    ev.depth = Some(depth);
+                    ev.dropped_header_ids = Some(dropped_header_ids);
                 }
                 K::PeerConnected { addr } => {
                     ev.kind = "peerConnected".into();
@@ -1108,6 +1111,36 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn build_events_projection_reorg_includes_depth_and_dropped_header_ids() {
+        let mut ring = crate::node::event_feed::EventFeedRing::new();
+        ring.push(
+            1_700_000_000_000,
+            crate::node::event_feed::FeedEventKind::Reorg {
+                height: 100,
+                header_id: "new-tip".to_string(),
+                depth: 2,
+                dropped_header_ids: vec!["old-100".to_string(), "old-99".to_string()],
+            },
+        );
+
+        let events = build_events_projection(&ring);
+        let event = serde_json::to_value(&events.events[0]).unwrap();
+
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "seq": 1,
+                "unixMs": 1_700_000_000_000u64,
+                "kind": "reorg",
+                "height": 100,
+                "headerId": "new-tip",
+                "depth": 2,
+                "droppedHeaderIds": ["old-100", "old-99"],
+            })
+        );
+    }
 
     /// Newest-first over the canonical full chain, with `size_bytes` summing
     /// the on-disk sections and adProofs being optional: the block without

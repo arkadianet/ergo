@@ -925,7 +925,9 @@ pub struct ApiMinerStats {
 /// One operator event for `GET /api/v1/events` — flat shape with optional
 /// per-kind fields so the feed renders without a type registry. `kind` is
 /// one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-/// `indexerStatus`.
+/// `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
+/// best-effort from the node's 32-block committed tail; deeper orphan ids are
+/// not fabricated.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiNodeEvent {
@@ -937,6 +939,10 @@ pub struct ApiNodeEvent {
     pub height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_header_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1301,6 +1307,61 @@ mod tests {
             !obj.contains_key("detail"),
             "absent detail must omit the key, not serialize as null"
         );
+    }
+
+    #[test]
+    fn api_node_events_reorg_serializes_depth_and_dropped_header_ids() {
+        let event = ApiNodeEvent {
+            seq: 1,
+            unix_ms: 1_700_000_000_000,
+            kind: "reorg".to_string(),
+            height: Some(100),
+            header_id: Some("new-tip".to_string()),
+            depth: Some(2),
+            dropped_header_ids: Some(vec!["old-100".to_string(), "old-99".to_string()]),
+            txs: None,
+            size_bytes: None,
+            addr: None,
+            detail: None,
+        };
+
+        let v = serde_json::to_value(event).unwrap();
+
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "seq": 1,
+                "unixMs": 1_700_000_000_000u64,
+                "kind": "reorg",
+                "height": 100,
+                "headerId": "new-tip",
+                "depth": 2,
+                "droppedHeaderIds": ["old-100", "old-99"],
+            })
+        );
+    }
+
+    #[test]
+    fn api_node_events_non_reorg_omits_reorg_fields() {
+        let event = ApiNodeEvent {
+            seq: 1,
+            unix_ms: 1_700_000_000_000,
+            kind: "peerConnected".to_string(),
+            height: None,
+            header_id: None,
+            depth: None,
+            dropped_header_ids: None,
+            txs: None,
+            size_bytes: None,
+            addr: Some("127.0.0.1:9030".to_string()),
+            detail: None,
+        };
+
+        let v = serde_json::to_value(event).unwrap();
+        let obj = v.as_object().expect("object");
+
+        assert!(!obj.contains_key("depth"));
+        assert!(!obj.contains_key("droppedHeaderIds"));
     }
 
     #[test]
