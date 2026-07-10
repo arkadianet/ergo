@@ -15,13 +15,13 @@
 //! * [`ws`] — the thin axum [`WebSocketUpgrade`](axum::extract::ws::WebSocketUpgrade)
 //!   adapter + the server-seam coarse-ring bridge feeder.
 //!
-//! **Upstream tap (honest Phase-1):** the bus is fed by [`ws::spawn_event_bridge`],
-//! which bridges the node's existing coarse operator event ring
-//! (`GET /api/v1/events`) into the bus `blocks` channel — one push path, no
-//! second event source. The fine-grained `address:`/`box:`/`token:`/`tx:` taps
-//! live in node internals and are a follow-up; until they land those classes
-//! are gated `channel_unavailable`. Webhooks (the durable sibling) are a
-//! separate follow-up and are NOT built here.
+//! **Upstream tap:** the bus is fed by [`ws::spawn_event_bridge`], which bridges
+//! the node's existing coarse operator event ring (`GET /api/v1/events`) into
+//! the bus `blocks` channel — one push path, no second event source. The
+//! fine-grained `address:`/`box:`/`token:`/`tx:` taps live in node internals and
+//! are a follow-up; until they land those classes are gated
+//! `channel_unavailable`. Webhooks (the durable sibling) are a separate
+//! follow-up and are NOT built here.
 
 pub mod bus;
 pub mod model;
@@ -61,5 +61,28 @@ impl RealtimeHandle {
             bus: Arc::new(RealtimeBus::blocks_only()),
             limiter: Arc::new(ConnLimiter::new(MAX_SOCKETS_PER_IP, GLOBAL_SOCKET_CEILING)),
         }
+    }
+
+    /// A realtime handle with live block and mempool channels.
+    pub fn blocks_and_mempool() -> Self {
+        RealtimeHandle {
+            bus: Arc::new(RealtimeBus::blocks_and_mempool()),
+            limiter: Arc::new(ConnLimiter::new(MAX_SOCKETS_PER_IP, GLOBAL_SOCKET_CEILING)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- happy path -----
+
+    #[test]
+    fn blocks_and_mempool_handle_marks_mempool_live() {
+        let handle = RealtimeHandle::blocks_and_mempool();
+        assert!(handle.bus.is_live(ChannelClass::Blocks));
+        assert!(handle.bus.is_live(ChannelClass::Mempool));
+        assert!(!handle.bus.is_live(ChannelClass::Tx));
     }
 }

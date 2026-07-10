@@ -287,6 +287,50 @@ impl RealtimeEventBody {
             previous_seq: None,
         }
     }
+
+    /// `tx_accepted` on the `mempool` channel (§2.5). Mempool events are
+    /// tentative until a later chain event confirms or drops the transaction.
+    pub fn tx_accepted(
+        unix_ms: u64,
+        tx_id: String,
+        fee_nano: Option<u64>,
+        size_bytes: Option<u64>,
+    ) -> Self {
+        RealtimeEventBody {
+            emitted_at_unix_ms: unix_ms,
+            routes: vec!["mempool".to_string()],
+            event: "tx_accepted",
+            confirmed: false,
+            height: None,
+            data: json!({
+                "tx_id": tx_id,
+                "fee_nano": fee_nano,
+                "size_bytes": size_bytes,
+            }),
+            previous_seq: None,
+        }
+    }
+
+    /// `tx_dropped` on both `mempool` and the terminal `tx:` channel (§2.5).
+    pub fn tx_dropped(
+        unix_ms: u64,
+        tx_id: String,
+        reason: String,
+        previous_seq: Option<u64>,
+    ) -> Self {
+        RealtimeEventBody {
+            emitted_at_unix_ms: unix_ms,
+            routes: vec!["mempool".to_string(), format!("tx:{tx_id}")],
+            event: "tx_dropped",
+            confirmed: false,
+            height: None,
+            data: json!({
+                "tx_id": tx_id,
+                "reason": reason,
+            }),
+            previous_seq,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +423,30 @@ mod tests {
             vec!["address:9f".to_string(), format!("box:{HEX64}")]
         );
         assert_eq!(b.event, "box_spent");
+    }
+
+    #[test]
+    fn tx_accepted_body_routes_to_mempool_and_is_unconfirmed() {
+        let b = RealtimeEventBody::tx_accepted(1, HEX64.into(), Some(1000), Some(512));
+        assert_eq!(b.routes, vec!["mempool".to_string()]);
+        assert_eq!(b.event, "tx_accepted");
+        assert!(!b.confirmed);
+        assert_eq!(b.height, None);
+        assert_eq!(b.data["tx_id"], HEX64);
+        assert_eq!(b.data["fee_nano"], 1000);
+        assert_eq!(b.data["size_bytes"], 512);
+        assert_eq!(b.previous_seq, None);
+    }
+
+    #[test]
+    fn tx_dropped_body_routes_to_mempool_and_terminal_tx() {
+        let b = RealtimeEventBody::tx_dropped(1, HEX64.into(), "evicted".to_string(), Some(42));
+        assert_eq!(b.routes, vec!["mempool".to_string(), format!("tx:{HEX64}")]);
+        assert_eq!(b.event, "tx_dropped");
+        assert!(!b.confirmed);
+        assert_eq!(b.height, None);
+        assert_eq!(b.data["tx_id"], HEX64);
+        assert_eq!(b.data["reason"], "evicted");
+        assert_eq!(b.previous_seq, Some(42));
     }
 }

@@ -1284,7 +1284,7 @@ pub fn router_with_mempool_and_wallet_and_security(
     static V1_WEBHOOKS_ENGINE: std::sync::OnceLock<std::sync::Arc<crate::v1::WebhookEngine>> =
         std::sync::OnceLock::new();
     let v1_realtime = V1_REALTIME
-        .get_or_init(crate::v1::RealtimeHandle::blocks_only)
+        .get_or_init(crate::v1::RealtimeHandle::blocks_and_mempool)
         .clone();
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::v1::spawn_event_bridge_once(

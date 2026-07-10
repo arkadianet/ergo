@@ -30,10 +30,8 @@
 //! ## Liveness gate
 //!
 //! A bus is constructed knowing which [`ChannelClass`]es have a live upstream
-//! feed. In this PR only `blocks` is fed (bridged from the coarse operator
-//! ring, §4.1). Subscriptions to a class without a live feed are rejected
-//! `channel_unavailable` at the WS layer — the Phase-1 gate — until the
-//! node-internal fine-grained taps land.
+//! feed. Subscriptions to a class without a live feed are rejected
+//! `channel_unavailable` at the WS layer.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -161,6 +159,14 @@ impl RealtimeBus {
     pub fn blocks_only() -> Self {
         let mut s = HashSet::new();
         s.insert(ChannelClass::Blocks);
+        Self::new(s)
+    }
+
+    /// A bus with live block and mempool channels.
+    pub fn blocks_and_mempool() -> Self {
+        let mut s = HashSet::new();
+        s.insert(ChannelClass::Blocks);
+        s.insert(ChannelClass::Mempool);
         Self::new(s)
     }
 
@@ -395,6 +401,14 @@ mod tests {
         assert_eq!(bus.publish(blk(1)), 1);
         assert_eq!(bus.publish(blk(2)), 2);
         assert_eq!(bus.latest_seq(), 2);
+    }
+
+    #[test]
+    fn blocks_and_mempool_marks_mempool_live() {
+        let bus = RealtimeBus::blocks_and_mempool();
+        assert!(bus.is_live(ChannelClass::Blocks));
+        assert!(bus.is_live(ChannelClass::Mempool));
+        assert!(!bus.is_live(ChannelClass::Tx));
     }
 
     #[tokio::test]
