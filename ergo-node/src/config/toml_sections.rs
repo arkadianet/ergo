@@ -236,6 +236,14 @@ pub(super) struct TomlNode {
     /// state is reached at runtime when a UTXO snapshot bootstrap
     /// completes (Mode 2, deferred).
     pub(super) blocks_to_keep: Option<i32>,
+    /// `[node] keep_versions` — undo-retention window / max serviceable
+    /// reorg depth. Mirrors Scala `ergo.node.keepVersions` (default 200,
+    /// same on both nodes). Raising it lets the node follow deeper
+    /// best-chain reorgs at a linear undo-log disk cost; it can NOT be 0
+    /// (a store that can never roll back would wedge on any reorg).
+    /// Prospective only — undo entries already pruned by a previous run's
+    /// smaller window stay gone.
+    pub(super) keep_versions: Option<u32>,
     /// `[node] state_type` — node state backend (Modes 5/6 of the
     /// roadmap). Mirrors Scala `ergo.node.stateType`. Default
     /// `"utxo"`. `"digest"` selects the AD-proof-driven backend

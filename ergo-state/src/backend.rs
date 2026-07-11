@@ -294,7 +294,7 @@ impl StateBackendKind {
     /// a digest node still follows a legitimately deep better branch.
     pub fn max_rollback_depth(&self) -> Option<u32> {
         match self {
-            Self::Utxo(_) => Some(crate::store::ROLLBACK_WINDOW),
+            Self::Utxo(s) => Some(s.rollback_window()),
             Self::Digest(_) => None,
         }
     }

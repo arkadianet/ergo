@@ -127,18 +127,18 @@ impl StateStore {
         // than re-attempt a doomed rollback every tick. Scala-faithful:
         // keepVersions=200 means a deeper reorg is never attempted
         // (FullBlockProcessor caps its non-best cache at the same window).
-        if depth > crate::store::ROLLBACK_WINDOW {
+        if depth > self.rollback_window {
             warn!(
                 event = "state_rollback_refused",
                 from_height,
                 target_height,
                 depth,
-                max = crate::store::ROLLBACK_WINDOW,
+                max = self.rollback_window,
                 "reorg deeper than rollback window — refusing",
             );
             return Err(StateError::ReorgTooDeep {
                 depth,
-                max: crate::store::ROLLBACK_WINDOW,
+                max: self.rollback_window,
             });
         }
 

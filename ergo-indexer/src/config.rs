@@ -12,6 +12,10 @@ pub struct IndexerConfig {
     /// File name (relative to the node data directory) for the
     /// indexer's redb database.
     pub db_filename: String,
+    /// Undo-retention window (max serviceable rollback depth). Node boot
+    /// mirrors `[node] keep_versions` here so the indexer can follow any
+    /// reorg the state store performs. Default 200 (Scala keepVersions).
+    pub rollback_window: u64,
 }
 
 impl Default for IndexerConfig {
@@ -20,6 +24,7 @@ impl Default for IndexerConfig {
             enabled: false,
             poll_idle_ms: 1000,
             db_filename: "indexer.redb".to_string(),
+            rollback_window: crate::store::ROLLBACK_WINDOW,
         }
     }
 }

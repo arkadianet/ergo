@@ -95,6 +95,7 @@ fn archive_inputs() -> IdentityInputs {
         state_type: ergo_node::config::StateType::Utxo,
         verify_transactions: true,
         blocks_to_keep: -1,
+        keep_versions: ergo_state::store::ROLLBACK_WINDOW,
         utxo_bootstrap: false,
         nipopow_bootstrap: false,
         mining_enabled: false,

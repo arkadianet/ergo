@@ -18,7 +18,7 @@ use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction};
 use thiserror::Error;
 
-use crate::store::{StateStore, ROLLBACK_WINDOW};
+use crate::store::StateStore;
 
 /// Identifier of a committed-chain tip. Retained by callers between
 /// polls so [`StateStore::tx_diff_since`] can compute the delta.
@@ -154,7 +154,7 @@ impl StateStore {
             a_id = meta.parent_id;
             a_height = a_height.saturating_sub(1);
             steps += 1;
-            if steps > ROLLBACK_WINDOW {
+            if steps > self.rollback_window() {
                 return Err(TxDiffError::ReorgTooDeep);
             }
         }
@@ -167,7 +167,7 @@ impl StateStore {
             b_id = meta.parent_id;
             b_height = b_height.saturating_sub(1);
             steps += 1;
-            if steps > ROLLBACK_WINDOW {
+            if steps > self.rollback_window() {
                 return Err(TxDiffError::ReorgTooDeep);
             }
         }
@@ -192,7 +192,7 @@ impl StateStore {
             a_height = a_height.saturating_sub(1);
             b_height = b_height.saturating_sub(1);
             steps += 1;
-            if steps > ROLLBACK_WINDOW {
+            if steps > self.rollback_window() {
                 return Err(TxDiffError::ReorgTooDeep);
             }
         }

@@ -182,6 +182,17 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                 reason: e.reason.clone(),
                 age_ms: now.saturating_duration_since(e.at).as_millis() as u64,
             });
+    // Terminal deep-fork wedge, projected the same way (age at publish time).
+    let sync_wedged = state
+        .executor
+        .deep_fork_wedge()
+        .map(|w| ergo_api::types::ApiSyncWedged {
+            stuck_block_id: hex::encode(w.best_full_id),
+            stuck_height: w.best_full_height,
+            fork_below_height: w.scanned_to_height,
+            max_rollback_depth: w.max_rollback_depth,
+            age_ms: now.saturating_duration_since(w.since).as_millis() as u64,
+        });
 
     let peer_count = state.peer_manager.connected_peers().count() as u32;
     let peers_vec: Vec<&ergo_p2p::peer::PeerInfo> = state.peer_manager.connected_peers().collect();
@@ -328,6 +339,9 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                 recent: &recent_tuples,
                 peers: peers_vec.iter().map(|p| p.addr.to_string()).collect(),
                 indexer_status,
+                sync_wedged: sync_wedged
+                    .as_ref()
+                    .map(|w| (w.stuck_height, w.stuck_block_id.clone())),
             },
         );
         for r in tick_reorgs {
@@ -424,6 +438,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             .collect(),
         last_block_apply_error,
         block_apply_errors_total,
+        sync_wedged,
         mempool_tx_requested_total: state.mempool_tx_requested_total,
         mempool_peer_tx_admitted_total: state.mempool_peer_tx_admitted_total,
         mempool_peer_tx_rejected_total: state.mempool_peer_tx_rejected_total,
@@ -1033,6 +1048,15 @@ fn build_events_projection(
                         Some(d) => format!("{status} ({d})"),
                         None => status,
                     });
+                }
+                K::SyncWedged { height, header_id } => {
+                    ev.kind = "syncWedged".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.detail = Some(
+                        "best-header chain forks below the rollback window — resync required"
+                            .into(),
+                    );
                 }
             }
             ev

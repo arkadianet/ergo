@@ -75,22 +75,23 @@ pub(crate) async fn host(State(s): State<OperatorState>) -> Response {
 }
 
 /// `GET /api/v1/node/health` — T0, dual status. `200` when `status = ok`; `503`
-/// for `stalled|disconnected|rejecting`, WITH the full typed body (§3.1 — never
-/// a bare error). Same mapping as the compat `health_handler`.
+/// for `stalled|disconnected|rejecting|wedged`, WITH the full typed body (§3.1
+/// — never a bare error). Same mapping as the compat `health_handler`.
 #[utoipa::path(
     get, path = "/api/v1/node/health", tag = "node",
     responses(
         (status = 200, description = "Healthy", body = ApiHealth),
-        (status = 503, description = "Stalled, disconnected, or rejecting a block", body = ApiHealth),
+        (status = 503, description = "Stalled, disconnected, rejecting a block, or wedged", body = ApiHealth),
     ),
 )]
 pub(crate) async fn health(State(s): State<OperatorState>) -> Response {
     let h = s.read.health();
     let code = match h.status {
         HealthStatus::Ok => StatusCode::OK,
-        HealthStatus::Stalled | HealthStatus::Disconnected | HealthStatus::Rejecting => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        HealthStatus::Stalled
+        | HealthStatus::Disconnected
+        | HealthStatus::Rejecting
+        | HealthStatus::Wedged => StatusCode::SERVICE_UNAVAILABLE,
     };
     let body = serde_json::to_vec(&h).unwrap_or_else(|_| b"{}".to_vec());
     (code, [(header::CONTENT_TYPE, "application/json")], body).into_response()

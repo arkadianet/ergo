@@ -53,6 +53,13 @@ pub(crate) enum FeedEventKind {
         status: String,
         detail: Option<String>,
     },
+    /// Terminal deep-fork wedge detected: the best-header chain forks below
+    /// the rollback window and block apply is permanently stuck at this tip
+    /// (resync required). Emitted once per distinct stuck tip.
+    SyncWedged {
+        height: u32,
+        header_id: String,
+    },
 }
 
 /// Previous-tick observations the differ compares against. `primed=false`
@@ -67,6 +74,9 @@ pub(crate) struct FeedPrev {
     pub(crate) recent: Vec<(u32, String)>,
     pub(crate) peers: std::collections::HashSet<String>,
     pub(crate) indexer_status: Option<String>,
+    /// Stuck-tip id of the last-reported deep-fork wedge, so the standing
+    /// wedge (re-observed every tick) emits once per distinct stuck tip.
+    pub(crate) sync_wedged: Option<String>,
 }
 
 /// Per-tick caps so a churn burst (or initial sync) can't monopolize the
@@ -88,6 +98,8 @@ pub(crate) struct FeedObservation<'a> {
     pub(crate) peers: Vec<String>,
     /// Extra-index status label + optional halt detail; `None` = disabled.
     pub(crate) indexer_status: Option<(String, Option<String>)>,
+    /// Deep-fork wedge `(stuck_height, stuck_id_hex)`; `None` = not wedged.
+    pub(crate) sync_wedged: Option<(u32, String)>,
 }
 
 fn recent_tail(recent: &[(u32, String, u32, u64)]) -> Vec<(u32, String)> {
@@ -267,10 +279,33 @@ pub(crate) fn derive_events(
                 prev.indexer_status = Some(status.clone());
             }
         }
+
+        // Deep-fork wedge transition: the wedge is a standing condition
+        // re-observed every tick, so emit once per distinct stuck tip.
+        // Recovery needs no counterpart event — block apply resuming shows
+        // up as blockApplied entries.
+        match &obs.sync_wedged {
+            Some((height, id)) if prev.sync_wedged.as_deref() != Some(id.as_str()) => {
+                ring.push(
+                    obs.unix_ms,
+                    FeedEventKind::SyncWedged {
+                        height: *height,
+                        header_id: id.clone(),
+                    },
+                );
+                prev.sync_wedged = Some(id.clone());
+            }
+            Some(_) => {}
+            None => prev.sync_wedged = None,
+        }
     } else {
         prev.primed = true;
         prev.peers = obs.peers.iter().cloned().collect();
         prev.indexer_status = obs.indexer_status.as_ref().map(|(s, _)| s.clone());
+        // Seed the wedge key too: a node that BOOTS wedged should still
+        // report it, so deliberately do NOT seed silently — leaving prev
+        // empty makes the first primed tick emit the standing wedge.
+        prev.sync_wedged = None;
     }
     prev.tip_height = obs.tip_height;
     prev.recent = recent_tail(obs.recent);
@@ -432,6 +467,7 @@ mod tests {
             recent,
             peers: peers.iter().map(|s| s.to_string()).collect(),
             indexer_status: indexer.map(|(s, d)| (s.to_string(), d.map(|x| x.to_string()))),
+            sync_wedged: None,
         }
     }
 
@@ -448,6 +484,7 @@ mod tests {
                 FeedEventKind::PeerConnected { addr } => format!("peer+:{addr}"),
                 FeedEventKind::PeerDisconnected { addr } => format!("peer-:{addr}"),
                 FeedEventKind::IndexerStatus { status, .. } => format!("index:{status}"),
+                FeedEventKind::SyncWedged { height, .. } => format!("wedged:{height}"),
             })
             .collect()
     }
@@ -472,6 +509,31 @@ mod tests {
         assert!(kinds(&ring).is_empty());
         assert_eq!(prev.tip_height, 100);
         assert!(prev.primed);
+    }
+
+    /// The deep-fork wedge is a standing condition re-observed every tick:
+    /// it must emit once per distinct stuck tip — no per-tick duplicates —
+    /// and re-arm after recovery so a later wedge on a new tip reports.
+    #[test]
+    fn sync_wedged_emits_once_per_stuck_tip() {
+        let mut ring = EventFeedRing::new();
+        let mut prev = FeedPrev::default();
+        let recent = [blk(100, "aa")];
+        derive_events(&mut ring, &mut prev, obs((100, "aa"), &recent, &[], None));
+
+        let wedged = |id: &str, h: u32| {
+            let mut o = obs((100, "aa"), &recent, &[], None);
+            o.sync_wedged = Some((h, id.to_string()));
+            o
+        };
+        derive_events(&mut ring, &mut prev, wedged("aa", 100));
+        derive_events(&mut ring, &mut prev, wedged("aa", 100)); // same tip: no dup
+        assert_eq!(kinds(&ring), vec!["wedged:100"]);
+
+        // Cleared, then wedged again on a NEW stuck tip: reports again.
+        derive_events(&mut ring, &mut prev, obs((100, "aa"), &recent, &[], None));
+        derive_events(&mut ring, &mut prev, wedged("bb", 105));
+        assert_eq!(kinds(&ring), vec!["wedged:100", "wedged:105"]);
     }
 
     /// A repeated identical observation emits nothing (idempotent tick).

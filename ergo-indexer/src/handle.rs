@@ -60,7 +60,8 @@ impl IndexerHandle {
 
         let path = datadir.join(&config.db_filename);
         match IndexerStore::open(&path) {
-            Ok((store, _outcome)) => {
+            Ok((mut store, _outcome)) => {
+                store.set_rollback_window(config.rollback_window);
                 let meta = match store.read_meta() {
                     Ok(m) => m,
                     Err(e) => {

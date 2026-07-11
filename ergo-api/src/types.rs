@@ -144,7 +144,11 @@ pub enum ApiHistoryMode {
 
 /// Single-call dashboard view: collapses sync + tip + peer count.
 /// Polled at 1 Hz by the UI header strip.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Default)]
+///
+/// Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+/// `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
+/// on every added field.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct ApiStatus {
     pub sync_state: SyncStateLabel,
     pub peer_count: u32,
@@ -173,6 +177,13 @@ pub struct ApiStatus {
     /// Session-scoped — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub block_apply_errors_total: u64,
+    /// Terminal deep-fork wedge: the best-header chain forks below the
+    /// state backend's rollback window, so this node can never reorg onto
+    /// it and will not apply another block. A persistent `Some(_)` is an
+    /// operator page — the only recovery is a resync (wipe the data dir
+    /// and sync fresh). `None` in normal operation.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sync_wedged: Option<ApiSyncWedged>,
     /// Monotonic count of unconfirmed-tx ids this node REQUESTED from peers
     /// in response to a tx-typed `Inv` (the
     /// `ergo_node_mempool_tx_requested_total` Prometheus counter source).
@@ -235,6 +246,29 @@ pub struct ApiBlockApplyError {
     /// Operator-facing rejection reason (the `BlockProcessError` Display).
     pub reason: String,
     /// Milliseconds since the rejection was recorded (computed at read time).
+    pub age_ms: u64,
+}
+
+/// Terminal deep-fork wedge, surfaced to operators. The best-header chain
+/// (the heaviest chain the network is on) forks below this node's rollback
+/// window: the undo data needed to reorg onto it was pruned, so block apply
+/// is permanently stuck at `stuck_height` while headers keep advancing.
+/// Matches the Scala reference node's `keepVersions` horizon — a Scala node
+/// in the same position is equally unrecoverable. Only a resync recovers.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiSyncWedged {
+    /// Hex-encoded id of the stuck full-block tip (on the abandoned branch).
+    pub stuck_block_id: String,
+    /// Height of the stuck full-block tip.
+    pub stuck_height: u32,
+    /// Lowest height the fork-point walk examined — the best-header chain
+    /// still disagreed there, so the true fork is at or below it.
+    pub fork_below_height: u32,
+    /// The rollback window the fork depth exceeded.
+    pub max_rollback_depth: u32,
+    /// Milliseconds since the wedge was detected, computed when the snapshot
+    /// is PUBLISHED (staleness bounded by `snapshot_age_ms`, ~1 s ticks) —
+    /// not recomputed per read.
     pub age_ms: u64,
 }
 
@@ -355,10 +389,11 @@ pub enum ApiHeaderAvailability {
     Sparse,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema, Default)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStateLabel {
-    /// No connected peers.
+    /// No connected peers. The `Default` — matches the pre-first-publish
+    /// snapshot (`SnapshotPublisher` empty state).
     #[default]
     Disconnected,
     /// Catching up — header chain not yet near tip, or block-application
@@ -818,6 +853,11 @@ pub enum HealthStatus {
     /// peers may have accepted (a possible consensus fork from the network).
     /// /health maps this to HTTP 503 so operators page on it.
     Rejecting,
+    /// Terminal deep-fork wedge — the best-header chain forks below the
+    /// rollback window and this node can never reorg onto it (see
+    /// [`ApiSyncWedged`]). /health maps this to HTTP 503; the only recovery
+    /// is a resync.
+    Wedged,
 }
 
 /// Hex-encode a 32-byte id without the `0x` prefix.

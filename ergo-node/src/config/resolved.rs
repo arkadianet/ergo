@@ -93,10 +93,17 @@ pub struct NodeConfig {
     pub agent_name: String,
     pub node_name: String,
     /// Pruning suffix length advertised in the `Mode` peer-feature.
-    /// `-1` = full archive (default); `N >= 0` = Mode 3 pruned, retain
-    /// at least `max(N, ROLLBACK_WINDOW)` blocks below tip. Mirrors
-    /// Scala `ergo.node.blocksToKeep`.
+    /// `-1` = full archive (default); `N > 0` = Mode 3 pruned suffix,
+    /// where load rejects any `N` below the configurable floor
+    /// (`keep_versions + SAFETY_MARGIN`); `0` is reserved for the
+    /// canonical Mode 6 headers-only combo. Mirrors Scala
+    /// `ergo.node.blocksToKeep`.
     pub blocks_to_keep: i32,
+    /// `[node] keep_versions` — undo-retention window (max serviceable
+    /// reorg depth), Scala `keepVersions` parity. Always >= 1 (load
+    /// rejects 0). Wired into BOTH the state store and the indexer store
+    /// at boot so the indexer can follow any reorg the state performs.
+    pub keep_versions: u32,
     /// State backend kind. Default `Utxo`. `Digest` selects the
     /// AD-proof-driven backend (Modes 5/6 of the roadmap).
     pub state_type: StateType,

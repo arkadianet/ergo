@@ -2257,6 +2257,10 @@ components:
       description: |-
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
+
+        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
+        on every added field.
       required:
       - sync_state
       - peer_count
@@ -2401,6 +2405,16 @@ components:
           minimum: 0
         sync_state:
           $ref: '#/components/schemas/SyncStateLabel'
+        sync_wedged:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiSyncWedged'
+            description: |-
+              Terminal deep-fork wedge: the best-header chain forks below the
+              state backend's rollback window, so this node can never reorg onto
+              it and will not apply another block. A persistent `Some(_)` is an
+              operator page — the only recovery is a resync (wipe the data dir
+              and sync fresh). `None` in normal operation.
     ApiSubmitError:
       type: object
       description: |-
@@ -2467,6 +2481,50 @@ components:
           minimum: 0
         recovery_done:
           type: boolean
+    ApiSyncWedged:
+      type: object
+      description: |-
+        Terminal deep-fork wedge, surfaced to operators. The best-header chain
+        (the heaviest chain the network is on) forks below this node's rollback
+        window: the undo data needed to reorg onto it was pruned, so block apply
+        is permanently stuck at `stuck_height` while headers keep advancing.
+        Matches the Scala reference node's `keepVersions` horizon — a Scala node
+        in the same position is equally unrecoverable. Only a resync recovers.
+      required:
+      - stuck_block_id
+      - stuck_height
+      - fork_below_height
+      - max_rollback_depth
+      - age_ms
+      properties:
+        age_ms:
+          type: integer
+          format: int64
+          description: |-
+            Milliseconds since the wedge was detected, computed when the snapshot
+            is PUBLISHED (staleness bounded by `snapshot_age_ms`, ~1 s ticks) —
+            not recomputed per read.
+          minimum: 0
+        fork_below_height:
+          type: integer
+          format: int32
+          description: |-
+            Lowest height the fork-point walk examined — the best-header chain
+            still disagreed there, so the true fork is at or below it.
+          minimum: 0
+        max_rollback_depth:
+          type: integer
+          format: int32
+          description: The rollback window the fork depth exceeded.
+          minimum: 0
+        stuck_block_id:
+          type: string
+          description: Hex-encoded id of the stuck full-block tip (on the abandoned branch).
+        stuck_height:
+          type: integer
+          format: int32
+          description: Height of the stuck full-block tip.
+          minimum: 0
     ApiTip:
       type: object
       description: |-
@@ -3049,6 +3107,7 @@ components:
       - stalled
       - disconnected
       - rejecting
+      - wedged
     InitRequest:
       type: object
       description: '`POST /api/v1/wallet/init` request. Secrets body-only, never logged.'

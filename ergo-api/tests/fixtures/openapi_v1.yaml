@@ -2677,8 +2677,8 @@ paths:
       - node
       summary: |-
         `GET /api/v1/node/health` — T0, dual status. `200` when `status = ok`; `503`
-        for `stalled|disconnected|rejecting`, WITH the full typed body (§3.1 — never
-        a bare error). Same mapping as the compat `health_handler`.
+        for `stalled|disconnected|rejecting|wedged`, WITH the full typed body (§3.1
+        — never a bare error). Same mapping as the compat `health_handler`.
       operationId: health
       responses:
         '200':
@@ -2688,7 +2688,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiHealth'
         '503':
-          description: Stalled, disconnected, or rejecting a block
+          description: Stalled, disconnected, rejecting a block, or wedged
           content:
             application/json:
               schema:
@@ -5549,6 +5549,10 @@ components:
       description: |-
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
+
+        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
+        on every added field.
       required:
       - sync_state
       - peer_count
@@ -5693,6 +5697,16 @@ components:
           minimum: 0
         sync_state:
           $ref: '#/components/schemas/SyncStateLabel'
+        sync_wedged:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiSyncWedged'
+            description: |-
+              Terminal deep-fork wedge: the best-header chain forks below the
+              state backend's rollback window, so this node can never reorg onto
+              it and will not apply another block. A persistent `Some(_)` is an
+              operator page — the only recovery is a resync (wipe the data dir
+              and sync fresh). `None` in normal operation.
     ApiSyncStatus:
       type: object
       description: Sync pipeline state.
@@ -5729,6 +5743,50 @@ components:
           minimum: 0
         recovery_done:
           type: boolean
+    ApiSyncWedged:
+      type: object
+      description: |-
+        Terminal deep-fork wedge, surfaced to operators. The best-header chain
+        (the heaviest chain the network is on) forks below this node's rollback
+        window: the undo data needed to reorg onto it was pruned, so block apply
+        is permanently stuck at `stuck_height` while headers keep advancing.
+        Matches the Scala reference node's `keepVersions` horizon — a Scala node
+        in the same position is equally unrecoverable. Only a resync recovers.
+      required:
+      - stuck_block_id
+      - stuck_height
+      - fork_below_height
+      - max_rollback_depth
+      - age_ms
+      properties:
+        age_ms:
+          type: integer
+          format: int64
+          description: |-
+            Milliseconds since the wedge was detected, computed when the snapshot
+            is PUBLISHED (staleness bounded by `snapshot_age_ms`, ~1 s ticks) —
+            not recomputed per read.
+          minimum: 0
+        fork_below_height:
+          type: integer
+          format: int32
+          description: |-
+            Lowest height the fork-point walk examined — the best-header chain
+            still disagreed there, so the true fork is at or below it.
+          minimum: 0
+        max_rollback_depth:
+          type: integer
+          format: int32
+          description: The rollback window the fork depth exceeded.
+          minimum: 0
+        stuck_block_id:
+          type: string
+          description: Hex-encoded id of the stuck full-block tip (on the abandoned branch).
+        stuck_height:
+          type: integer
+          format: int32
+          description: Height of the stuck full-block tip.
+          minimum: 0
     ApiTip:
       type: object
       description: |-
@@ -7419,8 +7477,8 @@ components:
           - boolean
           - 'null'
           description: |-
-            `null`: the deep-reorg wedge is only a `debug!` today (WARGAMES 4a);
-            no snapshot field carries it yet (ASSUMED-new).
+            Whether the terminal deep-fork wedge is active — the best-header
+            chain forks below the rollback window (`ApiStatus.sync_wedged`).
         lone_producer:
           type: boolean
         rejecting_block:
@@ -7429,7 +7487,9 @@ components:
           type:
           - boolean
           - 'null'
-          description: '`null`: same ASSUMED-new deep-reorg state.'
+          description: |-
+            Whether recovery requires a resync. Today this is exactly the
+            wedge condition: a wedged node cannot reorg without one.
         self_mined_fraction_pct:
           type:
           - string
@@ -7451,6 +7511,7 @@ components:
       - stalled
       - disconnected
       - rejecting
+      - wedged
     HolderMetrics:
       type: object
       required:
