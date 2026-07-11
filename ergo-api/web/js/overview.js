@@ -7,13 +7,20 @@ import { lineChart, barChart } from './chart.js';
 import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
 import { minerNode, fetchOwnPk, ownPkHex } from './miners.js';
+import { createChannelSub } from './ws-client.js';
 
 const HISTORY_LEN = 60;
+const HTTP_TIP_FALLBACK_MS = 30_000;
+const WS_STALE_MS = 35_000;
 const hist = { blockTimes: [], mempool: [], height: [], difficulty: [] };
 const state = {
   status: null,
   info: null,
   tip: null,
+  wsHeight: null,
+  wsLastEventAt: 0,
+  httpHeight: null,
+  httpHeightAt: 0,
   identity: null,
   peerDist: null,
   lastBlockMs: null,
@@ -21,6 +28,48 @@ const state = {
 };
 let root = null;
 let viewMode = localStorage.getItem('ergo.ovview') || 'cockpit';
+let derivedTick = null;
+
+function handleBlocksFrame(frame) {
+  if (frame.type !== 'event' || frame.channel !== 'blocks') return;
+  if (frame.event !== 'block_applied' && frame.event !== 'reorg') return;
+  const h = frame.height ?? frame.data?.height;
+  if (h == null) return;
+  state.wsHeight = h;
+  state.wsLastEventAt = Date.now();
+  push(hist.height, h);
+  onFast({ status: state.status, info: state.info });
+}
+
+const blocksWs = createChannelSub({
+  id: 'overview-blocks',
+  channels: ['blocks'],
+  onEvent: handleBlocksFrame,
+});
+
+/** Ages that can advance without a network round-trip (last block, uptime). */
+function paintDerived() {
+  if (!root) return;
+  const tipMs = state.tip?.best_full_block?.timestamp_unix_ms ?? state.lastBlockMs;
+  const ageS = tipMs ? Math.max(0, Math.floor((Date.now() - tipMs) / 1000)) : null;
+  setText('[data-k="lastblk"]', ageS != null ? dur(ageS) : '—');
+  const started = state.info?.started_at_unix_ms;
+  if (started) {
+    setText('[data-k="up"]', dur(Math.max(0, Math.floor((Date.now() - started) / 1000))));
+  }
+}
+
+function startDerivedTick() {
+  if (derivedTick) return;
+  paintDerived();
+  derivedTick = setInterval(paintDerived, 1000);
+}
+
+function stopDerivedTick() {
+  if (!derivedTick) return;
+  clearInterval(derivedTick);
+  derivedTick = null;
+}
 
 // ---- domain formatters ----
 function parseDiff(s) {
@@ -62,6 +111,25 @@ const KPI = [
 function setText(sel, t) {
   const e = root && root.querySelector(sel);
   if (e) e.textContent = t;
+}
+
+function wsHeightFresh(now = Date.now()) {
+  // Freshness is time-based only: a reconnect must not revive a stale tip.
+  return state.wsHeight != null && now - state.wsLastEventAt < WS_STALE_MS;
+}
+
+function noteHttpHeight(status) {
+  const h = status?.best_full_block_height;
+  if (h == null) return;
+  const now = Date.now();
+  if (state.httpHeight == null || now - state.httpHeightAt >= HTTP_TIP_FALLBACK_MS) {
+    state.httpHeight = h;
+    state.httpHeightAt = now;
+  }
+}
+
+function displayHeight() {
+  return wsHeightFresh() ? state.wsHeight : state.httpHeight ?? state.status?.best_full_block_height ?? null;
 }
 
 export function mount(el) {
@@ -126,6 +194,19 @@ export function mount(el) {
   // the cached copy first so a re-entry doesn't flash empty.
   if (state.identity) renderIdentity();
   else fetchIdentity();
+  blocksWs.start();
+  startDerivedTick();
+}
+
+export function onShow() {
+  blocksWs.start();
+  startDerivedTick();
+  if (state.status) onFast({ status: state.status, info: state.info });
+}
+
+export function onHide() {
+  blocksWs.stop();
+  stopDerivedTick();
 }
 
 // ---- node identity strip (static, fetched once on mount) ----
@@ -189,8 +270,10 @@ export function onFast({ status, info }) {
   const tip = state.tip;
   if (!root) return;
 
-  const blkH = s?.best_full_block_height ?? null;
-  const hdrH = s?.best_header_height ?? null;
+  noteHttpHeight(s);
+  const blkH = displayHeight();
+  const rawHdrH = s?.best_header_height ?? null;
+  const hdrH = rawHdrH != null || blkH != null ? Math.max(rawHdrH ?? blkH, blkH ?? rawHdrH) : null;
   setText('[data-k="height"]', num(blkH));
   setText(
     '[data-s="height"]',
@@ -216,7 +299,12 @@ export function onFast({ status, info }) {
 
   setText('[data-k="mp"]', num(s?.mempool_size ?? 0));
 
-  setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
+  // Prefer boot timestamp so uptime advances between rare /info refreshes.
+  if (i?.started_at_unix_ms) {
+    setText('[data-k="up"]', dur(Math.max(0, Math.floor((Date.now() - i.started_at_unix_ms) / 1000))));
+  } else {
+    setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
+  }
   setText('[data-s="up"]', 'since restart');
 }
 

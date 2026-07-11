@@ -1937,7 +1937,9 @@ components:
         One operator event for `GET /api/v1/events` — flat shape with optional
         per-kind fields so the feed renders without a type registry. `kind` is
         one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-        `indexerStatus`.
+        `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
+        best-effort from the node's 32-block committed tail; deeper orphan ids are
+        not fabricated.
       required:
       - seq
       - unixMs
@@ -1947,10 +1949,22 @@ components:
           type:
           - string
           - 'null'
+        depth:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
         detail:
           type:
           - string
           - 'null'
+        droppedHeaderIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
         headerId:
           type:
           - string
@@ -2293,6 +2307,20 @@ components:
               fork-from-network signal (the node refused a block its peers may have
               accepted). `None` when no rejection has occurred this session. A
               persistent `Some(_)` is an operator page.
+        last_reorg_depth:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Depth of the most recent retained reorg, if any.
+          minimum: 0
+        last_reorg_unix_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Unix-ms of the most recent retained reorg, if any.
+          minimum: 0
         mempool_peer_tx_admitted_total:
           type: integer
           format: int64
@@ -2331,6 +2359,13 @@ components:
         peer_count:
           type: integer
           format: int32
+          minimum: 0
+        reorgs_total:
+          type: integer
+          format: int64
+          description: |-
+            Session-total tip-replacement reorgs detected by the operator event
+            differ (`ergo_node_reorg_total`).
           minimum: 0
         snapshot_age_ms:
           type: integer

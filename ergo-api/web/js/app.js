@@ -1,13 +1,14 @@
 // Dashboard bootstrap: wires the router, settings, status line, and
-// section-gated polling (fast status always; slow data only for the visible
-// section and only while the tab is visible).
+// section-gated polling (status heartbeat; slow data only for the visible
+// section and only while the tab is visible). Tip / mempool / peers panels
+// prefer WS; HTTP remains the fallback.
 //
 // Section lifecycle (all hooks except mount are optional):
 //   mount(el)   — build the section's DOM once (called lazily on first show).
 //   onShow()    — section became active (start section-specific work / refresh).
 //   onHide()    — section left (stop work; scrub sensitive state — see wallet).
-//   onFast(d)   — 1 Hz tick with {status, info}, only while active.
-//   onSlow()    — 4 s tick (may be async); only while active. Serialized
+//   onFast(d)   — status tick with {status, info}, only while active.
+//   onSlow()    — slow tick (may be async); only while active. Serialized
 //                 per-section so a slow fetch never overlaps its next tick.
 //   isBusy()    — section holds in-flight user input; it patches read-only
 //                 cells instead of rebuilding (the section enforces this).
@@ -31,10 +32,18 @@ const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting'
 const renderers = { overview, explorer, peers, mempool, mining, voting, wallet };
 const mounted = new Set();
 let current = null;
+// Tip/mempool/peers come from WS; /info is rarely needed for the chrome.
+const INFO_REFRESH_MS = 30_000;
+// Status heartbeat for conn-dot / peer+mempool counts (not tip or uptime).
+const STATUS_REFRESH_MS = 5_000;
+const SLOW_REFRESH_MS = 4_000;
+let cachedInfo = null;
+let lastInfoAt = 0;
 // Holds the section name whose onSlow() is in flight, so a 4 s tick can't
 // overlap a still-running slow fetch for the same section; a navigation to a
 // different section is not blocked (the names differ).
 let slowInFlight = null;
+let fastInFlight = false;
 
 function setConn(ok) {
   const dot = document.getElementById('conn-dot');
@@ -55,12 +64,36 @@ function tickClock() {
 
 async function fast() {
   if (document.visibilityState === 'hidden') return;
-  const [status, info] = await Promise.all([api.status(), api.info()]);
-  setConn(!!status);
-  const net = document.getElementById('side-net');
-  if (net && info) net.textContent = `${info.network ?? ''} · v${info.version ?? ''}`;
-  const r = current && renderers[current];
-  if (r && r.onFast) r.onFast({ status, info });
+  if (fastInFlight) return;
+  fastInFlight = true;
+  try {
+    const now = Date.now();
+    const needInfo = !cachedInfo || now - lastInfoAt >= INFO_REFRESH_MS;
+    let status = null;
+    let info = cachedInfo;
+    try {
+      [status, info] = await Promise.all([
+        api.status(),
+        needInfo ? api.info() : Promise.resolve(cachedInfo),
+      ]);
+    } catch {
+      // getJson normally resolves null; keep cached info and mark unreachable.
+      setConn(false);
+      return;
+    }
+    if (needInfo) {
+      lastInfoAt = now;
+      if (info) cachedInfo = info;
+    }
+    setConn(!!status);
+    const net = document.getElementById('side-net');
+    const infoForRender = cachedInfo || info;
+    if (net && infoForRender) net.textContent = `${infoForRender.network ?? ''} · v${infoForRender.version ?? ''}`;
+    const r = current && renderers[current];
+    if (r && r.onFast) r.onFast({ status, info: infoForRender });
+  } finally {
+    fastInFlight = false;
+  }
 }
 
 async function slow() {
@@ -132,8 +165,8 @@ function boot() {
     setTimeout(() => explorer.focusSearch(), 0);
   });
   fast();
-  setInterval(fast, 1000);
-  setInterval(slow, 4000);
+  setInterval(fast, STATUS_REFRESH_MS);
+  setInterval(slow, SLOW_REFRESH_MS);
   setInterval(tickClock, 1000);
   tickClock();
 }

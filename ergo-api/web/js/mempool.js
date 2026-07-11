@@ -2,15 +2,37 @@
 // local budget, subordinate) + weight policy + revalidation, a log-axis
 // smoothed fee-distribution curve, and the tx table with an in-node
 // detail drawer (inputs/outputs/tokens) via the tx-detail endpoint.
+// Live updates come from WS `mempool`; HTTP is the 30s fallback + first paint.
 import { api } from './api-client.js';
 import { makeTable, copyBtn } from './table.js';
 import { erg, num, bytes, ageMs, truncMiddle } from './format.js';
 import { feeCurve } from './sparkline.js';
 import { stats, logHistogram, logFrac } from './fee-stats.js';
+import { createChannelSub } from './ws-client.js';
 
 let root = null;
 let table = null;
 const detailCache = {}; // tx_id -> ApiTxDetail | null
+const HTTP_FALLBACK_MS = 30_000;
+let lastFullAt = 0;
+let refreshTimer = null;
+let refreshing = false;
+
+const mempoolWs = createChannelSub({
+  id: 'mempool-panel',
+  channels: ['mempool'],
+  onEvent(frame) {
+    if (frame.type !== 'event' || frame.channel !== 'mempool') return;
+    if (
+      frame.event !== 'tx_accepted' &&
+      frame.event !== 'tx_dropped' &&
+      frame.event !== 'tx_confirmed'
+    ) {
+      return;
+    }
+    scheduleRefresh(150);
+  },
+});
 
 function span(text, color) {
   const s = document.createElement('span');
@@ -169,51 +191,85 @@ function weightLabel(wf) {
   return wf.kind || JSON.stringify(wf);
 }
 
+function scheduleRefresh(delayMs) {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    fullRefresh();
+  }, delayMs);
+}
+
+async function fullRefresh() {
+  if (!root || refreshing) return;
+  refreshing = true;
+  try {
+    const [summary, txWrap] = await Promise.all([api.mempoolSummary(), api.mempoolTransactions()]);
+    const txs = (txWrap && txWrap.items) || []; // v1: mempool/transactions now returns {items,page}
+    const set = (sel, t) => {
+      const e = root.querySelector(sel);
+      if (e) e.textContent = t;
+    };
+    const setW = (sel, pct) => {
+      const e = root.querySelector(sel);
+      if (!e) return;
+      const clamped = Math.min(100, Math.max(0, pct));
+      e.style.width = `${clamped}%`;
+      // Mirror the fill into the parent gauge's aria-valuenow for screen readers.
+      if (e.parentElement) e.parentElement.setAttribute('aria-valuenow', String(Math.round(clamped)));
+    };
+
+    root.querySelector('[data-count]').textContent = `${num(summary?.size ?? txs.length)} unconfirmed`;
+
+    if (summary) {
+      const slotPct = summary.capacity_count > 0 ? (summary.size / summary.capacity_count) * 100 : 0;
+      set('[data-slot]', `${num(summary.size)} / ${num(summary.capacity_count)}  ·  ${slotPct.toFixed(0)}%`);
+      setW('[data-slotfill]', slotPct);
+      const bytePct = summary.capacity_bytes > 0 ? (summary.total_bytes / summary.capacity_bytes) * 100 : 0;
+      set('[data-byte]', `${bytes(summary.total_bytes)} / ${bytes(summary.capacity_bytes)}  ·  ${bytePct.toFixed(0)}%`);
+      setW('[data-bytefill]', bytePct);
+      set('[data-reval]', num(summary.revalidation_pending));
+    }
+    set('[data-weight]', weightLabel(summary && summary.weight_function));
+
+    // fee distribution
+    const feeb = txs.map((t) => Number(t.fee_per_byte)).filter((v) => Number.isFinite(v));
+    const curveHost = root.querySelector('[data-curve]');
+    curveHost.replaceChildren();
+    if (feeb.length) {
+      const st = stats(feeb);
+      const { counts, lo, hi } = logHistogram(feeb, 28);
+      curveHost.append(feeCurve(counts, { medianFrac: logFrac(st.median, lo, hi) }));
+      set('[data-feestats]', `median ${num(st.median)} · mode ${num(st.mode)} · mean ${num(Math.round(st.mean))}`);
+      set('[data-min]', `min ${num(lo)}`);
+      set('[data-max]', `max ${num(hi)}`);
+    } else {
+      set('[data-feestats]', '');
+      set('[data-min]', '');
+      set('[data-max]', '');
+    }
+
+    table.update(txs);
+    lastFullAt = Date.now();
+  } finally {
+    refreshing = false;
+  }
+}
+
+export function onShow() {
+  mempoolWs.start();
+  fullRefresh();
+}
+
+export function onHide() {
+  mempoolWs.stop();
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
 export async function onSlow() {
-  const [summary, txWrap] = await Promise.all([api.mempoolSummary(), api.mempoolTransactions()]);
-  const txs = (txWrap && txWrap.items) || []; // v1: mempool/transactions now returns {items,page}
-  const set = (sel, t) => {
-    const e = root.querySelector(sel);
-    if (e) e.textContent = t;
-  };
-  const setW = (sel, pct) => {
-    const e = root.querySelector(sel);
-    if (!e) return;
-    const clamped = Math.min(100, Math.max(0, pct));
-    e.style.width = `${clamped}%`;
-    // Mirror the fill into the parent gauge's aria-valuenow for screen readers.
-    if (e.parentElement) e.parentElement.setAttribute('aria-valuenow', String(Math.round(clamped)));
-  };
-
-  root.querySelector('[data-count]').textContent = `${num(summary?.size ?? txs.length)} unconfirmed`;
-
-  if (summary) {
-    const slotPct = summary.capacity_count > 0 ? (summary.size / summary.capacity_count) * 100 : 0;
-    set('[data-slot]', `${num(summary.size)} / ${num(summary.capacity_count)}  ·  ${slotPct.toFixed(0)}%`);
-    setW('[data-slotfill]', slotPct);
-    const bytePct = summary.capacity_bytes > 0 ? (summary.total_bytes / summary.capacity_bytes) * 100 : 0;
-    set('[data-byte]', `${bytes(summary.total_bytes)} / ${bytes(summary.capacity_bytes)}  ·  ${bytePct.toFixed(0)}%`);
-    setW('[data-bytefill]', bytePct);
-    set('[data-reval]', num(summary.revalidation_pending));
-  }
-  set('[data-weight]', weightLabel(summary && summary.weight_function));
-
-  // fee distribution
-  const feeb = txs.map((t) => Number(t.fee_per_byte)).filter((v) => Number.isFinite(v));
-  const curveHost = root.querySelector('[data-curve]');
-  curveHost.replaceChildren();
-  if (feeb.length) {
-    const st = stats(feeb);
-    const { counts, lo, hi } = logHistogram(feeb, 28);
-    curveHost.append(feeCurve(counts, { medianFrac: logFrac(st.median, lo, hi) }));
-    set('[data-feestats]', `median ${num(st.median)} · mode ${num(st.mode)} · mean ${num(Math.round(st.mean))}`);
-    set('[data-min]', `min ${num(lo)}`);
-    set('[data-max]', `max ${num(hi)}`);
-  } else {
-    set('[data-feestats]', '');
-    set('[data-min]', '');
-    set('[data-max]', '');
-  }
-
-  table.update(txs);
+  // While WS is live, HTTP is only a 30s consistency fallback.
+  if (mempoolWs.isConnected() && Date.now() - lastFullAt < HTTP_FALLBACK_MS) return;
+  await fullRefresh();
 }

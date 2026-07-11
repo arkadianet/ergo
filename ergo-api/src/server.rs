@@ -95,8 +95,8 @@ use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
     JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
-    JS_TOKEN_META, JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML,
-    TOKENS_CSS, V1_SWAGGER_HTML,
+    JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WS_CLIENT, NATIVE_SWAGGER_HTML, OPENAPI_YAML,
+    SWAGGER_HTML, TOKENS_CSS, V1_SWAGGER_HTML,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
@@ -158,6 +158,24 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<(SocketAddr, tokio::net::
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;
     Ok((actual, listener))
+}
+
+/// The process-wide realtime handle (WS fan-out bus + connection limiter).
+/// Constructed once, on first call, and shared for the life of the
+/// process — same singleton the router uses internally to feed the
+/// `blocks` coarse-ring bridge, so a caller reaching for it before or
+/// after router assembly gets the identical `Arc<RealtimeBus>`.
+///
+/// This is the seam `ergo-node` uses to publish mempool `tx_accepted` /
+/// `tx_dropped` events directly (bypassing the coarse ring, which only
+/// carries block/reorg/peer events): grab the bus here, wrap it in an
+/// adapter that implements `ergo_mempool::MempoolObserver`, and hand it to
+/// `Mempool::set_observer`.
+pub fn realtime_handle() -> crate::v1::RealtimeHandle {
+    static V1_REALTIME: std::sync::OnceLock<crate::v1::RealtimeHandle> = std::sync::OnceLock::new();
+    V1_REALTIME
+        .get_or_init(crate::v1::RealtimeHandle::blocks_and_mempool)
+        .clone()
 }
 
 /// Start serving on a pre-bound `listener`. Spawns the axum task and
@@ -612,6 +630,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
         .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
+        .route("/js/ws-client.js", get(|| async { js(JS_WS_CLIENT) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/swagger/v1", get(swagger_v1))
@@ -1273,19 +1292,18 @@ pub fn router_with_mempool_and_wallet_and_security(
     // shared like the O4 depth ring. It is fed by the coarse-ring bridge task
     // (production only — same live-runtime + once-per-process guards as the
     // depth sampler so non-async test router builds never spawn it and repeated
-    // router assembly never stacks pollers). Phase-1 feeds only the `blocks`
-    // channel; the fine-grained taps are a node-internals follow-up.
+    // router assembly never stacks pollers). `realtime_handle()` uses
+    // `RealtimeHandle::blocks_and_mempool()`, which marks `blocks`, `mempool`,
+    // `peers`, and `tx` live; fine-grained address/box/token taps remain a
+    // follow-up.
     // Process singletons: the `*_once` workers below bind the FIRST bus/engine
     // they see, so every router assembly must share those exact instances — a
     // per-assembly bus/engine would leave later routers holding handles no
     // worker feeds (registrations that never deliver, subscriptions that never
     // fire).
-    static V1_REALTIME: std::sync::OnceLock<crate::v1::RealtimeHandle> = std::sync::OnceLock::new();
     static V1_WEBHOOKS_ENGINE: std::sync::OnceLock<std::sync::Arc<crate::v1::WebhookEngine>> =
         std::sync::OnceLock::new();
-    let v1_realtime = V1_REALTIME
-        .get_or_init(crate::v1::RealtimeHandle::blocks_only)
-        .clone();
+    let v1_realtime = realtime_handle();
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::v1::spawn_event_bridge_once(
             v1_read.clone(),
@@ -2259,6 +2277,15 @@ ergo_node_mempool_peer_tx_admitted_total {peer_tx_admitted}
 # HELP ergo_node_mempool_peer_tx_rejected_total Peer-sourced txs rejected by admission since node start.
 # TYPE ergo_node_mempool_peer_tx_rejected_total counter
 ergo_node_mempool_peer_tx_rejected_total {peer_tx_rejected}
+# HELP ergo_node_reorg_total Tip-replacement reorgs detected since node start.
+# TYPE ergo_node_reorg_total counter
+ergo_node_reorg_total {reorgs_total}
+# HELP ergo_node_last_reorg_depth Depth of the most recent retained reorg (0 if none).
+# TYPE ergo_node_last_reorg_depth gauge
+ergo_node_last_reorg_depth {last_reorg_depth}
+# HELP ergo_node_last_reorg_age_ms Age of the most recent retained reorg in ms (-1 if none).
+# TYPE ergo_node_last_reorg_age_ms gauge
+ergo_node_last_reorg_age_ms {last_reorg_age_ms}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -2275,6 +2302,20 @@ ergo_node_mempool_peer_tx_rejected_total {peer_tx_rejected}
         tx_requested = status.mempool_tx_requested_total,
         peer_tx_admitted = status.mempool_peer_tx_admitted_total,
         peer_tx_rejected = status.mempool_peer_tx_rejected_total,
+        reorgs_total = status.reorgs_total,
+        last_reorg_depth = status.last_reorg_depth.unwrap_or(0),
+        last_reorg_age_ms = {
+            // Approximate "now" as snapshot build time: status.snapshot_age_ms
+            // is how stale the snapshot is relative to wall clock at read.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            status
+                .last_reorg_unix_ms
+                .map(|t| now_ms.saturating_sub(t) as i64)
+                .unwrap_or(-1)
+        },
     );
 
     (

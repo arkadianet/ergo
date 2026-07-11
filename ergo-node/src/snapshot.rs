@@ -122,6 +122,8 @@ pub struct NodeSnapshot {
     pub recent_blocks: Arc<Vec<ApiRecentBlock>>,
     /// Operator event feed tail (bounded ring projection) + newest seq.
     pub events: Arc<ergo_api::types::ApiNodeEvents>,
+    /// Postmortem reorg ring (64 / 7d) for diagnostics + metrics.
+    pub reorgs: Arc<ergo_api::types::ApiReorgHistory>,
     /// Best network-known header height — `SyncState::best_known_header_height()`
     /// (our validated-header latch, initialized to the full-block tip and
     /// advanced by peer sync info). Matches Scala's `maxPeerHeight` notion
@@ -216,6 +218,9 @@ impl NodeSnapshot {
                 mempool_tx_requested_total: 0,
                 mempool_peer_tx_admitted_total: 0,
                 mempool_peer_tx_rejected_total: 0,
+                reorgs_total: 0,
+                last_reorg_depth: None,
+                last_reorg_unix_ms: None,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -265,6 +270,7 @@ impl NodeSnapshot {
             banned_ips: Arc::new(Vec::new()),
             recent_blocks: Arc::new(Vec::new()),
             events: Arc::new(ergo_api::types::ApiNodeEvents::default()),
+            reorgs: Arc::new(ergo_api::types::ApiReorgHistory::default()),
             max_peer_height: 0,
             mining_enabled: false,
             snapshot_manifests: Vec::new(),
@@ -466,6 +472,8 @@ pub struct SnapshotParts<'a> {
     pub recent_blocks: Arc<Vec<ApiRecentBlock>>,
     /// Operator event feed tail (bounded ring projection) + newest seq.
     pub events: Arc<ergo_api::types::ApiNodeEvents>,
+    /// Postmortem reorg ring (64 / 7d).
+    pub reorgs: Arc<ergo_api::types::ApiReorgHistory>,
     /// `SyncState::best_known_header_height()` — the network-best-height
     /// latch advanced by peer sync info. Feeds `/info.maxPeerHeight`.
     pub max_peer_height: u32,
@@ -545,6 +553,9 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         mempool_tx_requested_total: p.mempool_tx_requested_total,
         mempool_peer_tx_admitted_total: p.mempool_peer_tx_admitted_total,
         mempool_peer_tx_rejected_total: p.mempool_peer_tx_rejected_total,
+        reorgs_total: p.reorgs.total,
+        last_reorg_depth: p.reorgs.reorgs.first().map(|r| r.depth),
+        last_reorg_unix_ms: p.reorgs.reorgs.first().map(|r| r.unix_ms),
     };
 
     let tip = ApiTip {
@@ -618,6 +629,7 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         banned_ips: p.banned_ips,
         recent_blocks: p.recent_blocks,
         events: p.events,
+        reorgs: p.reorgs,
         max_peer_height: p.max_peer_height,
         mining_enabled: p.mining_enabled,
         snapshot_manifests: p.snapshot_manifests,
@@ -954,6 +966,7 @@ mod tests {
             bootstrap: None,
             recent_blocks: Arc::new(Vec::new()),
             events: Arc::new(ergo_api::types::ApiNodeEvents::default()),
+            reorgs: Arc::new(ergo_api::types::ApiReorgHistory::default()),
             max_peer_height: 0,
             mining_enabled: false,
             snapshot_manifests: Vec::new(),

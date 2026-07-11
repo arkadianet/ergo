@@ -144,7 +144,7 @@ pub enum ApiHistoryMode {
 
 /// Single-call dashboard view: collapses sync + tip + peer count.
 /// Polled at 1 Hz by the UI header strip.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Default)]
 pub struct ApiStatus {
     pub sync_state: SyncStateLabel,
     pub peer_count: u32,
@@ -195,6 +195,16 @@ pub struct ApiStatus {
     /// — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub mempool_peer_tx_rejected_total: u64,
+    /// Session-total tip-replacement reorgs detected by the operator event
+    /// differ (`ergo_node_reorg_total`).
+    #[serde(default)]
+    pub reorgs_total: u64,
+    /// Depth of the most recent retained reorg, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reorg_depth: Option<u32>,
+    /// Unix-ms of the most recent retained reorg, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reorg_unix_ms: Option<u64>,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct
@@ -329,10 +339,11 @@ pub enum ApiHeaderAvailability {
     Sparse,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStateLabel {
     /// No connected peers.
+    #[default]
     Disconnected,
     /// Catching up — header chain not yet near tip, or block-application
     /// gap > tolerance.
@@ -925,7 +936,9 @@ pub struct ApiMinerStats {
 /// One operator event for `GET /api/v1/events` — flat shape with optional
 /// per-kind fields so the feed renders without a type registry. `kind` is
 /// one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-/// `indexerStatus`.
+/// `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
+/// best-effort from the node's 32-block committed tail; deeper orphan ids are
+/// not fabricated.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiNodeEvent {
@@ -937,6 +950,10 @@ pub struct ApiNodeEvent {
     pub height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_header_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -954,6 +971,32 @@ pub struct ApiNodeEvent {
 pub struct ApiNodeEvents {
     pub latest_seq: u64,
     pub events: Vec<ApiNodeEvent>,
+}
+
+/// One retained reorg for `GET /api/v1/diagnostics/reorgs` — postmortem
+/// ring (last 64 **or** 7 days), not the coarse glanceable event feed.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiReorgRecord {
+    pub unix_ms: u64,
+    pub height: u32,
+    pub header_id: String,
+    pub depth: u32,
+    pub dropped_header_ids: Vec<String>,
+    /// True when dropped ids hit the 32-block committed-tail cap.
+    pub orphans_truncated: bool,
+}
+
+/// Envelope for the diagnostics reorg history.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiReorgHistory {
+    /// Session-total reorgs detected (not reset by age/count prune).
+    pub total: u64,
+    pub cap: u32,
+    pub max_age_ms: u64,
+    /// Newest-first retained entries.
+    pub reorgs: Vec<ApiReorgRecord>,
 }
 
 /// Self-repair sub-state of the extra-index for `GET /api/v1/indexer/status`.
@@ -1301,6 +1344,61 @@ mod tests {
             !obj.contains_key("detail"),
             "absent detail must omit the key, not serialize as null"
         );
+    }
+
+    #[test]
+    fn api_node_events_reorg_serializes_depth_and_dropped_header_ids() {
+        let event = ApiNodeEvent {
+            seq: 1,
+            unix_ms: 1_700_000_000_000,
+            kind: "reorg".to_string(),
+            height: Some(100),
+            header_id: Some("new-tip".to_string()),
+            depth: Some(2),
+            dropped_header_ids: Some(vec!["old-100".to_string(), "old-99".to_string()]),
+            txs: None,
+            size_bytes: None,
+            addr: None,
+            detail: None,
+        };
+
+        let v = serde_json::to_value(event).unwrap();
+
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "seq": 1,
+                "unixMs": 1_700_000_000_000u64,
+                "kind": "reorg",
+                "height": 100,
+                "headerId": "new-tip",
+                "depth": 2,
+                "droppedHeaderIds": ["old-100", "old-99"],
+            })
+        );
+    }
+
+    #[test]
+    fn api_node_events_non_reorg_omits_reorg_fields() {
+        let event = ApiNodeEvent {
+            seq: 1,
+            unix_ms: 1_700_000_000_000,
+            kind: "peerConnected".to_string(),
+            height: None,
+            header_id: None,
+            depth: None,
+            dropped_header_ids: None,
+            txs: None,
+            size_bytes: None,
+            addr: Some("127.0.0.1:9030".to_string()),
+            detail: None,
+        };
+
+        let v = serde_json::to_value(event).unwrap();
+        let obj = v.as_object().expect("object");
+
+        assert!(!obj.contains_key("depth"));
+        assert!(!obj.contains_key("droppedHeaderIds"));
     }
 
     #[test]
