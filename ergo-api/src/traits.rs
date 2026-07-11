@@ -63,6 +63,11 @@ pub trait NodeReadState: Send + Sync {
     fn events(&self) -> crate::types::ApiNodeEvents {
         crate::types::ApiNodeEvents::default()
     }
+    /// Postmortem reorg ring (`GET /api/v1/diagnostics/reorgs`). Default
+    /// empty for test fixtures; production `SnapshotReadState` overrides.
+    fn reorgs(&self) -> crate::types::ApiReorgHistory {
+        crate::types::ApiReorgHistory::default()
+    }
     /// Host-process metrics — memory, DB sizes, disk space. Default impl
     /// returns all `None`s so test fixtures don't have to be updated; the
     /// production `SnapshotReadState` overrides with sysinfo + filesystem

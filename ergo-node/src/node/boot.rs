@@ -1570,6 +1570,7 @@ async fn run_inner_with_backend(
         first_deliverer_ring: crate::node::first_deliverer::FirstDelivererRing::new(),
         event_feed: crate::node::event_feed::EventFeedRing::new(),
         event_feed_prev: crate::node::event_feed::FeedPrev::default(),
+        reorg_history: crate::node::reorg_history::ReorgHistory::new(),
         event_feed_projection: None,
     };
 

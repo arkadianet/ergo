@@ -542,3 +542,15 @@ pub async fn composite(State(state): State<V1State>) -> Response {
     })
     .into_response()
 }
+
+/// `GET /api/v1/diagnostics/reorgs` — last-N / max-age postmortem ring.
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/reorgs", tag = "diagnostics",
+    responses(
+        (status = 200, description = "Retained tip-replacement reorgs (newest first)",
+         body = crate::types::ApiReorgHistory)
+    )
+)]
+pub async fn reorgs(State(state): State<V1State>) -> Response {
+    Json(state.read.reorgs()).into_response()
+}

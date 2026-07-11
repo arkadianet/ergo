@@ -326,6 +326,9 @@ pub(crate) struct NodeState {
     /// observability — never feeds sync / consensus / scoring.
     pub(super) event_feed: super::event_feed::EventFeedRing,
     pub(super) event_feed_prev: super::event_feed::FeedPrev,
+    /// Postmortem reorg ring (64 / 7d) — diagnostics + metrics, not the
+    /// coarse glanceable feed.
+    pub(super) reorg_history: super::reorg_history::ReorgHistory,
     /// Seq-keyed cache of the projected `ApiNodeEvents` Arc: rebuilt only
     /// when the ring's latest seq advances, so a quiet tick re-publishes
     /// the same allocation (mirrors the recent-blocks per-tip cache).

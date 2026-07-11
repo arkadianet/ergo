@@ -386,6 +386,7 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/diagnostics/candidate-build",
             get(diagnostics::candidate_build),
         )
+        .route("/api/v1/diagnostics/reorgs", get(diagnostics::reorgs))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::CheapRead),
             governor_mw,

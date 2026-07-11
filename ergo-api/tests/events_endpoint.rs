@@ -81,6 +81,9 @@ impl NodeReadState for FeedStub {
             mempool_tx_requested_total: 0,
             mempool_peer_tx_admitted_total: 0,
             mempool_peer_tx_rejected_total: 0,
+            reorgs_total: 0,
+            last_reorg_depth: None,
+            last_reorg_unix_ms: None,
         }
     }
     fn tip(&self) -> ApiTip {
@@ -239,6 +242,9 @@ impl NodeReadState for DefaultStub {
             mempool_tx_requested_total: 0,
             mempool_peer_tx_admitted_total: 0,
             mempool_peer_tx_rejected_total: 0,
+            reorgs_total: 0,
+            last_reorg_depth: None,
+            last_reorg_unix_ms: None,
         }
     }
     fn tip(&self) -> ApiTip {

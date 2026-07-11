@@ -1630,6 +1630,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PeerQuality'
+  /api/v1/diagnostics/reorgs:
+    get:
+      tags:
+      - diagnostics
+      summary: '`GET /api/v1/diagnostics/reorgs` — last-N / max-age postmortem ring.'
+      operationId: reorgs
+      responses:
+        '200':
+          description: Retained tip-replacement reorgs (newest first)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiReorgHistory'
   /api/v1/diagnostics/tip-health:
     get:
       tags:
@@ -5462,6 +5475,67 @@ components:
       - quorum_met
       - applied
       - catchup
+    ApiReorgHistory:
+      type: object
+      description: Envelope for the diagnostics reorg history.
+      required:
+      - total
+      - cap
+      - maxAgeMs
+      - reorgs
+      properties:
+        cap:
+          type: integer
+          format: int32
+          minimum: 0
+        maxAgeMs:
+          type: integer
+          format: int64
+          minimum: 0
+        reorgs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiReorgRecord'
+          description: Newest-first retained entries.
+        total:
+          type: integer
+          format: int64
+          description: Session-total reorgs detected (not reset by age/count prune).
+          minimum: 0
+    ApiReorgRecord:
+      type: object
+      description: |-
+        One retained reorg for `GET /api/v1/diagnostics/reorgs` — postmortem
+        ring (last 64 **or** 7 days), not the coarse glanceable event feed.
+      required:
+      - unixMs
+      - height
+      - headerId
+      - depth
+      - droppedHeaderIds
+      - orphansTruncated
+      properties:
+        depth:
+          type: integer
+          format: int32
+          minimum: 0
+        droppedHeaderIds:
+          type: array
+          items:
+            type: string
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        orphansTruncated:
+          type: boolean
+          description: True when dropped ids hit the 32-block committed-tail cap.
+        unixMs:
+          type: integer
+          format: int64
+          minimum: 0
     ApiStateType:
       type: string
       description: |-
@@ -5525,6 +5599,20 @@ components:
               fork-from-network signal (the node refused a block its peers may have
               accepted). `None` when no rejection has occurred this session. A
               persistent `Some(_)` is an operator page.
+        last_reorg_depth:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Depth of the most recent retained reorg, if any.
+          minimum: 0
+        last_reorg_unix_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Unix-ms of the most recent retained reorg, if any.
+          minimum: 0
         mempool_peer_tx_admitted_total:
           type: integer
           format: int64
@@ -5563,6 +5651,13 @@ components:
         peer_count:
           type: integer
           format: int32
+          minimum: 0
+        reorgs_total:
+          type: integer
+          format: int64
+          description: |-
+            Session-total tip-replacement reorgs detected by the operator event
+            differ (`ergo_node_reorg_total`).
           minimum: 0
         snapshot_age_ms:
           type: integer

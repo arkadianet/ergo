@@ -307,7 +307,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                 }
             }
         });
-        super::event_feed::derive_events(
+        let tick_reorgs = super::event_feed::derive_events(
             &mut state.event_feed,
             &mut state.event_feed_prev,
             super::event_feed::FeedObservation {
@@ -330,6 +330,9 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                 indexer_status,
             },
         );
+        for r in tick_reorgs {
+            state.reorg_history.push(r);
+        }
         // Seq-keyed cache: a quiet tick re-publishes the same Arc instead of
         // re-cloning 100 events per second.
         let seq_now = state.event_feed.latest_seq();
@@ -384,6 +387,25 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         bootstrap,
         recent_blocks,
         events: api_events,
+        reorgs: {
+            let list = state.reorg_history.list(now_unix_ms);
+            Arc::new(ergo_api::types::ApiReorgHistory {
+                total: state.reorg_history.total(),
+                cap: crate::node::reorg_history::ReorgHistory::CAP as u32,
+                max_age_ms: crate::node::reorg_history::ReorgHistory::MAX_AGE_MS,
+                reorgs: list
+                    .into_iter()
+                    .map(|r| ergo_api::types::ApiReorgRecord {
+                        unix_ms: r.unix_ms,
+                        height: r.height,
+                        header_id: r.header_id,
+                        depth: r.depth,
+                        dropped_header_ids: r.dropped_header_ids,
+                        orphans_truncated: r.orphans_truncated,
+                    })
+                    .collect(),
+            })
+        },
         max_peer_height,
         mining_enabled: state.mining_enabled,
         snapshot_manifests: state

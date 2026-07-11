@@ -144,7 +144,7 @@ pub enum ApiHistoryMode {
 
 /// Single-call dashboard view: collapses sync + tip + peer count.
 /// Polled at 1 Hz by the UI header strip.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, Default)]
 pub struct ApiStatus {
     pub sync_state: SyncStateLabel,
     pub peer_count: u32,
@@ -195,6 +195,16 @@ pub struct ApiStatus {
     /// — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub mempool_peer_tx_rejected_total: u64,
+    /// Session-total tip-replacement reorgs detected by the operator event
+    /// differ (`ergo_node_reorg_total`).
+    #[serde(default)]
+    pub reorgs_total: u64,
+    /// Depth of the most recent retained reorg, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reorg_depth: Option<u32>,
+    /// Unix-ms of the most recent retained reorg, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reorg_unix_ms: Option<u64>,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct
@@ -329,10 +339,11 @@ pub enum ApiHeaderAvailability {
     Sparse,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStateLabel {
     /// No connected peers.
+    #[default]
     Disconnected,
     /// Catching up — header chain not yet near tip, or block-application
     /// gap > tolerance.
@@ -960,6 +971,32 @@ pub struct ApiNodeEvent {
 pub struct ApiNodeEvents {
     pub latest_seq: u64,
     pub events: Vec<ApiNodeEvent>,
+}
+
+/// One retained reorg for `GET /api/v1/diagnostics/reorgs` — postmortem
+/// ring (last 64 **or** 7 days), not the coarse glanceable event feed.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiReorgRecord {
+    pub unix_ms: u64,
+    pub height: u32,
+    pub header_id: String,
+    pub depth: u32,
+    pub dropped_header_ids: Vec<String>,
+    /// True when dropped ids hit the 32-block committed-tail cap.
+    pub orphans_truncated: bool,
+}
+
+/// Envelope for the diagnostics reorg history.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiReorgHistory {
+    /// Session-total reorgs detected (not reset by age/count prune).
+    pub total: u64,
+    pub cap: u32,
+    pub max_age_ms: u64,
+    /// Newest-first retained entries.
+    pub reorgs: Vec<ApiReorgRecord>,
 }
 
 /// Self-repair sub-state of the extra-index for `GET /api/v1/indexer/status`.

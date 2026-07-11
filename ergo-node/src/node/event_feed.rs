@@ -135,7 +135,12 @@ fn dropped_header_ids(prev: &FeedPrev, recent: &[(u32, String, u32, u64)]) -> Ve
 /// committed chain would advance the cursor past heights that are not in
 /// `recent` yet during the async-persist window, permanently losing their
 /// block events.
-pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: FeedObservation) {
+pub(crate) fn derive_events(
+    ring: &mut EventFeedRing,
+    prev: &mut FeedPrev,
+    obs: FeedObservation,
+) -> Vec<super::reorg_history::ReorgRecord> {
+    let mut reorgs = Vec::new();
     if prev.primed {
         // Blocks: emit the newest few applied since the previous tick.
         if obs.tip_height > prev.tip_height {
@@ -150,6 +155,15 @@ pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: 
                     if *id != prev.tip_id {
                         let dropped_header_ids = dropped_header_ids(prev, obs.recent);
                         let depth = dropped_header_ids.len() as u32;
+                        let orphans_truncated = dropped_header_ids.len() >= RECENT_BLOCKS_CAP;
+                        reorgs.push(super::reorg_history::ReorgRecord {
+                            unix_ms: obs.unix_ms,
+                            height: prev.tip_height,
+                            header_id: id.clone(),
+                            depth,
+                            dropped_header_ids: dropped_header_ids.clone(),
+                            orphans_truncated,
+                        });
                         ring.push(
                             obs.unix_ms,
                             FeedEventKind::Reorg {
@@ -187,6 +201,15 @@ pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: 
             // Same-or-lower height with a different tip id = reorg.
             let dropped_header_ids = dropped_header_ids(prev, obs.recent);
             let depth = dropped_header_ids.len() as u32;
+            let orphans_truncated = dropped_header_ids.len() >= RECENT_BLOCKS_CAP;
+            reorgs.push(super::reorg_history::ReorgRecord {
+                unix_ms: obs.unix_ms,
+                height: obs.tip_height,
+                header_id: obs.tip_id.clone(),
+                depth,
+                dropped_header_ids: dropped_header_ids.clone(),
+                orphans_truncated,
+            });
             ring.push(
                 obs.unix_ms,
                 FeedEventKind::Reorg {
@@ -244,6 +267,7 @@ pub(crate) fn derive_events(ring: &mut EventFeedRing, prev: &mut FeedPrev, obs: 
     if !obs.tip_id.is_empty() {
         prev.tip_id = obs.tip_id;
     }
+    reorgs
 }
 
 /// Bounded FIFO event ring.
@@ -265,10 +289,13 @@ impl EventFeedRing {
         }
     }
 
-    /// Append an event, evicting the oldest past [`Self::CAP`].
+    /// Append an event. At [`Self::CAP`], prefer evicting a non-`reorg`
+    /// event so up to [`Self::PIN_REORGS`] recent reorgs survive peer-churn
+    /// floods. If the ring is all reorgs (or already over the pin), fall
+    /// back to plain FIFO.
     pub(crate) fn push(&mut self, unix_ms: u64, kind: FeedEventKind) {
         if self.events.len() == Self::CAP {
-            self.events.pop_front();
+            self.evict_one_for_capacity();
         }
         self.events.push_back(FeedEvent {
             seq: self.next_seq,
@@ -277,6 +304,29 @@ impl EventFeedRing {
         });
         self.next_seq += 1;
     }
+
+    /// Prefer dropping the oldest non-reorg; otherwise FIFO.
+    fn evict_one_for_capacity(&mut self) {
+        let reorg_count = self
+            .events
+            .iter()
+            .filter(|e| matches!(e.kind, FeedEventKind::Reorg { .. }))
+            .count();
+        if reorg_count <= Self::PIN_REORGS {
+            if let Some(idx) = self
+                .events
+                .iter()
+                .position(|e| !matches!(e.kind, FeedEventKind::Reorg { .. }))
+            {
+                self.events.remove(idx);
+                return;
+            }
+        }
+        self.events.pop_front();
+    }
+
+    /// How many `reorg` events to protect from peer-churn eviction.
+    pub(crate) const PIN_REORGS: usize = 16;
 
     /// Latest `n` events, oldest→newest, for snapshot projection.
     pub(crate) fn latest(&self, n: usize) -> Vec<FeedEvent> {
@@ -315,6 +365,29 @@ mod tests {
         assert_eq!(latest.len(), EventFeedRing::CAP, "bounded at CAP");
         assert_eq!(latest.first().unwrap().seq, 11, "oldest 10 evicted FIFO");
         assert_eq!(latest.last().unwrap().seq, (EventFeedRing::CAP + 10) as u64);
+    }
+
+    /// Peer churn must not wipe a pinned reorg from the coarse ring.
+    #[test]
+    fn peer_flood_preserves_pinned_reorg() {
+        let mut ring = EventFeedRing::new();
+        ring.push(
+            1,
+            FeedEventKind::Reorg {
+                height: 100,
+                header_id: "new".into(),
+                depth: 1,
+                dropped_header_ids: vec!["old".into()],
+            },
+        );
+        push_n(&mut ring, EventFeedRing::CAP); // fill + force eviction
+        let reorgs: Vec<_> = ring
+            .latest(EventFeedRing::CAP)
+            .into_iter()
+            .filter(|e| matches!(e.kind, FeedEventKind::Reorg { .. }))
+            .collect();
+        assert_eq!(reorgs.len(), 1, "pinned reorg must survive peer flood");
+        assert_eq!(reorgs[0].seq, 1);
     }
 
     /// `latest(n)` returns the newest n, oldest first.

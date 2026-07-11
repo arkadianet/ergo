@@ -2274,6 +2274,15 @@ ergo_node_mempool_peer_tx_admitted_total {peer_tx_admitted}
 # HELP ergo_node_mempool_peer_tx_rejected_total Peer-sourced txs rejected by admission since node start.
 # TYPE ergo_node_mempool_peer_tx_rejected_total counter
 ergo_node_mempool_peer_tx_rejected_total {peer_tx_rejected}
+# HELP ergo_node_reorg_total Tip-replacement reorgs detected since node start.
+# TYPE ergo_node_reorg_total counter
+ergo_node_reorg_total {reorgs_total}
+# HELP ergo_node_last_reorg_depth Depth of the most recent retained reorg (0 if none).
+# TYPE ergo_node_last_reorg_depth gauge
+ergo_node_last_reorg_depth {last_reorg_depth}
+# HELP ergo_node_last_reorg_age_ms Age of the most recent retained reorg in ms (-1 if none).
+# TYPE ergo_node_last_reorg_age_ms gauge
+ergo_node_last_reorg_age_ms {last_reorg_age_ms}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -2290,6 +2299,20 @@ ergo_node_mempool_peer_tx_rejected_total {peer_tx_rejected}
         tx_requested = status.mempool_tx_requested_total,
         peer_tx_admitted = status.mempool_peer_tx_admitted_total,
         peer_tx_rejected = status.mempool_peer_tx_rejected_total,
+        reorgs_total = status.reorgs_total,
+        last_reorg_depth = status.last_reorg_depth.unwrap_or(0),
+        last_reorg_age_ms = {
+            // Approximate "now" as snapshot build time: status.snapshot_age_ms
+            // is how stale the snapshot is relative to wall clock at read.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            status
+                .last_reorg_unix_ms
+                .map(|t| now_ms.saturating_sub(t) as i64)
+                .unwrap_or(-1)
+        },
     );
 
     (
