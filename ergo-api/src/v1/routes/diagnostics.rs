@@ -202,14 +202,13 @@ fn fork_risk_of(state: &V1State, chain_pos: &ChainPosition) -> ForkRisk {
     let identity = state.read.identity();
     let sync = state.read.sync();
     let wedged = state.read.status().sync_wedged.is_some();
-    // Wedged counts as forking: the node IS stranded on a branch the
-    // network abandoned (that is what made the reorg too deep to serve).
-    let rejecting_block = matches!(
-        health.status,
-        HealthStatus::Rejecting | HealthStatus::Wedged
-    );
+    // Wedged still counts as forking for the STATUS verdict (the node IS
+    // stranded on a branch the network abandoned), but `rejecting_block`
+    // stays truthful: a wedged node is not rejecting a block — it cannot
+    // apply one at all (`fork_too_deep`/`resync_required` carry the wedge).
+    let rejecting_block = matches!(health.status, HealthStatus::Rejecting);
     let lone_producer = identity.mining && chain_pos.status == "ahead_suspicious";
-    let status = if rejecting_block || lone_producer {
+    let status = if rejecting_block || wedged || lone_producer {
         "forking".to_string()
     } else if chain_pos.status == "ahead_suspicious" || sync.gap > BEHIND_THRESHOLD {
         "watch".to_string()

@@ -5762,7 +5762,10 @@ components:
         age_ms:
           type: integer
           format: int64
-          description: Milliseconds since the wedge was detected (computed at read time).
+          description: |-
+            Milliseconds since the wedge was detected, computed when the snapshot
+            is PUBLISHED (staleness bounded by `snapshot_age_ms`, ~1 s ticks) —
+            not recomputed per read.
           minimum: 0
         fork_below_height:
           type: integer

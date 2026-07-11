@@ -266,7 +266,9 @@ pub struct ApiSyncWedged {
     pub fork_below_height: u32,
     /// The rollback window the fork depth exceeded.
     pub max_rollback_depth: u32,
-    /// Milliseconds since the wedge was detected (computed at read time).
+    /// Milliseconds since the wedge was detected, computed when the snapshot
+    /// is PUBLISHED (staleness bounded by `snapshot_age_ms`, ~1 s ticks) —
+    /// not recomputed per read.
     pub age_ms: u64,
 }
 

@@ -1283,11 +1283,10 @@ mod tests {
         assert_eq!(w.max_rollback_depth, 200);
         assert_eq!(snap.health.status, HealthStatus::Wedged);
 
-        // Not wedged: None on status, health never Wedged.
-        let mut publisher2 =
-            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
-        publisher2.publish(make_parts(500, 500, &[]));
-        let snap2 = publisher2.handle().load_full();
+        // Wedge CLEARS on the same publisher: a healthy publish replaces the
+        // wedged snapshot (the production path — one publisher per process).
+        publisher.publish(make_parts(500, 500, &[]));
+        let snap2 = publisher.handle().load_full();
         assert!(snap2.status.sync_wedged.is_none());
         assert_ne!(snap2.health.status, HealthStatus::Wedged);
     }
