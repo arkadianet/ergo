@@ -59,7 +59,7 @@ docs/research/
 # Not part of the public release. AGENTS.md / CLAUDE.md / gotchas.md hold
 # internal contributor-tooling notes; dev-docs/ holds development working
 # files (audits, checklists, archived investigations, planning specs);
-# .claude/ + .codex/ are agent/Codex tooling; audit/ + extract-tools/ are
+# .claude/ + .claire/ + .codex/ are agent tooling; audit/ + extract-tools/ are
 # dev-side audit reports and oracle-vector generation harnesses. These stay
 # in the local working tree but are never committed to the public repo.
 # Shipped docs are README / ARCHITECTURE / CONTRIBUTING / SECURITY /
@@ -71,6 +71,7 @@ docs/research/
 /.superpowers/
 /dev-docs/
 /.claude/
+/.claire/
 /.codex/
 /audit/
 /extract-tools/
