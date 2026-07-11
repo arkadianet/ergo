@@ -1292,8 +1292,10 @@ pub fn router_with_mempool_and_wallet_and_security(
     // shared like the O4 depth ring. It is fed by the coarse-ring bridge task
     // (production only — same live-runtime + once-per-process guards as the
     // depth sampler so non-async test router builds never spawn it and repeated
-    // router assembly never stacks pollers). Phase-1 feeds only the `blocks`
-    // channel; the fine-grained taps are a node-internals follow-up.
+    // router assembly never stacks pollers). `realtime_handle()` uses
+    // `RealtimeHandle::blocks_and_mempool()`, which marks `blocks`, `mempool`,
+    // `peers`, and `tx` live; fine-grained address/box/token taps remain a
+    // follow-up.
     // Process singletons: the `*_once` workers below bind the FIRST bus/engine
     // they see, so every router assembly must share those exact instances — a
     // per-assembly bus/engine would leave later routers holding handles no

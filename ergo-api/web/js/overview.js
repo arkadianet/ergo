@@ -114,7 +114,8 @@ function setText(sel, t) {
 }
 
 function wsHeightFresh(now = Date.now()) {
-  return state.wsHeight != null && (blocksWs.isConnected() || now - state.wsLastEventAt < WS_STALE_MS);
+  // Freshness is time-based only: a reconnect must not revive a stale tip.
+  return state.wsHeight != null && now - state.wsLastEventAt < WS_STALE_MS;
 }
 
 function noteHttpHeight(status) {
