@@ -75,6 +75,8 @@ pub struct SnapshotReadState {
     /// `GET /api/v1/votes` always reports the LIVE policy (config + any runtime
     /// edits). Empty ⇒ neutral.
     voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
+    /// Live apply-phase gauges from `SyncExecutor` (not snapshot-stale).
+    apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
 }
 
 /// Filesystem paths the `/api/v1/host` handler needs to compute per-call
@@ -257,12 +259,14 @@ impl SnapshotReadState {
         identity: IdentitySlot,
         host_paths: HostPaths,
         voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
+        apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
     ) -> Self {
         Self {
             handle,
             identity,
             host_paths,
             voting_targets,
+            apply_phase,
         }
     }
 
@@ -395,6 +399,11 @@ impl NodeReadState for SnapshotReadState {
         let snap = self.handle.load();
         let mut s = snap.status.clone();
         s.snapshot_age_ms = self.age_ms(snap.produced_at);
+        // Live apply-phase probes — must not wait for the next snapshot tick.
+        s.apply_in_progress = self.apply_phase.in_progress();
+        s.last_apply_duration_ms = self.apply_phase.last_duration_ms();
+        s.last_applied_height = self.apply_phase.last_applied_height();
+        s.last_apply_age_ms = self.apply_phase.last_apply_age_ms();
         s
     }
 

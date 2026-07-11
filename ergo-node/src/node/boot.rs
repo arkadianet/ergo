@@ -1065,6 +1065,7 @@ async fn run_inner_with_backend(
         identity_slot.clone(),
         host_paths,
         voting_targets_slot.clone(),
+        executor.apply_phase_metrics(),
     )
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =

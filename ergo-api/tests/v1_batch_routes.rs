@@ -148,6 +148,10 @@ impl NodeReadState for StubRead {
             reorgs_total: 0,
             last_reorg_depth: None,
             last_reorg_unix_ms: None,
+            apply_in_progress: false,
+            last_apply_duration_ms: 0,
+            last_applied_height: 0,
+            last_apply_age_ms: None,
         }
     }
     fn tip(&self) -> ApiTip {

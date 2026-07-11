@@ -1097,6 +1097,7 @@ fn read_state_with_slot(
         identity_slot,
         host_paths,
         voting_targets,
+        std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
     )
 }
 

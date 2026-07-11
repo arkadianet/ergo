@@ -221,6 +221,10 @@ impl NodeSnapshot {
                 reorgs_total: 0,
                 last_reorg_depth: None,
                 last_reorg_unix_ms: None,
+                apply_in_progress: false,
+                last_apply_duration_ms: 0,
+                last_applied_height: 0,
+                last_apply_age_ms: None,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -556,6 +560,11 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         reorgs_total: p.reorgs.total,
         last_reorg_depth: p.reorgs.reorgs.first().map(|r| r.depth),
         last_reorg_unix_ms: p.reorgs.reorgs.first().map(|r| r.unix_ms),
+        // Filled live by SnapshotReadState::status() from ApplyPhaseMetrics.
+        apply_in_progress: false,
+        last_apply_duration_ms: 0,
+        last_applied_height: 0,
+        last_apply_age_ms: None,
     };
 
     let tip = ApiTip {

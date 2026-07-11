@@ -2286,6 +2286,18 @@ ergo_node_last_reorg_depth {last_reorg_depth}
 # HELP ergo_node_last_reorg_age_ms Age of the most recent retained reorg in ms (-1 if none).
 # TYPE ergo_node_last_reorg_age_ms gauge
 ergo_node_last_reorg_age_ms {last_reorg_age_ms}
+# HELP ergo_node_apply_in_progress 1 while a full-block process_block is running on the action loop.
+# TYPE ergo_node_apply_in_progress gauge
+ergo_node_apply_in_progress {apply_in_progress}
+# HELP ergo_node_last_apply_duration_ms Wall ms of the last finished full-block apply attempt.
+# TYPE ergo_node_last_apply_duration_ms gauge
+ergo_node_last_apply_duration_ms {last_apply_duration_ms}
+# HELP ergo_node_last_applied_height Height of the last successful full-block apply (0 if none).
+# TYPE ergo_node_last_applied_height gauge
+ergo_node_last_applied_height {last_applied_height}
+# HELP ergo_node_last_apply_age_ms Age of the last finished apply attempt in ms (-1 if none).
+# TYPE ergo_node_last_apply_age_ms gauge
+ergo_node_last_apply_age_ms {last_apply_age_ms}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -2316,6 +2328,13 @@ ergo_node_last_reorg_age_ms {last_reorg_age_ms}
                 .map(|t| now_ms.saturating_sub(t) as i64)
                 .unwrap_or(-1)
         },
+        apply_in_progress = if status.apply_in_progress { 1 } else { 0 },
+        last_apply_duration_ms = status.last_apply_duration_ms,
+        last_applied_height = status.last_applied_height,
+        last_apply_age_ms = status
+            .last_apply_age_ms
+            .map(|a| a as i64)
+            .unwrap_or(-1),
     );
 
     (

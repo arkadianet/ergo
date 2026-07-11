@@ -23,6 +23,7 @@
 //!   → validate → apply to state. Includes the epoch-boundary voting
 //!   recompute on extension blocks.
 
+pub mod apply_phase;
 pub mod block_proc;
 pub mod coordinator;
 pub mod executor;
@@ -30,3 +31,5 @@ pub mod header_proc;
 pub mod perf;
 pub mod popow_bootstrap;
 pub mod snapshot_bootstrap;
+
+pub use apply_phase::ApplyPhaseMetrics;
