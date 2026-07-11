@@ -28,6 +28,7 @@ const state = {
 };
 let root = null;
 let viewMode = localStorage.getItem('ergo.ovview') || 'cockpit';
+let derivedTick = null;
 
 function handleBlocksFrame(frame) {
   if (frame.type !== 'event' || frame.channel !== 'blocks') return;
@@ -45,6 +46,30 @@ const blocksWs = createChannelSub({
   channels: ['blocks'],
   onEvent: handleBlocksFrame,
 });
+
+/** Ages that can advance without a network round-trip (last block, uptime). */
+function paintDerived() {
+  if (!root) return;
+  const tipMs = state.tip?.best_full_block?.timestamp_unix_ms ?? state.lastBlockMs;
+  const ageS = tipMs ? Math.max(0, Math.floor((Date.now() - tipMs) / 1000)) : null;
+  setText('[data-k="lastblk"]', ageS != null ? dur(ageS) : '—');
+  const started = state.info?.started_at_unix_ms;
+  if (started) {
+    setText('[data-k="up"]', dur(Math.max(0, Math.floor((Date.now() - started) / 1000))));
+  }
+}
+
+function startDerivedTick() {
+  if (derivedTick) return;
+  paintDerived();
+  derivedTick = setInterval(paintDerived, 1000);
+}
+
+function stopDerivedTick() {
+  if (!derivedTick) return;
+  clearInterval(derivedTick);
+  derivedTick = null;
+}
 
 // ---- domain formatters ----
 function parseDiff(s) {
@@ -169,15 +194,18 @@ export function mount(el) {
   if (state.identity) renderIdentity();
   else fetchIdentity();
   blocksWs.start();
+  startDerivedTick();
 }
 
 export function onShow() {
   blocksWs.start();
+  startDerivedTick();
   if (state.status) onFast({ status: state.status, info: state.info });
 }
 
 export function onHide() {
   blocksWs.stop();
+  stopDerivedTick();
 }
 
 // ---- node identity strip (static, fetched once on mount) ----
@@ -270,7 +298,12 @@ export function onFast({ status, info }) {
 
   setText('[data-k="mp"]', num(s?.mempool_size ?? 0));
 
-  setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
+  // Prefer boot timestamp so uptime advances between rare /info refreshes.
+  if (i?.started_at_unix_ms) {
+    setText('[data-k="up"]', dur(Math.max(0, Math.floor((Date.now() - i.started_at_unix_ms) / 1000))));
+  } else {
+    setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
+  }
   setText('[data-s="up"]', 'since restart');
 }
 

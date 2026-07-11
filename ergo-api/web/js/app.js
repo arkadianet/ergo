@@ -34,7 +34,7 @@ const mounted = new Set();
 let current = null;
 // Tip/mempool/peers come from WS; /info is rarely needed for the chrome.
 const INFO_REFRESH_MS = 30_000;
-// Status heartbeat for conn-dot / uptime / non-WS KPIs (not tip).
+// Status heartbeat for conn-dot / peer+mempool counts (not tip or uptime).
 const STATUS_REFRESH_MS = 5_000;
 const SLOW_REFRESH_MS = 4_000;
 let cachedInfo = null;
