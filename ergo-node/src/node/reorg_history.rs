@@ -52,6 +52,14 @@ impl ReorgHistory {
         self.entries.iter().rev().cloned().collect()
     }
 
+    /// Cache key after age/count prune: `(session_total, retained_len)`.
+    /// `total` alone is not enough — age prune can shrink the ring without
+    /// changing the counter.
+    pub(crate) fn projection_key(&mut self, now_ms: u64) -> (u64, usize) {
+        self.prune(now_ms);
+        (self.total, self.entries.len())
+    }
+
     pub(crate) fn total(&self) -> u64 {
         self.total
     }

@@ -199,4 +199,70 @@ mod tests {
             "exactly one tx_accepted expected, got a second event"
         );
     }
+
+    #[test]
+    fn confirmed_tx_publishes_tx_confirmed_on_mempool_channel() {
+        let handle = RealtimeHandle::blocks_and_mempool();
+        let mut sub = handle.bus.subscribe();
+        sub.filter.write().unwrap().insert("mempool".to_string());
+
+        let obs = RealtimeMempoolObserver::new(handle.bus.clone());
+        let tx = id(0x11);
+        let header = id(0x22);
+        obs.on_confirmed(tx, 1_234, header);
+
+        let event = sub
+            .rx
+            .try_recv()
+            .expect("tx_confirmed should have been published");
+        assert_eq!(event.event, "tx_confirmed");
+        assert!(event.confirmed);
+        assert_eq!(
+            event.data["tx_id"],
+            serde_json::json!(hex::encode(tx.as_bytes()))
+        );
+        assert_eq!(event.data["height"], serde_json::json!(1_234));
+        assert_eq!(
+            event.data["header_id"],
+            serde_json::json!(hex::encode(header.as_bytes()))
+        );
+        assert!(
+            event.routes.iter().any(|r| r == "mempool"),
+            "routes={:?}",
+            event.routes
+        );
+    }
+
+    #[test]
+    fn replaced_tx_publishes_tx_dropped_with_winner_id() {
+        let handle = RealtimeHandle::blocks_and_mempool();
+        let mut sub = handle.bus.subscribe();
+        sub.filter.write().unwrap().insert("mempool".to_string());
+
+        let obs = RealtimeMempoolObserver::new(handle.bus.clone());
+        let loser = id(0x33);
+        let winner = id(0x44);
+        obs.on_replaced(loser, winner);
+
+        let event = sub
+            .rx
+            .try_recv()
+            .expect("tx_dropped should have been published for replacement");
+        assert_eq!(event.event, "tx_dropped");
+        assert!(!event.confirmed);
+        assert_eq!(
+            event.data["tx_id"],
+            serde_json::json!(hex::encode(loser.as_bytes()))
+        );
+        assert_eq!(event.data["reason"], serde_json::json!("Replaced"));
+        assert_eq!(
+            event.data["winner_id"],
+            serde_json::json!(hex::encode(winner.as_bytes()))
+        );
+        assert!(
+            event.routes.iter().any(|r| r == "mempool"),
+            "routes={:?}",
+            event.routes
+        );
+    }
 }

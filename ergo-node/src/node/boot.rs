@@ -1572,6 +1572,7 @@ async fn run_inner_with_backend(
         event_feed_prev: crate::node::event_feed::FeedPrev::default(),
         reorg_history: crate::node::reorg_history::ReorgHistory::new(),
         event_feed_projection: None,
+        reorg_history_projection: None,
     };
 
     // Spawn the Step B anchor-map builder. Background task that

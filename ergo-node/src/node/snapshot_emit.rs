@@ -388,23 +388,31 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         recent_blocks,
         events: api_events,
         reorgs: {
-            let list = state.reorg_history.list(now_unix_ms);
-            Arc::new(ergo_api::types::ApiReorgHistory {
-                total: state.reorg_history.total(),
-                cap: crate::node::reorg_history::ReorgHistory::CAP as u32,
-                max_age_ms: crate::node::reorg_history::ReorgHistory::MAX_AGE_MS,
-                reorgs: list
-                    .into_iter()
-                    .map(|r| ergo_api::types::ApiReorgRecord {
-                        unix_ms: r.unix_ms,
-                        height: r.height,
-                        header_id: r.header_id,
-                        depth: r.depth,
-                        dropped_header_ids: r.dropped_header_ids,
-                        orphans_truncated: r.orphans_truncated,
-                    })
-                    .collect(),
-            })
+            let key = state.reorg_history.projection_key(now_unix_ms);
+            match &state.reorg_history_projection {
+                Some((cached_key, cached)) if *cached_key == key => cached.clone(),
+                _ => {
+                    let list = state.reorg_history.list(now_unix_ms);
+                    let built = Arc::new(ergo_api::types::ApiReorgHistory {
+                        total: state.reorg_history.total(),
+                        cap: crate::node::reorg_history::ReorgHistory::CAP as u32,
+                        max_age_ms: crate::node::reorg_history::ReorgHistory::MAX_AGE_MS,
+                        reorgs: list
+                            .into_iter()
+                            .map(|r| ergo_api::types::ApiReorgRecord {
+                                unix_ms: r.unix_ms,
+                                height: r.height,
+                                header_id: r.header_id,
+                                depth: r.depth,
+                                dropped_header_ids: r.dropped_header_ids,
+                                orphans_truncated: r.orphans_truncated,
+                            })
+                            .collect(),
+                    });
+                    state.reorg_history_projection = Some((key, built.clone()));
+                    built
+                }
+            }
         },
         max_peer_height,
         mining_enabled: state.mining_enabled,

@@ -126,6 +126,38 @@ fn dropped_header_ids(prev: &FeedPrev, recent: &[(u32, String, u32, u64)]) -> Ve
     dropped
 }
 
+/// Push one reorg onto the coarse ring and the postmortem list.
+fn push_reorg(
+    ring: &mut EventFeedRing,
+    reorgs: &mut Vec<super::reorg_history::ReorgRecord>,
+    unix_ms: u64,
+    height: u32,
+    header_id: String,
+    prev: &FeedPrev,
+    recent: &[(u32, String, u32, u64)],
+) {
+    let dropped_header_ids = dropped_header_ids(prev, recent);
+    let depth = dropped_header_ids.len() as u32;
+    let orphans_truncated = dropped_header_ids.len() >= RECENT_BLOCKS_CAP;
+    reorgs.push(super::reorg_history::ReorgRecord {
+        unix_ms,
+        height,
+        header_id: header_id.clone(),
+        depth,
+        dropped_header_ids: dropped_header_ids.clone(),
+        orphans_truncated,
+    });
+    ring.push(
+        unix_ms,
+        FeedEventKind::Reorg {
+            height,
+            header_id,
+            depth,
+            dropped_header_ids,
+        },
+    );
+}
+
 /// Diff `obs` against `prev`, appending derived events to `ring`, then
 /// advance `prev`. First call only primes.
 ///
@@ -153,25 +185,14 @@ pub(crate) fn derive_events(
             if !prev.tip_id.is_empty() {
                 if let Some((_, id, ..)) = obs.recent.iter().find(|(h, ..)| *h == prev.tip_height) {
                     if *id != prev.tip_id {
-                        let dropped_header_ids = dropped_header_ids(prev, obs.recent);
-                        let depth = dropped_header_ids.len() as u32;
-                        let orphans_truncated = dropped_header_ids.len() >= RECENT_BLOCKS_CAP;
-                        reorgs.push(super::reorg_history::ReorgRecord {
-                            unix_ms: obs.unix_ms,
-                            height: prev.tip_height,
-                            header_id: id.clone(),
-                            depth,
-                            dropped_header_ids: dropped_header_ids.clone(),
-                            orphans_truncated,
-                        });
-                        ring.push(
+                        push_reorg(
+                            ring,
+                            &mut reorgs,
                             obs.unix_ms,
-                            FeedEventKind::Reorg {
-                                height: prev.tip_height,
-                                header_id: id.clone(),
-                                depth,
-                                dropped_header_ids,
-                            },
+                            prev.tip_height,
+                            id.clone(),
+                            prev,
+                            obs.recent,
                         );
                     }
                 }
@@ -199,25 +220,14 @@ pub(crate) fn derive_events(
             }
         } else if !obs.tip_id.is_empty() && obs.tip_id != prev.tip_id {
             // Same-or-lower height with a different tip id = reorg.
-            let dropped_header_ids = dropped_header_ids(prev, obs.recent);
-            let depth = dropped_header_ids.len() as u32;
-            let orphans_truncated = dropped_header_ids.len() >= RECENT_BLOCKS_CAP;
-            reorgs.push(super::reorg_history::ReorgRecord {
-                unix_ms: obs.unix_ms,
-                height: obs.tip_height,
-                header_id: obs.tip_id.clone(),
-                depth,
-                dropped_header_ids: dropped_header_ids.clone(),
-                orphans_truncated,
-            });
-            ring.push(
+            push_reorg(
+                ring,
+                &mut reorgs,
                 obs.unix_ms,
-                FeedEventKind::Reorg {
-                    height: obs.tip_height,
-                    header_id: obs.tip_id.clone(),
-                    depth,
-                    dropped_header_ids,
-                },
+                obs.tip_height,
+                obs.tip_id.clone(),
+                prev,
+                obs.recent,
             );
         }
 

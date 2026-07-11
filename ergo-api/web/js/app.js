@@ -43,6 +43,7 @@ let lastInfoAt = 0;
 // overlap a still-running slow fetch for the same section; a navigation to a
 // different section is not blocked (the names differ).
 let slowInFlight = null;
+let fastInFlight = false;
 
 function setConn(ok) {
   const dot = document.getElementById('conn-dot');
@@ -63,19 +64,36 @@ function tickClock() {
 
 async function fast() {
   if (document.visibilityState === 'hidden') return;
-  const now = Date.now();
-  const needInfo = !cachedInfo || now - lastInfoAt >= INFO_REFRESH_MS;
-  const [status, info] = await Promise.all([api.status(), needInfo ? api.info() : Promise.resolve(cachedInfo)]);
-  if (needInfo) {
-    lastInfoAt = now;
-    if (info) cachedInfo = info;
+  if (fastInFlight) return;
+  fastInFlight = true;
+  try {
+    const now = Date.now();
+    const needInfo = !cachedInfo || now - lastInfoAt >= INFO_REFRESH_MS;
+    let status = null;
+    let info = cachedInfo;
+    try {
+      [status, info] = await Promise.all([
+        api.status(),
+        needInfo ? api.info() : Promise.resolve(cachedInfo),
+      ]);
+    } catch {
+      // getJson normally resolves null; keep cached info and mark unreachable.
+      setConn(false);
+      return;
+    }
+    if (needInfo) {
+      lastInfoAt = now;
+      if (info) cachedInfo = info;
+    }
+    setConn(!!status);
+    const net = document.getElementById('side-net');
+    const infoForRender = cachedInfo || info;
+    if (net && infoForRender) net.textContent = `${infoForRender.network ?? ''} · v${infoForRender.version ?? ''}`;
+    const r = current && renderers[current];
+    if (r && r.onFast) r.onFast({ status, info: infoForRender });
+  } finally {
+    fastInFlight = false;
   }
-  setConn(!!status);
-  const net = document.getElementById('side-net');
-  const infoForRender = cachedInfo || info;
-  if (net && infoForRender) net.textContent = `${infoForRender.network ?? ''} · v${infoForRender.version ?? ''}`;
-  const r = current && renderers[current];
-  if (r && r.onFast) r.onFast({ status, info: infoForRender });
 }
 
 async function slow() {

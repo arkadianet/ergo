@@ -333,4 +333,10 @@ pub(crate) struct NodeState {
     /// when the ring's latest seq advances, so a quiet tick re-publishes
     /// the same allocation (mirrors the recent-blocks per-tip cache).
     pub(super) event_feed_projection: Option<(u64, std::sync::Arc<ergo_api::types::ApiNodeEvents>)>,
+    /// `(total, retained_len)`-keyed cache of the diagnostics reorg history
+    /// Arc — rebuilt only when push/age-prune changes the ring.
+    pub(super) reorg_history_projection: Option<(
+        (u64, usize),
+        std::sync::Arc<ergo_api::types::ApiReorgHistory>,
+    )>,
 }

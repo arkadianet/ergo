@@ -56,7 +56,9 @@ export function createChannelSub(opts) {
       }
     });
     ws.addEventListener('close', () => {
-      if (socket === ws) socket = null;
+      // Ignore close from a socket that `stop()`/`connect()` already replaced.
+      if (socket !== ws) return;
+      socket = null;
       connected = false;
       if (opts.onClose) opts.onClose();
       scheduleReconnect();
