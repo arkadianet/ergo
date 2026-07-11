@@ -1,21 +1,24 @@
 //! Bridges `ergo_mempool::MempoolObserver` to `ergo_api`'s realtime WS bus.
 //!
 //! `ergo-mempool` never depends on `ergo-api` — this adapter is the one-way
-//! seam that lets admission/eviction fire `tx_accepted` / `tx_dropped` on
-//! the `mempool` WS channel without the mempool crate ever learning
-//! `ergo-api` exists. `RealtimeBus::publish` is synchronous and never
-//! blocks on a slow WS client (drop-and-flag under the bus's never-block
-//! policy), so this stays safe to call inline from the mempool's admission
-//! hot path (no `.await`, no lock contention with the WS fan-out).
+//! seam that lets admission/eviction/confirmation fire on the realtime bus
+//! without the mempool crate ever learning `ergo-api` exists.
+//! `RealtimeBus::publish` is synchronous and never blocks on a slow WS
+//! client (drop-and-flag under the bus's never-block policy), so this stays
+//! safe to call inline from the mempool's admission hot path (no `.await`,
+//! no lock contention with the WS fan-out).
+//!
+//! Events describe **this node's pool under this node's policy / tip**.
 
 use std::sync::Arc;
 
 use ergo_api::v1::realtime::{RealtimeBus, RealtimeEventBody};
 use ergo_mempool::{MempoolObserver, TxId};
+use ergo_primitives::digest::Digest32;
 
 use crate::snapshot::unix_now_ms;
 
-/// Publishes mempool admit/evict telemetry onto the shared realtime bus.
+/// Publishes mempool admit/evict/confirm telemetry onto the shared realtime bus.
 pub struct RealtimeMempoolObserver {
     bus: Arc<RealtimeBus>,
 }
@@ -42,6 +45,26 @@ impl MempoolObserver for RealtimeMempoolObserver {
             hex::encode(tx_id.as_bytes()),
             reason.to_string(),
             None,
+            None,
+        ));
+    }
+
+    fn on_confirmed(&self, tx_id: TxId, height: u32, header_id: Digest32) {
+        self.bus.publish(RealtimeEventBody::tx_confirmed(
+            unix_now_ms(),
+            hex::encode(tx_id.as_bytes()),
+            height,
+            hex::encode(header_id.as_bytes()),
+        ));
+    }
+
+    fn on_replaced(&self, loser_id: TxId, winner_id: TxId) {
+        self.bus.publish(RealtimeEventBody::tx_dropped(
+            unix_now_ms(),
+            hex::encode(loser_id.as_bytes()),
+            "Replaced".to_string(),
+            None,
+            Some(hex::encode(winner_id.as_bytes())),
         ));
     }
 }

@@ -67,6 +67,7 @@ pub use weight::{ByCost, ByMin, BySize, WeightFunction, WeightInputs, SCALE};
 
 use std::sync::Arc;
 
+use ergo_primitives::digest::Digest32;
 use tracing::{debug, info};
 
 /// Sink for mempool admission/eviction telemetry — the tap the operator
@@ -80,16 +81,25 @@ use tracing::{debug, info};
 /// Calls happen inline on the admission hot path under `&mut Mempool` —
 /// implementations must be cheap and non-blocking (no `.await`, no lock
 /// contention with the WS fan-out). Fired from the same call sites as the
-/// `mempool_tx_admitted` / `mempool_tx_evicted` tracing events, and ONLY
-/// for real state transitions: check-only (`Mempool::check`) and
-/// would-admit outcomes never call this.
+/// `mempool_tx_admitted` / `mempool_tx_evicted` / `mempool_tx_replaced`
+/// tracing events, and ONLY for real state transitions: check-only
+/// (`Mempool::check`) and would-admit outcomes never call this.
+///
+/// All callbacks describe **this node's pool under this node's policy /
+/// tip** — not a network-wide mempool oracle.
 pub trait MempoolObserver: Send + Sync {
     /// A tx was admitted to the pool.
     fn on_admitted(&self, tx_id: TxId, fee: u64, size_bytes: u32);
-    /// A tx was evicted from the pool. `reason` is `EvictionReason`'s
-    /// `Debug` rendering — a short, stable tag, not meant for further
-    /// parsing.
+    /// A tx left the pool without confirming (policy eviction, tip-invalid,
+    /// etc.). `reason` is `EvictionReason`'s `Debug` rendering — a short,
+    /// stable tag. Never used for `EvictionReason::Confirmed` (see
+    /// [`on_confirmed`]) or replacement losers (see [`on_replaced`]).
     fn on_evicted(&self, tx_id: TxId, reason: &str);
+    /// A pooled tx was applied in our tip. Not a drop — confirmation.
+    fn on_confirmed(&self, tx_id: TxId, height: u32, header_id: Digest32);
+    /// Loser of a same-node replacement / weight fight. `winner_id` is the
+    /// tx that stayed (or entered) the pool.
+    fn on_replaced(&self, loser_id: TxId, winner_id: TxId);
 }
 
 /// Tag string emitted in the `source` journal-event field.
@@ -143,9 +153,13 @@ fn extract_dropped_tx_id(actions: &[MempoolAction]) -> Option<TxId> {
 /// evicts, but the caller still passes `None` explicitly so this stays
 /// correct even if that invariant ever changes) and `Some` for every real
 /// pool mutation (admission-time eviction, reorg, revalidation, recheck).
+///
+/// `tip` is the tip *after* the mutation (used to turn
+/// `EvictionReason::Confirmed` into [`MempoolObserver::on_confirmed`]).
 fn emit_tracing_for_pool_actions(
     actions: &[MempoolAction],
     observer: Option<&dyn MempoolObserver>,
+    tip: Option<TipPointer>,
 ) {
     for a in actions {
         if let MempoolAction::Observe { event } = a {
@@ -158,9 +172,23 @@ fn emit_tracing_for_pool_actions(
                         "mempool eviction",
                     );
                     if let Some(obs) = observer {
-                        let reason_str = format!("{reason:?}");
-                        for tx_id in tx_ids {
-                            obs.on_evicted(*tx_id, &reason_str);
+                        match reason {
+                            EvictionReason::Confirmed => {
+                                // Confirmation is not a drop. Need tip
+                                // context for height/header; without it
+                                // skip the observer (still traced above).
+                                if let Some(t) = tip {
+                                    for tx_id in tx_ids {
+                                        obs.on_confirmed(*tx_id, t.height, t.header_id);
+                                    }
+                                }
+                            }
+                            _ => {
+                                let reason_str = format!("{reason:?}");
+                                for tx_id in tx_ids {
+                                    obs.on_evicted(*tx_id, &reason_str);
+                                }
+                            }
                         }
                     }
                 }
@@ -178,6 +206,9 @@ fn emit_tracing_for_pool_actions(
                         weight_winner,
                         "mempool tx replaced",
                     );
+                    if let Some(obs) = observer {
+                        obs.on_replaced(*loser_id, *winner_id);
+                    }
                 }
                 _ => {}
             }
@@ -272,6 +303,7 @@ fn emit_tracing_for_admission(
     pool_size: usize,
     pool_bytes: usize,
     observer: Option<&dyn MempoolObserver>,
+    tip: Option<TipPointer>,
 ) {
     let src = source_tag(source);
     // User-initiated sources (`Api`, `Wallet`) log at `info!`;
@@ -348,7 +380,7 @@ fn emit_tracing_for_admission(
         }
     }
 
-    emit_tracing_for_pool_actions(actions, observer);
+    emit_tracing_for_pool_actions(actions, observer, tip);
 }
 
 /// Symmetric `Mempool::check`-side variant. `CheckOutcome` never
@@ -434,7 +466,7 @@ fn emit_tracing_for_check(
     // observer is never fired here — `None`, not the live observer, even
     // though `actions` in practice carries no `Evicted`/`Replaced` events
     // for this outcome.
-    emit_tracing_for_pool_actions(actions, None);
+    emit_tracing_for_pool_actions(actions, None, None);
 }
 
 /// Top-level mempool handle. Bundles all the sub-components so callers
@@ -609,6 +641,7 @@ impl Mempool {
                 self.pool.len(),
                 self.pool.total_bytes(),
                 self.observer.as_deref(),
+                self.tip,
             );
             return (outcome, Vec::new());
         }
@@ -630,6 +663,7 @@ impl Mempool {
             self.pool.len(),
             self.pool.total_bytes(),
             self.observer.as_deref(),
+            self.tip,
         );
         (outcome, actions)
     }
@@ -709,7 +743,7 @@ impl Mempool {
 
         // Per-action evictions log first so dashboards show the cause
         // before the summary.
-        emit_tracing_for_pool_actions(&actions, self.observer.as_deref());
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), Some(new_tip));
         let evicted_count: usize = actions
             .iter()
             .filter_map(|a| match a {
@@ -771,7 +805,7 @@ impl Mempool {
         // Per-action evictions (rare during revalidation but possible
         // if a demoted tx wins a double-spend conflict against an
         // already-pooled one).
-        emit_tracing_for_pool_actions(&actions, self.observer.as_deref());
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
 
         // Counts derived from the action stream: each successful
         // re-admission emits exactly one `BroadcastInv`.
@@ -972,7 +1006,7 @@ impl Mempool {
             }
         }
 
-        emit_tracing_for_pool_actions(&actions, self.observer.as_deref());
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
         info!(
             event = "mempool_recheck_completed",
             rechecked,
@@ -1167,7 +1201,7 @@ impl Mempool {
                 },
             });
         }
-        emit_tracing_for_pool_actions(&actions, self.observer.as_deref());
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
         info!(
             event = "mempool_suspect_recheck_completed",
             suspects = ids.len(),

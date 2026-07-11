@@ -22,7 +22,8 @@ use serde_json::json;
 pub enum ChannelClass {
     /// `blocks` — `block_applied`, `reorg`. Class channel (no selector).
     Blocks,
-    /// `mempool` — `tx_accepted`, `tx_dropped`, `fee_histogram_changed`.
+    /// `mempool` — `tx_accepted`, `tx_dropped`, `tx_confirmed` (leave-on-mine),
+    /// `fee_histogram_changed`. Events are this node's local pool view.
     Mempool,
     /// `address:<address>` — `box_created`, `box_spent`.
     Address,
@@ -270,11 +271,16 @@ impl RealtimeEventBody {
         }
     }
 
-    /// `tx_confirmed` on a terminal `tx:` channel (§2.5).
+    /// `tx_confirmed` on `mempool` + terminal `tx:` (§2.5).
+    ///
+    /// Dual-routed to `mempool` so pool dashboards see the leave-on-mine
+    /// without waiting for a fine-grained `tx:` subscription. `confirmed:
+    /// true` distinguishes this from `tx_dropped`. Payload is this node's
+    /// tip view (height/header of the applying block).
     pub fn tx_confirmed(unix_ms: u64, tx_id: String, height: u32, header_id: String) -> Self {
         RealtimeEventBody {
             emitted_at_unix_ms: unix_ms,
-            routes: vec![format!("tx:{tx_id}")],
+            routes: vec!["mempool".to_string(), format!("tx:{tx_id}")],
             event: "tx_confirmed",
             confirmed: true,
             height: Some(height),
@@ -290,6 +296,7 @@ impl RealtimeEventBody {
 
     /// `tx_accepted` on the `mempool` channel (§2.5). Mempool events are
     /// tentative until a later chain event confirms or drops the transaction.
+    /// Local to this node's admission policy — not a network-wide oracle.
     pub fn tx_accepted(
         unix_ms: u64,
         tx_id: String,
@@ -312,22 +319,32 @@ impl RealtimeEventBody {
     }
 
     /// `tx_dropped` on both `mempool` and the terminal `tx:` channel (§2.5).
+    ///
+    /// Means the tx left this node's pool *without* confirming (policy
+    /// eviction, tip-invalid, replacement loser, …). Not used for mined
+    /// txs — those are [`Self::tx_confirmed`]. Optional `winner_id` is set
+    /// for replacement losers.
     pub fn tx_dropped(
         unix_ms: u64,
         tx_id: String,
         reason: String,
         previous_seq: Option<u64>,
+        winner_id: Option<String>,
     ) -> Self {
+        let mut data = json!({
+            "tx_id": tx_id,
+            "reason": reason,
+        });
+        if let Some(w) = winner_id {
+            data["winner_id"] = json!(w);
+        }
         RealtimeEventBody {
             emitted_at_unix_ms: unix_ms,
             routes: vec!["mempool".to_string(), format!("tx:{tx_id}")],
             event: "tx_dropped",
             confirmed: false,
             height: None,
-            data: json!({
-                "tx_id": tx_id,
-                "reason": reason,
-            }),
+            data,
             previous_seq,
         }
     }
@@ -440,13 +457,40 @@ mod tests {
 
     #[test]
     fn tx_dropped_body_routes_to_mempool_and_terminal_tx() {
-        let b = RealtimeEventBody::tx_dropped(1, HEX64.into(), "evicted".to_string(), Some(42));
+        let b =
+            RealtimeEventBody::tx_dropped(1, HEX64.into(), "evicted".to_string(), Some(42), None);
         assert_eq!(b.routes, vec!["mempool".to_string(), format!("tx:{HEX64}")]);
         assert_eq!(b.event, "tx_dropped");
         assert!(!b.confirmed);
         assert_eq!(b.height, None);
         assert_eq!(b.data["tx_id"], HEX64);
         assert_eq!(b.data["reason"], "evicted");
+        assert!(b.data.get("winner_id").is_none());
         assert_eq!(b.previous_seq, Some(42));
+    }
+
+    #[test]
+    fn tx_dropped_replacement_includes_winner_id() {
+        let winner = "bb".repeat(32);
+        let b = RealtimeEventBody::tx_dropped(
+            1,
+            HEX64.into(),
+            "Replaced".to_string(),
+            None,
+            Some(winner.clone()),
+        );
+        assert_eq!(b.data["reason"], "Replaced");
+        assert_eq!(b.data["winner_id"], winner);
+    }
+
+    #[test]
+    fn tx_confirmed_routes_to_mempool_and_terminal_tx() {
+        let hdr = "cc".repeat(32);
+        let b = RealtimeEventBody::tx_confirmed(1, HEX64.into(), 100, hdr.clone());
+        assert_eq!(b.routes, vec!["mempool".to_string(), format!("tx:{HEX64}")]);
+        assert_eq!(b.event, "tx_confirmed");
+        assert!(b.confirmed);
+        assert_eq!(b.height, Some(100));
+        assert_eq!(b.data["header_id"], hdr);
     }
 }

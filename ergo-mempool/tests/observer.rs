@@ -81,13 +81,14 @@ fn validator_accepting(bytes: &'static [u8], tx_id_byte: u8, fee: u64) -> MockVa
     )
 }
 
-/// Records every `on_admitted` / `on_evicted` call for assertion. Mirrors
-/// the shape a real observer (e.g. `ergo-node`'s `RealtimeMempoolObserver`)
-/// would receive.
+/// Records every observer callback for assertion. Mirrors the shape a real
+/// observer (e.g. `ergo-node`'s `RealtimeMempoolObserver`) would receive.
 #[derive(Default)]
 struct MockObserver {
     admitted: Mutex<Vec<(TxId, u64, u32)>>,
     evicted: Mutex<Vec<(TxId, String)>>,
+    confirmed: Mutex<Vec<(TxId, u32, Digest32)>>,
+    replaced: Mutex<Vec<(TxId, TxId)>>,
 }
 
 impl MempoolObserver for MockObserver {
@@ -99,6 +100,15 @@ impl MempoolObserver for MockObserver {
             .lock()
             .unwrap()
             .push((tx_id, reason.to_string()));
+    }
+    fn on_confirmed(&self, tx_id: TxId, height: u32, header_id: Digest32) {
+        self.confirmed
+            .lock()
+            .unwrap()
+            .push((tx_id, height, header_id));
+    }
+    fn on_replaced(&self, loser_id: TxId, winner_id: TxId) {
+        self.replaced.lock().unwrap().push((loser_id, winner_id));
     }
 }
 
@@ -135,7 +145,7 @@ fn process_admits_calls_observer_on_admitted_once() {
 }
 
 #[test]
-fn on_tip_change_confirming_a_pooled_tx_calls_observer_on_evicted() {
+fn on_tip_change_confirming_a_pooled_tx_calls_observer_on_confirmed() {
     let mut mempool = Mempool::new(MempoolConfig::default(), Box::new(ByCost));
     let observer = Arc::new(MockObserver::default());
     mempool.set_observer(Some(observer.clone()));
@@ -154,11 +164,11 @@ fn on_tip_change_confirming_a_pooled_tx_calls_observer_on_evicted() {
         &validator,
     );
     assert!(matches!(outcome, AdmissionOutcome::Admitted { .. }));
-    observer.admitted.lock().unwrap().clear(); // isolate this test's assertion to the eviction
+    observer.admitted.lock().unwrap().clear(); // isolate this test's assertion to the confirmation
 
-    // A block confirms the pooled tx — removed from the pool via the same
-    // `ObservedEvent::Evicted` action the `mempool_tx_evicted` tracing event
-    // fires for (reason `Confirmed`).
+    // A block confirms the pooled tx — removed from the pool via
+    // `ObservedEvent::Evicted { reason: Confirmed }`, which the observer
+    // maps to `on_confirmed` (not `on_evicted` / `tx_dropped`).
     let diff = TxDiff {
         new_tip: TipPointer {
             height: 1001,
@@ -174,9 +184,15 @@ fn on_tip_change_confirming_a_pooled_tx_calls_observer_on_evicted() {
     mempool.on_tip_change(&diff);
     assert_eq!(mempool.size(), 0);
 
-    let evicted = observer.evicted.lock().unwrap();
-    assert_eq!(evicted.len(), 1, "expected exactly one on_evicted call");
-    assert_eq!(evicted[0].0, digest(0x22));
+    assert!(
+        observer.evicted.lock().unwrap().is_empty(),
+        "Confirmed must not fire on_evicted / tx_dropped"
+    );
+    let confirmed = observer.confirmed.lock().unwrap();
+    assert_eq!(confirmed.len(), 1, "expected exactly one on_confirmed call");
+    assert_eq!(confirmed[0].0, digest(0x22));
+    assert_eq!(confirmed[0].1, 1001);
+    assert_eq!(confirmed[0].2, digest(0x01));
 }
 
 // ----- error paths -----
@@ -207,6 +223,8 @@ fn check_would_admit_never_calls_observer() {
         "check-only outcomes must never fire the observer"
     );
     assert!(observer.evicted.lock().unwrap().is_empty());
+    assert!(observer.confirmed.lock().unwrap().is_empty());
+    assert!(observer.replaced.lock().unwrap().is_empty());
 }
 
 #[test]
