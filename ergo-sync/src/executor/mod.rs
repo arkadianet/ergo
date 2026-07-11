@@ -271,6 +271,8 @@ pub struct SyncExecutor {
     /// Monotonic count of block-apply rejections since start. Backs the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     block_apply_error_count: u64,
+    /// Live apply-phase gauges shared with the API `/metrics` bridge.
+    apply_phase: std::sync::Arc<crate::ApplyPhaseMetrics>,
 }
 
 /// A block this node rejected during apply. `at` is an `Instant` so callers
@@ -364,7 +366,13 @@ impl SyncExecutor {
             block_perf: BlockPerfCounters::default(),
             last_block_apply_error: None,
             block_apply_error_count: 0,
+            apply_phase: std::sync::Arc::new(crate::ApplyPhaseMetrics::default()),
         }
+    }
+
+    /// Shared apply-phase metrics (clone into the API read bridge).
+    pub fn apply_phase_metrics(&self) -> std::sync::Arc<crate::ApplyPhaseMetrics> {
+        self.apply_phase.clone()
     }
 
     /// Set the script-validation checkpoint. Blocks at or below `height`
@@ -1166,6 +1174,7 @@ impl SyncExecutor {
         } else {
             Some(self.block_context_headers.as_slice())
         };
+        let guard = self.apply_phase.begin();
         match block_proc::process_block(
             store,
             header_id,
@@ -1177,6 +1186,7 @@ impl SyncExecutor {
             wallet_wiring.map(|w| w.hook),
         ) {
             Ok(processed) => {
+                guard.success(processed.height);
                 self.update_block_context_cache(&processed);
                 coordinator.on_block_applied(processed.header_id, processed.height);
                 if processed.height % 100 == 0 {
@@ -1195,7 +1205,10 @@ impl SyncExecutor {
                 // arrived yet. Same "wait for the section" semantics as
                 // SectionNotFound — NOT block invalidity, never poison.
                 | BlockProcessError::AdProofsUnavailable { .. },
-            ) => Vec::new(),
+            ) => {
+                guard.failure();
+                Vec::new()
+            }
             Err(
                 BlockProcessError::ParentNotBestFull { .. }
                 // Digest fork / out-of-order: the block's parent is not
@@ -1204,6 +1217,7 @@ impl SyncExecutor {
                 | BlockProcessError::DigestNonLinearParent { .. }
                 | BlockProcessError::DigestOutOfOrder { .. },
             ) => {
+                guard.failure();
                 match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
                     Ok(true) => {
                         self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
@@ -1214,6 +1228,7 @@ impl SyncExecutor {
                 Vec::new()
             }
             Err(e) => {
+                guard.failure();
                 warn!(
                     block_id = %hex::encode(header_id),
                     error = %e,
@@ -1420,7 +1435,8 @@ impl SyncExecutor {
             } else {
                 Some(self.block_context_headers.as_slice())
             };
-            match block_proc::process_block(
+            let guard = self.apply_phase.begin();
+            let apply_result = block_proc::process_block(
                 store,
                 &header_id,
                 &self.params,
@@ -1429,8 +1445,10 @@ impl SyncExecutor {
                 self.reemission.as_ref(),
                 Some(&self.block_perf),
                 wallet_wiring.map(|w| w.hook),
-            ) {
+            );
+            match apply_result {
                 Ok(processed) => {
+                    guard.success(processed.height);
                     self.update_block_context_cache(&processed);
                     coordinator.on_block_applied(processed.header_id, processed.height);
                     progressed = true;
@@ -1444,6 +1462,7 @@ impl SyncExecutor {
                     // Same wait-for-section semantics; never poison.
                     | block_proc::BlockProcessError::AdProofsUnavailable { .. },
                 ) => {
+                    guard.failure();
                     hit_section_wait = true;
                     break;
                 }
@@ -1453,6 +1472,7 @@ impl SyncExecutor {
                     | block_proc::BlockProcessError::DigestNonLinearParent { .. }
                     | block_proc::BlockProcessError::DigestOutOfOrder { .. },
                 ) => {
+                    guard.failure();
                     match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
                         Ok(true) => {
                             progressed = true;
@@ -1466,6 +1486,7 @@ impl SyncExecutor {
                     }
                 }
                 Err(e) => {
+                    guard.failure();
                     warn!(height = next, error = %e, "block apply failed");
                     self.record_block_apply_error(header_id, next, e.to_string());
                     if is_validation_verdict(&e) {

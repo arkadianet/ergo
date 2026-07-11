@@ -5558,6 +5558,11 @@ components:
       - mempool_size
       - snapshot_age_ms
       properties:
+        apply_in_progress:
+          type: boolean
+          description: |-
+            `1` while the action loop is inside full-block `process_block`
+            (`ergo_node_apply_in_progress`). Live atomic — not snapshot-stale.
         best_full_block_height:
           type: integer
           format: int32
@@ -5589,6 +5594,29 @@ components:
         headers_ahead_of_full_blocks:
           type: integer
           format: int32
+          minimum: 0
+        last_applied_height:
+          type: integer
+          format: int32
+          description: |-
+            Height of the last *successful* full-block apply
+            (`ergo_node_last_applied_height`). `0` until the first success.
+          minimum: 0
+        last_apply_age_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            ms since the last finished apply attempt, if any
+            (`ergo_node_last_apply_age_ms`).
+          minimum: 0
+        last_apply_duration_ms:
+          type: integer
+          format: int64
+          description: |-
+            Wall-clock ms of the last finished apply attempt
+            (`ergo_node_last_apply_duration_ms`).
           minimum: 0
         last_block_apply_error:
           oneOf:

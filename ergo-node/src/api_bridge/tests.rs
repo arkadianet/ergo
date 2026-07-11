@@ -1076,6 +1076,18 @@ fn read_state_with_slot(
     host_paths: HostPaths,
     voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
 ) -> SnapshotReadState {
+    read_state_with_slot_and_apply(
+        host_paths,
+        voting_targets,
+        std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
+    )
+}
+
+fn read_state_with_slot_and_apply(
+    host_paths: HostPaths,
+    voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
+    apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
+) -> SnapshotReadState {
     let api_info = ergo_api::types::ApiInfo {
         agent_name: "test".into(),
         node_name: "test".into(),
@@ -1097,7 +1109,43 @@ fn read_state_with_slot(
         identity_slot,
         host_paths,
         voting_targets,
+        apply_phase,
     )
+}
+
+/// Live apply-phase atomics must overlay snapshot-stale ApiStatus fields.
+#[test]
+fn status_overlays_live_apply_phase_metrics() {
+    use ergo_api::NodeReadState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default());
+    let read = read_state_with_slot_and_apply(
+        HostPaths {
+            state_db: dir.path().join("s.redb"),
+            index_db: dir.path().join("i.redb"),
+            data_dir: dir.path().to_path_buf(),
+        },
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+        metrics.clone(),
+    );
+
+    let before = read.status();
+    assert!(!before.apply_in_progress);
+    assert_eq!(before.last_apply_duration_ms, 0);
+    assert_eq!(before.last_applied_height, 0);
+    assert!(before.last_apply_age_ms.is_none());
+
+    let guard = metrics.begin();
+    let mid = read.status();
+    assert!(mid.apply_in_progress);
+    guard.success(42);
+
+    let after = read.status();
+    assert!(!after.apply_in_progress);
+    assert_eq!(after.last_applied_height, 42);
+    assert!(after.last_apply_duration_ms < 5_000);
+    assert!(after.last_apply_age_ms.is_some());
 }
 
 /// `votes()` projects the snapshot's active params into the votable-parameter

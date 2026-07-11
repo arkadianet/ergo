@@ -205,6 +205,22 @@ pub struct ApiStatus {
     /// Unix-ms of the most recent retained reorg, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reorg_unix_ms: Option<u64>,
+    /// `1` while the action loop is inside full-block `process_block`
+    /// (`ergo_node_apply_in_progress`). Live atomic — not snapshot-stale.
+    #[serde(default)]
+    pub apply_in_progress: bool,
+    /// Wall-clock ms of the last finished apply attempt
+    /// (`ergo_node_last_apply_duration_ms`).
+    #[serde(default)]
+    pub last_apply_duration_ms: u64,
+    /// Height of the last *successful* full-block apply
+    /// (`ergo_node_last_applied_height`). `0` until the first success.
+    #[serde(default)]
+    pub last_applied_height: u32,
+    /// ms since the last finished apply attempt, if any
+    /// (`ergo_node_last_apply_age_ms`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_apply_age_ms: Option<u64>,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct
