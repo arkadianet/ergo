@@ -33,6 +33,7 @@ pub const JS_VOTING: &str = include_str!("../web/js/voting.js");
 pub const JS_WALLET: &str = include_str!("../web/js/wallet.js");
 pub const JS_MINERS: &str = include_str!("../web/js/miners.js");
 pub const JS_MINING: &str = include_str!("../web/js/mining.js");
+pub const JS_WS_CLIENT: &str = include_str!("../web/js/ws-client.js");
 pub const JS_APP: &str = include_str!("../web/js/app.js");
 
 /// Self-hosted JetBrains Mono (variable, SIL OFL 1.1) — embedded so both

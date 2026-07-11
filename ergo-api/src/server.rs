@@ -95,8 +95,8 @@ use crate::web::{
     COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
     JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
-    JS_TOKEN_META, JS_VOTING, JS_WALLET, NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML,
-    TOKENS_CSS, V1_SWAGGER_HTML,
+    JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WS_CLIENT, NATIVE_SWAGGER_HTML, OPENAPI_YAML,
+    SWAGGER_HTML, TOKENS_CSS, V1_SWAGGER_HTML,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
@@ -630,6 +630,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
         .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
+        .route("/js/ws-client.js", get(|| async { js(JS_WS_CLIENT) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/swagger/v1", get(swagger_v1))
