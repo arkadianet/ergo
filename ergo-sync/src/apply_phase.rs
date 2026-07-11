@@ -19,6 +19,7 @@ pub struct ApplyPhaseMetrics {
 }
 
 /// RAII: sets `in_progress` for the duration of one `process_block` call.
+#[must_use = "the guard clears apply_in_progress on drop; discarding it ends the phase immediately"]
 pub struct ApplyPhaseGuard<'a> {
     metrics: &'a ApplyPhaseMetrics,
     started: Instant,

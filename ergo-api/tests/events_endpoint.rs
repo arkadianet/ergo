@@ -69,25 +69,9 @@ impl NodeReadState for FeedStub {
     fn status(&self) -> ApiStatus {
         ApiStatus {
             sync_state: SyncStateLabel::AtTip,
-            peer_count: 0,
             best_header_height: 900_000,
             best_full_block_height: 900_000,
-            headers_ahead_of_full_blocks: 0,
-            mempool_size: 0,
-            snapshot_age_ms: 0,
-            bootstrap: None,
-            last_block_apply_error: None,
-            block_apply_errors_total: 0,
-            mempool_tx_requested_total: 0,
-            mempool_peer_tx_admitted_total: 0,
-            mempool_peer_tx_rejected_total: 0,
-            reorgs_total: 0,
-            last_reorg_depth: None,
-            last_reorg_unix_ms: None,
-            apply_in_progress: false,
-            last_apply_duration_ms: 0,
-            last_applied_height: 0,
-            last_apply_age_ms: None,
+            ..Default::default()
         }
     }
     fn tip(&self) -> ApiTip {
@@ -234,25 +218,9 @@ impl NodeReadState for DefaultStub {
     fn status(&self) -> ApiStatus {
         ApiStatus {
             sync_state: SyncStateLabel::AtTip,
-            peer_count: 0,
             best_header_height: 900_000,
             best_full_block_height: 900_000,
-            headers_ahead_of_full_blocks: 0,
-            mempool_size: 0,
-            snapshot_age_ms: 0,
-            bootstrap: None,
-            last_block_apply_error: None,
-            block_apply_errors_total: 0,
-            mempool_tx_requested_total: 0,
-            mempool_peer_tx_admitted_total: 0,
-            mempool_peer_tx_rejected_total: 0,
-            reorgs_total: 0,
-            last_reorg_depth: None,
-            last_reorg_unix_ms: None,
-            apply_in_progress: false,
-            last_apply_duration_ms: 0,
-            last_applied_height: 0,
-            last_apply_age_ms: None,
+            ..Default::default()
         }
     }
     fn tip(&self) -> ApiTip {
