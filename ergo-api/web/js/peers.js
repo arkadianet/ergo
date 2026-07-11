@@ -1,13 +1,29 @@
 // Peers page: composition strip (direction / state / agents) + the shared
 // sortable card-row table with a per-peer detail drawer. In/Out show each
 // peer's post-handshake framed bytes (plumbed through ergo-p2p).
+// Live connect/disconnect from WS `peers`; HTTP is the 30s fallback + first paint.
 import { api } from './api-client.js';
 import { makeTable, copyBtn } from './table.js';
 import { num, dur, bytes } from './format.js';
+import { createChannelSub } from './ws-client.js';
 
 let root = null;
 let table = null;
 let ourHeight = null;
+const HTTP_FALLBACK_MS = 30_000;
+let lastFullAt = 0;
+let refreshTimer = null;
+let refreshing = false;
+
+const peersWs = createChannelSub({
+  id: 'peers-panel',
+  channels: ['peers'],
+  onEvent(frame) {
+    if (frame.type !== 'event' || frame.channel !== 'peers') return;
+    if (frame.event !== 'peer_connected' && frame.event !== 'peer_disconnected') return;
+    scheduleRefresh(200);
+  },
+});
 
 const dirColor = (d) => (d === 'outbound' ? 'var(--blue)' : 'var(--purple)');
 const stateColor = (s) =>
@@ -200,11 +216,44 @@ function renderComp(peers) {
   host.append(compCell('Direction', dirBody), compCell('State', stBody), compCell('Agents', agBody));
 }
 
+function scheduleRefresh(delayMs) {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    fullRefresh();
+  }, delayMs);
+}
+
+async function fullRefresh() {
+  if (!root || refreshing) return;
+  refreshing = true;
+  try {
+    const [peers, status] = await Promise.all([api.peers(), api.status()]);
+    if (status) ourHeight = status.best_header_height ?? null;
+    const list = Array.isArray(peers) ? peers : [];
+    root.querySelector('[data-count]').textContent = `${list.length} connected`;
+    renderComp(list);
+    table.update(list);
+    lastFullAt = Date.now();
+  } finally {
+    refreshing = false;
+  }
+}
+
+export function onShow() {
+  peersWs.start();
+  fullRefresh();
+}
+
+export function onHide() {
+  peersWs.stop();
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
 export async function onSlow() {
-  const [peers, status] = await Promise.all([api.peers(), api.status()]);
-  if (status) ourHeight = status.best_header_height ?? null;
-  const list = Array.isArray(peers) ? peers : [];
-  root.querySelector('[data-count]').textContent = `${list.length} connected`;
-  renderComp(list);
-  table.update(list);
+  if (peersWs.isConnected() && Date.now() - lastFullAt < HTTP_FALLBACK_MS) return;
+  await fullRefresh();
 }

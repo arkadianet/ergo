@@ -63,7 +63,7 @@ impl RealtimeHandle {
         }
     }
 
-    /// A realtime handle with live block, mempool, and per-tx channels.
+    /// A realtime handle with live block, mempool, peers, and per-tx channels.
     pub fn blocks_and_mempool() -> Self {
         RealtimeHandle {
             bus: Arc::new(RealtimeBus::blocks_and_mempool()),
@@ -83,6 +83,7 @@ mod tests {
         let handle = RealtimeHandle::blocks_and_mempool();
         assert!(handle.bus.is_live(ChannelClass::Blocks));
         assert!(handle.bus.is_live(ChannelClass::Mempool));
+        assert!(handle.bus.is_live(ChannelClass::Peers));
         assert!(handle.bus.is_live(ChannelClass::Tx));
     }
 }

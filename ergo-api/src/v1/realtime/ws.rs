@@ -364,6 +364,18 @@ fn project_tick(
                     ev.dropped_header_ids.clone().unwrap_or_default(),
                 ));
             }
+            "peerConnected" => {
+                bus.publish(super::model::RealtimeEventBody::peer_connected(
+                    ev.unix_ms,
+                    ev.addr.clone().unwrap_or_default(),
+                ));
+            }
+            "peerDisconnected" => {
+                bus.publish(super::model::RealtimeEventBody::peer_disconnected(
+                    ev.unix_ms,
+                    ev.addr.clone().unwrap_or_default(),
+                ));
+            }
             _ => {}
         }
     }
@@ -371,9 +383,9 @@ fn project_tick(
 }
 
 /// Spawn the server-seam bridge feeder: poll the coarse operator event ring and
-/// republish `block_applied` / `reorg` into the bus `blocks` channel. Spawn
-/// ONLY from an async context (a Tokio runtime must be current); the server
-/// wiring guards the call exactly like the O4 depth sampler.
+/// republish `block_applied` / `reorg` / peer connect-disconnect into the bus.
+/// Spawn ONLY from an async context (a Tokio runtime must be current); the
+/// server wiring guards the call exactly like the O4 depth sampler.
 pub fn spawn_event_bridge(
     read: Arc<dyn NodeReadState>,
     bus: Arc<RealtimeBus>,
@@ -555,6 +567,66 @@ mod tests {
             ev.data["dropped_header_ids"],
             serde_json::json!(["old-200", "old-199"])
         );
+    }
+
+    #[test]
+    fn project_tick_maps_peer_events() {
+        let bus = Arc::new(RealtimeBus::blocks_and_mempool());
+        let sub = bus.subscribe();
+        *sub.filter.write().unwrap() = std::iter::once("peers".to_string()).collect();
+        let mut sub = sub;
+        let (mut last, mut seeded) = (0u64, false);
+        project_tick(
+            &ApiNodeEvents {
+                latest_seq: 0,
+                events: vec![],
+            },
+            &bus,
+            &mut last,
+            &mut seeded,
+        );
+        project_tick(
+            &ApiNodeEvents {
+                latest_seq: 2,
+                events: vec![
+                    ApiNodeEvent {
+                        seq: 1,
+                        unix_ms: 3_000,
+                        kind: "peerConnected".into(),
+                        height: None,
+                        header_id: None,
+                        depth: None,
+                        dropped_header_ids: None,
+                        txs: None,
+                        size_bytes: None,
+                        addr: Some("1.2.3.4:9030".into()),
+                        detail: None,
+                    },
+                    ApiNodeEvent {
+                        seq: 2,
+                        unix_ms: 4_000,
+                        kind: "peerDisconnected".into(),
+                        height: None,
+                        header_id: None,
+                        depth: None,
+                        dropped_header_ids: None,
+                        txs: None,
+                        size_bytes: None,
+                        addr: Some("1.2.3.4:9030".into()),
+                        detail: None,
+                    },
+                ],
+            },
+            &bus,
+            &mut last,
+            &mut seeded,
+        );
+        let a = sub.rx.try_recv().unwrap();
+        let b = sub.rx.try_recv().unwrap();
+        assert_eq!(a.event, "peer_connected");
+        assert_eq!(a.data["addr"], "1.2.3.4:9030");
+        assert_eq!(b.event, "peer_disconnected");
+        assert_eq!(b.data["addr"], "1.2.3.4:9030");
     }
 
     // ----- end-to-end spawn (drives the async task) -----

@@ -17,7 +17,7 @@
 use ergo_ser::address::NetworkPrefix;
 use serde_json::json;
 
-/// One of the six subscription channel classes (§4.1 vocabulary).
+/// One of the seven subscription channel classes (§4.1 vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelClass {
     /// `blocks` — `block_applied`, `reorg`. Class channel (no selector).
@@ -25,6 +25,8 @@ pub enum ChannelClass {
     /// `mempool` — `tx_accepted`, `tx_dropped`, `tx_confirmed` (leave-on-mine),
     /// `fee_histogram_changed`. Events are this node's local pool view.
     Mempool,
+    /// `peers` — `peer_connected`, `peer_disconnected`. Class channel.
+    Peers,
     /// `address:<address>` — `box_created`, `box_spent`.
     Address,
     /// `box:<box_id>` — `box_spent`. **Terminal** (fires once).
@@ -41,6 +43,7 @@ impl ChannelClass {
         match self {
             ChannelClass::Blocks => "blocks",
             ChannelClass::Mempool => "mempool",
+            ChannelClass::Peers => "peers",
             ChannelClass::Address => "address",
             ChannelClass::Box => "box",
             ChannelClass::Token => "token",
@@ -48,9 +51,12 @@ impl ChannelClass {
         }
     }
 
-    /// True for the two class channels that take no selector.
+    /// True for class channels that take no selector.
     fn is_class_channel(self) -> bool {
-        matches!(self, ChannelClass::Blocks | ChannelClass::Mempool)
+        matches!(
+            self,
+            ChannelClass::Blocks | ChannelClass::Mempool | ChannelClass::Peers
+        )
     }
 
     /// True for channels that fire exactly once and then auto-unsubscribe
@@ -110,6 +116,7 @@ pub fn parse_channel(raw: &str, network: NetworkPrefix) -> Result<ParsedChannel,
     let class = match class_tok {
         "blocks" => ChannelClass::Blocks,
         "mempool" => ChannelClass::Mempool,
+        "peers" => ChannelClass::Peers,
         "address" => ChannelClass::Address,
         "box" => ChannelClass::Box,
         "token" => ChannelClass::Token,
@@ -160,7 +167,9 @@ pub fn parse_channel(raw: &str, network: NetworkPrefix) -> Result<ParsedChannel,
                 )));
             }
         }
-        ChannelClass::Blocks | ChannelClass::Mempool => unreachable!("handled above"),
+        ChannelClass::Blocks | ChannelClass::Mempool | ChannelClass::Peers => {
+            unreachable!("handled above")
+        }
     }
 
     Ok(ParsedChannel {
@@ -348,6 +357,33 @@ impl RealtimeEventBody {
             previous_seq,
         }
     }
+
+    /// `peer_connected` on the `peers` channel — mirrors coarse `peerConnected`.
+    pub fn peer_connected(unix_ms: u64, addr: String) -> Self {
+        RealtimeEventBody {
+            emitted_at_unix_ms: unix_ms,
+            routes: vec!["peers".to_string()],
+            event: "peer_connected",
+            confirmed: true,
+            height: None,
+            data: json!({ "addr": addr }),
+            previous_seq: None,
+        }
+    }
+
+    /// `peer_disconnected` on the `peers` channel — mirrors coarse
+    /// `peerDisconnected`.
+    pub fn peer_disconnected(unix_ms: u64, addr: String) -> Self {
+        RealtimeEventBody {
+            emitted_at_unix_ms: unix_ms,
+            routes: vec!["peers".to_string()],
+            event: "peer_disconnected",
+            confirmed: true,
+            height: None,
+            data: json!({ "addr": addr }),
+            previous_seq: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +407,9 @@ mod tests {
         assert_eq!(b.key, "blocks");
         let m = parse_channel("mempool", net()).unwrap();
         assert_eq!(m.class, ChannelClass::Mempool);
+        let p = parse_channel("peers", net()).unwrap();
+        assert_eq!(p.class, ChannelClass::Peers);
+        assert_eq!(p.key, "peers");
     }
 
     #[test]

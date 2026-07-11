@@ -162,14 +162,16 @@ impl RealtimeBus {
         Self::new(s)
     }
 
-    /// A bus with live block, mempool, and per-tx channels.
+    /// A bus with live block, mempool, peers, and per-tx channels.
     ///
     /// `Tx` is live so `tx_confirmed` / `tx_dropped` terminal subscriptions
-    /// work; mempool still carries the class-level feed.
+    /// work; mempool still carries the class-level feed. `Peers` mirrors the
+    /// coarse ring's connect/disconnect events for the operator dashboard.
     pub fn blocks_and_mempool() -> Self {
         let mut s = HashSet::new();
         s.insert(ChannelClass::Blocks);
         s.insert(ChannelClass::Mempool);
+        s.insert(ChannelClass::Peers);
         s.insert(ChannelClass::Tx);
         Self::new(s)
     }
@@ -412,6 +414,7 @@ mod tests {
         let bus = RealtimeBus::blocks_and_mempool();
         assert!(bus.is_live(ChannelClass::Blocks));
         assert!(bus.is_live(ChannelClass::Mempool));
+        assert!(bus.is_live(ChannelClass::Peers));
         assert!(bus.is_live(ChannelClass::Tx));
     }
 

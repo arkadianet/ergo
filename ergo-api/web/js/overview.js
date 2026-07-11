@@ -7,6 +7,7 @@ import { lineChart, barChart } from './chart.js';
 import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
 import { minerNode, fetchOwnPk, ownPkHex } from './miners.js';
+import { createChannelSub } from './ws-client.js';
 
 const HISTORY_LEN = 60;
 const HTTP_TIP_FALLBACK_MS = 30_000;
@@ -27,13 +28,23 @@ const state = {
 };
 let root = null;
 let viewMode = localStorage.getItem('ergo.ovview') || 'cockpit';
-const blocksWs = {
-  socket: null,
-  retryTimer: null,
-  retryMs: 1000,
-  connected: false,
-  stopped: true,
-};
+
+function handleBlocksFrame(frame) {
+  if (frame.type !== 'event' || frame.channel !== 'blocks') return;
+  if (frame.event !== 'block_applied' && frame.event !== 'reorg') return;
+  const h = frame.height ?? frame.data?.height;
+  if (h == null) return;
+  state.wsHeight = h;
+  state.wsLastEventAt = Date.now();
+  push(hist.height, h);
+  onFast({ status: state.status, info: state.info });
+}
+
+const blocksWs = createChannelSub({
+  id: 'overview-blocks',
+  channels: ['blocks'],
+  onEvent: handleBlocksFrame,
+});
 
 // ---- domain formatters ----
 function parseDiff(s) {
@@ -77,14 +88,8 @@ function setText(sel, t) {
   if (e) e.textContent = t;
 }
 
-function wsUrl() {
-  const u = new URL('/api/v1/ws', window.location.href);
-  u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
-  return u;
-}
-
 function wsHeightFresh(now = Date.now()) {
-  return state.wsHeight != null && (blocksWs.connected || now - state.wsLastEventAt < WS_STALE_MS);
+  return state.wsHeight != null && (blocksWs.isConnected() || now - state.wsLastEventAt < WS_STALE_MS);
 }
 
 function noteHttpHeight(status) {
@@ -99,71 +104,6 @@ function noteHttpHeight(status) {
 
 function displayHeight() {
   return wsHeightFresh() ? state.wsHeight : state.httpHeight ?? state.status?.best_full_block_height ?? null;
-}
-
-function scheduleBlocksReconnect() {
-  if (blocksWs.stopped || blocksWs.retryTimer || !root) return;
-  const delay = blocksWs.retryMs;
-  blocksWs.retryTimer = setTimeout(() => {
-    blocksWs.retryTimer = null;
-    connectBlocksWs();
-  }, delay);
-  blocksWs.retryMs = Math.min(30_000, blocksWs.retryMs * 2);
-}
-
-function handleBlocksFrame(frame) {
-  if (frame.type !== 'event' || frame.channel !== 'blocks') return;
-  if (frame.event !== 'block_applied' && frame.event !== 'reorg') return;
-  const h = frame.height ?? frame.data?.height;
-  if (h == null) return;
-  state.wsHeight = h;
-  state.wsLastEventAt = Date.now();
-  push(hist.height, h);
-  onFast({ status: state.status, info: state.info });
-}
-
-function connectBlocksWs() {
-  if (blocksWs.stopped || blocksWs.socket || typeof WebSocket === 'undefined') return;
-  const ws = new WebSocket(wsUrl());
-  blocksWs.socket = ws;
-  ws.addEventListener('open', () => {
-    blocksWs.connected = true;
-    blocksWs.retryMs = 1000;
-    ws.send(JSON.stringify({ op: 'subscribe', id: 'overview-blocks', channels: ['blocks'] }));
-  });
-  ws.addEventListener('message', (ev) => {
-    try {
-      handleBlocksFrame(JSON.parse(ev.data));
-    } catch {
-      /* ignore malformed frames */
-    }
-  });
-  ws.addEventListener('close', () => {
-    if (blocksWs.socket === ws) blocksWs.socket = null;
-    blocksWs.connected = false;
-    scheduleBlocksReconnect();
-  });
-  ws.addEventListener('error', () => {
-    ws.close();
-  });
-}
-
-function startBlocksWs() {
-  if (blocksWs.socket || blocksWs.retryTimer) return;
-  blocksWs.stopped = false;
-  connectBlocksWs();
-}
-
-function stopBlocksWs() {
-  blocksWs.stopped = true;
-  blocksWs.connected = false;
-  if (blocksWs.retryTimer) {
-    clearTimeout(blocksWs.retryTimer);
-    blocksWs.retryTimer = null;
-  }
-  const ws = blocksWs.socket;
-  blocksWs.socket = null;
-  if (ws) ws.close();
 }
 
 export function mount(el) {
@@ -228,16 +168,16 @@ export function mount(el) {
   // the cached copy first so a re-entry doesn't flash empty.
   if (state.identity) renderIdentity();
   else fetchIdentity();
-  startBlocksWs();
+  blocksWs.start();
 }
 
 export function onShow() {
-  startBlocksWs();
+  blocksWs.start();
   if (state.status) onFast({ status: state.status, info: state.info });
 }
 
 export function onHide() {
-  stopBlocksWs();
+  blocksWs.stop();
 }
 
 // ---- node identity strip (static, fetched once on mount) ----
