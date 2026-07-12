@@ -40,6 +40,7 @@ mod mining_dispatch;
 mod mining_engine;
 mod peer_actions;
 mod reorg_history;
+mod shadow_watch;
 mod snapshot_emit;
 mod snapshot_state;
 mod state;

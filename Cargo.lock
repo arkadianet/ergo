@@ -864,6 +864,7 @@ dependencies = [
  "num-bigint",
  "parking_lot",
  "redb",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",
