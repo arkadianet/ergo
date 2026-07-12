@@ -2341,6 +2341,32 @@ ergo_node_last_apply_age_ms {last_apply_age_ms}
             .unwrap_or(-1),
     );
 
+    // Shadow-validation series — emitted only when the mode is enabled, so
+    // "absent" and "quiet" stay distinguishable in Prometheus.
+    let body = match &status.shadow {
+        Some(sh) => format!(
+            "{body}\
+# HELP ergo_node_shadow_divergence_total Confirmed shadow divergences vs the reference node since start.
+# TYPE ergo_node_shadow_divergence_total counter
+ergo_node_shadow_divergence_total {dv}
+# HELP ergo_node_shadow_last_compared_height Highest height a shadow compare completed at.
+# TYPE ergo_node_shadow_last_compared_height gauge
+ergo_node_shadow_last_compared_height {lc}
+# HELP ergo_node_shadow_reference_unreachable 1 when the reference node failed the most recent compare tick.
+# TYPE ergo_node_shadow_reference_unreachable gauge
+ergo_node_shadow_reference_unreachable {ur}
+# HELP ergo_node_shadow_diverged 1 while a confirmed divergence is ACTIVE (latched).
+# TYPE ergo_node_shadow_diverged gauge
+ergo_node_shadow_diverged {ad}
+",
+            dv = sh.divergence_total,
+            lc = sh.last_compared_height,
+            ur = u8::from(!sh.reference_reachable),
+            ad = u8::from(sh.diverged.is_some()),
+        ),
+        None => body,
+    };
+
     (
         [(
             header::CONTENT_TYPE,

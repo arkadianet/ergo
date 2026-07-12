@@ -56,6 +56,13 @@ pub(crate) enum FeedEventKind {
     /// Terminal deep-fork wedge detected: the best-header chain forks below
     /// the rollback window and block apply is permanently stuck at this tip
     /// (resync required). Emitted once per distinct stuck tip.
+    /// Shadow validation confirmed a divergence vs the reference node.
+    ShadowDivergence {
+        kind: String,
+        height: u32,
+        ours: String,
+        theirs: String,
+    },
     SyncWedged {
         height: u32,
         header_id: String,
@@ -77,6 +84,9 @@ pub(crate) struct FeedPrev {
     /// Stuck-tip id of the last-reported deep-fork wedge, so the standing
     /// wedge (re-observed every tick) emits once per distinct stuck tip.
     pub(crate) sync_wedged: Option<String>,
+    /// Identity `(kind, height)` of the last-reported shadow divergence, so
+    /// a standing (latched) divergence emits once per distinct incident.
+    pub(crate) shadow_diverged: Option<(String, u32)>,
 }
 
 /// Per-tick caps so a churn burst (or initial sync) can't monopolize the
@@ -100,6 +110,9 @@ pub(crate) struct FeedObservation<'a> {
     pub(crate) indexer_status: Option<(String, Option<String>)>,
     /// Deep-fork wedge `(stuck_height, stuck_id_hex)`; `None` = not wedged.
     pub(crate) sync_wedged: Option<(u32, String)>,
+    /// Active shadow divergence `(kind, height, ours, theirs)`; `None` =
+    /// chains agree or the mode is off.
+    pub(crate) shadow_diverged: Option<(String, u32, String, String)>,
 }
 
 fn recent_tail(recent: &[(u32, String, u32, u64)]) -> Vec<(u32, String)> {
@@ -298,6 +311,28 @@ pub(crate) fn derive_events(
             Some(_) => {}
             None => prev.sync_wedged = None,
         }
+
+        // Shadow divergence: latched upstream (the watch task keeps ONE
+        // active divergence); emit once per distinct incident identity, and
+        // re-arm when it clears so a NEW divergence emits again.
+        match &obs.shadow_diverged {
+            Some((kind, height, ours, theirs))
+                if prev.shadow_diverged.as_ref() != Some(&(kind.clone(), *height)) =>
+            {
+                ring.push(
+                    obs.unix_ms,
+                    FeedEventKind::ShadowDivergence {
+                        kind: kind.clone(),
+                        height: *height,
+                        ours: ours.clone(),
+                        theirs: theirs.clone(),
+                    },
+                );
+                prev.shadow_diverged = Some((kind.clone(), *height));
+            }
+            Some(_) => {}
+            None => prev.shadow_diverged = None,
+        }
     } else {
         prev.primed = true;
         prev.peers = obs.peers.iter().cloned().collect();
@@ -468,6 +503,7 @@ mod tests {
             peers: peers.iter().map(|s| s.to_string()).collect(),
             indexer_status: indexer.map(|(s, d)| (s.to_string(), d.map(|x| x.to_string()))),
             sync_wedged: None,
+            shadow_diverged: None,
         }
     }
 
@@ -485,6 +521,9 @@ mod tests {
                 FeedEventKind::PeerDisconnected { addr } => format!("peer-:{addr}"),
                 FeedEventKind::IndexerStatus { status, .. } => format!("index:{status}"),
                 FeedEventKind::SyncWedged { height, .. } => format!("wedged:{height}"),
+                FeedEventKind::ShadowDivergence { kind, height, .. } => {
+                    format!("shadow:{kind}:{height}")
+                }
             })
             .collect()
     }

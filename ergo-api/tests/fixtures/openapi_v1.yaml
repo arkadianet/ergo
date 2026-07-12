@@ -5536,6 +5536,62 @@ components:
           type: integer
           format: int64
           minimum: 0
+    ApiShadowDivergence:
+      type: object
+      description: |-
+        One active shadow divergence: `header_mismatch` (this node and the
+        reference follow different canonical headers at `height`) or
+        `tip_stall` (the reference's full-block tip is advancing past ours).
+      required:
+      - kind
+      - height
+      - ours
+      - theirs
+      properties:
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        kind:
+          type: string
+          description: '`header_mismatch | tip_stall`.'
+        ours:
+          type: string
+          description: Our canonical header id at `height` (empty for `tip_stall`).
+        theirs:
+          type: string
+          description: The reference's canonical header id at `height` (empty for `tip_stall`).
+    ApiShadowStatus:
+      type: object
+      description: |-
+        Shadow-validation status (`[shadow]`): the outcome of the live
+        cross-check against the configured Scala reference node. Sourced from
+        the watch task's shared state at snapshot publish; backs the
+        `ergo_node_shadow_*` Prometheus series and the `shadowDivergence`
+        operator event.
+      required:
+      - reference_reachable
+      - last_compared_height
+      - divergence_total
+      properties:
+        diverged:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiShadowDivergence'
+            description: The ACTIVE confirmed divergence, or `None` when the chains agree.
+        divergence_total:
+          type: integer
+          format: int64
+          description: Confirmed divergences since node start (monotonic).
+          minimum: 0
+        last_compared_height:
+          type: integer
+          format: int32
+          description: Highest height a compare completed at (0 = none yet).
+          minimum: 0
+        reference_reachable:
+          type: boolean
+          description: Reference answered on the most recent compare tick.
     ApiStateType:
       type: string
       description: |-
@@ -5691,6 +5747,13 @@ components:
             Session-total tip-replacement reorgs detected by the operator event
             differ (`ergo_node_reorg_total`).
           minimum: 0
+        shadow:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiShadowStatus'
+            description: |-
+              Shadow-validation status (`[shadow]` — live cross-check against a
+              Scala reference node). Present only when the mode is enabled.
         snapshot_age_ms:
           type: integer
           format: int64

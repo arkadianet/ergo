@@ -24,6 +24,26 @@ pub(super) struct TomlConfig {
     #[serde(default)]
     pub(super) mining: ergo_mining::MiningConfig,
     pub(super) voting: TomlVoting,
+    pub(super) shadow: TomlShadow,
+}
+
+/// `[shadow]` TOML section: shadow validation — live cross-check against a
+/// Scala reference node (operator workload §D). Off by default, always
+/// opt-in; observe-and-alert only (no behavior change on divergence).
+///
+/// `deny_unknown_fields` so typos don't silently no-op.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TomlShadow {
+    pub(super) enabled: Option<bool>,
+    /// Reference node base URL, e.g. `"http://127.0.0.1:9053"`.
+    pub(super) reference_url: Option<String>,
+    pub(super) interval_secs: Option<u64>,
+    /// Compare this many blocks below `min(tips)` (reorg noise floor).
+    pub(super) lag_tolerance: Option<u32>,
+    /// Fire `tip_stall` when the reference is ahead by more than this.
+    pub(super) stall_gap_threshold: Option<u32>,
+    pub(super) request_timeout_secs: Option<u64>,
 }
 
 /// `[voting]` TOML section: operator on-chain voting policy. Only a

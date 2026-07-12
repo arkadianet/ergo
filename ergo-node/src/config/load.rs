@@ -697,6 +697,40 @@ impl NodeConfig {
 
         let enable_anchor_scheduler = toml_cfg.sync.enable_anchor_scheduler.unwrap_or(false);
 
+        // [shadow] — shadow validation vs a Scala reference node. Defaults
+        // off; validated only when enabled so a dormant section can't brick
+        // boot.
+        let sh_def = crate::node::ShadowConfig::default();
+        let ts = &toml_cfg.shadow;
+        let shadow_config = crate::node::ShadowConfig {
+            enabled: ts.enabled.unwrap_or(sh_def.enabled),
+            reference_url: ts
+                .reference_url
+                .clone()
+                .unwrap_or_else(|| sh_def.reference_url.clone()),
+            interval_secs: ts.interval_secs.unwrap_or(sh_def.interval_secs),
+            lag_tolerance: ts.lag_tolerance.unwrap_or(sh_def.lag_tolerance),
+            stall_gap_threshold: ts.stall_gap_threshold.unwrap_or(sh_def.stall_gap_threshold),
+            request_timeout_secs: ts
+                .request_timeout_secs
+                .unwrap_or(sh_def.request_timeout_secs),
+        };
+        if shadow_config.enabled {
+            let url = shadow_config.reference_url.trim();
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err("[shadow] reference_url must be an http(s):// base URL".into());
+            }
+            if shadow_config.interval_secs == 0 {
+                return Err("[shadow] interval_secs must be >= 1".into());
+            }
+            if shadow_config.request_timeout_secs == 0 {
+                return Err("[shadow] request_timeout_secs must be >= 1".into());
+            }
+            if shadow_config.stall_gap_threshold == 0 {
+                return Err("[shadow] stall_gap_threshold must be >= 1".into());
+            }
+        }
+
         // [mining] — external-miner subsystem. Defaults disabled. CLI
         // overrides applied below.
         let mut mining_config = toml_cfg.mining.clone();
@@ -860,6 +894,7 @@ impl NodeConfig {
             mempool_config,
             mempool_sort_policy,
             indexer_config,
+            shadow_config,
             enable_anchor_scheduler,
             logging,
             mining_config,

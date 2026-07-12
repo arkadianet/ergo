@@ -32,6 +32,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
     let chain_spec = Arc::new(ChainSpec::mainnet());
     NodeConfig {
         network: Network::Mainnet,
+        shadow_config: Default::default(),
         chain_spec: chain_spec.clone(),
         data_dir,
         known_peers: vec![unreachable_peer],

@@ -90,6 +90,10 @@ pub(crate) struct NodeState {
     // a 250ms tick; on tip change it calls `on_tip_change`. P2P
     // transaction admission goes through `Mempool::process`.
     pub(super) mempool: Mempool,
+    /// Shadow-validation outcome state (`Some` only when `[shadow]`
+    /// enabled): written by the watch task, projected into the snapshot
+    /// (status/metrics) and the operator event differ each publish.
+    pub(super) shadow: Option<std::sync::Arc<super::shadow_watch::ShadowState>>,
     pub(super) mempool_notifier: MempoolNotifier,
     // ---- throughput limiter ----
     // Per-peer sliding-window cap (1000 msg/sec, 2 MB/sec over 10s).

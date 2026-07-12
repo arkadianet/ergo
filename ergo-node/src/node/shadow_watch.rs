@@ -151,7 +151,10 @@ pub struct ShadowState {
 
 impl ShadowState {
     pub fn snapshot_active(&self) -> Option<ShadowDivergence> {
-        self.active.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -227,9 +230,7 @@ pub async fn tick<T, H>(
     }
 
     // ----- S1: header id at depth (accept-invalid class) -----
-    let compare_h = our_tip
-        .min(ref_tip)
-        .saturating_sub(config.lag_tolerance);
+    let compare_h = our_tip.min(ref_tip).saturating_sub(config.lag_tolerance);
     if compare_h == 0 {
         return;
     }
@@ -295,6 +296,27 @@ pub async fn tick<T, H>(
     }
 }
 
+/// The shadow watch task: tick forever at the configured cadence. Spawned
+/// from boot ONLY when `[shadow] enabled = true`; never on the apply path.
+pub async fn run<T, H>(
+    config: ShadowConfig,
+    reference: impl ShadowReference + 'static,
+    local: LocalChainView<T, H>,
+    state: std::sync::Arc<ShadowState>,
+) where
+    T: Fn() -> u32 + Send + Sync + 'static,
+    H: Fn(u32) -> Vec<String> + Send + Sync + 'static,
+{
+    let mut memory = TickMemory::default();
+    let mut ticker =
+        tokio::time::interval(std::time::Duration::from_secs(config.interval_secs.max(1)));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        tick(&config, &reference, &local, &state, &mut memory).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,8 +360,10 @@ mod tests {
         }
     }
 
-    fn local(tip: u32, id: &'static str) -> LocalChainView<impl Fn() -> u32, impl Fn(u32) -> Vec<String>>
-    {
+    fn local(
+        tip: u32,
+        id: &'static str,
+    ) -> LocalChainView<impl Fn() -> u32, impl Fn(u32) -> Vec<String>> {
         LocalChainView {
             tip: move || tip,
             header_ids_at: move |_h| vec![id.to_string()],

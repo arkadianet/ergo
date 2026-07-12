@@ -93,6 +93,7 @@ fn make_state_with_backend(
     let mempool = Mempool::new(mempool_cfg, weight::from_config("cost").unwrap());
     NodeState {
         store: backend,
+        shadow: None,
         coordinator,
         executor,
         peer_manager,
@@ -723,6 +724,7 @@ fn cfg_with_mode(
     }
     NodeConfig {
         network: Network::Mainnet,
+        shadow_config: Default::default(),
         chain_spec: Arc::new(ChainSpec::mainnet()),
         data_dir: std::env::temp_dir().join("ergo-mode-label-cfg"),
         known_peers: vec!["127.0.0.1:1".parse().unwrap()],
