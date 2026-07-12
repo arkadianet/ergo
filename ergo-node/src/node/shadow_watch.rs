@@ -73,13 +73,24 @@ pub struct HttpShadowReference {
 
 impl HttpShadowReference {
     pub fn new(base_url: &str, timeout_secs: u64) -> Result<Self, String> {
+        // Validate the base URL up front (defense-in-depth beyond config
+        // load): a malformed reference must fail construction, not surface
+        // as per-tick "unreachable" noise.
+        let parsed = reqwest::Url::parse(base_url.trim())
+            .map_err(|e| format!("reference_url {base_url:?} is not a valid URL: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(format!(
+                "reference_url {base_url:?} must be http(s), got {}",
+                parsed.scheme()
+            ));
+        }
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(timeout_secs))
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(HttpShadowReference {
-            base: base_url.trim_end_matches('/').to_string(),
+            base: base_url.trim().trim_end_matches('/').to_string(),
             client,
         })
     }
@@ -195,6 +206,9 @@ pub async fn tick<T, H>(
         Err(e) => {
             debug!(error = %e, "shadow: reference unreachable");
             state.reference_unreachable.store(true, Ordering::Relaxed);
+            // An inconclusive tick voids the pending suspect: confirmation
+            // requires two CONSECUTIVE observations (module doc).
+            memory.suspect = None;
             return;
         }
     };
@@ -232,6 +246,7 @@ pub async fn tick<T, H>(
     // ----- S1: header id at depth (accept-invalid class) -----
     let compare_h = our_tip.min(ref_tip).saturating_sub(config.lag_tolerance);
     if compare_h == 0 {
+        memory.suspect = None;
         return;
     }
     let ours = (local.header_ids_at)(compare_h).into_iter().next();
@@ -240,6 +255,7 @@ pub async fn tick<T, H>(
         Err(e) => {
             debug!(error = %e, height = compare_h, "shadow: reference header read failed");
             state.reference_unreachable.store(true, Ordering::Relaxed);
+            memory.suspect = None;
             return;
         }
     };
@@ -250,8 +266,12 @@ pub async fn tick<T, H>(
     let (ours, theirs) = match (ours, theirs) {
         (Some(o), Some(t)) => (o, t),
         // Either side lacking a canonical id at a depth-floored height is a
-        // read anomaly, not a verdict — skip the tick.
-        _ => return,
+        // read anomaly, not a verdict — skip the tick (and void the suspect:
+        // confirmation requires consecutive conclusive observations).
+        _ => {
+            memory.suspect = None;
+            return;
+        }
     };
 
     if ours == theirs {
@@ -478,6 +498,37 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[tokio::test]
+    async fn inconclusive_tick_voids_suspect() {
+        // Armed mismatch → unreachable tick → mismatch again must RE-ARM,
+        // not confirm: confirmation is two CONSECUTIVE observations.
+        let reference = FakeReference::new(1000, "bb");
+        let state = ShadowState::default();
+        let mut mem = TickMemory::default();
+        tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
+        assert!(mem.suspect.is_some());
+        *reference.id.lock().unwrap() = None; // unreachable
+        tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
+        assert!(mem.suspect.is_none(), "inconclusive tick voids the suspect");
+        *reference.id.lock().unwrap() = Some("bb".to_string());
+        tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
+        assert_eq!(
+            state.divergence_total.load(Ordering::Relaxed),
+            0,
+            "first post-gap mismatch only re-arms"
+        );
+        tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
+        assert_eq!(state.divergence_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn http_reference_rejects_bad_urls() {
+        assert!(HttpShadowReference::new("not a url", 5).is_err());
+        assert!(HttpShadowReference::new("ftp://x.example", 5).is_err());
+        assert!(HttpShadowReference::new("http://127.0.0.1:9053", 5).is_ok());
+        assert!(HttpShadowReference::new("  https://ref.example/ ", 5).is_ok());
+    }
 
     #[tokio::test]
     async fn unreachable_sets_gauge_never_event() {

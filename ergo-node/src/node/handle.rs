@@ -58,6 +58,11 @@ pub struct RunHandle {
     /// `pub` so integration tests can assert the tracking happened
     /// (regression guard against silent task leaks).
     pub inbound_handle: Option<JoinHandle<()>>,
+    /// Shadow-validation watch task (`[shadow] enabled`). Observation-only
+    /// (interval + reads, no locks held), so shutdown aborts it outright —
+    /// no graceful drain needed; the store reader's redb read-txns are
+    /// per-call and safe to tear down.
+    pub(super) shadow_task_handle: Option<JoinHandle<()>>,
     /// Cancel flag wired into the indexer polling task — `IndexerTask::run`
     /// exits cleanly when it observes `cancel.load(Acquire) == true`.
     /// Always allocated — `None`
@@ -343,6 +348,12 @@ impl RunHandle {
         if let Some(tx) = self.api_shutdown_tx.take() {
             let _ = tx.send(());
         }
+        // Shadow watch — observation-only; abort + await so the task is
+        // fully torn down (and its reader dropped) before shutdown returns.
+        if let Some(h) = self.shadow_task_handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
         if let Some(h) = self.inbound_handle.take() {
             h.abort();
         }
@@ -416,6 +427,10 @@ impl Drop for RunHandle {
             let _ = tx.send(());
         }
         if let Some(h) = self.api_handle.take() {
+            h.abort();
+        }
+        // Shadow watch: abort (Drop is sync; observation-only task).
+        if let Some(h) = self.shadow_task_handle.take() {
             h.abort();
         }
         if let Some(h) = self.inbound_handle.take() {

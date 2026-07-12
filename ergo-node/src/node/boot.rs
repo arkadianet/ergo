@@ -834,10 +834,10 @@ async fn run_inner_with_backend(
     // reference node. Opt-in; the task never touches the apply path — it
     // reads through its own `ChainStoreReader` and writes only the shared
     // `ShadowState` the snapshot emitter / event differ project out.
-    let shadow_state: Option<Arc<super::shadow_watch::ShadowState>> = if config
-        .shadow_config
-        .enabled
-    {
+    let (shadow_state, shadow_task_handle): (
+        Option<Arc<super::shadow_watch::ShadowState>>,
+        Option<JoinHandle<()>>,
+    ) = if config.shadow_config.enabled {
         match super::shadow_watch::HttpShadowReference::new(
             &config.shadow_config.reference_url,
             config.shadow_config.request_timeout_secs,
@@ -875,13 +875,13 @@ async fn run_inner_with_backend(
                     lag_tolerance = config.shadow_config.lag_tolerance,
                     "shadow validation enabled"
                 );
-                tokio::spawn(super::shadow_watch::run(
+                let task = tokio::spawn(super::shadow_watch::run(
                     config.shadow_config.clone(),
                     reference,
                     local,
                     st.clone(),
                 ));
-                Some(st)
+                (Some(st), Some(task))
             }
             Err(error) => {
                 // Fail loudly at boot: an enabled shadow that silently can't
@@ -890,7 +890,7 @@ async fn run_inner_with_backend(
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     // 7. Hydrate + recover + build header index.
@@ -1820,6 +1820,7 @@ async fn run_inner_with_backend(
         loop_handle,
         api_handle,
         inbound_handle,
+        shadow_task_handle,
         indexer_cancel,
         indexer_task_handle,
         anchor_builder_handle: Some(anchor_builder_handle),

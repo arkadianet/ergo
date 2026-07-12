@@ -706,7 +706,9 @@ impl NodeConfig {
             enabled: ts.enabled.unwrap_or(sh_def.enabled),
             reference_url: ts
                 .reference_url
-                .clone()
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_string)
                 .unwrap_or_else(|| sh_def.reference_url.clone()),
             interval_secs: ts.interval_secs.unwrap_or(sh_def.interval_secs),
             lag_tolerance: ts.lag_tolerance.unwrap_or(sh_def.lag_tolerance),
