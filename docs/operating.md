@@ -337,6 +337,21 @@ RUST_LOG=ergo_mempool=debug,info # mempool admission decisions
 RUST_LOG=ergo_p2p=debug,info     # P2P handshake / disconnect events
 ```
 
+## Dry-running a transaction (the one recommended path)
+
+To validate an unsigned transaction against current state **without
+broadcasting**, use `POST /api/v1/transactions/simulate` — it runs the real
+validation pipeline (current UTXO + mempool context) and returns structured
+failure detail (cost, failing input, reason). `fee-estimate` and `status`
+live beside it.
+
+The `/api/v1/script/*` playground (compile / execute / cost / explain /
+diff) is the CONTRACT-developer surface: single-script reduction with
+traces, not whole-transaction validation. If you hold a full unsigned tx,
+`transactions/simulate` is the path; reach for `script/*` when iterating on
+a guard script itself. Typed event push for consumers is documented in
+[events.md](events.md).
+
 ## Shadow validation
 
 Opt-in mode that live cross-checks this node's chain against a Scala
@@ -413,6 +428,22 @@ Safe defaults: divergence changes nothing about node behavior (observe and
 alert only). Do not wipe the data dir until the evidence (both header ids,
 heights, logs) is preserved — a confirmed divergence data dir is the most
 valuable debugging artifact this node can produce.
+
+### Runbook: "it looks stuck" — query these first
+
+Symptom → the signals that decide it — Prometheus series on `GET /metrics`
+plus the JSON status fields on `GET /api/v1/node/status` where noted. The
+point is that no false "height 0 / stalled" signal exists without a
+companion gauge explaining it.
+
+| Symptom | Decisive metrics | Reading |
+|---|---|---|
+| Height not moving | `ergo_node_apply_in_progress`, `ergo_node_last_apply_duration_ms`, `ergo_node_last_apply_age_ms` | `apply_in_progress 1` with a growing duration = a big block mid-apply, not a stall. Old `last_apply_age_ms` with `apply_in_progress 0` = genuinely not applying → next row. |
+| Not applying, headers advancing | `ergo_node_sync_gap`, `ergo_node_block_apply_errors_total`, `/api/v1/node/status .last_block_apply_error` | Rising errors on one block = rejection loop (capture the block id + reason). Zero errors + growing gap = download starvation → peers row. |
+| Suspected network isolation | `ergo_node_peer_count`, peer events on `/api/v1/events` | Low/zero peers or churn = connectivity, not consensus. |
+| Chain disagreement suspected | `ergo_node_shadow_diverged`, `ergo_node_shadow_divergence_total`, `_reference_unreachable` | See the Shadow validation triage below — do NOT wipe the data dir first. |
+| Tip frozen forever, headers far ahead | `/api/v1/node/status .sync_wedged` | Deep-fork wedge: below the rollback window only a resync recovers (see Troubleshooting). |
+| Mempool looks dead | `ergo_node_mempool_size`, admit/reject counters | Rejections climbing = admission policy at work, not a hang. |
 
 ## API security posture
 
